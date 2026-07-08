@@ -1,30 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-# TurboQuant decode v4 GQA-6 sibling (FlyDSL) — MI355X / gfx950 / CDNA4
+# TurboQuant decode (FlyDSL) — MI355X / gfx950 / CDNA4
 #
 # Decode-only paged attention over a TurboQuant SoA KV cache.
-# Targets MiniMax-M2.5 class models: HEAD_SIZE=128, GQA group=6, MSE_BITS=4 K,
-# VQB=4 V, N_CENTROIDS=16, BLOCK_SIZE=16, partitioned mode.
+# Targets Qwen-class models: HEAD_SIZE=128, GQA group=8, MSE_BITS=4 K, VQB=4 V,
+# N_CENTROIDS=16, BLOCK_SIZE=16, partitioned mode.
 #
-# === Sibling-file rationale ===
-# Structurally identical to tq_decode_v4.py except:
-#   * QUERY_GROUP_SIZE default = 6 (was 8)
-#   * Build-time assert allows query_group_size = 6 only (Qwen sizes go to
-#     the canonical tq_decode_v4 kernel — NOT this file)
-#   * QG_LOAD_ITERS = (QG + 3) // 4 (round-up; 2 iters for QG=6 loads
-#     8 LDS rows of which only 6 carry real Q; rows 6..7 are zero-padded
-#     by buffer_load OOB protection — gated out by the same mfma_row < QG
-#     predicate the canonical kernel already uses for QG=8)
-#
-# All cross-lane operations (xor_shuffle softmax reductions, ds_read_tr16_b64
-# HW V transpose) are mfma_row-isolated and thus already GQA-agnostic. The
-# kernel is functionally a direct copy of tq_decode_v4.py with the QG knob
-# turned to 6 — kept as a sibling per FlyDSL convention to preserve the
-# canonical kernel's invariants for its production callers (Qwen2.5-72B,
-# Qwen3-32B).
-#
-# === Design (v4.1) ===
+# === Design ===
 # * 1 wave (64 lanes) per CTA — simpler than 4-warp; trades parallelism for
-#   correctness/debug-ability. v4.4 will fan out to 4 warps.
+#   correctness/debug-ability. A later revision will fan out to 4 warps.
 # * Flash-Attention-2 online softmax: rescale running PV/sum per K-tile,
 #   no QK score storage across tiles, no P-LDS round-trip (qk_acc layout
 #   matches PV B-operand directly).
@@ -61,14 +44,15 @@ from flydsl.expr.typing import Int32, T  # noqa: F401  Int32 via fx.Int32
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
-# === Constants (MiniMax-M2.5-class TQ decode profile) =======================
+# === Constants (Qwen-class TQ decode profile) ===============================
 HEAD_SIZE = 128
-# default; overridable via build_tq_decode_v4_gqa6_module(kv_block_size=...)
+# default; overridable via build_tq_decode_module(kv_block_size=...)
 KV_BLOCK_SIZE = 16
 # MFMA tile = 16 tokens (do not change without re-deriving MFMA shapes)
 TILE_SIZE = 16
 N_CENTROIDS = 16
-QUERY_GROUP_SIZE = 6  # GQA-6 default for MiniMax-M2.5
+# default for tests; overridable via build_tq_decode_module(query_group_size=...)
+QUERY_GROUP_SIZE = 16
 WARP_SIZE = 64
 NUM_WARPS = 1
 BLOCK_THREADS = NUM_WARPS * WARP_SIZE
@@ -91,10 +75,8 @@ QK_K_CHUNKS = HEAD_SIZE // MFMA_K_BF16_QK  # 4 (down from 8)
 PV_N_CHUNKS = HEAD_SIZE // MFMA_N  # 8
 
 # LDS regions
-# Bisect: use full QG=16 footprint (4096 B) for Q region to test if the
-# 2048-vs-4096 boundary is the source of the multi-shape JIT NaN bug.
 CENTROID_LDS_BYTES = N_CENTROIDS * 4  # 64
-Q_LDS_BYTES = 16 * HEAD_SIZE * 2  # 4096
+Q_LDS_BYTES = QUERY_GROUP_SIZE * HEAD_SIZE * 2  # 4096
 KV_TILE_LDS_BYTES = TILE_SIZE * HEAD_SIZE * 2  # 4096
 
 LOG2E = 1.4426950408889634
@@ -109,7 +91,7 @@ def _vsplat_mul(vec, scalar):
 allocator = None
 
 
-def build_tq_decode_v4_gqa6_module(
+def build_tq_decode_module(
     num_seqs: int,
     num_kv_heads: int,
     num_partitions: int,
@@ -121,30 +103,49 @@ def build_tq_decode_v4_gqa6_module(
     tile_groups_per_partition: int = 1,
     use_wht_butterfly: bool = False,
 ):
-    """Build a TQ decode v4 GQA-6 kernel module (MiniMax-M2.5).
+    """Build a TQ decode kernel module.
 
-    ``query_group_size`` (= num_query_heads // num_kv_heads) is fixed at 6
-    for this sibling. The MFMA's 16-row capacity is 6/16 = 37.5% used;
-    lanes 6..15 compute garbage and are gated out of all global-memory
-    writes via the same ``mfma_row < QG`` predicate the canonical kernel
-    uses for QG=8. Q load iterates ``(QG + 3) // 4`` = 2 chunks (loads
-    8 LDS rows of which rows 6..7 are zero-padded by the buffer-resource
-    OOB protection — they're never consumed because the gating lanes
-    don't write).
-
-    For GQA-8 or GQA-16 (Qwen models), use the canonical
-    ``build_tq_decode_v4_module`` from ``tq_decode_v4.py`` instead.
+    ``query_group_size`` (= num_query_heads // num_kv_heads) selects the
+    GQA factor. Supported values: 8 and 16. For 8 the MFMA's 16-row
+    capacity is half-used; lanes 8..15 compute garbage and are gated out
+    of all global-memory writes via an OOB-offset trick on the buffer
+    resource. Q load iterates ``QG // 4`` chunks (= 2 for QG=8, 4 for
+    QG=16) so we never read past the real Q rows in HBM.
 
     ``kv_block_size`` is the number of tokens per vLLM cache block. Must
-    be a multiple of TILE_SIZE (=16). Supported values: 16 and 32.
+    be a multiple of TILE_SIZE (=16). Supported values: 16 and 32. With
+    block_size=32, two MFMA K-tiles fit in each block; the kernel walks
+    block-table entries every ``kv_block_size // TILE_SIZE`` tiles and
+    re-uses the entry for sub-tiles within the same block. SoA metadata
+    region grows linearly with block_size.
 
-    ``use_hw_v_transpose`` (CDNA4 / gfx950 only) — see canonical kernel
-    docstring for details. Same fence pattern applies here.
+    ``use_hw_v_transpose`` (CDNA4 / gfx950 only) replaces the 32-element
+    scattered ``ds_write_b16`` V-dequant pattern with a row-major
+    ``V[token][head_dim]`` LDS layout written as 4 wide ``ds_write_b128``
+    per lane, then read back into the MFMA A operand via the hardware
+    ``ds_read_tr16_b64`` transpose. This eliminates ~28 ds_write
+    instructions per lane per K-tile (32 -> 4) and 8 strided ds_read_b64
+    per PV chunk (replaces them with 1 hw-transpose read each). Pattern
+    derived from ``flash_attn_func.py`` (USE_HW_TR=True path).
+
+    ``tile_groups_per_partition`` (default 1) controls the FA-2 split-K
+    granularity. With value G each partition processes ``G * 16`` K-tiles
+    = ``G * KV_COMPUTE_BLOCK`` tokens, with the existing 16-tile loop
+    body iterated G times. The launcher uses this to bound
+    ``num_partitions`` (e.g. cap at 32) for long context: at 32K /
+    block_size=32 / num_partitions=32, G=5 covers 32*5*256 = 40 960
+    tokens of worst-case context with grid.z=32 instead of 256.
+    Behavior at G=1 is bit-identical to the pre-Option-A kernel.
+
+    ``use_wht_butterfly`` (default False) replaces the STEP B HBM load of
+    the externally-rotated ``q_rot`` tensor with an in-register 7-stage
+    Walsh-Hadamard butterfly that computes ``H @ q`` directly (H = the
+    normalised Hadamard matrix = PiT for TurboQuant).  The launcher must
+    pass the raw ``query`` tensor instead of ``q_rot`` when this is True.
+    Gate: ``VLLM_TQ_FLYDSL_WHT_BUTTERFLY=1``.
     """
-    assert query_group_size == 6, (
-        f"build_tq_decode_v4_gqa6_module is GQA-6 only; got "
-        f"query_group_size={query_group_size}. Use build_tq_decode_v4_module "
-        f"from tq_decode_v4.py for GQA-8 or GQA-16."
+    assert query_group_size in (8, 16), (
+        f"query_group_size must be 8 or 16; got {query_group_size}"
     )
     assert kv_block_size in (16, 32), (
         f"kv_block_size must be 16 or 32; got {kv_block_size}"
@@ -158,10 +159,7 @@ def build_tq_decode_v4_gqa6_module(
     PARTITION_EXTENT_TOKENS = TGPP * KV_COMPUTE_BLOCK
 
     QG = int(query_group_size)
-    # Round-up: 2 iters for QG=6 → loads 8 LDS rows (rows 6..7 are
-    # zero-padded by buffer_load OOB protection; never consumed because
-    # mfma_row >= QG lanes are gated out of all global stores below).
-    QG_LOAD_ITERS = (QG + 3) // 4
+    QG_LOAD_ITERS = QG // 4  # 2 for QG=8, 4 for QG=16
     OOB_OFFSET = 0x7FFFFFF0  # noqa: F841  ~2GB byte offset; > any plausible buffer
 
     _BS = int(kv_block_size)
@@ -192,7 +190,7 @@ def build_tq_decode_v4_gqa6_module(
     _stride_ml_seq = _stride_es_seq
 
     # --- LDS layout ---
-    allocator = SmemAllocator(None, arch=arch, global_sym_name="tq_v4_gqa6_smem")
+    allocator = SmemAllocator(None, arch=arch, global_sym_name="tq_smem")
     centroid_off = 0
     allocator.ptr = CENTROID_LDS_BYTES
     q_off = allocator.ptr
@@ -201,7 +199,7 @@ def build_tq_decode_v4_gqa6_module(
     allocator.ptr += KV_TILE_LDS_BYTES
 
     @flyc.kernel
-    def tq_decode_v4_gqa6_kernel(
+    def tq_decode_kernel(
         out_ptr: fx.Tensor,
         exp_sums_ptr: fx.Tensor,
         max_logits_ptr: fx.Tensor,
@@ -258,61 +256,37 @@ def build_tq_decode_v4_gqa6_module(
         LOG2E_C = arith.constant(LOG2E, type=T.f32)
         QK_SCALE = arith.constant(_qk_scale, type=T.f32)
 
+        # Helper: unwrap fx wrapper → raw ir.Value (used in STEP B' and STEP F)
+        def _ival(v):
+            return v.ir_value() if hasattr(v, "ir_value") else v
+
         # ===== STEP A: Load centroids → LDS (cooperative, race-safe) =====
         c_idx_safe = lane & fx.Int32(N_CENTROIDS - 1)
         c_val = buffer_ops.buffer_load(cent_rsrc, c_idx_safe, vec_width=1, dtype=T.f32)
         cent_lds.store(c_val, [arith.index_cast(T.index, c_idx_safe)])
         gpu.barrier()
 
-        # ===== STEP B: Load Q → row-major LDS [query_row, head_dim] ======
-        # Q layout in HBM: [N, Hq, D] bf16, slice = QG rows × D=128 cols × 2B.
-        # QG=6 → 1536 B real, 96 chunks; QG_LOAD_ITERS=2 issues 128 chunks
-        # (8 rows × 16 col_b) so lanes whose row ∈ {6, 7} address heads that
-        # do NOT exist in the Q tensor (Hq = num_kv_heads * 6).
+        # ===== STEP B / B': Load Q → row-major LDS [query_row, head_dim] ===
+        # Two paths controlled by the use_wht_butterfly compile-time flag:
         #
-        # ── Per-lane Q-load OOB redirect ─────────────────────────────────
-        # Hq = num_kv_heads * QG, so head index = kv_h * QG + row. For QG=6
-        # the upper rows alias to (kv_h+1)'s real heads (still in-bounds
-        # for most kv_h), but for the *last* (seq, kv_h) the read tips
-        # past the Q tensor entirely. With ``max_size=True`` the buffer
-        # descriptor advertises 4 GB so the HW does no OOB clamping; the
-        # padding read then touches unmapped pages and the kernel dies
-        # with "Memory access fault by GPU node" the moment the
-        # surrounding allocator state leaves the next page unmapped
-        # (allocator-pattern-dependent → reproduces as a heisenbug).
+        # STEP B  (use_wht_butterfly=False, default):
+        #   q_rsrc points to the externally-rotated q_rot tensor.  Load 8 bf16
+        #   per lane per iter (vec_width=4 i32) in QG_LOAD_ITERS iterations.
         #
-        # Fix: redirect OOB lanes (``row >= QG``) to load Q[0,0,col_elem]
-        # — a byte offset that is always inside the actual Q tensor.
-        # The redundant load is wasted but harmless; the resulting LDS
-        # write to row ∈ {6, 7} is overwritten/ignored downstream because
-        # every global store is gated by the output-time
-        # ``mfma_row < QG`` predicate (the same gate canonical QG=8 uses
-        # for its garbage rows 8..15).
-        #
-        # NB: A ``mask=`` parameter on ``buffer_load`` substitutes the
-        # masked-out offset with 0x7FFFFFFF *bytes*; with ``max_size=True``
-        # this is still inside the 4 GB descriptor and so the HW happily
-        # dereferences ``q_base + 2 GB`` → another unmapped page → fault.
-        # The address-redirect below is the only safe option short of
-        # threading the true Q size through as a runtime kernel arg.
-        #
-        # The canonical Qwen kernel does not need this redirect because
-        # for QG ∈ {8, 16} the (kv_h, row) iteration covers exactly the
-        # real heads; QG=6 is the only case where
-        # ``QG_LOAD_ITERS * 4 != QG``.
-        # Two paths controlled by the use_wht_butterfly compile-time flag
-        # (mirrors the canonical tq_decode_v4 kernel).  When OFF (default) the
-        # code below is bit-identical to the original GQA-6 STEP B, so the
-        # non-butterfly flow / accuracy is completely unchanged.
+        # STEP B' (use_wht_butterfly=True):
+        #   q_rsrc points to the RAW query tensor.  For each GQA head h, lane i
+        #   loads elements [2*i, 2*i+1], applies a 7-stage Hadamard butterfly
+        #   (1 intra-lane + 6 cross-lane shuffle_xor) to compute H @ q in
+        #   register, scales by 1/sqrt(D), and writes the rotated pair to Q_LDS.
+        #   No external GEMM or HBM q_rot tensor needed.
         if not use_wht_butterfly:
+            # --- STEP B: load pre-rotated q_rot → Q_LDS ---
             for c in range_constexpr(QG_LOAD_ITERS):
-                row_chunk = lane + fx.Int32(c * WARP_SIZE)  # 0..127
-                row = row_chunk >> fx.Int32(4)  # 0..7
+                row_chunk = lane + fx.Int32(c * WARP_SIZE)  # 0..QG*16-1
+                row = row_chunk >> fx.Int32(4)  # 0..QG-1
                 col_b = row_chunk & fx.Int32(15)  # 0..15
                 col_elem = col_b * fx.Int32(8)  # 0..120 in bf16
-                q_off_real = seq * c_sq + (kv_h * c_qg + row) * c_qh + col_elem
-                row_in_qg = row < fx.Int32(QG)
-                q_off_elem = row_in_qg.select(q_off_real, col_elem)
+                q_off_elem = seq * c_sq + (kv_h * c_qg + row) * c_qh + col_elem
                 q_v = buffer_ops.buffer_load(
                     q_rsrc,
                     q_off_elem // fx.Int32(2),
@@ -326,25 +300,19 @@ def build_tq_decode_v4_gqa6_module(
                     [arith.index_cast(T.index, q_lds_byte // fx.Int32(4))],
                 )
         else:
-            # --- STEP B': in-register FWHT → Q_LDS (GQA-6 sibling) ---
+            # --- STEP B': in-register FWHT → Q_LDS ---
             # PiT = H (pure normalised Hadamard, symmetric) so H @ q = q @ H.
-            # Lane i holds elements [2*i, 2*i+1] of one head at a time. The
-            # loop runs only over the QG (=6) REAL heads, so unlike STEP B it
-            # never over-reads Q (no OOB redirect needed). Rows 6..15 of Q_LDS
-            # stay stale but are gated out downstream by the mfma_row < QG
-            # predicate (identical treatment to STEP B's garbage rows 8..15).
-            # Sign convention matches the corrected canonical kernel:
-            #   low  (lane_bit=0):  y = self + other
-            #   high (lane_bit=1):  y = other - self   (= sign*self + other)
-            def _ival(v):
-                return v.ir_value() if hasattr(v, "ir_value") else v
-
+            # Lane i holds elements [2*i, 2*i+1] of one head at a time.
+            # After all QG heads + barrier, Q_LDS is identical to what STEP B
+            # would have produced from an externally pre-rotated q_rot tensor.
             _WHT_SCALE = arith.constant(1.0 / (HEAD_SIZE**0.5), type=T.f32)
             _ONE_F32_I32 = arith.constant(0x3F800000, type=T.i32)  # +1.0 bits
-            _C16b = arith.constant(16, type=T.i32)
-            _C31b = arith.constant(31, type=T.i32)
+            _C16 = arith.constant(16, type=T.i32)
+            _C31 = arith.constant(31, type=T.i32)
             _q_lds_smem = SmemPtr(base, q_off, T.i32, shape=(Q_LDS_BYTES // 4,))
+
             for h in range_constexpr(QG):
+                # -- Load 2 packed bf16 (= 1 i32) for this lane / head --
                 _q_elem_off = (
                     seq * c_sq + (kv_h * c_qg + fx.Int32(h)) * c_qh + lane * fx.Int32(2)
                 )
@@ -354,38 +322,59 @@ def build_tq_decode_v4_gqa6_module(
                     vec_width=1,
                     dtype=T.i32,
                 )
+                # Unpack i32 → 2 × bf16 → 2 × f32
                 _lo_i16 = arith.trunci(T.i16, _q_raw)
-                _hi_i16 = arith.trunci(T.i16, arith.shrui(_q_raw, _C16b))
+                _hi_i16 = arith.trunci(T.i16, arith.shrui(_q_raw, _C16))
                 _q_lo = arith.extf(T.f32, arith.bitcast(T.bf16, _lo_i16))
                 _q_hi = arith.extf(T.f32, arith.bitcast(T.bf16, _hi_i16))
 
-                # Stage 0: intra-lane butterfly
+                # Stage 0: intra-lane butterfly (no shuffle required)
                 _a = _q_lo + _q_hi
                 _b = _q_lo - _q_hi
                 _q_lo = _a
                 _q_hi = _b
 
-                # Stages 1-6: cross-lane butterfly (result = sign*self + other)
-                for _log2m in range_constexpr(6):  # masks 1,2,4,8,16,32
+                # Stages 1-6: cross-lane butterfly (shuffle_xor + branchless ±)
+                # Sylvester-Hadamard core [[1,1],[1,-1]] per pair:
+                #   low  (lane_bit=0):  y = self + other
+                #   high (lane_bit=1):  y = other - self
+                # i.e. result = sign * self + other  where sign ∈ {+1, -1}.
+                # The sign MUST be applied to `self`, not `other`; applying it
+                # to `other` gives high = self - other = -(correct), flipping
+                # the transform by a per-coordinate sign vs. the pure Hadamard
+                # PiT used to rotate K -> decorrelated Q·K scores -> garbage.
+                # sign = bitcast_f32(float_bits(1.0) XOR (lane_bit << 31))
+                for _log2m in range_constexpr(6):  # masks 1, 2, 4, 8, 16, 32
                     _mask = 1 << _log2m
                     _other_lo = _q_lo.shuffle_xor(fx.Int32(_mask), c_w)
                     _other_hi = _q_hi.shuffle_xor(fx.Int32(_mask), c_w)
+                    # lane_bit = 0 if this lane is "low" in the pair, else 1
                     _lane_bit = _ival((lane >> fx.Int32(_log2m)) & fx.Int32(1))
                     _sign_f32 = arith.bitcast(
                         T.f32,
-                        arith.xori(_ONE_F32_I32, arith.shli(_lane_bit, _C31b)),
+                        arith.xori(
+                            _ONE_F32_I32,
+                            arith.shli(_lane_bit, _C31),
+                        ),
                     )
                     _q_lo = _sign_f32 * _q_lo + _other_lo
                     _q_hi = _sign_f32 * _q_hi + _other_hi
 
+                # Scale by 1/sqrt(HEAD_SIZE)
                 _q_lo = _q_lo * _WHT_SCALE
                 _q_hi = _q_hi * _WHT_SCALE
 
+                # Pack 2 × f32 → 2 × bf16 → 1 × i32
                 _lo_bf16_out = arith.truncf(T.bf16, _ival(_q_lo))
                 _hi_bf16_out = arith.truncf(T.bf16, _ival(_q_hi))
                 _lo_i32_out = arith.extui(T.i32, arith.bitcast(T.i16, _lo_bf16_out))
                 _hi_i32_out = arith.extui(T.i32, arith.bitcast(T.i16, _hi_bf16_out))
-                _packed = arith.ori(_lo_i32_out, arith.shli(_hi_i32_out, _C16b))
+                _packed = arith.ori(
+                    _lo_i32_out,
+                    arith.shli(_hi_i32_out, _C16),
+                )
+
+                # Write to Q_LDS: row h, cols [2*lane, 2*lane+1]
                 _lds_i32_idx = fx.Int32(h * HEAD_SIZE // 2) + lane
                 _q_lds_smem.store(
                     _packed,
@@ -424,11 +413,13 @@ def build_tq_decode_v4_gqa6_module(
         # ===== STEP E: Sequence-len + partition base ====================
         seq_len = buffer_ops.buffer_load(sl_rsrc, seq, vec_width=1, dtype=T.i32)
         # ── Option A: bounded num_partitions + internal looping ─────────
-        # Mirrors the canonical tq_decode_v4 kernel: each CTA owns
-        # ``PARTITION_EXTENT_TOKENS = TGPP * KV_COMPUTE_BLOCK`` contiguous
-        # tokens of the seq, processed as TGPP groups of 16 K-tiles each.
-        # FA-2 online-softmax state accumulates across all TGPP * 16 tiles.
-        # With TGPP=1 this is bit-identical to the legacy 16-tile body.
+        # With TGPP > 1 this CTA owns a contiguous slice of length
+        # ``PARTITION_EXTENT_TOKENS`` that is iterated as ``TGPP`` groups
+        # of 16 K-tiles each. ``partition_start`` is recomputed per
+        # outer ``tg`` iteration below; the FA-2 online-softmax state
+        # (running_max, running_sum, acc_pv) accumulates across all
+        # ``TGPP * 16`` tiles for this CTA — semantically identical to
+        # processing one large 16*TGPP-tile partition.
         partition_base = part * fx.Int32(PARTITION_EXTENT_TOKENS)
 
         # Per-K-tile dequant lane assignment:
@@ -454,17 +445,18 @@ def build_tq_decode_v4_gqa6_module(
         # ── Per-tile block-table OOB redirect ────────────────────────────
         # The K-tile loop is unrolled 16 times so every CTA issues 16
         # block-table reads regardless of (partition, seq_len). When a
-        # partition extends past ``seq_len`` (e.g. num_partitions=2 for a
-        # 256-token sequence — partition 1 covers tokens 256..511, all
+        # partition extends past ``seq_len`` (e.g. num_partitions=2 for
+        # a 256-token sequence — partition 1 covers tokens 256..511, all
         # masked out) the per-tile bt offset can land beyond the bt
-        # allocation. With ``max_size=True`` the descriptor is 4 GB so
-        # the HW returns whatever pre-existing HBM bytes live at that
-        # offset; the resulting garbage ``phys_block`` is multiplied by
-        # ``stride_cache_block`` and the subsequent kv_cache read jumps
-        # into unmapped pages, killing the whole launch with a
-        # "Memory access fault by GPU node" exactly as the OOB Q load
-        # used to (same allocator-pattern-dependent heisenbug; B=4 makes
-        # it deterministic by adding more colliding CTAs).
+        # allocation. With ``max_size=True`` the descriptor advertises
+        # 4 GB so the HW returns whatever pre-existing HBM bytes live at
+        # that offset; the resulting garbage ``phys_block`` is multiplied
+        # by ``stride_cache_block`` and the subsequent kv_cache read
+        # jumps into pages that may be unmapped (→ "Memory access fault
+        # by GPU node") or may decode as NaN bytes (→ NaN segm_out).
+        # Allocator-pattern dependent, but reproduces deterministically
+        # at large B (e.g. B=64 seq=256 in the test sweep produces 8 192
+        # NaN entries even on canonical QG=8).
         #
         # Fix: when the tile starts at or past ``seq_len`` (so its
         # qk_acc is going to be killed by the per-token
@@ -472,14 +464,6 @@ def build_tq_decode_v4_gqa6_module(
         # ``bt[seq, 0]`` — always in bounds. The redundant phys_block
         # decode + kv_cache read is wasted work, but correctness is
         # preserved without changing the kernel's iteration count.
-        #
-        # The canonical Qwen kernel reads the same tiles and is also
-        # exposed to this issue in principle; in practice the bug bites
-        # GQA-6 first because the surrounding allocator state happens
-        # to differ (extra Q-tail allocation) and shifts the page maps
-        # so the bt overflow lands on unmapped pages. Applying the same
-        # redirect to canonical is a follow-up; for this branch we keep
-        # the canonical kernel byte-identical to its release behavior.
         # ===== Option A': scf.ForOp w/ iter_args (HIP-style) =========
         # Runtime-adaptive outer loop: trip count derives from
         # actual seq_len, NOT TGPP_max. At cudagraph-capture warmup
@@ -516,16 +500,12 @@ def build_tq_decode_v4_gqa6_module(
             if hasattr(trip_or_zero, "ir_value")
             else trip_or_zero,
         )
-
         # Initial iter_args list: FA-2 accumulator state.
         # Order: running_max, running_sum, acc_pv[0..PV_N_CHUNKS-1].
         # NOTE: scf.ForOp requires ir.Value (with .type). The DSL
         # constants ZERO_F / ONE_F are fx.Float32 (Numeric) wrappers,
         # not raw ir.Value, so we unwrap via .ir_value() before
-        # passing.
-        def _ival(v):
-            return v.ir_value() if hasattr(v, "ir_value") else v
-
+        # passing.  _ival() is defined once near the top of the kernel body.
         _init_iter = [
             _ival(running_max),
             _ival(running_sum),
@@ -940,4 +920,4 @@ def build_tq_decode_v4_gqa6_module(
             buffer_ops.buffer_store(running_sum, es_rsrc, es_off)
             _scf.YieldOp([])
 
-    return tq_decode_v4_gqa6_kernel
+    return tq_decode_kernel

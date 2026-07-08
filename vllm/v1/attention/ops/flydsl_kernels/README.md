@@ -8,7 +8,7 @@ must be installed once per machine.
 
 ## What's vendored
 
-- `tq_decode_v4.py` — TurboQuant 4-bit MSE-key decode attention kernel for
+- `tq_decode.py` — TurboQuant 4-bit MSE-key decode attention kernel for
   AMD MI355X (gfx950 / CDNA4). Implements:
     - LDS-resident centroids (one-time DMA in CTA prologue)
     - `buffer_load_to_lds` cross-tile prefetch with LDS ping-pong
@@ -16,25 +16,14 @@ must be installed once per machine.
     - `ds_read_tr16_b64` hardware V-transpose (with cross-lane LDS race fence)
     - Flash-Attention-2 style online softmax with split-K reduction
 
-- `fp8_g32_decode_v4.py` — fp8_g32 (FP4 E2M1 codes + UE8M0 per-group-of-32
-  scales) decode attention kernel. A direct port of `tq_decode_v4.py`: the
-  MFMA layouts, online-softmax loop, HW/SW V-transpose, output store and
-  split-K reducer are reused verbatim. Only the dequant + cache addressing
-  differ:
-    - AoS cache slot `[num_blocks, BS, Hk, padded_slot]` (K codes@0, K
-      scales@64, V codes@68, V scales@132 for D=128/group=32)
-    - fixed FP4 value table reused via the LDS centroid LUT
-    - K/V dequant = `FP4_value[nibble] * 2^(scale_byte-127)` where the pow2
-      scale is `bitcast_f32(byte << 23)` (no `exp2`); each lane owns exactly
-      one group so it loads one K-scale + one V-scale byte
-    - Q is Hadamard-rotated + FP8-E4M3-haircut in the launcher, fed bf16
-  Launcher: `vllm/v1/attention/ops/flydsl_fp8_g32_decode_v4.py`. Enable with
-  `VLLM_FP8_G32_DECODE_V4=1` (eligible: HEAD_SIZE=128, GQA {8,16}, no
-  sinks/SWA). Parity test: `tests/kernels/turboquant_v4/test_fp8_g32_v4_parity.py`.
+- `tq_decode_gqa6.py` — GQA-6 sibling of `tq_decode.py` (MiniMax-class
+  models). Structurally identical to `tq_decode.py` with the query-group
+  size specialized to 6; kept as a separate module so the canonical
+  GQA-{8,16} kernel's invariants stay untouched.
 
-The canonical upstream copies live at `<FlyDSL repo>/kernels/tq_decode_v4.py`
-and `<FlyDSL repo>/kernels/fp8_g32_decode_v4.py`.
-This directory is updated by re-copying that file when a new tested snapshot
+The canonical upstream copies live at `<FlyDSL repo>/kernels/tq_decode.py`
+and `<FlyDSL repo>/kernels/tq_decode_gqa6.py`.
+This directory is updated by re-copying those files when a new tested snapshot
 is ready. **Do not edit the vendored copy in-place** — make changes in the
 FlyDSL repo, validate, then re-vendor.
 
@@ -72,7 +61,7 @@ export PYTHONPATH="/opt/FlyDSL:/opt/FlyDSL/build-fly/python_packages:$PYTHONPATH
 python3 -c "import flydsl; print('FlyDSL OK')"
 ```
 
-## Step 3 — Enable the v4 decode kernel
+## Step 3 — Enable the FlyDSL decode kernel
 
 ```bash
 export VLLM_ROCM_TQ_FLYDSL_DECODE=1        # master enable
@@ -80,14 +69,14 @@ export VLLM_ROCM_TQ_FLYDSL_DECODE=1        # master enable
 
 The HW V-transpose is enabled automatically on gfx950+. Eligible TQ layers
 (`HEAD_SIZE=128`, GQA in {8, 16}, `MSE_BITS=4`, no sinks,
-no FP8) will route to `tq_decode_v4.py`. If the framework is missing or the
+no FP8) will route to `tq_decode.py`. If the framework is missing or the
 layer is ineligible, vLLM logs a warning and falls back to Triton v3.
 
 Confirmation appears in the server log on startup:
 
 ```
-TurboQuant has flash attn: True, decode kernel: v4(flydsl)
-FlyDSL v4 launcher invoked: B=... Hk=... ... hw_v_transpose=True
+TurboQuant has flash attn: True, decode kernel: flydsl
+FlyDSL launcher invoked: B=... Hk=... ... hw_v_transpose=True
 ```
 
 If you see this instead, FlyDSL was not found:
@@ -115,19 +104,15 @@ vllm serve Qwen/Qwen2.5-72B \
 ## Tests
 
 Unit / regression tests for the kernel live alongside vLLM's other kernel
-tests at `tests/kernels/turboquant_v4/`:
+tests at `tests/kernels/turboquant/`:
 
 ```bash
-pytest tests/kernels/turboquant_v4/ -v
+pytest tests/kernels/turboquant/ -v
 ```
 
-Three tests are included:
-
-| Test | What it checks |
-|---|---|
-| `test_v4_vs_v3_fast.py` | Per-element diff vs Triton v3 reference (max ≤ 1.95e-3) |
-| `test_v4_hwtr_long_seq_regression.py` | Bit-exact HW vs SW V-transpose on Qwen3-32B production shape (post-fence-fix regression guard) |
-| `test_v4_norm_correction_equivalence.py` | `norm_correction={True, False}` toggle equivalence |
+The suite (`test_flydsl_turboquant_decode.py`) is parametrized over batch
+sizes, sequence lengths, GQA factors and block sizes, and checks the FlyDSL
+decode output against an fp32 reference (dequantized-KV attention).
 
 ## Validated results
 
@@ -140,7 +125,7 @@ TP=4:
 |---|---:|---:|
 | BF16 baseline | 0.6892 | — |
 | TQ Triton v3 | 0.7074 | +1.8 pp |
-| **TQ FlyDSL v4 (HW transpose ON, post-fence-fix)** | **0.6907** | **+0.1 pp** |
+| **TQ FlyDSL (HW transpose ON, post-fence-fix)** | **0.6907** | **+0.1 pp** |
 
 **Throughput (Qwen2.5-72B, 32K prompt / 1K out, N=80):**
 
@@ -148,7 +133,7 @@ TP=4:
 |---|---:|---:|---:|
 | BF16 baseline | 304 | — | +39% |
 | TQ Triton v3 | 219 | −28% | — |
-| **TQ FlyDSL v4** | **332.9** | **+9.6%** | **+52.0%** |
+| **TQ FlyDSL** | **332.9** | **+9.6%** | **+52.0%** |
 
 ## Why isn't the FlyDSL framework vendored?
 

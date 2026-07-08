@@ -76,31 +76,31 @@ _CONTINUATION_DECODE_THRESHOLD = 128
 
 
 # --------------------------------------------------------------------------- #
-#  FlyDSL TurboQuant v4 decode (opt-in; AMD MI355X / gfx950).                  #
+#  FlyDSL TurboQuant decode (opt-in; AMD MI355X / gfx950).                     #
 #                                                                             #
-#  Enabled with VLLM_ROCM_TQ_FLYDSL_DECODE=1. When OFF (the default) NONE of the v4    #
+#  Enabled with VLLM_ROCM_TQ_FLYDSL_DECODE=1. When OFF (default) NONE of the below #
 #  branches execute and the upstream TurboQuant v1 path runs byte-for-byte    #
 #  unchanged. When ON, the whole self-consistent SoA pipeline is used:        #
 #    * SoA Triton store (write)                                               #
-#    * FlyDSL v4 decode (GQA in {6, 8, 16}; gfx950) — GQA-6 = MiniMax sibling #
+#    * FlyDSL decode (GQA in {6, 8, 16}; gfx950) — GQA-6 = MiniMax sibling #
 #    * SoA-aware continuation/dequant for chunked prefill                     #
 #    * SoA Triton v3 fallback for ineligible layers / missing FlyDSL          #
 #  The FlyDSL framework is a separate runtime dependency; if unavailable the  #
 #  decode silently falls back to the SoA Triton v3 path.                      #
 # --------------------------------------------------------------------------- #
-_USE_TQ_V4 = os.environ.get("VLLM_ROCM_TQ_FLYDSL_DECODE", "0") == "1"
-if _USE_TQ_V4:
-    from vllm.v1.attention.ops.flydsl_turboquant_decode_v4 import (
-        flydsl_turboquant_decode_attention_v4,
+_USE_TQ_FLYDSL = os.environ.get("VLLM_ROCM_TQ_FLYDSL_DECODE", "0") == "1"
+if _USE_TQ_FLYDSL:
+    from vllm.v1.attention.ops.flydsl_turboquant_decode import (
+        flydsl_turboquant_decode_attention,
     )
-    from vllm.v1.attention.ops.flydsl_turboquant_decode_v4 import (
-        is_flydsl_available as _flydsl_v4_available,
+    from vllm.v1.attention.ops.flydsl_turboquant_decode import (
+        is_flydsl_available as _flydsl_available,
     )
-    from vllm.v1.attention.ops.flydsl_turboquant_decode_v4 import (
-        is_flydsl_gqa6_available as _flydsl_v4_gqa6_available,
+    from vllm.v1.attention.ops.flydsl_turboquant_decode import (
+        is_flydsl_gqa6_available as _flydsl_gqa6_available,
     )
 
-    if not _flydsl_v4_available():
+    if not _flydsl_available():
         logger.warning(
             "VLLM_ROCM_TQ_FLYDSL_DECODE=1 but FlyDSL is unavailable; the decode path "
             "will fall back to the SoA Triton v3 kernel."
@@ -110,7 +110,7 @@ if _USE_TQ_V4:
 def _soa_imports():
     """Lazy import of the HIP-free SoA Triton subset (store / dequant / v3).
 
-    Kept lazy so the default (v4-off) path never imports these modules.
+    Kept lazy so the default (FlyDSL-off) path never imports these modules.
     """
     from vllm.v1.attention.ops.turboquant_soa.triton_turboquant_decode import (
         _tq_full_dequant_kv as soa_dequant,
@@ -389,17 +389,17 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
         )
 
-        # ---- FlyDSL v4 (opt-in) state. Inert unless VLLM_ROCM_TQ_FLYDSL_DECODE=1. ----
+        # ---- FlyDSL (opt-in) state. Inert unless VLLM_ROCM_TQ_FLYDSL_DECODE=1. ----
         self.sliding_window = sliding_window
         self.sinks = kwargs.get("sinks")
         # Cache max_model_len now (config is available at __init__ but NOT
         # during CUDA-graph capture when _ensure_on_device is re-entered).
         self._max_model_len = vllm_config.model_config.max_model_len
-        # The SoA cache layout is integral to the FlyDSL v4 pipeline (the v4
+        # The SoA cache layout is integral to the FlyDSL pipeline (the SoA
         # decode kernel and SoA-aware continuation both read it), so the SoA
-        # store is always on whenever v4 is enabled. There is no separate
+        # store is always on whenever FlyDSL is enabled. There is no separate
         # toggle: the single VLLM_ROCM_TQ_FLYDSL_DECODE flag drives the whole pipeline.
-        self._soa_store = _USE_TQ_V4
+        self._soa_store = _USE_TQ_FLYDSL
 
     def _flash_attn_varlen(
         self,
@@ -447,7 +447,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         maps it to the mirror centroid with identical distortion).
         """
         if self._soa_store:
-            # CUDA-graph capture safety for the FlyDSL v4 decode path on ROCm.
+            # CUDA-graph capture safety for the FlyDSL decode path on ROCm.
             # (1) Pre-allocate _arange_cache / _cu_2 BEFORE any capture; lazy
             #     allocation during graph replay lands in the HIP graph memory
             #     pool and yields stale addresses (GPU fault / garbage).
@@ -712,7 +712,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         """Quantize + store via fused Triton kernel."""
         if self._soa_store:
             # SoA layout (data region + metadata region separated per block),
-            # required by the FlyDSL v4 decode kernel. Pure-Triton store; the
+            # required by the FlyDSL decode kernel. Pure-Triton store; the
             # cache tensor shape is identical to the default AoS store, only
             # the within-block byte convention differs.
             soa_store, _, _ = _soa_imports()
@@ -864,13 +864,14 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                     synth_seq_lens = _arange_cache[cached_len + 1 : seq_len + 1]
                     synth_bt = attn_metadata.block_table[i : i + 1].expand(q_len, -1)
                     if self._soa_store:
-                        # The cache was written in SoA layout (always, for v4),
+                        # The cache was written in SoA layout (always, for FlyDSL),
                         # so it MUST be read with the SoA-aware v3 decode. The
                         # default AoS decode mis-addresses k_norm/v_scale/v_zero
                         # in a SoA cache -> garbage cached-prefix output ->
                         # accuracy collapse on every multi-turn / prefix-cached
-                        # (APC) request. Continuation stays on v3 even when v4
-                        # is the main decode kernel (v4 is decode-batch only).
+                        # (APC) request. Continuation stays on the Triton SoA
+                        # path even when FlyDSL is the main decode kernel
+                        # (FlyDSL is decode-batch only).
                         out = self._dispatch_decode_v3(
                             query=q_seq,
                             kv_cache=kv_cache,
@@ -1151,23 +1152,25 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 )
             )
 
-        if _USE_TQ_V4:
-            # FlyDSL v4 decode (MI355X/gfx950, MSE-key, HEAD_SIZE=128,
+        if _USE_TQ_FLYDSL:
+            # FlyDSL decode (MI355X/gfx950, MSE-key, HEAD_SIZE=128,
             # GQA in {6, 8, 16}). GQA-6 routes to the MiniMax sibling kernel.
             # Ineligible layers / missing FlyDSL fall back to SoA Triton v3.
             _gqa = self.num_kv_groups
-            v4_gqa_ok = (_gqa in (8, 16)) or (_gqa == 6 and _flydsl_v4_gqa6_available())
-            v4_eligible = (
+            flydsl_gqa_ok = (_gqa in (8, 16)) or (
+                _gqa == 6 and _flydsl_gqa6_available()
+            )
+            flydsl_eligible = (
                 not self.tq_config.key_fp8
                 and self.tq_config.key_mse_bits == 4
                 and self.tq_config.effective_value_quant_bits == 4
                 and self.head_size == 128
-                and v4_gqa_ok
+                and flydsl_gqa_ok
                 and self.sinks is None
                 and not (self.sliding_window and self.sliding_window > 0)
             )
-            if v4_eligible:
-                return flydsl_turboquant_decode_attention_v4(
+            if flydsl_eligible:
+                return flydsl_turboquant_decode_attention(
                     query=query,
                     kv_cache=kv_cache,
                     block_table=attn_metadata.block_table,
@@ -1191,7 +1194,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                     sinks=self.sinks,
                 )
             logger.warning_once(
-                "TurboQuant v4 ineligible (key_fp8=%s mse_bits=%s vqb=%s "
+                "TurboQuant FlyDSL ineligible (key_fp8=%s mse_bits=%s vqb=%s "
                 "head_size=%s num_kv_groups=%s sinks=%s) -> SoA Triton v3",
                 self.tq_config.key_fp8,
                 self.tq_config.key_mse_bits,
@@ -1248,9 +1251,9 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         return result
 
     def _dispatch_decode_v3(self, **kwargs):
-        """SoA-aware Triton v3 decode — fallback for v4-ineligible layers.
+        """SoA-aware Triton v3 decode — fallback for FlyDSL-ineligible layers.
 
-        The SoA v3 launcher accepts a subset of the v4 kwargs; filter to the
+        The SoA v3 launcher accepts a subset of the FlyDSL kwargs; filter to the
         params it accepts and raise if a *meaningful* (non-None) kwarg would
         be silently dropped (so we never mask a real feature gap).
         """
