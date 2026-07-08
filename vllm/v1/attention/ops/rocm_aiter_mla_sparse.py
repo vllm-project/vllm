@@ -25,6 +25,10 @@ else:
     _ON_GFX950 = False
 
 
+def _decode_budget_bytes() -> int:
+    return int(envs.VLLM_SPARSE_INDEXER_DECODE_MAX_MB) * 1024 * 1024
+
+
 @triton.jit
 def _indexer_k_quant_and_cache_kernel(
     k_ptr,  # [num_tokens, head_dim]
@@ -421,48 +425,119 @@ def rocm_fp8_paged_mqa_logits(
         aiter_paged_mqa_logits_module = paged_mqa_logits_module()
 
     if aiter_paged_mqa_logits_module is not None:
+        batch_size, next_n, heads, _ = q_fp8.shape
+        rows = batch_size * next_n
+        cols = max_model_len
+        budget = _decode_budget_bytes()
+        workspace = current_workspace_manager()
+
         if _ON_GFX942 or _ON_GFX950:
             deepgemm_fp8_paged_mqa_logits = (
                 aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
             )
-            batch_size, next_n, heads, _ = q_fp8.shape
-            (out_logits,) = current_workspace_manager().get_simultaneous(
-                ((batch_size * next_n, max_model_len), torch.float32),
+            if budget <= 0 or rows * cols * 4 <= budget:
+                (out_logits,) = workspace.get_simultaneous(
+                    ((rows, cols), torch.float32),
+                )
+                out_logits.fill_(float("-inf"))
+                deepgemm_fp8_paged_mqa_logits(
+                    q_fp8,
+                    kv_cache_fp8,
+                    weights,
+                    out_logits,
+                    context_lens,
+                    block_tables,
+                    max_model_len,
+                    ChunkK=256,
+                    Preshuffle=block_size > 1,
+                    KVBlockSize=block_size,
+                    WavePerEU=2,
+                )
+                return out_logits
+
+            # Per-call working set exceeds the budget: split the batch into
+            # sub-batches that each fit and copy every chunk's logits into the
+            # full output. The aiter kernel ignores schedule_metadata on ROCm,
+            # so chunking needs no per-chunk metadata re-derivation. The full
+            # output and the per-chunk buffer are two distinct, concurrently
+            # live views from one workspace allocation.
+            chunk_b = max(1, budget // (next_n * cols * 4))
+            max_chunk_rows = min(batch_size, chunk_b) * next_n
+            out_logits, chunk_buf = workspace.get_simultaneous(
+                ((rows, cols), torch.float32),
+                ((max_chunk_rows, cols), torch.float32),
             )
-            out_logits.fill_(float("-inf"))
-            deepgemm_fp8_paged_mqa_logits(
-                q_fp8,
-                kv_cache_fp8,
-                weights,
-                out_logits,
-                context_lens,
-                block_tables,
-                max_model_len,
-                ChunkK=256,
-                Preshuffle=block_size > 1,
-                KVBlockSize=block_size,
-                WavePerEU=2,
-            )
+            for b0 in range(0, batch_size, chunk_b):
+                b1 = min(batch_size, b0 + chunk_b)
+                chunk = chunk_buf[: (b1 - b0) * next_n]
+                chunk.fill_(float("-inf"))
+                deepgemm_fp8_paged_mqa_logits(
+                    q_fp8[b0:b1].contiguous(),
+                    kv_cache_fp8,
+                    weights[b0 * next_n : b1 * next_n].contiguous(),
+                    chunk,
+                    context_lens[b0:b1].contiguous(),
+                    block_tables[b0:b1].contiguous(),
+                    max_model_len,
+                    ChunkK=256,
+                    Preshuffle=block_size > 1,
+                    KVBlockSize=block_size,
+                    WavePerEU=2,
+                )
+                out_logits[b0 * next_n : b1 * next_n].copy_(chunk)
             return out_logits
+
         deepgemm_fp8_paged_mqa_logits_stage1 = (
             aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits_stage1
         )
-        batch_size, next_n, heads, _ = q_fp8.shape
-        (out_qk,) = current_workspace_manager().get_simultaneous(
-            ((heads, batch_size * next_n, max_model_len), torch.float32),
+        if budget <= 0 or heads * rows * cols * 4 <= budget:
+            (out_qk,) = workspace.get_simultaneous(
+                ((heads, rows, cols), torch.float32),
+            )
+            out_qk.fill_(float("-inf"))
+            deepgemm_fp8_paged_mqa_logits_stage1(
+                q_fp8,
+                kv_cache_fp8,
+                weights,
+                out_qk,
+                context_lens,
+                block_tables,
+                max_model_len,
+                ChunkQ=heads,
+            )
+            return out_qk.sum(dim=0)
+
+        # The stage1 working set carries an extra `heads` factor, so it is the
+        # first to blow past the budget. Reduce over heads per chunk before
+        # writing the [rows, cols] slice into the full output. chunk_buf is a
+        # flat buffer so each chunk is a fresh contiguous [heads, n, cols] view
+        # (a middle-dim slice of a fixed [heads, max, cols] tensor would not be
+        # contiguous for the trailing partial chunk).
+        chunk_b = max(1, budget // (heads * next_n * cols * 4))
+        max_chunk_rows = min(batch_size, chunk_b) * next_n
+        out_logits, chunk_buf = workspace.get_simultaneous(
+            ((rows, cols), torch.float32),
+            ((heads * max_chunk_rows * cols,), torch.float32),
         )
-        out_qk.fill_(float("-inf"))
-        deepgemm_fp8_paged_mqa_logits_stage1(
-            q_fp8,
-            kv_cache_fp8,
-            weights,
-            out_qk,
-            context_lens,
-            block_tables,
-            max_model_len,
-            ChunkQ=heads,
-        )
-        return out_qk.sum(dim=0)
+        for b0 in range(0, batch_size, chunk_b):
+            b1 = min(batch_size, b0 + chunk_b)
+            chunk_rows = (b1 - b0) * next_n
+            chunk = chunk_buf[: heads * chunk_rows * cols].reshape(
+                heads, chunk_rows, cols
+            )
+            chunk.fill_(float("-inf"))
+            deepgemm_fp8_paged_mqa_logits_stage1(
+                q_fp8[b0:b1].contiguous(),
+                kv_cache_fp8,
+                weights[b0 * next_n : b1 * next_n].contiguous(),
+                chunk,
+                context_lens[b0:b1].contiguous(),
+                block_tables[b0:b1].contiguous(),
+                max_model_len,
+                ChunkQ=heads,
+            )
+            out_logits[b0 * next_n : b1 * next_n].copy_(chunk.sum(dim=0))
+        return out_logits
     else:
         return fp8_paged_mqa_logits_torch(
             q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
