@@ -176,3 +176,73 @@ def test_online_quant_load_format_dummy(
     ) as llm:
         outputs = llm.generate_greedy(["The future of AI is"], max_tokens=4)
         print(outputs[0][1])
+
+
+@pytest.mark.parametrize("is_act_and_mul", [True, False])
+@pytest.mark.parametrize("has_bias", [True, False])
+def test_online_moe_create_weights_w13_dim(is_act_and_mul, has_bias):
+    """w13 holds gate+up (2N) for gated MoE and up only (N) for non-gated MoE
+    (is_act_and_mul=False, e.g. NemotronH relu2)."""
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.quantization.online.moe_base import (
+        OnlineMoEMethodBase,
+    )
+
+    class _Method(OnlineMoEMethodBase):
+        def __init__(self, moe):
+            self.moe = moe
+
+        def process_weights_after_loading(self, layer):
+            pass
+
+        def get_fused_moe_quant_config(self, layer):
+            return None
+
+    e, n, k = 4, 96, 64
+    moe = SimpleNamespace(is_act_and_mul=is_act_and_mul, has_bias=has_bias)
+    layer = torch.nn.Module()
+    _Method(moe).create_weights(
+        layer=layer,
+        num_experts=e,
+        hidden_size=k,
+        intermediate_size_per_partition=n,
+        params_dtype=torch.bfloat16,
+    )
+    w13_up_dim = 2 * n if is_act_and_mul else n
+    assert layer.w13_weight.shape == (e, w13_up_dim, k)
+    assert layer.w2_weight.shape == (e, k, n)
+    if has_bias:
+        assert layer.w13_bias.shape == (e, w13_up_dim)
+        assert layer.w2_bias.shape == (e, k)
+
+
+@pytest.mark.parametrize("is_act_and_mul", [True, False])
+def test_fp8_per_block_zero_padding(is_act_and_mul):
+    """_zero_padding must zero the roundup-padded rows of each w13 shard: two
+    gate/up shards for gated MoE, a single up shard for non-gated MoE."""
+    from types import SimpleNamespace
+
+    e, n, k = 2, 96, 256  # unpadded sizes; k is already block-aligned
+    n_pad = 128  # rounded up to the 128 quant block
+    num_shards = 2 if is_act_and_mul else 1
+    layer = SimpleNamespace(
+        moe_config=SimpleNamespace(
+            hidden_dim_unpadded=k, intermediate_size_per_partition_unpadded=n
+        ),
+        w13_weight=torch.ones(e, num_shards * n_pad, k),
+        w2_weight=torch.ones(e, k, n_pad),
+        w13_bias=torch.ones(e, num_shards * n_pad),
+        w2_bias=torch.ones(e, k),
+    )
+    method = SimpleNamespace(moe=SimpleNamespace(is_act_and_mul=is_act_and_mul))
+    Fp8PerBlockOnlineMoEMethod._zero_padding(method, layer)
+
+    w13 = layer.w13_weight.view(e, num_shards, n_pad, k)
+    assert (w13[:, :, :n] == 1).all()
+    assert (w13[:, :, n:] == 0).all()
+    bias = layer.w13_bias.view(e, num_shards, n_pad)
+    assert (bias[..., :n] == 1).all()
+    assert (bias[..., n:] == 0).all()
+    assert (layer.w2_weight[:, :, :n] == 1).all()
+    assert (layer.w2_weight[:, :, n:] == 0).all()

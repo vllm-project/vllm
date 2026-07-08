@@ -37,11 +37,19 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
 
+        # Non-gated MoE (is_act_and_mul=False) has no gate_proj, so w13 holds
+        # only the up projection.
+        w13_up_dim = (
+            2 * intermediate_size_per_partition
+            if self.moe.is_act_and_mul
+            else intermediate_size_per_partition
+        )
+
         # Fused gate_up_proj (column parallel) — full precision on meta device
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                w13_up_dim,
                 hidden_size,
                 device="meta",
                 dtype=params_dtype,
@@ -70,7 +78,7 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
             w13_bias = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
-                    2 * intermediate_size_per_partition,
+                    w13_up_dim,
                     device="meta",
                     dtype=layer.orig_dtype,
                 ),

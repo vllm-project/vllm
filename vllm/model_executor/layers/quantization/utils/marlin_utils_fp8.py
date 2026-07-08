@@ -217,16 +217,20 @@ def prepare_fp8_layer_for_marlin(
         replace_parameter(layer, "bias", bias)
 
 
-def _moe_pad_shard_rows(x: torch.Tensor, n: int, padded_n: int) -> torch.Tensor:
-    """Zero-pad each gate/up shard of a ``(E, 2 * n, ...)`` tensor to padded_n
-    rows. FP8 zero decodes to 0.0, so the padded rows contribute nothing."""
+def _moe_pad_shard_rows(
+    x: torch.Tensor, n: int, padded_n: int, num_shards: int = 2
+) -> torch.Tensor:
+    """Zero-pad each w13 shard of a ``(E, num_shards * n, ...)`` tensor to
+    padded_n rows. FP8 zero decodes to 0.0, so the padded rows contribute
+    nothing. Gated MoE stores two gate/up shards; non-gated MoE
+    (``is_act_and_mul=False``) stores a single up shard."""
     if padded_n == n:
         return x
     e = x.size(0)
     rest = x.shape[2:]
-    x = x.view(e, 2, n, *rest)
+    x = x.view(e, num_shards, n, *rest)
     x = torch.nn.functional.pad(x, (0, 0) * len(rest) + (0, padded_n - n))
-    return x.reshape(e, 2 * padded_n, *rest)
+    return x.reshape(e, num_shards * padded_n, *rest)
 
 
 def _moe_pad_last(x: torch.Tensor, n: int, padded_n: int) -> torch.Tensor:
@@ -265,6 +269,10 @@ def prepare_fp8_moe_layer_for_marlin(
     k = layer.hidden_size
     n = layer.intermediate_size_per_partition
     w13_n = w13_weight.size(1)
+    # w13 holds two gate/up shards for gated MoE, a single up shard for
+    # non-gated MoE (is_act_and_mul=False).
+    num_w13_shards = w13_n // n
+    assert w13_n == num_w13_shards * n and num_w13_shards in (1, 2)
     weight_block_size = getattr(layer, "weight_block_size", None)
     group_size = -1 if weight_block_size is None else weight_block_size[1]
 
@@ -273,7 +281,7 @@ def prepare_fp8_moe_layer_for_marlin(
     # are padded to match below (the padded values are irrelevant).
     padded_n = marlin_moe_padded_intermediate(n, group_size)
     if padded_n != n:
-        w13_weight = _moe_pad_shard_rows(w13_weight, n, padded_n)
+        w13_weight = _moe_pad_shard_rows(w13_weight, n, padded_n, num_w13_shards)
         w2_weight = _moe_pad_last(w2_weight, n, padded_n)
 
     # WORKSPACE
@@ -345,10 +353,10 @@ def prepare_fp8_moe_layer_for_marlin(
         if padded_n != n:
             if "w13" in name:
                 g = scales.size(1)
-                scales = scales.view(e, g, 2, n)
+                scales = scales.view(e, g, num_w13_shards, n)
                 scales = torch.nn.functional.pad(scales, (0, padded_n - n))
-                scales = scales.reshape(e, g, 2 * padded_n)
-                size_n = 2 * padded_n
+                scales = scales.reshape(e, g, num_w13_shards * padded_n)
+                size_n = num_w13_shards * padded_n
             else:
                 if group_size > 0:
                     pad_groups = (padded_n - n) // group_size
@@ -522,9 +530,10 @@ def prepare_mxfp8_moe_layer_for_marlin(
 
     Args:
         layer: MoE layer (used to read params_dtype and attach workspace).
-        w13: [E, 2*N, K] float8_e4m3fn weights.
+        w13: [E, S*N, K] float8_e4m3fn weights, where S is 2 for gated MoE
+            (gate/up shards) and 1 for non-gated MoE (is_act_and_mul=False).
         w2:  [E, K, N] float8_e4m3fn weights.
-        w13_scale: [E, 2*N, K//32] uint8 e8m0 scales.
+        w13_scale: [E, S*N, K//32] uint8 e8m0 scales.
         w2_scale:  [E, K, N//32] uint8 e8m0 scales.
 
     Returns:
@@ -534,12 +543,14 @@ def prepare_mxfp8_moe_layer_for_marlin(
     e = w13.shape[0]
     k = w13.shape[2]
     n = w2.shape[2]
+    num_w13_shards = w13.shape[1] // n
+    assert w13.shape[1] == num_w13_shards * n and num_w13_shards in (1, 2)
 
     # Pad a tile-misaligned intermediate size to a valid Marlin thread tile.
     padded_n = marlin_moe_padded_intermediate(n, group_size)
     if padded_n != n:
-        w13 = _moe_pad_shard_rows(w13, n, padded_n)
-        w13_scale = _moe_pad_shard_rows(w13_scale, n, padded_n)
+        w13 = _moe_pad_shard_rows(w13, n, padded_n, num_w13_shards)
+        w13_scale = _moe_pad_shard_rows(w13_scale, n, padded_n, num_w13_shards)
         w2 = _moe_pad_last(w2, n, padded_n)
         w2_scale = _moe_pad_last(w2_scale, n // group_size, padded_n // group_size)
         n = padded_n
