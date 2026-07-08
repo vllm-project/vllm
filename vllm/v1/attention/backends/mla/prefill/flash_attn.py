@@ -3,7 +3,7 @@
 """FlashAttention backend for MLA prefill."""
 
 import functools
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
@@ -25,7 +25,10 @@ from vllm.v1.attention.backends.fa_utils import (
     get_flash_attn_version,
     is_flash_attn_varlen_func_available,
 )
-from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+from vllm.v1.attention.backends.mla.prefill.base import (
+    MLADimensions,
+    MLAPrefillBackend,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -39,6 +42,14 @@ else:
 
 class FlashAttnPrefillBackend(MLAPrefillBackend):
     """FlashAttention backend for MLA prefill."""
+
+    supported_mla_dimensions: ClassVar[list[MLADimensions]] = [
+        MLADimensions(
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+        ),
+    ]
 
     @staticmethod
     def get_name() -> str:
