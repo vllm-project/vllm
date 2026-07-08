@@ -120,6 +120,7 @@ class EngineCoreRequest(
 
     trace_headers: Mapping[str, str] | None = None
     resumable: bool = False
+    session_id: str | None = None
 
     # The user-provided request ID. This field is set internally,
     # copied from the provided request_id that's originally assigned
