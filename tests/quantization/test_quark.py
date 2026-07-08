@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
     QuarkW8A8Int8,
 )
 from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
+    QuarkW4A8Fp8MoEMethod,
     QuarkW8A8Int8MoEMethod,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -163,6 +164,38 @@ def test_quark_int8_w8a8_moe(vllm_runner, tp):
             # Non-MoE linear layers should use QuarkW8A8Int8
             qkv_proj = layer.self_attn.qkv_proj
             assert isinstance(qkv_proj.scheme, QuarkW8A8Int8)
+
+        llm.apply_model(check_model)
+
+        output = llm.generate_greedy("Hello", max_tokens=4)
+        assert output
+
+
+@pytest.mark.skipif(
+    not on_gfx950(),
+    reason="Quark W4A8 (INT4-FP8) MoE requires the AITER kernel on gfx942/gfx950",
+)
+@pytest.mark.parametrize("tp", [1])
+def test_quark_w4a8_fp8_moe(vllm_runner, monkeypatch, tp):
+    """Test W4A8 (INT4 weight + FP8 activation) MoE with a tiny Qwen3 MoE model.
+
+    W4A8 dispatches through the AITER fused MoE kernel, so AITER must be on.
+    """
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+    model_path = "amd/tiny-qwen3-moe-w4a8"
+    with vllm_runner(
+        model_path,
+        enforce_eager=True,
+        tensor_parallel_size=tp,
+        gpu_memory_utilization=0.1,
+    ) as llm:
+
+        def check_model(model):
+            moe = model.model.layers[0].mlp.experts
+            assert isinstance(moe._quant_method, QuarkW4A8Fp8MoEMethod), (
+                f"Expected QuarkW4A8Fp8MoEMethod, got {type(moe._quant_method)}"
+            )
 
         llm.apply_model(check_model)
 
