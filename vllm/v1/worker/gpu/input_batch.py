@@ -105,6 +105,7 @@ class InputBatch:
         num_reqs: int,
         num_tokens: int,
         input_buffers: InputBuffers,
+        num_logits_per_req: int = 1,
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
@@ -112,8 +113,6 @@ class InputBatch:
         req_ids = [f"req_{i}_{random_uuid()}" for i in range(num_reqs)]
         idx_mapping_np = np.arange(num_reqs, dtype=np.int32)
         idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
-        expanded_idx_mapping = idx_mapping
-        expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
 
         num_scheduled_tokens = np.full(num_reqs, num_tokens // num_reqs, dtype=np.int32)
         num_scheduled_tokens[-1] += num_tokens % num_reqs
@@ -143,9 +142,23 @@ class InputBatch:
         input_buffers.is_padding[:num_tokens].fill_(True)
         is_padding = input_buffers.is_padding[:num_tokens]
 
-        logits_indices = query_start_loc[1:] - 1
-        cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
-        cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
+        if num_logits_per_req == 1:
+            logits_indices = query_start_loc[1:] - 1
+            cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
+            expanded_idx_mapping = idx_mapping
+            expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
+        else:
+            # Spec decode: num_logits_per_req logits per request.
+            num_logits = num_reqs * num_logits_per_req
+            logits_indices = torch.arange(num_logits, device=device, dtype=torch.int32)
+            cu_num_logits_np = (
+                np.arange(num_reqs + 1, dtype=np.int32) * num_logits_per_req
+            )
+            expanded_idx_mapping = idx_mapping.repeat_interleave(num_logits_per_req)
+            expanded_local_pos = torch.arange(
+                num_logits_per_req, dtype=torch.int32, device=device
+            ).repeat(num_reqs)
+        cu_num_logits = torch.from_numpy(cu_num_logits_np).to(device)
         # Dummy: seq_len == query_len (fresh-prefill shape).
         seq_lens_cpu_upper_bound = torch.from_numpy(num_scheduled_tokens.copy())
         return cls(

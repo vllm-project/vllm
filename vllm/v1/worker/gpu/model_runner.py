@@ -627,6 +627,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
+        if self.rejection_sampler is not None:
+            self._dummy_rejection_sampler_run(hidden_states)
+            return
+
         num_reqs = hidden_states.shape[0]
         logits = self.model.compute_logits(hidden_states)
         dummy_input_batch = InputBatch.make_dummy(
@@ -638,6 +642,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # during actual execution.
         assert self.sampler is not None
         self.sampler(logits, dummy_input_batch)
+
+    @torch.inference_mode()
+    def _dummy_rejection_sampler_run(self, hidden_states: torch.Tensor) -> None:
+        # Profile the spec-decode peak: the rejection sampler copies the expanded
+        # decode_query_len logits per request to fp32 (apply_sampling_params),
+        # which the plain sampler path never exercises. Size like the largest
+        # real decode step; only the shapes matter.
+        assert self.rejection_sampler is not None
+        assert self.speculator is not None
+        num_logits_per_req = self.decode_query_len
+        num_reqs = max(
+            1, min(self.max_num_reqs, self.max_num_tokens // num_logits_per_req)
+        )
+        num_logits = num_reqs * num_logits_per_req
+
+        hidden_states = hidden_states.new_zeros((num_logits, hidden_states.shape[-1]))
+        logits = self.model.compute_logits(hidden_states)
+        dummy_input_batch = InputBatch.make_dummy(
+            num_reqs, num_logits, self.input_buffers, num_logits_per_req
+        )
+        self.rejection_sampler(logits, dummy_input_batch, self.speculator.draft_logits)
 
     @torch.inference_mode()
     def _dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:
