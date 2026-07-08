@@ -431,12 +431,14 @@ class TransferTopology:
         # CPU_ATTN stores fused 4D blocks-first KV as [num_blocks, H,N,2D].
         # Hybrid SSM models assume a single blocks_first layout.
         backend_name = getattr(attn_backend, "get_name", lambda: "")()
-        self._is_kv_layout_blocks_first = self.is_mamba or (
-            len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
-        ) or (
-            backend_name == "CPU_ATTN"
-            and len(kv_cache_shape) == 4
-            and kv_cache_shape[0] == 1
+        self._is_kv_layout_blocks_first = (
+            self.is_mamba
+            or (len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1)
+            or (
+                backend_name == "CPU_ATTN"
+                and len(kv_cache_shape) == 4
+                and kv_cache_shape[0] == 1
+            )
         )
 
         self._cross_layers_blocks = False
