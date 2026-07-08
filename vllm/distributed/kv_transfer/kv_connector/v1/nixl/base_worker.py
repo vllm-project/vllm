@@ -52,7 +52,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     _NIXL_SUPPORTED_DEVICE,
     get_representative_spec_type,
-    zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
     MambaConvSplitInfo,
@@ -65,7 +64,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.network_utils import make_zmq_path
+from vllm.utils.network_utils import make_zmq_path, zmq_socket_ctx
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -561,7 +560,7 @@ class NixlBaseConnectorWorker:
         remote_rank_to_agent_name = {}
         path = make_zmq_path("tcp", host, port)
 
-        with zmq_ctx(zmq.REQ, path) as sock:
+        with zmq_socket_ctx(path, zmq.REQ, bind=False) as sock:
             for remote_rank in p_remote_ranks:
                 logger.debug(
                     "Querying metadata on path: %s at remote tp rank %s",
