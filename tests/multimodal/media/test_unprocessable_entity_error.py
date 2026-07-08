@@ -1,17 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Tests for VLLMUnprocessableEntityError and media fetch error handling.
-
-Verifies that unprocessable image URLs (404, 403, DNS failures, etc.) return
-HTTP 422 instead of 500.
-"""
+"""Tests for VLLMUnprocessableEntityError and media fetch error handling."""
 
 from http import HTTPStatus
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
+import requests
 
 from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.exceptions import VLLMUnprocessableEntityError
@@ -64,7 +61,7 @@ class TestMediaConnectorErrorHandling:
 
     @pytest.mark.asyncio
     async def test_fetch_image_async_dns_error(self):
-        """DNS errors are transient and should remain as-is for retry."""
+        """DNS errors should remain retryable transport failures."""
         connector = MediaConnector()
 
         with patch.object(
@@ -75,12 +72,50 @@ class TestMediaConnectorErrorHandling:
                 os_error=MagicMock(),
             )
 
-            with pytest.raises(aiohttp.ClientConnectorDNSError) as exc_info:
+            with pytest.raises(aiohttp.ClientConnectorDNSError):
                 await connector.fetch_image_async(
                     "https://nonexistent.example/image.jpg"
                 )
 
-            assert isinstance(exc_info.value, aiohttp.ClientConnectorDNSError)
+    @pytest.mark.asyncio
+    async def test_fetch_image_async_429(self):
+        """HTTP 429 should remain a retryable upstream response."""
+        connector = MediaConnector()
+
+        with patch.object(
+            connector.connection, "async_get_bytes", new_callable=AsyncMock
+        ) as mock_get:
+            mock_get.side_effect = aiohttp.ClientResponseError(
+                request_info=MagicMock(),
+                history=(),
+                status=429,
+                message="Too Many Requests",
+            )
+
+            with pytest.raises(aiohttp.ClientResponseError) as exc_info:
+                await connector.fetch_image_async("https://example.com/image.jpg")
+
+            assert exc_info.value.status == 429
+
+    @pytest.mark.asyncio
+    async def test_fetch_image_async_invalid_url(self):
+        connector = MediaConnector()
+
+        with patch.object(
+            connector.connection, "async_get_bytes", new_callable=AsyncMock
+        ) as mock_get:
+            mock_get.side_effect = aiohttp.InvalidURL(
+                "http://internal.example:8080/image.jpg"
+            )
+
+            with pytest.raises(VLLMUnprocessableEntityError) as exc_info:
+                await connector.fetch_image_async("http:// bad")
+
+            assert exc_info.value.parameter == "image_url"
+            assert str(exc_info.value).startswith(
+                "Failed to fetch media from URL: Invalid URL"
+            )
+            assert "internal.example" not in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_fetch_image_async_500_preserved(self):
@@ -121,7 +156,7 @@ class TestMediaConnectorErrorHandling:
             assert exc_info.value.parameter == "image_url"
 
     def test_fetch_image_connection_error(self):
-        """Connection errors are transient and should remain as-is for retry."""
+        """Connection errors should remain retryable transport failures."""
         connector = MediaConnector()
 
         with patch.object(
@@ -129,10 +164,41 @@ class TestMediaConnectorErrorHandling:
         ) as mock_get:
             mock_get.side_effect = aiohttp.ClientConnectionError("Connection refused")
 
-            with pytest.raises(aiohttp.ClientConnectionError) as exc_info:
+            with pytest.raises(aiohttp.ClientConnectionError):
                 connector.fetch_image("https://example.com/image.jpg")
 
-            assert isinstance(exc_info.value, aiohttp.ClientConnectionError)
+    def test_fetch_image_requests_connection_error(self):
+        """Requests connection errors should remain retryable failures."""
+        connector = MediaConnector()
+
+        with patch.object(
+            connector.connection, "get_bytes", new_callable=MagicMock
+        ) as mock_get:
+            mock_get.side_effect = requests.exceptions.ConnectionError(
+                "Connection refused"
+            )
+
+            with pytest.raises(requests.exceptions.ConnectionError):
+                connector.fetch_image("https://example.com/image.jpg")
+
+    def test_fetch_image_requests_invalid_url(self):
+        connector = MediaConnector()
+
+        with patch.object(
+            connector.connection, "get_bytes", new_callable=MagicMock
+        ) as mock_get:
+            mock_get.side_effect = requests.exceptions.InvalidURL(
+                "No host supplied for internal.example:8080"
+            )
+
+            with pytest.raises(VLLMUnprocessableEntityError) as exc_info:
+                connector.fetch_image("http:// bad")
+
+            assert exc_info.value.parameter == "image_url"
+            assert str(exc_info.value).startswith(
+                "Failed to fetch media from URL: Invalid URL"
+            )
+            assert "internal.example" not in str(exc_info.value)
 
 
 class TestErrorResponse:

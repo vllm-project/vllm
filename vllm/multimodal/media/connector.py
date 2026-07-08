@@ -56,47 +56,48 @@ def _wrap_media_fetch_error(
 ) -> VLLMUnprocessableEntityError | Exception:
     """Convert media fetch exceptions to VLLMUnprocessableEntityError.
 
-    This handles HTTP errors that indicate the media resource is invalid
-    (4xx responses except 408/429, malformed URLs) and converts them to a
-    422 Unprocessable Entity error instead of 500.
+    This handles permanent HTTP/client errors that indicate the media resource
+    is invalid (4xx responses except 408/429, malformed URLs) and converts them
+    to a 422 Unprocessable Entity error instead of 500.
 
-    Transient errors (5xx, 408, 429, DNS failures, connection errors,
-    timeouts) are returned as-is to allow retry logic to handle them
-    appropriately.
+    Transient errors (5xx, 408, 429, DNS failures, connection errors, timeouts)
+    are returned as-is to allow retry logic to handle them appropriately.
 
     Returns:
-        VLLMUnprocessableEntityError for permanent client errors (4xx except
-            408/429, invalid URL)
-        Original exception for transient errors (5xx, 408, 429, network blips)
-            or other exceptions
+        VLLMUnprocessableEntityError for permanent client errors.
+        Original exception for transient errors or other exceptions.
     """
     if isinstance(exc, aiohttp.ClientResponseError):
-        if exc.status in (408, 429):
+        if exc.status in (408, 429) or exc.status >= 500:
             return exc
-        if exc.status < 500:
-            return VLLMUnprocessableEntityError(
-                f"Failed to fetch media from URL: HTTP {exc.status} error",
-                parameter="image_url",
-                value=url,
-            )
-        return exc
+        return VLLMUnprocessableEntityError(
+            f"Failed to fetch media from URL: HTTP {exc.status} error",
+            parameter="image_url",
+            value=url,
+        )
+
+    if isinstance(exc, aiohttp.InvalidURL):
+        return VLLMUnprocessableEntityError(
+            "Failed to fetch media from URL: Invalid URL",
+            parameter="image_url",
+            value=url,
+        )
 
     if isinstance(exc, requests.exceptions.HTTPError):
-        if exc.response is not None:
-            status_code = exc.response.status_code
-            if status_code in (408, 429):
-                return exc
-            if status_code < 500:
-                return VLLMUnprocessableEntityError(
-                    f"Failed to fetch media from URL: HTTP {status_code} error",
-                    parameter="image_url",
-                    value=url,
-                )
-        return exc
+        if exc.response is None:
+            return exc
+        status = exc.response.status_code
+        if status in (408, 429) or status >= 500:
+            return exc
+        return VLLMUnprocessableEntityError(
+            f"Failed to fetch media from URL: HTTP {status} error",
+            parameter="image_url",
+            value=url,
+        )
 
     if isinstance(exc, requests.exceptions.InvalidURL):
         return VLLMUnprocessableEntityError(
-            "Failed to fetch media from URL: Invalid URL format",
+            "Failed to fetch media from URL: Invalid URL",
             parameter="image_url",
             value=url,
         )
