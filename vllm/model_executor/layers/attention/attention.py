@@ -428,7 +428,14 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_sharing_target_layer_name,
             **extra_impl_args,
         )
-        self.backend = AttentionBackendEnum[self.attn_backend.get_name()]
+        if self.attn_backend.is_composite():
+            # Composite backends have no single enum member; use the decode
+            # backend's enum (decode-first owns the layout/identity).
+            self.backend = AttentionBackendEnum[
+                self.attn_backend.decode_backend.get_name()  # type: ignore[attr-defined]
+            ]
+        else:
+            self.backend = AttentionBackendEnum[self.attn_backend.get_name()]
         self.dtype = dtype
 
         # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how

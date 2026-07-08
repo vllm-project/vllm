@@ -16,7 +16,6 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
-    QueryLenSupport,
 )
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.platform_utils import num_compute_units
@@ -26,6 +25,7 @@ from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
     MultipleOf,
+    QueryLenSupport,
 )
 from vllm.v1.attention.backends.utils import (
     reshape_attn_output_for_spec_decode,

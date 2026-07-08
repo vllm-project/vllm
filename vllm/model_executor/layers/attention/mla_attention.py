@@ -190,7 +190,6 @@ return curr_o @ W_O
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass
-from enum import Enum
 from typing import ClassVar, Generic, TypeVar, cast
 
 import torch
@@ -259,6 +258,7 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
     MLAAttentionImpl,
+    QueryLenSupport,
     SparseMLAAttentionImpl,
 )
 from vllm.v1.attention.backends.mla.prefill import (
@@ -1142,23 +1142,6 @@ direct_register_custom_op(
 )
 
 
-class QueryLenSupport(Enum):
-    """Defines the level of query length support for an attention backend's
-    decode pipeline.
-
-    - SINGLE_ONLY: Decode pipeline only supports single-token queries
-                   (query_len=1)
-    - UNIFORM: Decode pipeline supports uniform multi-token queries
-               (all requests must have same query_len > 1)
-    - VARLEN: Decode pipeline supports variable-length queries
-              (mixed query lengths in same batch)
-    """
-
-    SINGLE_ONLY = "single_only"
-    UNIFORM = "uniform"
-    VARLEN = "varlen"
-
-
 def dynamic_per_batched_tensor_quant(
     x: torch.Tensor, dtype: torch.dtype = torch.float8_e4m3fn
 ):
@@ -1570,16 +1553,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             layer_names[0]
         ].prefill_backend.clone()
 
-        supports_spec_decode = self.query_len_support != QueryLenSupport.SINGLE_ONLY
-        self._init_reorder_batch_threshold(
-            self.reorder_batch_threshold, supports_spec_decode, supports_dcp_with_varlen
+        self._init_reorder_from_query_len_support(
+            self.reorder_batch_threshold, supports_dcp_with_varlen
         )
-
-        if self.query_len_support == QueryLenSupport.SINGLE_ONLY:
-            assert self.reorder_batch_threshold == 1, (
-                f"reorder_batch_threshold must be 1 when query_len_support is "
-                f"SINGLE_ONLY, got {self.reorder_batch_threshold}"
-            )
 
     def _build_decode(
         self,

@@ -20,6 +20,7 @@ from .interface import DeviceCapability, Platform, PlatformEnum
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.kernel import IrOpPriorityConfig
+    from vllm.v1.attention.backend import AttentionBackend, AttentionRole
     from vllm.v1.attention.selector import AttentionSelectorConfig
 
 logger = init_logger(__name__)
@@ -533,6 +534,8 @@ class RocmPlatform(Platform):
         selected_backend: "AttentionBackendEnum",
         attn_selector_config: "AttentionSelectorConfig",
         num_heads: int | None = None,
+        role: "AttentionRole | None" = None,
+        decode_backend: "type[AttentionBackend] | None" = None,
     ) -> str:
         device_capability = cls.get_device_capability()
         assert device_capability is not None

@@ -46,6 +46,19 @@ class AttentionType(str, Enum):
     """Attention between dec. Q and enc. K/V for encoder-decoder."""
 
 
+class AttentionRole(Enum):
+    """The phase a backend serves within an attention layer.
+
+    A backend may serve one or both roles (see
+    ``AttentionBackend.supports_role``). Independent per-role selection lets a
+    layer pair, e.g., a non-causal prefill backend with a fast causal-only
+    decode backend behind a single ``CompositeAttentionBackend``.
+    """
+
+    PREFILL = "prefill"
+    DECODE = "decode"
+
+
 class MultipleOf:
     base: int
 
@@ -237,6 +250,32 @@ class AttentionBackend(ABC):
     @classmethod
     def is_mla(cls) -> bool:
         return False
+
+    @classmethod
+    def is_composite(cls) -> bool:
+        """Whether this is a composite backend pairing a prefill and a decode
+        backend (see ``CompositeAttentionBackend``). Composites expose
+        ``prefill_backend`` / ``decode_backend`` attributes."""
+        return False
+
+    @classmethod
+    def supports_role(cls, role: "AttentionRole") -> bool:
+        """Whether this backend can serve the given attention role.
+
+        Monolithic backends serve both roles, so the default is ``True``. Role-
+        only backends (e.g. MLA prefill backends, or decode-only sparse-MLA
+        impls) override this to advertise a single role.
+        """
+        return True
+
+    @classmethod
+    def default_priority(cls, role: "AttentionRole") -> int | None:
+        """Per-role auto-selection priority, or ``None`` for no constraint.
+
+        Reserved for role-aware selection; not consulted by any selection path
+        yet. Platform priority lists remain the source of truth until wired.
+        """
+        return None
 
     @classmethod
     def supports_sink(cls) -> bool:
@@ -597,6 +636,23 @@ class AttentionCGSupport(Enum):
     """NO cudagraph support"""
 
 
+class QueryLenSupport(Enum):
+    """Defines the level of query length support for an attention backend's
+    decode pipeline.
+
+    - SINGLE_ONLY: Decode pipeline only supports single-token queries
+                   (query_len=1)
+    - UNIFORM: Decode pipeline supports uniform multi-token queries
+               (all requests must have same query_len > 1)
+    - VARLEN: Decode pipeline supports variable-length queries
+              (mixed query lengths in same batch)
+    """
+
+    SINGLE_ONLY = "single_only"
+    UNIFORM = "uniform"
+    VARLEN = "varlen"
+
+
 class AttentionMetadataBuilder(ABC, Generic[M]):
     # Does this backend/builder support CUDA Graphs for attention (default: no).
     # Do not access directly. Call get_cudagraph_support() instead.
@@ -605,6 +661,12 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
     reorder_batch_threshold: int | None = None
+    # The level of query length support for this builder's decode pipeline.
+    # Drives `reorder_batch_threshold` (via `_init_reorder_from_query_len_support`)
+    # and spec-decode support. Backends may either declare this enum or set
+    # `reorder_batch_threshold` directly; the default (SINGLE_ONLY) maps to a
+    # threshold of 1, matching backends that do not reorder.
+    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.SINGLE_ONLY
     # Does this backend/builder support updating the block table in existing
     # metadata
     supports_update_block_table: bool = False
@@ -662,6 +724,29 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
             and not supports_dcp_with_varlen
         ):
             self.reorder_batch_threshold = 1
+
+    def _init_reorder_from_query_len_support(
+        self,
+        reorder_batch_threshold: int | None = 1,
+        supports_dcp_with_varlen: bool = False,
+    ) -> None:
+        """Initialize ``reorder_batch_threshold`` from ``query_len_support``.
+
+        Spec-decode queries are treated as decodes iff ``query_len_support`` is
+        not ``SINGLE_ONLY``, in which case the threshold is bumped to cover the
+        speculative window. ``SINGLE_ONLY`` must keep a threshold of 1.
+        """
+        supports_spec_as_decode = self.query_len_support != QueryLenSupport.SINGLE_ONLY
+        self._init_reorder_batch_threshold(
+            reorder_batch_threshold,
+            supports_spec_as_decode,
+            supports_dcp_with_varlen,
+        )
+        if self.query_len_support == QueryLenSupport.SINGLE_ONLY:
+            assert self.reorder_batch_threshold == 1, (
+                f"reorder_batch_threshold must be 1 when query_len_support is "
+                f"SINGLE_ONLY, got {self.reorder_batch_threshold}"
+            )
 
     @abstractmethod
     def build(

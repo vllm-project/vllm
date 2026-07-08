@@ -10,7 +10,7 @@ import vllm.envs as envs
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.v1.attention.backend import AttentionBackend, AttentionType
+from vllm.v1.attention.backend import AttentionBackend, AttentionRole, AttentionType
 from vllm.v1.attention.backends.registry import (
     MambaAttentionBackendEnum,
 )
@@ -103,10 +103,52 @@ def get_attn_backend(
         use_kv_connector=use_kv_connector,
     )
 
-    return _cached_get_attn_backend(
-        backend=vllm_config.attention_config.backend,
+    prefill_backend, decode_backend = vllm_config.attention_config.resolved_backends()
+
+    # Single-backend path (identical to the pre-role behavior): both roles map to
+    # the same backend enum (nothing set, `--attention-backend`, or matching
+    # per-role flags). No composite is constructed.
+    if prefill_backend == decode_backend:
+        return _cached_get_attn_backend(
+            backend=decode_backend,
+            attn_selector_config=attn_selector_config,
+            num_heads=num_heads,
+        )
+
+    # Decode-first: the decode backend fixes the KV layout and cudagraph support;
+    # the prefill backend is resolved constrained to be compatible with it.
+    decode_cls = _cached_get_attn_backend(
+        backend=decode_backend,
         attn_selector_config=attn_selector_config,
         num_heads=num_heads,
+        role=AttentionRole.DECODE,
+    )
+    prefill_cls = _cached_get_attn_backend(
+        backend=prefill_backend,
+        attn_selector_config=attn_selector_config,
+        num_heads=num_heads,
+        role=AttentionRole.PREFILL,
+        decode_backend=decode_cls,
+    )
+
+    if prefill_cls is decode_cls:
+        # Roles resolved to the same backend: no composite needed.
+        return decode_cls
+
+    from vllm.v1.attention.backends.composite import make_composite_backend
+    from vllm.v1.attention.backends.utils import kv_layouts_compatible
+
+    if not kv_layouts_compatible(decode_cls, prefill_cls, attn_selector_config):
+        raise ValueError(
+            f"Prefill backend {prefill_cls.get_name()} and decode backend "
+            f"{decode_cls.get_name()} cannot be composed: their KV cache "
+            "layouts are incompatible (decode-first requires the prefill "
+            "backend to match the decode backend's KV layout and both to "
+            "externalize the KV-cache write)."
+        )
+
+    return make_composite_backend(
+        prefill_backend=prefill_cls, decode_backend=decode_cls
     )
 
 
@@ -115,6 +157,8 @@ def _cached_get_attn_backend(
     backend,
     attn_selector_config: AttentionSelectorConfig,
     num_heads: int | None = None,
+    role: AttentionRole | None = None,
+    decode_backend: type[AttentionBackend] | None = None,
 ) -> type[AttentionBackend]:
     from vllm.platforms import current_platform
 
@@ -122,6 +166,8 @@ def _cached_get_attn_backend(
         backend,
         attn_selector_config=attn_selector_config,
         num_heads=num_heads,
+        role=role,
+        decode_backend=decode_backend,
     )
     if not attention_cls:
         raise ValueError(
@@ -129,17 +175,20 @@ def _cached_get_attn_backend(
         )
     backend = resolve_obj_by_qualname(attention_cls)
 
-    # Adjust kv cache layout if the selected backend requires a specific one
-    required_layout = backend.get_required_kv_cache_layout()
-    if required_layout is not None:
-        from vllm.v1.attention.backends.utils import set_kv_cache_layout
+    # Adjust kv cache layout if the selected backend requires a specific one.
+    # Decode owns the layout (decode-first), so skip this for the prefill role;
+    # the prefill backend is already constrained to match the decode layout.
+    if role != AttentionRole.PREFILL:
+        required_layout = backend.get_required_kv_cache_layout()
+        if required_layout is not None:
+            from vllm.v1.attention.backends.utils import set_kv_cache_layout
 
-        set_kv_cache_layout(required_layout)
-        logger.info(
-            "Using %s KV cache layout for %s backend.",
-            required_layout,
-            backend.get_name(),
-        )
+            set_kv_cache_layout(required_layout)
+            logger.info(
+                "Using %s KV cache layout for %s backend.",
+                required_layout,
+                backend.get_name(),
+            )
 
     return backend
 

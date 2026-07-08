@@ -21,6 +21,7 @@ from .interface import DeviceCapability, Platform, PlatformEnum
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.kernel import IrOpPriorityConfig
+    from vllm.v1.attention.backend import AttentionBackend, AttentionRole
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
@@ -123,6 +124,8 @@ class XPUPlatform(Platform):
         selected_backend: "AttentionBackendEnum",
         attn_selector_config: "AttentionSelectorConfig",
         num_heads: int | None = None,
+        role: "AttentionRole | None" = None,
+        decode_backend: "type[AttentionBackend] | None" = None,
     ) -> str:
         from vllm.v1.attention.backends.utils import set_kv_cache_layout
 

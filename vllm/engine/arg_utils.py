@@ -681,6 +681,12 @@ class EngineArgs:
     model_impl: str = ModelConfig.model_impl
     override_attention_dtype: str | None = ModelConfig.override_attention_dtype
     attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
+    attention_prefill_backend: AttentionBackendEnum | None = (
+        AttentionConfig.prefill_backend
+    )
+    attention_decode_backend: AttentionBackendEnum | None = (
+        AttentionConfig.decode_backend
+    )
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
     kv_cache_dtype_skip_layers: list[str] = get_field(
@@ -921,6 +927,12 @@ class EngineArgs:
         )
         attention_group.add_argument(
             "--attention-backend", **attention_kwargs["backend"]
+        )
+        attention_group.add_argument(
+            "--attention-prefill-backend", **attention_kwargs["prefill_backend"]
+        )
+        attention_group.add_argument(
+            "--attention-decode-backend", **attention_kwargs["decode_backend"]
         )
 
         # Mamba arguments
@@ -2224,6 +2236,39 @@ class EngineArgs:
             # Reuse the validator to handle "auto" and string-to-enum conversion
             attention_config.backend = AttentionConfig.validate_backend_before(
                 self.attention_backend
+            )
+        if self.attention_prefill_backend is not None:
+            if attention_config.prefill_backend is not None:
+                raise ValueError(
+                    "attention_prefill_backend and "
+                    "attention_config.prefill_backend are mutually exclusive"
+                )
+            attention_config.prefill_backend = (
+                AttentionConfig.validate_role_backend_before(
+                    self.attention_prefill_backend
+                )
+            )
+        if self.attention_decode_backend is not None:
+            if attention_config.decode_backend is not None:
+                raise ValueError(
+                    "attention_decode_backend and "
+                    "attention_config.decode_backend are mutually exclusive"
+                )
+            attention_config.decode_backend = (
+                AttentionConfig.validate_role_backend_before(
+                    self.attention_decode_backend
+                )
+            )
+        # Re-check `backend` vs per-role mutual exclusion after merging the CLI
+        # flags into the (mutated) attention_config copy (the model validator
+        # only runs at construction time, not on post-hoc mutation).
+        if attention_config.backend is not None and (
+            attention_config.prefill_backend is not None
+            or attention_config.decode_backend is not None
+        ):
+            raise ValueError(
+                "attention_backend is mutually exclusive with "
+                "attention_prefill_backend / attention_decode_backend"
             )
 
         # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert

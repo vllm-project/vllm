@@ -16,7 +16,6 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
-    QueryLenSupport,
 )
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import round_up
@@ -26,6 +25,7 @@ from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
     MultipleOf,
+    QueryLenSupport,
 )
 from vllm.v1.attention.backends.fa_utils import (
     flash_attn_supports_mla,

@@ -3,7 +3,7 @@
 
 from typing import Any, Literal
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 
 from vllm.config.utils import config
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
@@ -17,7 +17,17 @@ class AttentionConfig:
     """Configuration for attention mechanisms in vLLM."""
 
     backend: AttentionBackendEnum | None = None
-    """Attention backend to use. Use "auto" or None for automatic selection."""
+    """Attention backend to use. Use "auto" or None for automatic selection.
+    Mutually exclusive with `prefill_backend`/`decode_backend`; setting `backend`
+    applies the same backend to both roles."""
+
+    prefill_backend: AttentionBackendEnum | None = None
+    """Attention backend for the prefill role. Use "auto" or None for automatic
+    selection. Mutually exclusive with `backend`."""
+
+    decode_backend: AttentionBackendEnum | None = None
+    """Attention backend for the decode role. Use "auto" or None for automatic
+    selection. Mutually exclusive with `backend`."""
 
     flash_attn_version: Literal[2, 3, 4] | None = None
     """Force vllm to use a specific flash-attention version (2, 3, or 4).
@@ -108,6 +118,20 @@ class AttentionConfig:
             return AttentionBackendEnum[value.upper()]
         return value
 
+    @field_validator("prefill_backend", "decode_backend", mode="before")
+    @classmethod
+    def validate_role_backend_before(cls, value: Any) -> Any:
+        """Parse the per-role backend enums from strings.
+
+        Mirrors `validate_backend_before`: "auto" is treated as None (automatic
+        selection) and other strings are parsed into `AttentionBackendEnum`.
+        """
+        if isinstance(value, str):
+            if value.lower() == "auto":
+                return None
+            return AttentionBackendEnum[value.upper()]
+        return value
+
     @field_validator("mla_prefill_backend", mode="before")
     @classmethod
     def validate_mla_prefill_backend_before(cls, value: Any) -> Any:
@@ -115,3 +139,30 @@ class AttentionConfig:
         if isinstance(value, str):
             return MLAPrefillBackendEnum[value.upper()]
         return value
+
+    @model_validator(mode="after")
+    def validate_role_backend_exclusivity(self) -> "AttentionConfig":
+        """`backend` is mutually exclusive with the per-role fields."""
+        if self.backend is not None and (
+            self.prefill_backend is not None or self.decode_backend is not None
+        ):
+            raise ValueError(
+                "`backend` (--attention-backend) is mutually exclusive with "
+                "`prefill_backend`/`decode_backend` "
+                "(--attention-prefill-backend / --attention-decode-backend). "
+                "Set either the single `backend` or the per-role backends, not "
+                "both."
+            )
+        return self
+
+    def resolved_backends(
+        self,
+    ) -> tuple[AttentionBackendEnum | None, AttentionBackendEnum | None]:
+        """Return the (prefill, decode) backend enums after applying precedence.
+
+        When only `backend` is set it applies to both roles; otherwise the
+        per-role fields are returned as-is (either may be None for auto).
+        """
+        if self.backend is not None:
+            return self.backend, self.backend
+        return self.prefill_backend, self.decode_backend

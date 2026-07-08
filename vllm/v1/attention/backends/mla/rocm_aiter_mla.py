@@ -17,7 +17,6 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
-    QueryLenSupport,
 )
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
@@ -25,6 +24,7 @@ from vllm.v1.attention.backend import (
     AttentionLayer,
     CommonAttentionMetadata,
     MultipleOf,
+    QueryLenSupport,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 

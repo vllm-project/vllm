@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.utils.argparse_utils import FlexibleArgumentParser
-    from vllm.v1.attention.backend import AttentionBackend
+    from vllm.v1.attention.backend import AttentionBackend, AttentionRole
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     FlexibleArgumentParser = object
@@ -365,8 +365,19 @@ class Platform:
         selected_backend: "AttentionBackendEnum",
         attn_selector_config: "AttentionSelectorConfig",
         num_heads: int | None = None,
+        role: "AttentionRole | None" = None,
+        decode_backend: "type[AttentionBackend] | None" = None,
     ) -> str:
-        """Get the attention backend class of a device."""
+        """Get the attention backend class of a device.
+
+        Args:
+            role: When set, resolve the backend for a specific attention role
+                (prefill / decode) for composite selection. None keeps the
+                single-backend behavior.
+            decode_backend: For ``role == PREFILL``, the already-resolved decode
+                backend the prefill backend must be KV-layout-compatible with
+                (decode-first). Ignored otherwise.
+        """
         return ""
 
     @classmethod

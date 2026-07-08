@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
     from vllm.config.kernel import IrOpPriorityConfig
-    from vllm.v1.attention.backend import AttentionBackend
+    from vllm.v1.attention.backend import AttentionBackend, AttentionRole
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
@@ -356,10 +356,15 @@ class CudaPlatformBase(Platform):
         device_capability: DeviceCapability,
         attn_selector_config: AttentionSelectorConfig,
         num_heads: int | None = None,
+        role: AttentionRole | None = None,
+        decode_backend: type[AttentionBackend] | None = None,
     ) -> tuple[
         list[_BackendCandidate],
         dict[AttentionBackendEnum, tuple[int, list[str]]],
     ]:
+        from vllm.v1.attention.backend import AttentionRole
+        from vllm.v1.attention.backends.utils import kv_layouts_compatible
+
         valid_backends_priorities = []
         invalid_reasons: dict[AttentionBackendEnum, tuple[int, list[str]]] = {}
 
@@ -378,6 +383,21 @@ class CudaPlatformBase(Platform):
                 )
             except ImportError:
                 invalid_reasons_i = ["ImportError"]
+            # Role-aware filtering for composite selection.
+            if not invalid_reasons_i and role is not None:
+                if not backend_class.supports_role(role):
+                    invalid_reasons_i = [f"does not support {role.value} role"]
+                elif (
+                    role == AttentionRole.PREFILL
+                    and decode_backend is not None
+                    and not kv_layouts_compatible(
+                        decode_backend, backend_class, attn_selector_config
+                    )
+                ):
+                    invalid_reasons_i = [
+                        "KV layout incompatible with decode backend "
+                        f"{decode_backend.get_name()}"
+                    ]
             if invalid_reasons_i:
                 invalid_reasons[backend] = (priority, invalid_reasons_i)
             else:
@@ -393,7 +413,11 @@ class CudaPlatformBase(Platform):
         selected_backend: AttentionBackendEnum | None,
         attn_selector_config: AttentionSelectorConfig,
         num_heads: int | None = None,
+        role: AttentionRole | None = None,
+        decode_backend: type[AttentionBackend] | None = None,
     ) -> str:
+        from vllm.v1.attention.backend import AttentionRole
+
         device_capability = cls.get_device_capability()
         assert device_capability is not None
 
@@ -412,9 +436,27 @@ class CudaPlatformBase(Platform):
                     f"Selected backend {selected_backend} is not valid for "
                     f"this configuration. Reason: {invalid_reasons}"
                 )
-            else:
-                logger.info("Using %s backend.", selected_backend)
-                return _backend_cls_path(backend_class)
+            # Role-aware validation for composite (per-role) selection.
+            if role is not None and not backend_class.supports_role(role):
+                raise ValueError(
+                    f"Selected backend {selected_backend} does not support the "
+                    f"{role.value} role."
+                )
+            if role == AttentionRole.PREFILL and decode_backend is not None:
+                from vllm.v1.attention.backends.utils import kv_layouts_compatible
+
+                if not kv_layouts_compatible(
+                    decode_backend, backend_class, attn_selector_config
+                ):
+                    raise ValueError(
+                        f"Selected prefill backend {selected_backend} has a KV "
+                        "cache layout incompatible with the resolved decode "
+                        f"backend {decode_backend.get_name()}. Decode-first "
+                        "requires the prefill backend to match the decode "
+                        "layout and both to externalize the KV-cache write."
+                    )
+            logger.info("Using %s backend.", selected_backend)
+            return _backend_cls_path(backend_class)
 
         # No selected backend or the selected backend is invalid,
         # so we try finding a valid backend.
@@ -422,6 +464,8 @@ class CudaPlatformBase(Platform):
             device_capability=device_capability,
             attn_selector_config=attn_selector_config,
             num_heads=num_heads,
+            role=role,
+            decode_backend=decode_backend,
         )
         reasons_str = (
             "{"
