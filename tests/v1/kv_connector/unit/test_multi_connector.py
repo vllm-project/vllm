@@ -272,7 +272,7 @@ def test_multi_example_connector_consistency():
         "set_xfer_handshake_metadata_pp_aware",
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[0] 0",
+        "update_state_after_alloc num_blocks=[7] 0",
         "build_connector_meta",
     ]
     # First three events are from initialization (register_kv_caches,
@@ -292,7 +292,7 @@ def test_multi_example_connector_consistency():
         "set_xfer_handshake_metadata_pp_aware",
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[0] 0",
+        "update_state_after_alloc num_blocks=[7] 0",
         "build_connector_meta",
     ]
     assert events["storage2-WORKER"][:8] == [
@@ -315,9 +315,9 @@ def test_multi_example_connector_consistency():
 
     events = get_connector_events()
     # get_num_new_matched_tokens will return new tokens from the first
-    # connector so update_state_after_alloc will be with allocated blocks
-    # on that one but with zero blocks for others (first nonzero match is
-    # chosen).
+    # connector (first nonzero match is chosen), so update_state_after_alloc
+    # will report those external tokens on that one. Other connectors still
+    # receive the request's real blocks but with 0 external tokens.
     storage1_scheduler_events = _ignore_event_collection(events["storage1-SCHEDULER"])
     storage2_scheduler_events = _ignore_event_collection(events["storage2-SCHEDULER"])
     assert storage1_scheduler_events[:4] == [
@@ -329,7 +329,7 @@ def test_multi_example_connector_consistency():
     assert storage2_scheduler_events[:4] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[0] 0",
+        "update_state_after_alloc num_blocks=[7] 0",
         "build_connector_meta",
     ]
 
@@ -345,15 +345,15 @@ def test_multi_example_connector_consistency():
 
     events = get_connector_events()
     # get_num_new_matched_tokens will be called for both connectors but will
-    # return 0 from the first connector, but the second connector should have
-    # a hit, so update_state_after_alloc will only be called with allocated
-    # blocks for the second connector.
+    # return 0 from the first connector, while the second connector has a hit.
+    # Both connectors receive the request's real blocks, but only the chosen
+    # (second) connector reports external tokens.
     storage1_scheduler_events = _ignore_event_collection(events["storage1-SCHEDULER"])
     storage2_scheduler_events = _ignore_event_collection(events["storage2-SCHEDULER"])
     assert storage1_scheduler_events[:4] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[0] 0",
+        "update_state_after_alloc num_blocks=[7] 0",
         "build_connector_meta",
     ]
     assert storage2_scheduler_events[:4] == [
