@@ -510,6 +510,23 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     Safe (the per-slot read-done event already serializes pull(N+1) against
     process(N)) but costs the pull/process pipeline; diagnostic only."""
 
+    pack_single_blob: bool = False
+    """[RDT-PACK] Extend coalescing ACROSS dtypes (implies coalesce): producer and
+    consumer byte-pack every slice (16B-aligned, keys order) into ONE uint8 arena,
+    so each pull is ONE contiguous NIXL descriptor instead of one per dtype
+    (Kimi: fp8 ~96% + fp32 ~2% + bf16 ~2%). The consumer carves dtype views back
+    out of the packed arena at the same offsets for the scatter. Both sides
+    compute the layout independently from the same (keys order, dtype, shape,
+    16B-align) rule, so the bytes land identically. Set from RDT_COALESCE=2.
+    Bench (nixl_sustained.py): 3 dtype blobs -> 1 blob = 42.3 -> 44.4 GB/s."""
+
+    pack_check: bool = False
+    """[RDT-PACK-CHECK diagnostic] With pack_single_blob: after every pull, checksum
+    the received packed blob (int64 sum of the uint8 arena) and append
+    {pid, bytes, sum} to /tmp/rdt_profile/packcheck_cons.jsonl. The producer logs
+    the matching checksum of its served blob (RDT_PACK_CHECK=1). Diffing the two
+    streams localizes nondeterministic corruption to transfer vs serve vs scatter."""
+
     coalesce_dtype_blobs: bool = False
     """[RDT-COALESCE] If set, the producer returns ONE contiguous tensor per dtype
     (its packed per-dtype serve arena) instead of one view per source name, and the
@@ -622,11 +639,17 @@ class ShardedRDTWeightTransferEngine(
             {} for _ in range(self._NSLOTS)
         ]
         self._slot_read_done: list[Any] = []  # one torch.cuda.Event per slot
+        # Generation counters guarding the events (see _ensure_proc_worker).
+        self._slot_queued: list[int] = []
+        self._slot_done: list[int] = []
+        self._slot_cv: Any = None
         self._pull_slot = 0
         # [RDT-COALESCE] Set from init_info in init_transfer_engine: transfer one
         # contiguous tensor per dtype instead of one per source name (see the flag's
         # docstring). Off by default.
         self._coalesce = False
+        self._pack = False  # [RDT-PACK] single cross-dtype blob; set from init_info
+        self._pack_check = False  # [RDT-PACK-CHECK diagnostic] set from init_info
         self._inline_process = False  # [RDT-INLINE diagnostic] set from init_info
 
         # ---- Background post-processing thread (pull/process pipelining) -------
@@ -643,6 +666,8 @@ class ShardedRDTWeightTransferEngine(
     def init_transfer_engine(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
         """Resolve the trainer actor and bind its batched producer method."""
         self._coalesce = bool(init_info.coalesce_dtype_blobs)
+        self._pack = bool(init_info.pack_single_blob)
+        self._pack_check = bool(init_info.pack_check)
         self._inline_process = bool(init_info.inline_process)
         if init_info.one_slot:
             # [RDT-ONE-SLOT diagnostic] single receive slot; must be set before
@@ -878,9 +903,15 @@ class ShardedRDTWeightTransferEngine(
             # scatter/quant/kernel-copy and return -- so the NEXT group's pull
             # overlaps this group's processing.
             item = self._pull_groups(groups)
+            # Count the item against its slot BEFORE dispatch: the next pull into
+            # this slot must wait until the background thread has processed (and
+            # RECORDED the read-done event for) every item ever queued on it.
+            with self._slot_cv:
+                self._slot_queued[item.slot] += 1
             if self._inline_process:
                 # [RDT-INLINE diagnostic] process synchronously so no quant overlaps
                 # the next group's transfer (tests HBM contention on the read path).
+                # (_process_item publishes the slot generation internally.)
                 self._process_item(item)
             else:
                 assert self._proc_queue is not None
@@ -963,13 +994,74 @@ class ShardedRDTWeightTransferEngine(
         from ray.experimental import register_nixl_memory, set_target_for_ref
 
         # Block until the background thread's scatter out of this slot (from the
-        # pull two calls ago that reused it) has completed on the GPU, so the NIXL
-        # read below does not overwrite data still being read. Freshly-created
-        # events (first use of a slot) are already "complete" -> returns instantly.
+        # last pull that used it) has completed on the GPU, so the NIXL read
+        # below does not overwrite data still being read. TWO stages, both
+        # required: (1) generation wait — the CUDA event only binds to its LAST
+        # record(), so we must first wait for the background thread to have
+        # RECORDED the event for every item ever queued on this slot (else the
+        # synchronize binds to a stale record and the guard silently passes —
+        # observed as nondeterministic weight corruption with _NSLOTS=1);
+        # (2) event synchronize — waits for the recorded stream work (the
+        # scatters) to actually finish on the GPU.
         if self._slot_read_done:
+            with self._slot_cv:
+                while self._slot_done[slot] < self._slot_queued[slot]:
+                    self._slot_cv.wait(timeout=1.0)
             self._slot_read_done[slot].synchronize()
 
         arenas = self._dest_arenas[slot]
+
+        if self._pack:
+            # [RDT-PACK] Byte-pack every slice into ONE uint8 arena (16B-aligned,
+            # keys order) so the pull is ONE contiguous NIXL descriptor. The
+            # producer computes the identical layout from the same rule, so the
+            # bytes land at these exact offsets; ``targets`` carves the dtype
+            # views back out for the scatter (transfer granularity changes, the
+            # returned per-name views do not).
+            playout: list[tuple[int, torch.dtype, int, Any]] = []  # off,dt,n,shape
+            cur = 0
+            for k in keys:
+                dt = self._src_dtypes[k]
+                shape = self._src_shapes[k]
+                n = prod(shape) or 1
+                off = (cur + 15) & ~15
+                playout.append((off, dt, n, shape))
+                cur = off + n * dt.itemsize
+            arena = arenas.get(torch.uint8)
+            if arena is None or arena.numel() < cur:
+                arena = torch.empty(cur, dtype=torch.uint8, device=self.device)
+                register_nixl_memory(arena)
+                arenas[torch.uint8] = arena
+            targets = [
+                arena[off : off + n * dt.itemsize].view(dt).reshape(shape)
+                for off, dt, n, shape in playout
+            ]
+            from vllm.distributed.weight_transfer import _nixl_profile
+            _nixl_profile.mark_pull_start()
+            ref = self._produce_method.remote(keys)  # type: ignore[union-attr]
+            # Strong ref through the ray.get — set_target_for_ref stores WEAKREFS
+            # to the target tensors, so a temporary view here would be collected
+            # before the NIXL read and the bytes would land in a fallback buffer,
+            # never reaching the arena the ``targets`` views alias.
+            blob = [arena[:cur]]
+            set_target_for_ref(ref, blob)
+            ray.get(ref)  # ONE NIXL read straight into the packed arena
+            if self._pack_check:
+                # [RDT-PACK-CHECK] checksum the received blob; producer logs the
+                # matching sum of what it served (compare offline per pull order).
+                # Chunked: .sum(dtype=int64) upcasts its INPUT to int64, so a
+                # whole-blob sum materializes 8x the blob (OOM on the consumer).
+                s = 0
+                _w = 32 << 20
+                for _i in range(0, cur, _w):
+                    s += int(arena[_i : min(_i + _w, cur)].sum(dtype=torch.int64))
+                import json as _json
+                import os as _os
+                _os.makedirs("/tmp/rdt_profile", exist_ok=True)
+                with open("/tmp/rdt_profile/packcheck_cons.jsonl", "a") as f:
+                    f.write(_json.dumps(
+                        {"pid": _os.getpid(), "bytes": cur, "sum": s}) + "\n")
+            return dict(zip(keys, targets))
 
         # Lay each slice into the persistent arena FOR ITS DTYPE, so mixed-dtype
         # groups (Kimi: fp8 weights + fp32 weight_scale_inv + bf16 norms) all use
@@ -1239,6 +1331,18 @@ class ShardedRDTWeightTransferEngine(
         import threading
 
         self._slot_read_done = [torch.cuda.Event() for _ in range(self._NSLOTS)]
+        # Generation handshake for the events above. A torch.cuda.Event only
+        # waits on its LAST record(); if the RPC thread reaches synchronize()
+        # for slot s before the background thread has RECORDED item N's event
+        # (it is still in Python before the scatter), the wait silently binds to
+        # item N-1's record and the next RDMA overwrites the slot under the
+        # pending scatter — subtle nondeterministic weight corruption, seen live
+        # with _NSLOTS=1. So: the RPC thread counts items queued per slot, the
+        # background thread counts records; a pull may synchronize() only after
+        # done[slot] has caught up with queued[slot].
+        self._slot_queued = [0] * self._NSLOTS
+        self._slot_done = [0] * self._NSLOTS
+        self._slot_cv = threading.Condition()
         self._proc_stream = torch.cuda.Stream(device=self.device)
         self._proc_queue = queue.Queue()
         self._proc_error = None
@@ -1262,12 +1366,23 @@ class ShardedRDTWeightTransferEngine(
             try:
                 if item is None:
                     return
+                # _process_item publishes the slot generation internally (in a
+                # finally around its scatter pass), so an error here still
+                # unblocks the RPC thread's generation wait.
                 self._process_item(item)
             except BaseException as e:  # noqa: BLE001 - surfaced on the RPC thread
                 self._proc_error = e
                 logger.exception("RDT background post-processing failed")
             finally:
                 q.task_done()
+
+    def _mark_slot_done(self, slot: int) -> None:
+        """Publish that a queued item's read-done event has been recorded (or the
+        item failed) so a pull waiting to reuse ``slot`` can proceed to its
+        CUDA-event synchronize."""
+        with self._slot_cv:
+            self._slot_done[slot] += 1
+            self._slot_cv.notify_all()
 
     def _raise_proc_error(self) -> None:
         """Re-raise (once) any error captured by the background thread."""
@@ -1366,26 +1481,43 @@ class ShardedRDTWeightTransferEngine(
             torch.cuda.stream(self._proc_stream),
             torch.device(self.device),
         ):
+            # PASS 1 — slot readers: materialize + scatter every group. The
+            # scatter copies are the ONLY reads of the receive arena; quant and
+            # kernel-copy operate on the scattered params. Releasing the slot
+            # right after the scatters lets the NEXT pull's RDMA overwrite the
+            # arena while this item's quant still runs — quant is hidden behind
+            # the next transfer even at _NSLOTS=1.
+            try:
+                for g in item.groups:
+                    layer = g.layer
+                    info = LAYERWISE_INFO.get(layer)
+                    if info is None or not info.can_load():
+                        raise RuntimeError(
+                            f"Baked replay: layer {type(layer).__name__} was not "
+                            "set up for reload this sync (start_weight_update "
+                            "must run before update_weights)."
+                        )
+                    with ph.phase("materialize_seconds"):
+                        materialize_layer(layer, info)  # cheap empty HF params
+                    with ph.phase("scatter_seconds"):
+                        for c in g.copies:
+                            param = getattr(layer, c.param_name)
+                            dst = param.as_strided(c.shape, c.stride, c.offset)
+                            with torch._C.DisableTorchFunctionSubclass():
+                                dst.copy_(results[c.src])
+                # All reads of this slot's arena are now enqueued on the process
+                # stream; record + publish so the RPC thread can reuse the slot.
+                self._slot_read_done[item.slot].record(self._proc_stream)
+            finally:
+                # Publish even on error so the RPC thread's generation wait
+                # unblocks (the failure itself surfaces via _raise_proc_error).
+                self._mark_slot_done(item.slot)
+
+            # PASS 2 — param readers only: quant / kernel-copy / reset, exactly
+            # as _layerwise_process. May overlap the next pull's RDMA.
             for g in item.groups:
                 layer = g.layer
                 info = LAYERWISE_INFO.get(layer)
-                if info is None or not info.can_load():
-                    raise RuntimeError(
-                        f"Baked replay: layer {type(layer).__name__} was not set "
-                        "up for reload this sync (start_weight_update must run "
-                        "before update_weights)."
-                    )
-                with ph.phase("materialize_seconds"):
-                    materialize_layer(layer, info)  # cheap empty HF params
-                with ph.phase("scatter_seconds"):
-                    for c in g.copies:
-                        param = getattr(layer, c.param_name)
-                        dst = param.as_strided(c.shape, c.stride, c.offset)
-                        with torch._C.DisableTorchFunctionSubclass():
-                            dst.copy_(results[c.src])
-                # Quantization / repack, exactly as _layerwise_process: run it iff
-                # the layer has a QuantizeMethodBase quant method (a no-op for
-                # unquantized layers, real work for quantized ones).
                 quant_method = getattr(layer, "quant_method", None)
                 if isinstance(quant_method, QuantizeMethodBase):
                     if hasattr(
@@ -1402,9 +1534,6 @@ class ShardedRDTWeightTransferEngine(
                         _copy_and_restore_kernel_tensors(layer, info)
                 # Reset so finalize_layerwise_reload skips this (loaded) layer.
                 info.reset()
-            # All reads of this slot's arena are now enqueued on the process
-            # stream; mark it so the RPC thread can safely reuse the slot.
-            self._slot_read_done[item.slot].record(self._proc_stream)
         process_seconds = time.perf_counter() - _t_proc
         self._log_timing(
             "replay",

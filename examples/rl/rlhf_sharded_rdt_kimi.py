@@ -183,7 +183,12 @@ class KimiTrainWorker:
         # + ~144 tiny fp32 scales). The consumer lays its receive arena out with the
         # IDENTICAL per-dtype/aligned/keys-order layout, so the bytes match exactly.
         # Driver mirrors this into init_info.coalesce_dtype_blobs for the consumer.
-        self._coalesce = os.environ.get("RDT_COALESCE", "0") == "1"
+        # RDT_COALESCE=2 ([RDT-PACK]) goes further: byte-pack ALL dtypes into ONE
+        # uint8 arena -> ONE descriptor per pull (fp32/bf16 tails byte-reinterpreted
+        # into the fp8-dominated blob; consumer carves dtype views back out).
+        _co = os.environ.get("RDT_COALESCE", "0")
+        self._coalesce = _co in ("1", "2")
+        self._pack = _co == "2"
 
         # profiling counters
         self._timing_lock = threading.Lock()
@@ -448,6 +453,7 @@ class KimiTrainWorker:
         sliced: list = []                    # (dtype, off, numel, shape, tensor)
         totals: dict[torch.dtype, int] = {}
         nbytes = 0
+        pack_cur = 0                         # [RDT-PACK] byte cursor in the packed arena
         for name, chain in specs:
             t = self._cache[name]
             for op, args, kw in chain:
@@ -455,10 +461,18 @@ class KimiTrainWorker:
                     raise ValueError(f"{name!r}: disallowed op {op!r}")
                 t = getattr(t, op)(*args, **dict(kw))
             dt, n = t.dtype, t.numel()
-            off = totals.get(dt, 0)
+            if self._pack:
+                # [RDT-PACK] byte offsets into ONE uint8 arena, 16B-aligned per
+                # slice, specs order — the consumer computes the identical layout.
+                off = (pack_cur + 15) & ~15
+                pack_cur = off + n * t.element_size()
+            else:
+                off = totals.get(dt, 0)
+                totals[dt] = off + ((n + 7) & ~7)
             sliced.append((dt, off, n, tuple(t.shape), t))
-            totals[dt] = off + ((n + 7) & ~7)
             nbytes += t.element_size() * n
+        if self._pack:
+            totals = {torch.uint8: pack_cur}
         for dt, total in totals.items():
             a = self._serve_arenas.get(dt)
             if a is None or a.numel() < total:
@@ -480,7 +494,12 @@ class KimiTrainWorker:
                 ss.wait_event(ev)
         with torch.cuda.stream(ss):
             for i, (dt, off, n, shape, t) in enumerate(sliced):
-                view = self._serve_arenas[dt][off:off + n].reshape(shape)
+                if self._pack:
+                    # [RDT-PACK] carve the dtype view out of the packed uint8 arena
+                    view = (self._serve_arenas[torch.uint8]
+                            [off:off + n * t.element_size()].view(dt).reshape(shape))
+                else:
+                    view = self._serve_arenas[dt][off:off + n].reshape(shape)
                 view.copy_(t)                                   # the per-slice copy
                 served[i] = view
         if ss is not None:
@@ -493,6 +512,25 @@ class KimiTrainWorker:
             self._produce_slice_seconds += slice_s
             self._produce_bytes += nbytes
             self._produce_method_seconds += time.perf_counter() - _t_m0
+        if self._pack:
+            # [RDT-PACK] ONE contiguous uint8 blob for the whole group — a single
+            # NIXL descriptor. The consumer receives it into its packed arena and
+            # carves the dtype views back out at the same offsets.
+            blob = self._serve_arenas[torch.uint8][:pack_cur]
+            if os.environ.get("RDT_PACK_CHECK", "0") == "1":
+                # [RDT-PACK-CHECK] checksum what we serve; the consumer logs the
+                # matching sum of what it received (compare offline per pull order).
+                import json
+                # chunked: sum(dtype=int64) upcasts its input (8x blob) — OOM risk
+                s = 0
+                _w = 32 << 20
+                for _i in range(0, pack_cur, _w):
+                    s += int(blob[_i:min(_i + _w, pack_cur)].sum(dtype=torch.int64))
+                os.makedirs("/tmp/rdt_profile", exist_ok=True)
+                with open("/tmp/rdt_profile/packcheck_prod.jsonl", "a") as f:
+                    f.write(json.dumps(
+                        {"pid": os.getpid(), "bytes": pack_cur, "sum": s}) + "\n")
+            return [blob]
         if self._coalesce:
             # [RDT-COALESCE] Return one contiguous tensor per dtype (sorted-dtype
             # order, matching the consumer's set_target_for_ref). The data is already
@@ -627,7 +665,10 @@ async def main():
             warmup_method_name=None,
             # [RDT-COALESCE] carry the flag to the consumer via init_info (env vars
             # don't reach vLLM worker procs); producer reads RDT_COALESCE directly.
-            coalesce_dtype_blobs=os.environ.get("RDT_COALESCE", "0") == "1",
+            # "2" = [RDT-PACK]: single cross-dtype uint8 blob (one desc per pull).
+            coalesce_dtype_blobs=os.environ.get("RDT_COALESCE", "0") in ("1", "2"),
+            pack_single_blob=os.environ.get("RDT_COALESCE", "0") == "2",
+            pack_check=os.environ.get("RDT_PACK_CHECK", "0") == "1",
             # [RDT-INLINE diagnostic] serialize process off the transfer (test HBM contention)
             inline_process=os.environ.get("RDT_INLINE_PROCESS", "0") == "1",
             # [RDT-ONE-SLOT diagnostic] single receive slot: shrink the RDMA-write
