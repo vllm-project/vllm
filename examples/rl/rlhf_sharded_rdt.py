@@ -1,29 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Demonstrates reinforcement learning using vLLM and Ray with the
-**sharded** RDT (Ray Direct Transport) weight transfer backend.
+Minimal RLHF weight sync with the **sharded** RDT (Ray Direct Transport)
+weight-transfer backend.
 
-Compared to ``rlhf_rdt.py``, this example uses ``backend="sharded_rdt"``,
-which pulls only the *slice* of each weight that the local TP worker
-actually consumes, rather than the full HF-shaped tensor. The savings are
-roughly 1/TP_size in trainer -> worker bandwidth, and the slicing is
-discovered by handing vLLM's existing ``model.load_weights`` lazy
-placeholders that record narrow chains while it does its usual
-fused-QKV / merged-MLP routing. See ``sharded_weight_loader_rdt.md``
-for the full design.
+The sharded backend pulls only the *slice* of each weight that the local
+worker actually consumes, rather than the full HF-shaped tensor: at
+``init_weight_transfer_engine`` the engine dry-runs vLLM's own
+``model.load_weights`` against lazy placeholders and BAKES, per checkpoint
+name, the op chain the loader applied (the slice) and the destination
+param/offsets. Every ``update_weights`` replays that plan: the worker sends
+the specs to the trainer in packed chunk pulls (one contiguous NIXL blob per
+pull, received into a pre-registered ring of arenas) and scatters/quantizes
+on background threads. The trainer side is the shared
+:class:`rdt_producer.RDTShardedProducer`.
 
-The sharded backend requires the layerwise reload path
-(``is_checkpoint_format=True``); it raises otherwise. The trainer must
-expose a single batched accessor that takes ``(name, [(dim, start,
-size), ...])`` specs and returns one slice tensor per spec, all
-decorated with ``@ray.method(tensor_transport="nixl")`` so NIXL
-view-aware transport ships only the requested bytes.
+This is the minimal, single-node (3 GPU: 1 trainer + TP-2 inference),
+gather-free variant: the trainer holds the full model resident and serves
+slices of the LIVE parameters, so there is no gather plan and the engine's
+per-group ``free_gather`` calls are no-ops. See rlhf_sharded_rdt_fsdp_ep.py
+(FSDP-sharded trainer, per-group gathers) and rlhf_sharded_rdt_kimi.py
+(1T FP8 MoE) for the full-scale variants.
 
 Prerequisites:
     pip install nixl
-
-This example assumes a single-node cluster with three GPUs.
 """
 
 import os
@@ -38,13 +38,13 @@ from transformers import AutoModelForCausalLM
 from vllm import LLM, SamplingParams
 from vllm.config import WeightTransferConfig
 
+from rdt_producer import RDTShardedProducer, layerwise_groups
+
 MODEL_NAME = "Qwen/Qwen3-30B-A3B"
 TRAINER_ACTOR_NAME = "sharded_rdt_trainer"
 # Explicit namespace so vLLM workers -- which run in an EngineCore
 # subprocess that does its own ray.init() -- can resolve the named
-# trainer actor. With an anonymous namespace, the worker-side init
-# would land in a *different* anonymous namespace and ray.get_actor
-# would fail.
+# trainer actor.
 RAY_NAMESPACE = "sharded_rdt_example"
 
 
@@ -56,91 +56,26 @@ class MyLLM(LLM):
         super().__init__(*args, **kwargs)
 
 
-# Mirror of the supported op set the worker-side LazyRDTTensor allows. The
-# trainer refuses any op name outside this set so a misbehaving / spoofed
-# spec can't reach into arbitrary tensor methods via getattr.
-_ALLOWED_OPS = frozenset(
-    {
-        "narrow",
-        "view",
-        "reshape",
-        "__getitem__",
-        "unsqueeze",
-        "squeeze",
-        "transpose",
-        "t",
-        "permute",
-        "flatten",
-        "contiguous",
-        "chunk",
-    }
-)
-
-
-@ray.remote(num_gpus=1, enable_tensor_transport=True)
-class TrainModel:
-    """Ray actor wrapping the training model and serving slice tensors
-    over RDT/NIXL.
-
-    The producer method takes a *list of specs* in one call -- one entry
-    per ``LazyRDTTensor.copy_`` the layer's loaders are about to issue --
-    and returns one slice per spec. Batching matters: each worker would
-    otherwise pay one RPC per fused-QKV/MergedColumn shard call, of
-    which there are several per layer.
-
-    Each spec is ``(name, [(op_name, args, kwargs_items), ...])`` and
-    the chain is replayed in order on the trainer's live parameter via
-    ``getattr(tensor, op_name)(*args, **dict(kwargs_items))``.
-    """
+@ray.remote(num_gpus=1, max_concurrency=8, enable_tensor_transport=True)
+class TrainModel(RDTShardedProducer):
+    """Trainer actor: the full HF model resident on one GPU, serving packed
+    slice pulls of its LIVE parameters (no gather plan needed — the shared
+    producer's cache is pre-populated once and never freed)."""
 
     def __init__(self, model_name: str):
         self.model = AutoModelForCausalLM.from_pretrained(model_name).to("cuda:0")
-        # Cache name -> Parameter for O(1) lookups. PyTorch parameters
-        # mutate in place during training, so cached references stay valid.
-        self._param_lookup: dict[str, torch.Tensor] = dict(
-            self.model.named_parameters()
-        )
-
-    @ray.method(tensor_transport="nixl")
-    def rdt_produce_weights_batched(
-        self,
-        specs,
-    ) -> list[torch.Tensor]:
-        """Replay each op chain on the named parameter and return one
-        slice per spec.
-
-        Each slice is materialized via ``.clone(memory_format=
-        torch.contiguous_format)`` for two reasons: (1) NIXL's
-        list-of-tensors transport requires contiguous tensors ("Please
-        use a list of contiguous Tensors"); (2) returning views that
-        share storage with the trainer's live parameters causes RDT to
-        reject the second call with "still in scope as part of another
-        RDT object". ``.contiguous()`` alone is not enough -- for
-        dim-0 narrows on a row-major tensor the result is *already*
-        contiguous, so ``.contiguous()`` returns the view as-is with
-        aliased storage. ``.clone(...)`` forces a fresh allocation
-        with contiguous layout. Bandwidth savings are preserved --
-        the clone is only the slice size, not the full HF tensor.
-        """
-        out: list[torch.Tensor] = []
-        for name, chain in specs:
-            tensor = self._param_lookup[name]
-            for op_name, args, kwargs_items in chain:
-                if op_name not in _ALLOWED_OPS:
-                    raise ValueError(
-                        f"Spec for {name!r} requested disallowed op "
-                        f"{op_name!r}; allowed: {sorted(_ALLOWED_OPS)}"
-                    )
-                kwargs = dict(kwargs_items)
-                tensor = getattr(tensor, op_name)(*args, **kwargs)
-            out.append(tensor.clone(memory_format=torch.contiguous_format))
-        return out
+        self.init_rdt_producer()
+        # Live parameters ARE the serve cache: produce replays each spec's op
+        # chain on them and packs the slices into the registered serve ring.
+        # PyTorch parameters mutate in place during training, so the cached
+        # references stay valid across syncs.
+        with self._cache_cond:
+            self._cache.update(dict(self.model.named_parameters()))
+            self._cache_cond.notify_all()
 
     def get_weight_metadata(self):
-        """Return weight names, dtypes, and shapes for the update_info."""
-        names = []
-        dtype_names = []
-        shapes = []
+        """Weight names/dtypes/shapes for the engine's bake at init."""
+        names, dtype_names, shapes = [], [], []
         for name, p in self.model.named_parameters():
             names.append(name)
             dtype_names.append(str(p.dtype).split(".")[-1])
@@ -148,12 +83,12 @@ class TrainModel:
         return names, dtype_names, shapes
 
 
-# Pin Ray-actor processes to the same Python interpreter as the driver.
-# Matters on managed clusters where the default worker Python may
-# differ from the venv that has vLLM + nixl installed. Also propagate
-# selected env vars (NCCL config, LD_PRELOAD) so vLLM's TP=2 workers
-# see the same setup as the driver.
-_RUNTIME_ENV: dict[str, object] = {"py_executable": sys.executable}
+# Pin Ray-actor processes to the same Python interpreter as the driver, and
+# ship this example directory so actors can import rdt_producer.
+_RUNTIME_ENV: dict[str, object] = {
+    "py_executable": sys.executable,
+    "working_dir": os.path.dirname(os.path.abspath(__file__)),
+}
 _FORWARDED_ENV_VARS = {
     k: os.environ[k]
     for k in ("NCCL_CUMEM_ENABLE", "VLLM_NCCL_SO_PATH", "LD_PRELOAD")
@@ -205,44 +140,20 @@ outputs = ray.get(llm.generate.remote(prompts, sampling_params))
 print("-" * 50)
 print("Before weight sync (dummy weights):")
 for output in outputs:
-    prompt = output.prompt
-    generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
+    print(f"Prompt: {output.prompt!r}\nGenerated text: {output.outputs[0].text!r}")
     print("-" * 50)
 
 ray.get(llm.sleep.remote(level=0))
 
+# The engine bakes its replay plan over ALL names at init (a meta dry run of
+# model.load_weights), so the metadata goes in the INIT info.
+names, dtype_names, shapes = ray.get(train_model.get_weight_metadata.remote())
 ray.get(
     llm.init_weight_transfer_engine.remote(
         dict(
             init_info=dict(
                 trainer_actor_name=TRAINER_ACTOR_NAME,
                 trainer_actor_namespace=RAY_NAMESPACE,
-            )
-        )
-    )
-)
-
-names, dtype_names, shapes = ray.get(train_model.get_weight_metadata.remote())
-
-# is_checkpoint_format=True is MANDATORY for the sharded backend --
-# it requires the layerwise reload path so the engine can buffer the
-# lazy placeholders and drain their slices in one batched RPC. The
-# engine raises if it doesn't find layerwise infos.
-ray.get(llm.start_weight_update.remote(is_checkpoint_format=True))
-
-# update_weights drives model.load_weights with lazy placeholders.
-# vLLM's existing loaders call narrow/view/reshape/transpose/...
-# /.copy_() on them; we record the full op chain during pass 1, batch
-# every layer's chains into a single rdt_produce_weights_batched RPC
-# in the pre-replay hook, then copy the prefetched slices during pass
-# 2. Loaders that need ops outside the supported set (e.g. .to(),
-# .float(), .item(), .data, bool-mask indexing) raise from
-# __torch_dispatch__ so the failure is loud rather than silent.
-ray.get(
-    llm.update_weights.remote(
-        dict(
-            update_info=dict(
                 names=names,
                 dtype_names=dtype_names,
                 shapes=shapes,
@@ -250,6 +161,21 @@ ray.get(
         )
     )
 )
+
+# is_checkpoint_format=True is MANDATORY for the sharded backend --
+# it requires the layerwise reload path.
+ray.get(llm.start_weight_update.remote(is_checkpoint_format=True))
+
+# ONE update_weights for the whole sync. group_lens partitions the names into
+# per-layer groups: the group is the packed pull's chunk budget, so the
+# receive/serve arenas stay layer-sized instead of ballooning to the whole
+# model. (The trainer serves live params, so there is no gather plan and the
+# engine's per-group free_gather calls are no-ops.)
+groups = layerwise_groups(names)
+ray.get(llm.update_weights.remote(dict(update_info=dict(
+    names=[n for g in groups for n in g],
+    group_lens=[len(g) for g in groups],
+)))) 
 
 ray.get(llm.finish_weight_update.remote())
 ray.get(llm.wake_up.remote(tags=["scheduling"]))
@@ -259,7 +185,5 @@ outputs_updated = ray.get(llm.generate.remote(prompts, sampling_params))
 print("-" * 50)
 print("After weight sync (trainer slices pulled via sharded RDT/NIXL):")
 for output in outputs_updated:
-    prompt = output.prompt
-    generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
+    print(f"Prompt: {output.prompt!r}\nGenerated text: {output.outputs[0].text!r}")
     print("-" * 50)

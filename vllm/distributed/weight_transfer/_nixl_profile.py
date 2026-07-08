@@ -100,15 +100,27 @@ _FIELDS = (
     "produce_wait_seconds",
     "produce_wait_calls",
     "recv_wall_seconds",
+    # Sub-split of produce_wait: time from the engine entering ray.get on the
+    # drained chunk (mark_get_entry) to recv entry = the TRUE wait inside the
+    # get (producer metadata not yet arrived + rdt store plumbing). The
+    # remainder (produce_wait - meta_wait) is issue-side work between the last
+    # produce.remote and the drain (set_target, loop Python, GIL).
+    "meta_wait_seconds",
 )
 
 # Set by the engine just before it calls produce.remote(); read at recv entry.
 # Pulls are serialized per consumer, so a plain holder (no thread-local) is safe.
 _pull_t0 = [0.0]
+_get_t0 = [0.0]
 
 
 def mark_pull_start() -> None:
     _pull_t0[0] = time.perf_counter()
+
+
+def mark_get_entry() -> None:
+    """Stamp just before the engine's blocking ray.get on a pending pull."""
+    _get_t0[0] = time.perf_counter()
 
 
 def _zero() -> dict:
@@ -301,6 +313,10 @@ def install_nixl_timing() -> bool:
         if _pull_t0[0]:
             _add("produce_wait_seconds", t_start - _pull_t0[0], "produce_wait_calls")
             _pull_t0[0] = 0.0
+        if _get_t0[0]:
+            # In-get portion: metadata wait + rdt store plumbing.
+            _add("meta_wait_seconds", t_start - _get_t0[0])
+            _get_t0[0] = 0.0
         try:
             return orig_recv(self, *a, **k)
         finally:
