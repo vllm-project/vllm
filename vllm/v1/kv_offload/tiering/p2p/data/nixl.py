@@ -52,7 +52,10 @@ class NixlTransport(DataTransport):
         self._local_dlist: Any = None
         self._remote_dlists: dict[str, object] = {}
         self._peer_nixl_names: dict[str, str] = {}
-        self._inflight: dict[int, object] = {}  # transfer_id → handle
+        # transfer_id → (peer_id, handle). The peer_id lets poll() scope to a
+        # single owning session, since this transport is shared across all
+        # peer sessions of the engine.
+        self._inflight: dict[int, tuple[str, object]] = {}
         self._next_id = itertools.count()
 
         self._init(view)
@@ -172,11 +175,16 @@ class NixlTransport(DataTransport):
         )
         self._agent.transfer(handle)
         transfer_id = next(self._next_id)
-        self._inflight[transfer_id] = handle
+        self._inflight[transfer_id] = (peer_id, handle)
         return transfer_id
 
-    def poll(self) -> PollResult:
-        """Poll all inflight transfers.
+    def poll(self, owner: str | None = None) -> PollResult:
+        """Poll inflight transfers.
+
+        When *owner* is given, only transfers submitted for that peer_id are
+        checked and drained — the transport is shared across peer sessions, so
+        an unscoped poll by one session would consume and discard siblings'
+        completions. *owner* None polls every peer (shutdown drain only).
 
         Returns PollResult(done=..., failed=...) with transfer IDs.
         Completed handles are released automatically.
@@ -187,7 +195,9 @@ class NixlTransport(DataTransport):
         done_ids: list[int] | None = None
         failed_ids: list[int] | None = None
 
-        for transfer_id, handle in self._inflight.items():
+        for transfer_id, (peer_id, handle) in self._inflight.items():
+            if owner is not None and peer_id != owner:
+                continue
             try:
                 state = self._agent.check_xfer_state(handle)
             except Exception as exc:
@@ -212,9 +222,9 @@ class NixlTransport(DataTransport):
 
         handles_to_release = []
         for tid in done_ids or ():
-            handles_to_release.append(self._inflight.pop(tid))
+            handles_to_release.append(self._inflight.pop(tid)[1])
         for tid in failed_ids or ():
-            handles_to_release.append(self._inflight.pop(tid))
+            handles_to_release.append(self._inflight.pop(tid)[1])
         self._release_handles(handles_to_release)
 
         return PollResult(
@@ -236,16 +246,19 @@ class NixlTransport(DataTransport):
         """
         if mode == "immediate":
             handles = [
-                self._inflight.pop(tid) for tid in transfer_ids if tid in self._inflight
+                self._inflight.pop(tid)[1]
+                for tid in transfer_ids
+                if tid in self._inflight
             ]
             self._release_handles(handles)
             return []
 
         still_inflight: list[int] = []
         for tid in transfer_ids:
-            handle = self._inflight.get(tid)
-            if handle is None:
+            entry = self._inflight.get(tid)
+            if entry is None:
                 continue
+            handle = entry[1]
             try:
                 self._agent.release_xfer_handle(handle)
             except Exception as exc:
@@ -267,7 +280,7 @@ class NixlTransport(DataTransport):
     def close(self) -> None:
         if self._agent is None:
             return
-        self._release_handles(list(self._inflight.values()))
+        self._release_handles([handle for _, handle in self._inflight.values()])
         self._inflight.clear()
         for peer_id in list(self._remote_dlists):
             self.remove_remote_peer(peer_id)

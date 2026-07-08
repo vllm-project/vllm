@@ -15,7 +15,9 @@ from typing import TYPE_CHECKING
 
 from typing_extensions import override
 
+import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_offload.base import (
     LookupResult,
     OffloadKey,
@@ -42,6 +44,31 @@ if TYPE_CHECKING:
     from vllm.v1.kv_offload.tiering.p2p.control.base import ControlConnection
 
 logger = init_logger(__name__)
+
+# Bind hosts that are not usable as a peer identity: a wildcard binds the
+# control socket to every interface but is not routable, and a loopback is
+# not unique across hosts. When the socket binds to one of these, the
+# advertised identity (NIXL agent name + the address peers dial back) is
+# resolved to a routable node IP instead. An explicit non-wildcard host is
+# always kept verbatim.
+_NON_ROUTABLE_BIND_HOSTS = frozenset(
+    {"", "0.0.0.0", "::", "localhost", "127.0.0.1", "::1"}
+)
+
+
+def _resolve_advertise_host(bind_host: str) -> str:
+    """Map a control-socket bind host to a routable peer identity.
+
+    The bind host may be a wildcard (``0.0.0.0``/``::``) so the socket
+    listens on all interfaces, or a loopback. Neither is usable as the
+    identity that peers dial back and that NIXL uses as the agent name, so
+    those resolve to a routable node IP (honoring ``VLLM_HOST_IP``). Any
+    explicit host is returned unchanged.
+    """
+    if bind_host in _NON_ROUTABLE_BIND_HOSTS:
+        return get_ip()
+    return bind_host
+
 
 # Reap unbound store batches that have been parked without a FetchMsg
 # binding them to a session for longer than this. Protects against the
@@ -136,8 +163,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         offloading_spec: OffloadingSpec,
         primary_kv_view: memoryview,
         tier_type: str = "p2p",
-        host: str = "0.0.0.0",
-        port: int = 7777,
+        host: str | None = None,
+        port: int | None = None,
         backends: list[str] | None = None,
         num_threads: int = 4,
         tiering_callbacks: TieringCallbacks | None = None,
@@ -156,9 +183,15 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             primary_kv_view: Memoryview over the CPU primary tier; the
                 NIXL agent registers this region for RDMA transfers.
             tier_type: Tier identifier (defaults to ``"p2p"``).
-            host: Address the ZMQ control socket binds to.
-            port: Port for the ZMQ control socket. Must be reachable
-                from peers.
+            host: Address the ZMQ control socket binds to. Defaults to
+                ``VLLM_P2P_SIDE_CHANNEL_HOST`` (``0.0.0.0``) when not
+                set; override to the node IP for cross-host P/D.
+            port: Base port for the ZMQ control socket. Must be
+                reachable from peers. Defaults to
+                ``VLLM_P2P_SIDE_CHANNEL_PORT`` (``5710``) when not set.
+                The bound port is ``base + data_parallel_index`` so each
+                DP replica gets a distinct port (one socket per replica,
+                like NIXL); for DP=1 the offset is 0.
             backends: NIXL transport backends (e.g. ``["UCX"]``,
                 ``["MOONCAKE"]``, ``["LIBFABRIC"]``). Defaults to
                 ``["UCX"]``. When any non-UCX backend is requested, the
@@ -179,8 +212,23 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         self._tiering_callbacks: TieringCallbacks = (
             tiering_callbacks if tiering_callbacks is not None else _AllMissCallbacks()
         )
-        port = int(port)
-        self._local_id = f"{host}:{port}"
+        if host is None:
+            host = envs.VLLM_P2P_SIDE_CHANNEL_HOST
+        if port is None:
+            port = envs.VLLM_P2P_SIDE_CHANNEL_PORT
+        # One control socket per DP replica: offset the base by the global
+        # data-parallel index so replicas on a host don't collide (mirrors
+        # NIXL). For DP=1 the index is 0, leaving the base port unchanged.
+        dp_index = offloading_spec.vllm_config.parallel_config.data_parallel_index
+        port = int(port) + dp_index
+        # The socket binds to ``host`` (may be a wildcard so it listens on
+        # every interface), but the advertised identity — used as the NIXL
+        # agent name and as the address peers dial back — must be unique and
+        # routable. Resolve a node IP when ``host`` is a wildcard/loopback so
+        # two peers binding 0.0.0.0 don't both claim ``0.0.0.0:<port>`` and
+        # collide (NIXL rejects a remote agent whose name equals the local).
+        advertise_host = _resolve_advertise_host(host)
+        self._local_id = f"{advertise_host}:{port}"
 
         config_fields = FileMapper.from_offloading_spec(
             root_dir="",

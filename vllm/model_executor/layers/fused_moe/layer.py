@@ -127,6 +127,7 @@ def FusedMoE(
     num_redundant_experts: int = 0,
     has_bias: bool = False,
     is_sequence_parallel: bool = False,
+    reduce_results: bool = True,
     ckpt_names: tuple[str, str, str] = ("gate_proj", "down_proj", "up_proj"),
     n_shared_experts: int | None = None,
     router_logits_dtype: torch.dtype | None = None,
@@ -184,6 +185,9 @@ def FusedMoE(
         num_redundant_experts: Number of redundant experts for EPLB
         has_bias: Whether expert layers have bias terms
         is_sequence_parallel: Whether sequence parallelism is enabled
+        reduce_results: Whether to all-reduce the final output. Setting this
+        to False (to fuse the all-reduce downstream) is only honored on the
+        late-AR path.
         expert_mapping: Expert parameter mapping for weight loading
         n_shared_experts: Number of shared experts to fuse into the routed
             grouped GEMM (ROCm; requires aiter FSE or the router-append path)
@@ -218,6 +222,14 @@ def FusedMoE(
         pcp_size=pcp_size,
         is_sequence_parallel=is_sequence_parallel,
         parallel_config=vllm_config.parallel_config,
+    )
+
+    # Resolve the deferred all-reduce request against the parallel config.
+    skip_final_all_reduce = (
+        not reduce_results
+        and not moe_parallel_config.use_all2all_kernels
+        and not moe_parallel_config.is_sequence_parallel
+        and zero_expert_type is None
     )
 
     global_num_experts, logical_num_experts, num_fused_shared_experts = (
@@ -340,6 +352,7 @@ def FusedMoE(
         swiglu_alpha=swiglu_alpha,
         swiglu_beta=swiglu_beta,
         max_capture_size=vllm_config.compilation_config.max_cudagraph_capture_size,
+        skip_final_all_reduce=skip_final_all_reduce,
     )
 
     logger.debug("FusedMoEConfig = %s", moe_config)

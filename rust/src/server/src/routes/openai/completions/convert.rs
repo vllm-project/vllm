@@ -117,6 +117,7 @@ pub(super) fn prepare_completion_request(
             frequency_penalty: request.frequency_penalty,
             presence_penalty: request.presence_penalty,
             repetition_penalty: request.repetition_penalty,
+            repetition_detection: request.repetition_detection,
             stop_token_ids: request.stop_token_ids,
             ignore_eos: request.ignore_eos,
             logit_bias: convert_logit_bias(request.logit_bias)?,
@@ -143,6 +144,7 @@ pub(super) fn prepare_completion_request(
         data_parallel_rank: ctx.data_parallel_rank,
         reasoning_parser_kwargs: None,
         lora_request: lora_resolution.lora_request.clone(),
+        arrival_time: None,
     };
 
     Ok(PreparedRequest {
@@ -199,6 +201,7 @@ mod tests {
     use super::prepare_completion_request;
     use crate::lora::LoraModelResolution;
     use crate::routes::openai::completions::types::CompletionRequest;
+    use crate::routes::openai::utils::types::Normalizable;
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
     fn request_context(headers: &HeaderMap, request_id: Option<&str>) -> ResolvedRequestContext {
@@ -247,6 +250,28 @@ mod tests {
         assert_eq!(request.prompt, Prompt::TokenIds(vec![11, 22, 33]));
         assert_eq!(request.max_tokens, Some(7));
         assert!(request.ignore_eos);
+    }
+
+    #[test]
+    fn normalize_coerces_null_max_tokens_to_default() {
+        // An absent `max_tokens` already gets the serde default.
+        let absent: CompletionRequest =
+            serde_json::from_value(base_request_json()).expect("parse request");
+        assert_eq!(absent.max_tokens, Some(16));
+
+        // An explicit `null` deserializes to `None`, bypassing the default;
+        // `normalize` must coerce it back to match Python vLLM.
+        let mut request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": true,
+            "max_tokens": null
+        }))
+        .expect("parse request");
+        assert_eq!(request.max_tokens, None);
+
+        request.normalize();
+        assert_eq!(request.max_tokens, Some(16));
     }
 
     #[test]

@@ -163,6 +163,14 @@ class ClientRole:
         """Handle an AbortAckMsg from the peer."""
         req = self._inbound.pop(kv_request_id, None)
         if req is not None:
+            logger.warning(
+                "P2PSession %s: load request %s (job_id=%d) timed out; "
+                "load job completed with failure. If this recurs, ensure "
+                "PYTHONHASHSEED is set to the same value on all nodes.",
+                self._peer_id,
+                kv_request_id,
+                req.job_id,
+            )
             self._completed_loads.append(
                 LoadResult(
                     job_id=req.job_id,

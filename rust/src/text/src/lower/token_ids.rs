@@ -1,7 +1,7 @@
 use std::result::Result;
 
 use thiserror::Error;
-use vllm_engine_core_client::protocol::EngineCoreSamplingParams;
+use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 
 use crate::SamplingLimits;
 
@@ -10,7 +10,7 @@ pub enum TokenIdsError {
     #[error("allowed_token_ids should not be empty")]
     EmptyAllowedTokenIds,
     #[error(
-        "token_id(s) {token_ids:?} in {parameter} contain out-of-vocab token ids. \
+        "token_id(s) {token_ids:?} in {parameter} are out of vocabulary. \
          Vocabulary size: {vocab_size}"
     )]
     OutOfVocab {

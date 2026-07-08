@@ -14,7 +14,7 @@ Usage:
         --port 8192 \
         --prefiller-host 127.0.0.1 --prefiller-port 8100 \
         --decoder-host   127.0.0.1 --decoder-port  8200 \
-        --p2p-connector-host 127.0.0.1 --p2p-connector-port 7777
+        --p2p-connector-host 127.0.0.1 --p2p-connector-port 5710
 """
 
 import argparse
@@ -73,16 +73,25 @@ async def lifespan(app: FastAPI):
     app.state.prefill_iterator = itertools.cycle(range(len(app.state.prefill_clients)))
     app.state.decode_iterator = itertools.cycle(range(len(app.state.decode_clients)))
 
+    # Round-robin over each role's data-parallel replicas (independent of the
+    # instance iterators above). For dp_size=1 these yield only rank 0.
+    app.state.prefill_dp_iterator = itertools.cycle(
+        range(global_args.prefiller_dp_size)
+    )
+    app.state.decode_dp_iterator = itertools.cycle(range(global_args.decoder_dp_size))
+
     mode = "decoder-first" if global_args.decoder_first else "prefiller-first"
     if global_args.p2p:
         mode += ",p2p"
     pd_host = global_args.p2p_connector_host
     pd_port = global_args.p2p_connector_port
+    n_pref = len(app.state.prefill_clients)
+    n_dec = len(app.state.decode_clients)
     print(
         f"Proxy ready [{mode}]: "
-        f"{len(app.state.prefill_clients)} prefiller(s), "
-        f"{len(app.state.decode_clients)} decoder(s). "
-        f"P2PConnector at {pd_host}:{pd_port}"
+        f"{n_pref} prefiller(s) x dp={global_args.prefiller_dp_size}, "
+        f"{n_dec} decoder(s) x dp={global_args.decoder_dp_size}. "
+        f"P2PConnector base at {pd_host}:{pd_port}"
     )
     yield
 
@@ -113,8 +122,9 @@ def parse_args():
     p.add_argument(
         "--p2p-connector-port",
         type=int,
-        default=7777,
-        help="Port of the prefiller's P2PConnector ZMQ socket",
+        default=int(os.getenv("VLLM_P2P_SIDE_CHANNEL_PORT", "5710")),
+        help="Port of the prefiller's P2PConnector ZMQ socket "
+        "(default: $VLLM_P2P_SIDE_CHANNEL_PORT or 5710)",
     )
     # P2PConnector coordinates of the decoder — injected into prefill requests
     # so the prefiller's submit_store can resolve the peer to push KV to.
@@ -127,8 +137,9 @@ def parse_args():
     p.add_argument(
         "--decoder-p2p-connector-port",
         type=int,
-        default=7778,
-        help="Port of the decoder's P2PConnector ZMQ socket",
+        default=int(os.getenv("VLLM_P2P_SIDE_CHANNEL_PORT", "5710")) + 1,
+        help="Port of the decoder's P2PConnector ZMQ socket "
+        "(default: $VLLM_P2P_SIDE_CHANNEL_PORT + 1 or 5711)",
     )
     p.add_argument(
         "--decoder-first",
@@ -143,6 +154,23 @@ def parse_args():
         "on the decoder, inject kv_transfer_params with a top-level 'p2p' "
         "block ({kv_request_id, remote_host, remote_port}) instead of the "
         "default 'prefill' block.",
+    )
+    p.add_argument(
+        "--prefiller-dp-size",
+        type=int,
+        default=1,
+        help="Data-parallel replica count of the prefiller. When >1 the proxy "
+        "round-robins prefill across ranks via the X-data-parallel-rank header "
+        "and injects remote_port = p2p-connector-port + rank into the decode "
+        "request so the decoder pulls KV from that replica's control socket. "
+        "Assumes a single prefiller instance (one host/port fronting N replicas).",
+    )
+    p.add_argument(
+        "--decoder-dp-size",
+        type=int,
+        default=1,
+        help="Data-parallel replica count of the decoder. When >1 the proxy "
+        "round-robins decode across ranks via the X-data-parallel-rank header.",
     )
     args = p.parse_args()
     if len(args.prefiller_hosts) != len(args.prefiller_ports):
@@ -160,6 +188,23 @@ def _get_next(app, service: str):
     return app.state.decode_clients[next(app.state.decode_iterator)]
 
 
+def _next_dp_rank(app, service: str):
+    """Advance the round-robin DP cursor for a role.
+
+    Returns (rank, header_rank). ``rank`` (0..dp_size-1) is always used for the
+    P2P remote_port arithmetic; ``header_rank`` is the same value when the role
+    has dp_size>1 and None otherwise (so dp=1 sends no header, matching the
+    single-replica behavior).
+    """
+    if service == "prefill":
+        rank = next(app.state.prefill_dp_iterator)
+        dp_size = global_args.prefiller_dp_size
+    else:
+        rank = next(app.state.decode_dp_iterator)
+        dp_size = global_args.decoder_dp_size
+    return rank, (rank if dp_size > 1 else None)
+
+
 def _auth_headers(request_id: str) -> dict:
     headers: dict = {"X-Request-Id": request_id}
     api_key = os.environ.get("OPENAI_API_KEY", "")
@@ -168,7 +213,7 @@ def _auth_headers(request_id: str) -> dict:
     return headers
 
 
-async def _prefill(client_info, endpoint, req_data, request_id):
+async def _prefill(client_info, endpoint, req_data, request_id, dp_rank=None):
     """Send a prefill-only request (max_tokens=1) to the prefiller."""
     data = req_data.copy()
     if global_args.p2p:
@@ -187,14 +232,21 @@ async def _prefill(client_info, endpoint, req_data, request_id):
     data.pop("min_completion_tokens", None)
 
     headers = _auth_headers(request_id)
+    if dp_rank is not None:
+        # Pin this prefill to a specific DP replica so its P2PConnector (bound
+        # at base_port + data_parallel_index) holds the produced KV blocks.
+        headers["X-data-parallel-rank"] = str(dp_rank)
     resp = await client_info["client"].post(endpoint, json=data, headers=headers)
     resp.raise_for_status()
     await resp.aread()
     return resp
 
 
-async def _stream_decode(client_info, endpoint, req_data, request_id):
+async def _stream_decode(client_info, endpoint, req_data, request_id, dp_rank=None):
     headers = _auth_headers(request_id)
+    if dp_rank is not None:
+        # Round-robin this decode onto a specific DP replica of the decoder.
+        headers["X-data-parallel-rank"] = str(dp_rank)
     async with client_info["client"].stream(
         "POST", endpoint, json=req_data, headers=headers
     ) as resp:
@@ -208,25 +260,40 @@ async def _handle_completions(api: str, request: Request):
         req_data = await request.json()
         request_id = str(uuid.uuid4())
 
+        # Pick DP replicas for both roles up front (before any await) so the
+        # two round-robin advances are atomic together. Header rank is None for
+        # a role with dp_size==1 (no header → single replica, unchanged).
+        prefill_rank, prefill_hdr = _next_dp_rank(request.app, "prefill")
+        decode_rank, decode_hdr = _next_dp_rank(request.app, "decode")
+
         prefill_client = _get_next(request.app, "prefill")
-        await _prefill(prefill_client, api, req_data, request_id)
+        await _prefill(prefill_client, api, req_data, request_id, dp_rank=prefill_hdr)
 
         # Inject the prefiller's P2PConnector address so the decoder can pull
-        # KV blocks from it via the P2PConnector transport.
+        # KV blocks from it. remote_port = base + prefill_rank targets the
+        # replica that produced the KV (base+0 == base when dp=1).
         decoder_key = "p2p" if global_args.p2p else "prefill"
         req_data["kv_transfer_params"] = {
             decoder_key: {
                 "kv_request_id": request_id,
                 "remote_host": global_args.p2p_connector_host,
-                "remote_port": global_args.p2p_connector_port,
+                "remote_port": global_args.p2p_connector_port + prefill_rank,
             },
         }
 
         decode_client = _get_next(request.app, "decode")
-        logger.debug("prefill=%s decode=%s", prefill_client, decode_client)
+        logger.debug(
+            "prefill=%s dp=%s decode=%s dp=%s",
+            prefill_client,
+            prefill_rank,
+            decode_client,
+            decode_rank,
+        )
 
         async def generate():
-            async for chunk in _stream_decode(decode_client, api, req_data, request_id):
+            async for chunk in _stream_decode(
+                decode_client, api, req_data, request_id, dp_rank=decode_hdr
+            ):
                 yield chunk
 
         return StreamingResponse(generate(), media_type="application/json")
@@ -251,6 +318,10 @@ async def _handle_completions_decoder_first(api: str, request: Request):
         req_data = await request.json()
         request_id = str(uuid.uuid4())
 
+        # Pick DP replicas up front (see _handle_completions for rationale).
+        prefill_rank, prefill_hdr = _next_dp_rank(request.app, "prefill")
+        decode_rank, decode_hdr = _next_dp_rank(request.app, "decode")
+
         prefill_client = _get_next(request.app, "prefill")
         decode_client = _get_next(request.app, "decode")
 
@@ -260,7 +331,7 @@ async def _handle_completions_decoder_first(api: str, request: Request):
             decoder_key: {
                 "kv_request_id": request_id,
                 "remote_host": global_args.p2p_connector_host,
-                "remote_port": global_args.p2p_connector_port,
+                "remote_port": global_args.p2p_connector_port + prefill_rank,
             },
         }
 
@@ -270,7 +341,7 @@ async def _handle_completions_decoder_first(api: str, request: Request):
             async def _run_decode():
                 try:
                     async for chunk in _stream_decode(
-                        decode_client, api, decode_data, request_id
+                        decode_client, api, decode_data, request_id, dp_rank=decode_hdr
                     ):
                         await queue.put(("data", chunk))
                 except Exception as exc:
@@ -283,7 +354,9 @@ async def _handle_completions_decoder_first(api: str, request: Request):
 
             # 2. Send prefill — blocks are computed and pushed to the decoder
             try:
-                await _prefill(prefill_client, api, req_data, request_id)
+                await _prefill(
+                    prefill_client, api, req_data, request_id, dp_rank=prefill_hdr
+                )
             except Exception as exc:
                 logger.warning("decoder-first: prefill failed: %s", exc)
 

@@ -121,7 +121,7 @@ class FakeDataTransport:
         self._transfers[tid] = (peer_id, local_idxs, remote_idxs)
         return tid
 
-    def poll(self):
+    def poll(self, owner=None):
         from vllm.v1.kv_offload.tiering.p2p.data.base import PollResult
 
         result = PollResult(done=list(self._poll_done), failed=list(self._poll_failed))
