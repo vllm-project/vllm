@@ -74,6 +74,12 @@ else:
 
 logger = init_logger(__name__)
 
+# Process-local record of which (arch, target) model-class overrides have been
+# registered in *this* process. Must not live on ModelConfig: that instance is
+# pickled to each worker, so an instance flag would arrive already "registered"
+# while the worker's own global ModelRegistry is still untouched.
+_REGISTERED_MODEL_CLASS_OVERRIDES: set[tuple[str, str]] = set()
+
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
@@ -213,7 +219,7 @@ class ModelConfig:
     flexibility."""
     enable_return_routed_experts: bool = False
     """Whether to return routed experts."""
-    max_logprobs: int = 20
+    max_logprobs: int = Field(default=20, ge=-1)
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
     OpenAI Chat Completions API. -1 means no cap, i.e. all (output_length *
@@ -274,6 +280,13 @@ class ModelConfig:
     hf_overrides: HfOverrides = field(default_factory=dict)
     """If a dictionary, contains arguments to be forwarded to the Hugging Face
     config. If a callable, it is called to update the HuggingFace config."""
+    model_class_overrides: dict[str, str] = field(default_factory=dict)
+    """Override the model class used for one or more architectures, mapping the
+    architecture name to a `"module:class"` target (the same format accepted by
+    `ModelRegistry.register_model`). This registers the target class at runtime,
+    e.g. `{"GlmMoeDsaForCausalLM":
+    "vllm.models.deepseek_v32.nvidia.model:DeepseekV32ForCausalLM"}`. This
+    argument is for development and debugging purposes only."""
     generation_config: str = "auto"
     """The folder path to the generation config. Defaults to `"auto"`, the
     generation config will be loaded from model path. If set to `"vllm"`, no
@@ -289,6 +302,11 @@ class ModelConfig:
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda and
     hip platforms are supported)."""
+    sleep_mode_backend: str = "cumem"
+    """Mechanism used to free and restore GPU state for sleep mode. ``"cumem"``
+    (default) uses the built-in ``CuMemAllocator`` and is behavior-compatible
+    with prior releases. Additional backends (CUDA checkpoint, CRIU, durable
+    snapshot) may be registered in-tree or by plugins (RFC #34303)."""
     enable_cumem_allocator: bool = False
     """Enable the custom cumem allocator to leverage advanced GPU memory
     allocation features such as multi-node NVLink support.
@@ -351,6 +369,7 @@ class ModelConfig:
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
     mm_tensor_ipc: InitVar[MMTensorIPC] = None
+    mm_ipc_gpu_memory_gb: InitVar[float | None] = None
 
     def compute_hash(self) -> str:
         """
@@ -397,6 +416,7 @@ class ModelConfig:
             "mm_encoder_tp_mode",
             "interleave_mm_strings",
             "skip_mm_profiling",
+            "mm_ipc_gpu_memory_gb",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
@@ -477,6 +497,7 @@ class ModelConfig:
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
         mm_tensor_ipc: MMTensorIPC,
+        mm_ipc_gpu_memory_gb: float | None,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(
@@ -601,8 +622,6 @@ class ModelConfig:
         if self.tokenizer_mode == "auto":
             if self.model_impl == "terratorch":
                 self.tokenizer_mode = "terratorch"
-            elif arch == "Grok1ForCausalLM":
-                self.tokenizer_mode = "grok2"
             elif arch == "MoonshotKimiaForCausalLM":
                 self.tokenizer_mode = "kimi_audio"
             elif arch == "DeepseekV32ForCausalLM":
@@ -692,6 +711,7 @@ class ModelConfig:
                 skip_mm_profiling=skip_mm_profiling,
                 video_pruning_rate=video_pruning_rate,
                 mm_tensor_ipc=mm_tensor_ipc,
+                mm_ipc_gpu_memory_gb=mm_ipc_gpu_memory_gb,
             )
 
             mm_config_kwargs = {
@@ -805,7 +825,33 @@ class ModelConfig:
 
     @property
     def registry(self):
+        self._maybe_register_model_class_overrides()
         return me_models.ModelRegistry
+
+    def _maybe_register_model_class_overrides(self) -> None:
+        # Apply ``model_class_overrides`` here because this property is the
+        # single chokepoint through which every model-class inspect/resolve
+        # passes, in both the engine front-end and every worker process. The
+        # guard is process-local (see ``_REGISTERED_MODEL_CLASS_OVERRIDES``), so
+        # each worker re-registers into its own ModelRegistry exactly once
+        # rather than trusting a pickled-in instance flag.
+        if not self.model_class_overrides:
+            return
+        pending = [
+            (arch, target)
+            for arch, target in self.model_class_overrides.items()
+            if (arch, target) not in _REGISTERED_MODEL_CLASS_OVERRIDES
+        ]
+        if not pending:
+            return
+        logger.warning_once(
+            "Applying model_class_overrides %s. This is intended for "
+            "development/debugging.",
+            str(self.model_class_overrides),
+        )
+        for arch, target in pending:
+            me_models.ModelRegistry.register_model(arch, target)
+            _REGISTERED_MODEL_CLASS_OVERRIDES.add((arch, target))
 
     @property
     def architectures(self) -> list[str]:
@@ -992,6 +1038,7 @@ class ModelConfig:
                 "modelopt",
                 "modelopt_fp4",
                 "modelopt_mxfp8",
+                "mxfp8",
                 "modelopt_mixed",
                 # Ensure heavy backends are probed last to avoid unnecessary
                 # imports during override detection (e.g., MXFP4 imports Triton)
@@ -1245,9 +1292,13 @@ class ModelConfig:
     def is_deepseek_mla(self) -> bool:
         return self.model_arch_config.is_deepseek_mla
 
-    @property
+    @cached_property
     def is_mm_prefix_lm(self) -> bool:
         return self.model_arch_config.is_mm_prefix_lm
+
+    @property
+    def rswa_window(self) -> int | None:
+        return self.model_arch_config.rswa_window
 
     def get_head_size(self) -> int:
         return self.model_arch_config.head_size

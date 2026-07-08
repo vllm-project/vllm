@@ -2,10 +2,11 @@ use std::time::Duration;
 
 use criterion::{BatchSize, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use vllm_parser::tool::test_utils::{split_by_chars, test_tools};
-use vllm_parser::tool::{Gemma4ToolParser, Tool, ToolParser};
+use vllm_parser::tool::{Tool, ToolParser};
+use vllm_parser::unified::Gemma4UnifiedParser;
 
 mod utils;
-use utils::feed_parser;
+use utils::{UnifiedToolParserAdapter, feed_parser};
 
 const CHUNK_CHARS: usize = 7;
 const LONG_NORMAL_TEXT_REPEATS: usize = 2048;
@@ -68,7 +69,8 @@ fn long_tool_argument_fixture() -> String {
 }
 
 fn parser(tools: &[Tool]) -> Box<dyn ToolParser> {
-    Gemma4ToolParser::create(tools).expect("Gemma4 parser should initialize")
+    UnifiedToolParserAdapter::<Gemma4UnifiedParser>::create(tools)
+        .expect("Gemma4 unified parser should initialize")
 }
 
 fn run_stream_group(
