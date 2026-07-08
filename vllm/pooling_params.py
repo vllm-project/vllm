@@ -164,28 +164,34 @@ class PoolingParams(
                 self.use_activation = True
 
             if self.dimensions is not None:
+                dimensions = self.dimensions
+                model_name = model_config.served_model_name
+                embedding_size = model_config.embedding_size
+                valid_range = f"[1, {embedding_size}]"
+                if dimensions <= 0:
+                    raise ValueError(
+                        f"Model {model_name!r} only supports dimensions in "
+                        f"range {valid_range}, got {dimensions}."
+                    )
+                if dimensions > embedding_size:
+                    raise ValueError(
+                        f"Model {model_name!r} only supports dimensions in "
+                        f"range {valid_range}, got {dimensions}."
+                    )
                 if not model_config.is_matryoshka:
                     raise ValueError(
-                        f'Model "{model_config.served_model_name}" does not '
-                        f"support matryoshka representation, "
-                        f"changing output dimensions will lead to poor results."
+                        f"Model {model_name!r} does not support Matryoshka "
+                        f"embeddings; dimensions must be unset. Numeric "
+                        f"dimensions are valid only for Matryoshka models in "
+                        f"range {valid_range}."
                     )
 
                 mds = model_config.matryoshka_dimensions
-                if mds is not None:
-                    if self.dimensions not in mds:
-                        raise ValueError(
-                            f"Model {model_config.served_model_name!r} "
-                            f"only supports {str(mds)} matryoshka dimensions, "
-                            f"use other output dimensions will "
-                            f"lead to poor results."
-                        )
-                elif self.dimensions < 1:
-                    raise ValueError("Dimensions must be greater than 0")
-                elif self.dimensions > model_config.embedding_size:
+                if mds is not None and dimensions not in mds:
                     raise ValueError(
-                        "Dimensions must be less than or equal to the model's "
-                        f"embedding size ({model_config.embedding_size})"
+                        f"Model {model_name!r} only supports {str(mds)} "
+                        f"Matryoshka dimensions in range {valid_range}, "
+                        f"got {dimensions}."
                     )
 
         elif self.task in ["classify", "token_classify"]:

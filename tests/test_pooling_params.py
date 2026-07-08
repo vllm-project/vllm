@@ -75,7 +75,7 @@ def test_embed_dimensions(model_info: EmbedModelInfo):
 
 
 @dataclass()
-class MockMatryoshkaModelConfig:
+class MockEmbeddingModelConfig:
     pooler_config: PoolerConfig
     is_matryoshka: bool = True
     matryoshka_dimensions: list[int] | None = None
@@ -85,7 +85,7 @@ class MockMatryoshkaModelConfig:
 
 def test_embed_dimensions_matryoshka_without_list_upper_bound():
     task = "embed"
-    model_config = MockMatryoshkaModelConfig(
+    model_config = MockEmbeddingModelConfig(
         pooler_config=PoolerConfig(seq_pooling_type="CLS"),
         matryoshka_dimensions=None,
         embedding_size=32,
@@ -95,6 +95,42 @@ def test_embed_dimensions_matryoshka_without_list_upper_bound():
 
     with pytest.raises(ValueError):
         PoolingParams(task=task, dimensions=64).verify(model_config)
+
+
+def test_embed_dimensions_validation_errors():
+    task = "embed"
+    model_config = MockEmbeddingModelConfig(
+        pooler_config=PoolerConfig(seq_pooling_type="CLS"),
+        matryoshka_dimensions=None,
+        embedding_size=32,
+    )
+
+    for dimensions in (0, -5, 64):
+        with pytest.raises(
+            ValueError,
+            match=(
+                f"Model 'mock-matryoshka-model' only supports dimensions "
+                f"in range \\[1, 32\\], got {dimensions}."
+            ),
+        ):
+            PoolingParams(task=task, dimensions=dimensions).verify(model_config)
+
+    non_matryoshka_config = MockEmbeddingModelConfig(
+        pooler_config=PoolerConfig(seq_pooling_type="CLS"),
+        is_matryoshka=False,
+        served_model_name="mock-embedding-model",
+        embedding_size=32,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Model 'mock-embedding-model' does not support Matryoshka "
+            "embeddings; dimensions must be unset. Numeric dimensions are "
+            "valid only for Matryoshka models in range \\[1, 32\\]."
+        ),
+    ):
+        PoolingParams(task=task, dimensions=1).verify(non_matryoshka_config)
 
 
 @pytest.mark.parametrize("task", ["classify"])
