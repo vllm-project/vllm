@@ -305,9 +305,7 @@ class DeepseekV2MoE(nn.Module):
         self.gate = GateLinear(
             config.hidden_size,
             config.n_routed_experts,
-            params_dtype=self.router_dtype,
             out_dtype=self.router_dtype,
-            force_fp32_compute=self.router_dtype == torch.float32,
             prefix=f"{prefix}.gate",
         )
         if getattr(config, "topk_method", None) == "noaux_tc":
