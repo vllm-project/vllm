@@ -797,7 +797,8 @@ def unified_kv_cache_update_fake(
     value: torch.Tensor,
     layer_name: LayerNameType,
 ) -> torch.Tensor:
-    return torch.empty(0, device=key.device, dtype=key.dtype)
+    del layer_name
+    return key.flatten()[:0] + value.flatten()[:0]
 
 
 direct_register_custom_op(
@@ -850,6 +851,14 @@ def unified_attention_with_output_fake(
     output_block_scale: torch.Tensor | None = None,
     kv_cache_dummy_dep: torch.Tensor | None = None,
 ) -> None:
+    del key, value, layer_name, output_scale
+    if kv_cache_dummy_dep is None:
+        output.copy_(query.to(output.dtype))
+    else:
+        dep = kv_cache_dummy_dep.sum().to(query.dtype) * 0
+        output.copy_((query + dep).to(output.dtype))
+    if output_block_scale is not None:
+        output_block_scale.copy_(output_block_scale)
     return
 
 

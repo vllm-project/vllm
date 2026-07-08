@@ -86,7 +86,8 @@ def fused_rope_and_unified_kv_cache_update_fake(
     is_neox: bool,
     layer_name: LayerNameType,
 ) -> torch.Tensor:
-    return torch.empty(0, device=query.device, dtype=query.dtype)
+    del positions, cos_sin_cache, is_neox, layer_name
+    return query.flatten()[:0] + key.flatten()[:0] + value.flatten()[:0]
 
 
 direct_register_custom_op(

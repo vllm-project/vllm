@@ -92,6 +92,18 @@ logger = init_logger(__name__)
 trtllm_workspace_buffer = None
 
 
+def _use_replicated_full_attention_heads(layer: torch.nn.Module) -> bool:
+    if not envs.VLLM_EXPERIMENTAL_DCP_REPLICATED_FULL_ATTENTION:
+        return False
+    if hasattr(layer, "dcp_replicated_full_attention_heads"):
+        assert getattr(layer, "dcp_replicated_full_attention_heads"), (
+            "DCP replicated full-attention planning is enabled globally, but "
+            f"{layer.__class__.__name__}.dcp_replicated_full_attention_heads is "
+            "False. FlashInfer DCP plan/run head layouts would diverge."
+        )
+    return True
+
+
 def _dcp_debug_sync(label: str, *tensors: torch.Tensor) -> None:
     if os.environ.get("VLLM_EXP_DCP_DEBUG") != "1":
         return
@@ -367,10 +379,7 @@ class BatchDCPPrefillWrapper:
         out: torch.Tensor,
     ):
         _dcp_debug_sync("prefill.start", prefill_query, key, value, out)
-        replicated_full_heads = (
-            envs.VLLM_EXPERIMENTAL_DCP_REPLICATED_FULL_ATTENTION
-            and getattr(layer, "dcp_replicated_full_attention_heads", False)
-        )
+        replicated_full_heads = _use_replicated_full_attention_heads(layer)
         prefill_query_across_dcp = (
             prefill_query
             if replicated_full_heads
@@ -2081,10 +2090,7 @@ class FlashInferImpl(AttentionImpl):
                     out_decode = output[:num_decode_tokens]
 
                 if use_dcp:
-                    replicated_full_heads = (
-                        envs.VLLM_EXPERIMENTAL_DCP_REPLICATED_FULL_ATTENTION
-                        and getattr(layer, "dcp_replicated_full_attention_heads", False)
-                    )
+                    replicated_full_heads = _use_replicated_full_attention_heads(layer)
                     if not replicated_full_heads:
                         decode_query = get_dcp_group().all_gather(
                             decode_query.contiguous(), dim=-2

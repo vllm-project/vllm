@@ -70,6 +70,87 @@ class TestNonStreaming:
         args = json.loads(result.tool_calls[0].function.arguments)
         assert args == {"city": "Tokyo"}
 
+    @pytest.mark.parametrize(
+        ("function_opener", "function_closer"),
+        [
+            ('<|im_start|>="', '"'),
+            ("<|im_start|>function=", ">"),
+            ("=", "\n"),
+        ],
+    )
+    def test_malformed_auto_function_openers(
+        self,
+        parser,
+        mock_request,
+        function_opener,
+        function_closer,
+    ):
+        text = (
+            "<tool_call>\n"
+            f"{function_opener}read{function_closer}\n"
+            "<parameter=filePath>solution.cpp</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "read"
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"filePath": "solution.cpp"}
+
+    def test_quoted_xml_parameter_name_and_value(self, parser, mock_request):
+        text = (
+            "<tool_call>\n"
+            "<function=read>\n"
+            '<parameter="filePath">"solution.cpp"</parameter>\n'
+            "</function>\n"
+            "</tool_call>"
+        )
+
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"filePath": "solution.cpp"}
+
+    def test_default_api_call_fallback(self, parser, mock_request):
+        text = (
+            "I'll read it.\n"
+            "```text\n"
+            "\"call: default_api:read{'filePath': 'solution.cpp'}\"\n"
+            "```"
+        )
+
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "read"
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"filePath": "solution.cpp"}
+        assert "call: default_api" not in (result.content or "")
+
+    def test_json_tool_descriptor_fallback(self, parser, mock_request):
+        text = (
+            "Here is the read request.\n"
+            "```json\n"
+            '{\n  "tool": "read",\n'
+            '  "arguments": {"filePath": "solution.cpp"}\n'
+            "}\n"
+            "```"
+        )
+
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "read"
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"filePath": "solution.cpp"}
+
     def test_parallel_tool_calls(self, parser, mock_request):
         text = (
             "<tool_call>\n"
@@ -541,6 +622,51 @@ class TestStreaming:
         assert args_text
         parsed = json.loads(args_text)
         assert parsed["x"] == "1"
+
+    def test_streaming_malformed_auto_imstart_function_opener(
+        self,
+        parser,
+        mock_request,
+    ):
+        chunks = [
+            "<tool_call>\n",
+            '<|im_start|>="read"\n',
+            "<parameter=filePath>solution.cpp</parameter>\n",
+            "</function>\n",
+            "</tool_call>",
+        ]
+
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        name = collect_function_name(results)
+        assert name == "read"
+
+        args_text = collect_tool_arguments(results)
+        assert args_text
+        parsed = json.loads(args_text)
+        assert parsed["filePath"] == "solution.cpp"
+
+    def test_streaming_quoted_xml_parameter_value(
+        self,
+        parser,
+        mock_request,
+    ):
+        chunks = [
+            "<tool_call>\n",
+            "<function=read>\n",
+            '<parameter=filePath>"s',
+            "olution.cpp",
+            '"</parameter>\n',
+            "</function>\n",
+            "</tool_call>",
+        ]
+
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        args_text = collect_tool_arguments(results)
+        assert args_text
+        parsed = json.loads(args_text)
+        assert parsed["filePath"] == "solution.cpp"
 
     def test_char_by_char_streaming(self, mock_request):
         """Feed text character-by-character to test lexer robustness.

@@ -983,6 +983,25 @@ class PaddedMergedColumnParallelLinear(MergedColumnParallelLinear):
         for param in self.parameters(recurse=False):
             param.data.zero_()
 
+    @staticmethod
+    def _maybe_adjust_output_span_for_packing(
+        param: Parameter,
+        shard_size: int,
+        shard_offset: int,
+    ) -> tuple[int, int]:
+        output_dim = getattr(param, "output_dim", None)
+        packed_dim = getattr(param, "packed_dim", None)
+        if (
+            output_dim is not None
+            and packed_dim == output_dim
+            and isinstance(param, (PackedColumnParameter, PackedvLLMParameter))
+        ):
+            return param.adjust_shard_indexes_for_packing(
+                shard_size=shard_size,
+                shard_offset=shard_offset,
+            )
+        return shard_size, shard_offset
+
     def _copy_padded_output_shard(
         self,
         param: Parameter,
@@ -1000,12 +1019,18 @@ class PaddedMergedColumnParallelLinear(MergedColumnParallelLinear):
         copy_size = max(0, min(padded_shard_size, logical_size - global_start))
 
         local_offset = sum(self.output_sizes[:loaded_shard_id]) // self.tp_size
+        padded_shard_size, local_offset = self._maybe_adjust_output_span_for_packing(
+            param, padded_shard_size, local_offset
+        )
         param_data = param.data.narrow(output_dim, local_offset,
                                        padded_shard_size)
         param_data.zero_()
         if copy_size == 0:
             return True
 
+        copy_size, global_start = self._maybe_adjust_output_span_for_packing(
+            param, copy_size, global_start
+        )
         param_data = param_data.narrow(output_dim, 0, copy_size)
         loaded_weight = loaded_weight.narrow(output_dim, global_start,
                                              copy_size)
@@ -1014,6 +1039,42 @@ class PaddedMergedColumnParallelLinear(MergedColumnParallelLinear):
             f"{param_data.shape}"
         )
         param_data.copy_(loaded_weight)
+        return True
+
+    def _copy_fused_checkpoint_weight(
+        self,
+        param: Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, ...] | None,
+    ) -> bool:
+        output_dim = getattr(param, "output_dim", None)
+        if output_dim is None:
+            return False
+
+        shard_ids = (
+            list(loaded_shard_id)
+            if loaded_shard_id is not None
+            else list(range(len(self.logical_output_sizes)))
+        )
+        source_offset = 0
+        if loaded_shard_id is not None:
+            source_offset = sum(self.logical_output_sizes[: loaded_shard_id[0]])
+
+        for shard_id in shard_ids:
+            logical_size = self.logical_output_sizes[shard_id]
+            source_size, packed_source_offset = (
+                self._maybe_adjust_output_span_for_packing(
+                    param, logical_size, source_offset
+                )
+            )
+            loaded_weight_shard = loaded_weight.narrow(
+                output_dim, packed_source_offset, source_size
+            )
+            if not self._copy_padded_output_shard(
+                param, loaded_weight_shard, shard_id
+            ):
+                return False
+            source_offset += logical_size
         return True
 
     def weight_loader(
@@ -1029,6 +1090,15 @@ class PaddedMergedColumnParallelLinear(MergedColumnParallelLinear):
                 return
             if self._copy_padded_output_shard(param, loaded_weight,
                                              loaded_shard_id):
+                return
+        if loaded_shard_id is None or isinstance(loaded_shard_id, tuple):
+            if isinstance(param, PerTensorScaleParameter):
+                return super().weight_loader(
+                    param, loaded_weight, loaded_shard_id
+                )
+            if self._copy_fused_checkpoint_weight(
+                param, loaded_weight, loaded_shard_id
+            ):
                 return
         super().weight_loader(param, loaded_weight, loaded_shard_id)
 
@@ -1049,6 +1119,15 @@ class PaddedMergedColumnParallelLinear(MergedColumnParallelLinear):
                 return
             if self._copy_padded_output_shard(param, loaded_weight,
                                              loaded_shard_id):
+                return
+        if loaded_shard_id is None or isinstance(loaded_shard_id, tuple):
+            if isinstance(param, PerTensorScaleParameter):
+                return super().weight_loader_v2(
+                    param, loaded_weight, loaded_shard_id
+                )
+            if self._copy_fused_checkpoint_weight(
+                param, loaded_weight, loaded_shard_id
+            ):
                 return
         super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
 
@@ -1114,12 +1193,18 @@ class ExplicitPaddedMergedColumnParallelLinear(PaddedMergedColumnParallelLinear)
         global_start = self.local_starts[loaded_shard_id]
 
         local_offset = sum(self.output_sizes[:loaded_shard_id]) // self.tp_size
+        padded_shard_size, local_offset = self._maybe_adjust_output_span_for_packing(
+            param, padded_shard_size, local_offset
+        )
         param_data = param.data.narrow(output_dim, local_offset,
                                        padded_shard_size)
         param_data.zero_()
         if copy_size == 0:
             return True
 
+        copy_size, global_start = self._maybe_adjust_output_span_for_packing(
+            param, copy_size, global_start
+        )
         param_data = param_data.narrow(output_dim, 0, copy_size)
         loaded_weight = loaded_weight.narrow(output_dim, global_start,
                                              copy_size)
@@ -1151,8 +1236,13 @@ class ExplicitPaddedMergedColumnParallelLinear(PaddedMergedColumnParallelLinear)
 
         for shard_id in shard_ids:
             logical_size = self.logical_output_sizes[shard_id]
+            source_size, packed_source_offset = (
+                self._maybe_adjust_output_span_for_packing(
+                    param, logical_size, source_offset
+                )
+            )
             loaded_weight_shard = loaded_weight.narrow(
-                output_dim, source_offset, logical_size
+                output_dim, packed_source_offset, source_size
             )
             if not self._copy_padded_output_shard(
                 param, loaded_weight_shard, shard_id
@@ -1704,6 +1794,25 @@ class QKVParallelLinearOverlappingGQA(QKVParallelLinear):
             disable_tp=disable_tp,
         )
 
+    @staticmethod
+    def _maybe_adjust_output_span_for_packing(
+        param: Parameter,
+        shard_size: int,
+        shard_offset: int,
+    ) -> tuple[int, int]:
+        output_dim = getattr(param, "output_dim", None)
+        packed_dim = getattr(param, "packed_dim", None)
+        if (
+            output_dim is not None
+            and packed_dim == output_dim
+            and isinstance(param, (PackedColumnParameter, PackedvLLMParameter))
+        ):
+            return param.adjust_shard_indexes_for_packing(
+                shard_size=shard_size,
+                shard_offset=shard_offset,
+            )
+        return shard_size, shard_offset
+
     def _load_overlapping_kv_weight(
         self,
         param: Parameter,
@@ -1723,16 +1832,26 @@ class QKVParallelLinearOverlappingGQA(QKVParallelLinear):
         )
         shard_offset = self._get_shard_offset_mapping(loaded_shard_id)
         assert shard_offset is not None
+        shard_size = self.num_kv_heads * local_head_size
+        shard_size, shard_offset = self._maybe_adjust_output_span_for_packing(
+            param, shard_size, shard_offset
+        )
         param_data = param_data.narrow(
-            output_dim, shard_offset, self.num_kv_heads * local_head_size
+            output_dim, shard_offset, shard_size
         )
 
         for slot_idx, global_kv_idx in enumerate(self.kv_head_indices):
+            local_span_size, dst_offset = self._maybe_adjust_output_span_for_packing(
+                param, local_head_size, slot_idx * local_head_size
+            )
+            _, src_offset = self._maybe_adjust_output_span_for_packing(
+                param, local_head_size, global_kv_idx * local_head_size
+            )
             dst = param_data.narrow(
-                output_dim, slot_idx * local_head_size, local_head_size
+                output_dim, dst_offset, local_span_size
             )
             src = loaded_weight.narrow(
-                output_dim, global_kv_idx * local_head_size, local_head_size
+                output_dim, src_offset, local_span_size
             )
             assert dst.shape == src.shape
             dst.copy_(src)

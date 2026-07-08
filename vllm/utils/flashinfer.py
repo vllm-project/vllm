@@ -879,7 +879,7 @@ def flashinfer_scaled_fp8_mm(
         scale_a,
         scale_b,
         out_dtype,
-        "auto",
+        backend="cudnn",
     ).view(a.shape[0], b.shape[1])
 
     if bias is not None:
@@ -913,8 +913,8 @@ def flashinfer_scaled_fp8_mm_out(
         scale_a,
         scale_b,
         out_dtype or out.dtype,
-        out.unsqueeze(0),
-        "auto",
+        out=out.unsqueeze(0),
+        backend="cudnn",
     )
     return out
 

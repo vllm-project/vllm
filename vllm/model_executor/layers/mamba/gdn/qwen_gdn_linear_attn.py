@@ -480,7 +480,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         replicate_uneven_gdn = os.environ.get(
             "VLLM_EXPERIMENTAL_REPLICATE_UNEVEN_GDN", ""
         ).lower() in ("1", "true", "yes", "on")
-        self.gdn_explicit_partition = incompatible_gdn_tp and (
+        # Qwen3.5 stores non-interleaved GDN projections as separate
+        # [q, k, v] + [z] checkpoint tensors and maps them into one vLLM-side
+        # qkvz projection.  Use the explicit partition loader for every TP
+        # size, not only uneven TP.  For evenly divisible TP this is
+        # mathematically the same contiguous split, but it keeps the q/k/v/z
+        # load and split contract identical to the uneven path.
+        self.gdn_explicit_partition = (
             not self.gqa_interleaved_layout and not replicate_uneven_gdn
         )
         self.disable_tp_for_gdn = incompatible_gdn_tp and (
@@ -1044,7 +1050,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         hidden_states: torch.Tensor,
         output: torch.Tensor,
     ):
-        self._forward_method(hidden_states, output)
+        torch.ops.vllm.qwen_gdn_full_forward(
+            hidden_states,
+            output,
+            layer_name=_encode_layer_name(self.prefix),
+        )
 
     def _output_projection(
         self,
@@ -1091,13 +1101,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 device=projected_states_qkvz.device,
             )
 
-            torch.ops.vllm.qwen_gdn_attention_core(
+            torch.ops.vllm.qwen_gdn_attention_core_aiter(
                 projected_states_qkvz,
                 projected_states_ba,
                 z,
                 core_attn_out,
                 layer_name=_encode_layer_name(self.prefix),
-                use_aiter=True,
             )
 
             self._output_projection(core_attn_out, z, output, num_tokens)
@@ -1910,38 +1919,65 @@ def qwen_gdn_attention_core(
     a_or_z_out: torch.Tensor,
     core_attn_out: torch.Tensor,
     layer_name: LayerNameType,
-    use_aiter: bool = False,
 ) -> None:
-    """Custom op dispatching to _forward_core or _forward_core_rocm.
+    """Custom op dispatching to the standard CUDA GDN core.
 
     Handles conv1d + recurrent attention only; input/output projections
     are performed by the caller.
 
-    When ``use_aiter=False`` (standard path):
-        qkv_or_qkvz is [q, k, v], b_or_ba is b, a_or_z_out is a (read-only).
-    When ``use_aiter=True`` (AITER Triton path, ROCm only):
-        qkv_or_qkvz is [q, k, v, z], b_or_ba is [b, a], a_or_z_out is the
-        z output buffer (mutated in-place).
-
-    ``core_attn_out`` is always mutated in-place.
+    qkv_or_qkvz is [q, k, v], b_or_ba is b, a_or_z_out is a (read-only).
+    Only ``core_attn_out`` is mutated in-place.
     """
     layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    if use_aiter:
-        self._forward_core_rocm(
-            qkvz=qkv_or_qkvz,
-            ba=b_or_ba,
-            z_out=a_or_z_out,
-            core_attn_out=core_attn_out,
-        )
-    else:
-        self._forward_core(
-            mixed_qkv=qkv_or_qkvz,
-            b=b_or_ba,
-            a=a_or_z_out,
-            core_attn_out=core_attn_out,
-        )
+    self._forward_core(
+        mixed_qkv=qkv_or_qkvz,
+        b=b_or_ba,
+        a=a_or_z_out,
+        core_attn_out=core_attn_out,
+    )
+
+
+def qwen_gdn_attention_core_aiter(
+    qkvz: torch.Tensor,
+    ba: torch.Tensor,
+    z_out: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: LayerNameType,
+) -> None:
+    """ROCm/AITER GDN core custom op.
+
+    This variant mutates both ``z_out`` and ``core_attn_out``.  Keeping it
+    separate from the standard CUDA op preserves the alias/mutation contract
+    that torch.compile sees for the common path.
+    """
+    layer_name = _resolve_layer_name(layer_name)
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    self._forward_core_rocm(
+        qkvz=qkvz,
+        ba=ba,
+        z_out=z_out,
+        core_attn_out=core_attn_out,
+    )
+
+
+def qwen_gdn_full_forward(
+    hidden_states: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: LayerNameType,
+) -> None:
+    """Full Qwen GDN forward wrapped as a custom op.
+
+    Keeping the projections, recurrent core, gated RMSNorm, and output
+    projection opaque to Inductor avoids compiling through recurrent-state
+    numerics and FLA wrapper code that is not Dynamo-safe.
+    """
+    layer_name = _resolve_layer_name(layer_name)
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    self._forward_method(hidden_states, output)
 
 
 def gdn_attention_core_fake(
@@ -1950,7 +1986,26 @@ def gdn_attention_core_fake(
     a_or_z_out: torch.Tensor,
     core_attn_out: torch.Tensor,
     layer_name: LayerNameType,
-    use_aiter: bool = False,
+) -> None:
+    """Fake implementation for torch.compile."""
+    return
+
+
+def gdn_attention_core_aiter_fake(
+    qkvz: torch.Tensor,
+    ba: torch.Tensor,
+    z_out: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: LayerNameType,
+) -> None:
+    """Fake implementation for torch.compile."""
+    return
+
+
+def qwen_gdn_full_forward_fake(
+    hidden_states: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: LayerNameType,
 ) -> None:
     """Fake implementation for torch.compile."""
     return
@@ -1959,8 +2014,22 @@ def gdn_attention_core_fake(
 direct_register_custom_op(
     op_name="qwen_gdn_attention_core",
     op_func=qwen_gdn_attention_core,
-    mutates_args=["a_or_z_out", "core_attn_out"],
+    mutates_args=["core_attn_out"],
     fake_impl=gdn_attention_core_fake,
+)
+
+direct_register_custom_op(
+    op_name="qwen_gdn_full_forward",
+    op_func=qwen_gdn_full_forward,
+    mutates_args=["output"],
+    fake_impl=qwen_gdn_full_forward_fake,
+)
+
+direct_register_custom_op(
+    op_name="qwen_gdn_attention_core_aiter",
+    op_func=qwen_gdn_attention_core_aiter,
+    mutates_args=["z_out", "core_attn_out"],
+    fake_impl=gdn_attention_core_aiter_fake,
 )
 
 

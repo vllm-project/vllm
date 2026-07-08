@@ -9,9 +9,15 @@ from itertools import islice
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    ModelConfig,
+    VllmConfig,
+    get_current_vllm_config_or_none,
+)
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -19,6 +25,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
@@ -58,6 +65,12 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
+from vllm.utils.torch_utils import (
+    LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
+    direct_register_custom_op,
+)
 from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import (
@@ -86,6 +99,49 @@ def _experimental_replicate_uneven_full_attention() -> bool:
     return os.environ.get(
         "VLLM_EXPERIMENTAL_REPLICATE_UNEVEN_FULL_ATTENTION", ""
     ).lower() in ("1", "true", "yes", "on")
+
+
+def _diagnostic_decoder_layer_full_boundary() -> bool:
+    return os.environ.get(
+        "VLLM_QWEN3_NEXT_DIAGNOSTIC_DECODER_LAYER_FULL_OP", ""
+    ).lower() in ("1", "true", "yes", "on")
+
+
+def _diagnostic_final_norm_full_boundary() -> bool:
+    return os.environ.get(
+        "VLLM_QWEN3_NEXT_DIAGNOSTIC_FINAL_NORM_FULL_OP", ""
+    ).lower() in ("1", "true", "yes", "on")
+
+
+def _decode_context_parallel_size() -> int:
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return 1
+    return vllm_config.parallel_config.decode_context_parallel_size
+
+
+def _should_replicate_full_attention_heads(
+    total_num_heads: int,
+    total_num_kv_heads: int,
+    tp_size: int,
+    dcp_size: int,
+    enable_dcp_replicated_full_attention: bool,
+) -> tuple[bool, bool]:
+    use_overlapping_gqa = (
+        total_num_heads % tp_size == 0
+        and total_num_kv_heads % tp_size != 0
+        and tp_size % total_num_kv_heads != 0
+    )
+    replicate_for_dcp_overlapping_gqa = (
+        use_overlapping_gqa
+        and dcp_size > 1
+        and enable_dcp_replicated_full_attention
+    )
+    return (
+        total_num_heads % tp_size != 0 or replicate_for_dcp_overlapping_gqa,
+        use_overlapping_gqa,
+    )
+
 
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
@@ -245,34 +301,52 @@ class Qwen3NextAttention(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
+        self.prefix = prefix
         self.hidden_size = config.hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         self.total_num_heads = config.num_attention_heads
+        self.total_num_kv_heads = config.num_key_value_heads
+        dcp_size = _decode_context_parallel_size()
+        (
+            should_replicate_full_attention,
+            use_overlapping_gqa,
+        ) = _should_replicate_full_attention_heads(
+            self.total_num_heads,
+            self.total_num_kv_heads,
+            tp_size,
+            dcp_size,
+            envs.VLLM_EXPERIMENTAL_DCP_REPLICATED_FULL_ATTENTION,
+        )
         self.replicate_uneven_full_attention = (
-            self.total_num_heads % tp_size != 0
+            should_replicate_full_attention
             and _experimental_replicate_uneven_full_attention()
         )
         if self.replicate_uneven_full_attention:
+            reason = (
+                "num_attention_heads is not divisible"
+                if self.total_num_heads % tp_size != 0
+                else "DCP with overlapping GQA KV-head partition"
+            )
             logger.warning(
                 "Replicating Qwen3Next full-attention layer %s on every TP rank "
-                "because num_attention_heads=%d is not divisible by "
-                "tensor_parallel_size=%d.",
+                "because %s requires full local Q/KV head layout "
+                "(num_attention_heads=%d, num_key_value_heads=%d, "
+                "tensor_parallel_size=%d, decode_context_parallel_size=%d).",
                 prefix,
+                reason,
                 self.total_num_heads,
+                self.total_num_kv_heads,
                 tp_size,
+                dcp_size,
             )
             self.num_heads = self.total_num_heads
         else:
             assert self.total_num_heads % tp_size == 0
             self.num_heads = self.total_num_heads // tp_size
-        self.total_num_kv_heads = config.num_key_value_heads
         self.attn_head_partition = None
         use_overlapping_gqa = (
-            not self.replicate_uneven_full_attention
-            and
-            self.total_num_kv_heads % tp_size != 0
-            and tp_size % self.total_num_kv_heads != 0
+            use_overlapping_gqa and not self.replicate_uneven_full_attention
         )
         if use_overlapping_gqa:
             self.attn_head_partition = make_attention_head_partition(
@@ -366,6 +440,13 @@ class Qwen3NextAttention(nn.Module):
             self.replicate_uneven_full_attention
         )
 
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is not None:
+            compilation_config = vllm_config.compilation_config
+            if prefix in compilation_config.static_forward_context:
+                raise ValueError(f"Duplicate layer name: {prefix}")
+            compilation_config.static_forward_context[prefix] = self
+
         self.q_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
@@ -442,12 +523,59 @@ class Qwen3NextAttention(nn.Module):
         output: torch.Tensor,
         hidden_states: torch.Tensor,
     ):
+        torch.ops.vllm.qwen3_next_attention_full_forward(
+            positions,
+            output,
+            hidden_states,
+            layer_name=_encode_layer_name(self.prefix),
+        )
+
+    def _forward_impl(
+        self,
+        positions: torch.Tensor,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v, gate = self._project_qkv_gate(qkv, positions)
         attn_output = self.attn(q, k, v)
         if gate is not None:
             attn_output = attn_output * torch.sigmoid(gate)
         output[:], _ = self.o_proj(attn_output)
+
+
+def qwen3_next_attention_full_forward(
+    positions: torch.Tensor,
+    output: torch.Tensor,
+    hidden_states: torch.Tensor,
+    layer_name: LayerNameType,
+) -> None:
+    """Full Qwen full-attention block wrapped as a custom op."""
+    layer_name = _resolve_layer_name(layer_name)
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    self._forward_impl(
+        positions=positions,
+        output=output,
+        hidden_states=hidden_states,
+    )
+
+
+def qwen3_next_attention_full_forward_fake(
+    positions: torch.Tensor,
+    output: torch.Tensor,
+    hidden_states: torch.Tensor,
+    layer_name: LayerNameType,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="qwen3_next_attention_full_forward",
+    op_func=qwen3_next_attention_full_forward,
+    mutates_args=["output"],
+    fake_impl=qwen3_next_attention_full_forward_fake,
+)
 
 
 class Qwen3NextDecoderLayer(nn.Module):
@@ -466,6 +594,7 @@ class Qwen3NextDecoderLayer(nn.Module):
 
         self.layer_type = layer_type
         self.layer_idx = extract_layer_index(prefix)
+        self.prefix = prefix
 
         if self.layer_type == "linear_attention":
             self.linear_attn = QwenGatedDeltaNetAttention(
@@ -529,12 +658,44 @@ class Qwen3NextDecoderLayer(nn.Module):
                 ),
             )
 
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is not None:
+            compilation_config = vllm_config.compilation_config
+            if prefix in compilation_config.static_forward_context:
+                raise ValueError(f"Duplicate layer name: {prefix}")
+            compilation_config.static_forward_context[prefix] = self
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
         positions: torch.Tensor = None,
         **kwargs: object,
+    ):
+        if _diagnostic_decoder_layer_full_boundary():
+            hidden_out = torch.empty_like(hidden_states)
+            residual_out = torch.empty_like(hidden_states)
+            torch.ops.vllm.qwen3_next_decoder_layer_full_forward(
+                hidden_states,
+                residual,
+                positions,
+                hidden_out,
+                residual_out,
+                layer_name=_encode_layer_name(self.prefix),
+            )
+            return hidden_out, residual_out
+
+        return self._forward_impl(
+            hidden_states=hidden_states,
+            residual=residual,
+            positions=positions,
+        )
+
+    def _forward_impl(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        positions: torch.Tensor = None,
     ):
         if residual is None:
             residual = hidden_states
@@ -589,6 +750,46 @@ class Qwen3NextDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+def qwen3_next_decoder_layer_full_forward(
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor | None,
+    positions: torch.Tensor,
+    hidden_out: torch.Tensor,
+    residual_out: torch.Tensor,
+    layer_name: LayerNameType,
+) -> None:
+    """Diagnostic full decoder-layer custom op for compile isolation."""
+    layer_name = _resolve_layer_name(layer_name)
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    next_hidden, next_residual = self._forward_impl(
+        hidden_states=hidden_states,
+        residual=residual,
+        positions=positions,
+    )
+    hidden_out.copy_(next_hidden)
+    residual_out.copy_(next_residual)
+
+
+def qwen3_next_decoder_layer_full_forward_fake(
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor | None,
+    positions: torch.Tensor,
+    hidden_out: torch.Tensor,
+    residual_out: torch.Tensor,
+    layer_name: LayerNameType,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="qwen3_next_decoder_layer_full_forward",
+    op_func=qwen3_next_decoder_layer_full_forward,
+    mutates_args=["hidden_out", "residual_out"],
+    fake_impl=qwen3_next_decoder_layer_full_forward_fake,
+)
+
+
 @support_torch_compile
 class Qwen3NextModel(nn.Module, EagleModelMixin):
     hf_to_vllm_mapper = WeightsMapper(
@@ -614,6 +815,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
         self.num_redundant_experts = eplb_config.num_redundant_experts
 
         self.config = config
+        self.prefix = prefix
 
         self.vocab_size = config.vocab_size
 
@@ -640,6 +842,13 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             self.norm = Qwen3NextRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
+
+        vllm_config_for_context = get_current_vllm_config_or_none()
+        if vllm_config_for_context is not None:
+            compilation_config = vllm_config_for_context.compilation_config
+            if prefix in compilation_config.static_forward_context:
+                raise ValueError(f"Duplicate layer name: {prefix}")
+            compilation_config.static_forward_context[prefix] = self
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -680,7 +889,17 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
-        hidden_states, _ = self.norm(hidden_states, residual)
+        if _diagnostic_final_norm_full_boundary():
+            norm_out = torch.empty_like(hidden_states)
+            torch.ops.vllm.qwen3_next_final_norm_forward(
+                hidden_states,
+                residual,
+                norm_out,
+                layer_name=_encode_layer_name(self.prefix),
+            )
+            hidden_states = norm_out
+        else:
+            hidden_states, _ = self.norm(hidden_states, residual)
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states
@@ -697,6 +916,37 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             )
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=mapper)
+
+
+def qwen3_next_final_norm_forward(
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor | None,
+    output: torch.Tensor,
+    layer_name: LayerNameType,
+) -> None:
+    """Diagnostic final RMSNorm custom op for compile isolation."""
+    layer_name = _resolve_layer_name(layer_name)
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    next_hidden, _ = self.norm(hidden_states, residual)
+    output.copy_(next_hidden)
+
+
+def qwen3_next_final_norm_forward_fake(
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor | None,
+    output: torch.Tensor,
+    layer_name: LayerNameType,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="qwen3_next_final_norm_forward",
+    op_func=qwen3_next_final_norm_forward,
+    mutates_args=["output"],
+    fake_impl=qwen3_next_final_norm_forward_fake,
+)
 
 
 class QwenNextMixtureOfExperts(MixtureOfExperts):

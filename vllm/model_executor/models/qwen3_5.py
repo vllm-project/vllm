@@ -31,7 +31,7 @@ from torch import nn
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.distributed import (
     get_pp_group,
 )
@@ -69,6 +69,7 @@ from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
     SupportsLoRA,
+    SupportsMRoPE,
     SupportsPP,
     _require_is_multimodal,
 )
@@ -102,6 +103,14 @@ from .utils import (
 logger = init_logger(__name__)
 
 
+def _is_qwen3_5_critical_weight_loaded(name: str, loaded_weights: set[str]) -> bool:
+    if name in loaded_weights:
+        return True
+    if name.endswith(".weight"):
+        return f"{name[:-len('.weight')]}.weight_packed" in loaded_weights
+    return False
+
+
 class Qwen3_5ProcessingInfo(Qwen3VLProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen3_5Config)
@@ -128,6 +137,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
 
         self.layer_type = layer_type
         self.layer_idx = extract_layer_index(prefix)
+        self.prefix = prefix
 
         if self.layer_type == "linear_attention":
             self.linear_attn = QwenGatedDeltaNetAttention(
@@ -189,6 +199,13 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 ),
             )
 
+        vllm_config_for_context = get_current_vllm_config_or_none()
+        if vllm_config_for_context is not None:
+            compilation_config = vllm_config_for_context.compilation_config
+            if prefix in compilation_config.static_forward_context:
+                raise ValueError(f"Duplicate layer name: {prefix}")
+            compilation_config.static_forward_context[prefix] = self
+
 
 @support_torch_compile(
     dynamic_arg_dims={
@@ -225,6 +242,7 @@ class Qwen3_5Model(Qwen3NextModel):
 
         self.config = config
         self.quant_config = vllm_config.quant_config
+        self.prefix = prefix
 
         self.vocab_size = config.vocab_size
 
@@ -254,6 +272,13 @@ class Qwen3_5Model(Qwen3NextModel):
 
         self.aux_hidden_state_layers: tuple[int, ...] = ()
 
+        vllm_config_for_context = get_current_vllm_config_or_none()
+        if vllm_config_for_context is not None:
+            compilation_config = vllm_config_for_context.compilation_config
+            if prefix in compilation_config.static_forward_context:
+                raise ValueError(f"Duplicate layer name: {prefix}")
+            compilation_config.static_forward_context[prefix] = self
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         mapper = self.hf_to_vllm_mapper
         # FSE must match construction (Qwen3NextSparseMoeBlock): reroute the
@@ -276,6 +301,7 @@ class Qwen3_5ForCausalLMBase(
     HasInnerState,
     SupportsEagle3,
     SupportsLoRA,
+    SupportsMRoPE,
     SupportsPP,
 ):
     packed_modules_mapping = {
@@ -331,6 +357,16 @@ class Qwen3_5ForCausalLMBase(
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
+
+    def get_mrope_input_positions(
+        self,
+        input_tokens: list[int],
+        mm_features: list,
+    ) -> tuple[torch.Tensor, int]:
+        if mm_features:
+            raise ValueError("Qwen3.5 text-only CausalLM received multimodal features")
+        positions = torch.arange(len(input_tokens), dtype=torch.long)
+        return positions.unsqueeze(0).expand(3, -1).contiguous(), 0
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.model.aux_hidden_state_layers = layers
@@ -528,12 +564,17 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         )
         loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         critical_weights = {
-            "language_model.lm_head.weight",
             "language_model.model.embed_tokens.weight",
             "language_model.model.layers.0.linear_attn.in_proj_qkvz.weight",
             "language_model.model.layers.0.linear_attn.out_proj.weight",
         }
-        missing_critical = sorted(critical_weights - loaded_weights)
+        if not self.config.tie_word_embeddings:
+            critical_weights.add("language_model.lm_head.weight")
+        missing_critical = sorted(
+            name
+            for name in critical_weights
+            if not _is_qwen3_5_critical_weight_loaded(name, loaded_weights)
+        )
         if missing_critical:
             raise RuntimeError(
                 "Qwen3.5 critical weights were not loaded: "

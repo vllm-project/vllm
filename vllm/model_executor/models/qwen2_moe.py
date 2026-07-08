@@ -79,6 +79,13 @@ def _ceil_to_multiple(value: int, multiple: int) -> int:
     return ((value + multiple - 1) // multiple) * multiple
 
 
+def _dense_mlp_padded_intermediate_multiple(tp_size: int) -> int:
+    # Row-parallel W4A16/AWQ kernels require the rank-local K dimension to
+    # satisfy group-size alignment. Padding the global intermediate by
+    # tp_size * 32 keeps each TP shard divisible by 32.
+    return math.lcm(tp_size * 32, 16)
+
+
 class Qwen2MoeMLP(nn.Module):
     def __init__(
         self,
@@ -95,7 +102,7 @@ class Qwen2MoeMLP(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
         needs_padding = not is_sequence_parallel and intermediate_size % tp_size != 0
         if needs_padding:
-            pad_multiple = math.lcm(tp_size, 16)
+            pad_multiple = _dense_mlp_padded_intermediate_multiple(tp_size)
             padded_intermediate_size = _ceil_to_multiple(intermediate_size,
                                                          pad_multiple)
             self.gate_up_proj = PaddedMergedColumnParallelLinear(
