@@ -60,6 +60,7 @@ from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.cp_utils import (
     run_split_fa2_dcp_context_attention,
+    should_skip_dcp_context_attention,
     should_split_fa2_dcp_context_attention,
     split_dcp_context_queries,
 )
@@ -546,7 +547,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self._dcp_context_kv_lens[num_reqs:] = 0
             dcp_context_kv_lens = self._dcp_context_kv_lens[:num_reqs]
 
-            max_local_context_kv_len: int | None = None
+            skip_dcp_context_attention = False
             if common_attn_metadata.seq_lens_cpu_upper_bound is not None:
                 query_lens_cpu = (
                     common_attn_metadata.query_start_loc_cpu[1 : num_reqs + 1]
@@ -556,13 +557,9 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                     common_attn_metadata.seq_lens_cpu_upper_bound[:num_reqs]
                     - query_lens_cpu
                 )
-                local_context_kv_lens_cpu = get_dcp_local_seq_lens(
-                    context_kv_lens_cpu,
-                    self.dcp_world_size,
-                    self.dcp_rank,
-                    self.cp_kv_cache_interleave_size,
+                skip_dcp_context_attention = should_skip_dcp_context_attention(
+                    context_kv_lens_cpu
                 )
-                max_local_context_kv_len = int(local_context_kv_lens_cpu.max().item())
 
             if max_query_len > 1:
                 (
@@ -581,7 +578,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             # ceil(L / (N * I)) * I, where L is max_seq_len, N is dcp_world_size,
             # and I is cp_kv_cache_interleave_size.
             # This eliminates GPU->CPU sync while minimizing workspace over-allocation.
-            if max_local_context_kv_len == 0:
+            if skip_dcp_context_attention:
                 max_dcp_context_kv_len = 0
                 scheduler_metadata = None
             else:

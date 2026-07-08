@@ -125,6 +125,19 @@ def prepare_dcp_dummy_context_metadata(
     )
 
 
+def should_skip_dcp_context_attention(context_kv_lens_cpu: torch.Tensor) -> bool:
+    """Whether DCP context attention can be skipped for this batch.
+
+    Must be computed from rank-invariant inputs only (the global context
+    lengths, NOT this rank's local share from get_dcp_local_seq_lens): the
+    non-skip path in _forward_with_dcp issues DCP collectives (query
+    all-gather + LSE combine), so every DCP rank must take the same branch.
+    A rank can hold zero local context tokens while other ranks still hold
+    context for the same batch.
+    """
+    return int(context_kv_lens_cpu.max().item()) == 0
+
+
 def split_dcp_context_queries(
     query_start_loc: torch.Tensor,
     seq_lens_cpu_upper_bound: torch.Tensor | None,
