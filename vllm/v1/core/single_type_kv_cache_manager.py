@@ -117,9 +117,8 @@ class SingleTypeKVCacheManager(ABC):
         new_computed_blocks: Sequence[KVCacheBlock],
         num_local_computed_tokens: int,
     ) -> bool:
-        # The local hit ends inside one of this manager's blocks: the shared
-        # tail block needs CoW. External-only (connector) prefixes have a
-        # private tail and never need CoW.
+        # The local prefix-cache hit ends inside one of this manager's
+        # blocks: the shared tail block needs CoW.
         return (
             len(new_computed_blocks) > 0
             and num_local_computed_tokens % self.block_size != 0
