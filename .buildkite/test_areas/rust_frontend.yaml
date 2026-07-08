@@ -64,7 +64,7 @@ steps:
   - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "text and not show and not run_batch and not test_metrics_counts and not test_metrics_exist"
   # - pytest -v -s entrypoints/serve/dev/test_sleep.py
   # /tokenizer_info is not implemented in the Rust frontend (the CLI flag is accepted as a no-op).
-  - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info and not test_tokenize_chat"
+  - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info"
 
 - label: Rust Frontend Core Correctness
   timeout_in_minutes: 30
