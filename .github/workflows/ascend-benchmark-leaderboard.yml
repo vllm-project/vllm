@@ -251,7 +251,8 @@ jobs:
       issues: write
     runs-on:
       - self-hosted
-      - linux-aarch64-a2b3-0
+      - ascend
+      - 910b
       - docker
     timeout-minutes: 60
     env:
@@ -799,12 +800,7 @@ jobs:
           VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
         run: |
           source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
-          if "${PYTHON_BIN}" -c "import torch, torch_npu; print(f'torch={torch.__version__}')"; then
-            echo "Ascend torch stack is already importable."
-            exit 0
-          fi
-
-          "${PYTHON_BIN}" -m pip install "torch==2.9.0" "torch-npu==2.9.0"
+          bash .github/workflows/scripts/ensure_ascend_torch_stack.sh
 
       - name: Runner health preflight (before install)
         env:

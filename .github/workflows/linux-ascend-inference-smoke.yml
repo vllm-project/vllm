@@ -22,7 +22,8 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on:
       - self-hosted
-      - linux-aarch64-a2b3-0
+      - ascend
+      - 910b
       - docker
     timeout-minutes: 30
     env:
@@ -236,15 +237,16 @@ jobs:
           dirname "$PYTHON_BIN" >> "$GITHUB_PATH"
           "$PYTHON_BIN" --version
 
+      - name: Install ascend-runtime-manager from fresh checkout
+        run: |
+          "$PYTHON_BIN" -m pip uninstall -y hust-ascend-manager 2>/dev/null || true
+          "$PYTHON_BIN" -m pip install --no-deps -e "$HUST_ASCEND_MANAGER_REPO"
+          "$PYTHON_BIN" -c "import hust_ascend_manager.doctor; print('hust-ascend-manager loaded from:', hust_ascend_manager.doctor.__file__)"
+
       - name: Install Ascend torch stack for preflight
         run: |
           source "$VLLM_ASCEND_HUST_REPO/scripts/use_single_ascend_env.sh"
-          if "$PYTHON_BIN" -c "import torch, torch_npu; print(f'torch={torch.__version__}')"; then
-            echo "Ascend torch stack is already importable."
-            exit 0
-          fi
-
-          "$PYTHON_BIN" -m pip install "torch==2.9.0" "torch-npu==2.9.0"
+          bash .github/workflows/scripts/ensure_ascend_torch_stack.sh
 
       - name: Prepare Ascend runtime and install current checkout
         env:
