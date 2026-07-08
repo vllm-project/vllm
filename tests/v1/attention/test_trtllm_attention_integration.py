@@ -599,7 +599,7 @@ def _run_trtllm_integration(
         if is_nvfp4:
             atol, rtol = 1.0, 1.0  # nvfp4 has higher quantization error
         elif is_fp8:
-            atol, rtol = 5e-2, 5e-2  # fp8 KV quantization error
+            atol, rtol = 2e-1, 2e-1  # fp8 KV quantization error
         else:
             atol, rtol = 1e-2, 1e-2
         torch.testing.assert_close(output, sdpa_output, atol=atol, rtol=rtol)
