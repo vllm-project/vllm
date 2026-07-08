@@ -19,6 +19,7 @@ The kernel is imported via
 import pytest
 import torch
 
+from tests.kernels.utils import bf16_ulp_distance, fp8_ulp_distance
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
@@ -160,35 +161,6 @@ def _call_fused(
     )
 
 
-def _bf16_ulp_distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """Representable-step distance between two bf16 tensors.
-
-    Reinterprets the bf16 bit patterns under the IEEE-754 total ordering so
-    that adjacent representable values differ by exactly 1.
-    """
-
-    def key(t: torch.Tensor) -> torch.Tensor:
-        u = t.contiguous().view(torch.int16).to(torch.int64) & 0xFFFF
-        return torch.where(u >= 0x8000, 0xFFFF - u, u + 0x8000)
-
-    return (key(a) - key(b)).abs()
-
-
-def _fp8_ulp_distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """Representable-step distance between two 8-bit fp8 tensors.
-
-    Reinterprets the fp8 bytes under a sign-magnitude total ordering so that
-    adjacent representable values differ by exactly 1. Inputs must already share
-    the same fp8 encoding (e.g. both FP8_STORE_DTYPE).
-    """
-
-    def key(t: torch.Tensor) -> torch.Tensor:
-        u = t.contiguous().view(torch.uint8).to(torch.int64)
-        return torch.where(u >= 0x80, 0xFF - u, u + 0x80)
-
-    return (key(a) - key(b)).abs()
-
-
 def _as_stored_fp8(t: torch.Tensor) -> torch.Tensor:
     """Reinterpret a float8_e4m3fn-typed kernel output under the real (FNUZ on
     gfx942) encoding the kernel actually wrote, without touching the bytes."""
@@ -235,7 +207,7 @@ def _assert_kv_cache_parity(
         rec_fused[:, :NOPE_DIM], rec_ref[:, :NOPE_DIM], rtol=0, atol=0
     )
     max_ulp = int(
-        _bf16_ulp_distance(rec_fused[:, NOPE_DIM:], rec_ref[:, NOPE_DIM:]).max().item()
+        bf16_ulp_distance(rec_fused[:, NOPE_DIM:], rec_ref[:, NOPE_DIM:]).max().item()
     )
     assert max_ulp <= 1, f"RoPE bf16 region differs by {max_ulp} ULP (>1)"
 
@@ -709,7 +681,7 @@ def test_full_cache_per_tensor_fp8_matches_reference(
     # reduction and RoPE rotation can land the kernel and the torch reference on
     # opposite sides of an fp8 round-to-nearest tie, so allow <=1 fp8 ULP.
     q_fused = _as_stored_fp8(q_fp8_fused)
-    q_max_ulp = int(_fp8_ulp_distance(q_fused, q_fp8_ref).max().item())
+    q_max_ulp = int(fp8_ulp_distance(q_fused, q_fp8_ref).max().item())
     assert q_max_ulp <= 1, f"Q fp8 differs by {q_max_ulp} ULP (>1)"
 
     # K-cache NoPE region [0, NOPE_DIM) is a deterministic per-tensor fp8 quant
@@ -723,7 +695,7 @@ def test_full_cache_per_tensor_fp8_matches_reference(
         atol=0,
     )
     k_max_ulp = int(
-        _fp8_ulp_distance(k_fused[..., NOPE_DIM:], k_cache_ref[..., NOPE_DIM:])
+        fp8_ulp_distance(k_fused[..., NOPE_DIM:], k_cache_ref[..., NOPE_DIM:])
         .max()
         .item()
     )

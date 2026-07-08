@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterator
 from typing import Any
 
 from typing_extensions import override
@@ -11,21 +10,17 @@ from vllm.utils.math_utils import round_up
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
-    GPULoadStoreSpec,
-    LoadStoreSpec,
     OffloadingCounterMetadata,
     OffloadingGaugeMetadata,
+    OffloadingHistogramMetadata,
     OffloadingManager,
     OffloadingMetricMetadata,
     OffloadingSpec,
+    OffloadingWorker,
 )
-from vllm.v1.kv_offload.cpu.common import (
-    CPULoadStoreSpec,
-    CPUOffloadingMetrics,
-)
-from vllm.v1.kv_offload.cpu.gpu_worker import CpuGpuOffloadingHandlers
+from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
+from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
-from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 
 class CPUOffloadingSpec(OffloadingSpec):
@@ -43,7 +38,14 @@ class CPUOffloadingSpec(OffloadingSpec):
                     "values indicate transfers (stores or promotions) may be "
                     "dropped due to insufficient capacity."
                 ),
-            )
+            ),
+            CPUOffloadingMetrics.CPU_ALLOCATION_SIZE: OffloadingHistogramMetadata(
+                documentation=(
+                    "Histogram of the number of CPU blocks requested by each "
+                    "KV offload prepare_store call."
+                ),
+                buckets=(1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144),
+            ),
         }
         store_threshold = int(extra_config.get("store_threshold", 0))
         if store_threshold >= 2:
@@ -107,7 +109,7 @@ class CPUOffloadingSpec(OffloadingSpec):
         self._manager: OffloadingManager | None = None
 
         # worker-side
-        self._handlers: CpuGpuOffloadingHandlers | None = None
+        self._worker: CPUOffloadingWorker | None = None
 
         self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
 
@@ -131,25 +133,22 @@ class CPUOffloadingSpec(OffloadingSpec):
             )
         return self._manager
 
-    def create_handlers(self, kv_caches: CanonicalKVCaches) -> CpuGpuOffloadingHandlers:
-        return CpuGpuOffloadingHandlers(
+    def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
+        return CPUOffloadingWorker(
             kv_caches=kv_caches,
             block_size_factor=self.block_size_factor,
             num_cpu_blocks=self.num_blocks,
         )
 
     @override
-    def get_handlers(
-        self, kv_caches: CanonicalKVCaches
-    ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
-        if not self._handlers:
+    def get_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
+        if not self._worker:
             if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
                 raise Exception(
                     "CPU Offloading is currently only supported on CUDA-alike "
                     "and XPU GPUs"
                 )
-            self._handlers = self.create_handlers(kv_caches)
+            self._worker = self.create_worker(kv_caches)
 
-        assert self._handlers is not None
-        yield GPULoadStoreSpec, CPULoadStoreSpec, self._handlers.gpu_to_cpu_handler
-        yield CPULoadStoreSpec, GPULoadStoreSpec, self._handlers.cpu_to_gpu_handler
+        assert self._worker is not None
+        return self._worker

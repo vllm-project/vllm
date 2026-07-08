@@ -127,8 +127,8 @@ if TYPE_CHECKING:
     from vllm.v1.executor import Executor
 else:
     Executor = Any
-    QuantizationMethods = Any
-    LoadFormats = Any
+    QuantizationMethods = str
+    LoadFormats = str
     UsageContext = Any
 
 
@@ -536,6 +536,9 @@ class EngineArgs:
     code_revision: str | None = ModelConfig.code_revision
     hf_token: bool | str | None = ModelConfig.hf_token
     hf_overrides: HfOverrides = get_field(ModelConfig, "hf_overrides")
+    model_class_overrides: dict[str, str] = get_field(
+        ModelConfig, "model_class_overrides"
+    )
     tokenizer_revision: str | None = ModelConfig.tokenizer_revision
     quantization: QuantizationMethods | str | None = ModelConfig.quantization
     quantization_config: "dict[str, Any] | QuantizationConfigArgs | None" = None
@@ -582,6 +585,7 @@ class EngineArgs:
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
+    mm_ipc_gpu_memory_gb: float = MultiModalConfig.mm_ipc_gpu_memory_gb
     # LoRA fields
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras
@@ -643,6 +647,7 @@ class EngineArgs:
     enable_logging_iteration_details: bool = (
         ObservabilityConfig.enable_logging_iteration_details
     )
+    jit_monitor_mode: Literal["warn", "error"] = ObservabilityConfig.jit_monitor_mode
     jit_monitor_verbose: bool = ObservabilityConfig.jit_monitor_verbose
     enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
@@ -849,6 +854,9 @@ class EngineArgs:
         model_group.add_argument("--config-format", **model_kwargs["config_format"])
         model_group.add_argument("--hf-token", **model_kwargs["hf_token"])
         model_group.add_argument("--hf-overrides", **model_kwargs["hf_overrides"])
+        model_group.add_argument(
+            "--model-class-overrides", **model_kwargs["model_class_overrides"]
+        )
         model_group.add_argument("--pooler-config", **model_kwargs["pooler_config"])
         model_group.add_argument(
             "--generation-config", **model_kwargs["generation_config"]
@@ -1293,6 +1301,10 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--mm-tensor-ipc", **multimodal_kwargs["mm_tensor_ipc"]
         )
+        multimodal_group.add_argument(
+            "--mm-ipc-gpu-memory-gb",
+            **multimodal_kwargs["mm_ipc_gpu_memory_gb"],
+        )
 
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
@@ -1377,6 +1389,10 @@ class EngineArgs:
         observability_group.add_argument(
             "--enable-logging-iteration-details",
             **observability_kwargs["enable_logging_iteration_details"],
+        )
+        observability_group.add_argument(
+            "--jit-monitor-mode",
+            **observability_kwargs["jit_monitor_mode"],
         )
         observability_group.add_argument(
             "--jit-monitor-verbose",
@@ -1612,6 +1628,7 @@ class EngineArgs:
             code_revision=self.code_revision,
             hf_token=self.hf_token,
             hf_overrides=self.hf_overrides,
+            model_class_overrides=self.model_class_overrides,
             tokenizer_revision=self.tokenizer_revision,
             max_model_len=self.max_model_len,
             quantization=self.quantization,
@@ -1655,6 +1672,7 @@ class EngineArgs:
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
             mm_tensor_ipc=self.mm_tensor_ipc,
+            mm_ipc_gpu_memory_gb=self.mm_ipc_gpu_memory_gb,
             io_processor_plugin=self.io_processor_plugin,
             renderer_num_workers=self.renderer_num_workers,
         )
@@ -1780,6 +1798,22 @@ class EngineArgs:
         if isinstance(cfg, str):
             cfg = json.loads(cfg)
         return DiffusionConfig(**cfg)
+
+    def create_observability_config(self) -> ObservabilityConfig:
+        return ObservabilityConfig(
+            show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
+            otlp_traces_endpoint=self.otlp_traces_endpoint,
+            collect_detailed_traces=self.collect_detailed_traces,
+            kv_cache_metrics=self.kv_cache_metrics,
+            kv_cache_metrics_sample=self.kv_cache_metrics_sample,
+            cudagraph_metrics=self.cudagraph_metrics,
+            enable_layerwise_nvtx_tracing=self.enable_layerwise_nvtx_tracing,
+            enable_mfu_metrics=self.enable_mfu_metrics,
+            enable_mm_processor_stats=self.enable_mm_processor_stats,
+            enable_logging_iteration_details=self.enable_logging_iteration_details,
+            jit_monitor_mode=self.jit_monitor_mode,
+            jit_monitor_verbose=self.jit_monitor_verbose,
+        )
 
     def create_engine_config(
         self,
@@ -2263,19 +2297,7 @@ class EngineArgs:
                 self.reasoning_parser_plugin
             )
 
-        observability_config = ObservabilityConfig(
-            show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
-            otlp_traces_endpoint=self.otlp_traces_endpoint,
-            collect_detailed_traces=self.collect_detailed_traces,
-            kv_cache_metrics=self.kv_cache_metrics,
-            kv_cache_metrics_sample=self.kv_cache_metrics_sample,
-            cudagraph_metrics=self.cudagraph_metrics,
-            enable_layerwise_nvtx_tracing=self.enable_layerwise_nvtx_tracing,
-            enable_mfu_metrics=self.enable_mfu_metrics,
-            enable_mm_processor_stats=self.enable_mm_processor_stats,
-            enable_logging_iteration_details=self.enable_logging_iteration_details,
-            jit_monitor_verbose=self.jit_monitor_verbose,
-        )
+        observability_config = self.create_observability_config()
 
         # Compilation config overrides
         compilation_config = copy.deepcopy(self.compilation_config)
