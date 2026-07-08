@@ -3,10 +3,12 @@
 import torch
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.v1.worker.gpu.mm.encoder_cache_budget import EncoderCacheProfilerInputs
 
 
 class EncoderCache:
     def __init__(self):
+        self.profile_inputs: EncoderCacheProfilerInputs | None = None
         # req_id -> MM features
         self.mm_features: dict[str, list[MultiModalFeatureSpec]] = {}
         # MM hash -> encoder outputs
@@ -24,12 +26,9 @@ class EncoderCache:
         self.mm_features.pop(req_id, None)
 
     def reset_mm_cache(self) -> None:
-        """
-        Clear the multi-modal cache that was used during profiling,
-        but no longer needed during inference.
-        """
-        # TODO: Implement MM budget for encoder dummy run
-        pass
+        """Clear the profiling-only multimodal processor cache."""
+        if self.profile_inputs is not None:
+            self.profile_inputs.reset_cache()
 
     def reset_encoder_cache(self) -> None:
         """Clear the GPU-side encoder cache storing vision embeddings.

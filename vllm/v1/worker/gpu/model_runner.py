@@ -94,6 +94,7 @@ from vllm.v1.worker.gpu.lora_utils import (
     get_num_active_loras_for_dispatch,
 )
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
+from vllm.v1.worker.gpu.mm.encoder_cache_budget import EncoderCacheProfilerInputs
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
@@ -184,6 +185,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.encoder_cache = None
         if self.supports_mm_inputs and self.is_first_pp_rank:
             self.encoder_cache = EncoderCache()
+            self.encoder_cache.profile_inputs = EncoderCacheProfilerInputs(
+                self.vllm_config, self.mm_registry
+            )
 
         # Speculative decoding.
         self.speculator = None
@@ -646,6 +650,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def profile_run(self) -> None:
+        if self.encoder_cache is not None:
+            self.model_state.encoder_runner.profile_encoder_cache()
+
         hidden_states, sample_hidden_states = self._dummy_run(
             self.max_num_tokens, skip_attn=True, is_profile=True
         )
@@ -660,6 +667,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         torch.accelerator.synchronize()
         del hidden_states, sample_hidden_states
+        self.reset_encoder_cache()
+        self.reset_mm_cache()
         gc.collect()
 
     def post_kv_cache_wake_up(self) -> None:
