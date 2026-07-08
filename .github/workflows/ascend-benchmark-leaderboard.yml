@@ -2,11 +2,9 @@ name: Ascend Benchmark Leaderboard
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize, labeled]
+    types: [labeled]
   issue_comment:
     types: [created]
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       benchmark_scenario:
@@ -240,9 +238,12 @@ jobs:
     if: >-
       always() &&
       (
-        github.event_name == 'push' ||
         github.event_name == 'workflow_dispatch' ||
-        (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
+        (
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          (github.event.label.name == 'ready' || github.event.label.name == 'verified')
+        ) ||
         (github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.should_run == '1')
       )
     permissions:

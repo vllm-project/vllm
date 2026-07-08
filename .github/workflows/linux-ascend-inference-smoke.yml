@@ -2,9 +2,7 @@ name: Linux Ascend Inference Smoke Test
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize, labeled]
-  push:
-    branches: [main]
+    types: [labeled]
   workflow_dispatch:
 
 concurrency:
@@ -16,10 +14,15 @@ permissions:
 
 jobs:
   linux-ascend-inference-smoke:
-    # Only run for same-repo PRs (skip fork PRs for security - self-hosted runner).
+    # Run only when explicitly requested: manual dispatch, or applying
+    # a trusted test label to a same-repo PR.
     if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        (github.event.label.name == 'ready' || github.event.label.name == 'verified')
+      )
     runs-on:
       - self-hosted
       - ascend
