@@ -691,7 +691,11 @@ class OpenAIServingChat(GenerateBaseServing):
                         # finish_reason is:
                         # "tool_calls" for "auto" or "required" tool calls,
                         # and "stop" for named tool calls.
-                        if tools_streamed[i] and not tool_choice_function_name:
+                        if (
+                            tools_streamed[i]
+                            and not tool_choice_function_name
+                            and output.finish_reason == "stop"
+                        ):
                             finish_reason_ = "tool_calls"
                         else:
                             finish_reason_ = (

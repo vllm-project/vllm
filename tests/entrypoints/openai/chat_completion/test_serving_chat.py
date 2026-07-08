@@ -2300,3 +2300,131 @@ async def test_streaming_n_gt1_independent_tool_parsers():
             f"Choice {choice_idx}: expected finish_reason='tool_calls', "
             f"got '{reasons[0]}'"
         )
+
+
+@pytest.mark.asyncio
+async def test_streaming_truncated_tool_call_reports_length_finish_reason():
+    """A tool call cut off by max_tokens must stream finish_reason="length",
+    matching the non-streaming path, not "tool_calls" (#47903).
+    """
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    models = OpenAIServingModels(
+        engine_client=mock_engine,
+        base_model_paths=BASE_MODEL_PATHS,
+    )
+    online_renderer = _build_online_renderer(mock_engine, models.registry)
+
+    serving_chat = OpenAIServingChat(
+        mock_engine,
+        models,
+        response_role="assistant",
+        online_renderer=online_renderer,
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        request_logger=None,
+        enable_auto_tools=True,
+        tool_parser="hermes",
+    )
+
+    tokenizer = get_tokenizer(MODEL_NAME)
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            },
+        }
+    ]
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "test"}],
+        stream=True,
+        tools=tools,
+        tool_choice="required",
+    )
+
+    truncated_tool_call_text = (
+        '<tool_call>\n{"name": "get_weather", "arguments": {"city'
+    )
+    all_token_ids = tokenizer.encode(truncated_tool_call_text, add_special_tokens=False)
+
+    steps: list[tuple[str, int]] = []
+    prev_decoded = ""
+    for i, tid in enumerate(all_token_ids):
+        decoded_so_far = tokenizer.decode(all_token_ids[: i + 1])
+        steps.append((decoded_so_far[len(prev_decoded) :], tid))
+        prev_decoded = decoded_so_far
+
+    async def result_generator():
+        for delta_text, token_id in steps:
+            yield RequestOutput(
+                request_id="test-req",
+                prompt="test",
+                prompt_token_ids=[1, 2, 3],
+                prompt_logprobs=None,
+                outputs=[
+                    CompletionOutput(
+                        index=0,
+                        text=delta_text,
+                        token_ids=[token_id],
+                        cumulative_logprob=0.0,
+                        logprobs=None,
+                    )
+                ],
+                finished=False,
+            )
+        yield RequestOutput(
+            request_id="test-req",
+            prompt="test",
+            prompt_token_ids=[1, 2, 3],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="",
+                    token_ids=[],
+                    cumulative_logprob=0.0,
+                    logprobs=None,
+                    finish_reason="length",
+                )
+            ],
+            finished=True,
+        )
+
+    finish_reasons: list[str] = []
+    async for chunk_str in serving_chat.chat_completion_stream_generator(
+        request=request,
+        result_generator=result_generator(),
+        request_id="test-req",
+        model_name=MODEL_NAME,
+        conversation=[],
+        tokenizer=tokenizer,
+        request_metadata=RequestResponseMetadata(
+            request_id="test-req",
+            model_name=MODEL_NAME,
+        ),
+    ):
+        if not chunk_str.strip() or "data: [DONE]" in chunk_str:
+            continue
+        if chunk_str.startswith("data: "):
+            data = json.loads(chunk_str[6:].strip())
+            for choice in data.get("choices", []):
+                if choice.get("finish_reason") is not None:
+                    finish_reasons.append(choice["finish_reason"])
+
+    assert finish_reasons == ["length"], (
+        f"Truncated tool call must report finish_reason='length', got {finish_reasons}"
+    )
