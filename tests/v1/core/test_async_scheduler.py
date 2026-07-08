@@ -369,3 +369,66 @@ def test_no_placeholder_underflow_on_discarded_spec_frame():
     assert req.num_computed_tokens == computed_before
     assert req.async_tokens_to_discard == num_spec - 1
     assert req.status == RequestStatus.RUNNING
+
+
+def test_preempt_converts_inflight_async_frame_to_discard():
+    """A KV-pressure preemption of a request that has an in-flight async output
+    frame must convert its outstanding ``num_output_placeholders`` into
+    ``async_tokens_to_discard`` so the stale frame is discarded when it returns,
+    rather than drained against the reset placeholder count (which underflows:
+    the assert in ``AsyncScheduler._update_request_with_output``).
+
+    Regression: only ``reset_prefix_cache`` preemption used to do this; the
+    common KV-pressure preemption path (``_preempt_request``) did not.
+    """
+    num_spec = 4
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        num_speculative_tokens=num_spec,
+        speculative_method="ngram_gpu",
+    )
+    req = create_requests(num_requests=1, max_tokens=20)[0]
+    req.num_computed_tokens = req.num_tokens
+    scheduler.requests[req.request_id] = req
+    scheduler.running.append(req)
+    req.status = RequestStatus.RUNNING
+    # One in-flight async decode frame is outstanding: _update_after_schedule
+    # reserves num_sampled_tokens_per_step (1) + num_spec draft placeholders.
+    req.num_output_placeholders = scheduler.num_sampled_tokens_per_step + num_spec
+    assert req.async_tokens_to_discard == 0
+
+    scheduler._preempt_request(req, timestamp=0.0)
+
+    assert req.status == RequestStatus.PREEMPTED
+    # Exactly ONE frame is queued for discard. async_tokens_to_discard counts
+    # frames (drained one per returned output frame), not placeholder tokens;
+    # discarding num_output_placeholders (1 + num_spec) instead would
+    # over-discard the request's next real frames after it resumes.
+    assert req.async_tokens_to_discard == 1
+    assert req.num_output_placeholders == 0
+
+    # The stale in-flight frame now returns. It must be discarded (dropped),
+    # not drained -- and must not underflow num_output_placeholders.
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: num_spec + 1},
+        total_num_scheduled_tokens=num_spec + 1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={req.request_id: [10] * num_spec},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[req.request_id],
+        req_id_to_index={req.request_id: 0},
+        sampled_token_ids=[[999]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert req.num_output_placeholders == 0
+    assert req.async_tokens_to_discard == 0
