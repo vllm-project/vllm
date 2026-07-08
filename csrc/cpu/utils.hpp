@@ -2,13 +2,14 @@
 #define UTILS_HPP
 
 #include <atomic>
+#include <string>
 #include <unistd.h>
 #include <ATen/cpu/Utils.h>
 
 #include "cpu/cpu_types.hpp"
 
 namespace cpu_utils {
-enum class ISA { AMX, VEC, RVV };
+enum class ISA { AMX, VEC, RVV, NEON };
 
 inline ISA get_isa(const std::string& isa) {
   if (isa == "amx") {
@@ -17,6 +18,8 @@ inline ISA get_isa(const std::string& isa) {
     return ISA::VEC;
   } else if (isa == "rvv") {
     return ISA::RVV;
+  } else if (isa == "neon") {
+    return ISA::NEON;
   } else {
     TORCH_CHECK(false, "Invalid isa type: " + isa);
   }
@@ -73,14 +76,14 @@ inline int64_t get_available_l2_size() {
     if (l2_cache_size == 0) {
       l2_cache_size = 256 * 1024;
     }
-    return static_cast<int64_t>(l2_cache_size) >> 1;  // use 50% of L2 cache
+    return static_cast<int64_t>(l2_cache_size) >> 1;
   }();
   return size;
 #else
   static int64_t size = []() {
     auto caps = at::cpu::get_cpu_capabilities();
     const uint32_t l2_cache_size = caps.at("l2_cache_size").toInt();
-    return l2_cache_size >> 1;  // use 50% of L2 cache
+    return l2_cache_size >> 1;
   }();
   return size;
 #endif

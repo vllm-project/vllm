@@ -227,10 +227,16 @@ def fused_moe_mxfp8_native(
 
     tiles = _mxfp8_moe_tiles(T)
     block_m = tiles["block_m"]
+    # Bin by the actual number of expert weight rows. With fused shared experts
+    # the weight tensor has more rows than ``global_num_experts`` (the routed
+    # count), and their ids fall outside [0, global_num_experts); binning by the
+    # routed count would treat them as invalid. Under EP (expert_map set) the
+    # tensor holds only local experts, so keep the global count for remapping.
+    num_align_experts = w13.shape[0] if expert_map is None else global_num_experts
     sorted_ids, expert_ids, num_post = moe_align_block_size(
         topk_ids,
         block_m,
-        global_num_experts,
+        num_align_experts,
         expert_map,
         ignore_invalid_experts=expert_map is not None,
     )

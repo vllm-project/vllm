@@ -112,6 +112,11 @@ steps:
   commands:
     # Only run tests that need exactly 2 GPUs
     - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
+  mirror:
+    amd:
+      device: mi300_2
+      depends_on:
+      - image-build-amd
 
 - label: V1 e2e (4 GPUs)
   key: v1-e2e-4-gpus
