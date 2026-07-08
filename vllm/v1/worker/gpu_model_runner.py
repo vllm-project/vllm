@@ -3513,8 +3513,6 @@ class GPUModelRunner(
                     self._gather_mm_embeddings(scheduler_output)
                 )
 
-            self.get_model()._last_embedding_modalities = mm_embed_modalities
-
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
@@ -3535,6 +3533,7 @@ class GPUModelRunner(
                     safe_input_ids,
                     multimodal_embeddings=mm_embeds,
                     is_multimodal=is_mm_embed,
+                    embedding_modalities=mm_embed_modalities,
                 )
                 target = self.inputs_embeds.gpu[:num_scheduled_tokens]
                 self.inputs_embeds.gpu[:num_scheduled_tokens] = torch.where(
@@ -3547,6 +3546,7 @@ class GPUModelRunner(
                     self.input_ids.gpu[:num_scheduled_tokens],
                     multimodal_embeddings=mm_embeds,
                     is_multimodal=is_mm_embed,
+                    embedding_modalities=mm_embed_modalities,
                 )
 
                 # TODO(woosuk): Avoid the copy. Optimize.

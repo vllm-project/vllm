@@ -1819,6 +1819,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
+        embedding_modalities: Sequence[str] | None = None,
     ) -> torch.Tensor:
         inputs_embeds = self._embed_text_input_ids(
             input_ids,
@@ -1921,7 +1922,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 is_multimodal,
                 num_video,
                 num_audio,
-                embedding_modalities=getattr(self, "_last_embedding_modalities", None),
+                embedding_modalities=embedding_modalities,
             )
 
         # Default: standard merge (no interleaving), same as parent class.
