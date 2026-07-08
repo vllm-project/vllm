@@ -8,8 +8,6 @@ Validating the configuration and printing results for manual checking.
 Run `pytest tests/quantization/test_auto_round.py`.
 """
 
-from pathlib import Path
-
 import pytest
 import torch
 
@@ -42,8 +40,6 @@ from vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_scheme import
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
 
-LOCAL_MXFP8_MODEL = Path("~/Qwen3-8B-MXFP8-AR").expanduser()
-
 MODELS = [
     pytest.param(
         "OPEA/Qwen2.5-0.5B-Instruct-int4-sym-inc",
@@ -58,9 +54,7 @@ MODELS = [
         id="auto_round:auto_awq",
     ),
     pytest.param(
-        str(LOCAL_MXFP8_MODEL)
-        if LOCAL_MXFP8_MODEL.exists()
-        else "Yi30/Qwen3-8B-MXFP8-AR",
+        "INC4AI/Qwen3-8B-MXFP8-AR",
         marks=pytest.mark.skipif(
             not (current_platform.is_cuda() or current_platform.is_xpu()),
             reason="MXFP8 AutoRound model only supports CUDA/XPU backend for now.",
@@ -68,6 +62,14 @@ MODELS = [
         id="auto_round:llm_compressor_mxfp8",
     ),
 ]
+
+MODEL_RUNNER_KWARGS = {
+    "INC4AI/Qwen3-8B-MXFP8-AR": {
+        "block_size": 64,
+        "gpu_memory_utilization": 0.6,
+        "max_model_len": 4096,
+    },
+}
 
 
 @pytest.mark.skipif(
@@ -80,11 +82,7 @@ MODELS = [
 )
 @pytest.mark.parametrize("model", MODELS)
 def test_auto_round_model(vllm_runner, model):
-    runner_kwargs = {}
-    if "Qwen3-8B-MXFP8-AR" in model:
-        runner_kwargs["gpu_memory_utilization"] = 0.6
-
-    with vllm_runner(model, **runner_kwargs) as llm:
+    with vllm_runner(model, **MODEL_RUNNER_KWARGS.get(model, {})) as llm:
         output = llm.generate_greedy(["The capital of France is"], max_tokens=8)
 
     assert output
