@@ -759,7 +759,11 @@ class Worker(WorkerBase):
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
-            if not self.use_v2_model_runner and get_pp_group().is_last_rank:
+            if (
+                current_platform.is_rocm()
+                and not self.use_v2_model_runner
+                and get_pp_group().is_last_rank
+            ):
                 max_num_reqs = min(
                     self.scheduler_config.max_num_seqs,
                     self.scheduler_config.max_num_batched_tokens,
