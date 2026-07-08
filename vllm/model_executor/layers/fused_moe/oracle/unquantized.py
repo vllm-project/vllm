@@ -251,7 +251,17 @@ def select_unquantized_moe_backend(
                 AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.AITER)
         else:
             backend = UnquantizedMoeBackend.AITER
-            return _return_or_raise(backend, moe_config, activation_format)
+            k_cls = backend_to_kernel_cls(backend)
+            supported, reason = k_cls.is_supported_config(
+                k_cls, moe_config, None, None, activation_format
+            )
+            if supported:
+                logger.info_once(_make_log_backend(backend))
+                return backend, k_cls
+
+            logger.debug_once(_make_log_unsupported(backend, reason))
+            if backend in AVAILABLE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(backend)
 
     for backend in AVAILABLE_BACKENDS:
         k_cls = backend_to_kernel_cls(backend)
