@@ -22,6 +22,7 @@ import zmq
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
+from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
     stateless_destroy_torch_distributed_process_group,
@@ -121,6 +122,7 @@ class EngineCore:
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
+        self._pooler_config_logged = False
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(executor_fail_callback)
 
@@ -348,7 +350,70 @@ class EngineCore:
         return scheduler_kv_cache_config
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        return self.model_executor.supported_tasks
+        supported_tasks = self.model_executor.supported_tasks
+        self._log_pooler_config(supported_tasks)
+        return supported_tasks
+
+    def _log_pooler_config(self, supported_tasks: tuple[SupportedTask, ...]) -> None:
+        if self._pooler_config_logged:
+            return
+
+        model_config = self.vllm_config.model_config
+        pooler_config = model_config.pooler_config
+        if (
+            self.vllm_config.parallel_config.data_parallel_rank_local
+            or model_config.runner_type != "pooling"
+            or pooler_config is None
+        ):
+            return
+
+        supported_pooling_tasks = tuple(
+            sorted(set(supported_tasks) & set(POOLING_TASKS))
+        )
+        if not supported_pooling_tasks:
+            return
+
+        self._pooler_config_logged = True
+        task_set = set(supported_pooling_tasks)
+        use_activation = pooler_config.use_activation
+        if use_activation is None:
+            use_activation = True
+        sources = getattr(model_config, "_pooler_config_sources", {})
+        pooling_type_field = (
+            "seq_pooling_type"
+            if task_set & {"embed", "classify"}
+            else "tok_pooling_type"
+        )
+
+        def with_source(name: str, field: str, value: object) -> str:
+            return f"{name}={value}(source={sources.get(field, 'unknown')})"
+
+        field_values: dict[str, object] = {
+            field: getattr(pooler_config, field) for field in POOLER_CONFIG_LOG_FIELDS
+        }
+        field_values["use_activation"] = use_activation
+        log_items = [
+            (
+                "pooling_type",
+                pooling_type_field,
+                getattr(pooler_config, pooling_type_field),
+            )
+        ]
+        log_items.extend(
+            (field, field, field_values[field]) for field in POOLER_CONFIG_LOG_FIELDS
+        )
+        config_fields = ", ".join(
+            with_source(name, field, value) for name, field, value in log_items
+        )
+
+        logger.info_once(
+            "Resolved pooling config: %s, normalize=%s, activation_or_softmax=%s, "
+            "supported_tasks=%s",
+            config_fields,
+            use_activation if task_set & {"embed", "token_embed"} else None,
+            use_activation if task_set & {"classify", "token_classify"} else None,
+            supported_pooling_tasks,
+        )
 
     def get_kv_cache_group_metadata(self) -> list[dict[str, int | str | None]]:
         """Return msgspec-serializable metadata for scheduler KV cache groups."""
