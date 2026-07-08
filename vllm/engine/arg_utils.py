@@ -609,6 +609,14 @@ class EngineArgs:
 
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
     prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
+    enable_prefill_delayer: bool = SchedulerConfig.enable_prefill_delayer
+    prefill_delayer_max_delay_passes: int = (
+        SchedulerConfig.prefill_delayer_max_delay_passes
+    )
+    prefill_delayer_max_delay_ms: float = SchedulerConfig.prefill_delayer_max_delay_ms
+    prefill_delayer_token_usage_low_watermark: float | None = (
+        SchedulerConfig.prefill_delayer_token_usage_low_watermark
+    )
 
     watermark: float = SchedulerConfig.watermark
 
@@ -1458,6 +1466,22 @@ class EngineArgs:
             **scheduler_kwargs["prefill_schedule_interval"],
         )
         scheduler_group.add_argument(
+            "--enable-prefill-delayer",
+            **scheduler_kwargs["enable_prefill_delayer"],
+        )
+        scheduler_group.add_argument(
+            "--prefill-delayer-max-delay-passes",
+            **scheduler_kwargs["prefill_delayer_max_delay_passes"],
+        )
+        scheduler_group.add_argument(
+            "--prefill-delayer-max-delay-ms",
+            **scheduler_kwargs["prefill_delayer_max_delay_ms"],
+        )
+        scheduler_group.add_argument(
+            "--prefill-delayer-token-usage-low-watermark",
+            **scheduler_kwargs["prefill_delayer_token_usage_low_watermark"],
+        )
+        scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
         )
@@ -2165,6 +2189,12 @@ class EngineArgs:
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,
+            enable_prefill_delayer=self.enable_prefill_delayer,
+            prefill_delayer_max_delay_passes=self.prefill_delayer_max_delay_passes,
+            prefill_delayer_max_delay_ms=self.prefill_delayer_max_delay_ms,
+            prefill_delayer_token_usage_low_watermark=(
+                self.prefill_delayer_token_usage_low_watermark
+            ),
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,

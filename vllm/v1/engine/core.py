@@ -69,6 +69,7 @@ from vllm.v1.engine import (
     UtilityOutput,
     UtilityResult,
 )
+from vllm.v1.engine.prefill_delayer import PrefillDelayer
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
@@ -1762,6 +1763,13 @@ class DPEngineCoreProc(EngineCoreProc):
 
         scheduler_config = vllm_config.scheduler_config
         self.prefill_schedule_interval = scheduler_config.prefill_schedule_interval
+        self.enable_prefill_delayer = scheduler_config.enable_prefill_delayer
+
+        # Content-aware prefill alignment. Constructed after super().__init__
+        # (which sets self.dp_group via _init_data_parallel). Cached decision
+        # is refreshed once per busy-loop iteration in lockstep across ranks.
+        self._prefill_delayer: PrefillDelayer | None = None
+        self._delayer_throttle: bool = False
 
         # Counts forward-passes of the model so that we can synchronize
         # finished with DP peers every N steps.
@@ -1793,6 +1801,19 @@ class DPEngineCoreProc(EngineCoreProc):
             engine_index=dp_rank,
             tensor_queue=tensor_queue,
         )
+
+        # Construct after super().__init__ so self.dp_group and self.scheduler
+        # both exist.
+        if self.enable_prefill_delayer:
+            self._prefill_delayer = PrefillDelayer(
+                dp_size=self.dp_size,
+                cpu_group=self.dp_group,
+                max_delay_passes=scheduler_config.prefill_delayer_max_delay_passes,
+                max_delay_ms=scheduler_config.prefill_delayer_max_delay_ms,
+                token_usage_low_watermark=(
+                    scheduler_config.prefill_delayer_token_usage_low_watermark
+                ),
+            )
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         # Configure GPUs and stateless process group for data parallel.
@@ -1917,10 +1938,34 @@ class DPEngineCoreProc(EngineCoreProc):
         # Throttle new prefills to cadence-aligned steps for DP balancing.
         # step_counter is identical across DP ranks. On a fresh wave the
         # counter is 0, so prefills are admitted immediately after idle.
+        if self._prefill_delayer is not None:
+            # Content-aware path: return the decision computed in lockstep at
+            # the top of this busy-loop iteration (see _refresh_prefill_delayer).
+            return self._delayer_throttle
         return (
             self.prefill_schedule_interval > 1
             and self.step_counter % self.prefill_schedule_interval != 0
         )
+
+    def _refresh_prefill_delayer(self) -> None:
+        """Run the delayer's cross-DP collective once per step, in lockstep.
+
+        Must be called before _process_engine_step so schedule() reads a fresh
+        decision. Gated on engines_running: during the running phase every rank
+        performs a real-or-dummy forward each iteration (whose own DP collective
+        already enforces lockstep), so the all_reduce here is safe. When idle,
+        no prefills are admitted anyway, so we skip the collective.
+        """
+        if self._prefill_delayer is None:
+            return
+        if not self.engines_running:
+            self._delayer_throttle = False
+            return
+        allow = self._prefill_delayer.should_allow_prefill(
+            local_prefillable=self.scheduler.local_prefillable(),
+            token_usage=self.scheduler.kv_cache_usage(),
+        )
+        self._delayer_throttle = not allow
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
@@ -1939,6 +1984,10 @@ class DPEngineCoreProc(EngineCoreProc):
                         raise SystemExit
                     self.process_input_queue_block = True
                     self.eep_scaling_state = None
+
+            # Compute the prefill-delay decision in lockstep before stepping,
+            # so schedule() (called inside _process_engine_step) reads it fresh.
+            self._refresh_prefill_delayer()
 
             executed = self._process_engine_step()
             self._maybe_publish_request_counts()
@@ -1979,6 +2028,8 @@ class DPEngineCoreProc(EngineCoreProc):
                 # Increment wave count and reset step counter.
                 self.current_wave += 1
                 self.step_counter = 0
+                if self._prefill_delayer is not None:
+                    self._prefill_delayer.on_wave_boundary()
 
         raise SystemExit
 

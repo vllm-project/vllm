@@ -2011,6 +2011,17 @@ class Scheduler(SchedulerInterface):
         """Returns (num_running_reqs, num_waiting_reqs)."""
         return len(self.running), len(self.waiting) + len(self.skipped_waiting)
 
+    def local_prefillable(self) -> bool:
+        """Whether this rank has a new prefill request waiting to be admitted.
+
+        Used by the PrefillDelayer for cross-DP prefill alignment.
+        """
+        return bool(self.waiting) or bool(self.skipped_waiting)
+
+    def kv_cache_usage(self) -> float:
+        """KV-cache usage fraction in [0, 1] (for the PrefillDelayer valve)."""
+        return self.kv_cache_manager.usage
+
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
         if existing is not None:
