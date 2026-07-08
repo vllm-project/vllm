@@ -285,6 +285,93 @@ def test_mxfp8_native_moe(T, H, inter, E, top_k):
 
 
 # --------------------------------------------------------------------------- #
+# Native MXFP8 grouped GEMM (dot_scaled) vs pure-PyTorch grouped matmul
+# --------------------------------------------------------------------------- #
+def _ref_grouped_gemm(a_deq, w_deq, topk_ids, a_div, num_valid, mul_weight=None):
+    """Pure-PyTorch reference for ``_grouped_gemm_mxfp8``.
+
+    For each routed (expanded) token ``tid in [0, num_valid)`` the kernel writes
+    ``out[tid] = a[tid // a_div] @ w[expert(tid)].T`` (fp32 accumulate), optionally
+    scaled by ``mul_weight[tid]``. The expert for ``tid`` is ``topk_ids.flatten()
+    [tid]`` (row-major expansion: ``tid = token*top_k + slot``). This is computed
+    here with plain ``torch.matmul`` on the dequantized operands — independent of
+    the Triton ``dot_scaled`` path and of the (separate) aiter backend.
+    """
+    eids = topk_ids.reshape(-1)
+    n = w_deq.shape[1]
+    out = torch.empty(num_valid, n, dtype=torch.float32, device=a_deq.device)
+    for tid in range(num_valid):
+        e = int(eids[tid].item())
+        out[tid] = a_deq[tid // a_div].float() @ w_deq[e].float().T
+        if mul_weight is not None:
+            out[tid] *= float(mul_weight[tid].item())
+    return out
+
+
+@requires_gfx950
+@pytest.mark.parametrize("T,N,K,E,top_k", [(8, 256, 128, 8, 2), (5, 512, 256, 16, 4)])
+@pytest.mark.parametrize("weighted", [False, True])
+@torch.inference_mode()
+def test_mxfp8_grouped_gemm_native(T, N, K, E, top_k, weighted):
+    """Directly exercise ``_grouped_gemm_mxfp8`` against a non-Triton reference.
+
+    Covers both call modes used by ``fused_moe_mxfp8_native``:
+      * ``weighted=False`` -> g1: ``a_div=top_k`` (a-row shared across the top_k
+        expansions of a token), no per-token weight.
+      * ``weighted=True``  -> g2: ``a_div=1`` (one a-row per expansion), output
+        scaled by ``topk_weights``.
+    """
+    from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
+        _grouped_gemm_mxfp8,
+    )
+    from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
+        moe_align_block_size,
+    )
+
+    torch.manual_seed(0)
+    block_m = 64
+    a_div = 1 if weighted else top_k
+    m_routed = T * top_k
+    # a-rows: g1 reads one row per token (a_div=top_k); g2 one per expansion.
+    a_rows = m_routed if weighted else T
+    a_bf16 = torch.randn(a_rows, K, device=DEVICE, dtype=torch.bfloat16) * 0.5
+    w_bf16 = torch.randn(E, N, K, device=DEVICE, dtype=torch.bfloat16) * 0.1
+    a_fp8, a_scale = _mxfp8_e4m3_quantize_torch(a_bf16, is_sf_swizzled_layout=False)
+    w_fp8, w_scale = _mxfp8_e4m3_quantize_torch(w_bf16, is_sf_swizzled_layout=False)
+
+    logits = torch.randn(T, E, device=DEVICE, dtype=torch.float32)
+    topk_weights, topk_ids = logits.softmax(dim=-1).topk(top_k, dim=-1)
+    topk_weights = topk_weights.to(torch.float32)
+    topk_ids = topk_ids.to(torch.int32)
+    mul = topk_weights.reshape(-1) if weighted else None
+
+    sorted_ids, expert_ids, num_post = moe_align_block_size(
+        topk_ids, block_m, E, None, ignore_invalid_experts=False
+    )
+    got = _grouped_gemm_mxfp8(
+        a_fp8,
+        a_scale,
+        w_fp8,
+        w_scale,
+        sorted_ids,
+        expert_ids,
+        num_post,
+        m_routed,
+        top_k,
+        block_m,
+        torch.bfloat16,
+        a_div=a_div,
+        mul_weight_by=mul,
+    )
+    # Reference: dequant the SAME bits the kernel reads, plain torch matmul.
+    a_deq = dequant_mxfp8_to_bf16(a_fp8, a_scale)
+    w_deq = dequant_mxfp8_to_bf16(w_fp8, w_scale)
+    ref = _ref_grouped_gemm(a_deq, w_deq, topk_ids, a_div, m_routed, mul)
+    assert got.shape == (m_routed, N)
+    assert _relerr(got, ref) < 5e-2
+
+
+# --------------------------------------------------------------------------- #
 # MXFP8 linear emulation: BF16-at-load (default) vs per-step dequant + switch
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("shape", [(512, 2048), (1, 6144)])
