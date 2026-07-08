@@ -37,6 +37,7 @@ from vllm.sequence import IntermediateTensors
 
 from .attention import DeepseekV32Attention
 from .fused_ops import fused_allreduce_rms_norm
+from .mega_moe import DeepseekV32MegaMoE
 
 
 class DeepseekV32DecoderLayer(torch.nn.Module):
@@ -72,17 +73,28 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             and layer_idx >= config.first_k_dense_replace
             and layer_idx % moe_layer_freq == 0
         ):
-            self.mlp = DeepseekV2MoE(
-                config=config,
-                parallel_config=parallel_config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.mlp",
-                apply_routed_scale_to_output=False,
-            )
-            # Defer the MoE cross-rank all-reduce; it is fused into the next
-            # layer's input_layernorm (or the final norm) via
-            # fused_allreduce_rms_norm. self.mlp.experts is the MoERunner.
-            self.mlp.experts.moe_config.skip_final_all_reduce = True
+            if vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe":
+                # Fully fused NVFP4 x NVFP4 MoE (dispatch + experts + combine in
+                # one DeepGEMM kernel). Its output is already combined across
+                # the EP group; TP is enforced to 1, so the deferred all-reduce
+                # below degenerates to a plain RMSNorm.
+                self.mlp = DeepseekV32MegaMoE(
+                    vllm_config=vllm_config,
+                    config=config,
+                    prefix=f"{prefix}.mlp",
+                )
+            else:
+                self.mlp = DeepseekV2MoE(
+                    config=config,
+                    parallel_config=parallel_config,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.mlp",
+                    apply_routed_scale_to_output=False,
+                )
+                # Defer the MoE cross-rank all-reduce; it is fused into the next
+                # layer's input_layernorm (or the final norm) via
+                # fused_allreduce_rms_norm. self.mlp.experts is the MoERunner.
+                self.mlp.experts.moe_config.skip_final_all_reduce = True
         else:
             self.mlp = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
@@ -236,6 +248,14 @@ class DeepseekV32Model(torch.nn.Module):
             ("wk_weights_proj", "wk", 0),
             ("wk_weights_proj", "weights_proj", 1),
         ]
+        # MegaMoE experts hold their parameters directly on the experts module
+        # (``experts.w13_*`` / ``experts.w2_*``) rather than under the MoERunner's
+        # ``routed_experts`` child.
+        use_mega_moe = any(
+            isinstance(layer.mlp, DeepseekV32MegaMoE)
+            for layer in self.layers
+            if not isinstance(layer, PPMissingLayer)
+        )
         expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
@@ -243,6 +263,7 @@ class DeepseekV32Model(torch.nn.Module):
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts,
             num_redundant_experts=self.num_redundant_experts,
+            routed_experts_prefix="" if use_mega_moe else "routed_experts",
         )
 
         pp_missing_layer_names = get_pp_missing_layer_names(self)
@@ -325,6 +346,13 @@ class DeepseekV32Model(torch.nn.Module):
             loaded_params.add(name)
         return loaded_params
 
+    def finalize_mega_moe_weights(self) -> None:
+        for layer in self.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+            if isinstance(layer.mlp, DeepseekV32MegaMoE):
+                layer.mlp.finalize_mega_moe_weights()
+
 
 class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
     """DSA causal LM — DeepSeek V2/V3 orchestration with the DSA backbone.
@@ -337,6 +365,7 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
     def set_moe_parameters(self):
         # Same as the base, but keyed on the MoE block type rather than the
         # decoder-layer type (DeepseekV32DecoderLayer is a plain nn.Module).
+        # MegaMoE blocks manage their own experts (no MoERunner / EPLB).
         self.num_expert_groups = getattr(self.config, "n_group", 1)
         self.moe_layers = []
         self.moe_mlp_layers = []
@@ -349,3 +378,8 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
                 self.moe_mlp_layers.append(layer.mlp)
                 self.moe_layers.append(layer.mlp.experts)
         self.extract_moe_parameters(example_moe)
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loaded_params = super().load_weights(weights)
+        self.model.finalize_mega_moe_weights()
+        return loaded_params
