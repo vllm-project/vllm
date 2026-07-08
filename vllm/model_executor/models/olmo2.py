@@ -137,11 +137,9 @@ class Olmo2Attention(nn.Module):
         )
 
         # Rotary embeddings. Rope scaling is only applied on full attention layers.
-        if sliding_window is None:
-            rope_parameters = self.config.rope_parameters
-        else:
-            rope_theta = self.config.rope_parameters["rope_theta"]
-            rope_parameters = {"rope_type": "default", "rope_theta": rope_theta}
+        rope_parameters = self.config.rope_parameters
+        attn_type = "full_attention" if sliding_window is None else "sliding_attention"
+        rope_parameters = rope_parameters.get(attn_type, rope_parameters)
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=self.max_position_embeddings,
