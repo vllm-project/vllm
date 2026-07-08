@@ -38,7 +38,7 @@ from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
 from .load import LoadConfig
 from .lora import LoRAConfig
-from .mamba import MambaConfig
+from .mamba import MambaBackendEnum, MambaConfig
 from .model import ModelConfig
 from .observability import ObservabilityConfig
 from .offload import OffloadConfig
@@ -2241,6 +2241,22 @@ class VllmConfig:
         if mamba_block_size_is_set and not self.cache_config.enable_prefix_caching:
             raise ValueError(
                 "--mamba-block-size can only be set with --enable-prefix-caching"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_mamba_cached_kernel(self) -> "VllmConfig":
+        if not self.cache_config.use_replayssm:
+            return self
+        if self.cache_config.mamba_cache_mode != "none":
+            raise ValueError("--use-replayssm requires --mamba-cache-mode none")
+        if self.num_speculative_tokens > 0:
+            raise ValueError("--use-replayssm does not support speculative decoding")
+        if self.mamba_config.backend != MambaBackendEnum.TRITON:
+            raise ValueError("--use-replayssm requires --mamba-backend triton")
+        if self.mamba_config.enable_stochastic_rounding:
+            raise ValueError(
+                "--use-replayssm does not support Mamba cache stochastic rounding"
             )
         return self
 
