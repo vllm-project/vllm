@@ -551,7 +551,12 @@ async def lifespan(app: FastAPI):
             and is_primary_dp
         ):
             logger.info("Running post-startup snapshot before server readiness...")
-            await asyncio.to_thread(engine_client.snapshot_manager.run_snapshot)
+            try:
+                await asyncio.to_thread(engine_client.snapshot_manager.run_snapshot)
+                logger.info("Post-startup snapshot completed successfully.")
+            except Exception:
+                logger.exception("Post-startup snapshot failed; "
+                                 "continuing to barrier to avoid deadlock.")
             logger.info("Post-startup snapshot completed successfully.")
 
         if snapshot_barrier is not None:
