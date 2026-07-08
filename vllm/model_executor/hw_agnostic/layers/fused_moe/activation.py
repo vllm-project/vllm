@@ -99,16 +99,23 @@ def apply_moe_activation(
             f"{output.size(-1)} vs {input.size(-1)}"
         )
 
-    # Activations with gated multiplication (gate × activation(up))
+    # Activations with gated multiplication (gate × activation(up)). The gate
+    # is the first half of the packed [gate || up] input; the up projection is
+    # the second half.
     if activation == MoEActivation.SILU:
         if clamp_limit is not None:
+            # Clamped SwiGLU has non-trivial alpha/beta/pre-clamp semantics;
+            # keep the fused kernel for it.
             torch.ops._C.silu_and_mul_with_clamp(output, input, clamp_limit, 1.0, 0.0)
         else:
-            torch.ops._C.silu_and_mul(output, input)
+            gate, up = input.chunk(2, dim=-1)
+            torch.mul(F.silu(gate), up, out=output)
     elif activation == MoEActivation.GELU:
-        torch.ops._C.gelu_and_mul(output, input)
+        gate, up = input.chunk(2, dim=-1)
+        torch.mul(F.gelu(gate), up, out=output)
     elif activation == MoEActivation.GELU_TANH:
-        torch.ops._C.gelu_tanh_and_mul(output, input)
+        gate, up = input.chunk(2, dim=-1)
+        torch.mul(F.gelu(gate, approximate="tanh"), up, out=output)
     elif activation == MoEActivation.SWIGLUSTEP:
         from vllm.model_executor.hw_agnostic.layers.activation import (
             swiglustep_and_mul_triton,
