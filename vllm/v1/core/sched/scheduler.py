@@ -1160,8 +1160,7 @@ class Scheduler(SchedulerInterface):
             request.spec_token_ids = []
         # Async scheduling: this request's in-flight output frame is now stale
         # (rolled back above) and must be discarded when it returns, or it
-        # drains num_output_placeholders below zero (assert in
-        # AsyncScheduler._update_request_with_output). async_tokens_to_discard
+        # drains num_output_placeholders below zero. async_tokens_to_discard
         # counts frames, not placeholder tokens; a decode request has at most
         # one in-flight frame (eligible-step gating), so discard one -- not
         # num_output_placeholders (= 1 + spec_width, which would over-discard).
