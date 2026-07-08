@@ -26,7 +26,7 @@
 #include <torch/headeronly/util/Exception.h>
 
 #include "../../cuda_compat.h"
-#include "../../cub_helpers.h"
+#include "../cub_helpers.h"
 #include "libtorch_stable/torch_utils.h"
 #ifndef USE_ROCM
   #include <cuda_bf16.h>
@@ -173,7 +173,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
   float row_chunk[VPT];
 
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  asm volatile("griddepcontrol.wait;");
+  cudaGridDependencySynchronize();
 #endif
 
   // NOTE(zhuhaoran): dispatch different input types loading, BF16/FP16 convert
@@ -300,7 +300,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
       }
     }
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-    asm volatile("griddepcontrol.launch_dependents;");
+    cudaTriggerProgrammaticLaunchCompletion();
 #endif
     return;
   } else {
@@ -425,7 +425,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
       }
     }
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-    asm volatile("griddepcontrol.launch_dependents;");
+    cudaTriggerProgrammaticLaunchCompletion();
 #endif
   }
 }

@@ -654,6 +654,8 @@ def build_flashinfer_mixed_sparse_indices(
     topk: int,
     decode_compressed_indices_are_local: bool = False,
     decode_is_valid_token: torch.Tensor | None = None,
+    swa_block_span: int | None = None,
+    compressed_block_span: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build the FlashInfer DSV4 sparse-index matrix for decode-first batches.
 
@@ -730,6 +732,13 @@ def build_flashinfer_mixed_sparse_indices(
     max_block_size = max(window_block_size, topk_block_size)
     num_warps = 4 if max_block_size >= 256 else 1
 
+    # block_span = page_stride / token_stride; == block_size (no-op) for unpacked KV.
+    swa_span = swa_block_size if swa_block_span is None else swa_block_span
+    compressed_span = (
+        compressed_block_size
+        if compressed_block_span is None
+        else compressed_block_span
+    )
     _build_flashinfer_mixed_sparse_indices_kernel[(num_tokens,)](
         sparse_indices,
         sparse_indices.stride(0),
@@ -748,9 +757,11 @@ def build_flashinfer_mixed_sparse_indices(
         swa_block_table,
         swa_block_table.stride(0),
         swa_block_size,
+        swa_span,
         compressed_block_table,
         compressed_block_table.stride(0),
         compressed_block_size,
+        compressed_span,
         NUM_DECODE_TOKENS=num_decode_tokens,
         WINDOW_SIZE=window_size,
         COMPRESS_RATIO=compress_ratio,
@@ -767,6 +778,18 @@ def build_flashinfer_mixed_sparse_indices(
     return sparse_indices, sparse_topk_lens
 
 
+@triton.jit
+def _remap_flashinfer_index(values, block_size, block_span):
+    # FlashInfer's DSv4 kernel indexes sparse KV by physical token stride, so
+    # packed pages (#44577) need block*block_size+off -> block*block_span+off.
+    # TODO: remove once flashinfer-ai/flashinfer#3856 is fixed.
+    is_valid = values >= 0
+    safe_values = tl.where(is_valid, values, 0)
+    values = (safe_values // block_size) * block_span
+    values += safe_values % block_size
+    return tl.where(is_valid, values, -1)
+
+
 @triton.jit(
     do_not_specialize=[
         "sparse_indices_stride",
@@ -775,8 +798,10 @@ def build_flashinfer_mixed_sparse_indices(
         "prefill_topk_stride",
         "swa_block_table_stride",
         "swa_block_size",
+        "swa_block_span",
         "compressed_block_table_stride",
         "compressed_block_size",
+        "compressed_block_span",
         "NUM_DECODE_TOKENS",
         "PREFILL_TOPK_STRIDE",
     ]
@@ -799,9 +824,11 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
     swa_block_table_ptr,
     swa_block_table_stride,
     swa_block_size,
+    swa_block_span,
     compressed_block_table_ptr,
     compressed_block_table_stride,
     compressed_block_size,
+    compressed_block_span,
     NUM_DECODE_TOKENS,
     WINDOW_SIZE: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
@@ -825,6 +852,7 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
                 mask=mask,
                 other=-1,
             )
+            values = _remap_flashinfer_index(values, swa_block_size, swa_block_span)
             tl.store(
                 sparse_indices_ptr + token_idx * sparse_indices_stride + offset,
                 values,
@@ -858,6 +886,9 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
                 values = block_numbers * compressed_block_size + block_offsets
                 values = tl.where(is_valid, values, -1)
                 compressed_len += tl.sum((is_valid & token_valid).to(tl.int32), axis=0)
+            values = _remap_flashinfer_index(
+                values, compressed_block_size, compressed_block_span
+            )
             tl.store(
                 sparse_indices_ptr
                 + token_idx * sparse_indices_stride
@@ -904,6 +935,7 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
         block_offsets = pos_offset % swa_block_size
         slot_ids = block_numbers * swa_block_size + block_offsets
         slot_ids = tl.where(offset < swa_len, slot_ids, -1)
+        slot_ids = _remap_flashinfer_index(slot_ids, swa_block_size, swa_block_span)
         tl.store(
             sparse_indices_ptr + token_idx * sparse_indices_stride + offset,
             slot_ids,
@@ -930,6 +962,9 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
         block_offsets = local_idx % compressed_block_size
         slot_ids = block_numbers * compressed_block_size + block_offsets
         slot_ids = tl.where((offset < topk_len) & is_valid, slot_ids, -1)
+        slot_ids = _remap_flashinfer_index(
+            slot_ids, compressed_block_size, compressed_block_span
+        )
         tl.store(
             sparse_indices_ptr
             + token_idx * sparse_indices_stride

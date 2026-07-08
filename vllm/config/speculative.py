@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import functools
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, field_validator, model_validator
@@ -46,6 +48,7 @@ MTPModelTypes = Literal[
     "qwen3_5_mtp",
     "longcat_flash_mtp",
     "minimax_m3_mtp",
+    "bailing_hybrid_mtp",
     "mtp",
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
@@ -138,6 +141,12 @@ class SpeculativeConfig:
     for draft token generation. Reduces communication from O(vocab_size) to
     O(2 * tp_size) per token. Only applies to greedy draft selection in
     non-tree speculation."""
+
+    use_heterogeneous_vocab: bool = False
+    """Allow draft and target models to use different vocabularies.
+    When enabled, builds a token-level intersection at init and constrains
+    draft logits to shared tokens only (TLI algorithm). Requires
+    method='draft_model'."""
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
@@ -297,8 +306,10 @@ class SpeculativeConfig:
         )
         factors.append(uses_aux_hidden_states)
 
-        # The specific layers used also affect the computation graph
         if uses_aux_hidden_states and self.draft_model_config is not None:
+            factors.append(self.draft_model_config.compute_hash())
+
+            # The specific layers used also affect the computation graph.
             layer_ids = getattr(
                 self.draft_model_config.hf_config,
                 "eagle_aux_hidden_state_layer_ids",
@@ -457,6 +468,21 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["Qwen3NextMTP"]}
             )
 
+        architectures = getattr(hf_config, "architectures", []) or []
+        if (
+            hf_config.model_type == "bailing_hybrid"
+            or "BailingMoeV2_5ForCausalLM" in architectures
+        ):
+            hf_config.model_type = "bailing_hybrid_mtp"
+        if hf_config.model_type == "bailing_hybrid_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {
+                    "n_predict": n_predict,
+                    "architectures": ["BailingMoeV25MTPModel"],
+                }
+            )
+
         if hf_config.model_type == "exaone_moe":
             hf_config.model_type = "exaone_moe_mtp"
         if hf_config.model_type == "exaone_moe_mtp":
@@ -565,6 +591,40 @@ class SpeculativeConfig:
             )
 
         return hf_config
+
+    @staticmethod
+    def _apply_composed_hf_override(
+        target_hf_overrides: Callable[[PretrainedConfig], PretrainedConfig],
+        hf_config: PretrainedConfig,
+    ) -> PretrainedConfig:
+        hf_config = SpeculativeConfig.hf_config_override(hf_config)
+        return target_hf_overrides(hf_config)
+
+    @staticmethod
+    def compose_draft_hf_overrides(
+        target_hf_overrides: HfOverrides | None,
+    ) -> Callable[[PretrainedConfig], PretrainedConfig]:
+        """Build the ``hf_overrides`` for the draft ``ModelConfig``.
+
+        Callable overrides on the target are config-to-config transforms
+        (e.g. test harnesses shrinking ``num_hidden_layers``) and must also
+        reach the draft config — otherwise a draft belonging to a large
+        target is instantiated at full size even when the target is shrunk.
+        Dict overrides are target-specific key patches and are not applied
+        to the draft.
+
+        The composed override must stay picklable: the draft ``ModelConfig``
+        is sent to spawned engine-core processes, so a local closure would
+        fail with ``Can't get local object`` during pickling. Bind the
+        target via ``functools.partial`` over a module-referenceable static
+        method instead.
+        """
+        if not callable(target_hf_overrides):
+            return SpeculativeConfig.hf_config_override
+
+        return functools.partial(
+            SpeculativeConfig._apply_composed_hf_override, target_hf_overrides
+        )
 
     def __post_init__(self):
         # Note: "method" is a new parameter that helps to extend the
@@ -730,11 +790,20 @@ class SpeculativeConfig:
                 if self.method == "medusa":
                     draft_hf_overrides = {"model_type": "medusa"}
                 else:
-                    draft_hf_overrides = SpeculativeConfig.hf_config_override
+                    # Compose any callable hf_overrides set on the target so the
+                    # draft config receives the same transform (e.g. the test
+                    # shrink). Dict overrides stay target-only.
+                    draft_hf_overrides = SpeculativeConfig.compose_draft_hf_overrides(
+                        self.target_model_config.hf_overrides
+                    )
                 self.draft_model_config = ModelConfig(
                     model=self.model,
                     runner="draft",
-                    tokenizer=self.target_model_config.tokenizer,
+                    tokenizer=(
+                        self.model
+                        if self.use_heterogeneous_vocab
+                        else self.target_model_config.tokenizer
+                    ),
                     tokenizer_mode=self.target_model_config.tokenizer_mode,
                     trust_remote_code=self.target_model_config.trust_remote_code,
                     allowed_local_media_path=self.target_model_config.allowed_local_media_path,
@@ -1103,7 +1172,20 @@ class SpeculativeConfig:
                 self.draft_parallel_config
             )
 
-        self.verify_equal_vocab_size_if_draft_model()
+        if self.use_heterogeneous_vocab and not self.uses_draft_model():
+            raise ValueError(
+                "use_heterogeneous_vocab only works with method='draft_model'"
+            )
+
+        if self.use_heterogeneous_vocab and self.draft_sample_method != "greedy":
+            raise ValueError(
+                "use_heterogeneous_vocab currently only supports greedy draft "
+                "sampling. Set draft_sample_method='greedy' (the default) or "
+                "omit it."
+            )
+
+        if not self.use_heterogeneous_vocab:
+            self.verify_equal_vocab_size_if_draft_model()
         return self
 
     def verify_equal_vocab_size_if_draft_model(self):
