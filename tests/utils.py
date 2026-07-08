@@ -81,9 +81,8 @@ def _env_flag_enabled(name: str) -> bool:
 def _url_cache_miss_message(url: str, path: Path) -> str:
     return (
         f"Cached test asset is missing or invalid: {path}. "
-        f"Refusing to download {url!r} because VLLM_TEST_CACHE_ONLY is set. "
-        "Populate the persistent test cache first, or unset VLLM_TEST_CACHE_ONLY "
-        "for an explicit cache-populating run."
+        f"Refusing to download {url!r} because VLLM_TEST_CACHE_ONLY is enabled. "
+        "Populate the persistent test cache first, or unset VLLM_TEST_CACHE_ONLY."
     )
 
 

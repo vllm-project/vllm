@@ -424,7 +424,7 @@ mkdir -p "${HF_CACHE}" "${MODELSCOPE_CACHE}" "${VLLM_TEST_CACHE}" "${VLLM_ASSETS
 # Keep the CI default explicit and overridable from the Buildkite environment.
 : "${HF_HUB_DOWNLOAD_TIMEOUT:=300}"
 : "${HF_HUB_ETAG_TIMEOUT:=60}"
-: "${VLLM_TEST_CACHE_ONLY:=1}"
+: "${VLLM_TEST_CACHE_ONLY:=0}"
 
 # ---- Command source selection ----
 # Prefer VLLM_TEST_COMMANDS (preserves all inner quoting intact).
