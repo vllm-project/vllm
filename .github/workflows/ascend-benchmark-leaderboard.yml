@@ -424,14 +424,19 @@ jobs:
           printf '%s\n' "$BENCHMARK_REPO_SSH_KEY" > "$key_file"
           chmod 600 "$key_file"
 
+          known_hosts_file="$HOME/.ssh/known_hosts.github"
           known_hosts_tmp="$(mktemp)"
-          ssh-keyscan -p 443 -t rsa,ecdsa,ed25519 ssh.github.com > "$known_hosts_tmp" 2>/dev/null
+          {
+            ssh-keyscan -t rsa,ecdsa,ed25519 github.com 2>/dev/null
+            ssh-keyscan -p 443 -t rsa,ecdsa,ed25519 ssh.github.com 2>/dev/null
+          } > "$known_hosts_tmp"
           if [[ ! -s "$known_hosts_tmp" ]]; then
             echo "Unable to scan ssh.github.com host keys." >&2
             exit 2
           fi
-          cat "$known_hosts_tmp" >> "$HOME/.ssh/known_hosts"
-          chmod 600 "$HOME/.ssh/known_hosts"
+          sort -u "$known_hosts_tmp" > "$known_hosts_file"
+          rm -f "$known_hosts_tmp"
+          chmod 600 "$known_hosts_file"
 
           cat > "$HOME/.ssh/config" <<EOF
           Host github.com
@@ -441,6 +446,7 @@ jobs:
             IdentityFile $key_file
             IdentitiesOnly yes
             StrictHostKeyChecking yes
+            UserKnownHostsFile $known_hosts_file
           EOF
           chmod 600 "$HOME/.ssh/config"
 
