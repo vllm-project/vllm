@@ -258,7 +258,6 @@ class MiniMaxM3MoE(nn.Module):
             swiglu_alpha=config.swiglu_alpha,
             swiglu_beta=config.swiglu_beta,
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=True,
             router_logits_dtype=self.gate.out_dtype,
             shared_experts=self.shared_experts,
             quant_config=quant_config,
@@ -959,6 +958,11 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     """MiniMax M3 (sparse/dense backbone) for causal language modeling."""
 
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_text_config
@@ -1025,6 +1029,11 @@ class MiniMaxM3SparseForConditionalGeneration(
     # data``; ``run_dp_sharded_mrope_vision_model`` shards the work across
     # ranks (see ``_process_image_input`` / ``_process_video_input``).
     supports_encoder_tp_data = True
+
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={

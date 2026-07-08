@@ -202,9 +202,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "AfmoeForCausalLM": _HfExamplesInfo("arcee-ai/Trinity-Nano-Preview"),
     "ApertusForCausalLM": _HfExamplesInfo("swiss-ai/Apertus-8B-Instruct-2509"),
     "ArceeForCausalLM": _HfExamplesInfo("arcee-ai/AFM-4.5B-Base"),
-    "ArcticForCausalLM": _HfExamplesInfo(
-        "Snowflake/snowflake-arctic-instruct", trust_remote_code=True
-    ),
+    "ArcticForCausalLM": _HfExamplesInfo("Snowflake/snowflake-arctic-instruct"),
     "AXK1ForCausalLM": _HfExamplesInfo("skt/A.X-K1", trust_remote_code=True),
     "BailingMoeForCausalLM": _HfExamplesInfo(
         "inclusionAI/Ling-lite-1.5", trust_remote_code=True
@@ -1492,8 +1490,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "EagleMistralLarge3ForCausalLM": _HfExamplesInfo(
         "mistralai/Mistral-Large-3-675B-Instruct-2512",
         speculative_model="mistralai/Mistral-Large-3-675B-Instruct-2512-Eagle",
-        # TODO: revert once figuring out OOM in CI
-        is_available_online=False,
     ),
     "LlamaForCausalLMEagle3": _HfExamplesInfo(
         "Qwen/Qwen3-8B",
