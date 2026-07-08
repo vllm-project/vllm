@@ -553,19 +553,25 @@ class RocmPlatform(Platform):
                     selected_backend.name,
                 )
                 return selected_backend.get_path()
-            # The explicitly selected backend is incompatible with this
-            # specific layer (e.g. user passed ROCM_AITER_UNIFIED_ATTN but
-            # this layer needs TURBOQUANT for a quantized KV cache dtype).
-            # Fall through to auto-selection so the correct per-layer backend
-            # is chosen rather than raising an error. This preserves the
-            # mixed-backend setup (AITER for prefill / non-TQ layers,
-            # TURBOQUANT for turboquant_* KV-cache layers).
-            logger.debug(
-                "Selected backend %s is incompatible with this layer "
-                "(%s); falling back to auto-selection. Reason: %s",
+            # Only tolerate the mismatch for turboquant_* KV-cache layers:
+            # boundary layers keep the native dtype (served by the selected
+            # backend) while turboquant_* layers need TURBOQUANT, so no single
+            # --attention-backend can serve every layer. For any other dtype
+            # the explicit selection is genuinely invalid -> fail loud.
+            kv_dtype = attn_selector_config.kv_cache_dtype
+            if not (kv_dtype is not None and str(kv_dtype).startswith("turboquant")):
+                raise ValueError(
+                    f"Selected backend {selected_backend} is not valid for "
+                    f"this configuration. Reason: {invalid_reasons}"
+                )
+            # NOTE: pass a str (not the list) -- info_once hashes its args.
+            logger.info_once(
+                "Selected backend %s is incompatible with this turboquant "
+                "layer (%s); using the auto-selected per-layer backend. "
+                "Reason: %s",
                 selected_backend.name,
                 attn_selector_config.attn_type,
-                invalid_reasons,
+                str(invalid_reasons),
             )
 
         # No selected backend or the selected backend is invalid,
