@@ -619,7 +619,20 @@ class BlockPool:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
         """
-        # Identify blocks with hash (LRU cache) and without it (will never match in APC)
+        if not self.enable_caching:
+            # No block carries a hash, so the with-hash / without-hash split
+            # below is a no-op partition that only adds per-call CPU work.
+            # free_blocks() runs once per engine step, so on short decode
+            # steps this is a measurable fixed overhead. Free in one pass.
+            freed_blocks = []
+            for block in ordered_blocks:
+                block.ref_cnt -= 1
+                if block.ref_cnt == 0 and not block.is_null:
+                    freed_blocks.append(block)
+            self.free_block_queue.append_n(freed_blocks)
+            return
+
+        # Identify blocks with hash (LRU cache) and without it (never match APC)
         blocks_with_hash = []
         blocks_without_hash = []
         for block in ordered_blocks:
@@ -630,7 +643,7 @@ class BlockPool:
                 else:
                     blocks_with_hash.append(block)
 
-        # Blocks without hash always get evicted first - prepend them last to the tail
+        # Blocks without hash get evicted first - prepend them last to the tail
         self.free_block_queue.prepend_n(blocks_without_hash)
         self.free_block_queue.append_n(blocks_with_hash)
 
