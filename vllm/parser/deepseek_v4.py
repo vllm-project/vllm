@@ -35,6 +35,7 @@ from vllm.parser.engine.parser_engine_config import (
 from vllm.tool_parsers.utils import find_tool_properties
 
 if TYPE_CHECKING:
+    from vllm.parser.engine.parser_engine import ToolCallSlot
     from vllm.tokenizers import TokenizerLike
     from vllm.tool_parsers.abstract_tool_parser import Tool
 
@@ -227,11 +228,9 @@ class DeepSeekV4Parser(ParserEngine):
             parser_engine_config=deepseek_v4_config(thinking=thinking),
             **kwargs,
         )
-        self._arg_converter = self._convert_args
 
-    def _convert_args(self, raw_args: str, partial: bool) -> str:
-        result = _dsml_arg_converter(raw_args, partial)
+    def _convert_slot_args(self, slot: ToolCallSlot, partial: bool) -> str:
+        result = _dsml_arg_converter(slot.args, partial)
         if not self._tools:
             return result
-        func_name = next((s.name for s in self._tool_slots if s.args == raw_args), None)
-        return _unwrap_wrapper_args(result, self._tools, func_name)
+        return _unwrap_wrapper_args(result, self._tools, slot.name)

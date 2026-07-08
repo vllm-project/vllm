@@ -919,6 +919,12 @@ class ParserEngine(Parser):
 
     # ── Arg conversion helpers ─────────────────────────────────────────
 
+    def _convert_slot_args(self, slot: ToolCallSlot, partial: bool) -> str:
+        converter = self._arg_converter
+        if converter is None:
+            return slot.args
+        return converter(slot.args, partial)
+
     def _compute_arg_delta(self, idx: int, raw_delta: str) -> str | None:
         converter = self._arg_converter
         if converter is None:
@@ -933,7 +939,7 @@ class ParserEngine(Parser):
 
         slot = self._tool_slots[idx]
         try:
-            current_json = converter(slot.args, True)
+            current_json = self._convert_slot_args(slot, True)
         except (json.JSONDecodeError, ValueError, TypeError):
             logger.debug("arg converter failed (streaming): %s", slot.args[:80])
             return None
@@ -969,7 +975,7 @@ class ParserEngine(Parser):
 
         slot = self._tool_slots[idx]
         try:
-            final_json = converter(slot.args, False)
+            final_json = self._convert_slot_args(slot, False)
         except (json.JSONDecodeError, ValueError, TypeError):
             logger.debug("arg converter failed (flush): %s", slot.args[:80])
             return None
@@ -1021,7 +1027,7 @@ class ParserEngine(Parser):
                 converter = self._arg_converter
                 if converter is not None:
                     try:
-                        args_json = converter(raw_body, False)
+                        args_json = self._convert_slot_args(slot, False)
                     except (json.JSONDecodeError, ValueError, TypeError):
                         logger.debug(
                             "arg converter failed (extract): %s", raw_body[:80]
