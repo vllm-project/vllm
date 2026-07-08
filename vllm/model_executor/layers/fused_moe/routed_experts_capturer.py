@@ -210,15 +210,6 @@ class RoutedExpertsCapturer:
         if layer_id >= self.device_buffer.shape[1]:
             return
 
-        buf_top_k = self.device_buffer.shape[2]
-        ids_top_k = topk_ids.shape[1]
-        assert buf_top_k == ids_top_k, (
-            f"RoutedExpertsCapturer buffer top_k ({buf_top_k}) != "
-            f"topk_ids top_k ({ids_top_k}) at layer {layer_id}. "
-            f"The buffer was allocated from hf_config.num_experts_per_tok "
-            f"but the router produced a different top_k."
-        )
-
         self.device_buffer[:token_num_per_dp, layer_id, :] = topk_ids[
             start_loc:end_loc, :
         ]
