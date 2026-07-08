@@ -135,9 +135,7 @@ async def start_weight_update(raw_request: Request):
         try:
             body = json.loads(raw_body)
         except json.JSONDecodeError as e:
-            raise HTTPException(
-                status_code=400, detail="Invalid JSON format"
-            ) from e
+            raise HTTPException(status_code=400, detail="Invalid JSON format") from e
         include_draft = body.get("include_draft", False)
     await engine_client(raw_request).start_weight_update(include_draft=include_draft)
     return JSONResponse(content={"message": "Weight update started"})

@@ -201,8 +201,8 @@ class Worker(WorkerBase):
             }
             draft = self.get_draft_model()
             inner = getattr(draft, "model", None) if draft is not None else None
-            self._sleep_rebuild_draft_metadata_buffers = (
-                inner is not None and hasattr(inner, "_build_fused_kv_buffers")
+            self._sleep_rebuild_draft_metadata_buffers = inner is not None and hasattr(
+                inner, "_build_fused_kv_buffers"
             )
 
         self._get_sleep_mode_backend().suspend(level)
