@@ -974,8 +974,11 @@ void moe_align_block_size_radix(
   VLLM_STABLE_DISPATCH_INTEGRAL_AND_UNSIGNED_TYPES(
       topk_ids.scalar_type(), "moe_align_block_size_radix", [&] {
         constexpr int32_t key_threads = 256;
+        // Conservative portable CUDA grid cap. The key-prep kernel uses a
+        // grid-stride loop, so larger inputs are still processed correctly.
+        constexpr int32_t max_key_grid_blocks = 65535;
         const int32_t key_blocks =
-            std::min<int64_t>(CEILDIV(numel, key_threads), 65535);
+            std::min<int64_t>(CEILDIV(numel, key_threads), max_key_grid_blocks);
         vllm::moe::prepare_radix_sort_keys_kernel<scalar_t>
             <<<key_blocks, key_threads, 0, stream>>>(
                 reinterpret_cast<const scalar_t*>(topk_ids.const_data_ptr()),
