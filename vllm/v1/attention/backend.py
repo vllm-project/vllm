@@ -961,11 +961,7 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
     ) -> None:
-        """MHA-style (dense) prefill forward pass.
-
-        Provided by ``MLACommonBaseImpl``; impls without a dense prefill path
-        (e.g. sparse MQA-only backends) leave this unimplemented.
-        """
+        """MHA-style (dense) prefill forward pass."""
         raise NotImplementedError
 
     @abstractmethod
