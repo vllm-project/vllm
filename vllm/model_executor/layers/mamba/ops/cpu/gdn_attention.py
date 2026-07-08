@@ -7,7 +7,6 @@ import torch
 import torch.nn.functional as F
 
 import vllm._custom_ops as ops
-
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
@@ -68,7 +67,7 @@ def cpu_gdn_attention_core(
         # ===== Fast path: speculative decoding NOT configured =====
         # conv-state is exactly (..., dim, width-1); use the original AMX /
         # torch implementation unchanged.
-        _cpu_gdn_attention_nonspec_legacy(
+        _cpu_gdn_attention_nonspec(
             layer, attn_metadata_i, mixed_qkv, b, a, core_attn_out
         )
         return
@@ -80,9 +79,9 @@ def cpu_gdn_attention_core(
 
 
 # ---------------------------------------------------------------------------
-# Legacy (non-speculative) implementation: conv-state is exactly width-1.
+# Non-speculative implementation: conv-state is exactly width-1.
 # ---------------------------------------------------------------------------
-def _cpu_gdn_attention_nonspec_legacy(
+def _cpu_gdn_attention_nonspec(
     layer,
     attn_metadata_i: GDNAttentionMetadata,
     mixed_qkv: torch.Tensor,
@@ -104,6 +103,7 @@ def _cpu_gdn_attention_nonspec_legacy(
 
     conv_state = layer.kv_cache[0]
     if is_amx:
+        # AMX causal conv requires [num_allocated_slots, kernel - 1, conv_dim].
         if is_conv_state_dim_first():
             raise RuntimeError("AMX GDN attention requires `SD` conv_state layout.")
         conv_state = conv_state.transpose(1, 2)
@@ -114,6 +114,7 @@ def _cpu_gdn_attention_nonspec_legacy(
             layer.conv1d.weight.size(0), layer.conv1d.weight.size(2)
         )
 
+    # [num_allocated_slots, num_v_heads / tp_size, v_dim, k_dim]
     ssm_state = layer.kv_cache[1]
     mixed_qkv = mixed_qkv.contiguous()
     a = a.contiguous()
@@ -127,6 +128,7 @@ def _cpu_gdn_attention_nonspec_legacy(
     num_prefills = attn_metadata_i.num_prefills
     num_prefill_tokens = attn_metadata_i.num_prefill_tokens
 
+    # all decode requests (batched)
     if num_decodes > 0:
         decode_mixed_qkv = mixed_qkv[:num_decode_tokens]
         decode_b = b[:num_decode_tokens]
@@ -145,6 +147,7 @@ def _cpu_gdn_attention_nonspec_legacy(
         else:
             decode_conv_state = conv_state[decode_state_indices].contiguous()
             decode_mixed_qkv = causal_conv1d_update_torch(
+                # [B, dim] -> [B, dim, 1]
                 x=decode_mixed_qkv.unsqueeze(-1),
                 conv_state=decode_conv_state,
                 weight=conv_weights,
@@ -154,19 +157,15 @@ def _cpu_gdn_attention_nonspec_legacy(
             conv_state[decode_state_indices] = decode_conv_state
 
         query, key, value = layer.rearrange_mixed_qkv(decode_mixed_qkv)
-        # rearrange_mixed_qkv can return views whose last dim is not
-        # contiguous; the fused CPU kernel requires a contiguous last dim.
-        query = query.contiguous()
-        key = key.contiguous()
-        value = value.contiguous()
+
         attn_out = ops.fused_sigmoid_gating_delta_rule_update_cpu(
             A_log=layer.A_log,
             dt_bias=layer.dt_bias,
             q=query,
             k=key,
             v=value,
-            a=decode_a.contiguous(),
-            b=decode_b.contiguous(),
+            a=decode_a,
+            b=decode_b,
             initial_state_source=ssm_state,
             initial_state_indices=decode_state_indices,
             cu_seqlens=query_start_loc[: num_decodes + 1],
@@ -174,6 +173,7 @@ def _cpu_gdn_attention_nonspec_legacy(
         )
         core_attn_out[:num_decode_tokens] = attn_out.squeeze(1)
 
+    # all prefill requests: (varlen) currently naively loops over sequences
     if num_prefills > 0:
         has_initial_state = attn_metadata_i.has_initial_state
         assert has_initial_state is not None
@@ -307,7 +307,14 @@ def _cpu_gdn_attention_spec_aware(
         # torch conv (which only touches the first ``width-1`` columns of the
         # wide buffer, leaving the rolling history untouched).
         _spec_aware_nonspec(
-            layer, attn_metadata_i, mixed_qkv, b, a, core_attn_out, conv_buf, ssm_state,
+            layer,
+            attn_metadata_i,
+            mixed_qkv,
+            b,
+            a,
+            core_attn_out,
+            conv_buf,
+            ssm_state,
             width,
         )
         return
@@ -488,9 +495,9 @@ def _spec_aware_nonspec(
         decode_a = a[:num_decode_tokens]
         decode_state_indices = state_indices_tensor[:num_decodes]
         # Only the first ``width-1`` columns hold the real conv state.
-        decode_conv_state = (
-            conv_buf[decode_state_indices][:, :, : width - 1].contiguous()
-        )
+        decode_conv_state = conv_buf[decode_state_indices][
+            :, :, : width - 1
+        ].contiguous()
         decode_mixed_qkv = causal_conv1d_update_torch(
             x=decode_mixed_qkv.unsqueeze(-1),
             conv_state=decode_conv_state,

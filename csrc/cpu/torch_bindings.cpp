@@ -124,10 +124,9 @@ at::Tensor fused_sigmoid_gating_delta_rule_update_spec_cpu(
     const at::Tensor& A_log, const at::Tensor& dt_bias, const at::Tensor& q,
     const at::Tensor& k, const at::Tensor& v, const at::Tensor& a,
     const at::Tensor& b, at::Tensor& initial_state_source,
-    const at::Tensor& spec_state_indices,
-    const at::Tensor& num_accepted_tokens, const at::Tensor& cu_seqlens,
-    bool use_qk_l2norm_in_kernel, double softplus_beta = 1.0,
-    double softplus_threshold = 20.0);
+    const at::Tensor& spec_state_indices, const at::Tensor& num_accepted_tokens,
+    const at::Tensor& cu_seqlens, bool use_qk_l2norm_in_kernel,
+    double softplus_beta = 1.0, double softplus_threshold = 20.0);
 
 std::tuple<at::Tensor, at::Tensor> fused_gdn_gating_cpu(
     const at::Tensor& A_log, const at::Tensor& a, const at::Tensor& b,
