@@ -139,6 +139,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
+    VLLM_STOCK_CAPTURE_KV_PREP: bool = False
     VLLM_USE_LAYERNAME: bool = True
     Q_SCALE_CONSTANT: int = 200
     K_SCALE_CONSTANT: int = 200
@@ -320,6 +321,10 @@ def maybe_convert_json_str_or_file(value: str | None) -> dict[str, Any] | None:
 
 def disable_compile_cache() -> bool:
     return bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0")))
+
+
+def stock_capture_kv_prep() -> bool:
+    return bool(int(os.getenv("VLLM_STOCK_CAPTURE_KV_PREP", "0")))
 
 
 def use_aot_compile() -> bool:
@@ -1274,6 +1279,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_LOG_BATCHSIZE_INTERVAL", "-1")
     ),
     "VLLM_DISABLE_COMPILE_CACHE": disable_compile_cache,
+    # Prototype: capture the slot-mapping (KV-cache management) kernel into the
+    # stock FULL decode cudagraph instead of launching it eagerly each step.
+    "VLLM_STOCK_CAPTURE_KV_PREP": stock_capture_kv_prep,
     # If set to "0", disable LayerName opaque type for layer_name
     # parameters in custom ops.  Defaults to enabled on torch >= 2.11.
     "VLLM_USE_LAYERNAME": lambda: bool(int(os.getenv("VLLM_USE_LAYERNAME", "1"))),

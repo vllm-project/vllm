@@ -39,6 +39,10 @@ class CompilationCounter:
     num_aot_artifacts_loaded: int = 0
     # Number of times a model was loaded with CompilationMode.STOCK_TORCH_COMPILE
     stock_torch_compile_count: int = 0
+    # Number of times the VLLM_STOCK_CAPTURE_KV_PREP hook recorded the slot-mapping
+    # kernel inside a FULL decode cudagraph capture (0 => the prototype did not
+    # engage, e.g. gated off / silent fallback).
+    stock_kv_prep_captures: int = 0
 
     def clone(self) -> "CompilationCounter":
         return copy.deepcopy(self)

@@ -93,6 +93,13 @@ class StockTorchCompileCUDAGraphWrapper:
         self.cudagraph_options = cudagraph_options
         self.concrete_cudagraph_entries: dict[BatchDescriptor, StockCUDAGraphEntry] = {}
 
+        # Optional callable run ONCE inside the cudagraph capture region, right
+        # before the wrapped runnable, and never on replay (the replay path only
+        # calls cudagraph.replay()). Used by the VLLM_STOCK_CAPTURE_KV_PREP
+        # prototype to fold the slot-mapping kernel into the captured decode
+        # graph so it is not launched eagerly each step.
+        self.pre_forward_hook: Callable[[], None] | None = None
+
         StockTorchCompileCUDAGraphWrapper._all_instances.add(self)
 
     def __getattr__(self, key: str) -> Any:
@@ -204,6 +211,11 @@ class StockTorchCompileCUDAGraphWrapper:
                     pool=self.graph_pool,
                     stream=current_stream(),
                 ):
+                    if self.pre_forward_hook is not None:
+                        # Fold GPU-side KV-cache management (slot mapping) into
+                        # the captured graph; it writes persistent buffers the
+                        # attention op reads, ordered before the forward below.
+                        self.pre_forward_hook()
                     output = self.runnable(*args, **kwargs)
                     get_offloader().join_after_forward()
                     if self.cudagraph_options.weak_ref_output:

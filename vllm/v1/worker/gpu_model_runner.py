@@ -53,6 +53,7 @@ from vllm.distributed.parallel_state import (
 from vllm.distributed.weight_transfer.base import SparseWeightPatch
 from vllm.forward_context import (
     BatchDescriptor,
+    get_forward_context,
     set_forward_context,
 )
 from vllm.logger import init_logger
@@ -469,6 +470,12 @@ class GPUModelRunner(
         self.dcp_rank = 0 if self.dcp_world_size <= 1 else get_dcp_group().rank_in_group
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
+
+        # VLLM_STOCK_CAPTURE_KV_PREP prototype: whether the slot-mapping kernel is
+        # folded into the stock FULL decode cudagraph (resolved in load_model once
+        # the backend cudagraph support and wrapper are known). Gates both the
+        # eager-launch skip and the capture hook so they cannot diverge.
+        self.stock_capture_kv_prep = False
 
         # Broadcast PP output for external_launcher (torchrun)
         # to make sure we are synced across pp ranks
@@ -2003,7 +2010,10 @@ class GPUModelRunner(
         self.query_start_loc.np[0] = 0
         self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
         # Note: pad query_start_loc to be non-decreasing, as kernels
-        # like FlashAttention requires that
+        # like FlashAttention requires that. Also load-bearing for
+        # VLLM_STOCK_CAPTURE_KV_PREP: the flat tail makes the in-graph
+        # slot-mapping kernel emit empty ranges for padded reqs, so it writes
+        # only real slots -- see _capture_kv_prep's padding invariant.
         self.query_start_loc.np[num_reqs + 1 :].fill(cu_num_tokens[-1])
         self.query_start_loc.copy_to_gpu()
         query_start_loc = self.query_start_loc.gpu[: num_reqs + 1]
@@ -2124,11 +2134,16 @@ class GPUModelRunner(
         )
         self.seq_lens[num_reqs:].fill_(0)
 
-        self.input_batch.block_table.compute_slot_mapping(
-            num_reqs,
-            self.query_start_loc.gpu[: num_reqs + 1],
-            self.positions[:total_num_scheduled_tokens],
-        )
+        if not self.stock_capture_kv_prep:
+            # When the KV-prep-capture prototype is on, the slot-mapping kernel is
+            # relocated: to the captured graph (FULL decode) via the capture hook,
+            # or re-issued eagerly in execute_model (non-FULL) after the final
+            # cudagraph_mode is known. It must NOT also run here.
+            self.input_batch.block_table.compute_slot_mapping(
+                num_reqs,
+                self.query_start_loc.gpu[: num_reqs + 1],
+                self.positions[:total_num_scheduled_tokens],
+            )
 
         # Copy the tensors to the GPU.
         self._prepare_input_ids(
@@ -4024,6 +4039,10 @@ class GPUModelRunner(
 
             # Fill unused with -1. Needed for reshape_and_cache in full cuda
             # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
+            # Load-bearing for VLLM_STOCK_CAPTURE_KV_PREP: its in-graph kernel
+            # writes only the [0:num_tokens_unpadded] real slots, so this eager
+            # fill is the sole writer of the [unpadded:padded] PAD_SLOT_ID slots
+            # every replay -- see _capture_kv_prep's padding invariant.
             slot_mapping[num_tokens_unpadded:num_tokens_padded].fill_(-1)
 
             return slot_mapping
@@ -4305,6 +4324,23 @@ class GPUModelRunner(
             cudagraph_mode = CUDAGraphMode.NONE
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False
+
+        if self.stock_capture_kv_prep:
+            # Slot-mapping was skipped in _prepare_inputs under this prototype.
+            # Fold it into the FULL decode cudagraph (via the capture hook) only
+            # for uniform-decode FULL steps; otherwise (prefill / mixed / NONE,
+            # incl. the kv_scales first step which just forced NONE above) issue
+            # it eagerly here with the final cudagraph_mode known, using the
+            # unpadded sizes -- byte-identical to the baseline eager launch.
+            run_slotmap_in_graph = (
+                cudagraph_mode == CUDAGraphMode.FULL and batch_desc.uniform
+            )
+            if not run_slotmap_in_graph:
+                self.input_batch.block_table.compute_slot_mapping(
+                    num_reqs,
+                    self.query_start_loc.gpu[: num_reqs + 1],
+                    self.positions[:num_tokens_unpadded],
+                )
 
         # Encoder-decoder models can only compile the pure decode steps where no
         # encoder inputs are present. Use eager for the first pass.
@@ -5328,6 +5364,9 @@ class GPUModelRunner(
                 self.model = StockTorchCompileCUDAGraphWrapper(
                     self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
                 )
+                # NOTE: the VLLM_STOCK_CAPTURE_KV_PREP gate + hook install happens
+                # in initialize_kv_cache (not here): the real per-group block tables
+                # and routed-experts state are only known after KV cache init.
             else:
                 self.model = CUDAGraphWrapper(
                     self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
@@ -5348,6 +5387,134 @@ class GPUModelRunner(
                 )
 
         get_offloader().post_init()
+
+    def _maybe_enable_stock_capture_kv_prep(self) -> None:
+        """Prototype (VLLM_STOCK_CAPTURE_KV_PREP): fold the slot-mapping kernel
+        into the stock FULL decode cudagraph via the wrapper's pre-forward hook,
+        instead of launching it eagerly every step. Enabled only for the simple,
+        verified config (all-attention KV-cache groups, no spec-decode / mrope /
+        xdrope / context-parallel / routed-experts snapshot); otherwise stays fully
+        eager. See benchmarks/compile/decode_e2e_kv_rfc.md.
+
+        Called from initialize_kv_cache (not load_model): the real per-group block
+        tables are only rebuilt after KV-cache init, so the group-count gate below
+        must run here to see them. Routed-experts is gated on the config field
+        (known early) rather than routed_experts_initialized, which is set even
+        later (init_routed_experts_capturer).
+        """
+        if not envs.VLLM_STOCK_CAPTURE_KV_PREP:
+            return
+        reasons = []
+        if self.speculative_config is not None:
+            reasons.append("speculative decoding")
+        if self.uses_mrope or self.uses_xdrope_dim > 0:
+            reasons.append("mrope/xdrope positions")
+        if self.model_config.enable_return_routed_experts:
+            reasons.append("routed-experts slot_mapping snapshot")
+        if (
+            self.dcp_world_size > 1
+            or self.parallel_config.prefill_context_parallel_size > 1
+        ):
+            reasons.append("context parallel")
+        # Multiple attention groups (e.g. GPT-OSS full + sliding-window) are fine:
+        # MultiGroupBlockTable.compute_slot_mapping loops over all of them and the
+        # slot mapping is block-table based for every attention group. Only reject
+        # non-attention groups (Mamba / short-conv / linear-attention) whose KV
+        # state indexing is not the block-table slot-mapping this hook computes.
+        groups = self.kv_cache_config.kv_cache_groups
+        if not all(isinstance(g.kv_cache_spec, AttentionSpec) for g in groups):
+            reasons.append("non-attention KV-cache group (e.g. Mamba)")
+        # EncoderOnlyAttentionSpec subclasses AttentionSpec but _get_slot_mapping
+        # gives it a fresh zeros tensor, not the persistent block_table buffer the
+        # hook writes -- the attention op would read all-zero slots. Reject it.
+        if any(isinstance(g.kv_cache_spec, EncoderOnlyAttentionSpec) for g in groups):
+            reasons.append("encoder-only attention group")
+        if not isinstance(self.model, StockTorchCompileCUDAGraphWrapper):
+            reasons.append("no stock FULL cudagraph wrapper")
+        if reasons:
+            logger.warning(
+                "VLLM_STOCK_CAPTURE_KV_PREP requested but unsupported for this "
+                "config (%s); keeping slot-mapping eager.",
+                ", ".join(reasons),
+            )
+            return
+        self.stock_capture_kv_prep = True
+        self.model.pre_forward_hook = self._capture_kv_prep
+        self._warm_slot_mapping_kernel()
+        logger.info(
+            "VLLM_STOCK_CAPTURE_KV_PREP: slot-mapping folded into the FULL decode "
+            "cudagraph (skipped in the eager per-step path on uniform-decode steps)."
+        )
+
+    def _capture_kv_prep(self) -> None:
+        """Pre-forward hook run ONCE inside the FULL decode cudagraph capture. It
+        records the slot-mapping kernel so every replay recomputes slot_mapping
+        from the persistent block_table / query_start_loc / positions buffers
+        (refreshed eagerly each step) into the persistent slot_mapping buffer that
+        the attention op reads. Padded sizes come from the batch descriptor, so
+        the grid is baked once per captured graph. Never runs on replay.
+
+        Ordering invariant: nothing may read slot_mapping VALUES between
+        _build_attention_metadata and the in-graph kernel that writes [0:R] at
+        replay. FA3 / attention metadata builders only pass slot_mapping through
+        (they do not consume its values), and the one eager value-consumer (the
+        routed-experts snapshot) is already rejected by the gate above.
+
+        Padding invariant (load-bearing): the in-graph kernel writes only the
+        [0:R] real-token slots -- padded rows [R:num_tokens] get empty grid ranges
+        because query_start_loc is flat-padded (np[num_reqs+1:] = cu[-1]) in
+        _prepare_inputs. Those padded slots are set to PAD_SLOT_ID (-1) by the
+        eager slot_mapping[num_tokens_unpadded:num_tokens_padded].fill_(-1) in
+        _get_slot_mappings, which still runs every step under this prototype. If
+        either the flat-pad or the -1 fill is refactored away, [R:num_tokens]
+        would revert to stale real slots and corrupt live KV -- keep both.
+        """
+        bd = get_forward_context().batch_descriptor
+        if bd is None or bd.num_reqs is None:
+            raise RuntimeError(
+                "stock KV-prep capture: FULL decode batch_descriptor must carry "
+                f"num_reqs, got {bd}"
+            )
+        if not bd.uniform:
+            # This hook only owns uniform-decode FULL captures, matching the
+            # execute_model gate run_slotmap_in_graph = (mode == FULL and
+            # bd.uniform). For a non-uniform FULL graph run_slotmap_in_graph is
+            # False, so execute_model launches the kernel eagerly and provides
+            # slot_mapping for that graph; folding it in here would double-issue.
+            return
+        logger.info_once(
+            "VLLM_STOCK_CAPTURE_KV_PREP: recording slot-mapping kernel inside the "
+            "FULL decode cudagraph capture (num_reqs=%d).",
+            bd.num_reqs,
+        )
+        compilation_counter.stock_kv_prep_captures += 1
+        self.input_batch.block_table.compute_slot_mapping(
+            bd.num_reqs,
+            self.query_start_loc.gpu[: bd.num_reqs + 1],
+            self.positions[: bd.num_tokens],
+        )
+
+    def _warm_slot_mapping_kernel(self) -> None:
+        """JIT-compile the slot-mapping Triton kernel before any cudagraph capture
+        records it. Under this prototype its only eager launch (in _prepare_inputs)
+        is skipped, so without this warm-up its first launch would occur inside
+        torch.cuda.graph and abort capture. Bounded positions keep the kernel's
+        block_table reads in range.
+
+        Side effect: transiently dirties the persistent positions /
+        query_start_loc buffers (harmless: refreshed every step before use).
+        """
+        n = min(8, self.max_num_reqs)
+        self.positions[:n].zero_()
+        self.query_start_loc.gpu[: n + 1].copy_(
+            torch.arange(
+                n + 1, device=self.device, dtype=self.query_start_loc.gpu.dtype
+            )
+        )
+        self.input_batch.block_table.compute_slot_mapping(
+            n, self.query_start_loc.gpu[: n + 1], self.positions[:n]
+        )
+        torch.accelerator.synchronize()
 
     def _compile_model_stock(self) -> None:
         """Compile self.model (and any spec-decode drafter model) with stock
@@ -6067,6 +6234,17 @@ class GPUModelRunner(
                 # builder. Without this, stale block IDs from finished
                 # requests can corrupt Mamba state.
                 self.input_batch.block_table.commit_block_table(num_reqs_padded)
+
+                if (
+                    self.stock_capture_kv_prep
+                    and cudagraph_runtime_mode == CUDAGraphMode.FULL
+                ):
+                    # The capture hook recomputes slot_mapping from these positions
+                    # inside the graph; bound them (block index 0) so the captured
+                    # kernel indexes the committed block_table in range. Replay reads
+                    # the real positions refreshed each step, so this only affects
+                    # the discarded capture-time forward.
+                    self.positions[:num_tokens_padded].zero_()
 
                 pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
                 attn_metadata, _ = self._build_attention_metadata(
@@ -7563,6 +7741,11 @@ class GPUModelRunner(
             else:
                 kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
+
+        if not is_profiling:
+            # Resolve the KV-prep-capture gate now that the real per-group block
+            # tables exist and the KV-cache config is known (see method docstring).
+            self._maybe_enable_stock_capture_kv_prep()
 
     def _get_attention_kv_cache_gid(self) -> int:
         """Find the KV cache group index for attention layers.
