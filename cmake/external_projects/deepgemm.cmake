@@ -39,10 +39,36 @@ else()
   set(_deepgemm_bin "${_deepgemm_fc_root}/deepgemm-build")
   set(_deepgemm_sub "${_deepgemm_fc_root}/deepgemm-subbuild")
 
+  set(_deepgemm_reuse_existing FALSE)
   if(EXISTS "${_deepgemm_src}/csrc/python_api.cpp")
+    if(EXISTS "${_deepgemm_src}/.git")
+      execute_process(
+        COMMAND git -C "${_deepgemm_src}" rev-parse HEAD
+        OUTPUT_VARIABLE _deepgemm_existing_head
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _deepgemm_head_status
+      )
+      if(_deepgemm_head_status EQUAL 0
+         AND _deepgemm_existing_head STREQUAL _DEEPGEMM_UPSTREAM_TAG)
+        set(_deepgemm_reuse_existing TRUE)
+      else()
+        message(STATUS
+          "Refreshing DeepGEMM checkout at ${_deepgemm_src}: "
+          "found '${_deepgemm_existing_head}', expected "
+          "'${_DEEPGEMM_UPSTREAM_TAG}'.")
+      endif()
+    else()
+      message(STATUS
+        "Refreshing DeepGEMM checkout at ${_deepgemm_src}: "
+        "existing source tree is not a git checkout.")
+    endif()
+  endif()
+
+  if(_deepgemm_reuse_existing)
     set(deepgemm_SOURCE_DIR "${_deepgemm_src}")
     set(deepgemm_BINARY_DIR "${_deepgemm_bin}")
   else()
+    file(REMOVE_RECURSE "${_deepgemm_src}" "${_deepgemm_bin}" "${_deepgemm_sub}")
     FetchContent_Populate(
       deepgemm
       SUBBUILD_DIR "${_deepgemm_sub}"

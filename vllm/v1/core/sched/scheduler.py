@@ -4,7 +4,7 @@ import itertools
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
@@ -65,25 +65,6 @@ from vllm.v1.utils import record_function_or_nullcontext
 logger = init_logger(__name__)
 
 
-@dataclass
-class DSCDiagnosticSnapshot:
-    decode_request_ratio: float
-    waiting_request_ratio: float
-    oldest_waiting_age_sec: float
-    oldest_waiting_age_ratio: float
-    async_placeholder_ratio: float
-    pending_spec_request_ratio: float
-    pressure_score: float
-    window_draft_tokens: int
-    window_accepted_tokens: int
-    window_rejected_tokens: int
-    window_invalid_tokens: int
-    spec_acceptance_rate: float
-    spec_rejection_rate: float
-    spec_invalid_rate: float
-    spec_value_score: float
-
-
 class Scheduler(SchedulerInterface):
     def __init__(
         self,
@@ -125,7 +106,6 @@ class Scheduler(SchedulerInterface):
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
-        self.max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_scheduled_tokens = (
             self.scheduler_config.max_num_scheduled_tokens
             if self.scheduler_config.max_num_scheduled_tokens is not None
@@ -208,10 +188,9 @@ class Scheduler(SchedulerInterface):
         # requests so that they can free the cached states for those requests.
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
-        # Monotonic enqueue timestamps for requests currently tracked in
-        # waiting/skipped_waiting. Keep this separate from request.arrival_time,
-        # which is wall-clock based and intended for user-facing latency stats.
-        self._waiting_enqueue_monotonic: dict[str, float] = {}
+
+        # IDs of requests preempted since the last call to schedule().
+        self.reset_preempted_req_ids: set[str] = set()
 
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
@@ -249,32 +228,6 @@ class Scheduler(SchedulerInterface):
             else EncoderCacheManager(cache_size=encoder_cache_size)
         )
 
-        self._unieai_dsc_enabled = False
-        self._unieai_dsc_dflash_request_context_gate = False
-        self._unieai_dsc_method = ""
-        self._unieai_dsc_context_gate_logged_req_ids: set[str] = set()
-        self._unieai_dsc_spec_enabled = True
-        self._unieai_dsc_disable_decode_tokens = 0
-        self._unieai_dsc_enable_decode_tokens = 0
-        self._unieai_dsc_disable_waiting_reqs = 0
-        self._unieai_dsc_enable_waiting_reqs = 0
-        self._unieai_dsc_disable_pressure_score = 1.0
-        self._unieai_dsc_enable_pressure_score = 0.0
-        self._unieai_dsc_switch_cooldown_sec = 0.0
-        self._unieai_dsc_last_switch_time = 0.0
-        self._unieai_dsc_disable_condition_streak = 0
-        self._unieai_dsc_enable_condition_streak = 0
-        self._unieai_dsc_disable_required_samples = 0
-        self._unieai_dsc_enable_required_samples = 0
-        self._unieai_dsc_last_status_log_time = 0.0
-        self._unieai_dsc_status_log_interval_sec = 5.0
-        self._unieai_dsc_last_eval_time = 0.0
-        self._unieai_dsc_eval_interval_sec = 5.0
-        self._unieai_dsc_window_draft_tokens = 0
-        self._unieai_dsc_window_accepted_tokens = 0
-        self._unieai_dsc_window_invalid_tokens = 0
-
-
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
@@ -302,78 +255,6 @@ class Scheduler(SchedulerInterface):
                 # anchor itself is the first prediction position (no separate bonus
                 # query), so it needs exactly num_spec_tokens lookahead slots.
                 self.num_lookahead_tokens = self.num_spec_tokens
-                
-            if (
-                speculative_config.method
-                in ("ngram", "ngram_gpu", "mtp", "dflash")
-                and speculative_config.unieai_dsc
-            ):
-                self._unieai_dsc_enabled = True
-                self._unieai_dsc_method = speculative_config.method
-                self._unieai_dsc_dflash_request_context_gate = (
-                    speculative_config.use_dflash()
-                )
-                decode_capacity = max(
-                    1, min(self.max_num_running_reqs, self.max_num_scheduled_tokens)
-                )
-                # Auto threshold should not scale unbounded with max_num_seqs;
-                # a cap keeps switching responsive on large-capacity servers.
-                auto_disable = max(1, min(128, decode_capacity // 2))
-                disable_decode_tokens = (
-                    speculative_config.unieai_dsc_disable_decode_tokens
-                    or auto_disable
-                )
-                enable_decode_tokens = (
-                    speculative_config.unieai_dsc_enable_decode_tokens
-                )
-                if enable_decode_tokens is None:
-                    enable_decode_tokens = max(1, int(disable_decode_tokens * 0.8))
-                disable_waiting_reqs = max(
-                    32, min(128, self.max_num_running_reqs // 8)
-                )
-                enable_waiting_reqs = max(16, int(disable_waiting_reqs * 0.625))
-                self._unieai_dsc_disable_decode_tokens = disable_decode_tokens
-                self._unieai_dsc_enable_decode_tokens = min(
-                    enable_decode_tokens, disable_decode_tokens
-                )
-                self._unieai_dsc_disable_waiting_reqs = disable_waiting_reqs
-                self._unieai_dsc_enable_waiting_reqs = min(
-                    enable_waiting_reqs, disable_waiting_reqs
-                )
-                (
-                    self._unieai_dsc_disable_pressure_score,
-                    self._unieai_dsc_enable_pressure_score,
-                ) = self._get_unieai_dsc_pressure_thresholds(
-                    speculative_config.method
-                )
-                self._unieai_dsc_switch_cooldown_sec = (
-                    speculative_config.unieai_dsc_switch_cooldown_sec
-                )
-                self._unieai_dsc_disable_required_samples = 2
-                self._unieai_dsc_enable_required_samples = 3
-                logger.info(
-                    "UNIEAI_DSC_INIT policy=pressure method=%s "
-                    "disable_pressure=%.3f enable_pressure=%.3f "
-                    "disable_required_samples=%d "
-                    "enable_required_samples=%d switch_cooldown_sec=%.2f "
-                    "disable_decode_tokens=%d enable_decode_tokens=%d "
-                    "disable_waiting_reqs=%d enable_waiting_reqs=%d "
-                    "max_num_seqs=%d max_num_scheduled_tokens=%d "
-                    "max_num_batched_tokens=%d",
-                    speculative_config.method,
-                    self._unieai_dsc_disable_pressure_score,
-                    self._unieai_dsc_enable_pressure_score,
-                    self._unieai_dsc_disable_required_samples,
-                    self._unieai_dsc_enable_required_samples,
-                    self._unieai_dsc_switch_cooldown_sec,
-                    self._unieai_dsc_disable_decode_tokens,
-                    self._unieai_dsc_enable_decode_tokens,
-                    self._unieai_dsc_disable_waiting_reqs,
-                    self._unieai_dsc_enable_waiting_reqs,
-                    self.max_num_running_reqs,
-                    self.max_num_scheduled_tokens,
-                    self.max_num_batched_tokens,
-                )
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -547,11 +428,6 @@ class Scheduler(SchedulerInterface):
 
         # For logging.
         scheduled_timestamp = time.monotonic()
-        use_spec_decode = self._should_use_spec_decode()
-        step_max_num_scheduled_tokens = self._get_step_max_num_scheduled_tokens(
-            use_spec_decode
-        )
-        step_num_lookahead_tokens = self.num_lookahead_tokens if use_spec_decode else 0
 
         self.kv_cache_manager.new_step_starts()
 
@@ -565,29 +441,6 @@ class Scheduler(SchedulerInterface):
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
-            request_use_spec_decode = (
-                use_spec_decode
-                and self._request_allows_unieai_dsc_spec_decode(request)
-            )
-            request_num_lookahead_tokens = (
-                self.num_lookahead_tokens if request_use_spec_decode else 0
-            )
-            if (
-                not request_use_spec_decode
-                and self._unieai_dsc_dflash_request_context_gate
-                and request.request_id
-                not in self._unieai_dsc_context_gate_logged_req_ids
-            ):
-                logger.info(
-                    "UNIEAI_DSC_CONTEXT_GATE_ENTER request_id=%s "
-                    "context_len=%d threshold=%d",
-                    request.request_id,
-                    request.num_tokens,
-                    4096,
-                )
-                self._unieai_dsc_context_gate_logged_req_ids.add(request.request_id)
-            if not request_use_spec_decode and request.spec_token_ids:
-                request.spec_token_ids = []
 
             if (
                 request.num_output_placeholders > 0
@@ -785,7 +638,10 @@ class Scheduler(SchedulerInterface):
             step_skipped_waiting = create_request_queue(self.policy)
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
-                if len(self.running) == self.max_num_running_reqs:
+                # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
+                # in `running` but still hold a model-runner request slot.
+                num_running = len(self.running) + self.num_waiting_for_streaming_input
+                if num_running >= self.max_num_running_reqs:
                     break
 
                 request_queue = self._select_waiting_queue_for_scheduling()
@@ -865,9 +721,9 @@ class Scheduler(SchedulerInterface):
                                 preempted=request.num_preemptions > 0,
                             )
                     else:
-                    new_computed_blocks, num_new_local_computed_tokens = (
-                        self.kv_cache_manager.get_computed_blocks(request)
-                    )
+                        new_computed_blocks, num_new_local_computed_tokens = (
+                            self.kv_cache_manager.get_computed_blocks(request)
+                        )
 
                     # In case of hybrid models, obtain hint for Marconi-style APC logic
                     if self.has_mamba_layers:
@@ -955,8 +811,10 @@ class Scheduler(SchedulerInterface):
 
                     # Pad new decode requests to uniform spec decoding size to
                     # preserve full cudagraph for this step.
+                    # Not for diffusion where draft tokens can't be padded.
                     if (
                         (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
+                        and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
                         and (scheduled_running_reqs and not prefill_scheduled)
                     ):
@@ -1015,9 +873,6 @@ class Scheduler(SchedulerInterface):
                     )
                     if num_new_tokens == 0:
                         break
-
-                if not self._request_allows_unieai_dsc_spec_decode(request):
-                    request.spec_token_ids = []
 
                 # Handles an edge case when P/D Disaggregation
                 # is used with Spec Decoding where an
@@ -1116,7 +971,6 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 self.running.append(request)
-                self._clear_waiting_request_enqueued(request_id)
                 if self.log_stats:
                     request.record_event(
                         EngineCoreEventType.SCHEDULED, scheduled_timestamp
@@ -1223,13 +1077,14 @@ class Scheduler(SchedulerInterface):
 
         # Record the request ids that were scheduled in this step (MRV1-only).
         if not self.use_v2_model_runner:
-        self.prev_step_scheduled_req_ids.clear()
-        self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
+            self.prev_step_scheduled_req_ids.clear()
+            self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
+        # Drain new attention block ids every step so the manager-side list
+        # does not grow unbounded; only kv-cache zeroing consumes them.
+        new_attn_block_ids = self.kv_cache_manager.take_new_block_ids()
         new_block_ids_to_zero = (
-            (self.kv_cache_manager.take_new_block_ids() or None)
-            if self.needs_kv_cache_zeroing
-            else None
+            (new_attn_block_ids or None) if self.needs_kv_cache_zeroing else None
         )
 
         # Dynamic speculative decoding: compute optimal K
@@ -1247,7 +1102,7 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             num_common_prefix_blocks=num_common_prefix_blocks,
-            preempted_req_ids={req.request_id for req in preempted_reqs},
+            preempted_req_ids=self.reset_preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
             # It contains the request IDs that are finished in between
@@ -1308,8 +1163,8 @@ class Scheduler(SchedulerInterface):
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
         # Put the request back to the waiting queue.
-        self._mark_waiting_request_enqueued(request, reset=True, now=timestamp)
         self.waiting.prepend_request(request)
+        self.reset_preempted_req_ids.add(request.request_id)
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER
@@ -1354,10 +1209,11 @@ class Scheduler(SchedulerInterface):
                 }
             )
 
-        # Clear the finished request IDs.
-        # NOTE: We shouldn't do self.finished_req_ids.clear() here because
-        # it will also affect the scheduler output.
+        # Clear the finished and preempted request IDs.
+        # NOTE: We shouldn't just clear() here because it will also affect
+        # the scheduler output.
         self.finished_req_ids = set()
+        self.reset_preempted_req_ids = set()
 
     def _update_request_as_session(
         self, session: Request, update: StreamingUpdate
@@ -1398,7 +1254,6 @@ class Scheduler(SchedulerInterface):
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             self.num_waiting_for_streaming_input -= 1
         session.status = RequestStatus.WAITING
-        self._mark_waiting_request_enqueued(session, reset=True)
 
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
@@ -1443,7 +1298,7 @@ class Scheduler(SchedulerInterface):
                 resumed_req_ids.add(req_id)
             if not self.use_v2_model_runner:  # noqa: SIM102
                 if req_id not in self.prev_step_scheduled_req_ids:
-                all_token_ids[req_id] = req.all_token_ids.copy()
+                    all_token_ids[req_id] = req.all_token_ids.copy()
             new_block_ids.append(
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
             )
@@ -1733,18 +1588,17 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
-            if scheduled_spec_token_ids and (
-                generated_token_ids or self.num_sampled_tokens_per_step == 0
+            # Skip a stale frame still pending discard (async_tokens_to_discard
+            # > 0): its pre-reset rejection count would underflow the counters.
+            if (
+                scheduled_spec_token_ids
+                and (generated_token_ids or self.num_sampled_tokens_per_step == 0)
+                and request.async_tokens_to_discard == 0
             ):
                 num_draft_tokens = len(scheduled_spec_token_ids)
                 num_sampled = self.num_sampled_tokens_per_step
                 num_accepted = max(len(generated_token_ids) - num_sampled, 0)
                 num_rejected = num_draft_tokens - num_accepted
-                num_invalid_spec_tokens = 0
-                if scheduler_output.num_invalid_spec_tokens:
-                    num_invalid_spec_tokens = (
-                        scheduler_output.num_invalid_spec_tokens.get(req_id, 0)
-                    )
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
                 # tokens and rejections. If some tokens are rejected,
@@ -1756,11 +1610,6 @@ class Scheduler(SchedulerInterface):
                 # the scheduled spec tokens count and so is similarly adjusted.
                 if request.num_output_placeholders > 0:
                     request.num_output_placeholders -= num_rejected
-                self._observe_unieai_dsc_spec_activity(
-                    num_draft_tokens=num_draft_tokens,
-                    num_accepted_tokens=num_accepted,
-                    num_invalid_tokens=num_invalid_spec_tokens,
-                )
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
                     num_draft_tokens=num_draft_tokens,
@@ -1794,14 +1643,23 @@ class Scheduler(SchedulerInterface):
             if new_token_ids and self.structured_output_manager.should_advance(request):
                 struct_output_request = request.structured_output_request
                 assert struct_output_request is not None
-                assert struct_output_request.grammar is not None
-                if not struct_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
-                    req_id, new_token_ids
+                grammar = struct_output_request.grammar
+                assert grammar is not None
+                # new_token_ids can be a mixed block of reasoning content, then
+                # the reasoning end marker, then the start of the grammar content.
+                # Trim the reasoning content so the grammar only sees grammar content.
+                advance_token_ids = (
+                    self.structured_output_manager.trim_reasoning_for_advance(
+                        request, new_token_ids
+                    )
+                )
+                if advance_token_ids and not grammar.accept_tokens(
+                    req_id, advance_token_ids
                 ):
                     logger.error(
                         "Unexpected: grammar rejected tokens %s for request %s. "
                         "Terminating request.",
-                        new_token_ids,
+                        advance_token_ids,
                         req_id,
                     )
                     request.status = RequestStatus.FINISHED_ERROR
@@ -2006,26 +1864,10 @@ class Scheduler(SchedulerInterface):
         )
 
     def _enqueue_waiting_request(self, request: Request) -> None:
-        self._mark_waiting_request_enqueued(request, reset=True)
         if self._is_blocked_waiting_status(request.status):
             self.skipped_waiting.add_request(request)
         else:
             self.waiting.add_request(request)
-
-    def _mark_waiting_request_enqueued(
-        self,
-        request: Request,
-        *,
-        reset: bool,
-        now: float | None = None,
-    ) -> None:
-        if now is None:
-            now = time.monotonic()
-        if reset or request.request_id not in self._waiting_enqueue_monotonic:
-            self._waiting_enqueue_monotonic[request.request_id] = now
-
-    def _clear_waiting_request_enqueued(self, request_id: str) -> None:
-        self._waiting_enqueue_monotonic.pop(request_id, None)
 
     def _select_waiting_queue_for_scheduling(self) -> RequestQueue | None:
         if self.policy == SchedulingPolicy.FCFS:
@@ -2109,7 +1951,6 @@ class Scheduler(SchedulerInterface):
                 self.encoder_cache_manager.free_encoder_input(request, input_id)
 
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
-        use_spec_decode = self._should_use_spec_decode()
         for req_id, spec_token_ids in zip(
             draft_token_ids.req_ids,
             draft_token_ids.draft_token_ids,
@@ -2125,289 +1966,11 @@ class Scheduler(SchedulerInterface):
                     request.spec_token_ids = []
                 continue
 
-            if (
-                not use_spec_decode
-                or not self._request_allows_unieai_dsc_spec_decode(request)
-            ):
-                if request.spec_token_ids:
-                    request.spec_token_ids = []
-                continue
-
             # Add newly generated spec token ids to the request.
             if self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
                 spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
             request.spec_token_ids = spec_token_ids
-
-    def _get_running_decode_token_load(self) -> int:
-        return sum(
-            1
-            for request in self.running
-            if request.num_computed_tokens >= request.num_prompt_tokens
-        )
-
-    def _get_waiting_request_load(self) -> int:
-        return len(self.waiting)
-
-    def _get_oldest_waiting_age_sec(self, now: float) -> float:
-        if not (self.waiting or self.skipped_waiting):
-            return 0.0
-        oldest_waiting_enqueue = min(
-            self._waiting_enqueue_monotonic.get(request.request_id, now)
-            for request in itertools.chain(self.waiting, self.skipped_waiting)
-        )
-        return max(0.0, now - oldest_waiting_enqueue)
-
-    def _get_async_placeholder_load(self) -> int:
-        return sum(request.num_output_placeholders for request in self.running)
-
-    def _get_pending_spec_request_load(self) -> int:
-        return sum(
-            1
-            for request in self.running
-            if request.spec_token_ids
-            and self._request_allows_unieai_dsc_spec_decode(request)
-        )
-
-    def _observe_unieai_dsc_spec_activity(
-        self,
-        num_draft_tokens: int,
-        num_accepted_tokens: int,
-        num_invalid_tokens: int,
-    ) -> None:
-        if not self._unieai_dsc_enabled:
-            return
-        valid_draft_tokens = max(0, num_draft_tokens - num_invalid_tokens)
-        accepted_tokens = min(num_accepted_tokens, valid_draft_tokens)
-        self._unieai_dsc_window_draft_tokens += valid_draft_tokens
-        self._unieai_dsc_window_accepted_tokens += accepted_tokens
-        self._unieai_dsc_window_invalid_tokens += max(0, num_invalid_tokens)
-
-    def _collect_unieai_dsc_diagnostics(
-        self,
-        now: float,
-        decode_token_load: int,
-        waiting_request_load: int,
-    ) -> DSCDiagnosticSnapshot:
-        decode_capacity = max(1, self.max_num_running_reqs)
-        waiting_capacity = max(1, self.max_num_running_reqs)
-        scheduled_capacity = max(1, self.max_num_scheduled_tokens)
-        waiting_age_cap_sec = max(
-            30.0,
-            self._unieai_dsc_switch_cooldown_sec,
-            self._unieai_dsc_status_log_interval_sec * 6,
-        )
-
-        decode_request_ratio = min(1.0, decode_token_load / decode_capacity)
-        waiting_request_ratio = min(1.0, waiting_request_load / waiting_capacity)
-        oldest_waiting_age_sec = self._get_oldest_waiting_age_sec(now)
-        oldest_waiting_age_ratio = min(1.0, oldest_waiting_age_sec / waiting_age_cap_sec)
-        async_placeholder_ratio = min(
-            1.0, self._get_async_placeholder_load() / scheduled_capacity
-        )
-        pending_spec_request_ratio = min(
-            1.0, self._get_pending_spec_request_load() / decode_capacity
-        )
-        pressure_score = (
-            0.35 * decode_request_ratio
-            + 0.30 * waiting_request_ratio
-            + 0.20 * oldest_waiting_age_ratio
-            + 0.15 * async_placeholder_ratio
-        )
-
-        window_draft_tokens = self._unieai_dsc_window_draft_tokens
-        window_accepted_tokens = self._unieai_dsc_window_accepted_tokens
-        window_invalid_tokens = self._unieai_dsc_window_invalid_tokens
-        window_rejected_tokens = max(
-            0, window_draft_tokens - window_accepted_tokens
-        )
-        if window_draft_tokens > 0:
-            spec_acceptance_rate = window_accepted_tokens / window_draft_tokens
-            spec_rejection_rate = window_rejected_tokens / window_draft_tokens
-            spec_invalid_rate = window_invalid_tokens / window_draft_tokens
-            spec_value_score = max(
-                0.0, min(1.0, spec_acceptance_rate - spec_invalid_rate)
-            )
-        else:
-            spec_acceptance_rate = float("nan")
-            spec_rejection_rate = float("nan")
-            spec_invalid_rate = float("nan")
-            spec_value_score = float("nan")
-
-        return DSCDiagnosticSnapshot(
-            decode_request_ratio=decode_request_ratio,
-            waiting_request_ratio=waiting_request_ratio,
-            oldest_waiting_age_sec=oldest_waiting_age_sec,
-            oldest_waiting_age_ratio=oldest_waiting_age_ratio,
-            async_placeholder_ratio=async_placeholder_ratio,
-            pending_spec_request_ratio=pending_spec_request_ratio,
-            pressure_score=pressure_score,
-            window_draft_tokens=window_draft_tokens,
-            window_accepted_tokens=window_accepted_tokens,
-            window_rejected_tokens=window_rejected_tokens,
-            window_invalid_tokens=window_invalid_tokens,
-            spec_acceptance_rate=spec_acceptance_rate,
-            spec_rejection_rate=spec_rejection_rate,
-            spec_invalid_rate=spec_invalid_rate,
-            spec_value_score=spec_value_score,
-        )
-
-    @staticmethod
-    def _get_unieai_dsc_pressure_thresholds(method: str) -> tuple[float, float]:
-        if method in ("ngram", "ngram_gpu"):
-            return 0.10, 0.06
-        if method == "mtp":
-            return 0.50, 0.20
-        return 0.12, 0.08
-
-    def _reset_unieai_dsc_diagnostics_window(self) -> None:
-        self._unieai_dsc_window_draft_tokens = 0
-        self._unieai_dsc_window_accepted_tokens = 0
-        self._unieai_dsc_window_invalid_tokens = 0
-
-    def _get_step_max_num_scheduled_tokens(self, use_spec_decode: bool) -> int:
-        if use_spec_decode or self._has_pending_spec_decode_tokens():
-            return self.max_num_scheduled_tokens
-        return self.max_num_batched_tokens
-
-    def _has_pending_spec_decode_tokens(self) -> bool:
-        return any(
-            request.spec_token_ids
-            and self._request_allows_unieai_dsc_spec_decode(request)
-            for request in self.running
-        )
-
-    def _request_allows_unieai_dsc_spec_decode(self, request: Request) -> bool:
-        return not (
-            self._unieai_dsc_enabled
-            and self._unieai_dsc_dflash_request_context_gate
-            and request.num_tokens >= 4096
-        )
-
-    def _should_use_spec_decode(self) -> bool:
-        if not self._unieai_dsc_enabled:
-            return True
-
-        decode_token_load = self._get_running_decode_token_load()
-        waiting_request_load = self._get_waiting_request_load()
-        now = time.monotonic()
-
-        if now - self._unieai_dsc_last_eval_time >= self._unieai_dsc_eval_interval_sec:
-            self._unieai_dsc_last_eval_time = now
-
-            if self._unieai_dsc_spec_enabled:
-                diagnostics = self._collect_unieai_dsc_diagnostics(
-                    now, decode_token_load, waiting_request_load
-                )
-                disable_condition = (
-                    diagnostics.pressure_score
-                    >= self._unieai_dsc_disable_pressure_score
-                )
-                if disable_condition:
-                    self._unieai_dsc_disable_condition_streak += 1
-                else:
-                    self._unieai_dsc_disable_condition_streak = 0
-                self._unieai_dsc_enable_condition_streak = 0
-
-                if (
-                    self._unieai_dsc_disable_condition_streak
-                    >= self._unieai_dsc_disable_required_samples
-                ):
-                    self._unieai_dsc_spec_enabled = False
-                    self._unieai_dsc_last_switch_time = now
-                    self._unieai_dsc_disable_condition_streak = 0
-                    logger.info(
-                        "UNIEAI_DSC_SWITCH from=spec_decode to=normal_decode "
-                        "method=%s dec=%d wait=%d age=%.2fs "
-                        "pressure=%.3f value=%.3f disable_streak=%d "
-                        "disable_pressure=%.3f cooldown=%.2fs",
-                        self._unieai_dsc_method,
-                        decode_token_load,
-                        waiting_request_load,
-                        diagnostics.oldest_waiting_age_sec,
-                        diagnostics.pressure_score,
-                        diagnostics.spec_value_score,
-                        self._unieai_dsc_disable_required_samples,
-                        self._unieai_dsc_disable_pressure_score,
-                        self._unieai_dsc_switch_cooldown_sec,
-                    )
-            else:
-                if (
-                    now - self._unieai_dsc_last_switch_time
-                    >= self._unieai_dsc_switch_cooldown_sec
-                ):
-                    diagnostics = self._collect_unieai_dsc_diagnostics(
-                        now, decode_token_load, waiting_request_load
-                    )
-                    enable_condition = (
-                        diagnostics.pressure_score
-                        <= self._unieai_dsc_enable_pressure_score
-                    )
-                    if enable_condition:
-                        self._unieai_dsc_enable_condition_streak += 1
-                    else:
-                        self._unieai_dsc_enable_condition_streak = 0
-                    self._unieai_dsc_disable_condition_streak = 0
-
-                    if (
-                        self._unieai_dsc_enable_condition_streak
-                        >= self._unieai_dsc_enable_required_samples
-                    ):
-                        self._unieai_dsc_spec_enabled = True
-                        self._unieai_dsc_last_switch_time = now
-                        self._unieai_dsc_enable_condition_streak = 0
-                        logger.info(
-                            "UNIEAI_DSC_SWITCH from=normal_decode to=spec_decode "
-                            "method=%s dec=%d wait=%d age=%.2fs "
-                            "pressure=%.3f value=%.3f enable_streak=%d "
-                            "enable_pressure=%.3f cooldown=%.2fs",
-                            self._unieai_dsc_method,
-                            decode_token_load,
-                            waiting_request_load,
-                            diagnostics.oldest_waiting_age_sec,
-                            diagnostics.pressure_score,
-                            diagnostics.spec_value_score,
-                            self._unieai_dsc_enable_required_samples,
-                            self._unieai_dsc_enable_pressure_score,
-                            self._unieai_dsc_switch_cooldown_sec,
-                        )
-                else:
-                    self._unieai_dsc_enable_condition_streak = 0
-        decision = self._unieai_dsc_spec_enabled
-        self._log_unieai_dsc_state(
-            now, decode_token_load, waiting_request_load, decision
-        )
-        return decision
-
-    def _log_unieai_dsc_state(
-        self,
-        now: float,
-        decode_token_load: int,
-        waiting_request_load: int,
-        decision_use_spec_decode: bool,
-    ) -> None:
-        if (
-            now - self._unieai_dsc_last_status_log_time
-            < self._unieai_dsc_status_log_interval_sec
-        ):
-            return
-        diagnostics = self._collect_unieai_dsc_diagnostics(
-            now, decode_token_load, waiting_request_load
-        )
-        logger.info(
-            "UNIEAI_DSC_STATE spec=%d dec=%d wait=%d age=%.2fs "
-            "pressure=%.3f value=%.3f drafted=%d rejected=%d",
-            decision_use_spec_decode,
-            decode_token_load,
-            waiting_request_load,
-            diagnostics.oldest_waiting_age_sec,
-            diagnostics.pressure_score,
-            diagnostics.spec_value_score,
-            diagnostics.window_draft_tokens,
-            diagnostics.window_rejected_tokens,
-        )
-        self._unieai_dsc_last_status_log_time = now
-        self._reset_unieai_dsc_diagnostics_window()
 
     def update_draft_token_ids_in_output(
         self, draft_token_ids: DraftTokenIds, scheduler_output: SchedulerOutput
@@ -2548,8 +2111,6 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
         self.finished_req_ids.add(request_id)
-        self._clear_waiting_request_enqueued(request_id)
-        self._unieai_dsc_context_gate_logged_req_ids.discard(request_id)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
 

@@ -33,6 +33,14 @@ INSTALL_LOG="${INSTALL_LOG:-install.log}"
 AUTO_INSTALL_CUDA_DEV_HEADERS="${AUTO_INSTALL_CUDA_DEV_HEADERS:-1}"
 AUTO_INSTALL_SYSTEM_DEPS="${AUTO_INSTALL_SYSTEM_DEPS:-1}"
 UV_TORCH_BACKEND="${UV_TORCH_BACKEND:-${TORCH_BACKEND:-auto}}"
+LOG_FLASH_ATTN_BUILD="${LOG_FLASH_ATTN_BUILD:-1}"
+REFRESH_DEEPGEMM="${REFRESH_DEEPGEMM:-1}"
+
+if [[ "${VLLM_USE_PRECOMPILED:-}" =~ ^(1|true)$ ]]; then
+    echo "error: scripts/install.sh only supports installing vLLM from source." >&2
+    echo "Unset VLLM_USE_PRECOMPILED and rerun the installer." >&2
+    exit 1
+fi
 
 append_cmake_arg() {
     local arg="$1"
@@ -40,6 +48,16 @@ append_cmake_arg() {
         export CMAKE_ARGS="${CMAKE_ARGS:+${CMAKE_ARGS} }${arg}"
     fi
 }
+
+enable_flash_attn_build_logging() {
+    export VERBOSE="${VERBOSE:-1}"
+    append_cmake_arg "-DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE"
+    append_cmake_arg "-DFETCHCONTENT_QUIET=OFF"
+}
+
+if [[ "${LOG_FLASH_ATTN_BUILD}" =~ ^(1|true)$ ]]; then
+    enable_flash_attn_build_logging
+fi
 
 prepend_env_path() {
     local var_name="$1"
@@ -52,6 +70,30 @@ prepend_env_path() {
             export "${var_name}=${path}${current:+:${current}}"
             ;;
     esac
+}
+
+clean_stale_deepgemm_artifacts() {
+    if [[ ! "${REFRESH_DEEPGEMM}" =~ ^(1|true)$ ]]; then
+        return 0
+    fi
+
+    local artifact
+    local -a deepgemm_paths=(
+        ".deps/deepgemm-src"
+        ".deps/deepgemm-build"
+        ".deps/deepgemm-subbuild"
+        "build/_deps/deepgemm-src"
+        "build/_deps/deepgemm-build"
+        "build/_deps/deepgemm-subbuild"
+        "vllm/third_party/deep_gemm"
+    )
+
+    for artifact in "${deepgemm_paths[@]}"; do
+        if [[ -e "${artifact}" ]]; then
+            echo "Removing stale DeepGEMM artifact: ${artifact}"
+            rm -rf -- "${artifact}"
+        fi
+    done
 }
 
 ensure_uv() {
@@ -119,6 +161,14 @@ run_logged() {
         "$@" 2>&1 | tee "${INSTALL_LOG}"
     fi
     return "${PIPESTATUS[0]}"
+}
+
+install_log_indicates_flash_attn_fetch_failure() {
+    [[ -f "${INSTALL_LOG}" ]] || return 1
+
+    grep -Eq \
+        "Errors during submodule fetch:|Build step for vllm-flash-attn failed|fatal: remote error: upload-pack: not our ref" \
+        "${INSTALL_LOG}"
 }
 
 join_by() {
@@ -1074,7 +1124,7 @@ if ! refresh_cuda_environment; then
         scanned_locations+=("${include_root}")
     done < <(find_default_cuda_roots)
     missing_headers="$(describe_missing_cuda_headers "${scanned_locations[@]}")"
-    if [[ "${VLLM_USE_PRECOMPILED:-}" =~ ^(1|true)$ || "${ALLOW_NO_CUDA_HEADERS:-0}" == "1" ]]; then
+    if [[ "${ALLOW_NO_CUDA_HEADERS:-0}" == "1" ]]; then
         echo "warning: CUDA headers (cublas_v2.h/cusparse.h/cusolverDn.h/nvrtc.h) not found; build may fail without dev headers." >&2
     elif [[ "${AUTO_INSTALL_CUDA_DEV_HEADERS}" =~ ^(1|true)$ ]] && install_cuda_dev_headers "${CUDA_HOME_DETECTED:-}"; then
         echo "Rechecking CUDA environment after CUDA toolkit installation." >&2
@@ -1097,7 +1147,6 @@ if ! refresh_cuda_environment; then
         if [[ "${AUTO_INSTALL_CUDA_DEV_HEADERS}" =~ ^(0|false)$ ]]; then
             echo "Automatic package installation is disabled via AUTO_INSTALL_CUDA_DEV_HEADERS=${AUTO_INSTALL_CUDA_DEV_HEADERS}." >&2
         fi
-        echo "If you cannot install headers, try: VLLM_USE_PRECOMPILED=1 ./scripts/install.sh" >&2
         exit 1
     fi
 fi
@@ -1122,6 +1171,9 @@ fi
 if [[ -n "${CMAKE_ARGS:-}" ]]; then
     echo "Using CMAKE_ARGS=${CMAKE_ARGS}"
 fi
+if [[ "${LOG_FLASH_ATTN_BUILD}" =~ ^(1|true)$ ]]; then
+    echo "Verbose flash-attention build logging is enabled."
+fi
 
 # When build isolation is disabled, setuptools.build_meta imports run inside the
 # active environment. Install the mirrored build requirements first so setup.py
@@ -1131,6 +1183,18 @@ if ! run_logged truncate pip_install -r requirements/build/cuda.txt numpy; then
     exit 1
 fi
 
+clean_stale_deepgemm_artifacts
+
 echo "Installing vLLM editable package."
-run_logged append pip_install --no-build-isolation -e . "$@"
-exit "$?"
+if run_logged append pip_install --no-build-isolation -e . "$@"; then
+    exit 0
+fi
+
+if install_log_indicates_flash_attn_fetch_failure; then
+    echo "error: source build failed while fetching vllm-flash-attn or its submodules." >&2
+    echo "This installer does not fall back to precompiled packages." >&2
+    echo "Provide a local flash-attention checkout via VLLM_FLASH_ATTN_SRC_DIR," >&2
+    echo "or update the pinned flash-attention/submodule refs so they are fetchable." >&2
+fi
+
+exit 1
