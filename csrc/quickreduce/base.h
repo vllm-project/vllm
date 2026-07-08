@@ -79,6 +79,15 @@ union BufferResource {
   };
 };
 
+#if !defined(__gfx1250__)
+__quickreduce_device_inline__ static int32x4_t buffer_load_dwordx4(
+    int32x4_t srsrc, int32_t voffset, int32_t soffset,
+    int32_t aux) __asm("llvm.amdgcn.raw.buffer.load.v4i32");
+
+__quickreduce_device_inline__ static void buffer_store_dwordx4(
+    int32x4_t data, int32x4_t srsrc, int32_t voffset, int32_t soffset,
+    int32_t aux) __asm("llvm.amdgcn.raw.buffer.store.v4i32");
+#else
 __quickreduce_device_inline__ static int32x4_t buffer_load_dwordx4(
     int32x4_t srsrc, int32_t voffset, int32_t soffset,
     int32_t aux) {}
@@ -86,6 +95,7 @@ __quickreduce_device_inline__ static int32x4_t buffer_load_dwordx4(
 __quickreduce_device_inline__ static void buffer_store_dwordx4(
     int32x4_t data, int32x4_t srsrc, int32_t voffset, int32_t soffset,
     int32_t aux) {}
+#endif
 
 __quickreduce_device_inline__ static void set_fp16_ovfl(bool const value) {
 #if defined(__gfx942__)
