@@ -77,12 +77,7 @@ from vllm.v1.outputs import (
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
-from vllm.v1.worker.workspace import (
-    current_workspace_manager,
-    init_workspace_manager,
-    lock_workspace,
-    unlock_workspace,
-)
+from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...model_executor.model_loader import TensorizerLoader
 from .gpu.warmup import warmup_kernels
@@ -764,6 +759,19 @@ class Worker(WorkerBase):
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
+            if not self.use_v2_model_runner and get_pp_group().is_last_rank:
+                max_num_reqs = min(
+                    self.scheduler_config.max_num_seqs,
+                    self.scheduler_config.max_num_batched_tokens,
+                )
+                # Size workspaces needed by the post-capture sampler/pooler
+                # warmup before CUDA graphs capture their workspace pointers.
+                self.model_runner._dummy_run(
+                    num_tokens=max_num_reqs,
+                    skip_eplb=True,
+                    cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                    remove_lora=False,
+                )
             cuda_graph_memory_bytes = self.model_runner.capture_model()
 
         # Compare actual vs estimated CUDA graph memory (if we did profiling)
@@ -854,24 +862,17 @@ class Worker(WorkerBase):
             )
 
             # We skip EPLB here since we don't want to record dummy metrics
-            workspace_was_locked = current_workspace_manager().is_locked()
-            if workspace_was_locked:
-                unlock_workspace()
-            try:
-                hidden_states, last_hidden_states = self.model_runner._dummy_run(
-                    num_tokens=max_num_reqs,
-                    skip_eplb=True,
-                    cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            hidden_states, last_hidden_states = self.model_runner._dummy_run(
+                num_tokens=max_num_reqs,
+                skip_eplb=True,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            )
+            if self.model_runner.is_pooling_model:
+                self.model_runner._dummy_pooler_run(hidden_states)
+            else:
+                self.model_runner._dummy_sampler_run(
+                    hidden_states=last_hidden_states
                 )
-                if self.model_runner.is_pooling_model:
-                    self.model_runner._dummy_pooler_run(hidden_states)
-                else:
-                    self.model_runner._dummy_sampler_run(
-                        hidden_states=last_hidden_states
-                    )
-            finally:
-                if workspace_was_locked:
-                    lock_workspace()
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
