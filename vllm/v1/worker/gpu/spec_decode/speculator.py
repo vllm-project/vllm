@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -202,7 +203,7 @@ class DraftModelSpeculator(BaseSpeculator):
         num_reqs_padded: int,
         num_tokens_padded: int,
         num_query_per_req: int = 1,
-        causal: bool = True,
+        causal: bool | Mapping[int, bool] = True,
     ) -> dict[str, Any] | None:
         # Uniform query: query_start_loc[i] = min(i, num_reqs) * num_query_per_req.
         # Clamp keeps the series non-decreasing past num_reqs, which some
