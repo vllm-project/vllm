@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 FlyDSL Project Contributors
-"""Correctness test for the FlyDSL TurboQuant 4-bit KV decode v4 kernel.
+"""Correctness test for the FlyDSL TurboQuant 4-bit KV decode kernel.
 
 The kernel is validated against a pure-PyTorch full-precision attention
 oracle rather than another kernel: the synthetic KV cache is built from
@@ -21,12 +21,12 @@ from vllm.platforms.rocm import on_gfx950
 
 if not (current_platform.is_rocm() and on_gfx950()):
     pytest.skip(
-        "TurboQuant FlyDSL v4 decode only runs on ROCm gfx950.",
+        "TurboQuant FlyDSL decode only runs on ROCm gfx950.",
         allow_module_level=True,
     )
 
-from vllm.v1.attention.ops.flydsl_turboquant_decode_v4 import (  # noqa: E402
-    flydsl_turboquant_decode_attention_v4,
+from vllm.v1.attention.ops.flydsl_turboquant_decode import (  # noqa: E402
+    flydsl_turboquant_decode_attention,
     is_flydsl_available,
     is_flydsl_gqa6_available,
 )
@@ -48,7 +48,7 @@ ATOL = 5e-3
 def _build_cache(
     num_seqs, num_kv_heads, seq_len, qg, kv_block_size, seed=0xC0FFEE, device="cuda"
 ):
-    """Vectorized builder for a v4-layout 4-bit KV cache + fp32 ground truth.
+    """Vectorized builder for a SoA-layout 4-bit KV cache + fp32 ground truth.
 
     Returns ``(centroids, q_bf16, kv_cache_4d, block_table, seq_lens,
     K_ref, V_ref)`` where ``K_ref``/``V_ref`` are the dequantized
@@ -218,17 +218,17 @@ def _reference_attention(q_bf16, k_ref, v_ref, seq_lens, scale):
     ],
 )
 @pytest.mark.parametrize("kv_block_size", [16, 32])
-def test_flydsl_v4_matches_reference(
+def test_flydsl_matches_reference(
     num_seqs, seq_len, num_kv_heads, qg, kv_block_size
 ):
-    """FlyDSL v4 decode must match fp32 attention on dequantized KV."""
+    """FlyDSL decode must match fp32 attention on dequantized KV."""
     centroids, q_bf16, kv_cache, block_table, seq_lens, k_ref, v_ref = _build_cache(
         num_seqs, num_kv_heads, seq_len, qg, kv_block_size
     )
     scale = 1.0 / (HEAD_SIZE**0.5)
     identity = torch.eye(HEAD_SIZE, dtype=torch.float32, device="cuda")
 
-    out_v4 = flydsl_turboquant_decode_attention_v4(
+    out = flydsl_turboquant_decode_attention(
         query=q_bf16,
         kv_cache=kv_cache,
         block_table=block_table,
@@ -250,4 +250,4 @@ def test_flydsl_v4_matches_reference(
 
     ref = _reference_attention(q_bf16.cpu(), k_ref, v_ref, seq_lens.cpu(), scale)
 
-    torch.testing.assert_close(out_v4.cpu().float(), ref, atol=ATOL, rtol=0.0)
+    torch.testing.assert_close(out.cpu().float(), ref, atol=ATOL, rtol=0.0)

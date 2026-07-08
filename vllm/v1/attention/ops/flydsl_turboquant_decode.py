@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""FlyDSL TurboQuant decode v4 launcher (vLLM-side).
+"""FlyDSL TurboQuant decode launcher (vLLM-side).
 
 Drop-in replacement for ``triton_turboquant_decode_attention_v3`` for the
 TQ decode profile HEAD_SIZE=128, MSE_BITS=4 K, VQB=4 V, N_CENTROIDS=16,
 BLOCK_SIZE in {16, 32}.
 
 Per-GQA kernel dispatch:
-  * GQA group ∈ {8, 16} → canonical kernels.tq_decode_v4 (Qwen-class)
-  * GQA group == 6      → kernels.tq_decode_v4_gqa6 sibling (MiniMax-M2.5)
+  * GQA group ∈ {8, 16} → canonical kernels.tq_decode (Qwen-class)
+  * GQA group == 6      → kernels.tq_decode_gqa6 sibling (MiniMax-M2.5)
 
 Opt-in via ``VLLM_ROCM_TQ_FLYDSL_DECODE=1``. Falls back to v3 if FlyDSL is not
 importable (e.g. wrong arch, missing build tree). The GQA-6 sibling is
@@ -18,7 +18,7 @@ Architecture:
        launcher-side rocBLAS GEMM v3 uses with ``VLLM_TQ_FUSE_Q_ROT=0``.
     2. FlyDSL kernel writes per-partition outputs into
        ``[N, Hk, P, QG, D]`` bf16 + ``[N, Hk, P, QG]`` fp32 max/sum buffers.
-    3. A small Triton reducer combines partitions in v4's native layout
+    3. A small Triton reducer combines partitions in the kernel's native layout
        (no permute/cast), writing the final ``[N, Hq, D]`` output.
 
 Kernel module is built once per ``(num_kv_heads, num_partitions,
@@ -45,8 +45,8 @@ logger = init_logger(__name__)
 
 
 _FLYDSL_AVAILABLE: bool | None = None
-_TQ_MOD = None  # kernels.tq_decode_v4 module (Qwen GQA-{8,16})
-_TQ_MOD_GQA6 = None  # kernels.tq_decode_v4_gqa6 module (MiniMax GQA-6, optional)
+_TQ_MOD = None  # kernels.tq_decode module (Qwen GQA-{8,16})
+_TQ_MOD_GQA6 = None  # kernels.tq_decode_gqa6 module (MiniMax GQA-6, optional)
 _FLYC = None  # flydsl.compiler
 _FX = None  # flydsl.expr
 _TYPING_T = None
@@ -57,7 +57,7 @@ _IR = None
 def is_flydsl_available() -> bool:
     """Return True iff FlyDSL imports + canonical kernel module load successfully.
 
-    The GQA-6 sibling kernel (``kernels.tq_decode_v4_gqa6``) is imported
+    The GQA-6 sibling kernel (``kernels.tq_decode_gqa6``) is imported
     best-effort: if it's missing (older FlyDSL checkout that pre-dates
     MiniMax support) the canonical Qwen path stays fully functional and
     only GQA-6 dispatches will fail with a clear error at launch time.
@@ -75,7 +75,7 @@ def is_flydsl_available() -> bool:
 
         # Kernel is vendored in-tree (ships with vLLM); FlyDSL provides only
         # the compiler/runtime framework (imported above).
-        from vllm.v1.attention.ops.flydsl_kernels import tq_decode_v4 as tq_mod
+        from vllm.v1.attention.ops.flydsl_kernels import tq_decode as tq_mod
 
         _FLYC = flyc
         _FX = fx
@@ -84,11 +84,11 @@ def is_flydsl_available() -> bool:
         _IR = ir
         _TQ_MOD = tq_mod
         _FLYDSL_AVAILABLE = True
-        logger.info_once("FlyDSL TQ decode v4 launcher: available")
+        logger.info_once("FlyDSL TQ decode launcher: available")
     except Exception as ex:  # noqa: BLE001
         _FLYDSL_AVAILABLE = False
         logger.warning_once(
-            "FlyDSL TQ decode v4 launcher: unavailable (%s). "
+            "FlyDSL TQ decode launcher: unavailable (%s). "
             "Falling back to Triton v3.",
             ex,
         )
@@ -96,15 +96,15 @@ def is_flydsl_available() -> bool:
     # Best-effort GQA-6 sibling import (does NOT gate Qwen availability).
     try:
         from vllm.v1.attention.ops.flydsl_kernels import (
-            tq_decode_v4_gqa6 as tq_mod_gqa6,
+            tq_decode_gqa6 as tq_mod_gqa6,
         )
 
         _TQ_MOD_GQA6 = tq_mod_gqa6
-        logger.info_once("FlyDSL TQ decode v4 GQA-6 sibling: available (MiniMax-class)")
+        logger.info_once("FlyDSL TQ decode GQA-6 sibling: available (MiniMax-class)")
     except Exception as ex:  # noqa: BLE001
         _TQ_MOD_GQA6 = None
         logger.info_once(
-            "FlyDSL TQ decode v4 GQA-6 sibling: not available (%s); "
+            "FlyDSL TQ decode GQA-6 sibling: not available (%s); "
             "GQA-6 models will fall back to Triton v3.",
             ex,
         )
@@ -115,7 +115,7 @@ def is_flydsl_gqa6_available() -> bool:
     """True iff the optional GQA-6 sibling kernel module loaded.
 
     Used by the eligibility gate in turboquant_attn.py to decide whether
-    a layer with num_kv_groups==6 can run on FlyDSL v4 or must fall back
+    a layer with num_kv_groups==6 can run on FlyDSL or must fall back
     to Triton v3.
     """
     if _FLYDSL_AVAILABLE is None:
@@ -234,7 +234,7 @@ class _SegmBufPool:
                 # always-eager configs (a batch larger than any captured
                 # cudagraph size).
                 logger.warning_once(
-                    "FlyDSL v4 _SegmBufPool: growing bucket from %d to %d "
+                    "FlyDSL _SegmBufPool: growing bucket from %d to %d "
                     "(B=%d). If you see this AFTER cudagraph warmup, the "
                     "previously-captured graphs hold stale pointers and "
                     "will GPU-fault (max cudagraph capture size < B).",
@@ -294,7 +294,7 @@ class _SegmBufPool:
             self._bufs[key] = bufs
             self._max_B = B_bucket
             logger.info_once(
-                "FlyDSL v4 _SegmBufPool: allocated single-bucket "
+                "FlyDSL _SegmBufPool: allocated single-bucket "
                 "shape=(Hk=%d, Hq=%d, P=%d, QG=%d, D=%d, dtype=%s) "
                 "B_bucket=%d (covers all captured + eager B's). "
                 "VRAM = %.1f MiB / shape.",
@@ -350,7 +350,7 @@ def _wht_butterfly_enabled() -> bool:
     _WHT_BF_CACHED = os.environ.get("VLLM_TQ_FLYDSL_WHT_BUTTERFLY", "0") == "1"
     if _WHT_BF_CACHED:
         logger.info_once(
-            "FlyDSL TQ v4: WHT butterfly ON (VLLM_TQ_FLYDSL_WHT_BUTTERFLY=1)"
+            "FlyDSL TQ: WHT butterfly ON (VLLM_TQ_FLYDSL_WHT_BUTTERFLY=1)"
         )
     return _WHT_BF_CACHED
 
@@ -372,9 +372,9 @@ def _hw_tr_enabled() -> bool:
     except Exception:  # noqa: BLE001
         _HW_TR_CACHED = False
     if _HW_TR_CACHED:
-        logger.info_once("FlyDSL TQ v4: HW V transpose ON (default for gfx950+)")
+        logger.info_once("FlyDSL TQ: HW V transpose ON (default for gfx950+)")
     else:
-        logger.info_once("FlyDSL TQ v4: HW V transpose OFF")
+        logger.info_once("FlyDSL TQ: HW V transpose OFF")
     return _HW_TR_CACHED
 
 
@@ -422,18 +422,18 @@ def _get_kernel(
     _build_t0 = _t.perf_counter()
 
     # Per-GQA dispatch: GQA-6 (MiniMax-M2.5) lives in the sibling module
-    # tq_decode_v4_gqa6 to keep the Qwen kernel's invariants untouched.
-    # GQA-{8,16} (Qwen) keep using the canonical tq_decode_v4 kernel.
+    # tq_decode_gqa6 to keep the Qwen kernel's invariants untouched.
+    # GQA-{8,16} (Qwen) keep using the canonical tq_decode kernel.
     qg = int(query_group_size)
     if qg == 6:
         if _TQ_MOD_GQA6 is None:
             raise RuntimeError(
-                "FlyDSL TQ v4 GQA-6 sibling kernel "
-                "(vllm.v1.attention.ops.flydsl_kernels.tq_decode_v4_gqa6) "
+                "FlyDSL TQ GQA-6 sibling kernel "
+                "(vllm.v1.attention.ops.flydsl_kernels.tq_decode_gqa6) "
                 "failed to import; check that FlyDSL is installed/importable."
             )
         kmod = _TQ_MOD_GQA6
-        kfn = kmod.build_tq_decode_v4_gqa6_module(
+        kfn = kmod.build_tq_decode_gqa6_module(
             num_seqs=int(num_seqs_hint),
             num_kv_heads=num_kv_heads,
             num_partitions=num_partitions,
@@ -447,7 +447,7 @@ def _get_kernel(
         )
     else:
         kmod = _TQ_MOD
-        kfn = kmod.build_tq_decode_v4_module(
+        kfn = kmod.build_tq_decode_module(
             num_seqs=int(num_seqs_hint),
             num_kv_heads=num_kv_heads,
             num_partitions=num_partitions,
@@ -504,7 +504,7 @@ def _get_kernel(
     _GET_KERNEL_STATS["misses"] += 1
     _GET_KERNEL_STATS["build_total_s"] += _build_dt
     logger.info(
-        "FlyDSL v4 _get_kernel BUILD #%d dt=%.2fs (cumulative=%.1fs) key=%s",
+        "FlyDSL _get_kernel BUILD #%d dt=%.2fs (cumulative=%.1fs) key=%s",
         _GET_KERNEL_STATS["misses"],
         _build_dt,
         _GET_KERNEL_STATS["build_total_s"],
@@ -513,14 +513,14 @@ def _get_kernel(
     return _launch
 
 
-# -- Partition reducer (Triton, native v4 layout) ------------------------------
+# -- Partition reducer (Triton, native kernel layout) -------------------------
 # Reduces the FA2 split-KV partials produced by the FlyDSL kernel.
 #   segm_out [N, Hk, P, QG, D] bf16
 #   segm_max [N, Hk, P, QG]    fp32
 #   segm_sum [N, Hk, P, QG]    fp32
 # → output [N, Hq=Hk*QG, D] of any (bf16/fp16/fp32) dtype.
 @triton.jit
-def _reduce_partitions_v4(
+def _reduce_partitions(
     output_ptr,  # [N, Hq, D] in OUT_DTYPE
     segm_out_ptr,  # [N, Hk, P, QG, D] bf16
     segm_max_ptr,  # [N, Hk, P, QG] fp32
@@ -578,7 +578,7 @@ def _reduce_partitions_v4(
 
 
 # -- Public launcher ----------------------------------------------------------
-def flydsl_turboquant_decode_attention_v4(
+def flydsl_turboquant_decode_attention(
     query: torch.Tensor,  # [B, Hq, D] bf16/fp16
     kv_cache: torch.Tensor,  # [num_blocks, BS, Hk, slot_size_aligned]
     block_table: torch.Tensor,  # [B, max_blocks_per_seq] int32
@@ -601,7 +601,7 @@ def flydsl_turboquant_decode_attention_v4(
     max_num_kv_splits: int = 32,
     sinks: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """v3-compatible launcher backed by the FlyDSL v4 decode kernel.
+    """v3-compatible launcher backed by the FlyDSL decode kernel.
 
     Constraints:
       * key_fp8 == False
@@ -611,8 +611,8 @@ def flydsl_turboquant_decode_attention_v4(
       * D == 128
       * block_size in {16, 32}
       * Hq // Hk in {6, 8, 16}
-        - 8/16 → canonical tq_decode_v4 kernel (Qwen2.5-72B / Qwen3-32B)
-        - 6    → tq_decode_v4_gqa6 sibling kernel (MiniMax-M2.5)
+        - 8/16 → canonical tq_decode kernel (Qwen2.5-72B / Qwen3-32B)
+        - 6    → tq_decode_gqa6 sibling kernel (MiniMax-M2.5)
 
     Sinks are NYI and silently ignored if set. norm_correction is honored
     implicitly via the pre-folded stored K-norm (see footer comment).
@@ -622,12 +622,12 @@ def flydsl_turboquant_decode_attention_v4(
         raise RuntimeError(
             "VLLM_ROCM_TQ_FLYDSL_DECODE requested but FlyDSL is not available; "
             "set VLLM_ROCM_TQ_FLYDSL_DECODE=0, or install FlyDSL "
-            "(pip / PYTHONPATH) to use the v4 decode."
+            "(pip / PYTHONPATH) to use the FlyDSL decode."
         )
-    assert not key_fp8, "FlyDSL v4 supports MSE-key path only"
-    assert mse_bits == 4, f"FlyDSL v4 expects mse_bits=4, got {mse_bits}"
+    assert not key_fp8, "FlyDSL supports MSE-key path only"
+    assert mse_bits == 4, f"FlyDSL expects mse_bits=4, got {mse_bits}"
     assert value_quant_bits == 4, (
-        f"FlyDSL v4 expects value_quant_bits=4, got {value_quant_bits}"
+        f"FlyDSL expects value_quant_bits=4, got {value_quant_bits}"
     )
 
     B, Hq, D = query.shape
@@ -636,14 +636,14 @@ def flydsl_turboquant_decode_attention_v4(
     QG = Hq // Hk
     assert D == _TQ_MOD.HEAD_SIZE
     assert block_size in (16, 32), (
-        f"v4 supports kv_block_size 16 or 32, got {block_size}"
+        f"FlyDSL supports kv_block_size 16 or 32, got {block_size}"
     )
-    assert QG in (6, 8, 16), f"v4 supports GQA factor 6, 8 or 16, got {QG}"
+    assert QG in (6, 8, 16), f"FlyDSL supports GQA factor 6, 8 or 16, got {QG}"
     if QG == 6 and _TQ_MOD_GQA6 is None:
         raise RuntimeError(
-            "FlyDSL v4 launcher: GQA-6 requested (MiniMax-class) but the "
-            "tq_decode_v4_gqa6 sibling module is not available. Update your "
-            "FlyDSL checkout (must include kernels/tq_decode_v4_gqa6.py) or "
+            "FlyDSL launcher: GQA-6 requested (MiniMax-class) but the "
+            "tq_decode_gqa6 sibling module is not available. Update your "
+            "FlyDSL checkout (must include kernels/tq_decode_gqa6.py) or "
             "set VLLM_ROCM_TQ_FLYDSL_DECODE=0 to fall back to Triton v3."
         )
     assert centroids.numel() == _TQ_MOD.N_CENTROIDS, (
@@ -657,7 +657,7 @@ def flydsl_turboquant_decode_attention_v4(
     PiT_f32: torch.Tensor
     centroids_c: torch.Tensor
     if buf_holder is not None:
-        PiT_f32 = getattr(buf_holder, "_tq_v4_PiT_f32", None)
+        PiT_f32 = getattr(buf_holder, "_tq_PiT_f32", None)
         if PiT_f32 is None:
             _PiT_src = PiT if PiT is not None else Pi.T.contiguous()
             PiT_f32 = (
@@ -665,11 +665,11 @@ def flydsl_turboquant_decode_attention_v4(
                 if _PiT_src.dtype == torch.float32
                 else _PiT_src.to(torch.float32)
             )
-            buf_holder._tq_v4_PiT_f32 = PiT_f32
-        centroids_c = getattr(buf_holder, "_tq_v4_centroids_c", None)
+            buf_holder._tq_PiT_f32 = PiT_f32
+        centroids_c = getattr(buf_holder, "_tq_centroids_c", None)
         if centroids_c is None:
             centroids_c = centroids.contiguous()
-            buf_holder._tq_v4_centroids_c = centroids_c
+            buf_holder._tq_centroids_c = centroids_c
     else:
         # Defensive fallback (unit tests may pass ``buf_holder=None``).
         _PiT_src = PiT if PiT is not None else Pi.T.contiguous()
@@ -691,7 +691,7 @@ def flydsl_turboquant_decode_attention_v4(
 
     # ---- Partition count (FA2 split-KV) ----------------------------------
     #
-    # v4 runs INSIDE FULL cudagraph (TurboQuantMetadataBuilder._cudagraph_
+    # FlyDSL runs INSIDE FULL cudagraph (TurboQuantMetadataBuilder._cudagraph_
     # support = UNIFORM_BATCH). That means the gridDim baked at capture
     # time MUST equal the gridDim at replay — the kernel launch parameters
     # are recorded into the captured graph. So `num_partitions` (which
@@ -840,7 +840,7 @@ def flydsl_turboquant_decode_attention_v4(
     if not _LOG_INVOKED_ONCE:
         _LOG_INVOKED_ONCE = True
         logger.info(
-            "FlyDSL v4 launcher invoked (UNIFORM_BATCH cudagraph): "
+            "FlyDSL launcher invoked (UNIFORM_BATCH cudagraph): "
             "B=%d Hk=%d Hq=%d D=%d QG=%d num_partitions=%d (actual=%d, "
             "cap=%d) TGPP=%d max_bps=%d block_size=%d max_seq_len=%d "
             "hw_v_transpose=%s wht_butterfly=%s "
@@ -878,7 +878,7 @@ def flydsl_turboquant_decode_attention_v4(
     )
 
     # ---- Reduce partitions -> [B, Hq, D] --------------------------------
-    _reduce_partitions_v4[(B, Hq)](
+    _reduce_partitions[(B, Hq)](
         output_ptr=output,
         segm_out_ptr=segm_out,
         segm_max_ptr=segm_max,
@@ -893,7 +893,7 @@ def flydsl_turboquant_decode_attention_v4(
     if sinks is not None and not _LOG_SINKS_WARNED:
         _LOG_SINKS_WARNED = True
         logger.warning(
-            "FlyDSL v4 launcher: sinks ignored (NYI). Disable sinks or "
+            "FlyDSL launcher: sinks ignored (NYI). Disable sinks or "
             "use VLLM_TQ_DECODE_V3 if sinks are required."
         )
     # ── norm_correction is honored IMPLICITLY ───────────────────────────
@@ -902,7 +902,7 @@ def flydsl_turboquant_decode_attention_v4(
     # was pre-folded to ||k_t|| / ||c_t|| at store time by
     # triton_turboquant_store._store_packed_key step 3 (see lines 339-349:
     # `vn_f32 = vn_f32 * c_inv_norm`). The decode kernel just multiplies
-    # `c_vals * stored_knorm` (kernels/tq_decode_v4.py line 388:
+    # `c_vals * stored_knorm` (kernels/tq_decode.py line 388:
     # `cent_f32 * knorm_f32`), which then equals
     # `(c_vals / ||c_t||) * ||k_t||` — exactly the unit-norm-renormalized
     # centroid times the original key norm. v3 does the identical multiply
@@ -914,7 +914,7 @@ def flydsl_turboquant_decode_attention_v4(
     if norm_correction and not _LOG_NORM_WARNED:
         _LOG_NORM_WARNED = True
         logger.info(
-            "FlyDSL v4 launcher: norm_correction honored implicitly via "
+            "FlyDSL launcher: norm_correction honored implicitly via "
             "pre-folded stored K-norm (cf. triton_turboquant_store step 3); "
             "no decode-time work required, identical to v3 behavior."
         )
