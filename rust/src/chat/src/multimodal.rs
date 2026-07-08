@@ -343,7 +343,7 @@ impl MultimodalModelInfo {
         match modality {
             Modality::Image => self.image.as_ref()?.placeholder.token.as_str().into(),
             Modality::Video => self.video.as_ref()?.placeholder.token.as_str().into(),
-            _ => return None,
+            _ => None,
         }
     }
 }
