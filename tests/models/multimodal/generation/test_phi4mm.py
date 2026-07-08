@@ -33,6 +33,7 @@ HF_MULTIIMAGE_IMAGE_PROMPT = (
     "<|user|>\n<|image_1|>\n<|image_2|>\nDescribe these images.<|end|>\n<|assistant|>\n"  # noqa: E501
 )
 
+
 def vllm_to_hf_output(
     vllm_output: tuple[list[int], str, SampleLogprobs | None], model: str
 ):

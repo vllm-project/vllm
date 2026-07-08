@@ -45,6 +45,7 @@ PROMPT = "I am Gyoubu Masataka Oniwa"
 def get_prompt_tokens():
     return AutoTokenizer.from_pretrained(MODEL_NAME)(PROMPT).input_ids
 
+
 _REQUEST_COUNTER = 0
 
 

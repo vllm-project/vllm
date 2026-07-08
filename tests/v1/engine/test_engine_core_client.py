@@ -62,6 +62,7 @@ TEST_MODULE = "tests.v1.engine.test_engine_core_client"
 def get_prompt_tokens():
     return AutoTokenizer.from_pretrained(MODEL_NAME)(PROMPT).input_ids
 
+
 _REQUEST_COUNTER = 0
 
 

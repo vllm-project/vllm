@@ -137,6 +137,7 @@ TEST_CASES = [
     ),
 ]
 
+
 @pytest.fixture(scope="module")
 def tokenizer():
     return AutoTokenizer.from_pretrained("allenai/Olmo-3-7B-Think")

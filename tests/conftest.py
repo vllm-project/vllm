@@ -1502,9 +1502,9 @@ def _ensure_dummy_model_path(
         if ready_path.exists() and json_path.exists():
             ready_matches = False
             try:
-                ready_matches = json.loads(
-                    ready_path.read_text(encoding="utf-8")
-                ) == ready_payload
+                ready_matches = (
+                    json.loads(ready_path.read_text(encoding="utf-8")) == ready_payload
+                )
             except json.JSONDecodeError:
                 ready_matches = False
             if ready_matches:

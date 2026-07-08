@@ -119,6 +119,7 @@ TEST_CASES = [
     ),
 ]
 
+
 @pytest.fixture(scope="module")
 def tokenizer():
     return AutoTokenizer.from_pretrained("facebook/opt-125m")

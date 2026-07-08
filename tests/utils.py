@@ -12,8 +12,8 @@ import itertools
 import json
 import os
 import random
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -31,13 +31,13 @@ from urllib.parse import urlparse
 
 import anthropic
 import cloudpickle
-from filelock import FileLock
 import httpx
 import openai
 import pytest
 import requests
 import torch
 import torch.nn.functional as F
+from filelock import FileLock
 from huggingface_hub import hf_hub_download
 from huggingface_hub.constants import HF_HUB_OFFLINE
 from openai.types.completion import Completion
@@ -138,14 +138,14 @@ def download_url_to_file(
         if local_only:
             raise FileNotFoundError(_url_cache_miss_message(url, path))
 
-        tmp_file = tempfile.NamedTemporaryFile(
-            mode="wb", dir=path.parent, prefix=f".{path.name}.", delete=False
-        )
-        tmp_path = Path(tmp_file.name)
+        tmp_fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+        tmp_path = Path(tmp_name)
         try:
-            with tmp_file:
-                with urllib.request.urlopen(url, timeout=timeout) as response:
-                    shutil.copyfileobj(response, tmp_file)
+            with (
+                os.fdopen(tmp_fd, "wb") as tmp_file,
+                urllib.request.urlopen(url, timeout=timeout) as response,
+            ):
+                shutil.copyfileobj(response, tmp_file)
             if not _is_valid_cache_file(tmp_path):
                 raise ValueError(f"Downloaded empty cache file from {url}")
             os.replace(tmp_path, path)
