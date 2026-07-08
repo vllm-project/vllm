@@ -35,6 +35,27 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "                     Tensor! num_tokens_post_pad,"
       "                     Tensor? maybe_expert_map) -> ()");
 
+  m.def(
+      "moe_align_block_size_stable_small(Tensor topk_ids, int num_experts,"
+      "                     int block_size, Tensor! sorted_token_ids,"
+      "                     Tensor! experts_ids,"
+      "                     Tensor! num_tokens_post_pad,"
+      "                     Tensor? maybe_expert_map) -> ()");
+
+  m.def(
+      "moe_align_block_size_radix(Tensor topk_ids, int num_experts,"
+      "                     int block_size, Tensor! sorted_token_ids,"
+      "                     Tensor! experts_ids,"
+      "                     Tensor! num_tokens_post_pad,"
+      "                     Tensor! sort_workspace,"
+      "                     Tensor! sorted_expert_ids,"
+      "                     Tensor! compact_sorted_token_ids,"
+      "                     Tensor! token_indices,"
+      "                     Tensor! topk_ids_for_sort,"
+      "                     Tensor! padded_expert_offsets,"
+      "                     Tensor! unpadded_expert_offsets,"
+      "                     Tensor? maybe_expert_map) -> ()");
+
   // Aligning the number of tokens to be processed by each expert such
   // that it is divisible by the block size, but for the batched case.
   m.def(
@@ -134,6 +155,9 @@ STABLE_TORCH_LIBRARY_IMPL(_moe_C, CUDA, m) {
   m.impl("topk_softplus_sqrt", TORCH_BOX(&topk_softplus_sqrt));
   m.impl("moe_sum", TORCH_BOX(&moe_sum));
   m.impl("moe_align_block_size", TORCH_BOX(&moe_align_block_size));
+  m.impl("moe_align_block_size_stable_small",
+         TORCH_BOX(&moe_align_block_size_stable_small));
+  m.impl("moe_align_block_size_radix", TORCH_BOX(&moe_align_block_size_radix));
   m.impl("batched_moe_align_block_size",
          TORCH_BOX(&batched_moe_align_block_size));
   m.impl("moe_lora_align_block_size", TORCH_BOX(&moe_lora_align_block_size));
