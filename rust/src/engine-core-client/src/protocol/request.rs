@@ -110,9 +110,6 @@ pub struct EngineCoreRequest {
     pub trace_headers: Option<BTreeMap<String, String>>,
     #[serde(default)]
     pub resumable: bool,
-    /// Stable session identity shared by related requests.
-    #[serde(default)]
-    pub session_id: Option<String>,
     /// Original user-provided request ID, used for output reporting and aborts.
     #[serde(default)]
     pub external_req_id: Option<String>,
@@ -127,6 +124,9 @@ pub struct EngineCoreRequest {
     /// standard `request_finished` hook.
     #[serde(default)]
     pub abort_immediately: bool,
+    /// Stable session identity shared by related requests.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 impl EngineCoreRequest {
@@ -195,7 +195,7 @@ mod tests {
         assert_eq!(array[4], Value::Nil);
         assert_eq!(array[10], Value::Nil);
         assert_eq!(array[11], Value::from(7));
-        assert_eq!(array[16], Value::from("session-1"));
+        assert_eq!(array[20], Value::from("session-1"));
     }
 
     #[test]
