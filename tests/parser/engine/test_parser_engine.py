@@ -33,6 +33,7 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
+from vllm.parser.qwen3 import Qwen3Parser
 
 # ── Shared test configs ──────────────────────────────────────────────
 
@@ -1671,3 +1672,202 @@ class TestDropSpecialTokens:
             e.value for e in events if e.type == EventType.REASONING_CHUNK
         )
         assert "<bos>" not in reasoning_text
+
+
+# ── TestTruncatedToolCallStreamingParity ─────────────────────────────
+
+_QWEN3_VOCAB: dict[str, int] = {
+    "<think>": 200,
+    "</think>": 201,
+    "<tool_call>": 202,
+    "</tool_call>": 203,
+}
+
+_WEATHER_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+            },
+        },
+    }
+]
+
+
+def _make_qwen3_parser() -> Qwen3Parser:
+    tokenizer = make_mock_tokenizer(_QWEN3_VOCAB)
+    return Qwen3Parser(
+        tokenizer,
+        tools=None,
+        chat_template_kwargs={"enable_thinking": False},
+    )
+
+
+def _weather_request() -> ChatCompletionRequest:
+    return ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "test"}],
+        tools=_WEATHER_TOOLS,
+    )
+
+
+def _chars(text: str) -> list[tuple[str, list[int]]]:
+    """Split plain text into per-character (text, [token_id]) deltas."""
+    return [(c, [ord(c)]) for c in text]
+
+
+def _parse_non_streaming(
+    deltas: list[tuple[str, list[int]]],
+) -> tuple[str, list[tuple[str, str]]]:
+    """Run ``parse()`` on the full text; normalize the result."""
+    parser = _make_qwen3_parser()
+    full_text = "".join(text for text, _ in deltas)
+    all_ids = [tid for _, ids in deltas for tid in ids]
+    _, content, tool_calls = parser.parse(
+        full_text,
+        _weather_request(),
+        enable_auto_tools=True,
+        model_output_token_ids=all_ids,
+    )
+    calls = [(tc.name, tc.arguments) for tc in tool_calls or []]
+    return content or "", calls
+
+
+def _parse_streaming(
+    deltas: list[tuple[str, list[int]]],
+    chunk_size: int = 1,
+) -> tuple[str, list[tuple[str, str]]]:
+    """Replay deltas through ``parse_delta()``; accumulate like a client.
+
+    ``finished=True`` is passed on the last call, matching the serving
+    layer's behavior when generation stops (``max_tokens`` or ``stop``).
+    """
+    parser = _make_qwen3_parser()
+    request = _weather_request()
+    content_parts: list[str] = []
+    calls_by_index: dict[int, dict[str, str]] = {}
+
+    chunks = [deltas[i : i + chunk_size] for i in range(0, len(deltas), chunk_size)]
+    for i, chunk in enumerate(chunks):
+        text = "".join(t for t, _ in chunk)
+        ids = [tid for _, tids in chunk for tid in tids]
+        delta = parser.parse_delta(text, ids, request, finished=i == len(chunks) - 1)
+        if delta is None:
+            continue
+        if delta.content:
+            content_parts.append(delta.content)
+        for tc in delta.tool_calls or []:
+            slot = calls_by_index.setdefault(tc.index, {"name": "", "args": ""})
+            if tc.function and tc.function.name:
+                slot["name"] = tc.function.name
+            if tc.function and tc.function.arguments:
+                slot["args"] += tc.function.arguments
+
+    calls = [(slot["name"], slot["args"]) for _, slot in sorted(calls_by_index.items())]
+    return "".join(content_parts), calls
+
+
+class TestTruncatedToolCallStreamingParity:
+    """Streaming and non-streaming must agree on truncated tool calls.
+
+    Regression tests for #47137: when generation is cut off inside a
+    ``<tool_call>`` section (by ``max_tokens`` or a ``stop`` string),
+    non-streaming used to leak the raw markup into ``content`` while
+    streaming dropped it.  Since #46875 both paths must drop the
+    incomplete markup until a valid tool call is promoted.
+
+    Uses the real ``Qwen3Parser`` (the parser from the original report)
+    driven at several chunk sizes.
+    """
+
+    CHUNK_SIZES = [1, 3, 1_000_000]
+
+    @pytest.mark.parametrize("chunk_size", CHUNK_SIZES)
+    def test_stop_string_right_after_opener(self, chunk_size):
+        """Generation stopped by a stop string just after ``<tool_call>``.
+
+        A bare opener is not a tool call: neither path may emit a tool
+        call, and neither may leak the opener into content.
+        """
+        deltas = [*_chars("Let me check."), ("<tool_call>", [202])]
+        ns_content, ns_calls = _parse_non_streaming(deltas)
+        s_content, s_calls = _parse_streaming(deltas, chunk_size)
+
+        assert ns_content == "Let me check."
+        assert s_content == ns_content
+        assert ns_calls == []
+        assert s_calls == []
+
+    @pytest.mark.parametrize("chunk_size", CHUNK_SIZES)
+    def test_max_tokens_in_tool_preamble(self, chunk_size):
+        """Cut by ``max_tokens`` after the opener, before ``<function=``."""
+        deltas = [
+            *_chars("Let me check."),
+            ("<tool_call>", [202]),
+            *_chars("\n"),
+        ]
+        ns_content, ns_calls = _parse_non_streaming(deltas)
+        s_content, s_calls = _parse_streaming(deltas, chunk_size)
+
+        assert "<tool_call>" not in ns_content
+        assert s_content == ns_content
+        assert s_calls == ns_calls
+
+    @pytest.mark.parametrize("chunk_size", CHUNK_SIZES)
+    def test_max_tokens_mid_function_name(self, chunk_size):
+        """Cut by ``max_tokens`` inside ``<function=...`` markup.
+
+        The two paths must produce identical content (no markup leak)
+        and identical tool calls.
+        """
+        deltas = [
+            *_chars("Let me check."),
+            ("<tool_call>", [202]),
+            *_chars("\n<function=get_wea"),
+        ]
+        ns_content, ns_calls = _parse_non_streaming(deltas)
+        s_content, s_calls = _parse_streaming(deltas, chunk_size)
+
+        assert "<tool_call>" not in ns_content
+        assert "<function" not in ns_content
+        assert s_content == ns_content
+        assert s_calls == ns_calls
+
+    @pytest.mark.parametrize("chunk_size", CHUNK_SIZES)
+    def test_max_tokens_mid_opener_text(self, chunk_size):
+        """Cut by ``max_tokens`` inside a text-spelled opener.
+
+        ``<tool_c`` is not recognizable markup, so both paths must
+        treat it identically (as content); the two paths just may not
+        diverge from each other.
+        """
+        deltas = _chars("Let me check.<tool_c")
+        ns_content, ns_calls = _parse_non_streaming(deltas)
+        s_content, s_calls = _parse_streaming(deltas, chunk_size)
+
+        assert s_content == ns_content
+        assert s_calls == ns_calls == []
+
+    @pytest.mark.parametrize("chunk_size", CHUNK_SIZES)
+    def test_complete_tool_call_control(self, chunk_size):
+        """Control: a complete tool call is promoted by both paths."""
+        body = (
+            "\n<function=get_weather>\n<parameter=city>\nSF\n"
+            "</parameter>\n</function>\n"
+        )
+        deltas = [
+            *_chars("Let me check."),
+            ("<tool_call>", [202]),
+            *_chars(body),
+            ("</tool_call>", [203]),
+        ]
+        ns_content, ns_calls = _parse_non_streaming(deltas)
+        s_content, s_calls = _parse_streaming(deltas, chunk_size)
+
+        assert ns_content == "Let me check."
+        assert s_content == ns_content
+        assert ns_calls == [("get_weather", '{"city": "SF"}')]
+        assert s_calls == ns_calls
