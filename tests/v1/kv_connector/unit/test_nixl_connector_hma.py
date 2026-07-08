@@ -86,7 +86,9 @@ def test_logical_to_kernel_block_ids_with_hma():
 
     # Test conversion: FA + SW group
     logical_block_ids = [[0, 1, 2], [3, 4]]
-    kernel_block_ids = worker._logical_to_kernel_block_ids(logical_block_ids)
+    kernel_block_ids = worker._logical_to_kernel_block_ids(
+        logical_block_ids, worker._physical_blocks_per_logical_kv_block
+    )
 
     expected_kernel_block_ids = [[0, 1, 2, 3, 4, 5], [6, 7, 8, 9]]
     assert kernel_block_ids == expected_kernel_block_ids, (
@@ -1168,7 +1170,7 @@ def test_logical_to_remote_kernel_block_ids(
         swa_enabled=swa_enabled,
     )
 
-    result = worker._logical_to_remote_kernel_block_ids(
+    result = worker._logical_to_kernel_block_ids(
         logical_block_ids,
         remote_physical_per_logical,
     )
