@@ -517,13 +517,32 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
         self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
 
-        self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
+        # Some checkpoints (e.g. GLM MoE DSA / GlmMoeDsaForCausalLM) intentionally
+        # keep the MLA kv_b_proj weights in bf16 and only quantize the MoE experts
+        # to MXFP4. For those models the "kv_b_proj.weight is bf16" signal must NOT
+        # be treated as "unquantized, safe to fp4/fp8" -- re-quantizing a weight the
+        # checkpoint deliberately left in high precision injects large error into
+        # every attention layer and drives greedy decoding into repetition loops.
+        _archs = []
+        if _vllm_config is not None:
+            _mc = getattr(_vllm_config, "model_config", None)
+            _archs = list(
+                getattr(_mc, "architectures", None)
+                or getattr(getattr(_mc, "hf_config", None), "architectures", None)
+                or []
+            )
+        _bf16_mla_arch = any("GlmMoeDsa" in a for a in _archs)
+
+        self.is_aiter_triton_fp8_bmm_enabled = (
+            rocm_aiter_ops.is_fp8bmm_enabled() and not _bf16_mla_arch
+        )
 
         # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
         self.is_aiter_triton_fp4_bmm_enabled = (
             rocm_aiter_ops.is_fp4bmm_enabled()
             and hasattr(self.kv_b_proj, "weight")
             and self.kv_b_proj.weight.dtype == torch.bfloat16
+            and not _bf16_mla_arch
         )
 
         # Attributes for forward_impl method
