@@ -1043,31 +1043,33 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     # Request: 3 blocks
     prefix = [i for i in range(3) for _ in range(block_size)]
     req_0 = make_request("0", prefix, block_size, hash_fn)
-    computed_blocks, num_computed, num_uncached_common = manager.get_computed_blocks(
+    computed_blocks, num_computed, shared_prefix_boundary = manager.get_computed_blocks(
         req_0
     )
     assert num_computed == 0  # nothing cached yet
-    assert num_uncached_common == 0
+    assert shared_prefix_boundary == 0
     manager.allocate_slots(req_0, 3 * block_size, 0, computed_blocks)
 
     # Request: 3 blocks (shared with above) + 7 different tokens
     req_1 = make_request("1", prefix + [100] * 7, block_size, hash_fn)
-    computed_blocks, num_computed, num_uncached_common = manager.get_computed_blocks(
+    computed_blocks, num_computed, shared_prefix_boundary = manager.get_computed_blocks(
         req_1
     )
     assert num_computed == 3 * block_size  # we should observe a 3-block cache hit
-    assert num_uncached_common == 0
+    assert shared_prefix_boundary == 0
     manager.allocate_slots(req_1, 7, 3 * block_size, computed_blocks)
 
     # Request: 3 blocks, but only 2 blocks shared (replace the last token in 3rd block):
     req_2 = make_request("2", prefix[:-1] + [101], block_size, hash_fn)
-    computed_blocks, num_computed, num_uncached_common = manager.get_computed_blocks(
+    computed_blocks, num_computed, shared_prefix_boundary = manager.get_computed_blocks(
         req_2
     )
     assert num_computed == 0  # mamba_align doesn't cache intermediate blocks
-    assert num_uncached_common == 2 * block_size  # heuristic detects a shared prefix
+    # boundary == junction: 2 shared blocks (num_computed 0 + 2 uncached blocks).
+    assert shared_prefix_boundary == 2 * block_size
 
-    # Next, validate scheduler logic for num_uncached_common_prefix_tokens > 0
+    # Next, validate the align-mode Marconi split. It takes the shared-prefix
+    # junction (absolute) and stops the chunk there (req_2 has num_computed 0).
     # Create minimal mock with just the needed attributes
     mock = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=block_size), use_eagle=False
@@ -1076,7 +1078,7 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
         self=mock,
         request=req_2,
         num_new_tokens=3 * block_size,
-        num_uncached_common_prefix_tokens=num_uncached_common,
+        shared_prefix_boundary=shared_prefix_boundary,
     )
     assert num_new_tokens_adjusted == 2 * block_size  # adjust to the common prefix
 
@@ -4070,11 +4072,12 @@ def test_mamba_shared_prefix_reuse_under_zero_retention(monkeypatch):
         # req1 detects the shared prefix (attn hit, Mamba lag) and, via the
         # Marconi chunk, caches the junction's Mamba state.
         req1 = make_request("1", shared + distinct(60), block_size, sha256)
-        cb, nc, ucc = manager.get_computed_blocks(req1)
-        assert ucc == 2 * block_size  # shared prefix detected
+        cb, nc, boundary = manager.get_computed_blocks(req1)
+        assert boundary == 2 * block_size  # junction detected at 2 shared blocks
         if pin:
-            req1.shared_prefix_boundary = nc + ucc
-        manager.allocate_slots(req1, ucc, nc, cb)  # chunk stops at the junction
+            req1.shared_prefix_boundary = boundary
+        # Simulate the Marconi chunk: schedule up to the junction (boundary - nc).
+        manager.allocate_slots(req1, boundary - nc, nc, cb)
 
         # req2 shares the same prefix: does it reuse the cached junction?
         req2 = make_request("2", shared + distinct(70), block_size, sha256)
@@ -4166,11 +4169,11 @@ def test_swa_shared_prefix_reuse_under_zero_retention(monkeypatch):
         # req1 detects the shared prefix (full-attn hit, SWA lag). No chunk for
         # SWA -- the pin fires during normal prefill.
         req1 = make_request("1", shared + distinct(60), block_size, sha256)
-        cb, nc, ucc = manager.get_computed_blocks(req1)
+        cb, nc, boundary = manager.get_computed_blocks(req1)
         if retention == 0:
-            assert ucc == 4 * block_size  # detection fires when SWA lags
-        if pin and ucc >= block_size:
-            req1.shared_prefix_boundary = nc + ucc
+            assert boundary == 4 * block_size  # junction detected when SWA lags
+        if pin and boundary:
+            req1.shared_prefix_boundary = boundary
         manager.allocate_slots(req1, len(req1.all_token_ids), nc, cb)
 
         # req2 shares the same prefix: does its SWA window reuse the junction?

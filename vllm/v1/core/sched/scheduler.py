@@ -341,7 +341,7 @@ class Scheduler(SchedulerInterface):
         num_new_tokens: int,
         num_new_local_computed_tokens: int = 0,
         num_external_computed_tokens: int = 0,
-        num_uncached_common_prefix_tokens: int = 0,
+        shared_prefix_boundary: int = 0,
     ) -> int:
         num_computed_tokens = (
             request.num_computed_tokens
@@ -382,15 +382,18 @@ class Scheduler(SchedulerInterface):
                 # prefill the last few tokens
                 pass
 
-            # Marconi cache admission optimization:
-            # cache common prefixes by scheduling num_new_tokens = common prefix length
-            if (
-                num_uncached_common_prefix_tokens >= block_size
-                and num_new_tokens > num_uncached_common_prefix_tokens
-            ):
-                num_new_tokens = num_uncached_common_prefix_tokens
-                # keep alignment to block_size
-                num_new_tokens = num_new_tokens // block_size * block_size
+            # Marconi cache admission optimization: stop this prefill chunk on the
+            # detected shared-prefix junction so its Mamba state is cached there
+            # (a later request sharing the prefix can then reuse it). Only applies
+            # when the junction lies strictly within the chunk being scheduled.
+            if shared_prefix_boundary:
+                tokens_to_junction = shared_prefix_boundary - num_computed_tokens
+                if 0 < tokens_to_junction < num_new_tokens:
+                    # keep alignment to block_size; a sub-block junction rounds to 0
+                    # and is left unchanged (its state is not separately cacheable).
+                    aligned = tokens_to_junction // block_size * block_size
+                    if aligned:
+                        num_new_tokens = aligned
         return num_new_tokens
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
@@ -681,7 +684,6 @@ class Scheduler(SchedulerInterface):
                 num_external_computed_tokens = 0
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
-                num_uncached_common_prefix_tokens = 0
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
@@ -712,6 +714,9 @@ class Scheduler(SchedulerInterface):
                         # the last block) is transferred unconditionally by
                         # _apply_prefix_caching in nixl/worker.py.
                         num_new_local_computed_tokens = max(per_group_hits)
+                        # The per-group lookup does not detect an uncached shared
+                        # prefix, so there is no junction to pin in this path.
+                        request.shared_prefix_boundary = 0
                         if self.kv_cache_manager.log_stats:
                             assert self.kv_cache_manager.prefix_cache_stats is not None
                             self.kv_cache_manager.prefix_cache_stats.record(
@@ -723,24 +728,12 @@ class Scheduler(SchedulerInterface):
                         (
                             new_computed_blocks,
                             num_new_local_computed_tokens,
-                            # Shared-prefix hint (Marconi-style APC): a shared
-                            # prefix a sparse-retention group (Mamba / sliding
-                            # window) has not cached yet. The connector path above
-                            # uses a per-group lookup that does not compute it, so
-                            # it stays 0 there.
-                            num_uncached_common_prefix_tokens,
+                            # Junction to pin (Marconi-style APC) so its
+                            # sparse-retention state (Mamba block / sliding-window
+                            # tail) survives retention and serves a later hit; 0
+                            # if no uncached shared prefix was detected.
+                            request.shared_prefix_boundary,
                         ) = self.kv_cache_manager.get_computed_blocks(request)
-
-                    # Pin the detected junction so its sparse-retention state
-                    # (Mamba block / sliding-window tail) survives and can serve a
-                    # cross-request hit.
-                    request.shared_prefix_boundary = (
-                        num_new_local_computed_tokens
-                        + num_uncached_common_prefix_tokens
-                        if num_uncached_common_prefix_tokens
-                        >= self.cache_config.block_size
-                        else 0
-                    )
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -876,7 +869,7 @@ class Scheduler(SchedulerInterface):
                         num_new_tokens,
                         num_new_local_computed_tokens,
                         num_external_computed_tokens,
-                        num_uncached_common_prefix_tokens,
+                        request.shared_prefix_boundary,
                     )
                     if num_new_tokens == 0:
                         break

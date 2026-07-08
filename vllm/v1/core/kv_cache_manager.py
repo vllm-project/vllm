@@ -210,10 +210,11 @@ class KVCacheManager:
             A tuple containing:
                 - A list of blocks that are computed for the request.
                 - The number of computed tokens.
-                - ``num_uncached_common_prefix_tokens``: a shared prefix a
-                  sparse-retention group (Mamba / sliding window) has not cached
-                  yet (Marconi-style APC); 0 if none. Used to pin the junction so
-                  ``VLLM_PREFIX_CACHE_RETENTION_INTERVAL`` does not drop it.
+                - ``shared_prefix_boundary``: the block-aligned token position of
+                  a shared prefix that a sparse-retention group (Mamba / sliding
+                  window) has not cached yet (Marconi-style APC), or 0 if none.
+                  Pinned so ``VLLM_PREFIX_CACHE_RETENTION_INTERVAL`` does not drop
+                  the junction and defeat cross-request reuse.
         """
         # We skip finding the prefix cache hit when prefix caching is
         # disabled or the request is marked as skipping kv cache read
@@ -229,10 +230,18 @@ class KVCacheManager:
         # num_computed_tokens to be block-size aligned. Removing this limitation
         # could slightly improve performance in the future.
         max_cache_hit_length = request.num_tokens - 1
-        computed_blocks, num_new_computed_tokens, num_uncached_common_prefix_tokens = (
+        computed_blocks, num_new_computed_tokens, num_uncached = (
             self.coordinator.find_longest_cache_hit(
                 request.block_hashes, max_cache_hit_length
             )
+        )
+
+        # The junction to pin is where the lagging sparse-retention group stops
+        # (``num_new_computed_tokens``) plus the uncached shared prefix -- i.e.
+        # the longest single-group hit. Sub-block gaps are left to the mask,
+        # which floors to the alignment boundary (a no-op there).
+        shared_prefix_boundary = (
+            num_new_computed_tokens + num_uncached if num_uncached else 0
         )
 
         if self.log_stats:
@@ -244,7 +253,7 @@ class KVCacheManager:
             )
 
         blocks = self.create_kv_cache_blocks(computed_blocks)
-        return blocks, num_new_computed_tokens, num_uncached_common_prefix_tokens
+        return blocks, num_new_computed_tokens, shared_prefix_boundary
 
     def allocate_slots(
         self,
