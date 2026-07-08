@@ -330,7 +330,7 @@ fn diff_or_zero(end: f64, start: f64) -> f64 {
 ///
 /// Original Python request timestamp source:
 /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/metrics/stats.py#L206-L216>
-pub(crate) fn current_unix_timestamp_secs() -> f64 {
+pub fn current_unix_timestamp_secs() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock is before unix epoch")
