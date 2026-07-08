@@ -742,6 +742,126 @@ def test_flashinfer_sm90_xqa_decode_correctness(default_vllm_config):
     )
 
 
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+@pytest.mark.parametrize("dcp_rank", [0, 1])
+def test_flashinfer_dcp_paged_kv_metadata_uses_local_seq_lens(
+    default_vllm_config, monkeypatch, dcp_rank
+):
+    """Under DCP, paged-KV metadata must be derived from DCP-local seq lens:
+    block-table rows only hold cdiv(seq, page_size * world) entries, so
+    planning with global lengths reads pages the rank does not own (#29128).
+    """
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+    from vllm.v1.attention.backends.utils import (
+        PerLayerParameters,
+        get_dcp_local_seq_lens,
+    )
+
+    device = torch.device(DEVICE_TYPE)
+    dcp_world_size, interleave = 2, 1
+    page_size = 16
+    seq_lens = [100, 96, 17]
+    query_lens = [1, 1, 9]  # two decodes + one prefill
+    num_decodes = 2
+    sentinel = 999
+
+    vllm_config = create_vllm_config(
+        model_name="Qwen/Qwen2.5-0.5B-Instruct",
+        block_size=page_size,
+        max_model_len=1024,
+    )
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+
+    def mock_get_per_layer_parameters(cfg, layer_names, impl_cls):
+        head_size = cfg.model_config.get_head_size()
+        return {
+            name: PerLayerParameters(
+                window_left=-1, logits_soft_cap=0.0, sm_scale=1.0 / (head_size**0.5)
+            )
+            for name in layer_names
+        }
+
+    monkeypatch.setattr(
+        flashinfer_backend,
+        "get_per_layer_parameters",
+        mock_get_per_layer_parameters,
+    )
+    builder = flashinfer_backend.FlashInferMetadataBuilder(
+        kv_cache_spec, ["placeholder"], vllm_config, device
+    )
+    # Mock DCP mode without distributed initialization.
+    builder.dcp_world_size, builder.dcp_rank = dcp_world_size, dcp_rank
+    builder.dcp_kv_cache_interleave_size = interleave
+    builder.use_dcp = True
+
+    decode_capture: dict[str, torch.Tensor] = {}
+    prefill_capture: dict[str, torch.Tensor] = {}
+
+    def fake_plan_decode(wrapper, indptr_cpu, indices, last_page_len_cpu, **kwargs):
+        decode_capture["indptr"] = indptr_cpu.clone()
+        decode_capture["indices"] = indices.clone()
+        decode_capture["last_page_len"] = last_page_len_cpu.clone()
+
+    def fake_prefill_plan(self, qo_indptr_cpu, paged_kv_indptr_cpu, **kwargs):
+        prefill_capture["indptr"] = paged_kv_indptr_cpu.clone()
+
+    monkeypatch.setattr(flashinfer_backend, "fast_plan_decode", fake_plan_decode)
+    monkeypatch.setattr(
+        flashinfer_backend.BatchDCPPrefillWrapper, "plan", fake_prefill_plan
+    )
+
+    batch_spec = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
+    common_attn_metadata = create_common_attn_metadata(batch_spec, page_size, device)
+    orig_seq_lens = common_attn_metadata.seq_lens_cpu.clone()
+
+    # Sentinel columns simulate memory beyond the local-width block-table row.
+    local_pages = [cdiv(s, page_size * dcp_world_size) for s in seq_lens]
+    width = cdiv(max(seq_lens), page_size)
+    block_table = torch.full(
+        (len(seq_lens), width), sentinel, dtype=torch.int32, device=device
+    )
+    for row, num_pages in enumerate(local_pages):
+        block_table[row, :num_pages] = torch.arange(
+            100 * (row + 1), 100 * (row + 1) + num_pages, dtype=torch.int32
+        )
+    common_attn_metadata.block_table_tensor = block_table
+
+    builder.build(common_prefix_len=0, common_attn_metadata=common_attn_metadata)
+
+    # Context lengths: full seq for decodes, seq minus new tokens for prefills.
+    context_lens = torch.tensor(
+        [s - q if q > 1 else s for s, q in zip(seq_lens, query_lens)],
+        dtype=torch.int32,
+    )
+    local_lens = get_dcp_local_seq_lens(
+        context_lens, dcp_world_size, dcp_rank, interleave
+    ).tolist()
+    expected_pages = [cdiv(n, page_size) for n in local_lens]
+    expected_last_page_len = [
+        n - (p - 1) * page_size for n, p in zip(local_lens, expected_pages)
+    ]
+
+    got_decode_pages = (
+        decode_capture["indptr"][1:] - decode_capture["indptr"][:-1]
+    ).tolist()
+    assert got_decode_pages == expected_pages[:num_decodes]
+    assert (
+        decode_capture["last_page_len"].tolist() == expected_last_page_len[:num_decodes]
+    )
+    assert not (decode_capture["indices"] == sentinel).any(), (
+        "decode planned with pages beyond the rank-local block-table row"
+    )
+    got_prefill_pages = (
+        prefill_capture["indptr"][1:] - prefill_capture["indptr"][:-1]
+    ).tolist()
+    assert got_prefill_pages == expected_pages[num_decodes:]
+    # The builder must not mutate the runner's shared seq-lens buffer.
+    assert torch.equal(common_attn_metadata.seq_lens_cpu, orig_seq_lens)
+
+
 if current_platform.is_rocm():
     # FLASH_ATTN is not supported on ROCm
     SLIDING_WINDOW_BACKENDS_TO_TEST = [
