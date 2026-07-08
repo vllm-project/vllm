@@ -68,6 +68,7 @@ pub(super) fn prepare_generate_request(
         cache_salt: request.cache_salt,
         add_special_tokens: false,
         data_parallel_rank: ctx.data_parallel_rank,
+        session_id: ctx.session_id,
         reasoning_parser_kwargs: None,
         lora_request: lora_resolution.lora_request.clone(),
         arrival_time: None,

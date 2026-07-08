@@ -219,6 +219,9 @@ pub struct ChatCompletionRequest {
     /// External request ID used for response correlation.
     pub request_id: Option<String>,
 
+    /// Stable session identity shared by related requests.
+    pub session_id: Option<String>,
+
     /// Tokens represented as strings of the form 'token_id:{token_id}' in
     /// logprobs
     pub return_tokens_as_token_ids: Option<bool>,
@@ -295,6 +298,7 @@ impl Default for ChatCompletionRequest {
             structured_outputs: None,
             priority: None,
             request_id: None,
+            session_id: None,
             return_tokens_as_token_ids: None,
             return_token_ids: None,
             cache_salt: None,

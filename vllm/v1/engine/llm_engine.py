@@ -225,6 +225,7 @@ class LLMEngine:
         tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
+        session_id: str | None = None,
         prompt_text: str | None = None,
     ) -> str:
         # Validate the request_id type.
@@ -257,6 +258,7 @@ class LLMEngine:
                 tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=priority,
+                session_id=session_id,
             )
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 

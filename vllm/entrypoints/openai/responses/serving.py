@@ -451,6 +451,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 if raw_request is None
                 else await self._get_trace_headers(raw_request.headers)
             )
+            session_id = self._get_session_id(request, raw_request)
 
             chat_template_kwargs = self._effective_chat_template_kwargs(request)
             response_parser = self._make_response_parser(
@@ -516,6 +517,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 lora_request=lora_request,
                 priority=request.priority,
                 trace_headers=trace_headers,
+                session_id=session_id,
                 reasoning_parser_kwargs=reasoning_parser_kwargs
                 if self.parser and self.parser.reasoning_parser_cls is not None
                 else None,
@@ -663,6 +665,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         lora_request: LoRARequest | None = None,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
+        session_id: str | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
     ):
         max_model_len = self.model_config.max_model_len
@@ -687,6 +690,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 priority=priority,
+                session_id=session_id,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
             )
 

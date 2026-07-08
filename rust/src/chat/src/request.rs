@@ -435,6 +435,9 @@ pub struct ChatRequest {
     /// Override data parallel rank.
     #[serde(default)]
     pub data_parallel_rank: Option<u32>,
+    /// Stable session identity shared by related requests.
+    #[serde(default)]
+    pub session_id: Option<String>,
     /// LoRA adapter selected for this request.
     #[serde(default)]
     pub lora_request: Option<LoraRequest>,
@@ -458,6 +461,7 @@ impl ChatRequest {
             cache_salt: None,
             add_special_tokens: false,
             data_parallel_rank: None,
+            session_id: None,
             lora_request: None,
         }
     }

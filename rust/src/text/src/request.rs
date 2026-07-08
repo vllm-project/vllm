@@ -180,6 +180,9 @@ pub struct TextRequest {
     /// Override data parallel rank.
     #[serde(default)]
     pub data_parallel_rank: Option<u32>,
+    /// Stable session identity shared by related requests.
+    #[serde(default)]
+    pub session_id: Option<String>,
     /// Optional reasoning-parser kwargs forwarded to engine-side structured
     /// output logic.
     #[serde(default)]
@@ -209,6 +212,7 @@ impl TextRequest {
             cache_salt: None,
             add_special_tokens: false,
             data_parallel_rank: None,
+            session_id: None,
             reasoning_parser_kwargs: None,
             lora_request: None,
             arrival_time: None,
