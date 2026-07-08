@@ -14,7 +14,8 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
 )
 from vllm.platforms import current_platform
 
-if current_platform.get_device_capability() < (7, 0):
+_cap = current_platform.get_device_capability()
+if _cap is not None and _cap < (7, 0):
     pytest.skip("INT8 Triton requires CUDA 7.0 or higher", allow_module_level=True)
 
 vllm_config = VllmConfig()
@@ -65,3 +66,32 @@ def test_w8a8_block_int8_matmul(M, N, K, block_size, out_dtype, seed):
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
     ) / torch.mean(torch.abs(ref_out.to(torch.float32)))
     assert rel_diff < 0.001
+
+
+# Tensor-descriptor (TD) operand-load path for _w8a8_block_int8_matmul. The
+# block-scale multiply lands on the [M, N] accumulator (not the operands), so the
+# TD path must be bit-exact vs the plain masked-load path.
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="No GPU device available",
+)
+@pytest.mark.parametrize(
+    "M,N,K", [(1, 4096, 4096), (64, 4096, 4096), (256, 2048, 4096)]
+)
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.half])
+@torch.inference_mode()
+def test_w8a8_block_int8_matmul_td_matches_plain(M, N, K, out_dtype):
+    dev = current_platform.device_type
+    torch.manual_seed(0)
+    block_size = [128, 128]
+    bn, bk = block_size
+    A = torch.randint(-8, 8, (M, K), device=dev, dtype=torch.int8)
+    B = torch.randint(-8, 8, (N, K), device=dev, dtype=torch.int8)
+    As = torch.rand(M, K // bk, device=dev, dtype=torch.float32) * 1e-2
+    Bs = torch.rand(N // bn, K // bk, device=dev, dtype=torch.float32) * 1e-2
+
+    out_plain = w8a8_block_int8_matmul(
+        A, B, As, Bs, block_size, out_dtype, use_td=False
+    )
+    out_td = w8a8_block_int8_matmul(A, B, As, Bs, block_size, out_dtype, use_td=True)
+    torch.testing.assert_close(out_td, out_plain, rtol=0, atol=0)
