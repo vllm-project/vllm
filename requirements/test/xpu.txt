@@ -940,7 +940,7 @@ tqdm==4.67.3
     #   pqdm
     #   sentence-transformers
     #   transformers
-transformers @ git+https://github.com/huggingface/transformers.git@c782b84ed8afd5e7b22b4def45e398580f68a8c5
+transformers @ git+https://github.com/huggingface/transformers.git@8bbbe2475c1d93b2eeca83bf25f710c33d5d877e
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
