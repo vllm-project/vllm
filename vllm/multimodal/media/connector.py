@@ -86,16 +86,17 @@ def _wrap_media_fetch_error(
         )
 
     if isinstance(exc, requests.exceptions.HTTPError):
-        if exc.response is None:
-            return exc
-        status = exc.response.status_code
-        if status in (408, 429) or status >= 500:
-            return exc
-        return VLLMUnprocessableEntityError(
-            f"Failed to fetch media from URL: HTTP {status} error",
-            parameter="image_url",
-            value=url,
-        )
+        if exc.response is not None:
+            status_code = exc.response.status_code
+            if status_code in (408, 429):
+                return exc
+            if status_code < 500:
+                return VLLMUnprocessableEntityError(
+                    f"Failed to fetch media from URL: HTTP {status_code} error",
+                    parameter="image_url",
+                    value=url,
+                )
+        return exc
 
     if isinstance(exc, requests.exceptions.InvalidURL):
         return VLLMUnprocessableEntityError(
