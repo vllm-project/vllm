@@ -621,8 +621,6 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
         self.gemm1_beta = (
             quant_config.gemm1_beta if quant_config.gemm1_beta is not None else 0.0
         )
-        self._align_radix_scratch: MoEAlignRadixScratch | None = None
-
         super().__init__(
             moe_config=moe_config,
             quant_config=quant_config,
@@ -630,18 +628,18 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
             num_dispatchers=num_dispatchers,
         )
 
+        self._align_radix_scratch = MoEAlignRadixScratch(
+            max_num_tokens=self.moe_config.max_num_tokens,
+            topk=self.moe_config.experts_per_token,
+            num_experts=self.moe_config.num_experts,
+            device=torch.device(self.moe_config.device),
+        )
+
     def _get_align_radix_scratch(
         self, topk_ids: torch.Tensor
     ) -> MoEAlignRadixScratch | None:
         if topk_ids.numel() < RADIX_SORT_MIN_ROUTED_ENTRIES:
             return None
-        if self._align_radix_scratch is None:
-            self._align_radix_scratch = MoEAlignRadixScratch(
-                max_num_tokens=self.moe_config.max_num_tokens,
-                topk=self.moe_config.experts_per_token,
-                num_experts=self.moe_config.num_experts,
-                device=torch.device(self.moe_config.device),
-            )
         return self._align_radix_scratch
 
     @staticmethod
