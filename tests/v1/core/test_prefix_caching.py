@@ -1263,28 +1263,25 @@ def test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue():
     new_blocks = manager.allocate_slots(req0, 1)
     assert new_blocks is not None
 
-    mamba_new_block_ids = new_blocks.get_block_ids()[1]
-    assert len(mamba_new_block_ids) == 1
-    assert mamba_new_block_ids[0] != partial_mamba_block_id
-    assert manager.get_blocks("0").get_block_ids()[1][1] == mamba_new_block_ids[0]
-    assert partial_mamba_block[0].block_hash is not None
-    assert get_block_hash(partial_mamba_block[0].block_hash) == partial_mamba_hash
-    assert get_group_id(partial_mamba_block[0].block_hash) == 1
-    assert partial_mamba_block[0].block_hash_num_tokens == 6
-    cow_mamba_block = manager.get_blocks("0").blocks[1][1]
-    assert cow_mamba_block.block_hash is None
-    assert cow_mamba_block.block_hash_num_tokens is None
-    assert (
-        KVCacheBlockCopy(
-            src_block_id=partial_mamba_block_id,
-            dst_block_id=mamba_new_block_ids[0],
-        )
-        in manager.take_kv_cache_block_copies()
+    # Reversed CoW for the owning request: it keeps its own block (the
+    # worker's block table is append-only), and no new mamba block is handed
+    # to the worker. The prefix-cache entry is moved to a private copy that
+    # the queued block copy fills before the next forward.
+    assert new_blocks.get_block_ids()[1] == []
+    assert manager.get_blocks("0").get_block_ids()[1][1] == partial_mamba_block_id
+    copies = manager.take_kv_cache_block_copies()
+    cow_copy = next(c for c in copies if c.src_block_id == partial_mamba_block_id)
+    assert cow_copy.dst_block_id != partial_mamba_block_id
+    # The source block gave up the hash; the copy target now owns the entry.
+    assert partial_mamba_block[0].block_hash is None
+    moved = manager.block_pool.get_cached_block(
+        partial_mamba_hash, kv_cache_group_ids=[1]
     )
-    assert (
-        manager.block_pool.get_cached_block(partial_mamba_hash, kv_cache_group_ids=[1])
-        == partial_mamba_block
-    )
+    assert moved is not None
+    assert moved[0].block_id == cow_copy.dst_block_id
+    assert get_block_hash(moved[0].block_hash) == partial_mamba_hash
+    assert get_group_id(moved[0].block_hash) == 1
+    assert moved[0].block_hash_num_tokens == 6
 
 
 def test_hybrid_mamba_partial_tail_owner_continue_preserves_later_hit():
@@ -1336,26 +1333,93 @@ def test_hybrid_mamba_partial_tail_owner_continue_preserves_later_hit():
     req0.num_computed_tokens = 6
     req0.append_output_token_ids([3])
     assert manager.allocate_slots(req0, 1) is not None
-    manager.take_kv_cache_block_copies()
+    # The owner moved the prefix-cache entry to a private copy; capture its id.
+    owner_copies = manager.take_kv_cache_block_copies()
+    cow_copy = next(c for c in owner_copies if c.src_block_id == partial_mamba_block_id)
+    moved_block_id = cow_copy.dst_block_id
     manager.new_step_starts()
 
     req1 = make_request("1", [0, 0, 1, 1, 2, 2, 4, 4], hash_block_size, sha256)
     computed_blocks, num_computed = manager.get_computed_blocks(req1)
     assert num_computed == 6
-    assert computed_blocks.get_block_ids()[1][1] == partial_mamba_block_id
+    # The later request hits the moved (private-copy) entry, not the source.
+    assert computed_blocks.get_block_ids()[1][1] == moved_block_id
 
     new_blocks = manager.allocate_slots(req1, 2, num_computed, computed_blocks)
     assert new_blocks is not None
     mamba_new_block_ids = new_blocks.get_block_ids()[1]
     assert len(mamba_new_block_ids) == 1
-    assert mamba_new_block_ids[0] != partial_mamba_block_id
+    assert mamba_new_block_ids[0] != moved_block_id
+    # The hitting request CoWs from the moved entry into its own private block.
     assert (
         KVCacheBlockCopy(
-            src_block_id=partial_mamba_block_id,
+            src_block_id=moved_block_id,
             dst_block_id=mamba_new_block_ids[0],
         )
         in manager.take_kv_cache_block_copies()
     )
+
+
+def test_hybrid_mamba_moved_partial_entry_defers_same_step_hit():
+    """The owner's move re-arms the same-step guard: the moved entry is
+    filled by this step's copy, and chained same-step copies read stale
+    sources, so a request hitting it in the move step must be deferred."""
+    hash_block_size = 2
+    block_size = 2 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+
+    req0 = make_request("0", [0, 0, 1, 1, 2, 2], hash_block_size, sha256)
+    computed_blocks, num_computed = manager.get_computed_blocks(req0)
+    assert num_computed == 0
+    assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
+    manager.new_step_starts()
+
+    # The owning request continues decoding: the partial entry moves to a
+    # private copy in this step.
+    req0.num_computed_tokens = 6
+    req0.append_output_token_ids([3])
+    assert manager.allocate_slots(req0, 1) is not None
+
+    # A request hitting the moved entry in the SAME step must be deferred.
+    req1 = make_request("1", [0, 0, 1, 1, 2, 2, 4, 4], hash_block_size, sha256)
+    computed_blocks, num_computed = manager.get_computed_blocks(req1)
+    assert num_computed == 6
+    assert manager.allocate_slots(req1, 2, num_computed, computed_blocks) is None
+
+    # Next step the moved entry is consumable.
+    manager.new_step_starts()
+    computed_blocks, num_computed = manager.get_computed_blocks(req1)
+    assert num_computed == 6
+    assert manager.allocate_slots(req1, 2, num_computed, computed_blocks) is not None
 
 
 def test_hybrid_full_attention_partial_hash_hit_uses_cow():
