@@ -161,13 +161,11 @@ class CacheConfig:
     """Per-DP-engine maximum concurrency at max_model_len tokens."""
 
     kv_sharing_fast_prefill: bool = False
-    """This feature is work in progress and no prefill optimization takes place
-    with this flag enabled currently.
-
-    In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
+    """In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
     some layers can skip tokens corresponding to prefill. This flag enables
     attention metadata for eligible layers to be overridden with metadata
     necessary for implementing this optimization in some models (e.g. Gemma3n)
+    NOTE: KV cache sharing is not supported for MRv2 (v2 model runner).
     """
 
     kv_cache_memory_bytes: int | None = None
