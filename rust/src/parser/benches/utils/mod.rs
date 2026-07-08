@@ -1,5 +1,11 @@
+// This module is shared by multiple benchmark targets.
+// There could be false positives for unused code or imports, and fixing them would lead to some other benchmarks failing to compile.
 #![allow(dead_code)]
+#![allow(unused_imports)]
 
+mod adapter;
+
+pub(super) use adapter::UnifiedToolParserAdapter;
 use futures::FutureExt as _;
 use openai_protocol::common::{Function as OpenAiFunction, Tool as OpenAiTool};
 use tool_parser::traits::ToolParser as ExternalToolParser;

@@ -28,6 +28,7 @@ from transformers import AutoModel
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -46,6 +47,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.transformers.utils import recursive_replace_linear
 from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor, async_copy_to_gpu
@@ -499,6 +501,13 @@ def _compiled_sample_step(
     ST: int,
     # Sampler config
     entropy_bound: float,
+    # Tensor-parallel vocab sharding for the self-conditioning matmul.
+    # ``embed_weight`` is vocab-sharded ([vocab/tp, hidden]) while ``probs``
+    # spans the full vocab; [sc_vocab_start, sc_vocab_end) is this rank's slice.
+    sc_vocab_start: int,
+    sc_vocab_end: int,
+    tp_size: int,
+    tp_group_name: str,
 ) -> torch.Tensor:
     """Compiled decode step: temperature → Gumbel sample → probs/confidence →
     accept/renoise → convergence, all as vectorized PyTorch ops.
@@ -507,11 +516,6 @@ def _compiled_sample_step(
     caller can compute logprobs outside the compiled region."""
     num_decode = decode_slots.shape[0]
     device = decode_slots.device
-
-    # Clear outputs so prefill / non-decode slots report 0 (decode slots are
-    # overwritten below).
-    sampled.zero_()
-    num_sampled.zero_()
 
     # ---- Phase 1: Temperature schedule ----
     steps_f = step_tensor[decode_slots].float()
@@ -629,7 +633,17 @@ def _compiled_sample_step(
     # sc_embeds directly. Storing the [.., hidden] soft embed instead of the full
     # [.., vocab] probs avoids a giant persistent buffer.
     sc_keep = (is_denoise & ~is_encoder_phase[decode_slots])[:, None, None]
-    soft_embeds = torch.matmul(probs.to(embed_weight.dtype), embed_weight) * normalizer
+    # Self-conditioning soft embed = probs @ embed_tokens.weight. Under tensor
+    # parallelism the embedding is vocab-sharded ([vocab/tp, hidden]) while
+    # probs spans the full vocab, so each rank multiplies its local vocab slice
+    # [sc_vocab_start, sc_vocab_end) and the partials are summed across ranks.
+    local_probs = probs[..., sc_vocab_start:sc_vocab_end].to(embed_weight.dtype)
+    soft_embeds = torch.matmul(
+        local_probs, embed_weight[: sc_vocab_end - sc_vocab_start]
+    )
+    if tp_size > 1:
+        soft_embeds = torch.ops.vllm.all_reduce(soft_embeds, group_name=tp_group_name)
+    soft_embeds = soft_embeds * normalizer
     sc_embeds[decode_slots] = soft_embeds * sc_keep
 
     # Overwrite canvas with argmax for newly converged denoise requests
@@ -758,33 +772,7 @@ class DiffusionGemmaModelState(ModelState):
         encoder_cache: Any,
         device: torch.device,
     ) -> None:
-        self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        self.scheduler_config = vllm_config.scheduler_config
-        self.model = model
-        self.device = device
-
-        self.supports_mm_inputs = encoder_cache is not None
-        self.max_num_reqs = self.scheduler_config.max_num_seqs
-        self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
-        self.max_model_len = self.model_config.max_model_len
-        self.inputs_embeds_size = self.model_config.get_inputs_embeds_size()
-        self.dtype = self.model_config.dtype
-
-        if self.supports_mm_inputs:
-            from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
-            from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
-
-            assert isinstance(encoder_cache, EncoderCache)
-            self.encoder_cache = encoder_cache
-            self.encoder_runner = EncoderRunner(
-                model=self.model,
-                max_num_tokens=self.max_num_tokens,
-                hidden_size=self.inputs_embeds_size,
-                encoder_cache=encoder_cache,
-                dtype=self.dtype,
-                device=self.device,
-            )
+        super().__init__(vllm_config, model, encoder_cache, device)
 
         # Per-step MM data produced by get_mm_embeddings and consumed by
         # prepare_inputs.  Stored as raw (mm_embeds, is_mm_embed) so that
@@ -808,7 +796,10 @@ class DiffusionGemmaModelState(ModelState):
             max_denoising_steps=max_denoising_steps,
             device=device,
             hidden_size=text_config.hidden_size,
-            stability_threshold=self.gen_config["stability_threshold"],
+            # In Transformers, `stability_threshold=1` (the default) means the current
+            # step must match the previous step. In vLLM, the history buffer includes
+            # the current step, so we add 1 to match the same behavior.
+            stability_threshold=self.gen_config["stability_threshold"] + 1,
         )
         self._req_id_to_index: dict[str, int] = {}
 
@@ -843,6 +834,12 @@ class DiffusionGemmaModelState(ModelState):
             raise ValueError(
                 f"entropy_bound must be a positive float (got {entropy_bound})"
             )
+        # The self-conditioning matmul (probs @ embed_tokens.weight) runs over a
+        # vocab-parallel embedding shard. Hand the sampler this rank's vocab
+        # slice and TP group so it can all-reduce the partial products.
+        embed_tokens = self.model.model.embed_tokens
+        shard = embed_tokens.shard_indices
+        tp_group = get_tp_group()
         return DiffusionSampler(
             sampler=sampler,
             diffusion_config=diffusion_config,
@@ -852,8 +849,12 @@ class DiffusionGemmaModelState(ModelState):
             t_max=gen["t_max"],
             entropy_bound=entropy_bound,
             confidence_threshold=gen["confidence_threshold"],
-            embed_weight=self.model.model.embed_tokens.weight,
+            embed_weight=embed_tokens.weight,
             normalizer=self.model.model.normalizer,
+            sc_vocab_start=shard.org_vocab_start_index,
+            sc_vocab_end=shard.org_vocab_end_index,
+            tp_size=tp_group.world_size,
+            tp_group_name=tp_group.unique_name,
         ), None
 
     def apply_staged_writes(self) -> None:
@@ -876,7 +877,7 @@ class DiffusionGemmaModelState(ModelState):
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
         req_states: RequestState,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | None:
         if not self.supports_mm_inputs:
             return None
 
@@ -971,7 +972,9 @@ class DiffusionGemmaModelState(ModelState):
         # so the captured graph and runtime point to identical addresses.
         return {"inputs_embeds": self._inputs_embeds_buf[:num_tokens]}
 
-    def postprocess_state(self, idx_mapping, num_sampled) -> None:
+    def postprocess_state(
+        self, idx_mapping, num_sampled, num_computed_tokens=None
+    ) -> None:
         return None
 
     def prepare_attn(
@@ -1054,13 +1057,24 @@ class DiffusionSampler:
         entropy_bound: float,
         embed_weight: torch.Tensor,
         normalizer: torch.Tensor,
+        sc_vocab_start: int = 0,
+        sc_vocab_end: int | None = None,
+        tp_size: int = 1,
+        tp_group_name: str = "",
     ):
         self.sampling_states = sampler.sampling_states
         self.req_states = sampler.req_states
         # Self-conditioning soft embed = probs @ embed_weight * normalizer,
-        # computed in the sampler (see _compiled_sample_step).
+        # computed in the sampler (see _compiled_sample_step). ``embed_weight``
+        # is the vocab-parallel shard; [sc_vocab_start, sc_vocab_end) is this
+        # rank's slice of the full vocab and tp_* drive the cross-rank
+        # all-reduce.
         self.embed_weight = embed_weight
         self.normalizer = normalizer
+        self.sc_vocab_start = sc_vocab_start
+        self.sc_vocab_end = sc_vocab_end if sc_vocab_end is not None else vocab_size
+        self.tp_size = tp_size
+        self.tp_group_name = tp_group_name
         self.canvas_length = (
             diffusion_config.canvas_length if diffusion_config is not None else 32
         )
@@ -1258,9 +1272,12 @@ class DiffusionSampler:
             src = (starts.unsqueeze(1) + ar.unsqueeze(0)).clamp_max(logits.shape[0] - 1)
             logits = logits[src.reshape(-1)] * valid.reshape(-1, 1).to(logits.dtype)
 
-        # Cleared inside _compiled_sample_step so prefill/non-decode slots stay 0.
+        # Clear once: the tiled loop below only scatters its own decode slots,
+        # so it must not re-clear earlier tiles' writes.
         sampled = self._sampled[:num_reqs]
         num_sampled = self._num_sampled[:num_reqs]
+        sampled.zero_()
+        num_sampled.zero_()
 
         all_slots = input_batch.idx_mapping[:num_reqs]
 
@@ -1268,90 +1285,109 @@ class DiffusionSampler:
         # since it mutates is_encoder_phase (commit→False, converge→True).
         is_committing = states.is_encoder_phase[decode_slots].clone()
 
-        # --- Single compiled call: temp → sample → probs → post-process ---
-        scaled = _compiled_sample_step(
-            logits,
-            decode_slots,
-            decode_idx,
-            all_slots,
-            valid_canvas_len,
-            # State
-            states.canvas,
-            states.argmax_canvas,
-            states.step,
-            states.is_encoder_phase,
-            states.confident,
-            states.self_conditioning_embeds,
-            self.embed_weight,
-            self.normalizer,
-            states.accepted_canvas_history,
-            states.accepted_canvas_history_len,
-            # Output
-            sampled,
-            num_sampled,
-            self.req_states.draft_tokens,
-            # Config
-            max_denoising_steps=float(states.max_denoising_steps),
-            t_min=self.t_min,
-            t_max=self.t_max,
-            confidence_threshold=self.confidence_threshold,
-            vocab_size=self.vocab_size,
-            CL=self.canvas_length,
-            ST=states.stability_threshold,
-            entropy_bound=self.entropy_bound,
-        )
-
-        # --- Logprobs: stash on convergence, return on commit ---
         slots_np = input_batch.idx_mapping_np[:num_reqs]
         is_decode_np = per_req_nlogits_np > 0
-
-        logprobs_tensors = None
         max_num_logprobs = self.sampling_states.max_num_logprobs(slots_np)
-        if max_num_logprobs >= 0:
-            # Denoise steps that just converged: the compiled step flipped
-            # is_encoder_phase from False→True. Detect as slots where
-            # is_encoder_phase is now True but is_committing was False.
-            converged_mask = states.is_encoder_phase[decode_slots]
-            just_converged = converged_mask & ~is_committing
-            if just_converged.any():
-                flat_logits = scaled.reshape(-1, scaled.shape[-1])
-                argmax_tokens = scaled.argmax(dim=-1)
-                for local_idx in just_converged.nonzero(as_tuple=True)[0]:
-                    li = local_idx.item()
-                    slot = decode_slots[local_idx]
-                    # Stash only the real canvas positions (== CL unless this
-                    # canvas was truncated near max_model_len); padded tail
-                    # positions are never emitted.
-                    k_i = int(valid_canvas_len_np[li])
-                    start = li * CL
-                    self._pending_logprobs[slot.item()] = compute_topk_logprobs(
-                        flat_logits[start : start + k_i],
-                        max_num_logprobs,
-                        argmax_tokens[local_idx][:k_i],
-                    )
 
-            # Commit steps: is_committing was True at entry. Reassemble
-            # previously stashed logprobs and attach to SamplerOutput.
-            if is_committing.any() and self._pending_logprobs:
-                parts_ids, parts_lp, parts_ranks = [], [], []
-                cu_gen: list[int] = []
-                flat_offset = 0
-                for i in range(num_reqs):
-                    cu_gen.append(flat_offset)
-                    slot = int(slots_np[i])
-                    if is_decode_np[i] and slot in self._pending_logprobs:
-                        lp = self._pending_logprobs.pop(slot)
-                        parts_ids.append(lp.logprob_token_ids)
-                        parts_lp.append(lp.logprobs)
-                        parts_ranks.append(lp.selected_token_ranks)
-                        flat_offset += lp.logprobs.shape[0]
-                if parts_ids:
-                    logprobs_tensors = LogprobsTensors(
-                        logprob_token_ids=torch.cat(parts_ids),
-                        logprobs=torch.cat(parts_lp),
-                        selected_token_ranks=torch.cat(parts_ranks),
-                        cu_num_generated_tokens=cu_gen,
-                    )
+        # Sample over the [num_decode * CL, vocab] logits. The fp32 pipeline in
+        # _compiled_sample_step keeps several live [group * CL, vocab] copies, so
+        # size each tile to a fraction of free memory to bound the transient at
+        # high concurrency. Tiling is bit-identical to a single pass.
+        group = max(num_decode, 1)
+        if num_decode > 0:
+            free, _ = current_platform.mem_get_info()
+            # ~10 transient fp32 copies of [group * CL, vocab] inside the step
+            # (eager peaks at ~8; pad for allocator overhead and small tensors).
+            bytes_per_req = CL * self.vocab_size * 4 * 10
+            budget = int(free * 0.5) // max(bytes_per_req, 1)
+            group = max(1, min(num_decode, budget))
+
+        for start_req in range(0, num_decode, group):
+            end_req = min(start_req + group, num_decode)
+            tile = slice(start_req, end_req)
+            tile_slots = decode_slots[tile]
+
+            scaled = _compiled_sample_step(
+                logits[start_req * CL : end_req * CL],
+                tile_slots,
+                decode_idx[tile],
+                all_slots,
+                valid_canvas_len[tile],
+                # State
+                states.canvas,
+                states.argmax_canvas,
+                states.step,
+                states.is_encoder_phase,
+                states.confident,
+                states.self_conditioning_embeds,
+                self.embed_weight,
+                self.normalizer,
+                states.accepted_canvas_history,
+                states.accepted_canvas_history_len,
+                # Output
+                sampled,
+                num_sampled,
+                self.req_states.draft_tokens,
+                # Config
+                max_denoising_steps=float(states.max_denoising_steps),
+                t_min=self.t_min,
+                t_max=self.t_max,
+                confidence_threshold=self.confidence_threshold,
+                vocab_size=self.vocab_size,
+                CL=CL,
+                ST=states.stability_threshold,
+                entropy_bound=self.entropy_bound,
+                sc_vocab_start=self.sc_vocab_start,
+                sc_vocab_end=self.sc_vocab_end,
+                tp_size=self.tp_size,
+                tp_group_name=self.tp_group_name,
+            )
+
+            # Logprobs for denoise steps that just converged (is_encoder_phase
+            # flipped False→True), stashed per tile so `scaled` is freed each tile.
+            if max_num_logprobs >= 0:
+                converged_mask = states.is_encoder_phase[tile_slots]
+                just_converged = converged_mask & ~is_committing[tile]
+                if just_converged.any():
+                    flat_logits = scaled.reshape(-1, scaled.shape[-1])
+                    argmax_tokens = scaled.argmax(dim=-1)
+                    for local_idx in just_converged.nonzero(as_tuple=True)[0]:
+                        li = local_idx.item()
+                        slot = tile_slots[local_idx]
+                        # Stash only the real canvas positions (== CL unless this
+                        # canvas was truncated near max_model_len); padded tail
+                        # positions are never emitted.
+                        k_i = int(valid_canvas_len_np[start_req + li])
+                        pos = li * CL
+                        self._pending_logprobs[slot.item()] = compute_topk_logprobs(
+                            flat_logits[pos : pos + k_i],
+                            max_num_logprobs,
+                            argmax_tokens[local_idx][:k_i],
+                        )
+
+        # Commit steps: is_committing was True at entry. Reassemble previously
+        # stashed logprobs and attach to SamplerOutput.
+        logprobs_tensors = None
+        if max_num_logprobs >= 0 and is_committing.any() and self._pending_logprobs:
+            parts_ids, parts_lp, parts_ranks = [], [], []
+            cu_gen: list[int] = []
+            flat_offset = 0
+            for i in range(num_reqs):
+                cu_gen.append(flat_offset)
+                slot = int(slots_np[i])
+                if is_decode_np[i] and slot in self._pending_logprobs:
+                    lp = self._pending_logprobs.pop(slot)
+                    parts_ids.append(lp.logprob_token_ids)
+                    parts_lp.append(lp.logprobs)
+                    parts_ranks.append(lp.selected_token_ranks)
+                    flat_offset += lp.logprobs.shape[0]
+            if parts_ids:
+                logprobs_tensors = LogprobsTensors(
+                    logprob_token_ids=torch.cat(parts_ids),
+                    logprobs=torch.cat(parts_lp),
+                    selected_token_ranks=torch.cat(parts_ranks),
+                    cu_num_generated_tokens=cu_gen,
+                )
 
         return self._build_output(
             input_batch,

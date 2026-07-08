@@ -1,13 +1,13 @@
 //! Reasoning parser registration and selection boundary for `vllm-chat`.
 
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 pub use vllm_parser::reasoning::{
     CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser,
-    DeepSeekV4ReasoningParser, Gemma4ReasoningParser, Glm45ReasoningParser, KimiK2ReasoningParser,
-    KimiReasoningParser, MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser,
-    NemotronV3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta, ReasoningError,
-    ReasoningParser, SeedOssReasoningParser, Step3ReasoningParser, Step3p5ReasoningParser,
+    DeepSeekV4ReasoningParser, Glm45ReasoningParser, KimiK2ReasoningParser, KimiReasoningParser,
+    MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser, NemotronV3ReasoningParser,
+    Qwen3ReasoningParser, ReasoningDelta, ReasoningError, ReasoningParser, SeedOssReasoningParser,
+    Step3ReasoningParser, Step3p5ReasoningParser,
 };
 use vllm_tokenizer::DynTokenizer;
 
@@ -33,8 +33,9 @@ pub mod names {
 }
 
 /// Constructor signature for one registered reasoning parser implementation.
-type ReasoningParserCreator =
-    fn(DynTokenizer) -> vllm_parser::reasoning::Result<Box<dyn ReasoningParser>>;
+type ReasoningParserCreator = Arc<
+    dyn Fn(DynTokenizer) -> vllm_parser::reasoning::Result<Box<dyn ReasoningParser>> + Send + Sync,
+>;
 
 /// Registry and model matcher for reasoning parsers.
 pub type ReasoningParserFactory = ParserFactory<ReasoningParserCreator>;
@@ -58,7 +59,7 @@ impl ReasoningParserFactory {
             .register_parser::<DeepSeekR1ReasoningParser>(names::DEEPSEEK_R1)
             .register_parser::<DeepSeekV3ReasoningParser>(names::DEEPSEEK_V3)
             .register_parser::<DeepSeekV4ReasoningParser>(names::DEEPSEEK_V4)
-            .register_parser::<Gemma4ReasoningParser>(names::GEMMA4)
+            .register_unified_dummy(names::GEMMA4)
             .register_parser::<Glm45ReasoningParser>(names::GLM45)
             .register_parser::<KimiReasoningParser>(names::KIMI)
             .register_parser::<KimiK2ReasoningParser>(names::KIMI_K2)
@@ -109,7 +110,17 @@ impl ReasoningParserFactory {
     where
         T: ReasoningParser + 'static,
     {
-        self.register_creator(name, T::create)
+        self.register_creator(name, Arc::new(T::create))
+    }
+
+    /// Register one unified-only parser name in the split reasoning registry.
+    pub fn register_unified_dummy(&mut self, name: &str) -> &mut Self {
+        let name = name.to_string();
+        let registered_name = name.clone();
+        self.register_creator(
+            &registered_name,
+            Arc::new(move |_| Err(ReasoningError::DummyUnifiedParser { name: name.clone() })),
+        )
     }
 
     /// Construct a parser from an exact name.
@@ -124,7 +135,7 @@ impl ReasoningParserFactory {
             available_names: self.list(),
         })?;
 
-        creator(tokenizer).map_err(|error| crate::Error::ParserInitialization {
+        creator.as_ref()(tokenizer).map_err(|error| crate::Error::ParserInitialization {
             kind: "reasoning",
             name: name.to_string(),
             error: error.into(),
