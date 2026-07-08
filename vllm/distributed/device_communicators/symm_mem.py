@@ -120,6 +120,13 @@ class SymmMemCommunicator:
             )
             return
         self.force_multimem = force_multimem
+        # The one/two-shot kernels synchronize the group with per-slot
+        # signal-pad exchanges, so their device execution order must match
+        # the group issue order. Callers issue all-reduces from different
+        # streams (profile / compile warmup / capture), which CUDA does not
+        # order; serialize every op of this communicator on a dedicated
+        # stream, fenced with events against the caller's stream.
+        self._comm_stream = torch.cuda.Stream(device=self.device)
         self.disabled = False
         if envs.VLLM_BATCH_INVARIANT:
             self.disabled = True
@@ -141,7 +148,6 @@ class SymmMemCommunicator:
             return None
         if out is None:
             out = torch.empty_like(inp)
-        self.buffer[: inp.numel()].copy_(inp.view(-1))
 
         # Determine which algorithm to use
         use_multimem = False
@@ -154,13 +160,18 @@ class SymmMemCommunicator:
                 self.device_capability, []
             )
 
-        if use_multimem:
-            torch.ops.symm_mem.multimem_all_reduce_(
-                self.buffer[: inp.numel()], "sum", self.group.group_name
-            )
-        else:
-            torch.ops.symm_mem.two_shot_all_reduce_(
-                self.buffer[: inp.numel()], "sum", self.group.group_name
-            )
-        out.copy_(self.buffer[: inp.numel()].view(out.shape))
+        current = torch.cuda.current_stream()
+        self._comm_stream.wait_stream(current)
+        with torch.cuda.stream(self._comm_stream):
+            self.buffer[: inp.numel()].copy_(inp.view(-1))
+            if use_multimem:
+                torch.ops.symm_mem.multimem_all_reduce_(
+                    self.buffer[: inp.numel()], "sum", self.group.group_name
+                )
+            else:
+                torch.ops.symm_mem.two_shot_all_reduce_(
+                    self.buffer[: inp.numel()], "sum", self.group.group_name
+                )
+            out.copy_(self.buffer[: inp.numel()].view(out.shape))
+        current.wait_stream(self._comm_stream)
         return out
