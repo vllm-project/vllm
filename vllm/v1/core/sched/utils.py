@@ -22,9 +22,8 @@ def clip_uncomputed_blocks(
 
     With speculative decoding the scheduler reserves lookahead slots that
     spill into an extra block when ``num_computed_tokens`` is a multiple of
-    the block size. Such blocks hold no computed KV, so they must not be
-    exposed to KV connectors, whose block accounting would otherwise be
-    misaligned (e.g. P/D consumers matching local/remote block lists).
+    the block size. Such blocks hold no computed KV, so they should not be
+    exposed to KV connectors.
 
     Clips per group using each group's own block size for self-attention
     groups; state groups (Mamba/SSM) and any other spec whose block count

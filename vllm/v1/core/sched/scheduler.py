@@ -2376,10 +2376,9 @@ class Scheduler(SchedulerInterface):
 
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
 
-        # Connectors must only see blocks holding computed KV: drop trailing
+        # Connectors should only see blocks holding computed KV: drop trailing
         # blocks allocated beyond the computed tokens (e.g. spec-decode
-        # lookahead slots), which would otherwise misalign connector
-        # block accounting.
+        # lookahead slots).
         block_ids = clip_uncomputed_blocks(
             self.kv_cache_config.kv_cache_groups,
             block_ids,
