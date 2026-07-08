@@ -645,10 +645,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def _dummy_rejection_sampler_run(self, hidden_states: torch.Tensor) -> None:
-        # Profile the spec-decode peak: the rejection sampler copies the expanded
-        # decode_query_len logits per request to fp32 (apply_sampling_params),
-        # which the plain sampler path never exercises. Size like the largest
-        # real decode step; only the shapes matter.
         assert self.rejection_sampler is not None
         assert self.speculator is not None
         num_logits_per_req = self.decode_query_len
