@@ -12,8 +12,9 @@
 //! Modalities differ in payload types and preprocessing shape (images are
 //! preprocessed as one batch, videos one clip at a time), so each supported
 //! modality resolves into its own [`ModalitySupport`] and produces a common
-//! [`PreparedMedia`] intermediate. Everything downstream of that contract —
-//! placeholder expansion and feature assembly — is shared across modalities.
+//! [`PreparedMedia`] intermediate in its own submodule ([`image`], [`video`]).
+//! Everything downstream of that contract — placeholder expansion and feature
+//! assembly — is shared across modalities and lives here.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -31,8 +32,7 @@ use thiserror_ext::AsReport as _;
 use tracing::warn;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::{
-    MmBatchedField, MmFeatureSpec, MmFeatures, MmField, MmFieldElem, MmFlatField, MmKwargsItem,
-    MmSharedField, MmSlice, PlaceholderRange, SliceSpec,
+    MmFeatureSpec, MmFeatures, MmKwargsItem, PlaceholderRange,
 };
 use vllm_engine_core_client::protocol::tensor::WireTensor;
 use vllm_text::Prompt;
@@ -42,13 +42,9 @@ use crate::error::{Error, Result, bail_multimodal, multimodal};
 use crate::renderer::RenderedPrompt;
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 
+mod image;
 mod tensor;
-
-/// Forward-kwargs name of the primary video encoder input.
-///
-/// Video-capable vLLM models read `pixel_values_videos` alongside
-/// `video_grid_thw`, mirroring the HF processor output naming.
-const VIDEO_PRIMARY_KEY: &str = "pixel_values_videos";
+mod video;
 
 /// Resolved multimodal support for one loaded model.
 #[derive(Clone)]
@@ -259,7 +255,7 @@ impl MultimodalModelInfo {
             }
             None => PreProcessorConfig::default(),
         };
-        let video_preprocessor_config = load_video_preprocessor_config(
+        let video_preprocessor_config = video::load_video_preprocessor_config(
             files.video_preprocessor_config,
             files.processor_config,
         )?;
@@ -381,44 +377,6 @@ impl MultimodalModelInfo {
             _ => None,
         }
     }
-}
-
-/// Load the video preprocessor config from its dedicated file, falling back
-/// to the `video_processor` section of the combined processor config.
-///
-/// Returns `Ok(None)` when neither source provides one; callers then reuse
-/// the image preprocessor config, mirroring HF processor behavior.
-fn load_video_preprocessor_config(
-    video_preprocessor_config_path: Option<&Path>,
-    processor_config_path: Option<&Path>,
-) -> Result<Option<PreProcessorConfig>> {
-    if let Some(path) = video_preprocessor_config_path {
-        let text = fs::read_to_string(path).map_err(|error| {
-            multimodal!("failed to read video_preprocessor_config.json: {error}")
-        })?;
-        let config = PreProcessorConfig::from_json(&text).map_err(|error| {
-            multimodal!("failed to parse video_preprocessor_config.json: {error}")
-        })?;
-        return Ok(Some(config));
-    }
-
-    if let Some(path) = processor_config_path {
-        let text = fs::read_to_string(path)
-            .map_err(|error| multimodal!("failed to read processor_config.json: {error}"))?;
-        let value: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|error| multimodal!("failed to parse processor_config.json: {error}"))?;
-        if let Some(video_processor) = value.get("video_processor") {
-            let config =
-                PreProcessorConfig::from_value(video_processor.clone()).map_err(|error| {
-                    multimodal!(
-                        "failed to parse video_processor from processor_config.json: {error}"
-                    )
-                })?;
-            return Ok(Some(config));
-        }
-    }
-
-    Ok(None)
 }
 
 /// Finalize a rendered chat prompt into text-generation input.
@@ -607,279 +565,6 @@ impl MultimodalModelInfo {
             video_uuids,
         })
     }
-
-    /// Preprocess all fetched image frames as one batch and build per-item
-    /// features.
-    async fn prepare_images(
-        &self,
-        frames: Vec<Arc<ImageFrame>>,
-        uuids: Vec<Option<String>>,
-        model_dtype: ModelDtype,
-    ) -> Result<PreparedMedia> {
-        let support = self.image.as_ref().ok_or_else(|| Error::UnsupportedModality {
-            modality: Modality::Image.to_string(),
-        })?;
-        let preprocessed = self.preprocess_images(support, &frames).await?;
-        let replacements =
-            self.spec
-                .prompt_replacements_for(&self.context, &preprocessed, Modality::Image)?;
-        if replacements.len() != frames.len() {
-            bail_multimodal!(
-                "number of image prompt replacements {} does not match number of images {}",
-                replacements.len(),
-                frames.len()
-            );
-        }
-        let items = self.build_image_items(preprocessed, &frames, uuids, model_dtype)?;
-
-        Ok(PreparedMedia {
-            modality: Modality::Image,
-            placeholder: support.placeholder.clone(),
-            replacements,
-            items,
-        })
-    }
-
-    /// Preprocess fetched image frames with the model's resolved vision
-    /// processor.
-    ///
-    /// The processor work is CPU-heavy relative to request wiring, so it runs
-    /// in a blocking task and returns owned tensors ready for wire
-    /// conversion.
-    async fn preprocess_images(
-        &self,
-        support: &ModalitySupport,
-        image_frames: &[Arc<ImageFrame>],
-    ) -> Result<PreprocessedEncoderInputs> {
-        let config = support.config.clone();
-        let processor = support.processor;
-        let images = image_frames.iter().map(|frame| frame.data().clone()).collect::<Vec<_>>();
-
-        // TODO: is it still necessary given that we've already in a dedicated runtime?
-        tokio::task::spawn_blocking(move || {
-            processor.preprocess(&images, &config).map_err(|error| multimodal!("{error}"))
-        })
-        .await
-        .map_err(|error| multimodal!("image preprocessing task failed: {error}"))?
-    }
-
-    /// Preprocess fetched video clips one at a time and build per-item
-    /// features.
-    ///
-    /// Unlike images, each clip runs through the preprocessor independently
-    /// (a batch of one), so its tensors are complete per item and need no
-    /// cross-item slicing.
-    async fn prepare_videos(
-        &self,
-        clips: Vec<Arc<VideoClip>>,
-        uuids: Vec<Option<String>>,
-        model_dtype: ModelDtype,
-    ) -> Result<PreparedMedia> {
-        let support = self.video.as_ref().ok_or_else(|| Error::UnsupportedModality {
-            modality: Modality::Video.to_string(),
-        })?;
-        let mut replacements = Vec::with_capacity(clips.len());
-        let mut items = Vec::with_capacity(clips.len());
-
-        for (clip, uuid) in izip!(&clips, uuids) {
-            let preprocessed = self.preprocess_video_clip(support, Arc::clone(clip)).await?;
-            let mut clip_replacements =
-                self.spec
-                    .prompt_replacements_for(&self.context, &preprocessed, Modality::Video)?;
-            if clip_replacements.len() != 1 {
-                bail_multimodal!(
-                    "expected exactly one prompt replacement per video clip, got {}",
-                    clip_replacements.len()
-                );
-            }
-            replacements.push(clip_replacements.pop().unwrap());
-            items.push(self.build_video_item(
-                preprocessed,
-                clip.hash.clone(),
-                uuid,
-                model_dtype,
-            )?);
-        }
-
-        Ok(PreparedMedia {
-            modality: Modality::Video,
-            placeholder: support.placeholder.clone(),
-            replacements,
-            items,
-        })
-    }
-
-    /// Preprocess one decoded video clip with the model's resolved vision
-    /// processor.
-    async fn preprocess_video_clip(
-        &self,
-        support: &ModalitySupport,
-        clip: Arc<VideoClip>,
-    ) -> Result<PreprocessedEncoderInputs> {
-        let config = support.config.clone();
-        let processor = support.processor;
-
-        tokio::task::spawn_blocking(move || {
-            // Prefer the borrowed-RGB fast path, which avoids materializing a
-            // `DynamicImage` per sampled frame after media decode.
-            if let Some(rgb_video) = clip.rgb_video() {
-                match rgb_video.frame_refs() {
-                    Ok(frame_refs) => match processor.preprocess_video_rgb(&frame_refs, &config) {
-                        Ok(preprocessed) => return Ok(preprocessed),
-                        Err(error) => warn!(
-                            error = %error.as_report(),
-                            "RGB video preprocessing fast path failed; falling back to materialized frames"
-                        ),
-                    },
-                    Err(error) => warn!(
-                        error,
-                        "RGB video frame refs are invalid; falling back to materialized frames"
-                    ),
-                }
-            }
-
-            let frames = clip.materialized_frames().map_err(|error| multimodal!("{error}"))?;
-            processor.preprocess_video(&frames, &config).map_err(|error| multimodal!("{error}"))
-        })
-        .await
-        .map_err(|error| multimodal!("video preprocessing task failed: {error}"))?
-    }
-
-    /// Convert one batch of preprocessed image tensors into per-item engine
-    /// kwargs.
-    ///
-    /// Tensor fields are sliced per item according to the model spec's field
-    /// layout declarations.
-    fn build_image_items(
-        &self,
-        preprocessed: PreprocessedEncoderInputs,
-        frames: &[Arc<ImageFrame>],
-        uuids: Vec<Option<String>>,
-        model_dtype: ModelDtype,
-    ) -> Result<Vec<PreparedItem>> {
-        let len = frames.len();
-        let tensors = tensor::collect_tensors(preprocessed, "pixel_values", model_dtype)?;
-
-        let mut items = Vec::with_capacity(len);
-        for (index, (frame, uuid)) in izip!(frames, uuids).enumerate() {
-            let mut data = MmKwargsItem::new();
-            for (key, tensor) in &tensors {
-                let keep_on_cpu = self.spec.keep_on_cpu_keys.contains(key);
-                let (value, field) = match self.spec.field_layouts.get(key) {
-                    Some(FieldLayout::Batched) => (
-                        tensor.batched_value_at(index)?,
-                        MmField::Batched(MmBatchedField { keep_on_cpu }),
-                    ),
-                    Some(FieldLayout::Flat { sizes_key }) => {
-                        let sizes = tensors.get(sizes_key).ok_or_else(|| {
-                            multimodal!("flat tensor sizes key `{sizes_key}` is missing")
-                        })?;
-                        let (start, end) = tensor::flat_range_for_index(sizes, sizes_key, index)?;
-                        (
-                            tensor.flat_value_range(start, end)?,
-                            MmField::Flat(MmFlatField {
-                                slices: vec![MmSlice::Slice(SliceSpec {
-                                    start: Some(0),
-                                    stop: Some((end - start) as isize),
-                                    step: None,
-                                })],
-                                dim: 0,
-                                keep_on_cpu,
-                            }),
-                        )
-                    }
-                    None => (
-                        tensor.clone(),
-                        MmField::Shared(MmSharedField {
-                            batch_size: len,
-                            keep_on_cpu,
-                        }),
-                    ),
-                };
-
-                data.insert(
-                    key.clone(),
-                    MmFieldElem {
-                        data: Some(value.try_into()?),
-                        field,
-                    },
-                );
-            }
-
-            items.push(PreparedItem {
-                data,
-                hash: frame.hash.clone(),
-                uuid,
-            });
-        }
-
-        Ok(items)
-    }
-
-    /// Convert one preprocessed video clip into engine kwargs.
-    ///
-    /// The clip is a batch of one, so no per-item slicing is required: the
-    /// primary tensor ships as a full-range flat field (the engine re-batches
-    /// flat fields by concatenating along the declared dim, matching vLLM's
-    /// `flat_from_sizes` treatment of video patches), and batched metadata
-    /// tensors drop their singleton batch axis.
-    fn build_video_item(
-        &self,
-        preprocessed: PreprocessedEncoderInputs,
-        hash: String,
-        uuid: Option<String>,
-        model_dtype: ModelDtype,
-    ) -> Result<PreparedItem> {
-        let tensors = tensor::collect_tensors(preprocessed, VIDEO_PRIMARY_KEY, model_dtype)?;
-
-        let mut data = MmKwargsItem::new();
-        for (key, tensor) in tensors {
-            let keep_on_cpu = self.spec.keep_on_cpu_keys.contains(&key);
-            let (value, field) = if key == VIDEO_PRIMARY_KEY {
-                let len = tensor
-                    .first_dim()
-                    .ok_or_else(|| multimodal!("video encoder input `{key}` is not a tensor"))?;
-                (
-                    tensor,
-                    MmField::Flat(MmFlatField {
-                        slices: vec![MmSlice::Slice(SliceSpec {
-                            start: Some(0),
-                            stop: Some(len as isize),
-                            step: None,
-                        })],
-                        dim: 0,
-                        keep_on_cpu,
-                    }),
-                )
-            } else if matches!(
-                self.spec.field_layouts.get(&key),
-                Some(FieldLayout::Batched)
-            ) {
-                (
-                    tensor.batched_value_at(0)?,
-                    MmField::Batched(MmBatchedField { keep_on_cpu }),
-                )
-            } else {
-                (
-                    tensor,
-                    MmField::Shared(MmSharedField {
-                        batch_size: 1,
-                        keep_on_cpu,
-                    }),
-                )
-            };
-
-            data.insert(
-                key,
-                MmFieldElem {
-                    data: Some(value.try_into()?),
-                    field,
-                },
-            );
-        }
-
-        Ok(PreparedItem { data, hash, uuid })
-    }
 }
 
 /// One modality's queue of pending placeholder replacements for prompt
@@ -998,7 +683,6 @@ mod tests {
     use std::sync::Arc;
 
     use llm_multimodal::TokenId;
-    use vllm_engine_core_client::protocol::multimodal::MmKwargValue;
     use vllm_engine_core_client::protocol::tensor::WireArrayData;
     use vllm_tokenizer::test_utils::TestTokenizer;
 
@@ -1011,8 +695,8 @@ mod tests {
     const LLAMA4_TILE_X_SEPARATOR_ID: u32 = 200093;
     const LLAMA4_TILE_Y_SEPARATOR_ID: u32 = 200094;
 
-    const QWEN3_IMAGE_PAD_ID: u32 = 151655;
-    const QWEN3_VIDEO_PAD_ID: u32 = 151656;
+    pub(super) const QWEN3_IMAGE_PAD_ID: u32 = 151655;
+    pub(super) const QWEN3_VIDEO_PAD_ID: u32 = 151656;
 
     fn llama4_tokenizer() -> TestTokenizer {
         TestTokenizer::new()
@@ -1024,7 +708,7 @@ mod tests {
             .with_regular_token("<|tile_y_separator|>", LLAMA4_TILE_Y_SEPARATOR_ID)
     }
 
-    fn qwen3_vl_tokenizer() -> TestTokenizer {
+    pub(super) fn qwen3_vl_tokenizer() -> TestTokenizer {
         TestTokenizer::new()
             .with_regular_token("<|image_pad|>", QWEN3_IMAGE_PAD_ID)
             .with_regular_token("<|video_pad|>", QWEN3_VIDEO_PAD_ID)
@@ -1056,7 +740,7 @@ mod tests {
         test_info("llama4", config, llama4_tokenizer())
     }
 
-    fn qwen3_vl_info() -> MultimodalModelInfo {
+    pub(super) fn qwen3_vl_info() -> MultimodalModelInfo {
         let config = serde_json::json!({
             "model_type": "qwen3_vl",
             "image_token_id": QWEN3_IMAGE_PAD_ID,
@@ -1433,136 +1117,5 @@ mod tests {
                 if message.contains("<|video_pad|>") && message.contains("`video`")
         ));
         assert_eq!(prompt_token_ids, original_prompt_token_ids);
-    }
-
-    #[test]
-    fn from_paths_resolves_video_config_from_dedicated_file_or_processor_config() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.json");
-        std::fs::write(
-            &config_path,
-            serde_json::json!({
-                "model_type": "qwen3_vl",
-                "image_token_id": QWEN3_IMAGE_PAD_ID,
-                "video_token_id": QWEN3_VIDEO_PAD_ID,
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        let info_for = |files: MultimodalConfigFiles<'_>| {
-            MultimodalModelInfo::from_paths(
-                "qwen3-vl-test".to_string(),
-                Some("qwen3_vl".to_string()),
-                files,
-                Arc::new(qwen3_vl_tokenizer()),
-            )
-        };
-
-        // Dedicated video preprocessor config file.
-        let video_config_path = dir.path().join("video_preprocessor_config.json");
-        std::fs::write(&video_config_path, r#"{"size":{"shortest_edge":128}}"#).unwrap();
-        let info = info_for(MultimodalConfigFiles {
-            config: Some(&config_path),
-            video_preprocessor_config: Some(&video_config_path),
-            ..Default::default()
-        })
-        .unwrap()
-        .unwrap();
-        assert!(info.video.is_some());
-
-        // `video_processor` section of the combined processor config.
-        let processor_config_path = dir.path().join("processor_config.json");
-        std::fs::write(
-            &processor_config_path,
-            r#"{"video_processor":{"size":{"shortest_edge":128}}}"#,
-        )
-        .unwrap();
-        let info = info_for(MultimodalConfigFiles {
-            config: Some(&config_path),
-            processor_config: Some(&processor_config_path),
-            ..Default::default()
-        })
-        .unwrap()
-        .unwrap();
-        assert!(info.video.is_some());
-
-        // Neither source: video support still resolves on the image config.
-        let info = info_for(MultimodalConfigFiles {
-            config: Some(&config_path),
-            ..Default::default()
-        })
-        .unwrap()
-        .unwrap();
-        assert!(info.video.is_some());
-
-        // Malformed dedicated file is a real error, not a silent fallback.
-        std::fs::write(&video_config_path, r#"{"size""#).unwrap();
-        let error = match info_for(MultimodalConfigFiles {
-            config: Some(&config_path),
-            video_preprocessor_config: Some(&video_config_path),
-            ..Default::default()
-        }) {
-            Err(error) => error,
-            Ok(_) => panic!("malformed video preprocessor config should fail"),
-        };
-        assert!(matches!(
-            error,
-            Error::Multimodal(message)
-                if message.contains("failed to parse video_preprocessor_config.json")
-        ));
-    }
-
-    #[test]
-    fn build_video_item_names_primary_tensor_and_layouts() {
-        use llm_multimodal::ModelSpecificValue;
-        use ndarray::ArrayD;
-
-        let info = qwen3_vl_info();
-        // One clip flattened to 6 patches with 4 features each.
-        let preprocessed = PreprocessedEncoderInputs {
-            encoder_input: ArrayD::zeros(vec![6, 4]),
-            feature_token_counts: vec![6],
-            item_sizes: vec![(32, 32)],
-            model_specific: HashMap::from([
-                (
-                    "video_grid_thw".to_string(),
-                    ModelSpecificValue::int_2d(vec![1, 2, 3], 1, 3),
-                ),
-                (
-                    "patches_per_video".to_string(),
-                    ModelSpecificValue::int_1d(vec![6]),
-                ),
-            ]),
-        };
-
-        let item = info
-            .build_video_item(
-                preprocessed,
-                "<hash>".to_string(),
-                None,
-                ModelDtype::Float32,
-            )
-            .unwrap();
-
-        let primary = &item.data[VIDEO_PRIMARY_KEY];
-        assert!(matches!(
-            &primary.field,
-            MmField::Flat(MmFlatField { slices, dim: 0, .. })
-                if matches!(
-                    slices.as_slice(),
-                    [MmSlice::Slice(SliceSpec { start: Some(0), stop: Some(6), step: None })]
-                )
-        ));
-
-        // Batched metadata drops its singleton batch axis per item.
-        let grid = &item.data["video_grid_thw"];
-        assert!(matches!(&grid.field, MmField::Batched(_)));
-        let MmKwargValue::Tensor(grid_tensor) = grid.data.as_ref().unwrap() else {
-            panic!("expected tensor value for video_grid_thw");
-        };
-        assert_eq!(grid_tensor.shape, vec![3]);
-
-        assert_eq!(item.hash, "<hash>");
     }
 }
