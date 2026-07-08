@@ -131,7 +131,8 @@ extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*", "tests/tokenizer
     "rust/src/chat/src/renderer/deepseek_v32/fixtures/*",
     "rust/src/parser/src/tool/gemma4.rs", "rust/src/parser/src/unified/gemma4.rs",
     "rust/src/text/src/output/decoded.rs",
-    "rust/src/tokenizer/src/incremental.rs", "rust/src/parser/src/reasoning/tests.rs"]
+    "rust/src/tokenizer/src/incremental.rs", "rust/src/parser/src/reasoning/tests.rs",
+    "rust/src/parser/src/reasoning/mistral.rs"]
 ignore-hidden = false
 
 [tool.typos.default]

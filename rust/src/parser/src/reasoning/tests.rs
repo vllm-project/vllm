@@ -21,6 +21,8 @@ pub(crate) const MM_THINK_START_ID: u32 = 263;
 pub(crate) const MM_THINK_END_ID: u32 = 264;
 pub(crate) const SEED_THINK_START_ID: u32 = 265;
 pub(crate) const SEED_THINK_END_ID: u32 = 266;
+pub(crate) const MISTRAL_THINK_START_ID: u32 = 267;
+pub(crate) const MISTRAL_THINK_END_ID: u32 = 268;
 
 pub(crate) fn fake_tokenizer() -> TestTokenizer {
     TestTokenizer::new()
@@ -35,6 +37,8 @@ pub(crate) fn fake_tokenizer() -> TestTokenizer {
         .with_regular_token("</mm:think>", MM_THINK_END_ID)
         .with_regular_token("<seed:think>", SEED_THINK_START_ID)
         .with_regular_token("</seed:think>", SEED_THINK_END_ID)
+        .with_regular_token("[THINK]", MISTRAL_THINK_START_ID)
+        .with_regular_token("[/THINK]", MISTRAL_THINK_END_ID)
 }
 
 #[test]
