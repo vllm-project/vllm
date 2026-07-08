@@ -5,7 +5,7 @@
 import ctypes
 import time
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
 from vllm.distributed.kv_events import MEDIUM_OBJ
 from vllm.distributed.nixl_utils import NixlWrapper as nixl_agent
@@ -97,6 +97,8 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     primary tier. Object keys are formed as ``{prefix}/{hash_shard}/{hash}.bin``.
     """
 
+    medium: ClassVar[str] = MEDIUM_OBJ
+
     def __init__(
         self,
         offloading_spec: "OffloadingSpec",
@@ -105,7 +107,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         store_config: dict,
         prefix: str = "",
         io_threads: int = 4,
-        enable_secondary_tier_events: bool = False,
+        enable_kv_events: bool = False,
     ):
         """
         Args:
@@ -115,22 +117,21 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             store_config: Object store connection parameters (see ObjStoreConfig).
             prefix: Key prefix prepended to all object keys.
             io_threads: Number of NIXL I/O threads.
-            enable_secondary_tier_events: Emit BlockStored KV events for blocks
+            enable_kv_events: Emit BlockStored KV events for blocks
                 successfully stored to this tier. Effective only when KV
                 cache events are enabled globally (kv_events_config).
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
 
-        self.medium: str = MEDIUM_OBJ
         self.events: list[OffloadingEvent] | None = None
-        if enable_secondary_tier_events:
+        if enable_kv_events:
             if offloading_spec.kv_events_config.enable_kv_cache_events:
                 self.events = []
             else:
                 logger.warning(
-                    "enable_secondary_tier_events is set on secondary "
-                    "tier '%s' but KV cache events are disabled globally; "
-                    "the tier will not emit events.",
+                    "enable_kv_events is set on secondary tier '%s' but KV "
+                    "cache events are disabled globally; the tier will not "
+                    "emit events.",
                     tier_type,
                 )
         # Keys of in-flight store jobs, tracked only when events are enabled.

@@ -19,7 +19,7 @@ import functools
 import json
 import os
 from collections.abc import Iterable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 try:
     from vllm.fs_io_C import batch_lookup as batch_lookup_C
@@ -99,6 +99,8 @@ class FileSystemTierManager(SecondaryTierManager):
         content.
     """
 
+    medium: ClassVar[str] = MEDIUM_FS
+
     def __init__(
         self,
         offloading_spec: "OffloadingSpec",
@@ -107,7 +109,7 @@ class FileSystemTierManager(SecondaryTierManager):
         root_dir: str,
         n_read_threads: int = 16,
         n_write_threads: int = 16,
-        enable_secondary_tier_events: bool = False,
+        enable_kv_events: bool = False,
     ):
         """
         Args:
@@ -118,22 +120,21 @@ class FileSystemTierManager(SecondaryTierManager):
             root_dir: Root directory for block files.
             n_read_threads: Number of read-priority I/O threads.
             n_write_threads: Number of write-priority I/O threads.
-            enable_secondary_tier_events: Emit BlockStored KV events for blocks
+            enable_kv_events: Emit BlockStored KV events for blocks
                 successfully stored to this tier. Effective only when KV
                 cache events are enabled globally (kv_events_config).
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
 
-        self.medium: str = MEDIUM_FS
         self.events: list[OffloadingEvent] | None = None
-        if enable_secondary_tier_events:
+        if enable_kv_events:
             if offloading_spec.kv_events_config.enable_kv_cache_events:
                 self.events = []
             else:
                 logger.warning(
-                    "enable_secondary_tier_events is set on secondary "
-                    "tier '%s' but KV cache events are disabled globally; "
-                    "the tier will not emit events.",
+                    "enable_kv_events is set on secondary tier '%s' but KV "
+                    "cache events are disabled globally; the tier will not "
+                    "emit events.",
                     tier_type,
                 )
         # Keys of in-flight store jobs, tracked only when events are enabled.

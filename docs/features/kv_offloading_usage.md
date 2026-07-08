@@ -81,7 +81,7 @@ vllm serve <model> \
 
 Each entry in `secondary_tiers` is a dict with a required `type` field plus tier-specific fields.
 
-The filesystem and object-store tiers can publish hash-only `BlockStored` KV events for blocks they successfully store, tagged with a stable per-tier `medium` (`FS` for the filesystem tier, `OBJ` for the object-store tier). Set `enable_secondary_tier_events: true` in the tier's entry to opt in; events are published only when KV cache events are also enabled globally via `--kv-events-config`.
+The filesystem and object-store tiers can publish hash-only `BlockStored` KV events for blocks they successfully store, tagged with a stable per-tier `medium` (`FS` for the filesystem tier, `OBJ` for the object-store tier). Set `enable_kv_events: true` in the tier's entry to opt in; events are published only when KV cache events are also enabled globally via `--kv-events-config`.
 
 ### Filesystem (FS)
 
@@ -93,7 +93,7 @@ The filesystem tier (`type: "fs"`) writes blocks to a directory on local storage
 | `root_dir` | yes | — | Base directory; vLLM creates subdirectories beneath it (see [On-Disk Layout](#on-disk-layout)). |
 | `n_read_threads` | no | `16` | Read-priority I/O threads (load path). |
 | `n_write_threads` | no | `16` | Write-priority I/O threads (store path). |
-| `enable_secondary_tier_events` | no | `false` | Publish `BlockStored` KV events (medium `FS`) for successfully stored blocks. Requires globally enabled KV cache events. |
+| `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `FS`) for successfully stored blocks. Requires globally enabled KV cache events. |
 
 Each thread group prefers its own queue but pulls from the other when its primary queue is empty, so a write-heavy or read-heavy burst won't leave the off-priority queue waiting. Size the totals to your storage's effective concurrency.
 
@@ -133,7 +133,7 @@ The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object
 | `store_config` | yes | — | Object store connection parameters (see below). |
 | `prefix` | no | `""` | Key prefix prepended to all object keys. |
 | `io_threads` | no | `4` | NIXL OBJ backend I/O threads. |
-| `enable_secondary_tier_events` | no | `false` | Publish `BlockStored` KV events (medium `OBJ`) for successfully stored blocks. Requires globally enabled KV cache events. |
+| `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `OBJ`) for successfully stored blocks. Requires globally enabled KV cache events. |
 
 `store_config` fields:
 

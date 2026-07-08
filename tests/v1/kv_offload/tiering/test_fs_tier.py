@@ -186,7 +186,7 @@ def fs_tier_with_events(tmp_path):
         root_dir=str(tmp_path),
         n_read_threads=4,
         n_write_threads=4,
-        enable_secondary_tier_events=True,
+        enable_kv_events=True,
     )
     yield tier
     tier.shutdown()
@@ -536,7 +536,7 @@ def test_events_require_global_kv_events_flag(tmp_path):
         primary_kv_view=memoryview(tensor.numpy()),
         tier_type="fs",
         root_dir=str(tmp_path),
-        enable_secondary_tier_events=True,
+        enable_kv_events=True,
     )
     try:
         assert tier.events is None
@@ -568,7 +568,7 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
         primary_kv_view=primary.get_kv_memoryview(),
         tier_type="fs",
         root_dir=str(tmp_path),
-        enable_secondary_tier_events=True,
+        enable_kv_events=True,
     )
     manager = TieringOffloadingManager(primary_tier=primary, secondary_tiers=[tier])
     try:

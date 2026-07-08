@@ -437,7 +437,7 @@ class TestObjTierKVEvents:
     def setup_method(self):
         self.tier, self.agent = _make_tier(
             offloading_spec=_make_events_spec(enable_kv_cache_events=True),
-            enable_secondary_tier_events=True,
+            enable_kv_events=True,
         )
 
     def test_successful_store_emits_stored_event(self):
@@ -516,7 +516,7 @@ class TestObjTierKVEvents:
         """Tier-level opt-in alone is not enough; the global flag gates events."""
         tier, _ = _make_tier(
             offloading_spec=_make_events_spec(enable_kv_cache_events=False),
-            enable_secondary_tier_events=True,
+            enable_kv_events=True,
         )
         tier.submit_store(make_job(1, [key(1)], [0]))
         results = drain(tier)
