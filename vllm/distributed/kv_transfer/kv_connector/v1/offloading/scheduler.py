@@ -712,15 +712,15 @@ class OffloadingConnectorScheduler:
                   (between scheduler steps).
         """
         req_status = self._req_status[request.request_id]
-        for group_state in req_status.group_states:
-            group_state.block_ids.clear()
-
         if req_status.transfer_jobs:
             logger.debug(
-                "Delaying request %s since it still has in-flight transfers",
+                "Request %s has pending offload jobs; deferring prefix lookup",
                 request.request_id,
             )
             return None, False
+
+        for group_state in req_status.group_states:
+            group_state.block_ids.clear()
 
         req_status.update_offload_keys()
         req_status.num_locally_computed_tokens = num_computed_tokens

@@ -1431,7 +1431,8 @@ def test_pending_transfer_defers_prefix_lookup():
     worker before the scheduler consumes its completion. If the request is
     re-admitted in that window, the connector should defer it instead of
     looking up offloaded blocks and later asserting when a load is queued while
-    the store job is still tracked.
+    the store job is still tracked. Deferring must preserve the tracked GPU
+    blocks so the request can resume correctly after the transfer completes.
     """
     scheduler = object.__new__(OffloadingConnectorScheduler)
     scheduler.manager = MagicMock(spec=OffloadingManager)
@@ -1451,7 +1452,7 @@ def test_pending_transfer_defers_prefix_lookup():
 
     assert matched_tokens is None
     assert is_async is False
-    assert group_state.block_ids == []
+    assert group_state.block_ids == [1, 2, 3]
     scheduler.manager.lookup.assert_not_called()
 
 
