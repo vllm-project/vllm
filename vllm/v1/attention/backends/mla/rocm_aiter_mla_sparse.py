@@ -732,19 +732,29 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
         """Fused decode Q-prep.
 
         Applies RoPE to ``q_pe``/``k_pe``, concatenates ``ql_nope`` with the
-        RoPE'd ``q_pe`` into ``q_out`` (bf16), and writes the concatenated,
-        fp8-quantized latent+rope KV row into ``kv_cache``. The returned bf16
-        ``q_out`` is quantized to fp8 downstream in ``forward_mqa`` (matching the
-        split-kernel path), so the sparse decode kernel sees an identical query.
+        RoPE'd ``q_pe`` into ``q_out``, and writes the concatenated,
+        fp8-quantized latent+rope KV row into ``kv_cache``. The fused path only
+        runs with an fp8 KV cache, so ``q_out`` is produced directly in fp8
+        (quantized by the kernel with ``q_scale``).
         """
         num_tokens, num_q_heads = ql_nope.shape[:2]
+        # The aiter kernel builds the nope half of q_out (and the KV latent) by
+        # copying ql_nope and REQUIRES it to be contiguous: a strided ql_nope
+        # silently yields wrong q_out values. Force contiguity here.
+        ql_nope = ql_nope.contiguous()
+        # Emit q_out directly in fp8 when the KV cache is fp8
+        q_out_dtype = (
+            current_platform.fp8_dtype()
+            if self.kv_cache_dtype.startswith("fp8")
+            else ql_nope.dtype
+        )
         q_out = torch.empty(
             (num_tokens, num_q_heads, self.head_size),
-            dtype=ql_nope.dtype,
+            dtype=q_out_dtype,
             device=ql_nope.device,
         )
         kv_cache_3d = kv_cache.view(kv_cache.shape[0], -1, self.head_size)
-        
+
         rocm_aiter_ops.fused_qk_rope_concat_and_cache_mla(
             ql_nope,
             q_pe,
