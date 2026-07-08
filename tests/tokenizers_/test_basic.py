@@ -5,7 +5,7 @@ from typing import _get_protocol_attrs  # type: ignore
 import pytest
 from transformers import (
     PreTrainedTokenizerBase,
-    PreTrainedTokenizerFast,
+    TokenizersBackend,
 )
 
 from vllm.tokenizers import TokenizerLike, get_tokenizer
@@ -23,8 +23,8 @@ def _assert_tokenizer_like(tokenizer: object):
 
 
 def test_tokenizer_like_protocol():
-    tokenizer = get_tokenizer("gpt2", use_fast=True)
-    assert isinstance(tokenizer, PreTrainedTokenizerFast)
+    tokenizer = get_tokenizer("openai-community/gpt2", use_fast=True)
+    assert isinstance(tokenizer, TokenizersBackend)
     _assert_tokenizer_like(tokenizer)
 
     tokenizer = get_tokenizer(
@@ -38,12 +38,14 @@ def test_tokenizer_like_protocol():
     assert isinstance(tokenizer, HfTokenizer)
 
     # Verify it's a fast tokenizer (required for FastIncrementalDetokenizer)
-    assert isinstance(tokenizer, PreTrainedTokenizerFast)
+    assert isinstance(tokenizer, TokenizersBackend)
     assert "DSV32" in tokenizer.__class__.__name__
     _assert_tokenizer_like(tokenizer)
 
 
-@pytest.mark.parametrize("tokenizer_name", ["facebook/opt-125m", "gpt2"])
+@pytest.mark.parametrize(
+    "tokenizer_name", ["facebook/opt-125m", "openai-community/gpt2"]
+)
 def test_tokenizer_revision(tokenizer_name: str):
     # Assume that "main" branch always exists
     tokenizer = get_tokenizer(tokenizer_name, revision="main")
