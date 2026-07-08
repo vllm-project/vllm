@@ -88,8 +88,22 @@ class INCWna16Scheme(INCScheme):
         layer_config: "INCLayerConfig",
     ):
         del config, prefix
-        # XPU and CPU do not support MoE quantization yet
-        if current_platform.is_xpu() or current_platform.is_cpu():
+        # XPU: gptq-symmetric int4 group MoE is backed by XPUExpertsWNA16.
+        if current_platform.is_xpu():
+            if (
+                layer_config.is_gptq
+                and layer_config.bits == 4
+                and layer_config.sym
+                and layer_config.group_size > 0
+            ):
+                return _resolve_xpu_moe(layer, layer_config)
+            from vllm.model_executor.layers.fused_moe import (
+                UnquantizedFusedMoEMethod,
+            )
+
+            return UnquantizedFusedMoEMethod(layer.moe_config)
+        # CPU does not support quantized MoE yet
+        if current_platform.is_cpu():
             from vllm.model_executor.layers.fused_moe import (
                 UnquantizedFusedMoEMethod,
             )
@@ -199,3 +213,29 @@ def _resolve_awq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
         }
     )
     return MoeWNA16Method(moe_config, layer.moe_config)
+
+
+def _resolve_xpu_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
+    """Build a symmetric int4 group WNA16 MoE method backed by XPUExpertsWNA16.
+
+    AutoRound saves expert weights with GPTQ suffixes
+    (``qweight`` / ``scales`` / ``qzeros`` / ``g_idx``).
+    :class:`INCXPUWNA16MoEMethod` subclasses :class:`MoeWNA16Method`, so it
+    registers exactly those parameter names and repacks them into the uint8
+    ``[E, 2N, K // 2]`` layout expected by ``xpu_fused_moe(is_int4=True)``,
+    while routing compute through the native XPU kernel.
+    """
+    from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
+
+    from ..inc_moe import INCXPUWNA16MoEMethod
+
+    moe_config = MoeWNA16Config.from_config(
+        {
+            "quant_method": "gptq",
+            "bits": layer_config.bits,
+            "group_size": layer_config.group_size,
+            "sym": layer_config.sym,
+            "lm_head": False,
+        }
+    )
+    return INCXPUWNA16MoEMethod(moe_config, layer.moe_config)
