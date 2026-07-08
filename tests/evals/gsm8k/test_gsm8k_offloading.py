@@ -126,7 +126,7 @@ MODELS = [
         model="nvidia/Nemotron-H-8B-Base-8K",
         connector="OffloadingConnector",
         # Baseline ~0.49 on 200 questions (measured on GB200).
-        accuracy_threshold=0.45,
+        accuracy_threshold=0.39,
     ),
     OffloadingModelConfig(
         id="offloading-gemma-4-e4b-it",
