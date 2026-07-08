@@ -134,6 +134,7 @@ def _reference_index_topk(
     topk: int,
     init_blocks: int,
     local_blocks: int,
+    sm_scale: float = 1.0,
 ) -> torch.Tensor:
     total_q, num_idx_heads, _ = idx_q.shape
     out = torch.full(
@@ -149,7 +150,7 @@ def _reference_index_topk(
         num_blocks = (seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
         pages = block_table[req_id, :num_blocks]
         k = index_kv_cache[pages].reshape(num_blocks * BLOCK_SIZE, -1)
-        score = torch.einsum("qhd,kd->hqk", q.float(), k.float())
+        score = sm_scale * torch.einsum("qhd,kd->hqk", q.float(), k.float())
 
         q_pos = prefix_len + torch.arange(q_len, device=idx_q.device)
         k_pos = torch.arange(k.shape[0], device=idx_q.device)
@@ -244,6 +245,270 @@ def test_prefill_index_topk_correctness():
     _assert_topk_indices_equal_unordered(actual, expected)
 
 
+# MSA indexer (SM100): fmha_sm100 OnlyScore for the per-block scores, then the
+# Triton minimax_m3_index_topk for selection (no sparse_topk_select). Uses a
+# deterministic construction (idx_q == 1, distinct e4m3-exact per-block values)
+# so scores are strictly monotonic in the block id -> exact top-k agreement.
+def _fmha_indexer_topk(
+    idx_q: torch.Tensor,  # [total_q, H, 128] bf16/e4m3
+    index_cache: torch.Tensor,  # [num_pages, 128, 128] bf16/e4m3
+    block_table: torch.Tensor,
+    q_lens: torch.Tensor,
+    seq_lens: torch.Tensor,
+    prefix_lens: torch.Tensor,
+    sm_scale: float,
+    topk: int,
+) -> torch.Tensor:
+    """Replicate MiniMaxM3IndexerMSAImpl's score path (single decode/prefill side)."""
+    from vllm.third_party.fmha_sm100.api import _fmha_sm100, _fmha_sm100_plan
+
+    num_idx_heads, head_dim = idx_q.shape[1], idx_q.shape[2]
+    nvp = [(s + 127) // 128 for s in seq_lens.tolist()]
+    kv_indices = torch.cat([block_table[r, : nvp[r]] for r in range(len(nvp))]).to(
+        torch.int32
+    )
+
+    qo = q_lens.cpu().to(torch.int32)
+    kv = seq_lens.cpu().to(torch.int32)
+    plan = _fmha_sm100_plan(
+        qo,
+        kv,
+        num_idx_heads,
+        num_kv_heads=1,
+        qo_offset=kv - qo,
+        page_size=128,
+        output_maxscore=True,
+        causal=True,
+        num_kv_splits=1,
+    )
+    k_pages = index_cache.view(index_cache.shape[0], 1, 128, head_dim)
+    _, max_score = _fmha_sm100(
+        idx_q,
+        k_pages,
+        k_pages,
+        plan,
+        kv_indices=kv_indices,
+        output_o=False,
+        output_maxscore=True,
+        sm_scale=sm_scale,
+    )
+
+    batch = q_lens.numel()
+    cu = torch.zeros(batch + 1, dtype=torch.int32, device=idx_q.device)
+    cu[1:] = q_lens.to(torch.int32).cumsum(0)
+    # max_score [H, k_tiles, total_q] -> transpose to [H, total_q, k_tiles].
+    return minimax_m3_index_topk(
+        max_score.transpose(1, 2),
+        cu,
+        prefix_lens.to(torch.int32),
+        int(q_lens.max()),
+        topk,
+        0,  # init_blocks
+        0,  # local_blocks
+    )
+
+
+# e4m3-exact, strictly-increasing per-block values: with idx_q == 1 (also exact)
+# the per-block scores are exact and distinct in BOTH bf16 and e4m3, so the fp8
+# score path selects the same top-k as the reference (no quantization ties).
+_E4M3_EXACT_VALUES = [
+    *range(1, 17),  # 1..16  (step 1)
+    *range(18, 33, 2),  # 18..32 (step 2)
+    *range(36, 65, 4),  # 36..64 (step 4)
+    *range(72, 129, 8),  # 72..128 (step 8)
+]
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="fmha_sm100 indexer requires SM100 (Blackwell).",
+)
+@pytest.mark.parametrize("index_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.parametrize(
+    ("q_lens", "prefix_lens"),
+    [
+        ((4, 3), (2048, 2560)),  # prefill: every token sees >= 16 causal blocks
+        ((1, 1, 1), (2048, 3000, 4096)),  # decode: one query token per request
+    ],
+)
+def test_fmha_sm100_indexer_matches_reference(q_lens, prefix_lens, index_dtype):
+    torch.manual_seed(0)
+    num_idx_heads, head_dim = 4, HEAD_DIM
+    device = "cuda"
+
+    q_lens_t = torch.tensor(q_lens, device=device, dtype=torch.int32)
+    prefix_lens_t = torch.tensor(prefix_lens, device=device, dtype=torch.int32)
+    seq_lens = prefix_lens_t + q_lens_t
+    batch = len(q_lens)
+    max_blocks = (int(seq_lens.max()) + BLOCK_SIZE - 1) // BLOCK_SIZE
+    assert max_blocks <= len(_E4M3_EXACT_VALUES)
+    num_pages = batch * max_blocks
+    block_table = torch.randperm(num_pages, device=device, dtype=torch.int32).reshape(
+        batch, max_blocks
+    )
+
+    idx_q = torch.ones(
+        int(q_lens_t.sum()), num_idx_heads, head_dim, device=device, dtype=index_dtype
+    )
+    index_cache = torch.empty(
+        num_pages, BLOCK_SIZE, head_dim, device=device, dtype=index_dtype
+    )
+    for r in range(batch):
+        for b in range(max_blocks):
+            index_cache[block_table[r, b]] = float(_E4M3_EXACT_VALUES[b])
+
+    sm_scale = head_dim**-0.5
+    actual = _fmha_indexer_topk(
+        idx_q,
+        index_cache,
+        block_table,
+        q_lens_t,
+        seq_lens,
+        prefix_lens_t,
+        sm_scale,
+        TOPK,
+    )
+    expected = _reference_index_topk(
+        idx_q,
+        index_cache,
+        block_table,
+        q_lens_t,
+        seq_lens,
+        prefix_lens_t,
+        TOPK,
+        init_blocks=0,
+        local_blocks=0,
+        sm_scale=sm_scale,
+    )
+    _assert_topk_indices_equal_unordered(actual, expected)
+
+
+# Full impl-level parity: drive both MiniMaxM3IndexerMSAImpl (fmha_sm100 score +
+# Triton top-k) and MiniMaxM3IndexerTritonImpl through their real metadata
+# builders on the SAME CommonAttentionMetadata + index cache, and assert the
+# selected blocks agree. This exercises all the metadata the impl/kernels consume
+# (decode/prefill split, cu_seqlens_q rebasing, prefix_lens, kv_indices gather,
+# decode_pages split) -- a metadata bug on either side shifts the causal window
+# or the block->page mapping and breaks the comparison.
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="fmha_sm100 indexer requires SM100 (Blackwell).",
+)
+@pytest.mark.parametrize("topk", [8, 16])
+def test_msa_indexer_impl_matches_triton(topk, monkeypatch):
+    import vllm.models.minimax_m3.common.indexer as indexer_mod
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_vllm_config,
+    )
+    from vllm.config import set_current_vllm_config
+    from vllm.forward_context import set_forward_context
+    from vllm.models.minimax_m3.common.indexer import (
+        MiniMaxM3IndexerTritonImpl,
+        MiniMaxM3IndexerTritonMetadataBuilder,
+    )
+    from vllm.models.minimax_m3.nvidia.indexer_msa import (
+        MiniMaxM3IndexerMSAImpl,
+        MiniMaxM3IndexerMSAMetadataBuilder,
+    )
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    num_idx_heads, head_dim = 4, HEAD_DIM
+    # TP=1: avoid requiring an initialized distributed group in a unit test.
+    monkeypatch.setattr(indexer_mod, "get_tensor_model_parallel_world_size", lambda: 1)
+
+    vllm_config = create_vllm_config(
+        block_size=BLOCK_SIZE, max_model_len=8192, max_num_batched_tokens=8192
+    )
+    vllm_config.model_config.hf_config.sparse_attention_config = {
+        "sparse_num_index_heads": num_idx_heads
+    }
+
+    # Decode-first mixed batch: 2 decode reqs (q_len 1) then 2 prefill reqs. Long
+    # prefixes so every token sees > TOPK causal blocks (non-trivial selection).
+    batch = BatchSpec(seq_lens=[2305, 2561, 2624, 2720], query_lens=[1, 1, 64, 96])
+    common = create_common_attn_metadata(
+        batch, BLOCK_SIZE, device, arange_block_indices=True
+    )
+    num_tokens = batch.compute_num_tokens()
+
+    # Deterministic index cache: distinct, monotonic per-logical-block values so
+    # the top-k is unambiguous (both kernels pick the same blocks, no fp ties).
+    block_table = common.block_table_tensor
+    num_pages = int(block_table.max().item()) + 1
+    index_cache = torch.zeros(
+        num_pages, BLOCK_SIZE, head_dim, device=device, dtype=DTYPE
+    )
+    for r, seq_len in enumerate(batch.seq_lens):
+        for b in range((seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE):
+            index_cache[block_table[r, b]] = float(b + 1)
+    index_q = torch.ones(
+        num_tokens, num_idx_heads * head_dim, device=device, dtype=DTYPE
+    )
+
+    spec = MLAAttentionSpec(
+        block_size=BLOCK_SIZE, num_kv_heads=1, head_size=head_dim, dtype=DTYPE
+    )
+    impl_kwargs = dict(
+        num_kv_heads=num_idx_heads,
+        scale=head_dim**-0.5,
+        topk_blocks=topk,
+        sparse_block_size=BLOCK_SIZE,
+        num_index_heads=num_idx_heads,
+        index_head_dim=head_dim,
+        init_blocks=0,
+        local_blocks=0,
+    )
+
+    with set_current_vllm_config(vllm_config):
+        msa_impl = MiniMaxM3IndexerMSAImpl(prefix="idx_msa", **impl_kwargs)
+        triton_impl = MiniMaxM3IndexerTritonImpl(prefix="idx_triton", **impl_kwargs)
+        msa_builder = MiniMaxM3IndexerMSAMetadataBuilder(
+            spec, [msa_impl.index_cache.prefix], vllm_config, device
+        )
+        triton_builder = MiniMaxM3IndexerTritonMetadataBuilder(
+            spec, [triton_impl.index_cache.prefix], vllm_config, device
+        )
+
+    # Both impls score against the same index keys.
+    msa_impl.index_cache.kv_cache = index_cache
+    triton_impl.index_cache.kv_cache = index_cache
+
+    # Exercise the shared persistent top-k buffer for BOTH impls: each must write
+    # decode ([:, :nd]) and prefill ([:, nd:]) into its buffer and return views.
+    # Separate buffers so the two forwards don't clobber each other.
+    nd = sum(q for q in batch.query_lens if q <= 1)
+    msa_impl.topk_indices_buffer = torch.full(
+        (num_idx_heads, num_tokens, topk), -2, dtype=torch.int32, device=device
+    )
+    triton_impl.topk_indices_buffer = torch.full(
+        (num_idx_heads, num_tokens, topk), -2, dtype=torch.int32, device=device
+    )
+
+    attn_metadata = {
+        msa_impl.index_cache.prefix: msa_builder.build(0, common),
+        triton_impl.index_cache.prefix: triton_builder.build(0, common),
+    }
+    with set_forward_context(attn_metadata, vllm_config):
+        msa_decode, msa_prefill = msa_impl(index_q)
+        tri_decode, tri_prefill = triton_impl(index_q)
+
+    assert msa_decode is not None and tri_decode is not None
+    assert msa_prefill is not None and tri_prefill is not None
+    _assert_topk_indices_equal_unordered(msa_decode, tri_decode)
+    _assert_topk_indices_equal_unordered(msa_prefill, tri_prefill)
+    # decode/prefill outputs are views into each impl's persistent buffer.
+    for impl, dec, pre in (
+        (msa_impl, msa_decode, msa_prefill),
+        (triton_impl, tri_decode, tri_prefill),
+    ):
+        buf = impl.topk_indices_buffer
+        assert dec.data_ptr() == buf[:, :nd, :].data_ptr()
+        assert pre.data_ptr() == buf[:, nd:, :].data_ptr()
+
+
 @pytest.mark.parametrize(
     ("decode_query_len", "max_decode_query_len"),
     [
@@ -307,6 +572,65 @@ def test_decode_index_topk_correctness(
         idx_q[:active_tokens],
         index_kv_cache,
         block_table[:active_batch],
+        q_lens,
+        active_seq_lens,
+        prefix_lens,
+        topk,
+        init_blocks,
+        local_blocks,
+    )
+    _assert_topk_indices_equal_unordered(actual, expected)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="fp8 e4m3 indexer cache is the SM100 (MSA) path.",
+)
+@pytest.mark.parametrize("num_idx_heads", [1, 4])
+def test_decode_index_topk_fp8(num_idx_heads: int):
+    """The fp8 (e4m3) indexer cache feeds the Triton decode kernel on the MSA
+    path. The kernel must score in fp32 (no scaling) so its top-k matches a
+    reference computed from the dequantized fp8 values."""
+    torch.manual_seed(0)
+    topk, init_blocks, local_blocks, head_dim = 8, 0, 1, 128
+    decode_query_len = 1
+    active_seq_lens = torch.tensor((129, 1025, 4097), device="cuda", dtype=torch.int32)
+    q_lens = torch.full_like(active_seq_lens, decode_query_len)
+    prefix_lens = active_seq_lens - decode_query_len
+    batch = active_seq_lens.numel()
+    max_seq_len = int(active_seq_lens.max())
+    max_blocks = (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+    num_pages = batch * max_blocks
+    block_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32).reshape(
+        batch, max_blocks
+    )
+    idx_q = torch.randn(
+        batch * decode_query_len, num_idx_heads, head_dim, device="cuda"
+    ).to(torch.float8_e4m3fn)
+    index_kv_cache = torch.randn(num_pages, BLOCK_SIZE, head_dim, device="cuda").to(
+        torch.float8_e4m3fn
+    )
+
+    actual = minimax_m3_index_decode(
+        idx_q,
+        index_kv_cache,
+        block_table,
+        active_seq_lens,
+        max_seq_len=max_seq_len,
+        topk=topk,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+        num_kv_heads=num_idx_heads,
+        decode_query_len=decode_query_len,
+        max_decode_query_len=decode_query_len,
+    )
+    # Reference from the DEQUANTIZED fp8 values (the kernel computes the fp8 QK
+    # in fp32 with no scaling, so it must match an unscaled fp32 matmul of the
+    # same e4m3 values).
+    expected = _reference_index_topk(
+        idx_q.float(),
+        index_kv_cache.float(),
+        block_table,
         q_lens,
         active_seq_lens,
         prefix_lens,

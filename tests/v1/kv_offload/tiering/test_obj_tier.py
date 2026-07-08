@@ -17,8 +17,15 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import torch
 
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext, make_offload_key
+from vllm.v1.kv_offload.base import (
+    LookupResult,
+    OffloadKey,
+    ReqContext,
+    ScheduleEndContext,
+    make_offload_key,
+)
 from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult
+from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
 from vllm.v1.kv_offload.tiering.obj.manager import ObjectStoreSecondaryTierManager
 
 # ---------------------------------------------------------------------------
@@ -217,7 +224,7 @@ def lookup_and_wait(
     """Perform a full async lookup cycle and return resolved results."""
     for k in keys:
         tier.lookup(k, ctx)
-    tier.on_schedule_end()
+    tier.on_schedule_end(ScheduleEndContext(new_req_ids=[], preempted_req_ids=()))
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if not tier._lookup_manager._pending_results.empty():
@@ -236,19 +243,19 @@ class TestMockObjTierBasic:
         self.tier, self.agent = _make_tier(num_blocks=4)
 
     def test_lookup_empty_tier(self):
-        assert lookup_and_wait(self.tier, [key(1)]) == [False]
+        assert lookup_and_wait(self.tier, [key(1)]) == [LookupResult.MISS]
 
     def test_store_and_lookup(self):
         self.tier.submit_store(make_job(1, [key(1)], [0]))
         results = drain(self.tier)
         assert len(results) == 1
         assert results[0].success
-        assert lookup_and_wait(self.tier, [key(1)]) == [True]
+        assert lookup_and_wait(self.tier, [key(1)]) == [LookupResult.HIT]
 
     def test_lookup_unrelated_key_returns_false(self):
         self.tier.submit_store(make_job(1, [key(1)], [0]))
         drain(self.tier)
-        assert lookup_and_wait(self.tier, [key(999)]) == [False]
+        assert lookup_and_wait(self.tier, [key(999)]) == [LookupResult.MISS]
 
     def test_store_then_load_roundtrip(self):
         self.tier.submit_store(make_job(1, [key(1), key(2)], [0, 1]))
@@ -327,13 +334,17 @@ class TestMockObjTierMultiBlock:
         results = drain(tier)
         assert len(results) == 1
         assert results[0].success
-        assert lookup_and_wait(tier, keys) == [True] * 8
+        assert lookup_and_wait(tier, keys) == [LookupResult.HIT] * 8
 
     def test_partial_block_lookup(self):
         tier, _ = _make_tier(num_blocks=4)
         tier.submit_store(make_job(1, [key(0), key(1)], [0, 1]))
         drain(tier)
-        assert lookup_and_wait(tier, [key(0), key(1), key(2)]) == [True, True, False]
+        assert lookup_and_wait(tier, [key(0), key(1), key(2)]) == [
+            LookupResult.HIT,
+            LookupResult.HIT,
+            LookupResult.MISS,
+        ]
 
 
 class TestMockObjTierFailures:
@@ -342,7 +353,7 @@ class TestMockObjTierFailures:
         agent.query_memory = lambda *a, **k: (_ for _ in ()).throw(
             RuntimeError("backend error")
         )
-        assert lookup_and_wait(tier, [key(1)]) == [False]
+        assert lookup_and_wait(tier, [key(1)]) == [LookupResult.MISS]
 
     def test_submit_store_register_memory_failure_reported_in_get_finished(self):
         tier, agent = _make_tier(num_blocks=4)
@@ -408,3 +419,49 @@ class TestMockObjTierShutdown:
         tier, _ = _make_tier(num_blocks=4)
         tier.shutdown()
         tier.shutdown()  # must not raise
+
+
+class TestObjStoreConfig:
+    def test_explicit_credentials_included(self):
+        cfg = ObjStoreConfig(
+            bucket="b",
+            endpoint_override="ep",
+            access_key="ak",
+            secret_key="sk",
+        )
+        params = cfg.to_nixl_params()
+        assert params["access_key"] == "ak"
+        assert params["secret_key"] == "sk"
+
+    def test_credentials_omitted_when_empty(self):
+        cfg = ObjStoreConfig(bucket="b", endpoint_override="ep")
+        params = cfg.to_nixl_params()
+        assert "access_key" not in params
+        assert "secret_key" not in params
+        assert "session_token" not in params
+        assert "region" not in params
+        assert params["bucket"] == "b"
+        assert params["endpoint_override"] == "ep"
+
+    def test_session_token_and_region_included(self):
+        cfg = ObjStoreConfig(
+            bucket="b",
+            endpoint_override="ep",
+            access_key="ak",
+            secret_key="sk",
+            session_token="tok",
+            region="us-east-1",
+        )
+        params = cfg.to_nixl_params()
+        assert params["session_token"] == "tok"
+        assert params["region"] == "us-east-1"
+
+    def test_ca_bundle_included_when_set(self):
+        cfg = ObjStoreConfig(
+            bucket="b",
+            endpoint_override="ep",
+            ca_bundle="/path/to/ca.pem",
+        )
+        params = cfg.to_nixl_params()
+        assert params["ca_bundle"] == "/path/to/ca.pem"
+        assert "access_key" not in params

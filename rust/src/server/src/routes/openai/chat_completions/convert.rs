@@ -115,12 +115,14 @@ pub(super) fn prepare_chat_request(
             seed: request.seed,
             max_tokens: request.max_completion_tokens,
             min_tokens: request.min_tokens,
+            thinking_token_budget: request.thinking_token_budget,
             logprobs: request.logprobs.then_some(top_logprobs),
             prompt_logprobs,
             min_p: request.min_p,
             frequency_penalty: request.frequency_penalty,
             presence_penalty: request.presence_penalty,
             repetition_penalty: request.repetition_penalty,
+            repetition_detection: request.repetition_detection,
             stop_token_ids: request.stop_token_ids,
             ignore_eos: request.ignore_eos,
             logit_bias: convert_logit_bias(request.logit_bias)?,
@@ -360,6 +362,13 @@ fn convert_tool_choice(tool_choice: Option<&ToolChoice>) -> Result<ChatToolChoic
     match tool_choice {
         None | Some(ToolChoice::Value(ToolChoiceValue::Auto)) => Ok(ChatToolChoice::Auto),
         Some(ToolChoice::Value(ToolChoiceValue::None)) => Ok(ChatToolChoice::None),
+        Some(ToolChoice::Value(ToolChoiceValue::Required)) => Ok(ChatToolChoice::Required),
+        Some(ToolChoice::Function {
+            tool_type,
+            function,
+        }) if tool_type == "function" => Ok(ChatToolChoice::Function {
+            name: function.name.clone(),
+        }),
         _ => bail_invalid_request!("tool_choice={:?} is not supported yet.", tool_choice),
     }
 }
@@ -614,6 +623,31 @@ mod tests {
     }
 
     #[test]
+    fn prepare_chat_request_passes_through_thinking_token_budget() {
+        let prepare = |budget: Option<i64>| {
+            prepare_chat_request(
+                ChatCompletionRequest {
+                    thinking_token_budget: budget,
+                    ..base_request()
+                },
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .expect("request is valid")
+            .chat_request
+            .sampling_params
+            .thinking_token_budget
+        };
+
+        // The convert layer forwards the raw value verbatim (including the `-1`
+        // "unlimited" sentinel); normalization/validation happens during
+        // lowering (see `vllm_text::lower`).
+        assert_eq!(prepare(Some(64)), Some(64));
+        assert_eq!(prepare(Some(-1)), Some(-1));
+        assert_eq!(prepare(None), None);
+    }
+
+    #[test]
     fn prepare_chat_request_accepts_developer_messages() {
         let request = ChatCompletionRequest {
             messages: vec![ChatMessage::Developer {
@@ -796,7 +830,7 @@ mod tests {
         let message = ChatCompletionMessage {
             role: AssistantRole,
             content: Some("answer".to_string()),
-            tool_calls: None,
+            tool_calls: Vec::new(),
             reasoning: Some("inner".to_string()),
         };
         let message_json = serde_json::to_value(message).expect("message serializes");
@@ -934,6 +968,74 @@ mod tests {
             }]
         );
         assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::None);
+    }
+
+    #[test]
+    fn prepare_chat_request_lowers_required_tool_choice() {
+        let request = ChatCompletionRequest {
+            tools: Some(vec![Tool {
+                tool_type: "function".to_string(),
+                function: Function {
+                    name: "get_weather".to_string(),
+                    description: Some("Get weather".to_string()),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    }),
+                    strict: None,
+                },
+            }]),
+            tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Required)),
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::Required);
+    }
+
+    #[test]
+    fn prepare_chat_request_lowers_named_function_tool_choice() {
+        let request = ChatCompletionRequest {
+            tools: Some(vec![Tool {
+                tool_type: "function".to_string(),
+                function: Function {
+                    name: "get_weather".to_string(),
+                    description: Some("Get weather".to_string()),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    }),
+                    strict: None,
+                },
+            }]),
+            tool_choice: Some(ToolChoice::Function {
+                tool_type: "function".to_string(),
+                function: crate::routes::openai::utils::types::FunctionChoice {
+                    name: "get_weather".to_string(),
+                },
+            }),
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.tool_choice,
+            ChatToolChoice::Function {
+                name: "get_weather".to_string(),
+            }
+        );
     }
 
     #[test]

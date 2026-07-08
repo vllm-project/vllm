@@ -11,10 +11,12 @@ use tracing::{debug, info, trace};
 use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop};
 use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result};
+use crate::protocol::dtype::ModelDtype;
 use crate::protocol::handshake::EngineCoreReadyResponse;
 use crate::protocol::lora::LoraRequest;
+use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::utility::{EngineCoreUtilityRequest, PauseMode};
-use crate::protocol::{EngineCoreRequest, EngineCoreRequestType, ModelDtype};
+use crate::runtime::{BackgroundShutdownRuntime, build_zmq_runtime};
 use crate::transport::{self, ConnectedEngine};
 
 pub(crate) mod imp;
@@ -201,6 +203,8 @@ pub struct EngineCoreClient {
     coordinator: Option<CoordinatorHandle>,
     abort_tx: mpsc::UnboundedSender<AbortRequest>,
 
+    /// Runtime used to send messages to the engine and drive all background tasks.
+    runtime: BackgroundShutdownRuntime,
     // Background tasks
     output_task: AbortOnDropHandle<()>,
     dispatcher_task: AbortOnDropHandle<()>,
@@ -280,21 +284,22 @@ impl EngineCoreClient {
         let (output_tx, output_rx) = mpsc::channel(64);
         let (abort_tx, abort_rx) = mpsc::unbounded_channel();
         let engines = connected.engines;
+        let runtime = build_zmq_runtime();
         let inner = Arc::new(ClientInner::new(
             connected.input_send,
+            runtime.handle().clone(),
             config.model_name.clone(),
             &engines,
         ));
-        let output_task = AbortOnDropHandle::new(tokio::spawn(transport::run_output_loop(
+        let output_task = AbortOnDropHandle::new(runtime.spawn(transport::run_output_loop(
             connected.output_socket,
             output_tx,
         )));
-        let dispatcher_task = AbortOnDropHandle::new(tokio::spawn(run_output_dispatcher_loop(
-            inner.clone(),
-            output_rx,
-        )));
+        let dispatcher_task = AbortOnDropHandle::new(
+            runtime.spawn(run_output_dispatcher_loop(inner.clone(), output_rx)),
+        );
         let abort_task =
-            AbortOnDropHandle::new(tokio::spawn(run_abort_loop(inner.clone(), abort_rx)));
+            AbortOnDropHandle::new(runtime.spawn(run_abort_loop(inner.clone(), abort_rx)));
 
         // If any engine reported a dp_stats_address in its ready response, use it
         // as the external coordinator address.
@@ -307,13 +312,13 @@ impl EngineCoreClient {
                     CoordinatorHandle::new_inproc(coordinator_transport.input_socket);
                 let (coordinator_output_tx, coordinator_output_rx) = mpsc::channel(64);
                 let coordinator_output_task =
-                    AbortOnDropHandle::new(tokio::spawn(transport::run_output_loop(
+                    AbortOnDropHandle::new(runtime.spawn(transport::run_output_loop(
                         coordinator_transport.output_socket,
                         coordinator_output_tx,
                     )));
-                let coordinator_task = AbortOnDropHandle::new(tokio::spawn(
-                    runner.run(coordinator_output_rx, inner.clone()),
-                ));
+                let coordinator_task = AbortOnDropHandle::new(
+                    runtime.spawn(runner.run(coordinator_output_rx, inner.clone())),
+                );
                 (
                     Some(handle),
                     Some(coordinator_output_task),
@@ -327,7 +332,7 @@ impl EngineCoreClient {
             {
                 let (handle, service) = CoordinatorHandle::connect_external(address).await?;
                 let coordinator_task =
-                    AbortOnDropHandle::new(tokio::spawn(service.run(inner.clone())));
+                    AbortOnDropHandle::new(runtime.spawn(service.run(inner.clone())));
                 (Some(handle), None, Some(coordinator_task))
             } else {
                 (None, None, None)
@@ -341,6 +346,7 @@ impl EngineCoreClient {
             inner,
             coordinator,
             abort_tx,
+            runtime,
             output_task,
             dispatcher_task,
             abort_task,
@@ -364,6 +370,14 @@ impl EngineCoreClient {
     /// Return the number of engines connected to this client.
     pub fn engine_count(&self) -> usize {
         self.engines.len()
+    }
+
+    /// Return the engine-side indices connected to this client.
+    pub fn engine_indices(&self) -> Vec<u32> {
+        self.engines
+            .iter()
+            .map(|engine| engine.engine_id.engine_index().expect("engine id must encode as u16"))
+            .collect()
     }
 
     /// Return the engine identities of all engines connected to this client.
@@ -498,6 +512,7 @@ impl EngineCoreClient {
 
         Ok(EngineCoreOutputStream::new(
             request_id,
+            engine_id.engine_index().unwrap_or(0),
             self.abort_tx.clone(),
             rx,
         ))
@@ -732,11 +747,24 @@ impl EngineCoreClient {
         self.call_utility_consensus("is_scheduler_paused", ()).await
     }
 
+    /// Start profiling the engine.
+    pub async fn start_profile(&self, profile_prefix: Option<&str>) -> Result<()> {
+        self.call_utility::<(), _>("profile", (true, profile_prefix)).await?;
+        Ok(())
+    }
+
+    /// Stop profiling the engine.
+    pub async fn stop_profile(&self, profile_prefix: Option<&str>) -> Result<()> {
+        self.call_utility::<(), _>("profile", (false, profile_prefix)).await?;
+        Ok(())
+    }
+
     /// Shut down local client tasks and close transport state.
     pub async fn shutdown(self) -> Result<()> {
         let Self {
             inner,
             abort_tx,
+            runtime,
             output_task,
             dispatcher_task,
             abort_task,
@@ -757,6 +785,8 @@ impl EngineCoreClient {
 
         tasks.iter().for_each(|t| t.abort());
         join_all(tasks).await;
+        drop(inner);
+        drop(runtime);
 
         info!("engine-core client shut down");
         Ok(())

@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -22,33 +20,8 @@ from vllm.scalar_type import scalar_types
 
 from .inc_scheme import INCLinearScheme
 
-logger = init_logger(__name__)
-
 if TYPE_CHECKING:
     from ..config_parser import INCLayerConfig
-
-
-@lru_cache(maxsize=1)
-def get_ark_state() -> tuple[bool, str | None, Any | None, Any | None]:
-    """Return ARK availability, error details, cached module, and QuantLinear."""
-    try:
-        import auto_round_kernel as ark
-        from auto_round_kernel.qlinear import QuantLinear
-
-        logger.info("Successfully imported auto_round_kernel.")
-    except ImportError as error:
-        return False, str(error), None, None
-
-    if getattr(ark, "cpu_lib", None) is None and getattr(ark, "xpu_lib", None) is None:
-        return (
-            False,
-            "No ARK backend library is available.",
-            None,
-            None,
-        )
-    logger.info("Successfully loaded auto_round_kernel backend library.")
-
-    return True, None, ark, QuantLinear
 
 
 class INCWNA16LinearScheme(INCLinearScheme):
@@ -185,11 +158,17 @@ class INCWNA16LinearScheme(INCLinearScheme):
 
 
 class INCXPULinearBase(INCLinearScheme):
+    # AWQ packs nibbles within each int32 in the order [0, 2, 4, 6, 1, 3, 5, 7];
+    # this permutation undoes that ordering so values can be repacked in
+    # standard sequential (GPTQ) order.
+    _REVERSE_AWQ_PACK_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
+
     def __init__(self, layer_config: "INCLayerConfig") -> None:
         self.weight_bits = layer_config.bits
         self.group_size = layer_config.group_size
         self.sym = layer_config.sym
         self.pack_factor = 32 // self.weight_bits
+        self.is_awq_packed = layer_config.is_awq
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -206,18 +185,34 @@ class INCXPULinearBase(INCLinearScheme):
         output_size_per_partition = sum(output_partition_sizes)
         scales_and_zp_size = input_size_per_partition // self.group_size
 
-        qweight = PackedvLLMParameter(
-            data=torch.empty(
-                input_size_per_partition // self.pack_factor,
-                output_size_per_partition,
-                dtype=torch.int32,
-            ),
-            input_dim=0,
-            output_dim=1,
-            packed_dim=0,
-            packed_factor=self.pack_factor,
-            weight_loader=weight_loader,
-        )
+        if self.is_awq_packed:
+            # AWQ: qweight [in, out // pack_factor] packed along output dim
+            qweight = PackedvLLMParameter(
+                data=torch.empty(
+                    input_size_per_partition,
+                    output_size_per_partition // self.pack_factor,
+                    dtype=torch.int32,
+                ),
+                input_dim=0,
+                output_dim=1,
+                packed_dim=1,
+                packed_factor=self.pack_factor,
+                weight_loader=weight_loader,
+            )
+        else:
+            # GPTQ: qweight [in // pack_factor, out] packed along input dim
+            qweight = PackedvLLMParameter(
+                data=torch.empty(
+                    input_size_per_partition // self.pack_factor,
+                    output_size_per_partition,
+                    dtype=torch.int32,
+                ),
+                input_dim=0,
+                output_dim=1,
+                packed_dim=0,
+                packed_factor=self.pack_factor,
+                weight_loader=weight_loader,
+            )
         scales = GroupQuantScaleParameter(
             data=torch.empty(
                 scales_and_zp_size,
@@ -228,6 +223,8 @@ class INCXPULinearBase(INCLinearScheme):
             output_dim=1,
             weight_loader=weight_loader,
         )
+        # Both AWQ and GPTQ checkpoints store qzeros with this shape; for
+        # symmetric quantization the values are ignored downstream.
         qzeros = PackedvLLMParameter(
             data=torch.empty(
                 scales_and_zp_size,
@@ -255,6 +252,37 @@ class INCXPULinearBase(INCLinearScheme):
         )
         layer.register_parameter("g_idx", g_idx)
 
+    def _convert_awq_qweight_to_gptq(self, qw: torch.Tensor) -> torch.Tensor:
+        """Convert AWQ qweight [K, N // pf] to GPTQ qweight [K // pf, N].
+
+        AWQ packs along the output dim with a non-standard nibble order; GPTQ
+        packs along the input dim with sequential nibble order. The conversion
+        is lossless — it only reshuffles bits.
+        """
+        size_bits = self.weight_bits
+        pack_factor = self.pack_factor
+        mask = (1 << size_bits) - 1
+        device = qw.device
+        reverse_order = torch.tensor(
+            self._REVERSE_AWQ_PACK_ORDER, dtype=torch.long, device=device
+        )
+        shifts = torch.arange(0, 32, size_bits, dtype=torch.int32, device=device)
+
+        K, N_packed = qw.shape
+        N = N_packed * pack_factor
+
+        # Unpack int32 → individual values, fix AWQ nibble ordering
+        unpacked = (qw.unsqueeze(-1) >> shifts) & mask  # (K, N_packed, pf)
+        unpacked = unpacked[:, :, reverse_order]
+        unpacked = unpacked.reshape(K, N)  # (K, N)
+
+        # Repack along input dim (dim 0) in sequential nibble order
+        unpacked = unpacked.reshape(K // pack_factor, pack_factor, N)
+        new_qw = (unpacked.to(torch.int32) << shifts[None, :, None]).sum(
+            dim=1, dtype=torch.int32
+        )
+        return new_qw.contiguous()
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -276,10 +304,24 @@ class INCXPULinearBase(INCLinearScheme):
 
 
 class INCXPULinearMethod(INCXPULinearBase):
+    """XPU linear method for INC w4a16 quantization (symmetric only).
+
+    Supports both GPTQ-packed (``auto_round:auto_gptq``) and AWQ-packed
+    (``auto_round:auto_awq``) AutoRound checkpoints. AWQ-packed qweights are
+    losslessly repacked into the GPTQ-style nibble layout during
+    ``process_weights_after_loading``, before the final oneDNN "NT" transpose
+    that ``torch.ops._xpu_C.int4_gemm_w4a16`` expects.
+    """
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         device = layer.qweight.data.device
 
-        qweight_ct = layer.qweight.data.t().contiguous()
+        qweight_data = layer.qweight.data
+        if self.is_awq_packed:
+            # Lossless repack: AWQ [K, N // pf] → GPTQ [K // pf, N]
+            qweight_data = self._convert_awq_qweight_to_gptq(qweight_data)
+
+        qweight_ct = qweight_data.t().contiguous()
         layer.qweight = Parameter(qweight_ct.t(), requires_grad=False)
         layer.scales = Parameter(layer.scales.data, requires_grad=False)
         layer.qzeros = Parameter(
@@ -310,6 +352,8 @@ class INCXPULinearMethod(INCXPULinearBase):
 class INCARKLinearMethod(INCXPULinearBase):
     def __init__(self, layer_config: "INCLayerConfig") -> None:
         super().__init__(layer_config)
+
+        from .inc_ark_ops import get_ark_state
 
         is_available, error_str, _, quant_linear_cls = get_ark_state()
         if not is_available or quant_linear_cls is None:
@@ -370,7 +414,11 @@ class INCARKLinearMethod(INCXPULinearBase):
         ark_linear.to(layer.qweight.device)
 
         with torch.no_grad():
-            ark_linear.qweight.copy_(layer.qweight.detach())
+            qweight_src = layer.qweight.detach()
+            if self.is_awq_packed:
+                # ARK consumes GPTQ-style packed nibbles; convert AWQ losslessly.
+                qweight_src = self._convert_awq_qweight_to_gptq(qweight_src)
+            ark_linear.qweight.copy_(qweight_src)
             if hasattr(layer, "qzeros") and layer.qzeros is not None:
                 ark_linear.qzeros.copy_(layer.qzeros.detach())
             else:
@@ -380,9 +428,13 @@ class INCARKLinearMethod(INCXPULinearBase):
                 ark_linear.bias.copy_(layer.bias.detach())
 
         ark_linear.post_init()
-        layer.ark_linear = ark_linear
 
-        del layer.qweight
+        layer.qweight = Parameter(ark_linear.qweight.detach(), requires_grad=False)
+        layer.ark_bias = ark_linear.bias
+        layer.ark_compute_type = ark_linear.cdt
+        layer.ark_weight_type = ark_linear.wdt
+        layer.ark_scale_type = ark_linear.sdt
+
         if hasattr(layer, "qzeros"):
             del layer.qzeros
         del layer.scales
@@ -393,8 +445,18 @@ class INCARKLinearMethod(INCXPULinearBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        del bias
-        return layer.ark_linear.forward(x)
+        return torch.ops.vllm.inc_ark_woq_linear.default(
+            x,
+            layer.qweight,
+            layer.ark_bias,
+            layer.out_features,
+            layer.in_features,
+            self.group_size,
+            layer.ark_compute_type,
+            layer.ark_weight_type,
+            layer.ark_scale_type,
+            not self.sym,
+        )
 
 
 class INCXPUW4A16LinearScheme(INCXPULinearMethod):

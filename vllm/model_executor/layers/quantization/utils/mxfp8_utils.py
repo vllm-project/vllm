@@ -184,6 +184,7 @@ def _mxfp8_e4m3_quantize_impl(
             x,
             is_sf_swizzled_layout=is_sf_swizzled_layout,
             alignment=alignment if alignment > 0 else 32,
+            backend="cute-dsl",
         )
         if x_scales.ndim == 1 and x.ndim == 2 and not is_sf_swizzled_layout:
             x_scales = x_scales.view(x.size(0), -1)

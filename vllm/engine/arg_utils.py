@@ -6,6 +6,7 @@ import copy
 import dataclasses
 import functools
 import json
+import os
 import sys
 from collections.abc import Callable
 from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
@@ -126,8 +127,8 @@ if TYPE_CHECKING:
     from vllm.v1.executor import Executor
 else:
     Executor = Any
-    QuantizationMethods = Any
-    LoadFormats = Any
+    QuantizationMethods = str
+    LoadFormats = str
     UsageContext = Any
 
 
@@ -353,14 +354,17 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
         elif contains_type(type_hints, set):
             kwargs[name].update(collection_to_kwargs(type_hints, set))
         elif contains_type(type_hints, int):
+            # Arguments that accept human-readable integer strings (e.g., 1K, 2M, 1G)
+            human_readable_int_args = {
+                "max_num_batched_tokens",
+                "max_num_scheduled_tokens",
+                "kv_cache_memory_bytes",
+                "safetensors_prefetch_block_size",
+            }
             if name == "max_model_len":
                 kwargs[name]["type"] = human_readable_int_or_auto
                 kwargs[name]["help"] += f"\n\n{human_readable_int_or_auto.__doc__}"
-            elif name in (
-                "max_num_batched_tokens",
-                "kv_cache_memory_bytes",
-                "safetensors_prefetch_block_size",
-            ):
+            elif name in human_readable_int_args:
                 kwargs[name]["type"] = human_readable_int
                 kwargs[name]["help"] += f"\n\n{human_readable_int.__doc__}"
             else:
@@ -465,6 +469,7 @@ class EngineArgs:
     numa_bind: bool = ParallelConfig.numa_bind
     numa_bind_nodes: list[int] | None = ParallelConfig.numa_bind_nodes
     numa_bind_cpus: list[str] | None = ParallelConfig.numa_bind_cpus
+    device_ids: list[int | str] | None = None
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
@@ -521,6 +526,7 @@ class EngineArgs:
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
     max_num_batched_tokens: int | None = None
+    max_num_scheduled_tokens: int | None = None
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
     max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
@@ -534,6 +540,9 @@ class EngineArgs:
     code_revision: str | None = ModelConfig.code_revision
     hf_token: bool | str | None = ModelConfig.hf_token
     hf_overrides: HfOverrides = get_field(ModelConfig, "hf_overrides")
+    model_class_overrides: dict[str, str] = get_field(
+        ModelConfig, "model_class_overrides"
+    )
     tokenizer_revision: str | None = ModelConfig.tokenizer_revision
     quantization: QuantizationMethods | str | None = ModelConfig.quantization
     quantization_config: "dict[str, Any] | QuantizationConfigArgs | None" = None
@@ -580,6 +589,7 @@ class EngineArgs:
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
+    mm_ipc_gpu_memory_gb: float = MultiModalConfig.mm_ipc_gpu_memory_gb
     # LoRA fields
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras
@@ -641,6 +651,7 @@ class EngineArgs:
     enable_logging_iteration_details: bool = (
         ObservabilityConfig.enable_logging_iteration_details
     )
+    jit_monitor_mode: Literal["warn", "error"] = ObservabilityConfig.jit_monitor_mode
     jit_monitor_verbose: bool = ObservabilityConfig.jit_monitor_verbose
     enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
@@ -847,6 +858,9 @@ class EngineArgs:
         model_group.add_argument("--config-format", **model_kwargs["config_format"])
         model_group.add_argument("--hf-token", **model_kwargs["hf_token"])
         model_group.add_argument("--hf-overrides", **model_kwargs["hf_overrides"])
+        model_group.add_argument(
+            "--model-class-overrides", **model_kwargs["model_class_overrides"]
+        )
         model_group.add_argument("--pooler-config", **model_kwargs["pooler_config"])
         model_group.add_argument(
             "--generation-config", **model_kwargs["generation_config"]
@@ -978,6 +992,20 @@ class EngineArgs:
         )
         parallel_group.add_argument(
             "--numa-bind-cpus", **parallel_kwargs["numa_bind_cpus"]
+        )
+        parallel_group.add_argument(
+            "--device-ids",
+            type=lambda s: [
+                int(device_id) if device_id.isdigit() else device_id
+                for device_id in (part.strip() for part in s.split(","))
+            ],
+            default=None,
+            help="Comma-separated physical GPU device IDs or UUIDs to use "
+            '(e.g. --device-ids "2,3,5,7"). Avoids setting '
+            "CUDA_VISIBLE_DEVICES, preserving full GPU topology "
+            "visibility for GPU-NIC affinity and DeepGEMM. "
+            "Note: has no effect with Ray executors; use Ray "
+            "placement groups for GPU selection instead.",
         )
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
@@ -1277,6 +1305,10 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--mm-tensor-ipc", **multimodal_kwargs["mm_tensor_ipc"]
         )
+        multimodal_group.add_argument(
+            "--mm-ipc-gpu-memory-gb",
+            **multimodal_kwargs["mm_ipc_gpu_memory_gb"],
+        )
 
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
@@ -1363,6 +1395,10 @@ class EngineArgs:
             **observability_kwargs["enable_logging_iteration_details"],
         )
         observability_group.add_argument(
+            "--jit-monitor-mode",
+            **observability_kwargs["jit_monitor_mode"],
+        )
+        observability_group.add_argument(
             "--jit-monitor-verbose",
             **observability_kwargs["jit_monitor_verbose"],
         )
@@ -1377,6 +1413,13 @@ class EngineArgs:
             "--max-num-batched-tokens",
             **{
                 **scheduler_kwargs["max_num_batched_tokens"],
+                "default": None,
+            },
+        )
+        scheduler_group.add_argument(
+            "--max-num-scheduled-tokens",
+            **{
+                **scheduler_kwargs["max_num_scheduled_tokens"],
                 "default": None,
             },
         )
@@ -1596,6 +1639,7 @@ class EngineArgs:
             code_revision=self.code_revision,
             hf_token=self.hf_token,
             hf_overrides=self.hf_overrides,
+            model_class_overrides=self.model_class_overrides,
             tokenizer_revision=self.tokenizer_revision,
             max_model_len=self.max_model_len,
             quantization=self.quantization,
@@ -1639,6 +1683,7 @@ class EngineArgs:
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
             mm_tensor_ipc=self.mm_tensor_ipc,
+            mm_ipc_gpu_memory_gb=self.mm_ipc_gpu_memory_gb,
             io_processor_plugin=self.io_processor_plugin,
             renderer_num_workers=self.renderer_num_workers,
         )
@@ -1716,6 +1761,47 @@ class EngineArgs:
         )
         return SpeculativeConfig(**self.speculative_config)
 
+    def _resolve_device_ids(self) -> list[int] | None:
+        if not self.device_ids:
+            return None
+        if self.distributed_executor_backend == "ray":
+            logger.warning(
+                "--device-ids has no effect when using the Ray executor. "
+                "Use Ray placement groups for GPU selection instead."
+            )
+        ids = self.device_ids
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"--device-ids must not contain duplicates: {ids}")
+        if all(isinstance(i, str) for i in ids):
+            return [
+                current_platform.device_control_id_to_physical_device_id(i)
+                for i in cast(list[str], ids)
+            ]
+        if any(isinstance(i, str) for i in ids):
+            raise ValueError("--device-ids must not mix integer IDs and UUIDs")
+        int_ids = cast(list[int], ids)
+        # Compose with CUDA_VISIBLE_DEVICES: if CVD is set, treat
+        # --device-ids values as indices into the CVD-visible set.
+        cvd = getattr(
+            envs,
+            current_platform.device_control_env_var,
+            os.environ.get(current_platform.device_control_env_var),
+        )
+        if cvd:
+            cvd_ids = [
+                current_platform.device_control_id_to_physical_device_id(x)
+                for x in cvd.split(",")
+            ]
+            for i in int_ids:
+                if i >= len(cvd_ids):
+                    raise ValueError(
+                        f"--device-ids index {i} is out of range for "
+                        f"{current_platform.device_control_env_var}"
+                        f"={cvd} ({len(cvd_ids)} devices visible)"
+                    )
+            return [cvd_ids[i] for i in int_ids]
+        return int_ids
+
     def create_diffusion_config(self) -> DiffusionConfig | None:
         if self.diffusion_config is None:
             return None
@@ -1723,6 +1809,22 @@ class EngineArgs:
         if isinstance(cfg, str):
             cfg = json.loads(cfg)
         return DiffusionConfig(**cfg)
+
+    def create_observability_config(self) -> ObservabilityConfig:
+        return ObservabilityConfig(
+            show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
+            otlp_traces_endpoint=self.otlp_traces_endpoint,
+            collect_detailed_traces=self.collect_detailed_traces,
+            kv_cache_metrics=self.kv_cache_metrics,
+            kv_cache_metrics_sample=self.kv_cache_metrics_sample,
+            cudagraph_metrics=self.cudagraph_metrics,
+            enable_layerwise_nvtx_tracing=self.enable_layerwise_nvtx_tracing,
+            enable_mfu_metrics=self.enable_mfu_metrics,
+            enable_mm_processor_stats=self.enable_mm_processor_stats,
+            enable_logging_iteration_details=self.enable_logging_iteration_details,
+            jit_monitor_mode=self.jit_monitor_mode,
+            jit_monitor_verbose=self.jit_monitor_verbose,
+        )
 
     def create_engine_config(
         self,
@@ -2029,6 +2131,7 @@ class EngineArgs:
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
+            assigned_physical_gpu_ids=self._resolve_device_ids(),
             numa_bind=self.numa_bind,
             numa_bind_nodes=self.numa_bind_nodes,
             numa_bind_cpus=self.numa_bind_cpus,
@@ -2059,6 +2162,7 @@ class EngineArgs:
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
+            max_num_scheduled_tokens=self.max_num_scheduled_tokens,
             max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
@@ -2205,19 +2309,7 @@ class EngineArgs:
                 self.reasoning_parser_plugin
             )
 
-        observability_config = ObservabilityConfig(
-            show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
-            otlp_traces_endpoint=self.otlp_traces_endpoint,
-            collect_detailed_traces=self.collect_detailed_traces,
-            kv_cache_metrics=self.kv_cache_metrics,
-            kv_cache_metrics_sample=self.kv_cache_metrics_sample,
-            cudagraph_metrics=self.cudagraph_metrics,
-            enable_layerwise_nvtx_tracing=self.enable_layerwise_nvtx_tracing,
-            enable_mfu_metrics=self.enable_mfu_metrics,
-            enable_mm_processor_stats=self.enable_mm_processor_stats,
-            enable_logging_iteration_details=self.enable_logging_iteration_details,
-            jit_monitor_verbose=self.jit_monitor_verbose,
-        )
+        observability_config = self.create_observability_config()
 
         # Compilation config overrides
         compilation_config = copy.deepcopy(self.compilation_config)

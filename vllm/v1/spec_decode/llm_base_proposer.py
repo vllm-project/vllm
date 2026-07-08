@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import dataclasses
 from importlib.util import find_spec
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -14,6 +15,11 @@ from vllm.config import (
     get_layers_from_vllm_config,
     replace,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.spec_decode.vocab_mapping import VocabMapping
+
+from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
@@ -22,11 +28,13 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausalLM
 from vllm.model_executor.models.interfaces import SupportsMultiModal
+from vllm.model_executor.models.laguna_dflash import DFlashLagunaForCausalLM
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
+from vllm.model_executor.models.qwen3_eagle3 import Eagle3Qwen3ForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
-from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
@@ -77,6 +85,7 @@ class SpecDecodeBaseProposer:
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+        self.eplb_state: EplbState | None = None
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
 
         # We need to get the hidden size from the draft model config because
@@ -120,6 +129,11 @@ class SpecDecodeBaseProposer:
             self.speculative_config.use_local_argmax_reduction
         )
         self.use_fp64_gumbel = vllm_config.model_config.use_fp64_gumbel
+
+        self.use_heterogeneous_vocab: bool = (
+            self.speculative_config.use_heterogeneous_vocab
+        )
+        self.vocab_mapping: VocabMapping | None = None
 
         self.max_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -228,7 +242,7 @@ class SpecDecodeBaseProposer:
         self.backup_next_token_ids = CpuGpuBuffer(
             self.max_batch_size,
             dtype=torch.int32,
-            pin_memory=is_pin_memory_available(),
+            pin_memory=PIN_MEMORY,
             device=device,
             with_numpy=True,
         )
@@ -239,9 +253,7 @@ class SpecDecodeBaseProposer:
         self._last_draft_probs: torch.Tensor | None = None
 
         self._slot_mapping_buffer = torch.zeros(
-            self.max_positions,
-            dtype=torch.int64,
-            device=device,
+            self.max_positions, dtype=torch.int64, device=device
         )
 
         # Determine allowed attention backends once during initialization.
@@ -328,6 +340,10 @@ class SpecDecodeBaseProposer:
                 "does not support M-RoPE yet"
             )
 
+    def set_eplb_state(self, eplb_state: EplbState) -> None:
+        """Inject EPLB state after construction."""
+        self.eplb_state = eplb_state
+
     def _init_parallel_drafting_params(self):
         # For parallel drafting, we need the token ID to use for masked slots
         # And for EAGLE + parallel drafting, we need the hidden state tensor to use
@@ -413,6 +429,12 @@ class SpecDecodeBaseProposer:
         """Greedy-sample draft tokens from hidden states."""
         if self.use_local_argmax_reduction:
             return self.model.get_top_tokens(hidden_states)
+        if self.use_heterogeneous_vocab:
+            logits = self.model.compute_logits(hidden_states)
+            assert self.vocab_mapping is not None
+            logits = self.vocab_mapping.constrain_draft_logits(logits)
+            draft_token_ids = logits.argmax(dim=-1)
+            return self.vocab_mapping.map_draft_to_target_ids(draft_token_ids)
         return self.model.compute_logits(hidden_states).argmax(dim=-1)
 
     def _sample_from_logits(
@@ -424,6 +446,21 @@ class SpecDecodeBaseProposer:
             return logits.argmax(dim=-1), None
         if sampling_metadata.all_greedy:
             return logits.argmax(dim=-1), None
+
+        # Parallel drafting (e.g. DFlash) samples num_speculative_tokens rows
+        # per request in a single pass, so logits has batch_size * K rows while
+        # the sampling metadata is per-request. The rows are request-major
+        # (K consecutive slots per request), so repeat_interleave the
+        # per-request temperature to match before probabilistic sampling.
+        temperature = sampling_metadata.temperature
+        if temperature is not None and temperature.shape[0] != logits.shape[0]:
+            assert logits.shape[0] % temperature.shape[0] == 0
+            factor = logits.shape[0] // temperature.shape[0]
+            sampling_metadata = dataclasses.replace(
+                sampling_metadata,
+                temperature=temperature.repeat_interleave(factor, dim=0),
+            )
+
         return compute_probs_and_sample_next_token(
             logits, sampling_metadata, self.use_fp64_gumbel
         )
@@ -436,7 +473,28 @@ class SpecDecodeBaseProposer:
         if not self._enable_probabilistic_draft_probs or sampling_metadata.all_greedy:
             return self._greedy_sample(hidden_states), None
         logits = self.model.compute_logits(hidden_states)
-        return self._sample_from_logits(logits, sampling_metadata)
+        if self.use_heterogeneous_vocab:
+            assert self.vocab_mapping is not None
+            logits = self.vocab_mapping.constrain_draft_logits(logits)
+        draft_token_ids, draft_probs = self._sample_from_logits(
+            logits, sampling_metadata
+        )
+        if self.use_heterogeneous_vocab:
+            assert self.vocab_mapping is not None
+            draft_token_ids = self.vocab_mapping.map_draft_to_target_ids(
+                draft_token_ids
+            )
+            # Config validation ensures draft_sample_method == "greedy" when
+            # use_heterogeneous_vocab is True, so this branch should never be
+            # reached. Kept as a safety fallback until probabilistic rejection
+            # sampling with heterogeneous vocabularies is implemented.
+            # TODO: remap draft_probs to target-vocab space for lossless
+            # probabilistic rejection sampling with heterogeneous vocabularies.
+            assert draft_probs is None, (
+                "probabilistic draft sampling is not supported with "
+                "use_heterogeneous_vocab"
+            )
+        return draft_token_ids, draft_probs
 
     def take_last_draft_probs(self) -> torch.Tensor | None:
         return self._last_draft_probs
@@ -475,6 +533,8 @@ class SpecDecodeBaseProposer:
                     Eagle3LlamaForCausalLM,
                     Eagle3DeepseekV2ForCausalLM,
                     DFlashQwen3ForCausalLM,
+                    Eagle3Qwen3ForCausalLM,
+                    DFlashLagunaForCausalLM,
                 ),
             )
             target_hidden_states = self.model.combine_hidden_states(
@@ -511,6 +571,12 @@ class SpecDecodeBaseProposer:
         if self._share_mtp_indices and hasattr(self.model.model, "set_skip_topk"):
             self.model.model.set_skip_topk(False)
 
+        if self.eplb_state is not None:
+            self.eplb_state.prepare_forward(
+                self.draft_model_config,
+                num_tokens,
+            )
+
         with set_forward_context(
             per_layer_attn_metadata,
             self.vllm_config,
@@ -532,6 +598,9 @@ class SpecDecodeBaseProposer:
         # and read the indices that step 0 just wrote into the shared buffer.
         if self._share_mtp_indices and hasattr(self.model.model, "set_skip_topk"):
             self.model.model.set_skip_topk(True)
+            # The topk indices were written for each query token in the multi-token
+            # batch. Compact the topk indices for each request's last token.
+            self.model.model.compact_topk_indices(token_indices_to_sample)
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
@@ -616,6 +685,11 @@ class SpecDecodeBaseProposer:
             # tensor.argmax() returns int64 by default.
             input_ids = draft_token_ids_list[-1].int()
 
+            if self.use_heterogeneous_vocab:
+                # Map target token IDs to draft vocab space (TLI algorithm)
+                assert self.vocab_mapping is not None
+                input_ids = self.vocab_mapping.map_target_to_draft_ids(input_ids)
+
             if not self.constant_draft_positions:
                 positions = self._update_positions_dependent_metadata(
                     positions,
@@ -655,6 +729,12 @@ class SpecDecodeBaseProposer:
             }
             if self.pass_hidden_states_to_model:
                 model_kwargs["hidden_states"] = self.hidden_states[:input_batch_size]
+
+            if self.eplb_state is not None:
+                self.eplb_state.prepare_forward(
+                    self.draft_model_config,
+                    batch_size,
+                )
 
             with set_forward_context(
                 per_layer_attn_metadata,
@@ -748,6 +828,13 @@ class SpecDecodeBaseProposer:
         cad: CommonAttentionMetadata,
         num_rejected_tokens_gpu: torch.Tensor | None,
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
+        # Map target token IDs to draft vocab space (TLI algorithm)
+        if self.use_heterogeneous_vocab:
+            assert self.vocab_mapping is not None
+            target_token_ids = self.vocab_mapping.map_target_to_draft_ids(
+                target_token_ids
+            )
+            next_token_ids = self.vocab_mapping.map_target_to_draft_ids(next_token_ids)
         if not self.needs_extra_input_slots:
             # Default EAGLE pathway: no reshaping of input tensors needed.
             # Simply rotate the input ids and leave the positions unchanged,
@@ -1127,7 +1214,7 @@ class SpecDecodeBaseProposer:
         new_query_start_loc_cpu = torch.zeros(
             query_start_loc_cpu.shape,
             dtype=torch.int32,
-            pin_memory=is_pin_memory_available(),
+            pin_memory=PIN_MEMORY,
         )
         new_query_start_loc_np = new_query_start_loc_cpu.numpy()
         np.cumsum(new_num_tokens_per_req_np, out=new_query_start_loc_np[1:])
@@ -1160,11 +1247,11 @@ class SpecDecodeBaseProposer:
         #  q1 + 0, q1 + 1, q1 + 2, q1 + 3,       // req 2
         #  q1 + q2 + 0, q1 + q2 + 1, q1 + q2 + 2] // req 3
         token_indices_np = token_offsets + old_query_start_locs_expanded
-        token_indices = torch.from_numpy(token_indices_np).to(device, non_blocking=True)
+        token_indices = async_tensor_h2d(token_indices_np, device=device)
 
         spec_common_attn_metadata = CommonAttentionMetadata(
-            query_start_loc=new_query_start_loc_cpu.to(device, non_blocking=True),
-            seq_lens=new_seq_lens_cpu.to(device, non_blocking=True),
+            query_start_loc=async_tensor_h2d(new_query_start_loc_cpu, device=device),
+            seq_lens=async_tensor_h2d(new_seq_lens_cpu, device=device),
             query_start_loc_cpu=new_query_start_loc_cpu,
             _seq_lens_cpu=new_seq_lens_cpu,
             _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
@@ -1380,6 +1467,26 @@ class SpecDecodeBaseProposer:
                     "Detected MTP model. "
                     "Sharing target model embedding weights with the draft model."
                 )
+
+            if share_embeddings:
+                draft_embed = self.model.model.embed_tokens
+                # Only share when both models use the same embedding width.
+                # Guard with isinstance so non-Tensor weights (e.g. in tests)
+                # are not affected — mirrors the weight-equality check above.
+                if isinstance(target_embed_tokens.weight, torch.Tensor) and isinstance(
+                    draft_embed.weight, torch.Tensor
+                ):
+                    target_dim = target_embed_tokens.weight.shape[-1]
+                    draft_dim = draft_embed.weight.shape[-1]
+                    if target_dim != draft_dim:
+                        share_embeddings = False
+                        logger.info(
+                            "Target embedding dim (%d) differs from draft "
+                            "embedding dim (%d). Keeping separate embedding "
+                            "weights.",
+                            target_dim,
+                            draft_dim,
+                        )
 
             if share_embeddings:
                 if hasattr(self.model.model, "embed_tokens"):

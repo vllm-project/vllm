@@ -115,6 +115,14 @@ class UsageInfo(OpenAIBaseModel):
     prompt_tokens_details: PromptTokenUsageInfo | None = None
 
 
+class PerRequestTimingMetrics(OpenAIBaseModel):
+    time_to_first_token_ms: float | None = None
+    generation_time_ms: float | None = None
+    queue_time_ms: float | None = None
+    mean_itl_ms: float | None = None
+    tokens_per_second: float | None = None
+
+
 class RequestResponseMetadata(BaseModel):
     request_id: str
     final_usage_info: UsageInfo | None = None
@@ -352,6 +360,13 @@ class DeltaMessage(OpenAIBaseModel):
     content: str | None = None
     reasoning: str | None = None
     tool_calls: list[DeltaToolCall] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        if len(data.get("tool_calls", [])) == 0:
+            data.pop("tool_calls", None)
+        return data
 
 
 class GenerationError(Exception):
