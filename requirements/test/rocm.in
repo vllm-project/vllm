@@ -35,7 +35,7 @@ open_clip_torch==2.32.0 # Required for nemotron_vl test, Nemotron Parse in test_
 datamodel_code_generator # required for minicpm3 test
 lm-eval[api]>=0.4.12 # required for model evaluation test
 mteb[bm25s]>=2, <3 # required for mteb test
-transformers==5.13.0
+transformers @ git+https://github.com/huggingface/transformers.git@v5.13-release
 tokenizers==0.22.2
 schemathesis>=4.0.0 # Required for openai schema test
 # quantization

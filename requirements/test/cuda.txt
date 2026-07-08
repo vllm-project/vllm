@@ -1261,7 +1261,7 @@ tqdm==4.67.3
     #   segmentation-models-pytorch
     #   sentence-transformers
     #   transformers
-transformers==5.13.0
+transformers @ git+https://github.com/huggingface/transformers.git@c782b84ed8afd5e7b22b4def45e398580f68a8c5
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
