@@ -166,7 +166,7 @@ class MinTokensLogitsProcessor(LogitsProcessor):
     def __init__(
         self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool
     ):
-        # index -> (min_toks, output_token_ids, stop_token_ids)
+        # index -> (min_toks, output_token_ids, stop_token_ids, uses_structured_output)
         self.device = device
         self.min_toks: dict[int, tuple[int, Sequence[int], set[int], bool]] = {}
 
