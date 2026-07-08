@@ -57,6 +57,11 @@ class ECTransferConfig:
     """The Python module path to dynamically load the EC connector from.
     Only supported in V1."""
 
+    ec_enable_nixl: bool = False
+    """When True, enable NIXL peer-to-peer encoder-cache transfer in addition to
+    local CPU offload. When False, the connector performs local CPU offload
+    only and imports no NIXL/ZMQ dependencies."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
