@@ -2,8 +2,7 @@
 
 !!! note
     We currently support pooling models primarily for convenience. This is not guaranteed to provide any performance
-improvements over using Hugging Face Transformers or Sentence Transformers directly.
-
+    improvements over using Hugging Face Transformers or Sentence Transformers directly.
     We plan to optimize pooling models in vLLM. Please comment on <https://github.com/vllm-project/vllm/issues/21796> if you have any suggestions!
 
 ## What are pooling models?
@@ -63,7 +62,7 @@ please refer to [IO Processor Plugins](../../design/io_processor_plugins.md).
 
 !!! note
     Within classification tasks, there is a specialized subcategory: Cross-encoder (aka reranker) models. These models
-are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
+    are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
 
 ### Pooling Types
 

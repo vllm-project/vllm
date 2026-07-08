@@ -117,6 +117,7 @@ pub(super) fn prepare_completion_request(
             frequency_penalty: request.frequency_penalty,
             presence_penalty: request.presence_penalty,
             repetition_penalty: request.repetition_penalty,
+            repetition_detection: request.repetition_detection,
             stop_token_ids: request.stop_token_ids,
             ignore_eos: request.ignore_eos,
             logit_bias: convert_logit_bias(request.logit_bias)?,
@@ -143,6 +144,7 @@ pub(super) fn prepare_completion_request(
         data_parallel_rank: ctx.data_parallel_rank,
         reasoning_parser_kwargs: None,
         lora_request: lora_resolution.lora_request.clone(),
+        arrival_time: None,
     };
 
     Ok(PreparedRequest {

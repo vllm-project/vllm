@@ -328,8 +328,8 @@ def _compute_cumulative_log_p_kernel(
     HAS_DRAFT_LOGITS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
-    req_state_idx = tl.load(idx_mapping_ptr + req_idx)
-    start_idx = tl.load(cu_num_logits_ptr + req_idx)
+    req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
+    start_idx = tl.load(cu_num_logits_ptr + req_idx).to(tl.int64)
     end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
     num_draft_tokens = end_idx - start_idx - 1
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
@@ -405,7 +405,7 @@ def _compute_local_residual_mass_kernel(
     BLOCK_SIZE: tl.constexpr,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
 ):
-    logit_idx = tl.program_id(0)
+    logit_idx = tl.program_id(0).to(tl.int64)
     draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
     if draft_step_idx == 0 or draft_step_idx >= num_speculative_steps:
         # The acceptance threshold, h, looks one position ahead and sums
@@ -413,7 +413,7 @@ def _compute_local_residual_mass_kernel(
         # first and last (bonus) positions aren't needed for this computation.
         return
 
-    req_state_idx = tl.load(expanded_idx_mapping_ptr + logit_idx)
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + logit_idx).to(tl.int64)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
     if temp == 0.0:
         return

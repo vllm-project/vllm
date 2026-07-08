@@ -113,7 +113,7 @@ def _build_decode_metadata():
     # stub with the attribute is enough for metadata construction.
     layer_name = "placeholder"
     vllm_config.compilation_config.static_forward_context[layer_name] = (
-        types.SimpleNamespace(prefill_backend=None)
+        types.SimpleNamespace(prefill_backend=torch.empty((1,)))
     )
 
     init_workspace_manager(device)

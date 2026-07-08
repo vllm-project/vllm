@@ -37,7 +37,7 @@ pub enum ResponseFormat {
     },
     /// vLLM-specific structural tag format. The entire object (including the
     /// `type` field) is JSON-serialized and passed as
-    /// `StructuredOutputsParams.structural_tag`.
+    /// `StructuredOutputConstraint::StructuralTag`.
     ///
     /// We capture the payload as a catch-all map so both the legacy
     /// (`structures`/`triggers`) and current (`format`) shapes are
@@ -79,14 +79,10 @@ pub fn convert_from_response_format(
     };
     match fmt {
         ResponseFormat::Text => Ok(None),
-        ResponseFormat::JsonObject => Ok(Some(StructuredOutputsParams {
-            json_object: Some(true),
-            ..Default::default()
-        })),
-        ResponseFormat::JsonSchema { json_schema } => Ok(Some(StructuredOutputsParams {
-            json: Some(json_schema.schema.clone()),
-            ..Default::default()
-        })),
+        ResponseFormat::JsonObject => Ok(Some(StructuredOutputsParams::json_object())),
+        ResponseFormat::JsonSchema { json_schema } => Ok(Some(StructuredOutputsParams::json(
+            json_schema.schema.clone(),
+        ))),
         ResponseFormat::StructuralTag { .. } => {
             // The Python frontend dumps the entire response_format object (including the
             // `type` field) as a JSON string for the engine-core backend.
@@ -96,10 +92,7 @@ pub fn convert_from_response_format(
                     Some("response_format"),
                 )
             })?;
-            Ok(Some(StructuredOutputsParams {
-                structural_tag: Some(tag_json),
-                ..Default::default()
-            }))
+            Ok(Some(StructuredOutputsParams::structural_tag(tag_json)))
         }
     }
 }

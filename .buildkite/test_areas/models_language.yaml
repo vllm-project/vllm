@@ -14,7 +14,6 @@ steps:
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language -m 'core_model and (not slow_test)'
   mirror:
-    torch_nightly: {}
     amd:
       device: mi300_1
       depends_on:
@@ -35,7 +34,6 @@ steps:
     - pytest -v -s models/language -m 'core_model and slow_test' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 2
   mirror:
-    torch_nightly: {}
     amd:
       device: mi300_1
       depends_on:
@@ -67,7 +65,6 @@ steps:
     - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 2
   mirror:
-    torch_nightly: {}
     amd:
       device: mi325_1
       timeout_in_minutes: 90

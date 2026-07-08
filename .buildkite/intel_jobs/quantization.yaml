@@ -1,0 +1,28 @@
+group: Quantization
+depends_on:
+  - image-build-xpu
+steps:
+- label: Quantization
+  key: quantization
+  timeout_in_minutes: 30
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  no_plugin: true
+  working_dir: "."
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - tests/quantization
+  commands:
+  # - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s tests/quantization/test_per_token_kv_cache.py --deselect="tests/quantization/test_per_token_kv_cache.py::test_triton_unified_attention_per_token_head_scale[int4-16-128-num_heads0-seq_lens1]"'
+

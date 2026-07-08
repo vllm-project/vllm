@@ -31,8 +31,6 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import (
     KVCacheLayoutType,
-    get_per_layer_parameters,
-    infer_global_hyperparameters,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -86,9 +84,23 @@ class HpcAttnMetadata(AttentionMetadata):
     hpc_prefill_q_scale: torch.Tensor | None = None
     """FP8 per-token-per-head Q scale for prefill (from RopeNorm)."""
     hpc_decode_q_scale: torch.Tensor | None = None
-    """FP8 per-token-per-head Q scale for decode (from RopeNorm)."""
+    """FP8 per-token-per-head Q scale for decode (persistent buffer).
+    shape = [max_decode_tokens, num_q_heads], contiguous.
+    Only the first num_decode_q_scale_tokens rows are valid."""
     hpc_split_k_flag: torch.Tensor | None = None
-    """Split-K flag tensor for FP8 decode (from RopeNorm)."""
+    """Split-K flag tensor for FP8 decode (persistent buffer).
+    shape = [max_num_seqs, num_kv_heads], int32."""
+
+    # --- MTP (Multi-Token Prediction) fields ---
+    decode_query_len: int = 1
+    """Number of query tokens per decode request.
+    1 for standard decoding, mtp+1 for speculative decoding (2 or 3)."""
+    qo_indptr_decode: torch.Tensor | None = None
+    """Cumulative query offsets for decode requests (GPU tensor).
+    shape = [num_decodes + 1]. Only set when decode_query_len > 1.
+    e.g. 3 requests with dql=2: [0, 2, 4, 6]."""
+    task_map: torch.Tensor | None = None
+    """Used for HPC dynamic schedule attention"""
 
 
 class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
@@ -105,20 +117,40 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.model_config = vllm_config.model_config
-        self.cache_config = vllm_config.cache_config
+        import hpc
 
-        self.num_qo_heads = self.model_config.get_num_attention_heads(
-            vllm_config.parallel_config
-        )
         self.num_kv_heads = kv_cache_spec.num_kv_heads
-        self.head_dim = kv_cache_spec.head_size
-        self.page_size = kv_cache_spec.block_size
+        self.hpc_dynamic_sched_attn_min_split_len = 1024
 
-        self.cache_dtype = self.cache_config.cache_dtype
+        # MTP constraint: HPC decode kernel only supports mtp in {0, 1, 2, 3}
+        spec_config = vllm_config.speculative_config
+        if (
+            spec_config is not None
+            and spec_config.num_speculative_tokens is not None
+            and spec_config.num_speculative_tokens > 3
+        ):
+            raise ValueError(
+                f"HPC attention only supports up to 3 speculative tokens "
+                f"(mtp ∈ {{0, 1, 2, 3}}), got "
+                f"num_speculative_tokens={spec_config.num_speculative_tokens}. "
+                f"Please reduce num_speculative_tokens or use a different "
+                f"attention backend."
+            )
 
-        self.global_hyperparameters = infer_global_hyperparameters(
-            get_per_layer_parameters(vllm_config, layer_names, HpcAttentionImpl)
+        # Dynamic decode threshold for MTP support.
+        # _init_reorder_batch_threshold computes:
+        #   no spec_config → threshold=1 (unchanged)
+        #   with spec_config → threshold=1+num_speculative_tokens
+        self._init_reorder_batch_threshold(
+            reorder_batch_threshold=1,
+            supports_spec_as_decode=True,
+        )
+
+        self.task_map = hpc.get_attention_decode_task_workspace(
+            vllm_config.scheduler_config.max_num_seqs,
+            vllm_config.model_config.max_model_len or 4096,
+            self.num_kv_heads,
+            min_process_len=self.hpc_dynamic_sched_attn_min_split_len,
         )
 
     @override  # type: ignore[misc]
@@ -128,6 +160,13 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
+        spec_config = vllm_config.speculative_config
+        if (
+            spec_config is not None
+            and spec_config.num_speculative_tokens is not None
+            and spec_config.num_speculative_tokens > 0
+        ):
+            return AttentionCGSupport.UNIFORM_BATCH
         return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
     def build(
@@ -143,7 +182,8 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.reorder_batch_threshold,
-                require_uniform=False,
+                # MTP requires uniform query lengths across decode requests
+                require_uniform=(self.reorder_batch_threshold > 1),
             )
         )
 
@@ -152,7 +192,16 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
         slot_mapping = common_attn_metadata.slot_mapping
         max_query_len = common_attn_metadata.max_query_len
 
+        # Compute decode_query_len (tokens per decode request).
+        # Non-MTP: 1, MTP: mtp+1 (2 or 3).
+        if num_decodes > 0 and num_decode_tokens > num_decodes:
+            decode_query_len = num_decode_tokens // num_decodes
+        else:
+            decode_query_len = 1
+
+        seq_lens_decode = None
         qo_indptr = None
+        qo_indptr_decode = None
         if num_prefills > 0:
             qo_indptr_cpu = common_attn_metadata.query_start_loc_cpu
             prefill_start = num_decodes
@@ -160,6 +209,21 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
                 qo_indptr_cpu[prefill_start:] - qo_indptr_cpu[prefill_start]
             )
             qo_indptr = qo_indptr_prefill_cpu.to(self.device, non_blocking=True)
+
+        if num_decodes > 0:
+            seq_lens_decode = seq_lens[:num_decodes]
+            # block_table is per-request, indexed by num_decodes (not tokens)
+            qo_indptr_decode = common_attn_metadata.query_start_loc[: num_decodes + 1]
+            import hpc
+
+            hpc.assign_attention_decode_task(
+                seq_lens_decode,
+                self.task_map,
+                self.num_kv_heads,
+                decode_query_len,
+                new_kv_included=True,
+                min_process_len=self.hpc_dynamic_sched_attn_min_split_len,
+            )
 
         return HpcAttnMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -176,6 +240,9 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
             hpc_prefill_q_scale=None,
             hpc_decode_q_scale=None,
             hpc_split_k_flag=None,
+            decode_query_len=decode_query_len,
+            qo_indptr_decode=qo_indptr_decode,
+            task_map=self.task_map,
         )
 
 
@@ -192,6 +259,7 @@ class HpcAttentionBackend(AttentionBackend):
     ]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "bfloat16",
         "fp8_e4m3",
     ]
 
@@ -323,6 +391,13 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
         self.supports_quant_query_input = False
         self.splitk = True
 
+        import hpc
+
+        if self.use_fp8:
+            self._quant_type = hpc.QuantType.QPERTOKEN_PERHEAD_KPERTENSOR_VPERTENSOR
+        else:
+            self._quant_type = None
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -417,6 +492,7 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
                     block_table_prefill,
                     seq_lens_prefill,
                     max_seqlens,
+                    quant_type=self._quant_type,
                     output=output_prefill,
                 )
             else:
@@ -439,6 +515,8 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
             q_decode = query[:num_decode_tokens]
             output_decode = output[:num_decode_tokens]
 
+            mtp = attn_metadata.decode_query_len - 1
+
             if self.use_fp8:
                 hpc.attention_decode_fp8(
                     q_decode,
@@ -449,8 +527,14 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
                     hpc_decode_q_scale,
                     k_scale,
                     v_scale,
+                    mtp=mtp,
+                    # MTP: split_flag from rope_norm is unavailable
+                    # when using prefill-mode kernel; let HPC decide.
+                    # splitk=(self.splitk if mtp == 0 else True),
                     new_kv_included=True,
+                    quant_type=self._quant_type,
                     splitk=self.splitk,
+                    task_map=attn_metadata.task_map,
                     split_flag=hpc_split_k_flag,
                     output=output_decode,
                 )
@@ -461,6 +545,7 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
                     kv_cache[:, 1],
                     block_table_decode,
                     num_seq_kvcache,
+                    mtp=mtp,
                     output=output_decode,
                     new_kv_included=True,
                     splitk=self.splitk,

@@ -15,7 +15,7 @@ These models are what we list in [supported text models](#list-of-text-only-lang
 
 ### Transformers
 
-vLLM also supports model implementations that are available in Transformers. You should expect the performance of a Transformers model implementation used in vLLM to be within <5% of the performance of a dedicated vLLM model implementation. We call this feature the "Transformers modeling backend".
+vLLM also supports model implementations that are available in Transformers. We call this feature the "Transformers modeling backend". The performance of models loaded with the Transformers modeling backend should be identical to a dedicated vLLM model implementation.
 
 Currently, the Transformers modeling backend works for the following:
 
@@ -140,7 +140,7 @@ Here is what happens in the background when this model is loaded:
 
 That's it!
 
-For your model to be compatible with vLLM's tensor parallel and/or pipeline parallel features, you must add `base_model_tp_plan` and/or `base_model_pp_plan` to your model's config class:
+For your model to be compatible with vLLM's tensor parallel and/or pipeline parallel features, you may need to add `base_model_tp_plan` and/or `base_model_pp_plan` to your model's config class:
 
 <details class="code">
 <summary>configuration_my_model.py</summary>
@@ -168,9 +168,11 @@ class MyConfig(PretrainedConfig):
 </details>
 
 - `base_model_tp_plan` is a `dict` that maps fully qualified layer name patterns to tensor parallel styles (currently only `"colwise"` and `"rowwise"` are supported).
+    - vLLM infers the tensor parallel style of standard attention (`q`/`k`/`v`/`o_proj`) and gated-MLP/experts (`gate`/`up`/`down_proj`) projections if it can fuse them, so these may not need to be listed. `base_model_tp_plan` is only _required_ for layers that do not follow these patterns; any linear that is neither fused nor named in the plan is replicated.
 - `base_model_pp_plan` is a `dict` that maps direct child layer names to `tuple`s of `list`s of `str`s:
     - You only need to do this for layers which are not present on all pipeline stages
     - vLLM assumes that there will be only one `nn.ModuleList`, which is distributed across the pipeline stages
+    - When no `base_model_pp_plan` is provided, the Transformers modelling backend infers the split from the text model's sole `nn.ModuleList`, keeping the parameter-bearing modules around it (input embeddings, final norm) on the first/last stage (depending on declaration order) and parameter-free modules (e.g. rotary embeddings) on every stage
     - The `list` in the first element of the `tuple` contains the names of the input arguments
     - The `list` in the last element of the `tuple` contains the names of the variables the layer outputs to in your modeling code
 
@@ -240,49 +242,23 @@ Use the Hugging Face CLI to [manage models](https://huggingface.co/docs/huggingf
 
 ```bash
 # List cached models
-hf scan-cache
+hf cache list -q
 
 # Show detailed (verbose) output
-hf scan-cache -v
+hf cache list
 
 # Specify a custom cache directory
-hf scan-cache --dir ~/.cache/huggingface/hub
+hf cache list --dir ~/.cache/huggingface/hub
 ```
 
 #### Delete a cached model
 
-Use the Hugging Face CLI to interactively [delete downloaded model](https://huggingface.co/docs/huggingface_hub/guides/manage-cache#clean-your-cache) from the cache:
+Use the Hugging Face CLI to [delete downloaded model](https://huggingface.co/docs/huggingface_hub/guides/manage-cache#clean-your-cache) from the cache:
 
-<details>
-<summary>Commands</summary>
-
-```console
-# The `delete-cache` command requires extra dependencies to work with the TUI.
-# Please run `pip install huggingface_hub[cli]` to install them.
-
-# Launch the interactive TUI to select models to delete
-$ hf delete-cache
-? Select revisions to delete: 1 revisions selected counting for 438.9M.
-  ○ None of the following (if selected, nothing will be deleted).
-Model BAAI/bge-base-en-v1.5 (438.9M, used 1 week ago)
-❯ ◉ a5beb1e3: main # modified 1 week ago
-
-Model BAAI/bge-large-en-v1.5 (1.3G, used 1 week ago)
-  ○ d4aa6901: main # modified 1 week ago
-
-Model BAAI/bge-reranker-base (1.1G, used 4 weeks ago)
-  ○ 2cfc18c9: main # modified 4 weeks ago
-
-Press <space> to select, <enter> to validate and <ctrl+c> to quit without modification.
-
-# Need to confirm after selected
-? Select revisions to delete: 1 revision(s) selected.
-? 1 revisions selected counting for 438.9M. Confirm deletion ? Yes
-Start deletion.
-Done. Deleted 1 repo(s) and 0 revision(s) for a total of 438.9M.
+```bash
+# delete all the cached objects
+hf cache rm $(hf cache list -q)
 ```
-
-</details>
 
 #### Using a proxy
 
@@ -581,6 +557,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `LlavaForConditionalGeneration` | LLaVA-1.5, Pixtral (HF Transformers) | T + I<sup>E+</sup> | `llava-hf/llava-1.5-7b-hf`, `mistral-community/pixtral-12b`, etc. | ✅︎ | ✅︎ |
 | `LlavaNextForConditionalGeneration` | LLaVA-NeXT, Granite Vision | T + I<sup>E+</sup> | `llava-hf/llava-v1.6-mistral-7b-hf`, `llava-hf/llava-v1.6-vicuna-7b-hf`, `ibm-granite/granite-vision-3.3-2b`, etc. | | ✅︎ |
 | `LlavaNextVideoForConditionalGeneration` | LLaVA-NeXT-Video | T + V | `llava-hf/LLaVA-NeXT-Video-7B-hf`, etc. | | ✅︎ |
+| `LlavaOnevision2ForConditionalGeneration` | LLaVA-OneVision-2 | T + I<sup>+</sup> + V<sup>+</sup> | `lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct` | | |
 | `LlavaOnevisionForConditionalGeneration` | LLaVA-Onevision | T + I<sup>+</sup> + V<sup>+</sup> | `llava-hf/llava-onevision-qwen2-7b-ov-hf`, `llava-hf/llava-onevision-qwen2-0.5b-ov-hf`, etc. | | ✅︎ |
 | `MiDashengLMModel` | MiDashengLM | T + A<sup>+</sup> | `mispeech/midashenglm-7b` | | ✅︎ |
 | `MiMoV2OmniForCausalLM` | MiMo-V2.5-Omni | T + I<sup>E+</sup> + V<sup>E+</sup> + A<sup>+</sup> | `XiaomiMiMo/MiMo-V2.5-Omni` | | ✅︎ |

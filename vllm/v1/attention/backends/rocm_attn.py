@@ -421,13 +421,8 @@ class RocmAttentionImpl(AttentionImpl):
         if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
-            # chunked_prefill_paged_decode runs attention with a full-precision
-            # query (it does not quantize Q to fp8 and does not consume
-            # q_scale), so q_scale only matters when the query itself is fp8.
-            # For a non-fp8 query, q_scale is not applicable and is ignored
-            # (mirrors TritonAttentionImpl). This avoids spuriously failing on
-            # checkpoints that carry a non-1.0 q_scale while keeping the query
-            # in full precision.
+            # q_scale only applies to an fp8 query; this path keeps the query
+            # in full precision, so a non-1.0 q_scale is not applicable here.
             if query.dtype == self.fp8_dtype and layer._q_scale_float != 1.0:
                 raise NotImplementedError(
                     "A non 1.0 q_scale with an fp8 query is not currently "

@@ -119,6 +119,6 @@ def test_runai_invalid_extra_config_leaves_environ_untouched():
     # os.environ (all values are validated before any global mutation).
     with patch.dict(os.environ, {}, clear=False):
         os.environ.pop("RUNAI_STREAMER_CONCURRENCY", None)
-        with pytest.raises(ValueError, match="memory_limit must be a positive integer"):
+        with pytest.raises(ValueError, match="memory_limit must be an integer >= -1"):
             _runai_loader({"concurrency": 16, "memory_limit": -5})
         assert "RUNAI_STREAMER_CONCURRENCY" not in os.environ

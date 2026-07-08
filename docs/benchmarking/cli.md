@@ -1337,7 +1337,7 @@ Serve and benchmark VLM2Vec:
 # Run this in another process
 vllm serve TIGER-Lab/VLM2Vec-Full --runner pooling \
   --trust-remote-code \
-  --chat-template examples/template_vlm2vec_phi3v.jinja
+  --chat-template examples/pooling/embed/template/vlm2vec_phi3v.jinja
 
 # Run these one by one after the server is up
 # download dataset

@@ -44,6 +44,17 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
     backend_cls = DeepseekV4XPUSparseBackend
     use_flashmla_fp8_layout = True
 
+    def __init__(self, *args, **kwargs) -> None:
+        # torch.cuda.Event() raises RuntimeError on XPU ("dummy base class").
+        # The Base and DeepseekV4Indexer both create cuda Events in __init__, so
+        # we temporarily redirect torch.cuda.Event → torch.xpu.Event.
+        _orig_event = torch.cuda.Event
+        torch.cuda.Event = torch.xpu.Event  # type: ignore[misc]
+        try:
+            super().__init__(*args, **kwargs)
+        finally:
+            torch.cuda.Event = _orig_event  # type: ignore[misc]
+
     def _fused_qnorm_rope_kv_insert(self, q, kv, positions, attn_metadata):
         from typing import cast
 

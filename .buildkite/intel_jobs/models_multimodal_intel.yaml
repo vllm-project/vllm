@@ -9,7 +9,7 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
-    mem: 16+
+    mem: 24+
   no_plugin: true
   working_dir: "."
   env:
@@ -81,7 +81,7 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
-    mem: 16+
+    mem: 24+
   no_plugin: true
   working_dir: "."
   env:
@@ -105,7 +105,7 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
-    mem: 16+
+    mem: 24+
   no_plugin: true
   working_dir: "."
   env:

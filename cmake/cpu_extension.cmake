@@ -15,6 +15,7 @@ endif()
 #
 set(ENABLE_X86_ISA $ENV{VLLM_CPU_X86})
 set(ENABLE_ARM_BF16 $ENV{VLLM_CPU_ARM_BF16})
+set(ENABLE_RVV_BF16 $ENV{VLLM_CPU_RVV_BF16})
 
 include_directories("${CMAKE_SOURCE_DIR}/csrc")
 
@@ -110,6 +111,13 @@ else()
         set(ARM_BF16_FOUND ON)
         message(STATUS "ARM BF16 support enabled via VLLM_CPU_ARM_BF16 environment variable")
     endif()
+    # Some kernels (e.g. Bianbu on Spacemit X100) do not report zvfbfmin
+    # in /proc/cpuinfo despite hardware support. VLLM_CPU_RVV_BF16=1
+    # overrides the detection result.
+    if (ENABLE_RVV_BF16)
+        set(RVV_BF16_FOUND ON)
+        message(STATUS "RVV BF16 support enabled via VLLM_CPU_RVV_BF16 environment variable")
+    endif()
 endif()
 
 if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64" OR ENABLE_X86_ISA)
@@ -178,7 +186,10 @@ elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
     # Override with -DVLLM_RVV_VLEN=128 or -DVLLM_RVV_VLEN=256 for RVV.
     if(NOT DEFINED VLLM_RVV_VLEN)
         # Auto-detect: find the largest zvl<N>b in /proc/cpuinfo isa line.
-        if(EXISTS /proc/cpuinfo)
+        # Skip when cross-compiling — /proc/cpuinfo describes the build host.
+        if(CMAKE_CROSSCOMPILING)
+            message(STATUS "Cross-compiling: skipping VLEN auto-detection from /proc/cpuinfo")
+        elseif(EXISTS /proc/cpuinfo)
             file(READ /proc/cpuinfo _cpuinfo)
             set(_best 0)
             foreach(_n IN ITEMS 128 256 512 1024)
@@ -186,6 +197,13 @@ elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
                     set(_best ${_n})
                 endif()
             endforeach()
+            # Only VLEN=128 and VLEN=256 are supported by the RVV kernels.
+            if(_best GREATER 256)
+                message(WARNING
+                    "Detected VLEN=${_best} but only 128/256 are supported; "
+                    "clamping to 256")
+                set(_best 256)
+            endif()
             if(_best GREATER 0)
                 set(VLLM_RVV_VLEN ${_best})
             endif()
@@ -195,9 +213,9 @@ elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
         if(NOT DEFINED VLLM_RVV_VLEN AND (RVV_FP16_FOUND OR RVV_BF16_FOUND))
             message(FATAL_ERROR
                 "RISC-V RVV is available but VLEN could not be auto-detected. "
-                "Please specify VLEN explicitly:\n"
-                "  -DVLLM_RVV_VLEN=128   (for VLEN=128 hardware)\n"
-                "  -DVLLM_RVV_VLEN=256   (for VLEN=256 hardware, e.g. Spacemit X100)")
+                "Please specify VLEN explicitly via CMAKE_ARGS:\n"
+                "  CMAKE_ARGS='-DVLLM_RVV_VLEN=128'   (for VLEN=128 hardware)\n"
+                "  CMAKE_ARGS='-DVLLM_RVV_VLEN=256'   (for VLEN=256 hardware, e.g. Spacemit X100)")
         endif()
     endif()
     if(VLLM_RVV_VLEN AND VLLM_RVV_VLEN GREATER 0)
@@ -209,7 +227,7 @@ elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
             message(STATUS "BF16 extension detected")
             set(MARCH_FLAGS -march=rv64gcv_zvfh_zfbfmin_zvfbfmin_zvl${VLLM_RVV_VLEN}b -mrvv-vector-bits=zvl -mabi=lp64d)
         elseif(RVV_FP16_FOUND)
-            message(WARNING "BF16 functionality is not available")
+            message(WARNING "BF16 functionality is not available.")
             set(MARCH_FLAGS -march=rv64gcv_zvfh_zvl${VLLM_RVV_VLEN}b -mrvv-vector-bits=zvl -mabi=lp64d)
         else()
             message(STATUS "compile riscv with scalar (no FP16/BF16)")
@@ -329,7 +347,7 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
     set(ONEDNN_ENABLE_PRIMITIVE "MATMUL;REORDER")
     set(ONEDNN_BUILD_GRAPH "OFF")
     set(ONEDNN_ENABLE_JIT_PROFILING "ON")
-    set(ONEDNN_ENABLE_ITT_TASKS "OFF")
+    set(ONEDNN_ENABLE_ITT_TASKS "ON")
     set(ONEDNN_ENABLE_MAX_CPU_ISA "ON")
     set(ONEDNN_ENABLE_CPU_ISA_HINTS "ON")
     set(ONEDNN_VERBOSE "ON")

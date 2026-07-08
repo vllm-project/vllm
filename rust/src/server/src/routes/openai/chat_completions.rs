@@ -211,7 +211,7 @@ async fn collect_chat_completion(
                     Some(prefix) => Some(format!("{prefix}{}", message.text())),
                     None => Some(message.text()).filter(|t| !t.is_empty()),
                 },
-                tool_calls: Some(tool_calls).filter(|calls| !calls.is_empty()),
+                tool_calls,
                 reasoning: if include_reasoning { reasoning } else { None },
             },
             logprobs,
@@ -805,7 +805,7 @@ fn chat_finish_reason_to_openai(
         FinishReason::Stop(_) => Ok("stop"),
         FinishReason::Length => Ok("length"),
         FinishReason::Abort => Ok("abort"),
-        FinishReason::Repetition => Ok("stop"),
+        FinishReason::Repetition(_) => Ok("repetition"),
         FinishReason::Error => {
             bail_server_error!("Internal server error");
         }

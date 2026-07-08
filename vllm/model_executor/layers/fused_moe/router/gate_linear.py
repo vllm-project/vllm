@@ -74,6 +74,7 @@ class GateLinear(ReplicatedLinear):
         self.allow_specialized_router_gemm = can_use_specialized_kernels
         self.allow_dsv3_router_gemm = (
             self.allow_specialized_router_gemm
+            and self.weight.dtype == torch.bfloat16
             and output_size in self.DSV3_SUPPORTED_NUM_EXPERTS
             and input_size in self.DSV3_SUPPORTED_HIDDEN_SIZES
             and (input_size, output_size) not in self.DSV3_UNSUPPORTED_SHAPES

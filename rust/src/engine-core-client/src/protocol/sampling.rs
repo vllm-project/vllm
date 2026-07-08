@@ -21,6 +21,30 @@ fn default_max_tokens() -> u32 {
     16
 }
 
+///
+/// Parameters for detecting repetitive N-gram patterns in output tokens.
+///
+/// Mirrors Python's `RepetitionDetectionParams`:
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/sampling_params.py#L109-L144>
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RepetitionDetectionParams {
+    /// Maximum N-gram size to check. 0 disables detection.
+    pub max_pattern_size: u32,
+    /// Minimum N-gram size to check. Defaults to 1 when zero.
+    #[serde(default)]
+    pub min_pattern_size: u32,
+    /// Minimum number of repetitions to trigger detection (must be >= 2).
+    pub min_count: u32,
+}
+
+impl RepetitionDetectionParams {
+    /// Return `true` when the params are effectively disabled (max_pattern_size
+    /// is 0).
+    pub fn is_disabled(&self) -> bool {
+        self.max_pattern_size == 0
+    }
+}
+
 /// Engine-core-facing sampling parameters for text generation.
 ///
 /// This is the normalized southbound subset used by the Rust frontend when it
@@ -76,6 +100,9 @@ pub struct EngineCoreSamplingParams {
     /// Repetition penalty applied by the sampler.
     #[serde(default = "default_repetition_penalty")]
     pub repetition_penalty: f32,
+    /// Parameters for detecting repetitive N-gram patterns. `None` disables
+    /// detection.
+    pub repetition_detection: Option<RepetitionDetectionParams>,
     /// Token IDs that stop generation.
     pub stop_token_ids: Vec<u32>,
     /// Primary EOS token ID used by engine-core's dedicated EOS stop path.
@@ -134,6 +161,7 @@ impl EngineCoreSamplingParams {
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
             repetition_penalty: 1.0,
+            repetition_detection: None,
             stop_token_ids: Vec::new(),
             eos_token_id: None,
             all_stop_token_ids: BTreeSet::new(),
@@ -203,6 +231,7 @@ mod tests {
         assert_eq!(sampling.frequency_penalty, 0.0);
         assert_eq!(sampling.presence_penalty, 0.0);
         assert_eq!(sampling.repetition_penalty, 1.0);
+        assert_eq!(sampling.repetition_detection, None);
         assert_eq!(sampling.logprobs, None);
         assert_eq!(sampling.prompt_logprobs, None);
         assert_eq!(sampling.eos_token_id, None);

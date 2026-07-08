@@ -8,7 +8,12 @@ if [[ "$MODE" != "style-clippy" && "$MODE" != "test" ]]; then
   exit 2
 fi
 
-ROOT_DIR="$(git rev-parse --show-toplevel)"
+if ROOT_DIR="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+  :
+else
+  SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+  ROOT_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
+fi
 cd "$ROOT_DIR"
 
 export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"

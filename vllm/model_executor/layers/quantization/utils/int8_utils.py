@@ -16,43 +16,6 @@ from vllm.triton_utils import tl, triton
 logger = logging.getLogger(__name__)
 
 
-def apply_w8a8_block_int8_linear(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    block_size: list[int],
-    weight_scale: torch.Tensor,
-    input_scale: torch.Tensor | None = None,
-    bias: torch.Tensor | None = None,
-) -> torch.Tensor:
-    assert input_scale is None
-    # View input as 2D matrix for fp8 methods
-    input_2d = input.view(-1, input.shape[-1])
-    output_shape = [*input.shape[:-1], weight.shape[0]]
-
-    q_input, x_scale = per_token_group_quant_int8(input_2d, block_size[1])
-    output = w8a8_block_int8_matmul(
-        q_input, weight, x_scale, weight_scale, block_size, output_dtype=input.dtype
-    )
-
-    if bias is not None:
-        output = output + bias
-    return output.to(dtype=input.dtype).view(*output_shape)
-
-
-def input_to_int8(
-    x: torch.Tensor, dtype: torch.dtype = torch.int8
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """This function quantizes input values to int8 values with
-    tensor-wise quantization."""
-    iinfo = torch.iinfo(dtype)
-    min_val, max_val = x.aminmax()
-    amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-12)
-    int8_min, int8_max = iinfo.min, iinfo.max
-    scale = int8_max / amax
-    x_scl_sat = (x * scale).clamp(min=int8_min, max=int8_max)
-    return x_scl_sat.to(dtype).contiguous(), scale.float().reciprocal()
-
-
 def block_dequant(
     x_q_block: torch.Tensor,
     x_s: torch.Tensor,

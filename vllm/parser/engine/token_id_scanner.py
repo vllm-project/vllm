@@ -8,6 +8,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+DROP_TERMINAL = "__DROP__"
+
 
 @dataclass(slots=True)
 class TextChunk:
@@ -277,7 +279,15 @@ class TokenIDScanner:
                 consumed = pos + len(anchor.text)
             else:
                 has_later_valid = any(p >= 0 for p in positions[i + 1 :])
-                if not has_later_valid and consumed < len(delta_text):
+                # DROP anchors (EOS, etc.) may have text that never
+                # arrives in delta_text (stripped by detokenizer).
+                # Don't defer remaining content waiting for text
+                # that will never come.
+                if (
+                    not has_later_valid
+                    and consumed < len(delta_text)
+                    and anchor.terminal != DROP_TERMINAL
+                ):
                     self._deferred_post_text += delta_text[consumed:]
                     consumed = len(delta_text)
                 self._deferred_terminals.append(anchor)

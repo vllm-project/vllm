@@ -29,7 +29,8 @@ if(DEEPGEMM_SRC_DIR)
 else()
   # Keep in sync with tools/install_deepgemm.sh
   set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/deepseek-ai/DeepGEMM.git")
-  set(_DEEPGEMM_UPSTREAM_TAG "891d57b4db1071624b5c8fa0d1e51cb317fa709f")
+  # NOTE: This is currently targeting nv-dev branch due to sm120 support
+  set(_DEEPGEMM_UPSTREAM_TAG "a6b593d2826719dcf4892609af7b84ee23aaf32a")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
