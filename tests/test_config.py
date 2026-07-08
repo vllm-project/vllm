@@ -34,6 +34,7 @@ from vllm.config.vllm import (
     OptimizationLevel,
 )
 from vllm.platforms import current_platform
+from vllm.v1.attention.backend import AttentionCGSupport
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -65,6 +66,36 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
         monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", env_value)
 
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
+
+
+@pytest.mark.parametrize(
+    ("use_v2_model_runner", "expected_capture_sizes"),
+    [
+        (False, [4, 8, 12, 16]),
+        (True, list(range(1, 17))),
+    ],
+)
+def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
+    use_v2_model_runner,
+    expected_capture_sizes,
+):
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        cudagraph_capture_sizes=list(range(1, 17)),
+    )
+    compilation_config.max_cudagraph_capture_size = 16
+    compilation_config.post_init_cudagraph_sizes()
+
+    cudagraph_mode = compilation_config.resolve_cudagraph_mode_and_sizes(
+        AttentionCGSupport.ALWAYS,
+        "FakeAttentionBackend",
+        uniform_decode_query_len=4,
+        use_v2_model_runner=use_v2_model_runner,
+        tensor_parallel_size=1,
+    )
+
+    assert cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+    assert compilation_config.cudagraph_capture_sizes == expected_capture_sizes
 
 
 @pytest.mark.parametrize(
@@ -118,7 +149,17 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
                 is_moe=False,
                 is_quantized=False,
             ),
-            False,
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="google/gemma-2-2b",
+                architectures=["Gemma2ForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
         ),
         (
             SimpleNamespace(
@@ -197,6 +238,18 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
                 runner_type="generate",
                 is_moe=False,
                 is_quantized=False,
+                is_hybrid=True,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                model="state-spaces/mamba-130m-hf",
+                architectures=["MambaForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+                is_attention_free=True,
             ),
             False,
         ),
@@ -594,6 +647,30 @@ def test_nested_hf_overrides():
     assert model_config.hf_config.text_config.hidden_size == 2048
     assert model_config.hf_config.text_config.num_attention_heads == 16
     assert model_config.hf_config.vision_config.hidden_size == 512
+
+
+def test_model_class_overrides_registers_target():
+    """`model_class_overrides` redirects an architecture to a custom class."""
+    from vllm.model_executor.models import ModelRegistry
+
+    arch = "_TestModelClassOverrideArch"
+    target = "vllm.model_executor.models.llama:LlamaForCausalLM"
+    assert arch not in ModelRegistry.models
+
+    model_config = ModelConfig(
+        "facebook/opt-125m",
+        model_class_overrides={arch: target},
+    )
+    try:
+        # Accessing `.registry` is the chokepoint that applies the overrides;
+        # it has already run during construction.
+        registered = model_config.registry.models[arch]
+        assert registered.module_name == "vllm.model_executor.models.llama"
+        assert registered.class_name == "LlamaForCausalLM"
+        # Idempotent: a second access does not re-register or error out.
+        assert model_config.registry.models[arch] is registered
+    finally:
+        ModelRegistry.models.pop(arch, None)
 
 
 @pytest.mark.skipif(
@@ -1292,7 +1369,9 @@ def test_vllm_config_explicit_overrides():
         compilation_config=compilation_config,
     )
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-    assert config.compilation_config.pass_config.enable_qk_norm_rope_fusion is True
+    assert config.compilation_config.pass_config.enable_qk_norm_rope_fusion is (
+        current_platform.is_cuda_alike() or current_platform.is_xpu()
+    )
     # Mode should still use default for O2
     assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
 

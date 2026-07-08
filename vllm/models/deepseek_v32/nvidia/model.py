@@ -36,6 +36,7 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 from .attention import DeepseekV32Attention
+from .fused_ops import fused_allreduce_rms_norm
 
 
 class DeepseekV32DecoderLayer(torch.nn.Module):
@@ -76,7 +77,12 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 parallel_config=parallel_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
+                apply_routed_scale_to_output=False,
             )
+            # Defer the MoE cross-rank all-reduce; it is fused into the next
+            # layer's input_layernorm (or the final norm) via
+            # fused_allreduce_rms_norm. self.mlp.experts is the MoERunner.
+            self.mlp.experts.moe_config.skip_final_all_reduce = True
         else:
             self.mlp = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
@@ -84,6 +90,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
+                reduce_results=False,
             )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
@@ -98,12 +105,23 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
+            # First layer: hidden_states is the (already reduced) embedding.
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            # The previous layer's MLP/MoE output is left un-reduced; fuse its
+            # all-reduce into this input_layernorm.
+            hidden_states, residual = fused_allreduce_rms_norm(
+                hidden_states, residual, self.input_layernorm
+            )
+        # self_attn's o_proj runs reduce_results=False; fuse its all-reduce with
+        # the post-attention RMSNorm.
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states, residual = fused_allreduce_rms_norm(
+            hidden_states, residual, self.post_attention_layernorm
+        )
+        # MLP/MoE runs un-reduced; its all-reduce is fused into the next layer's
+        # input_layernorm (or the model's final norm).
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
@@ -201,7 +219,8 @@ class DeepseekV32Model(torch.nn.Module):
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        # Last layer's MoE output is un-reduced; fuse its all-reduce into norm.
+        hidden_states, _ = fused_allreduce_rms_norm(hidden_states, residual, self.norm)
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
@@ -318,7 +337,6 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
     def set_moe_parameters(self):
         # Same as the base, but keyed on the MoE block type rather than the
         # decoder-layer type (DeepseekV32DecoderLayer is a plain nn.Module).
-        self.expert_weights = []
         self.num_expert_groups = getattr(self.config, "n_group", 1)
         self.moe_layers = []
         self.moe_mlp_layers = []

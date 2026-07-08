@@ -818,14 +818,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         attn_out,
                         lse,
                         get_dcp_group(),
-                        is_lse_base_on_e=True,
+                        is_lse_base_on_e=self.impl.lse_base_on_e,
                     )
                 else:
                     attn_out = cp_lse_ag_out_rs(
                         attn_out,
                         lse,
                         get_dcp_group(),
-                        is_lse_base_on_e=True,
+                        is_lse_base_on_e=self.impl.lse_base_on_e,
                     )
 
             # v_up projection
@@ -1563,9 +1563,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 device=device,
             )
 
+        # Metadata builders are created per ubatch when DBO is enabled. MLA
+        # prefill backends keep the prepared metadata on the backend object, so
+        # each builder needs its own backend instance to avoid cross-ubatch races.
         self._prefill_backend = self.compilation_config.static_forward_context[
             layer_names[0]
-        ].prefill_backend
+        ].prefill_backend.clone()
 
         supports_spec_decode = self.query_len_support != QueryLenSupport.SINGLE_ONLY
         self._init_reorder_batch_threshold(
