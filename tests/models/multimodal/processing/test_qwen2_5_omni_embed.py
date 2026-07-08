@@ -328,6 +328,10 @@ class TestEmbedInputIds:
         ]
 
         model, _ = make_mock_model(hidden)
+        # embed_input_ids reads modalities via this instance attribute set
+        # by gpu_model_runner._preprocess in production; mirror it here so
+        # merge_interleaved_embeddings can group embeddings by modality.
+        model._last_embedding_modalities = ["video", "audio"]
         result = model.embed_input_ids(
             input_ids, mm_embeds, is_multimodal=is_multimodal
         )
