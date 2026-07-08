@@ -198,6 +198,12 @@ class ModelConfig:
     - -1 or 'auto' -> Automatically choose the maximum model length that fits in
       GPU memory. This will use the model's maximum context length if it fits,
       otherwise it will find the largest length that can be accommodated."""
+    max_model_len_cap: int | None = Field(default=None, gt=0)
+    """Optional upper bound for `--max-model-len auto`. If set together with
+    `--max-model-len auto`, the effective context length is capped to
+    `min(auto_fit_len, max_model_len_cap)`. If unset, auto-fit behavior is
+    unchanged. This is only valid when `max_model_len` is `-1` or `"auto"`."""
+
     spec_target_max_model_len: int | None = None
     """Specify the maximum length for spec decoding draft models."""
     quantization: QuantizationMethods | str | None = None
@@ -393,6 +399,7 @@ class ModelConfig:
             "allowed_media_domains",
             "tokenizer_revision",
             "spec_target_max_model_len",
+            "max_model_len_cap",
             "enforce_eager",
             "logprobs_mode",
             "use_fp64_gumbel",
@@ -673,7 +680,24 @@ class ModelConfig:
             self.hf_text_config.sliding_window = None
 
         self.original_max_model_len = self.max_model_len
+        if self.max_model_len_cap is not None and self.original_max_model_len != -1:
+            raise ValueError(
+                "`max_model_len_cap` can only be used with "
+                "`max_model_len=-1` or `max_model_len='auto'`."
+            )
+
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
+        if (
+            self.max_model_len_cap is not None
+            and self.max_model_len > self.max_model_len_cap
+        ):
+            logger.info(
+                "Capping auto-derived max_model_len from %d to %d "
+                "because max_model_len_cap is set.",
+                self.max_model_len,
+                self.max_model_len_cap,
+            )
+            self.max_model_len = self.max_model_len_cap
 
         if self.is_encoder_decoder:
             mm_processor_cache_gb = 0
