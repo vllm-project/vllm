@@ -1312,9 +1312,6 @@ def _get_kv_cache_config_packed(
     return num_blocks, kv_cache_tensors
 
 
-_get_kv_cache_config_deepseek_v4 = _get_kv_cache_config_packed
-
-
 def get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
