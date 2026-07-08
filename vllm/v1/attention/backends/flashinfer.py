@@ -1997,11 +1997,11 @@ class FlashInferImpl(AttentionImpl):
         if query.dtype != q_data_type:
             assert query.dtype in [torch.float16, torch.bfloat16]
             assert q_data_type in [torch.float8_e4m3fn, torch.float8_e5m2]
-            assert query.is_contiguous()
             assert query.dim() == 3
             num_tokens = query.shape[0]
             num_heads = query.shape[1]
             head_size = query.shape[2]
+            assert query.stride(2) == 1 and query.stride(1) == head_size
             query_quantized, _ = custom_ops.scaled_fp8_quant(
                 query.view(num_tokens, num_heads * head_size), scale=scale
             )

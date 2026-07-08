@@ -326,6 +326,19 @@ vLLM supports dynamically loading and unloading LoRA adapters at runtime via the
 
 **Warning:** Dynamic LoRA loading is not a secure operation and should not be enabled in deployments exposed to untrusted clients. If you must enable dynamic LoRA loading, restrict access to the `/v1/load_lora_adapter` and `/v1/unload_lora_adapter` endpoints to trusted administrators only, using a reverse proxy or network-level access controls. Do not expose these endpoints to end users. For details on configuring LoRA adapters, see the [LoRA Adapters documentation](../features/lora.md).
 
+## Endpoint Plugins
+
+vLLM supports loading out-of-tree HTTP routes via the `vllm.endpoint_plugins` entry point group (see [Endpoint Plugins](../design/endpoint_plugins.md) for how to write one). An endpoint plugin can register arbitrary FastAPI routes, including routes that reach the engine via `EngineClient.collective_rpc`, so it must be treated as part of the server's trusted code base and not as sandboxed or reviewed input.
+
+**Endpoint plugins are not loaded by default.** Unlike other vLLM plugin groups (`vllm.general_plugins`, `vllm.platform_plugins`, etc.), which load every discovered plugin unless `VLLM_PLUGINS` narrows the set, endpoint plugins load **none** unless `VLLM_PLUGINS` is set and explicitly names them. This mirrors the "off by default in production" posture used for development endpoints gated behind `VLLM_SERVER_DEV_MODE`. Both surfaces are only present when an operator has explicitly opted in.
+
+### Recommended Security Practices
+
+1. **Only allowlist plugins you trust.** Set `VLLM_PLUGINS` to the exact plugin names you intend to run and never wildcard or copy an allowlist between deployments without reviewing what each named plugin does.
+2. **Audit routes before deploying.** A plugin's `attach_router` can add routes under any path, including ones that duplicate existing `/v1/*` paths. There is currently no route conflict enforcement (tracked as a follow-up to RFC [#46565](https://github.com/vllm-project/vllm/issues/46565)), so a malicious or buggy plugin can **shadow a core route** and silently replace its behavior. Prefer plugins that namespace their routes under a distinct prefix (e.g. `/plugins/<plugin-name>/...`) instead of reusing `/v1/...` and review `app.routes` after startup if you need certainty about what is actually being served.
+3. **Treat plugin routes like any other unauthenticated by default surface.** `--api-key` only protects the `/v1`, `/v2`, and `/inference` path prefixes (see [API Key Authentication Limitations](#api-key-authentication-limitations)). A plugin route outside those prefixes is unauthenticated unless the plugin implements its own authentication. Deploy behind a reverse proxy that allowlists only the plugin routes you intend to expose externally.
+4. **Remember the `vllm.general_plugins` pairing.** A plugin that also needs new engine side behavior ships that half separately via `vllm.general_plugins` which loads in every worker process under the default (load all unless restricted) posture. Allowlisting the endpoint plugin does not by itself restrict its paired engine side plugin. Need to review both.
+
 ## gRPC Interface
 
 vLLM provides an optional gRPC Generate service on a separate TCP port, enabled via the `--grpc-port` flag. When not specified, no gRPC server is started. The gRPC listener binds to the same host address as the HTTP server.
