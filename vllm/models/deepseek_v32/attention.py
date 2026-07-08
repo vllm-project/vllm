@@ -350,6 +350,7 @@ class DeepseekV32Attention(MLAAttention):
             mla_kv_cache = None if hisparse_cache is not None else self.kv_cache
             mla_k_scale = self._k_scale
 
+        assert self.rotary_emb is not None
         if self.use_pcp or hisparse_cache is None:
             kv_c_out = torch.empty_like(kv_c)
             k_pe_out = torch.empty_like(k_pe)
