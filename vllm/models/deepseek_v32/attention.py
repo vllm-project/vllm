@@ -346,6 +346,7 @@ class DeepseekV32Attention(MLAAttention):
             mla_kv_cache = self.kv_cache
             mla_k_scale = self._k_scale
 
+        assert self.rotary_emb is not None
         kv_c_out = torch.empty_like(kv_c) if self.use_pcp else None
         k_pe_out = torch.empty_like(k_pe) if self.use_pcp else None
         q_c = fused_norm_rope(
