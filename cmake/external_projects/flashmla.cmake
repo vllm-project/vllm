@@ -18,8 +18,12 @@ if(FLASH_MLA_SRC_DIR)
 else()
   FetchContent_Declare(
         flashmla
-        GIT_REPOSITORY https://github.com/vllm-project/FlashMLA
-        GIT_TAG a6ec2ba7bd0a7dff98b3f4d3e6b52b159c48d78b
+        # TODO(mbonanni): revert to vllm-project/FlashMLA once
+        # https://github.com/vllm-project/FlashMLA/pull/14 merges, pinning the
+        # resulting merge commit SHA. Temporarily points at the PR branch to
+        # exercise the fp8 metadata num_sm_parts clamp fix (vllm-project/vllm#47935).
+        GIT_REPOSITORY https://github.com/MatthewBonanni/FlashMLA
+        GIT_TAG 4bce8a4ebadde8210fb3ff14c78650ea70c90a6b
         GIT_PROGRESS TRUE
         CONFIGURE_COMMAND ""
         BUILD_COMMAND ""
