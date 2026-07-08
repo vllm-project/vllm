@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
     NixlConnectorMetadata,
     NixlHandshakePayload,
+    NixlRegionInfo,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
     NixlPullConnectorScheduler,
@@ -58,4 +59,5 @@ __all__ = [
     "NixlPushConnector",
     "NixlPushConnectorScheduler",
     "NixlPushConnectorWorker",
+    "NixlRegionInfo",
 ]

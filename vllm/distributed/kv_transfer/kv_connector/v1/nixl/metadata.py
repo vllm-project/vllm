@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Metadata dataclasses and helpers for the NIXL connector."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from vllm.config import VllmConfig
@@ -39,8 +39,30 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   2: Add remote_request_id to kv_transfer_params
 #   3: Add physical_blocks_per_logical_kv_block to NixlAgentMetadata
 #   4: Add KV block lease renewal through heartbeats
+#   5: Add per-region KV layer names for PP/HMA region alignment
+#   6: Add semantic per-region metadata for PP/HMA alignment
+#   7: Add all KV group indices carried by shared HMA regions
 #
-NIXL_CONNECTOR_VERSION: int = 4
+NIXL_CONNECTOR_VERSION: int = 7
+
+
+@dataclass
+class NixlRegionInfo:
+    region_idx: int
+    base_addr: int
+    block_len: int
+    layer_names: list[str]
+    layer_indices: list[int]
+    kv_group_idx: int
+    group_slot_idx: int
+    spec_type: str
+    component: str
+    is_replicated: bool
+    emits_v: bool
+    kv_head_num: int
+    total_kv_head_num: int
+    kv_group_indices: list[int] = field(default_factory=list)
+    group_slot_indices: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -56,6 +78,8 @@ class NixlAgentMetadata:
     ssm_sizes: tuple[int, int]
     attn_backend_name: str
     physical_blocks_per_logical_kv_block: int
+    kv_cache_layer_names: list[list[str]] | None = None
+    region_infos: list[NixlRegionInfo] | None = None
 
 
 @dataclass
