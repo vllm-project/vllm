@@ -132,7 +132,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 NIXL agent registers this region for RDMA transfers.
             tier_type: Tier identifier (defaults to ``"p2p"``).
             host: Address the ZMQ control socket binds to. Defaults to
-                ``VLLM_P2P_SIDE_CHANNEL_HOST`` (``localhost``) when not
+                ``VLLM_P2P_SIDE_CHANNEL_HOST`` (``0.0.0.0``) when not
                 set; override to the node IP for cross-host P/D.
             port: Base port for the ZMQ control socket. Must be
                 reachable from peers. Defaults to

@@ -39,7 +39,7 @@ def test_nixl_side_channel_host_is_not_compile_factor(
 def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_PORT", raising=False)
-    assert envs.VLLM_P2P_SIDE_CHANNEL_HOST == "localhost"
+    assert envs.VLLM_P2P_SIDE_CHANNEL_HOST == "0.0.0.0"
     assert envs.VLLM_P2P_SIDE_CHANNEL_PORT == 5710
 
     monkeypatch.setenv("VLLM_P2P_SIDE_CHANNEL_HOST", "10.0.0.20")

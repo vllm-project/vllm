@@ -1413,7 +1413,7 @@ class TestBindHostPortDefaults:
         monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
         monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_PORT", raising=False)
         mgr = self._construct(monkeypatch)
-        assert mgr._local_id == "localhost:5710"
+        assert mgr._local_id == "0.0.0.0:5710"
 
     def test_env_override(self, monkeypatch):
         monkeypatch.setenv("VLLM_P2P_SIDE_CHANNEL_HOST", "10.1.2.3")
@@ -1431,7 +1431,7 @@ class TestBindHostPortDefaults:
         monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
         monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_PORT", raising=False)
         mgr = self._construct(monkeypatch, dp_index=2)
-        assert mgr._local_id == "localhost:5712"
+        assert mgr._local_id == "0.0.0.0:5712"
 
     def test_dp_index_offsets_explicit_port(self, monkeypatch):
         mgr = self._construct(monkeypatch, dp_index=1, host="0.0.0.0", port=6000)

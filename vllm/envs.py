@@ -200,7 +200,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
-    VLLM_P2P_SIDE_CHANNEL_HOST: str = "localhost"
+    VLLM_P2P_SIDE_CHANNEL_HOST: str = "0.0.0.0"
     VLLM_P2P_SIDE_CHANNEL_PORT: int = 5710
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
     VLLM_MOONCAKE_STORE_TIER_LOG: bool = False
@@ -1544,7 +1544,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # IP address the P2P KV-offload control socket binds to.
     "VLLM_P2P_SIDE_CHANNEL_HOST": lambda: os.getenv(
-        "VLLM_P2P_SIDE_CHANNEL_HOST", "localhost"
+        "VLLM_P2P_SIDE_CHANNEL_HOST", "0.0.0.0"
     ),
     # Port the P2P KV-offload control socket binds to.
     "VLLM_P2P_SIDE_CHANNEL_PORT": lambda: int(
