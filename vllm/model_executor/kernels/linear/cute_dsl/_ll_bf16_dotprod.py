@@ -50,7 +50,7 @@ def _make_thread_vector_slice(
     """Partition vectorized K-tiles across BS threads, return this thread's view."""
     tA = cute.logical_divide(gA_vec, (None, (None, bs)))
     tB = cute.logical_divide(gB_vec, (None, (None, bs)))
-    return tA[None, (None, (tidx, None))], tB[n_idx, (None, (tidx, None))]                
+    return tA[None, (None, (tidx, None))], tB[n_idx, (None, (tidx, None))]
 
 
 def _make_k_slice(
@@ -110,6 +110,8 @@ def make_host_bf16(k_val: int, bs: int = 128):
         SCALAR_REM: cutlass.Constexpr = K_TOTAL - K_DONE_ALL
         KS_FULL: cutlass.Constexpr = SCALAR_REM // BS
         KS_PART: cutlass.Constexpr = SCALAR_REM % BS
+        K_SCALAR_FULL: cutlass.Constexpr = KS_FULL * BS
+        K_PART_OFFSET: cutlass.Constexpr = K_DONE_ALL + K_SCALAR_FULL
         MAIN_TILES: cutlass.Constexpr = K_MAIN_ELEMS // (MAIN_VEC_WIDTH * BS)
         TAIL_TILES: cutlass.Constexpr = K_TAIL_ELEMS // (TAIL_VEC_WIDTH * BS)
 
@@ -117,7 +119,7 @@ def make_host_bf16(k_val: int, bs: int = 128):
         acc = cute.make_rmem_tensor((M,), cutlass.Float32)
         acc.fill(0.0)
 
-        cute.arch.griddepcontrol_wait()  # PDL wait
+        #cute.arch.griddepcontrol_wait()  # PDL wait
 
         # 128-bit vectorized main loop
         if K_MAIN_ELEMS > 0:
@@ -139,21 +141,29 @@ def make_host_bf16(k_val: int, bs: int = 128):
             )
             _vector_dotprod(acc, tA_t, tB_t, M, TAIL_TILES, 8)
 
-        # Scalar remainder (< BS elements per thread)
-        for si in cutlass.range_constexpr(KS_FULL):
-            ko = K_DONE_ALL + si * BS + tidx
-            bv = gB[n_idx, ko].to(cutlass.Float32)
-            for m in cutlass.range_constexpr(M):
-                acc[m] = acc[m] + gA[m, ko].to(cutlass.Float32) * bv
+        # Scalar remainder after vectorized loops. Full BS-wide rounds are
+        # expressed as width-1 CuTe partitions; only the final ragged tile needs
+        # a runtime guard for threads beyond KS_PART.
+        if KS_FULL > 0:
+            gA_scalar = _make_k_slice(gA, K_DONE_ALL, K_SCALAR_FULL)
+            gB_scalar = _make_k_slice(gB, K_DONE_ALL, K_SCALAR_FULL)
+            gA_scalar_vec = cute.logical_divide(gA_scalar, (None, 1))
+            gB_scalar_vec = cute.logical_divide(gB_scalar, (None, 1))
+            tA_s, tB_s = _make_thread_vector_slice(
+                gA_scalar_vec, gB_scalar_vec, tidx, n_idx, BS
+            )
+            _vector_dotprod(acc, tA_s, tB_s, M, KS_FULL, 2)
+
         # Compile-time guard: no partial remainder eliminates this block.
         # Runtime guard: only the first KS_PART threads participate.
         # Remaining threads do not execute any out-of-bounds loads.
         if KS_PART > 0:
-            ko_p = K_DONE_ALL + KS_FULL * BS + tidx
+            gA_part = _make_k_slice(gA, K_PART_OFFSET, KS_PART)
+            gB_part = _make_k_slice(gB, K_PART_OFFSET, KS_PART)
             if tidx < KS_PART:
-                bv2 = gB[n_idx, ko_p].to(cutlass.Float32)
+                bv2 = gB_part[n_idx, tidx].to(cutlass.Float32)
                 for m in cutlass.range_constexpr(M):
-                    acc[m] = acc[m] + gA[m, ko_p].to(cutlass.Float32) * bv2
+                    acc[m] = acc[m] + gA_part[m, tidx].to(cutlass.Float32) * bv2
 
         # Intra-warp shuffle reduction
         WS: cutlass.Constexpr = 32
@@ -162,7 +172,7 @@ def make_host_bf16(k_val: int, bs: int = 128):
             acc[m] = cute.arch.warp_reduction_sum(acc[m])
 
         # Cross-warp reduction via shared memory
-        wid = tidx // WS
+        wid = cute.arch.warp_idx()
         smem_red_layout = cute.make_layout((M, NW), stride=(NW, 1))
         sp = cute.arch.alloc_smem(
             cutlass.Float32, cute.cosize(smem_red_layout), alignment=16
@@ -180,7 +190,7 @@ def make_host_bf16(k_val: int, bs: int = 128):
                 gC[m, n_idx] = partials.reduce(
                     cute.ReductionOp.ADD, init_val=0.0, reduction_profile=0
                 )
-        cute.arch.griddepcontrol_launch_dependents()  # PDL signal
+        #cute.arch.griddepcontrol_launch_dependents()  # PDL signal
 
     @cute.jit
     def host_bf16_lf(
@@ -197,7 +207,7 @@ def make_host_bf16(k_val: int, bs: int = 128):
             block=[bs, 1, 1],
             smem=M * 4 * (bs // 32),
             stream=stream,
-            use_pdl=True,
+            use_pdl=False,
             min_blocks_per_mp=1,
         )
 
