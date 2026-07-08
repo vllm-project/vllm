@@ -405,10 +405,20 @@ class xLAMToolParser(ToolParser):
             if current_idx >= 0 and current_idx < tool_count:
                 # Support both regular and empty argument objects
                 # First, check for the empty arguments case: "arguments": {}
+                # The pattern starts at a tool's "name" key, so anchor the
+                # match to the current tool's name position; a match for any
+                # other tool must not mark the current one as empty-args.
                 empty_args_pattern = (
                     r'"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{\s*\}'
                 )
-                empty_args_match = re.search(empty_args_pattern, search_text)
+                empty_args_match = next(
+                    (
+                        m
+                        for m in re.finditer(empty_args_pattern, search_text)
+                        if m.start() == name_matches[current_idx].start()
+                    ),
+                    None,
+                )
 
                 # Check if this tool has empty arguments
                 if empty_args_match and empty_args_match.start() > 0:
