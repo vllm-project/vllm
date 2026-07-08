@@ -229,10 +229,11 @@ def get_model_path(model: str | Path, revision: str | None = None):
     if os.path.exists(model):
         return model
     assert huggingface_hub.constants.HF_HUB_OFFLINE
-    common_kwargs = {
-        "local_files_only": huggingface_hub.constants.HF_HUB_OFFLINE,
-        "revision": revision,
-    }
+    common_kwargs = dict(
+        local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+        ignore_patterns="*",
+        revision=revision,
+    )
 
     if envs.VLLM_USE_MODELSCOPE:
         from modelscope.hub.snapshot_download import snapshot_download
