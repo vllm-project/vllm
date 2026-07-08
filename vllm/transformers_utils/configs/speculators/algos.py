@@ -126,6 +126,47 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
     )
 
 
+@register_speculator("medusa")
+def update_medusa(config_dict: dict, pre_trained_config: dict) -> None:
+    """
+    Apply Medusa specific configuration transformations to the `dict` used to
+    construct the Transformers PreTrainedConfig.
+
+    Medusa uses K independent MLP heads (ResidualBlock) on top of the
+    verifier's last hidden state. Unlike Eagle/DFlash, it does not use
+    transformer decoder layers or a ``transformer_layer_config``.
+
+    Medusa specific fields:
+    - hidden_size: Hidden dimension (must match verifier)
+    - vocab_size: Full verifier vocabulary size
+    - truncated_vocab_size: Reduced vocab for speed (0 = full)
+    - num_heads: Number of prediction heads
+    - num_hidden_layers: Linear layers per head
+    - medusa_fc_bias: Whether head linear layers use bias
+    - original_lm_head: Whether all heads share the verifier's lm_head
+    """
+    pre_trained_config["model_type"] = "medusa"
+    pre_trained_config["architectures"] = ["MedusaModel"]
+    for key in (
+        "num_heads",
+        "num_hidden_layers",
+        "medusa_fc_bias",
+        "original_lm_head",
+    ):
+        if config_dict.get(key) is not None:
+            pre_trained_config[key] = config_dict[key]
+    pre_trained_config["hidden_size"] = config_dict.get(
+        "medusa_hidden_size", config_dict.get("hidden_size", 0)
+    )
+    pre_trained_config["vocab_size"] = config_dict.get(
+        "medusa_vocab_size", config_dict.get("vocab_size", 0)
+    )
+    truncated = config_dict.get("truncated_vocab_size", 0)
+    pre_trained_config["truncated_vocab_size"] = (
+        truncated if truncated > 0 else pre_trained_config["vocab_size"]
+    )
+
+
 @register_speculator("dspark")
 def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
     """

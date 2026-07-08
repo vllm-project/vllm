@@ -87,13 +87,15 @@ class SpeculatorsConfig(PretrainedConfig):
         except (KeyError, IndexError, TypeError) as e:
             raise ValueError("Invalid speculators config structure") from e
 
-        if "transformer_layer_config" not in config_dict:
-            raise ValueError("Must provide transformer_layer_config")
+        algo_type = config_dict.get("speculators_model_type")
+        if algo_type not in ("medusa",):
+            if "transformer_layer_config" not in config_dict:
+                raise ValueError("Must provide transformer_layer_config")
 
-        if not isinstance(config_dict["transformer_layer_config"], dict):
-            raise TypeError(
-                "'transformer_layer_config' must be a dictionary if provided"
-            )
+            if not isinstance(config_dict["transformer_layer_config"], dict):
+                raise TypeError(
+                    "'transformer_layer_config' must be a dictionary if provided"
+                )
 
     @classmethod
     def build_vllm_speculative_config(
