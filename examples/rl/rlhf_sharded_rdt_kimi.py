@@ -177,6 +177,14 @@ class KimiTrainWorker:
         self._serve_stream = torch.cuda.Stream() if self._scoped_sync else None
         self._cache_event: dict[str, "torch.cuda.Event"] = {}
 
+        # [RDT-COALESCE] When set, produce returns ONE contiguous tensor per dtype
+        # (the whole packed serve arena) instead of one view per name, so the NIXL
+        # transfer is ~2 big descriptors instead of ~309 small ones (~144 fp8 weights
+        # + ~144 tiny fp32 scales). The consumer lays its receive arena out with the
+        # IDENTICAL per-dtype/aligned/keys-order layout, so the bytes match exactly.
+        # Driver mirrors this into init_info.coalesce_dtype_blobs for the consumer.
+        self._coalesce = os.environ.get("RDT_COALESCE", "0") == "1"
+
         # profiling counters
         self._timing_lock = threading.Lock()
         self._produce_calls = self._produce_specs = self._produce_bytes = 0
@@ -485,6 +493,12 @@ class KimiTrainWorker:
             self._produce_slice_seconds += slice_s
             self._produce_bytes += nbytes
             self._produce_method_seconds += time.perf_counter() - _t_m0
+        if self._coalesce:
+            # [RDT-COALESCE] Return one contiguous tensor per dtype (sorted-dtype
+            # order, matching the consumer's set_target_for_ref). The data is already
+            # packed into these arenas by the copy loop above; we just hand back the
+            # whole regions instead of per-name views -> ~2 descriptors, not ~309.
+            return [self._serve_arenas[dt][:totals[dt]] for dt in sorted(totals, key=str)]
         return served
 
     def free_group(self, names):
@@ -610,7 +624,15 @@ async def main():
             trainer_actor_names=producer_names,
             trainer_actor_namespace=RAY_NAMESPACE,
             names=names, dtype_names=dtype_names, shapes=shapes,
-            warmup_method_name=None))))
+            warmup_method_name=None,
+            # [RDT-COALESCE] carry the flag to the consumer via init_info (env vars
+            # don't reach vLLM worker procs); producer reads RDT_COALESCE directly.
+            coalesce_dtype_blobs=os.environ.get("RDT_COALESCE", "0") == "1",
+            # [RDT-INLINE diagnostic] serialize process off the transfer (test HBM contention)
+            inline_process=os.environ.get("RDT_INLINE_PROCESS", "0") == "1",
+            # [RDT-ONE-SLOT diagnostic] single receive slot: shrink the RDMA-write
+            # working set under the ~2-3GB translation-cache reach (42 vs 34 GB/s)
+            one_slot=os.environ.get("RDT_ONE_SLOT", "0") == "1"))))
     print(f"[sync] bake took {time.perf_counter()-_t0:.1f}s", flush=True)
 
     await engine.pause_generation(mode="abort")
@@ -628,12 +650,23 @@ async def main():
         with cp.timed("start_weight_update"):
             await engine.start_weight_update(is_checkpoint_format=True)
         print(f"[sync] iter {sync_iter}: gather + update_weights...", flush=True)
+        # [RDT-NO-OVERLAP] Diagnostic: drain the previous group's update_weights
+        # (the inter-node NIXL read) BEFORE dispatching this group's intra-node
+        # all-gather, so the gather never runs concurrently with the transfer.
+        # Tests whether the gather (NVLink + HBM writes) contends with the RDMA read
+        # (HBM reads) and depresses transfer BW. Costs the gather's hiding.
+        no_overlap = os.environ.get("RDT_NO_OVERLAP", "0") == "1"
         prev_task = None
         prev_names = None
         pending_frees: list = []  # fire-and-forget free_group refs; drained once/iter
         for gidx, group_names in enumerate(layer_groups):
             gi = ShardedRDTWeightTransferUpdateInfo(names=group_names)
             slot = gidx % 2  # accepted by gather_layer for signature compat (ignored)
+            if no_overlap and prev_task is not None:
+                with cp.timed("update_weights"):
+                    await prev_task
+                pending_frees += [w.free_group.remote(prev_names) for w in workers]
+                prev_task = None
             # Dispatch this group's gather NOW (non-blocking) so it overlaps the
             # previous group's update_weights, which we await next.
             gfuts = [w.gather_layer.remote(group_names, slot) for w in workers]
@@ -678,6 +711,37 @@ async def main():
                         producer_nixl=nt, n_groups=len(layer_groups)), flush=True)
         print(f"[profile]   bytes moved (all producers)={gib:.2f}GiB  "
               f"produce calls={sum(p['calls'] for p in pt)}", flush=True)
+
+    # [RPC-PROBE] Measure the bare per-group control-plane directly: an empty
+    # update_weights (names=[]) does NO pull/gather/serve, so its driver round-trip
+    # is pure driver->AsyncLLMEngine->DP fan-out to 8 workers->await. Compares to a
+    # bare 8-way Ray actor fan-out (trainer ping) to separate Ray fan-out from the
+    # engine/DP path. Answers whether the ~9ms/group residual is real RPC cost.
+    import statistics as _st
+    empty = WeightTransferUpdateRequest(update_info=asdict(
+        ShardedRDTWeightTransferUpdateInfo(names=[])))
+    await engine.start_weight_update(is_checkpoint_format=True)
+    for _ in range(3):                      # warmup
+        await engine.update_weights(empty)
+    ms = []
+    for _ in range(30):
+        _t = time.perf_counter()
+        await engine.update_weights(empty)
+        ms.append((time.perf_counter() - _t) * 1000)
+    await engine.finish_weight_update()
+    ms.sort()
+    print(f"[rpc-probe] bare update_weights([]) round-trip ms (n={len(ms)}): "
+          f"min={ms[0]:.2f} med={ms[len(ms)//2]:.2f} mean={_st.mean(ms):.2f} "
+          f"p90={ms[int(len(ms)*0.9)]:.2f} max={ms[-1]:.2f}", flush=True)
+    pms = []
+    for _ in range(30):
+        _t = time.perf_counter()
+        ray.get([w.ping.remote() for w in workers])
+        pms.append((time.perf_counter() - _t) * 1000)
+    pms.sort()
+    print(f"[rpc-probe] bare 8-way trainer ping fan-out ms (n={len(pms)}): "
+          f"min={pms[0]:.2f} med={pms[len(pms)//2]:.2f} mean={_st.mean(pms):.2f} "
+          f"max={pms[-1]:.2f}", flush=True)
 
     await engine.resume_generation()
     print("[generate] AFTER sync (real weights):", flush=True)

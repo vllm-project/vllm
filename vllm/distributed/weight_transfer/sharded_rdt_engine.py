@@ -492,6 +492,35 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     The warmup must run on the worker (the NIXL consumer) since the connection
     is per consumer/producer pair."""
 
+    inline_process: bool = False
+    """[RDT-INLINE diagnostic] If set, receive_weights runs _process_item INLINE
+    (synchronously, before returning) instead of deferring it to the background
+    thread. This serializes process so no consumer quant/scatter overlaps any NIXL
+    read -- used to test whether concurrent-compute HBM contention depresses the
+    transfer BW (expect transfer to climb toward the microbench 44.7 if it does).
+    Costs the pull/process pipeline; diagnostic only."""
+
+    one_slot: bool = False
+    """[RDT-ONE-SLOT diagnostic] If set, use a SINGLE receive-arena slot instead of
+    the depth-2 double buffer. Every pull then writes the same arena region, so the
+    consumer's RDMA-write working set is ~group bytes instead of ~2x group bytes.
+    Purpose: validate in-engine that the ~34-vs-42 GB/s transfer gap is the NIC/
+    IOMMU address-translation-cache reach (~2-3 GB/flow, measured in nixl_envtax.py):
+    with one slot the working set fits the reach and transfer should climb to ~42.
+    Safe (the per-slot read-done event already serializes pull(N+1) against
+    process(N)) but costs the pull/process pipeline; diagnostic only."""
+
+    coalesce_dtype_blobs: bool = False
+    """[RDT-COALESCE] If set, the producer returns ONE contiguous tensor per dtype
+    (its packed per-dtype serve arena) instead of one view per source name, and the
+    consumer points ``set_target_for_ref`` at its matching per-dtype receive-arena
+    regions. Both sides already lay slices out with the IDENTICAL per-dtype,
+    8-elem-aligned, keys-order layout, so this transfers the same bytes as ~2 large
+    NIXL descriptors instead of ~hundreds of small ones (approaches contiguous-buffer
+    speed-of-light). Carried here (not via env) because vLLM only copies a filtered
+    env allowlist to its worker procs; the driver sets it from RDT_COALESCE and the
+    producer reads RDT_COALESCE directly."""
+
 
 @dataclass
 class ShardedRDTWeightTransferUpdateInfo(WeightTransferUpdateInfo):
@@ -594,6 +623,11 @@ class ShardedRDTWeightTransferEngine(
         ]
         self._slot_read_done: list[Any] = []  # one torch.cuda.Event per slot
         self._pull_slot = 0
+        # [RDT-COALESCE] Set from init_info in init_transfer_engine: transfer one
+        # contiguous tensor per dtype instead of one per source name (see the flag's
+        # docstring). Off by default.
+        self._coalesce = False
+        self._inline_process = False  # [RDT-INLINE diagnostic] set from init_info
 
         # ---- Background post-processing thread (pull/process pipelining) -------
         # receive_weights pulls synchronously on the RPC thread, then hands the
@@ -608,6 +642,15 @@ class ShardedRDTWeightTransferEngine(
 
     def init_transfer_engine(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
         """Resolve the trainer actor and bind its batched producer method."""
+        self._coalesce = bool(init_info.coalesce_dtype_blobs)
+        self._inline_process = bool(init_info.inline_process)
+        if init_info.one_slot:
+            # [RDT-ONE-SLOT diagnostic] single receive slot; must be set before
+            # _ensure_proc_thread creates the per-slot events and before any
+            # arena is grown (both happen on first pull, after init).
+            self._NSLOTS = 1
+            self._dest_arenas = [{}]
+            logger.info("[RDT-ONE-SLOT] single receive-arena slot (diagnostic)")
         try:
             import ray
         except ImportError as e:
@@ -835,8 +878,13 @@ class ShardedRDTWeightTransferEngine(
             # scatter/quant/kernel-copy and return -- so the NEXT group's pull
             # overlaps this group's processing.
             item = self._pull_groups(groups)
-            assert self._proc_queue is not None
-            self._proc_queue.put(item)
+            if self._inline_process:
+                # [RDT-INLINE diagnostic] process synchronously so no quant overlaps
+                # the next group's transfer (tests HBM contention on the read path).
+                self._process_item(item)
+            else:
+                assert self._proc_queue is not None
+                self._proc_queue.put(item)
         if residual:
             # Rare/absent path (0% for Kimi after unbaked-skip); run inline. It
             # touches only non-baked layers, so it does not race the background
@@ -960,7 +1008,17 @@ class ShardedRDTWeightTransferEngine(
         from vllm.distributed.weight_transfer import _nixl_profile
         _nixl_profile.mark_pull_start()
         ref = self._produce_method.remote(keys)  # type: ignore[union-attr]
-        set_target_for_ref(ref, targets)
+        if self._coalesce:
+            # [RDT-COALESCE] The producer returns ONE tensor per dtype (its whole
+            # packed arena region, sorted-dtype order); point each at our matching
+            # per-dtype receive-arena region. Same layout as ``targets`` above, so the
+            # bytes land identically -- but as ~2 big NIXL descriptors, not ~hundreds.
+            # ``targets`` (per-name views into the same arenas) is still what we return
+            # for the scatter; only the transfer granularity changes.
+            blob_targets = [arenas[dt][: totals[dt]] for dt in sorted(totals, key=str)]
+            set_target_for_ref(ref, blob_targets)
+        else:
+            set_target_for_ref(ref, targets)
         ray.get(ref)  # NIXL reads each slice directly into its arena view
         return dict(zip(keys, targets))
 
