@@ -6,7 +6,7 @@ import itertools
 import logging
 import os
 import queue
-import re
+import regex as re
 import threading
 import time
 import uuid
@@ -122,7 +122,7 @@ class NixlBaseConnectorWorker:
         # All-attention fast path: single vectorized broadcast.
         if num_ssm_regions == 0:
             if getattr(self, "_is_hma_required", False) and self.region_infos:
-                all_descs: list[np.ndarray] = []
+                hma_descs: list[np.ndarray] = []
                 stream_region_id = 0
                 for region_info in self.region_infos:
                     if stream_region_id >= num_fa_regions:
@@ -149,20 +149,20 @@ class NixlBaseConnectorWorker:
                         if group_descs else np.array([], dtype=np.int64)
                     )
                     if region_arr.size:
-                        all_descs.append(stream_region_id * num_blocks + region_arr)
+                        hma_descs.append(stream_region_id * num_blocks + region_arr)
                     stream_region_id += 1
                     if region_info.emits_v:
                         if region_arr.size:
-                            all_descs.append(stream_region_id * num_blocks +
+                            hma_descs.append(stream_region_id * num_blocks +
                                              region_arr)
                         stream_region_id += 1
                 assert stream_region_id == num_fa_regions, (
                     f"HMA region stream count {stream_region_id} != "
                     f"num_fa_regions {num_fa_regions}"
                 )
-                if not all_descs:
+                if not hma_descs:
                     return np.array([], dtype=np.int64)
-                return np.concatenate(all_descs)
+                return np.concatenate(hma_descs)
 
             # NOTE (NickLucche) With HMA, every kv group has the same number of layers
             # and layers from different groups share the same kv tensor.
