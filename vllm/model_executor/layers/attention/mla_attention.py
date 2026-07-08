@@ -513,7 +513,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.rotary_emb = rotary_emb
         self._fused_rope_cos_sin: tuple[torch.Tensor, torch.Tensor] | None = None
         if getattr(self.impl, "use_fused_qk_rope_cache", False) and rotary_emb is None:
-            self.impl.use_fused_qk_rope_cache = False
+            self.impl.use_fused_qk_rope_cache = False  # type: ignore[attr-defined]
 
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
@@ -900,8 +900,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         "forward positions when impl.use_fused_qk_rope_cache is set."
                     )
                 forward_context = get_forward_context()
-                slot_mapping = forward_context.slot_mapping[self.layer_name].flatten()
+                fc_slot_mapping = forward_context.slot_mapping
+                assert isinstance(fc_slot_mapping, dict), (
+                    f"Expected slot_mapping to be a dict, got {type(fc_slot_mapping)}."
+                )
+                slot_mapping = fc_slot_mapping[self.layer_name].flatten()
                 cos_cache, sin_cache = self._get_fused_rope_cos_sin()
+                assert self.rotary_emb is not None
                 mqa_q = self.impl.fused_qk_rope_concat_and_cache(  # type: ignore[attr-defined]
                     self,
                     mqa_ql_nope,
