@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from vllm.config import AttentionConfig, ModelConfig, VllmConfig
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
@@ -27,6 +28,18 @@ def clear_cache():
 
 GFX950 = DeviceCapability(major=9, minor=5)
 HOPPER = DeviceCapability(major=9, minor=0)
+
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx950
+
+    ON_GFX950 = on_gfx950()
+else:
+    ON_GFX950 = False
+
+requires_gfx950 = pytest.mark.skipif(
+    not ON_GFX950,
+    reason="AITER_ASM MLA prefill backend requires ROCm gfx950",
+)
 
 # DeepSeek-R1 MLA head dimensions, which AITER_ASM supports.
 _R1_DIMS = MLADimensions(qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128)
@@ -450,6 +463,7 @@ class TestMLAPrefillBackendConfig:
         assert config.mla_prefill_backend == MLAPrefillBackendEnum.TRTLLM_RAGGED
 
 
+@requires_gfx950
 class TestAiterAsmValidation:
     """AITER_ASM-specific validate_configuration contract (gfx950 FP8 only)."""
 
@@ -595,6 +609,7 @@ class TestAsmPrefillBackendActiveGate:
             assert gate(vllm_config) is False
 
 
+@requires_gfx950
 class TestAiterAsmSelectorPriority:
     """On gfx950, AITER_ASM should win over FLASH_ATTN when FP8 KV is on."""
 

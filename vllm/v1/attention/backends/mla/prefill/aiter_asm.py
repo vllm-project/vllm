@@ -63,6 +63,10 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
 
     @classmethod
     def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_rocm():
+            return False
         return device_capability.major == 9 and device_capability.minor == 5
 
     @classmethod
