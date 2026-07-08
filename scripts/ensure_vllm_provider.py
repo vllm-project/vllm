@@ -6,6 +6,15 @@ import subprocess
 import sys
 from importlib import metadata as importlib_metadata
 from pathlib import Path
+from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback
+    tomllib = None
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def parse_args() -> argparse.Namespace:
@@ -22,10 +31,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--expected-distribution",
-        default="vllm-hust",
+        default=None,
         help=(
             "Distribution name that is expected to provide the top-level "
-            "module (default: vllm-hust)."
+            "module (default: the current checkout's pyproject.toml name)."
         ),
     )
     parser.add_argument(
@@ -48,23 +57,71 @@ def distribution_metadata_path(distribution_name: str) -> Path:
     return Path(str(distribution._path)).resolve()
 
 
+def pyproject_distribution_name() -> str | None:
+    pyproject_path = REPO_ROOT / "pyproject.toml"
+    if not pyproject_path.exists():
+        return None
+
+    if tomllib is not None:
+        with pyproject_path.open("rb") as handle:
+            pyproject: dict[str, Any] = tomllib.load(handle)
+        project_name = pyproject.get("project", {}).get("name")
+        return project_name if isinstance(project_name, str) else None
+
+    in_project_section = False
+    for raw_line in pyproject_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line == "[project]":
+            in_project_section = True
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            in_project_section = False
+        if in_project_section and line.startswith("name"):
+            _, value = line.split("=", 1)
+            return value.strip().strip('"').strip("'") or None
+    return None
+
+
+def resolve_expected_distribution(
+    requested_distribution: str | None,
+    providers: list[str],
+) -> str:
+    repo_distribution = pyproject_distribution_name()
+    if repo_distribution:
+        if requested_distribution and requested_distribution != repo_distribution:
+            print(
+                f"Expected distribution {requested_distribution!r} was requested, "
+                f"but current checkout builds {repo_distribution!r}; using "
+                f"{repo_distribution!r}. Providers: {providers}",
+                file=sys.stderr,
+            )
+        return repo_distribution
+    if requested_distribution:
+        return requested_distribution
+    if repo_distribution:
+        return repo_distribution
+    raise RuntimeError(
+        "Unable to resolve expected distribution from --expected-distribution "
+        "or pyproject.toml"
+    )
+
+
 def filter_repo_local_shadow_metadata(
     providers: list[str],
     expected_distribution: str,
 ) -> list[str]:
-    repo_root = Path(__file__).resolve().parent.parent
     metadata_paths = {
         provider: distribution_metadata_path(provider) for provider in providers
     }
     expected_path = metadata_paths.get(expected_distribution)
 
-    if expected_path is None or repo_root not in expected_path.parents:
+    if expected_path is None or REPO_ROOT not in expected_path.parents:
         return providers
 
     filtered_providers = []
     for provider in providers:
         provider_path = metadata_paths[provider]
-        if provider != expected_distribution and repo_root in provider_path.parents:
+        if provider != expected_distribution and REPO_ROOT in provider_path.parents:
             continue
         filtered_providers.append(provider)
 
@@ -85,9 +142,13 @@ def uninstall_distribution(distribution_name: str) -> None:
 
 def main() -> int:
     args = parse_args()
+    expected_distribution = resolve_expected_distribution(
+        args.expected_distribution,
+        providers_for_module(args.module_name),
+    )
     providers = filter_repo_local_shadow_metadata(
         providers_for_module(args.module_name),
-        args.expected_distribution,
+        expected_distribution,
     )
 
     if not providers:
@@ -99,17 +160,17 @@ def main() -> int:
         )
         return 1
 
-    if args.expected_distribution not in providers:
+    if expected_distribution not in providers:
         print(
             f"Top-level {args.module_name!r} is provided by {providers}, but ",
-            f"expected distribution {args.expected_distribution!r} is missing",
+            f"expected distribution {expected_distribution!r} is missing",
             file=sys.stderr,
             sep="",
         )
         return 1
 
     conflicts = [
-        provider for provider in providers if provider != args.expected_distribution
+        provider for provider in providers if provider != expected_distribution
     ]
     if conflicts and args.remove_conflicts:
         for provider in conflicts:
@@ -120,16 +181,16 @@ def main() -> int:
             uninstall_distribution(provider)
         providers = filter_repo_local_shadow_metadata(
             providers_for_module(args.module_name),
-            args.expected_distribution,
+            expected_distribution,
         )
         conflicts = [
-            provider for provider in providers if provider != args.expected_distribution
+            provider for provider in providers if provider != expected_distribution
         ]
 
     if conflicts:
         print(
             f"Conflicting distributions still provide top-level {args.module_name!r}: ",
-            f"{providers}. Remove all but {args.expected_distribution!r}.",
+            f"{providers}. Remove all but {expected_distribution!r}.",
             file=sys.stderr,
             sep="",
         )
@@ -145,7 +206,7 @@ def main() -> int:
         return 1
 
     print(f"module={args.module_name}")
-    print(f"provider={args.expected_distribution}")
+    print(f"provider={expected_distribution}")
     print(f"import_path={module_path}")
     return 0
 

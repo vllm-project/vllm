@@ -25,6 +25,7 @@ SAME_SPEC_BENCHMARK_ENABLED=${SAME_SPEC_BENCHMARK_ENABLED:-1}
 SAME_SPEC_SPEC_FILE=${SAME_SPEC_SPEC_FILE:-$VLLM_HUST_BENCHMARK_REPO/docs/official-baselines/official-ascend-jan-2026-v0180-random-online-qwen25-14b-910b2.json}
 SAME_SPEC_CONSTRAINTS_FILE=${SAME_SPEC_CONSTRAINTS_FILE:-$VLLM_HUST_BENCHMARK_REPO/docs/official-baselines/official-ascend-constraints.stub.json}
 SAME_SPEC_READY_TIMEOUT_SECONDS=${SAME_SPEC_READY_TIMEOUT_SECONDS:-600}
+SAME_SPEC_PR_PREVIEW_COMPAT=${SAME_SPEC_PR_PREVIEW_COMPAT:-1}
 ALLOW_RANDOM_HF_PUBLISH=${ALLOW_RANDOM_HF_PUBLISH:-0}
 
 MODEL_NAME=${MODEL_NAME:-Qwen/Qwen2.5-14B-Instruct}
@@ -811,6 +812,11 @@ ensure_runner_npu_ready() {
     echo "Detected Ascend node-level runtime failure (87/507899)." >&2
     return "$NODE_ENV_RETRY_EXIT_CODE"
   fi
+  if printf '%s\n' "$preflight_output" | grep -Eq '"provider_check_ok": false|Conflicting distributions still provide top-level'; then
+    echo "vLLM provider validation failed before benchmark startup." >&2
+    echo "Remove conflicting distributions so only the checked-out package provides top-level 'vllm'." >&2
+    return 1
+  fi
 
   echo "Self-hosted runner NPU runtime is unhealthy before vLLM startup." >&2
   echo "All visible Ascend devices failed the basic torch_npu allocation check." >&2
@@ -922,6 +928,9 @@ run_same_spec_current_benchmark() {
   local same_spec_raw_result=$RESULT_ROOT/raw_benchmark_result.json
   local same_spec_submission_dir=$RESULT_ROOT/submission
   local same_spec_ready_timeout_seconds=${SAME_SPEC_READY_TIMEOUT_SECONDS:-600}
+  local effective_same_spec_file=$SAME_SPEC_SPEC_FILE
+  local same_spec_server_log=$RESULT_ROOT/server.stdout.log
+  local same_spec_status=0
   local current_vllm_hust_commit
   local current_vllm_hust_ref
   local current_plugin_commit
@@ -950,61 +959,127 @@ run_same_spec_current_benchmark() {
   rm -f "$same_spec_raw_result" "$RAW_RESULT_FILE"
   rm -rf "$same_spec_submission_dir" "$SUBMISSION_DIR"
 
-  if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
-    READY_TIMEOUT_SECONDS="$same_spec_ready_timeout_seconds" \
-      VLLM_HUST_WORKSPACE_ROOT="$WORKSPACE_ROOT" \
-      CURRENT_RUNTIME_CWD=/tmp \
-      CURRENT_RUNTIME_PYTHON="$PYTHON_BIN" \
-      CURRENT_VLLM_HUST_REPO="$VLLM_HUST_REPO" \
-      CURRENT_VLLM_ASCEND_HUST_REPO="$VLLM_ASCEND_HUST_REPO" \
-      CURRENT_VLLM_CACHE_ROOT="$runtime_root/current-ascend-same-spec-cache" \
-      CURRENT_ENGINE_VERSION="$display_version" \
-      CURRENT_GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-vLLM-HUST/vllm-hust}" \
-      CURRENT_GITHUB_REF="$current_vllm_hust_ref" \
-      CURRENT_GIT_COMMIT="$current_vllm_hust_commit" \
-      CURRENT_PLUGIN_ENGINE="vllm-ascend-hust" \
-      CURRENT_PLUGIN_GITHUB_REPOSITORY="vLLM-HUST/vllm-ascend-hust" \
-      CURRENT_PLUGIN_GITHUB_REF="$current_plugin_ref" \
-      CURRENT_PLUGIN_GIT_COMMIT="$current_plugin_commit" \
-      CURRENT_SUBMITTER="${GITHUB_ACTOR:-ci}" \
-      CURRENT_DATA_SOURCE="vllm-hust-ci-same-spec" \
-      RESULT_DIR="$RESULT_ROOT" \
-      RESULT_ROOT="$RESULT_ROOT" \
-      RUN_ID="$RUN_ID" \
-      CURRENT_SERVER_PORT="$PORT" \
-      CURRENT_CLIENT_PORT="$PORT" \
-      CONSTRAINTS_FILE="$SAME_SPEC_CONSTRAINTS_FILE" \
-      run_with_same_spec_stderr_filter run_ascend_root_helper same-spec "$same_spec_runner" "$SAME_SPEC_SPEC_FILE"
-  else
-    run_with_same_spec_stderr_filter env \
+  prepare_same_spec_pr_preview_compat_file() {
+    local output_file=$RESULT_ROOT/pr-preview-same-spec.compat.json
+
+    "$PYTHON_BIN" - "$SAME_SPEC_SPEC_FILE" "$output_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1])
+target = Path(sys.argv[2])
+payload = json.loads(source.read_text(encoding="utf-8"))
+
+server_parameters = dict(payload.get("server_parameters") or {})
+client_parameters = dict(payload.get("client_parameters") or {})
+
+# PR preview runs on self-hosted Ascend runners where the official same-spec
+# defaults can trip plugin paths that are not reliable for smoke gating.
+server_parameters["no_enable_chunked_prefill"] = True
+server_parameters["no_enable_prefix_caching"] = True
+client_parameters.setdefault("temperature", 0)
+
+payload["server_parameters"] = server_parameters
+payload["client_parameters"] = client_parameters
+
+target.parent.mkdir(parents=True, exist_ok=True)
+target.write_text(
+    json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+    encoding="utf-8",
+)
+print(target)
+PY
+  }
+
+  if [[ "$SAME_SPEC_PR_PREVIEW_COMPAT" == "1" && ( "${GITHUB_EVENT_NAME:-}" == "pull_request" || "${GITHUB_EVENT_NAME:-}" == "issue_comment" ) ]]; then
+    effective_same_spec_file=$(prepare_same_spec_pr_preview_compat_file)
+    echo "Using PR preview same-spec compatibility overlay: $effective_same_spec_file"
+  fi
+
+  run_same_spec_runner() {
+    if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
       READY_TIMEOUT_SECONDS="$same_spec_ready_timeout_seconds" \
-      VLLM_HUST_WORKSPACE_ROOT="$WORKSPACE_ROOT" \
-      CURRENT_RUNTIME_CWD=/tmp \
-      CURRENT_RUNTIME_PYTHON="$PYTHON_BIN" \
-      CURRENT_VLLM_HUST_REPO="$VLLM_HUST_REPO" \
-      CURRENT_VLLM_ASCEND_HUST_REPO="$VLLM_ASCEND_HUST_REPO" \
-      CURRENT_VLLM_CACHE_ROOT="$runtime_root/current-ascend-same-spec-cache" \
-      CURRENT_ENGINE_VERSION="$display_version" \
-      CURRENT_GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-vLLM-HUST/vllm-hust}" \
-      CURRENT_GITHUB_REF="$current_vllm_hust_ref" \
-      CURRENT_GIT_COMMIT="$current_vllm_hust_commit" \
-      CURRENT_PLUGIN_ENGINE="vllm-ascend-hust" \
-      CURRENT_PLUGIN_GITHUB_REPOSITORY="vLLM-HUST/vllm-ascend-hust" \
-      CURRENT_PLUGIN_GITHUB_REF="$current_plugin_ref" \
-      CURRENT_PLUGIN_GIT_COMMIT="$current_plugin_commit" \
-      CURRENT_SUBMITTER="${GITHUB_ACTOR:-ci}" \
-      CURRENT_DATA_SOURCE="vllm-hust-ci-same-spec" \
-      RESULT_DIR="$RESULT_ROOT" \
-      RESULT_ROOT="$RESULT_ROOT" \
-      RUN_ID="$RUN_ID" \
-      CURRENT_SERVER_PORT="$PORT" \
-      CURRENT_CLIENT_PORT="$PORT" \
-      CONSTRAINTS_FILE="$SAME_SPEC_CONSTRAINTS_FILE" \
-      bash "$same_spec_runner" "$SAME_SPEC_SPEC_FILE"
+        VLLM_HUST_WORKSPACE_ROOT="$WORKSPACE_ROOT" \
+        CURRENT_RUNTIME_CWD=/tmp \
+        CURRENT_RUNTIME_PYTHON="$PYTHON_BIN" \
+        CURRENT_VLLM_HUST_REPO="$VLLM_HUST_REPO" \
+        CURRENT_VLLM_ASCEND_HUST_REPO="$VLLM_ASCEND_HUST_REPO" \
+        CURRENT_VLLM_CACHE_ROOT="$runtime_root/current-ascend-same-spec-cache" \
+        CURRENT_ENGINE_VERSION="$display_version" \
+        CURRENT_GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-vLLM-HUST/vllm-hust}" \
+        CURRENT_GITHUB_REF="$current_vllm_hust_ref" \
+        CURRENT_GIT_COMMIT="$current_vllm_hust_commit" \
+        CURRENT_PLUGIN_ENGINE="vllm-ascend-hust" \
+        CURRENT_PLUGIN_GITHUB_REPOSITORY="vLLM-HUST/vllm-ascend-hust" \
+        CURRENT_PLUGIN_GITHUB_REF="$current_plugin_ref" \
+        CURRENT_PLUGIN_GIT_COMMIT="$current_plugin_commit" \
+        CURRENT_SUBMITTER="${GITHUB_ACTOR:-ci}" \
+        CURRENT_DATA_SOURCE="vllm-hust-ci-same-spec" \
+        RESULT_DIR="$RESULT_ROOT" \
+        RESULT_ROOT="$RESULT_ROOT" \
+        RUN_ID="$RUN_ID" \
+        CURRENT_SERVER_PORT="$PORT" \
+        CURRENT_CLIENT_PORT="$PORT" \
+        CONSTRAINTS_FILE="$SAME_SPEC_CONSTRAINTS_FILE" \
+        run_with_same_spec_stderr_filter run_ascend_root_helper same-spec "$same_spec_runner" "$effective_same_spec_file"
+    else
+      run_with_same_spec_stderr_filter env \
+        READY_TIMEOUT_SECONDS="$same_spec_ready_timeout_seconds" \
+        VLLM_HUST_WORKSPACE_ROOT="$WORKSPACE_ROOT" \
+        CURRENT_RUNTIME_CWD=/tmp \
+        CURRENT_RUNTIME_PYTHON="$PYTHON_BIN" \
+        CURRENT_VLLM_HUST_REPO="$VLLM_HUST_REPO" \
+        CURRENT_VLLM_ASCEND_HUST_REPO="$VLLM_ASCEND_HUST_REPO" \
+        CURRENT_VLLM_CACHE_ROOT="$runtime_root/current-ascend-same-spec-cache" \
+        CURRENT_ENGINE_VERSION="$display_version" \
+        CURRENT_GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-vLLM-HUST/vllm-hust}" \
+        CURRENT_GITHUB_REF="$current_vllm_hust_ref" \
+        CURRENT_GIT_COMMIT="$current_vllm_hust_commit" \
+        CURRENT_PLUGIN_ENGINE="vllm-ascend-hust" \
+        CURRENT_PLUGIN_GITHUB_REPOSITORY="vLLM-HUST/vllm-ascend-hust" \
+        CURRENT_PLUGIN_GITHUB_REF="$current_plugin_ref" \
+        CURRENT_PLUGIN_GIT_COMMIT="$current_plugin_commit" \
+        CURRENT_SUBMITTER="${GITHUB_ACTOR:-ci}" \
+        CURRENT_DATA_SOURCE="vllm-hust-ci-same-spec" \
+        RESULT_DIR="$RESULT_ROOT" \
+        RESULT_ROOT="$RESULT_ROOT" \
+        RUN_ID="$RUN_ID" \
+        CURRENT_SERVER_PORT="$PORT" \
+        CURRENT_CLIENT_PORT="$PORT" \
+        CONSTRAINTS_FILE="$SAME_SPEC_CONSTRAINTS_FILE" \
+        bash "$same_spec_runner" "$effective_same_spec_file"
+    fi
+  }
+
+  print_same_spec_server_log_tail() {
+    if [[ -f "$same_spec_server_log" ]]; then
+      echo "---- current same-spec vLLM server log tail ----" >&2
+      tail -n 300 "$same_spec_server_log" >&2
+      echo "---- end current same-spec vLLM server log tail ----" >&2
+    else
+      echo "current same-spec vLLM server log not found: $same_spec_server_log" >&2
+    fi
+  }
+
+  set +e
+  run_same_spec_runner
+  same_spec_status=$?
+  set -e
+
+  if [[ "$same_spec_status" -ne 0 ]]; then
+    print_same_spec_server_log_tail
+    collect_ascend_diagnostics "same-spec-current-failure"
+    if [[ -f "$same_spec_server_log" ]] && is_node_env_failure_text "$(cat "$same_spec_server_log" 2>/dev/null || true)"; then
+      mark_node_env_failure "same-spec benchmark failed due to Ascend node-level runtime errors"
+      return "$NODE_ENV_RETRY_EXIT_CODE"
+    fi
+    return "$same_spec_status"
   fi
 
   if [[ ! -f "$same_spec_raw_result" ]]; then
     echo "same-spec benchmark did not produce raw result: $same_spec_raw_result" >&2
+    print_same_spec_server_log_tail
     return 2
   fi
   if [[ ! -f "$same_spec_submission_dir/leaderboard_manifest.json" || ! -f "$same_spec_submission_dir/run_leaderboard.json" ]]; then

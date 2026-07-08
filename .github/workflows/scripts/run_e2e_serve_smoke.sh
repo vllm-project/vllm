@@ -407,6 +407,48 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
 PY
 }
 
+print_server_log_tail() {
+  if [[ -f "$SERVER_LOG" ]]; then
+    echo "---- vLLM server log tail ----" >&2
+    tail -n 300 "$SERVER_LOG" >&2
+    echo "---- end vLLM server log tail ----" >&2
+  else
+    echo "vLLM server log not found: $SERVER_LOG" >&2
+  fi
+}
+
+curl_with_server_log() {
+  local description=$1
+  shift
+  local max_attempts=${E2E_HTTP_REQUEST_ATTEMPTS:-5}
+  local delay_seconds=${E2E_HTTP_REQUEST_DELAY_SECONDS:-2}
+  local attempt=1
+  local rc=0
+
+  while [[ "$attempt" -le "$max_attempts" ]]; do
+    if curl -fsS "$@"; then
+      return 0
+    else
+      rc=$?
+    fi
+
+    if [[ -n "$server_pid" ]] && ! kill -0 "$server_pid" 2>/dev/null; then
+      echo "$description failed because the vLLM server exited (curl exit $rc)" >&2
+      print_server_log_tail
+      return "$rc"
+    fi
+
+    if [[ "$attempt" -eq "$max_attempts" ]]; then
+      echo "$description failed after ${max_attempts} attempts (curl exit $rc)" >&2
+      print_server_log_tail
+      return "$rc"
+    fi
+
+    sleep "$delay_seconds"
+    attempt=$((attempt + 1))
+  done
+}
+
 trap cleanup EXIT
 
 if [[ -z "$PORT" ]]; then
@@ -478,10 +520,13 @@ for attempt in $(seq 1 120); do
   sleep 2
 done
 
-curl -fsS "http://$HOST:$PORT/v1/models" >/dev/null
+curl_with_server_log \
+  "vLLM models endpoint readiness confirmation" \
+  "http://$HOST:$PORT/v1/models" >/dev/null
 
 completion_response=$(mktemp)
-curl -fsS "http://$HOST:$PORT/v1/completions" \
+curl_with_server_log "vLLM completions request" \
+  "http://$HOST:$PORT/v1/completions" \
   -H "Content-Type: application/json" \
   -d "{\"model\": \"$MODEL_NAME\", \"prompt\": \"$PROMPT\", \"max_tokens\": $MAX_TOKENS, \"temperature\": 0}" \
   > "$completion_response"

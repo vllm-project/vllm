@@ -190,8 +190,9 @@ class KnormFullAttentionManager(FullAttentionManager):
         prioritize_uncached_for_reuse: bool = False,
     ) -> None:
         """Free blocks and clean up score records."""
-        super().free(
-            request_id,
-            prioritize_uncached_for_reuse=prioritize_uncached_for_reuse,
-        )
+        # Keep the optional argument in this override for compatibility with
+        # callers from newer scheduler variants, but do not forward it to the
+        # current FullAttentionManager base class where free() only accepts the
+        # request ID.
+        super().free(request_id)
         self._block_scores.pop(request_id, None)

@@ -38,6 +38,7 @@ jobs:
       ASCEND_E2E_ROOT_HELPER: ${{ vars.VLLM_HUST_ASCEND_E2E_ROOT_HELPER || '' }}
       SOC_VERSION: ascend910b3
       TARGET_REPO_URL: https://github.com/${{ github.repository }}.git
+      TARGET_REPO_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
       TARGET_REPO_SHA: ${{ github.sha }}
       VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
       VLLM_ASCEND_HUST_REPO_URL: https://github.com/vLLM-HUST/vllm-ascend-hust.git
@@ -74,9 +75,10 @@ jobs:
           clone_with_retry() {
             local repo_url=$1
             local target_dir=$2
-            local target_sha=$3
-            local attempts=4
-            local delay_seconds=15
+            local target_ref=$3
+            local target_sha=$4
+            local attempts=${GIT_CHECKOUT_RETRY_ATTEMPTS:-6}
+            local delay_seconds=${GIT_CHECKOUT_RETRY_DELAY_SECONDS:-30}
             local try=1
             local parent_dir
             local temp_dir
@@ -87,10 +89,15 @@ jobs:
             mkdir -p "$parent_dir"
             rm -rf "$temp_dir"
             while [[ "$try" -le "$attempts" ]]; do
-              if git clone --depth 1 "$repo_url" "$temp_dir"; then
-                if ! git -C "$temp_dir" rev-parse --verify --quiet "$target_sha^{commit}" >/dev/null; then
-                  git -C "$temp_dir" fetch --depth 1 origin "$target_sha"
-                fi
+              mkdir -p "$temp_dir"
+              if git -C "$temp_dir" -c init.defaultBranch=main init \
+                && git -C "$temp_dir" remote add origin "$repo_url" \
+                && git -C "$temp_dir" \
+                  -c http.version=HTTP/1.1 \
+                  -c http.lowSpeedLimit=1024 \
+                  -c http.lowSpeedTime=30 \
+                  -c protocol.version=2 \
+                  fetch --no-tags --depth 1 origin "$target_ref"; then
                 git -C "$temp_dir" checkout --force "$target_sha"
                 rm -rf "$target_dir"
                 mv "$temp_dir" "$target_dir"
@@ -109,7 +116,7 @@ jobs:
             return 1
           }
 
-          clone_with_retry "$TARGET_REPO_URL" "$GITHUB_WORKSPACE" "$TARGET_REPO_SHA"
+          clone_with_retry "$TARGET_REPO_URL" "$GITHUB_WORKSPACE" "$TARGET_REPO_REF" "$TARGET_REPO_SHA"
 
       - name: Prepare Hugging Face cache directories
         run: |
@@ -233,19 +240,44 @@ jobs:
       - name: Acquire Ascend hardware lock
         run: bash .github/workflows/scripts/acquire_ascend_hardware_lock.sh
 
-      - name: Prepare Ascend runtime and install current checkout
+      - name: Install Ascend torch stack for preflight
         run: |
           source "$VLLM_ASCEND_HUST_REPO/scripts/use_single_ascend_env.sh"
+          if "$PYTHON_BIN" -c "import torch, torch_npu; print(f'torch={torch.__version__}')"; then
+            echo "Ascend torch stack is already importable."
+            exit 0
+          fi
+
+          "$PYTHON_BIN" -m pip install "torch==2.9.0" "torch-npu==2.9.0"
+
+      - name: Prepare Ascend runtime and install current checkout
+        env:
+          TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
+        run: |
+          source "$VLLM_ASCEND_HUST_REPO/scripts/use_single_ascend_env.sh"
+          "$PYTHON_BIN" -m pip uninstall -y torchvision torchaudio 2>/dev/null || true
           bash "$VLLM_ASCEND_HUST_REPO/scripts/install_local_ascend_plugin.sh" "$VLLM_ASCEND_HUST_REPO"
-          "$PYTHON_BIN" -m pip install --upgrade "setuptools>=77.0.3,<81.0.0" "setuptools-scm>=8.0" "wheel" "packaging>=24.2"
+          "$PYTHON_BIN" -m pip install --upgrade "setuptools>=77.0.3,<81.0.0" "setuptools-scm>=8.0" "setuptools-rust>=1.9.0" "wheel" "packaging>=24.2"
           VLLM_TARGET_DEVICE=empty "$PYTHON_BIN" -m pip install -e . --no-build-isolation --no-deps
 
       - name: Verify installation
+        env:
+          TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
         run: |
           source "$VLLM_ASCEND_HUST_REPO/scripts/use_single_ascend_env.sh"
           which python
           "$PYTHON_BIN" --version
-          "$PYTHON_BIN" -c "import vllm; print(f'vLLM version: {vllm.__version__}')"
+          "$PYTHON_BIN" - <<'PY'
+          import importlib.util
+
+          import vllm
+          import vllm.entrypoints.openai.api_server  # noqa: F401
+
+          print(f"vLLM version: {vllm.__version__}")
+          print(f"torchvision importable: {importlib.util.find_spec('torchvision') is not None}")
+          print(f"torchaudio importable: {importlib.util.find_spec('torchaudio') is not None}")
+          print("vLLM OpenAI server import: ok")
+          PY
 
       - name: Run real inference regression checks
         env:
@@ -264,8 +296,16 @@ jobs:
       - name: Cleanup leftover Ascend CI processes
         if: always()
         run: |
-          source "$VLLM_ASCEND_HUST_REPO/scripts/use_single_ascend_env.sh"
-          bash .github/workflows/scripts/cleanup_ascend_ci_processes.sh
+          if [[ -f "$VLLM_ASCEND_HUST_REPO/scripts/use_single_ascend_env.sh" ]]; then
+            source "$VLLM_ASCEND_HUST_REPO/scripts/use_single_ascend_env.sh"
+          else
+            echo "Skipping Ascend env setup during cleanup; vllm-ascend-hust checkout is unavailable."
+          fi
+          if [[ -f ".github/workflows/scripts/cleanup_ascend_ci_processes.sh" ]]; then
+            bash .github/workflows/scripts/cleanup_ascend_ci_processes.sh
+          else
+            echo "Skipping repository cleanup script; target checkout is unavailable."
+          fi
 
       - name: Release Ascend hardware lock
         if: always()

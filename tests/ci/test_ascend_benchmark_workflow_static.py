@@ -101,7 +101,10 @@ def test_benchmark_repo_default_ref_is_main():
 
     assert "feature/perfgate-two-stage" not in text
     assert (
-        "BENCHMARK_REPO_REF: ${{ vars.VLLM_HUST_BENCHMARK_REPO_REF || 'main' }}"
+        "BENCHMARK_REPO_REF: ${{ (github.event_name == 'pull_request' || "
+        "github.event_name == 'issue_comment' || github.event_name == "
+        "'workflow_dispatch') && (vars.VLLM_HUST_BENCHMARK_REPO_REF || "
+        "'main') || 'main' }}"
     ) in text
 
 
@@ -115,6 +118,34 @@ def test_pr_checkout_urls_use_https_without_publish_ssh_key():
     ) in text
     assert "https://github.com/vLLM-HUST/vllm-hust-benchmark.git" in text
     assert "https://github.com/vLLM-HUST/vllm-ascend-hust.git" in text
+
+
+def test_benchmark_install_removes_conflicting_vllm_provider():
+    text = workflow_text()
+
+    install_step = text[
+        text.index(
+            "      - name: Prepare Ascend runtime and install repos"
+        ) : text.index("      - name: Verify installation")
+    ]
+
+    assert '"${PYTHON_BIN}" -m pip uninstall -y vllm vllm-hust' in install_step
+    assert (
+        '"${PYTHON_BIN}" scripts/ensure_vllm_provider.py --remove-conflicts'
+        in install_step
+    )
+    assert '          "${PYTHON_BIN}" scripts/ensure_vllm_provider.py\n' in install_step
+    assert (
+        install_step.index(
+            '"${PYTHON_BIN}" scripts/ensure_vllm_provider.py --remove-conflicts'
+        )
+        < install_step.index(
+            '"${PYTHON_BIN}" -m pip install -e "${VLLM_HUST_BENCHMARK_REPO}[publish]"'
+        )
+        < install_step.index(
+            '          "${PYTHON_BIN}" scripts/ensure_vllm_provider.py\n'
+        )
+    )
 
 
 def test_main_benchmark_defaults_match_ascend_main_config():
@@ -158,6 +189,30 @@ def test_benchmark_script_does_not_default_pr_hardware_to_b3():
 
     assert "HARDWARE_CHIP_MODEL=${HARDWARE_CHIP_MODEL:-}" in script
     assert "HARDWARE_CHIP_MODEL=${HARDWARE_CHIP_MODEL:-910B3}" not in script
+
+
+def test_ascend_benchmark_installs_no_build_isolation_build_dependencies():
+    text = workflow_text()
+    stage2_script = (
+        Path(__file__).resolve().parents[2]
+        / ".github/workflows/scripts/perfgate_stage2_rebase_and_benchmark.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "--no-build-isolation" in text
+    assert '"setuptools-rust>=1.9.0"' in text
+    assert "--no-build-isolation" in stage2_script
+    assert '"setuptools-rust>=1.9.0"' in stage2_script
+
+
+def test_perfgate_spec_resolver_uses_benchmark_registry():
+    script = (
+        Path(__file__).resolve().parents[2]
+        / ".github/workflows/scripts/resolve_perfgate_spec_file.py"
+    ).read_text(encoding="utf-8")
+
+    assert "vllm_hust_benchmark" in script
+    assert "perfgate_specs.resolve_perfgate_spec_file" in script
+    assert "perfgate-ascend-qwen25-3b-910b3.json" not in script
 
 
 def test_issue_comment_uses_ubuntu_gate_before_self_hosted_runner():
@@ -330,6 +385,21 @@ def test_l3_benchmark_publish_preflight_runs_before_benchmark():
     assert "L3_BENCHMARK_PUBLISH_CREDENTIAL" in text[summary_step:]
     assert "GITHUB_SNAPSHOT_SYNC_VERIFICATION" in text[summary_step:]
     assert "GITHUB_SNAPSHOT_SYNC_VERIFIED_COMMIT" in text[summary_step:]
+
+
+def test_target_checkout_uses_resilient_git_http_retry_settings():
+    text = workflow_text()
+    checkout_step = text[
+        text.index("      - name: Checkout target repo with retry") : text.index(
+            "      - name: L3 benchmark publication preflight"
+        )
+    ]
+
+    assert "GIT_CHECKOUT_RETRY_ATTEMPTS:-6" in checkout_step
+    assert "GIT_CHECKOUT_RETRY_DELAY_SECONDS:-30" in checkout_step
+    assert "-c http.version=HTTP/1.1" in checkout_step
+    assert "-c http.lowSpeedLimit=1024" in checkout_step
+    assert "-c http.lowSpeedTime=30" in checkout_step
 
 
 def test_ascend_torch_stack_is_installed_before_preinstall_preflight():
