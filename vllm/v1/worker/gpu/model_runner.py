@@ -647,6 +647,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _dummy_rejection_sampler_run(self, hidden_states: torch.Tensor) -> None:
         assert self.rejection_sampler is not None
         assert self.speculator is not None
+        # The rejection sampler copies the expanded decode_query_len logits per request
         num_logits_per_req = self.decode_query_len
         num_reqs = max(
             1, min(self.max_num_reqs, self.max_num_tokens // num_logits_per_req)
