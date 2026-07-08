@@ -436,21 +436,10 @@ def _run_eagle_correctness(
         max_model_len = 2048
         max_num_batched_tokens = 128 if enable_chunked_prefill else max_model_len
 
-        # TRITON_ATTN graph capture has a large fixed VRAM overhead that the
-        # ROCm memory profiler does not reserve for, so the default utilization
-        # OOMs the KV cache on Llama-4-Scout. Lower it to leave room for
-        # capture. Only affects this backend/model combination.
-        gpu_memory_utilization = (
-            0.85
-            if attn_backend == "TRITON_ATTN" and "Llama-4-Scout" in model_name
-            else 0.92
-        )
-
         ref_llm = LLM(
             model=model_name,
             max_model_len=max_model_len,
             tensor_parallel_size=tp_size,
-            gpu_memory_utilization=gpu_memory_utilization,
             attention_config=attention_config,
         )
         evaluate_llm_for_gsm8k(
@@ -478,7 +467,6 @@ def _run_eagle_correctness(
             max_num_batched_tokens=max_num_batched_tokens,
             enable_chunked_prefill=enable_chunked_prefill,
             model_impl=model_impl,
-            gpu_memory_utilization=gpu_memory_utilization,
             attention_config=attention_config,
         )
         # EAGLE/EAGLE3 supports async scheduling; assert it is active by default.
