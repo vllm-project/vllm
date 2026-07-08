@@ -166,12 +166,6 @@ def _run_bf16_monolithic(
     )
 
 
-# DeepSeekV3 routing is the only routing method whose FlashInfer fused-MoE
-# kernel writes ``routing_replay_out`` (see
-# ``flashinfer/csrc/fused_moe/trtllm_backend/trtllm_fused_moe_routing_deepseek.cu``);
-# the other routing paths set the pointer but skip the write. Other routing
-# methods are still covered by the existing non-monolithic capture tests via
-# ``BaseRouter.set_capture_fn``.
 _DSV3_NUM_EXPERTS = 32
 _DSV3_N_GROUP = 4
 _DSV3_TOPK_GROUP = 2
@@ -255,6 +249,70 @@ def test_trtllm_bf16_monolithic_routing_replay_records_valid_experts(
         )
 
 
+@pytest.mark.parametrize("num_tokens", [2, 7, 16])
+@pytest.mark.parametrize(
+    "routing_method",
+    [
+        RoutingMethodType.Renormalize,
+        RoutingMethodType.RenormalizeNaive,
+    ],
+)
+def test_trtllm_bf16_monolithic_routing_replay_non_dsv3(
+    num_tokens: int,
+    routing_method: RoutingMethodType,
+) -> None:
+    """Routing replay works for non-DeepSeekV3 routing methods too.
+    FlashInfer's ``routing_replay_out`` is routing-method-agnostic."""
+    torch.manual_seed(0)
+    device = torch.device("cuda:0")
+
+    num_experts = 8
+    top_k = 2
+    hidden_size = 1024
+    intermediate_size = 1024
+
+    experts, w13, w2 = _make_bf16_monolithic_experts(
+        num_experts=num_experts,
+        top_k=top_k,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        routing_method=routing_method,
+        device=device,
+    )
+
+    captured: list[torch.Tensor] = []
+    experts.set_routing_replay_capture_fn(lambda r: captured.append(r.clone()))
+
+    hidden_states = (
+        torch.randn(num_tokens, hidden_size, device=device, dtype=torch.bfloat16) * 0.1
+    )
+    router_logits = torch.rand(
+        num_tokens, num_experts, device=device, dtype=torch.float32
+    )
+
+    _ = _run_bf16_monolithic(
+        experts,
+        hidden_states=hidden_states,
+        w13=w13,
+        w2=w2,
+        router_logits=router_logits,
+        num_experts=num_experts,
+    )
+
+    assert len(captured) == 1
+    replay = captured[0]
+    assert replay.dtype == torch.int16
+    assert replay.shape == (num_tokens, top_k)
+    assert (replay >= 0).all(), f"got out-of-range values: {replay}"
+    assert (replay < num_experts).all(), f"got out-of-range values: {replay}"
+    for t in range(num_tokens):
+        unique = replay[t].unique()
+        assert unique.numel() == top_k, (
+            f"token {t}: expected {top_k} distinct experts, "
+            f"got {unique.numel()} ({replay[t].tolist()})"
+        )
+
+
 def test_trtllm_bf16_monolithic_capture_disabled_skips_buffer_alloc() -> None:
     """With no callback installed the kernel should not see a
     ``routing_replay_out`` tensor — verify the helper short-circuits."""
@@ -276,28 +334,17 @@ def test_trtllm_bf16_monolithic_capture_disabled_skips_buffer_alloc() -> None:
     experts._maybe_dispatch_routing_replay(buf, num_tokens=4)
 
 
-def test_trtllm_bf16_monolithic_only_supports_capture_for_dsv3() -> None:
-    """The FlashInfer kernel only writes ``routing_replay_out`` from the
-    DSV3 routing path, so ``supports_routing_replay_capture`` must be False
-    for any other routing method. This prevents the runner from binding the
-    capture and silently observing uninitialized memory."""
+def test_trtllm_bf16_monolithic_supports_capture_for_all_routing() -> None:
+    """FlashInfer's ``routing_replay_out`` is supported by all routing
+    methods, so ``supports_routing_replay_capture`` should be True
+    regardless of routing method."""
     device = torch.device("cuda:0")
-    dsv3_experts, _, _ = _make_bf16_monolithic_experts(
-        num_experts=_DSV3_NUM_EXPERTS,
-        top_k=2,
-        hidden_size=1024,
-        intermediate_size=1024,
-        routing_method=RoutingMethodType.DeepSeekV3,
-        device=device,
-    )
-    assert dsv3_experts.supports_routing_replay_capture() is True
-
     for routing_method in (
+        RoutingMethodType.DeepSeekV3,
         RoutingMethodType.Renormalize,
         RoutingMethodType.RenormalizeNaive,
-        RoutingMethodType.Llama4,
     ):
-        other_experts, _, _ = _make_bf16_monolithic_experts(
+        experts, _, _ = _make_bf16_monolithic_experts(
             num_experts=_DSV3_NUM_EXPERTS,
             top_k=2,
             hidden_size=1024,
@@ -305,9 +352,8 @@ def test_trtllm_bf16_monolithic_only_supports_capture_for_dsv3() -> None:
             routing_method=routing_method,
             device=device,
         )
-        assert other_experts.supports_routing_replay_capture() is False, (
-            f"{routing_method!r} is not yet supported by FlashInfer's "
-            "routing_replay_out path; should not opt in to capture"
+        assert experts.supports_routing_replay_capture() is True, (
+            f"{routing_method!r} should support routing replay capture"
         )
 
 

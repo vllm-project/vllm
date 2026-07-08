@@ -992,14 +992,13 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         return True
 
     routing_replay_capture_fn: Callable[[torch.Tensor], None] | None = None
+    _routing_replay_buffer: torch.Tensor | None = None
 
     def supports_routing_replay_capture(self) -> bool:
         """Whether this expert supports routing replay capture.
 
         Subclasses backed by a kernel that exposes routed expert IDs
         (e.g. FlashInfer's ``routing_replay_out``) should override.
-        Only the DeepSeekV3 routing path currently writes
-        ``routing_replay_out`` in FlashInfer TRT-LLM kernels.
         """
         return False
 
@@ -1016,11 +1015,16 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
     ) -> torch.Tensor | None:
         if self.routing_replay_capture_fn is None:
             return None
-        return torch.empty(
-            (num_tokens, self.moe_config.experts_per_token),
-            dtype=torch.int16,
-            device=device,
-        )
+        topk = self.moe_config.experts_per_token
+        buf = self._routing_replay_buffer
+        if buf is None or buf.shape[0] < num_tokens or buf.device != device:
+            buf = torch.empty(
+                (num_tokens, topk),
+                dtype=torch.int16,
+                device=device,
+            )
+            self._routing_replay_buffer = buf
+        return buf
 
     def _maybe_dispatch_routing_replay(
         self,

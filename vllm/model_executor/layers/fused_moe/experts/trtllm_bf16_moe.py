@@ -28,7 +28,7 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
     """
 
     def supports_routing_replay_capture(self) -> bool:
-        return self.routing_method_type == RoutingMethodType.DeepSeekV3
+        return True
 
     def __init__(
         self,

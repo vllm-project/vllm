@@ -262,7 +262,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
     """
 
     def supports_routing_replay_capture(self) -> bool:
-        return self.routing_method_type == RoutingMethodType.DeepSeekV3
+        return True
 
     def __init__(
         self,
@@ -472,9 +472,6 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             assert apply_router_weight_on_input
         else:
             assert not apply_router_weight_on_input
-
-        if e_score_correction_bias is not None:
-            e_score_correction_bias = e_score_correction_bias.to(torch.bfloat16)
 
         routing_replay_out = self._maybe_make_routing_replay_buffer(
             num_tokens=hidden_states.shape[0],

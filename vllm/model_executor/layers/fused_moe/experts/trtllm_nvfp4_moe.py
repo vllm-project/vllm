@@ -387,7 +387,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
     """
 
     def supports_routing_replay_capture(self) -> bool:
-        return self.routing_method_type == RoutingMethodType.DeepSeekV3
+        return True
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
