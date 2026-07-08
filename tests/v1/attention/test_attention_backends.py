@@ -3,6 +3,7 @@
 """Tests for v1 attention backends without GPUModelRunner dependency."""
 
 from functools import partial
+from typing import Any
 
 import pytest
 import torch
@@ -648,6 +649,190 @@ def test_flashinfer_xqa_bmm1_scale_matches_decode_q_dtype():
 
     assert impl.get_xqa_bmm1_scale(MockLayer, torch.bfloat16) == 1.5
     assert impl.get_xqa_bmm1_scale(MockLayer, torch.float8_e4m3fn) == 3.0
+
+
+class _TrtllmScaleMockLayer:
+    def __init__(self, device: torch.device):
+        self._q_scale = torch.tensor(2.0, device=device)
+        self._k_scale = torch.tensor(3.0, device=device)
+        self._v_scale = torch.tensor(5.0, device=device)
+        self._q_scale_float = 2.0
+        self._k_scale_float = 3.0
+        self._v_scale_float = 5.0
+        self._o_scale_float = None
+
+
+def _make_trtllm_scale_test_impl(monkeypatch, flashinfer_backend):
+    # Avoid platform/network probes; the kernels are mocked in these tests.
+    monkeypatch.setattr(
+        flashinfer_backend, "can_use_trtllm_attention", lambda *args, **kwargs: False
+    )
+    return flashinfer_backend.FlashInferImpl(
+        num_heads=2,
+        head_size=64,
+        scale=0.125,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="fp8",
+    )
+
+
+def _make_hnd_fp8_kv_cache(device: torch.device) -> torch.Tensor:
+    # Physically HND [num_blocks, 2, num_kv_heads, block_size, head_size],
+    # passed to forward() in the logical NHD dim order.
+    return torch.zeros(
+        3, 2, 1, 16, 64, dtype=torch.float8_e4m3fn, device=device
+    ).permute(0, 1, 3, 2, 4)
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_trtllm_prefill_fp8_kv_dequant_kernel_scales(monkeypatch):
+    """The BF16-Q + FP8-KV TRTLLM prefill fallback dequantizes the KV cache
+    with k/v scales already applied, so the kernel must receive plain
+    sm_scale / 1.0 instead of the quantized-path bmm scales (#47847)."""
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    impl = _make_trtllm_scale_test_impl(monkeypatch, flashinfer_backend)
+    layer = _TrtllmScaleMockLayer(device)
+
+    captured: dict[str, Any] = {}
+
+    def fake_dequant(kv_cache, block_tables, k_scale, v_scale, dequant_dtype):
+        captured["dequant_scales"] = (k_scale.item(), v_scale.item())
+        mock_cache = torch.zeros(
+            2, 2, 1, 16, 64, dtype=dequant_dtype, device=kv_cache.device
+        )
+        return mock_cache, torch.ones_like(block_tables)
+
+    def fake_prefill_kernel(**kwargs):
+        captured["kernel"] = kwargs
+
+    monkeypatch.setattr(
+        flashinfer_backend, "trtllm_prefill_attn_kvfp8_dequant", fake_dequant
+    )
+    monkeypatch.setattr(
+        flashinfer_backend, "trtllm_batch_context_with_kv_cache", fake_prefill_kernel
+    )
+
+    attn_metadata = flashinfer_backend.FlashInferMetadata(
+        num_actual_tokens=4,
+        slot_mapping=torch.zeros(4, dtype=torch.int64, device=device),
+        q_data_type_prefill=torch.bfloat16,
+        q_data_type_decode=torch.bfloat16,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_prefills=1,
+        num_prefill_tokens=4,
+        causal=True,
+        prefill=flashinfer_backend.TRTLLMPrefill(
+            block_tables=torch.tensor([[1]], dtype=torch.int32, device=device),
+            seq_lens=torch.tensor([4], dtype=torch.int32, device=device),
+            cum_seq_lens_q=torch.tensor([0, 4], dtype=torch.int32, device=device),
+            cum_seq_lens_kv=torch.tensor([0, 4], dtype=torch.int32, device=device),
+            max_q_len=4,
+            max_seq_len=4,
+        ),
+        decode=None,
+        use_cascade=False,
+        cascade_wrapper=None,
+    )
+
+    query = torch.zeros(4, 2, 64, dtype=torch.bfloat16, device=device)
+    key = torch.zeros(4, 1, 64, dtype=torch.bfloat16, device=device)
+    value = torch.zeros(4, 1, 64, dtype=torch.bfloat16, device=device)
+    output = torch.empty(4, 128, dtype=torch.bfloat16, device=device)
+
+    set_kv_cache_layout("HND")
+    try:
+        impl.forward(
+            layer,
+            query,
+            key,
+            value,
+            _make_hnd_fp8_kv_cache(device),
+            attn_metadata,
+            output,
+        )
+    finally:
+        set_kv_cache_layout(None)
+
+    assert captured["dequant_scales"] == (3.0, 5.0)
+    kernel = captured["kernel"]
+    assert kernel["kv_cache"].dtype == torch.bfloat16
+    assert kernel["bmm1_scale"] == pytest.approx(impl.scale)
+    assert kernel["bmm2_scale"] == pytest.approx(1.0)
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_trtllm_gen_decode_bmm1_scale_bf16_q(monkeypatch):
+    """trtllm-gen decode must only include q_scale in bmm1 when the decode
+    query is actually FP8, like the XQA path already does (#47847)."""
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    impl = _make_trtllm_scale_test_impl(monkeypatch, flashinfer_backend)
+    layer = _TrtllmScaleMockLayer(device)
+
+    captured: dict[str, Any] = {}
+
+    def fake_decode_kernel(**kwargs):
+        captured["kernel"] = kwargs
+
+    monkeypatch.setattr(
+        flashinfer_backend, "trtllm_batch_decode_with_kv_cache", fake_decode_kernel
+    )
+
+    attn_metadata = flashinfer_backend.FlashInferMetadata(
+        num_actual_tokens=2,
+        slot_mapping=torch.zeros(2, dtype=torch.int64, device=device),
+        q_data_type_prefill=torch.bfloat16,
+        q_data_type_decode=torch.bfloat16,
+        num_decodes=2,
+        num_decode_tokens=2,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        causal=True,
+        prefill=None,
+        decode=flashinfer_backend.FlashInferTrtllmAPIDecode(
+            kernel=flashinfer_backend.FlashInferDecodeKernel.TRTLLM_GEN,
+            block_tables=torch.tensor([[1], [2]], dtype=torch.int32, device=device),
+            seq_lens=torch.tensor([8, 8], dtype=torch.int32, device=device),
+            max_seq_len=8,
+        ),
+        use_cascade=False,
+        cascade_wrapper=None,
+    )
+
+    query = torch.zeros(2, 2, 64, dtype=torch.bfloat16, device=device)
+    key = torch.zeros(2, 1, 64, dtype=torch.bfloat16, device=device)
+    value = torch.zeros(2, 1, 64, dtype=torch.bfloat16, device=device)
+    output = torch.empty(2, 128, dtype=torch.bfloat16, device=device)
+
+    set_kv_cache_layout("HND")
+    try:
+        impl.forward(
+            layer,
+            query,
+            key,
+            value,
+            _make_hnd_fp8_kv_cache(device),
+            attn_metadata,
+            output,
+        )
+    finally:
+        set_kv_cache_layout(None)
+
+    kernel = captured["kernel"]
+    assert kernel["bmm1_scale"] == pytest.approx(impl.scale * layer._k_scale_float)
+    assert kernel["bmm2_scale"] == pytest.approx(layer._v_scale_float)
 
 
 @pytest.mark.skipif(
