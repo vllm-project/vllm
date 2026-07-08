@@ -2473,6 +2473,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "rawpointer",
+ "serde",
 ]
 
 [[package]]
@@ -5093,6 +5094,7 @@ dependencies = [
  "llm-multimodal",
  "minijinja",
  "minijinja-contrib",
+ "ndarray 0.17.2",
  "oss-harmony",
  "paste",
  "reqwest",

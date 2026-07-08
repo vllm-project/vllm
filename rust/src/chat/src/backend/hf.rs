@@ -10,7 +10,7 @@ use crate::backend::{
     NewChatOutputProcessorOptions,
 };
 use crate::error::Result;
-use crate::multimodal::MultimodalModelInfo;
+use crate::multimodal::{MultimodalConfigFiles, MultimodalModelInfo};
 use crate::output::{
     DefaultChatOutputProcessor, HarmonyChatOutputProcessor, validate_harmony_parser_overrides,
 };
@@ -46,8 +46,12 @@ impl HfChatBackend {
             MultimodalModelInfo::from_paths(
                 model_id.clone(),
                 (!model_type.is_empty()).then_some(model_type.to_string()),
-                files.config_path.as_deref(),
-                files.preprocessor_config_path.as_deref(),
+                MultimodalConfigFiles {
+                    config: files.config_path.as_deref(),
+                    preprocessor_config: files.preprocessor_config_path.as_deref(),
+                    video_preprocessor_config: files.video_preprocessor_config_path.as_deref(),
+                    processor_config: files.processor_config_path.as_deref(),
+                },
                 tokenizer.clone(),
             )?
         };
@@ -139,8 +143,11 @@ pub(super) async fn load_model_backends(
 fn resolve_multimodal_render_info(
     info: Option<&MultimodalModelInfo>,
 ) -> Option<MultimodalRenderInfo> {
+    use llm_multimodal::Modality;
+
     info.map(|info| MultimodalRenderInfo {
-        placeholder_token: info.placeholder_token().to_string(),
+        image_token: info.placeholder_token(Modality::Image).map(str::to_string),
+        video_token: info.placeholder_token(Modality::Video).map(str::to_string),
     })
 }
 
@@ -192,6 +199,8 @@ mod tests {
             tokenizer_config_path: Some(tokenizer_config_path),
             generation_config_path: None,
             preprocessor_config_path: None,
+            video_preprocessor_config_path: None,
+            processor_config_path: None,
             chat_template_path: None,
             config_path: Some(config_path),
         }
