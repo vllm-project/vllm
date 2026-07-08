@@ -3,6 +3,7 @@
 """Scheduler-side manager for SimpleCPUOffloadConnector."""
 
 import contextlib
+from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -75,6 +76,7 @@ class SimpleCPUOffloadScheduler:
         scheduler_block_size: int,
         hash_block_size: int,
         lazy_offload: bool = False,
+        lazy_offload_min_prefix_tokens: int = 0,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -150,6 +152,14 @@ class SimpleCPUOffloadScheduler:
 
         # Store metadata
         self._lazy_mode = lazy_offload
+        self._lazy_offload_min_prefix_tokens = max(
+            0, lazy_offload_min_prefix_tokens
+        )
+        self._lazy_offloadable_hashes: OrderedDict[bytes, None] = OrderedDict()
+        self._lazy_offloadable_hash_capacity = max(
+            1,
+            kv_cache_config.num_blocks * len(kv_cache_config.kv_cache_groups),
+        )
         # Lazy mode: use a cursor to track the last scanned block in the GPU free queue.
         self._cursor: KVCacheBlock | None = None
         if self._lazy_mode:
@@ -289,6 +299,8 @@ class SimpleCPUOffloadScheduler:
         req_id = request.request_id
         block_ids_by_group = blocks.get_block_ids()
         num_groups = len(block_ids_by_group)
+
+        self._record_lazy_offloadable_hashes(blocks)
 
         # Store tracking (eager mode only). Register the request;
         # block IDs are accumulated from scheduler_output in
@@ -511,6 +523,7 @@ class SimpleCPUOffloadScheduler:
             if (
                 bhash is not None
                 and not node.is_null
+                and self._is_lazy_offload_candidate(bhash)
                 and cpu_pool.cached_block_hash_to_block.get_one_block(bhash) is None
             ):
                 gpu_ids.append(node.block_id)
@@ -533,6 +546,45 @@ class SimpleCPUOffloadScheduler:
             cpu_ids = []
 
         return gpu_ids, cpu_ids, []
+
+    def _record_lazy_offloadable_hashes(self, blocks: "KVCacheBlocks") -> None:
+        if (
+            not self._lazy_mode
+            or self._lazy_offload_min_prefix_tokens <= 0
+            or self.fa_gidx >= len(blocks.blocks)
+        ):
+            return
+
+        num_fa_hashes = sum(
+            1
+            for block in blocks.blocks[self.fa_gidx]
+            if block.block_hash is not None and not block.is_null
+        )
+        prefix_tokens = num_fa_hashes * self.fa_block_size
+        if prefix_tokens < self._lazy_offload_min_prefix_tokens:
+            return
+
+        for group_blocks in blocks.blocks:
+            for block in group_blocks:
+                if block.block_hash is not None and not block.is_null:
+                    self._remember_lazy_offloadable_hash(block.block_hash)
+
+    def _remember_lazy_offloadable_hash(self, block_hash: bytes) -> None:
+        if block_hash in self._lazy_offloadable_hashes:
+            self._lazy_offloadable_hashes.move_to_end(block_hash)
+            return
+
+        while len(self._lazy_offloadable_hashes) >= (
+            self._lazy_offloadable_hash_capacity
+        ):
+            self._lazy_offloadable_hashes.popitem(last=False)
+
+        self._lazy_offloadable_hashes[block_hash] = None
+
+    def _is_lazy_offload_candidate(self, block_hash: bytes) -> bool:
+        if self._lazy_offload_min_prefix_tokens <= 0:
+            return True
+        return block_hash in self._lazy_offloadable_hashes
 
     def _prepare_eager_store_specs(
         self, scheduler_output: SchedulerOutput

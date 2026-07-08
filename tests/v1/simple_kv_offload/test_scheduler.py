@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -14,9 +15,11 @@ from vllm.config import (
     CacheConfig,
     DeviceConfig,
     KVTransferConfig,
-    ModelConfig,
     SchedulerConfig,
     VllmConfig,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
+    _parse_lazy_offload_min_prefix_tokens,
 )
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
@@ -44,6 +47,8 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.simple_kv_offload.manager import SimpleCPUOffloadScheduler
 from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadWorkerMetadata
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -103,12 +108,6 @@ def _make_kv_cache_config(
 
 def _make_vllm_config(block_size: int = BLOCK_SIZE) -> VllmConfig:
     """Minimal VllmConfig for scheduler tests (no GPU)."""
-    model_config = ModelConfig(
-        model="facebook/opt-125m",
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
-    )
     scheduler_config = SchedulerConfig(
         max_num_seqs=16,
         max_num_batched_tokens=64,
@@ -125,13 +124,17 @@ def _make_vllm_config(block_size: int = BLOCK_SIZE) -> VllmConfig:
         kv_connector="SimpleCPUOffloadConnector",
         kv_role="kv_both",
     )
-    return VllmConfig(
+    vllm_config = VllmConfig(
         scheduler_config=scheduler_config,
-        model_config=model_config,
         cache_config=cache_config,
         kv_transfer_config=kv_transfer_config,
         device_config=DeviceConfig("cpu"),
     )
+    # Passing a SimpleNamespace as model_config to VllmConfig fails validation
+    # and constructing a real ModelConfig would resolve an HF model. The
+    # scheduler tests only need max_model_len.
+    vllm_config.model_config = SimpleNamespace(max_model_len=10000)
+    return vllm_config
 
 
 @dataclass
@@ -150,6 +153,7 @@ def make_scheduler(
     num_gpu_blocks: int = 16,
     num_groups: int = 1,
     lazy: bool = False,
+    lazy_offload_min_prefix_tokens: int = 0,
 ) -> SchedulerFixture:
     """Build a SimpleCPUOffloadScheduler with small block pools."""
     kv_cache_config = _make_kv_cache_config(num_gpu_blocks, num_groups)
@@ -163,6 +167,7 @@ def make_scheduler(
         scheduler_block_size=BLOCK_SIZE,
         hash_block_size=BLOCK_SIZE,
         lazy_offload=lazy,
+        lazy_offload_min_prefix_tokens=lazy_offload_min_prefix_tokens,
     )
 
     # Build a real GPU block pool and bind it
@@ -531,6 +536,114 @@ def test_lazy_store_and_load_roundtrip() -> None:
     meta2 = sched.build_connector_meta(sched_out2)
     assert meta2.load_event >= 0, "Expected a load event to be assigned"
     assert len(meta2.load_gpu_blocks) > 0
+
+
+def test_lazy_min_prefix_tokens_skips_short_prefix_blocks() -> None:
+    """Lazy mode should not spill blocks from prefixes below the threshold."""
+    fix = make_scheduler(
+        num_cpu_blocks=8,
+        num_gpu_blocks=8,
+        lazy=True,
+        lazy_offload_min_prefix_tokens=3 * BLOCK_SIZE,
+    )
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+
+    num_blocks = 2
+    req = make_request(num_blocks=num_blocks)
+    gpu_blocks = _allocate_gpu_blocks(gpu_pool, req, num_blocks, group_id=0)
+    kv_blocks = KVCacheBlocks(blocks=(gpu_blocks,))
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+    gpu_pool.free_blocks(gpu_blocks)
+
+    fillers = _flush_old_blocks_to_lru_head(gpu_pool, num_filler_blocks=5)
+    meta = sched.build_connector_meta(make_scheduler_output({}))
+    gpu_pool.free_blocks(fillers)
+
+    assert meta.store_event < 0
+    assert meta.store_gpu_blocks == []
+    assert meta.store_cpu_blocks == []
+
+
+def test_lazy_min_prefix_tokens_allows_prefix_at_threshold() -> None:
+    """Lazy mode should spill candidate blocks once the prefix reaches threshold."""
+    fix = make_scheduler(
+        num_cpu_blocks=8,
+        num_gpu_blocks=8,
+        lazy=True,
+        lazy_offload_min_prefix_tokens=2 * BLOCK_SIZE,
+    )
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+
+    num_blocks = 2
+    req = make_request(num_blocks=num_blocks)
+    gpu_blocks = _allocate_gpu_blocks(gpu_pool, req, num_blocks, group_id=0)
+    kv_blocks = KVCacheBlocks(blocks=(gpu_blocks,))
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+    gpu_pool.free_blocks(gpu_blocks)
+
+    fillers = _flush_old_blocks_to_lru_head(gpu_pool, num_filler_blocks=5)
+    meta = sched.build_connector_meta(make_scheduler_output({}))
+    gpu_pool.free_blocks(fillers)
+
+    assert meta.store_event >= 0
+    assert len(meta.store_gpu_blocks) == num_blocks
+    assert len(meta.store_cpu_blocks) == num_blocks
+
+
+def test_lazy_min_prefix_tokens_tracks_candidates_bounded() -> None:
+    """Long-prefix candidate hashes should not grow without bound."""
+    fix = make_scheduler(
+        num_cpu_blocks=8,
+        num_gpu_blocks=8,
+        lazy=True,
+        lazy_offload_min_prefix_tokens=BLOCK_SIZE,
+    )
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+
+    capacity = sched._lazy_offloadable_hash_capacity
+    for _ in range(capacity + 3):
+        req = make_request(num_blocks=1)
+        gpu_blocks = _allocate_gpu_blocks(gpu_pool, req, num_blocks=1, group_id=0)
+        kv_blocks = KVCacheBlocks(blocks=(gpu_blocks,))
+        sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+        gpu_pool.free_blocks(gpu_blocks)
+
+    assert len(sched._lazy_offloadable_hashes) <= capacity
+
+
+@pytest.mark.parametrize(
+    ("extra_config", "expected"),
+    [
+        ({}, 0),
+        ({"lazy_offload_min_prefix_tokens": 0}, 0),
+        ({"lazy_offload_min_prefix_tokens": 1024}, 1024),
+        ({"lazy_offload_min_prefix_tokens": "1024"}, 1024),
+    ],
+)
+def test_lazy_min_prefix_tokens_config_parses_valid_values(
+    extra_config: dict[str, object],
+    expected: int,
+) -> None:
+    assert _parse_lazy_offload_min_prefix_tokens(extra_config) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, True, -1, "-1", "abc", "1.5", 1.5],
+)
+def test_lazy_min_prefix_tokens_config_rejects_invalid_values(
+    value: object,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="lazy_offload_min_prefix_tokens.*non-negative integer",
+    ):
+        _parse_lazy_offload_min_prefix_tokens(
+            {"lazy_offload_min_prefix_tokens": value}
+        )
 
 
 # ---------------------------------------------------------------------------
