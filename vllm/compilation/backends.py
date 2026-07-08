@@ -1150,8 +1150,11 @@ class VllmBackend:
             dynamo_time,
         )
 
-        # Record Dynamo time in tracing if available
-        start_time = int(torch_compile_start_time * 1e9)
+        # Record Dynamo time in tracing if available.
+        # torch_compile_start_time is a perf_counter() value (arbitrary epoch);
+        # instrument_manual expects nanoseconds since the Unix epoch, so
+        # project the measured duration back from wall-clock now.
+        start_time = time.time_ns() - int(dynamo_time * 1e9)
         attributes = {"dynamo.time_seconds": dynamo_time}
         instrument_manual("Dynamo bytecode transform", start_time, None, attributes)
 
