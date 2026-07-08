@@ -11,6 +11,7 @@ from compressed_tensors.quantization import (
 
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -46,6 +47,7 @@ logger = init_logger(__name__)
 class WNA16MoEBackend(Enum):
     MARLIN = "MARLIN"
     BATCHED_MARLIN = "BATCHED_MARLIN"
+    HUMMING = "HUMMING"
     CPU = "CPU"
     FLASHINFER_TRTLLM = "FLASHINFER_TRTLLM"
     XPU = "XPU"
@@ -55,7 +57,19 @@ def backend_to_kernel_cls(
     backend: WNA16MoEBackend,
 ) -> list[type[mk.FusedMoEExperts]]:
     """Return the experts class for the given backend, or None for NONE."""
-    if backend == WNA16MoEBackend.MARLIN:
+    if backend == WNA16MoEBackend.HUMMING:
+        from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+            BatchedHummingGroupedExperts,
+            HummingGroupedExperts,
+            HummingIndexedExperts,
+        )
+
+        return [
+            BatchedHummingGroupedExperts,
+            HummingGroupedExperts,
+            HummingIndexedExperts,
+        ]
+    elif backend == WNA16MoEBackend.MARLIN:
         return [MarlinExperts]
     elif backend == WNA16MoEBackend.BATCHED_MARLIN:
         return [BatchedMarlinExperts]
@@ -90,8 +104,24 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
         WNA16MoEBackend.FLASHINFER_TRTLLM,
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
+        WNA16MoEBackend.HUMMING,
     ]
     return _AVAILABLE_BACKENDS
+
+
+def map_wna16_backend(runner_backend: MoEBackend) -> WNA16MoEBackend:
+    """Map user's MoEBackend to WNA16MoEBackend."""
+    mapping = {
+        "marlin": WNA16MoEBackend.MARLIN,
+        "humming": WNA16MoEBackend.HUMMING,
+        "flashinfer_trtllm": WNA16MoEBackend.FLASHINFER_TRTLLM,
+    }
+    if backend := mapping.get(runner_backend):
+        return backend
+    raise ValueError(
+        f"moe_backend='{runner_backend}' is not supported for WNA16 MoE. "
+        f"Expected one of {list(mapping.keys())}."
+    )
 
 
 def select_wna16_moe_backend(
@@ -167,6 +197,14 @@ def select_wna16_moe_backend(
                 return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
 
+    # Handle explicit moe_backend from user.
+    runner_backend = config.moe_backend
+    if runner_backend != "auto":
+        requested_backend = map_wna16_backend(runner_backend)
+        return _return_or_raise(
+            requested_backend, config, weight_key, None, activation_format
+        )
+
     # Select kernels in order of backend.
     AVAILABLE_BACKENDS = _get_priority_backends()
 
@@ -231,6 +269,8 @@ def make_wna16_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts],
+    backend: WNA16MoEBackend = WNA16MoEBackend.MARLIN,
+    layer: torch.nn.Module | None = None,
     is_k_full: bool = False,
     w13_g_idx: torch.Tensor | None = None,
     w2_g_idx: torch.Tensor | None = None,
@@ -249,14 +289,18 @@ def make_wna16_moe_kernel(
     )
 
     # Currently, we only support TrtLlmMxint4ExpertsMonolithic, MarlinExperts,
-    # BatchedMarlinExperts, XPUExpertsWNA16, and CPUExpertsInt4
-    assert experts_cls in (
+    # BatchedMarlinExperts, XPUExpertsWNA16, CPUExpertsInt4, and the Humming
+    # grouped/indexed experts.
+    allowed_experts: tuple[type[mk.FusedMoEExperts], ...] = (
         MarlinExperts,
         BatchedMarlinExperts,
         TrtLlmMxint4ExpertsMonolithic,
         XPUExpertsWNA16,
         CPUExpertsInt4,
     )
+    if backend == WNA16MoEBackend.HUMMING:
+        allowed_experts += tuple(backend_to_kernel_cls(WNA16MoEBackend.HUMMING))
+    assert experts_cls in allowed_experts
 
     is_monolithic = experts_cls.is_monolithic()
 
@@ -272,7 +316,10 @@ def make_wna16_moe_kernel(
     logger.info_once("Using %s", prepare_finalize.__class__.__name__, scope="local")
 
     extra_args: dict[str, Any] = {}
-    if issubclass(experts_cls, MarlinExpertsBase):
+    if backend == WNA16MoEBackend.HUMMING:
+        assert layer is not None
+        extra_args = {"layer": layer}
+    elif issubclass(experts_cls, MarlinExpertsBase):
         extra_args = {
             "w13_g_idx": w13_g_idx,
             "w2_g_idx": w2_g_idx,
@@ -962,6 +1009,35 @@ def _process_weights_xpu(
     )
 
 
+def _humming_wna16_weight_schema(
+    quant_config: QuantizationConfig | QuantizationArgs | None,
+) -> dict[str, Any]:
+    """Humming weight schema for a WNA16 checkpoint, derived from the quant
+    config rather than the running kernel."""
+    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+    from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
+
+    if isinstance(quant_config, AutoAWQConfig):
+        return {
+            "quant_method": "awq",
+            "bits": quant_config.weight_bits,
+            "group_size": quant_config.group_size,
+            "zero_point": quant_config.zero_point,
+        }
+    if isinstance(quant_config, AutoGPTQConfig):
+        return {
+            "quant_method": "gptq",
+            "bits": quant_config.weight_bits,
+            "group_size": quant_config.group_size,
+            "desc_act": quant_config.desc_act,
+            "sym": quant_config.is_sym,
+        }
+    raise TypeError(
+        "Humming WNA16 MoE requires AutoAWQConfig or AutoGPTQConfig, "
+        f"got {type(quant_config).__name__}."
+    )
+
+
 def convert_to_wna16_moe_kernel_format(
     backend: WNA16MoEBackend,
     layer: torch.nn.Module,
@@ -977,26 +1053,30 @@ def convert_to_wna16_moe_kernel_format(
     w2_qzeros: torch.Tensor | None = None,
     w13_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
-) -> tuple[
-    torch.Tensor,  # w13_qweight
-    torch.Tensor,  # w2_qweight
-    torch.Tensor,  # w13_scales
-    torch.Tensor,  # w2_scales
-    torch.Tensor | None,  # w13_g_idx
-    torch.Tensor | None,  # w2_g_idx
-    torch.Tensor | None,  # w13_g_idx_sort_indices
-    torch.Tensor | None,  # w2_g_idx_sort_indices
-    torch.Tensor | None,  # w13_qzeros
-    torch.Tensor | None,  # w2_qzeros
-    torch.Tensor | None,  # w13_input_global_scale
-    torch.Tensor | None,  # w2_input_global_scale
-    torch.Tensor | None,  # w13_bias
-    torch.Tensor | None,  # w2_bias
-]:
+) -> (
+    tuple[
+        torch.Tensor,  # w13_qweight
+        torch.Tensor,  # w2_qweight
+        torch.Tensor,  # w13_scales
+        torch.Tensor,  # w2_scales
+        torch.Tensor | None,  # w13_g_idx
+        torch.Tensor | None,  # w2_g_idx
+        torch.Tensor | None,  # w13_g_idx_sort_indices
+        torch.Tensor | None,  # w2_g_idx_sort_indices
+        torch.Tensor | None,  # w13_qzeros
+        torch.Tensor | None,  # w2_qzeros
+        torch.Tensor | None,  # w13_input_global_scale
+        torch.Tensor | None,  # w2_input_global_scale
+        torch.Tensor | None,  # w13_bias
+        torch.Tensor | None,  # w2_bias
+    ]
+    | None
+):
     """Dispatch weight post-processing to the appropriate per-backend handler.
 
     To add a new backend, implement a ``_process_weights_<name>`` helper and
-    add a branch here.
+    add a branch here. Backends that rewrite the layer's parameters in place
+    (e.g. Humming) return ``None``; the caller then skips the param scatter.
 
     Args:
         backend: the selected ``WNA16MoEBackend``.
@@ -1004,6 +1084,16 @@ def convert_to_wna16_moe_kernel_format(
         quant_config: the ``QuantizationConfig`` for this layer.
         input_dtype: optional activation dtype, usually should be 16 bit.
     """
+    if backend == WNA16MoEBackend.HUMMING:
+        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            convert_to_humming_moe_kernel_format,
+        )
+
+        convert_to_humming_moe_kernel_format(
+            layer, quant_config=_humming_wna16_weight_schema(quant_config)
+        )
+        return None
+
     if backend in (
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
