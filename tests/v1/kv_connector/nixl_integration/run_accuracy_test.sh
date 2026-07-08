@@ -80,6 +80,7 @@ DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.2}
 PREFILL_BLOCK_SIZE=${PREFILL_BLOCK_SIZE:-128}
 DECODE_BLOCK_SIZE=${DECODE_BLOCK_SIZE:-128}
+ENFORCE_EAGER=${ENFORCE_EAGER:-1}
 # Comma-separated extra args for vllm serve (e.g. --max-model-len,2048)
 VLLM_SERVE_EXTRA_ARGS=${VLLM_SERVE_EXTRA_ARGS:-}
 
@@ -162,12 +163,14 @@ run_tests_for_model() {
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
     vllm serve $model_name \
     --port $PORT \
-    --enforce-eager \
     --block-size ${PREFILL_BLOCK_SIZE} \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
     --pipeline-parallel-size $PREFILLER_PP_SIZE \
     --kv-transfer-config '$KV_CONFIG_P'"
+    if [[ "$ENFORCE_EAGER" == "1" ]]; then
+      BASE_CMD="${BASE_CMD} --enforce-eager"
+    fi
     if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
       IFS=',' read -r -a extra_args <<< "$VLLM_SERVE_EXTRA_ARGS"
       for arg in "${extra_args[@]}"; do
@@ -212,10 +215,12 @@ run_tests_for_model() {
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
     vllm serve $model_name \
     --port $PORT \
-    --enforce-eager \
     --block-size ${DECODE_BLOCK_SIZE} \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
     --kv-transfer-config '$KV_CONFIG_D'"
+    if [[ "$ENFORCE_EAGER" == "1" ]]; then
+      BASE_CMD="${BASE_CMD} --enforce-eager"
+    fi
     if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
       IFS=',' read -r -a extra_args <<< "$VLLM_SERVE_EXTRA_ARGS"
       for arg in "${extra_args[@]}"; do
