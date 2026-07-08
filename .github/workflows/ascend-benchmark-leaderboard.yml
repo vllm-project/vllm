@@ -446,12 +446,20 @@ jobs:
             IdentityFile $key_file
             IdentitiesOnly yes
             StrictHostKeyChecking yes
+            HostKeyAlias [ssh.github.com]:443
             UserKnownHostsFile $known_hosts_file
           EOF
           chmod 600 "$HOME/.ssh/config"
 
           ssh_output="$(ssh -o BatchMode=yes -T git@github.com 2>&1)" && ssh_status=$? || ssh_status=$?
           echo "$ssh_output"
+          if [[ "$ssh_output" == *"Host key verification failed"* ]]; then
+            echo "GitHub SSH host key probe failed. Effective non-secret SSH config:" >&2
+            ssh -G git@github.com 2>/dev/null \
+              | grep -E '^(hostname|port|user|hostkeyalias|stricthostkeychecking|userknownhostsfile) ' >&2 || true
+            echo "Known-hosts lookup for [ssh.github.com]:443:" >&2
+            ssh-keygen -F '[ssh.github.com]:443' -f "$known_hosts_file" >&2 || true
+          fi
           if [[ "$ssh_output" == *"Permission denied"* ]]; then
             echo "GitHub SSH authentication failed for the configured key." >&2
             exit 2
