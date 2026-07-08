@@ -629,6 +629,7 @@ class KVCacheManager:
             copies.extend(mgr.take_kv_cache_block_copies())
         return copies
 
-    def new_step_starts(self) -> None:
-        """Called when a new step is started."""
-        self.coordinator.new_step_starts()
+    def new_step_starts(self) -> list[KVCacheBlock]:
+        """Called when a new step is started. Returns the previous step's CoW
+        copy retentions; the caller owns releasing them."""
+        return self.coordinator.new_step_starts()

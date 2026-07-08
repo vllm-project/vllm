@@ -429,7 +429,7 @@ def test_hybrid_full_attention_partial_hash_hit_uses_cow():
         in manager.take_kv_cache_block_copies()
     )
     assert partial_full_block[0].ref_cnt == 1
-    manager.new_step_starts()
+    manager.block_pool.free_blocks(manager.new_step_starts())
     assert partial_full_block[0].ref_cnt == 0
 
 
@@ -586,3 +586,95 @@ def test_hybrid_partial_hash_truncates_full_attention_hit_length():
     computed_blocks, num_computed = manager.get_computed_blocks(req)
     assert num_computed == 6
     assert [len(group) for group in computed_blocks.blocks] == [2, 2]
+
+
+def test_cow_retained_blocks_returned_for_release():
+    """new_step_starts returns the CoW copy retentions instead of freeing
+    them; the scheduler owns releasing them once the copy has run."""
+    hash_block_size = 2
+    block_size = 2 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=24,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    req0 = make_request("0", [0, 0, 1, 1, 2, 2], hash_block_size, sha256)
+    computed_blocks, num_computed = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
+
+    # The owner's move queues a copy and retains both endpoints.
+    req0.num_computed_tokens = 6
+    req0.append_output_token_ids([3])
+    assert manager.allocate_slots(req0, 1) is not None
+    (cow_copy,) = manager.take_kv_cache_block_copies()
+
+    retained = manager.new_step_starts()
+    assert {b.block_id for b in retained} == {
+        cow_copy.src_block_id,
+        cow_copy.dst_block_id,
+    }
+    # Not freed yet: the retention refs are still held.
+    assert all(b.ref_cnt > 0 for b in retained)
+    manager.block_pool.free_blocks(retained)
+
+
+def test_free_cow_retained_blocks_defers_until_copy_step_processed():
+    """Scheduler releases CoW retentions immediately when the copy's step has
+    been processed (or deferral is off), and defers them otherwise."""
+    from collections import deque
+
+    freed: list = []
+    blocks = [SimpleNamespace(block_id=7), SimpleNamespace(block_id=9)]
+    mock = SimpleNamespace(
+        kv_cache_manager=SimpleNamespace(
+            block_pool=SimpleNamespace(free_blocks=freed.extend)
+        ),
+        deferred_frees=deque(),
+        defer_block_free=True,
+        cow_copy_fence_seq=3,
+        processed_step_seq=2,
+    )
+    free = Scheduler._free_cow_retained_blocks
+
+    # Copy step still in flight: deferred with its fence.
+    free(mock, list(blocks))
+    assert not freed
+    assert mock.deferred_frees == deque([(3, blocks[::-1])])
+
+    # Copy step processed: freed immediately.
+    mock.processed_step_seq = 3
+    free(mock, list(blocks))
+    assert freed == blocks
+
+    # Deferral disabled: freed immediately regardless of the fence.
+    freed.clear()
+    mock.deferred_frees.clear()
+    mock.defer_block_free = False
+    mock.processed_step_seq = 0
+    free(mock, list(blocks))
+    assert freed == blocks

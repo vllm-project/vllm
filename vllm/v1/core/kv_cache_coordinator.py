@@ -373,10 +373,13 @@ class KVCacheCoordinator(ABC):
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         pass
 
-    def new_step_starts(self) -> None:
-        """Called when a new step is started."""
+    def new_step_starts(self) -> list[KVCacheBlock]:
+        """Called when a new step is started. Returns the CoW copy retentions
+        from the previous step for the caller to release."""
+        blocks_to_release: list[KVCacheBlock] = []
         for manager in self.single_type_managers:
-            manager.new_step_starts()
+            blocks_to_release.extend(manager.new_step_starts())
+        return blocks_to_release
 
 
 class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):

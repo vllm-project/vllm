@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 from abc import ABC, abstractmethod
-from collections import Counter, defaultdict
+from collections import defaultdict
 from collections.abc import Sequence
 from typing import ClassVar
 
@@ -375,18 +375,6 @@ class SingleTypeKVCacheManager(ABC):
         self._kv_cache_block_copies = []
         return copies
 
-    def _free_retained_blocks(self, blocks: Sequence[KVCacheBlock]) -> None:
-        freed_blocks: list[KVCacheBlock] = []
-        ref_counts_by_id = Counter(block.block_id for block in blocks)
-        blocks_by_id = {block.block_id: block for block in blocks}
-        for block_id, count in ref_counts_by_id.items():
-            block = blocks_by_id[block_id]
-            assert block.ref_cnt >= count
-            block.ref_cnt -= count
-            if block.ref_cnt == 0 and not block.is_null:
-                freed_blocks.append(block)
-        self.block_pool.free_block_queue.append_n(freed_blocks)
-
     def _apply_cow(
         self,
         request_id: str,
@@ -654,12 +642,13 @@ class SingleTypeKVCacheManager(ABC):
         # The default behavior is to not skip any tokens.
         return 0
 
-    def new_step_starts(self) -> None:
-        # Release the previous step's CoW copy retentions; the copies have
-        # now run on the worker.
-        if self._cow_blocks_to_release:
-            self._free_retained_blocks(self._cow_blocks_to_release)
-            self._cow_blocks_to_release = []
+    def new_step_starts(self) -> list[KVCacheBlock]:
+        # Hand the previous step's CoW copy retentions back to the caller;
+        # the scheduler releases them once the step that ran the copies is
+        # no longer in flight.
+        blocks_to_release = self._cow_blocks_to_release
+        self._cow_blocks_to_release = []
+        return blocks_to_release
 
 
 class FullAttentionManager(SingleTypeKVCacheManager):
@@ -1660,9 +1649,10 @@ class MambaManager(SingleTypeKVCacheManager):
                     continue
                 self.cached_blocks_this_step.add(block.block_hash)
 
-    def new_step_starts(self) -> None:
-        super().new_step_starts()
+    def new_step_starts(self) -> list[KVCacheBlock]:
+        blocks_to_release = super().new_step_starts()
         self.cached_blocks_this_step.clear()
+        return blocks_to_release
 
     def _cache_partial_tail_block(
         self,
