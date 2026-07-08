@@ -125,6 +125,10 @@ class CpuPlatform(Platform):
                 "otherwise the performance is not optimized."
             )
 
+        # AMX GDN requires float32 state
+        if torch.cpu._is_amx_tile_supported():
+            cache_config.mamba_ssm_cache_dtype = "float32"
+
         # Lagecy setting
         env_key = "VLLM_CPU_KVCACHE_SPACE"
         if env_key in os.environ and os.environ[env_key] != "":
