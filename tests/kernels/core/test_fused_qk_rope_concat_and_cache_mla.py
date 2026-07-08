@@ -162,9 +162,7 @@ def _assert_q_out_close(q_out, c, fp8_q_out, seq_len):
         deq_ref = ref_q_fp8.to(torch.float32) * c.q_scale
         torch.testing.assert_close(deq_fused, deq_ref, atol=1e-3, rtol=0.15)
     else:
-        torch.testing.assert_close(
-            q_out, c.ref_q_out, atol=2e-2, rtol=2e-2
-        )
+        torch.testing.assert_close(q_out, c.ref_q_out, atol=2e-2, rtol=2e-2)
 
 
 def _assert_kv_close(kv_cache, c):
