@@ -380,6 +380,7 @@ steps:
   - tests/test_outputs.py
   - tests/test_pooling_params.py
   - tests/test_ray_env.py
+  - tests/test_sampling_params.py
   - tests/multimodal
   - tests/renderers
   - tests/standalone_tests/lazy_imports.py
@@ -395,6 +396,7 @@ steps:
   - pytest -v -s test_outputs.py
   - pytest -v -s test_pooling_params.py
   - pytest -v -s test_ray_env.py
+  - pytest -v -s test_sampling_params.py
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s renderers
   - pytest -v -s tokenizers_
@@ -403,6 +405,36 @@ steps:
   - pytest -v -s parser
   - pytest -v -s transformers_utils
   - pytest -v -s config
+
+#------------------------------------------------------------  mi250 · rust  -----------------------------------------------------------#
+
+- label: Rust Frontend Cargo Style + Clippy # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  agent_pool: mi250_1
+  no_gpu: true
+  working_dir: "/vllm-workspace"
+  source_file_dependencies:
+  - rust/
+  - rust-toolchain.toml
+  - .buildkite/test_areas/rust_frontend_cargo.yaml
+  - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
+  commands:
+  - bash .buildkite/scripts/run-rust-frontend-cargo-ci.sh style-clippy
+
+- label: Rust Frontend Cargo Tests # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  agent_pool: mi250_1
+  no_gpu: true
+  working_dir: "/vllm-workspace"
+  source_file_dependencies:
+  - rust/
+  - rust-toolchain.toml
+  - .buildkite/test_areas/rust_frontend_cargo.yaml
+  - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
+  commands:
+  - bash .buildkite/scripts/run-rust-frontend-cargo-ci.sh test
 
 #-----------------------------------------------------------  mi250 · docker  ----------------------------------------------------------#
 
@@ -472,7 +504,7 @@ steps:
   commands:
   - TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)'
-  - pytest models/test_transformers.py -v -s -m 'distributed(num_gpus=2)'
+  - pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/language -v -s -m 'distributed(num_gpus=2)'
   - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_phi4siglip.py
   - pytest models/multimodal/generation/test_phi4siglip.py -v -s -m 'distributed(num_gpus=2)'
@@ -1637,10 +1669,10 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/models/test_terratorch.py
-  - tests/models/test_transformers.py
+  - tests/models/transformers/test_backend.py
   - tests/models/test_registry.py
   commands:
-  - pytest -v -s models/test_terratorch.py models/test_transformers.py models/test_registry.py
+  - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py
 
 #-----------------------------------------------------  mi300 · models / language  -----------------------------------------------------#
 
@@ -1860,7 +1892,7 @@ steps:
   - examples/
   commands:
   - pip install --upgrade git+https://github.com/huggingface/transformers
-  - pytest -v -s tests/models/test_transformers.py
+  - pytest -v -s tests/models/transformers/test_backend.py
   - pytest -v -s tests/models/multimodal/test_mapping.py
   - python3 examples/basic/offline_inference/chat.py
   - python3 examples/generate/multimodal/vision_language_offline.py --model-type qwen2_5_vl
@@ -1906,6 +1938,11 @@ steps:
   - pytest -v -s plugins_tests/test_stats_logger_plugins.py
   - pip uninstall dummy_stat_logger -y
   # END: `stat_logger` plugins test
+  # BEGIN: `endpoint` plugins test
+  - pip install -e ./plugins/vllm_add_dummy_endpoint_plugin
+  - pytest -v -s plugins_tests/test_endpoint_plugins.py
+  - pip uninstall vllm_add_dummy_endpoint_plugin -y
+  # END: `endpoint` plugins test
   # BEGIN: other tests
   - pytest -v -s plugins_tests/test_scheduler_plugins.py
   - pip install -e ./plugins/vllm_add_dummy_model
@@ -1929,6 +1966,128 @@ steps:
   commands:
   - pip install "vllm-gguf-plugin >= 0.0.2"
   - pytest -v -s plugins_tests/gguf
+
+#-------------------------------------------------------  mi300 · rust_frontend  -------------------------------------------------------#
+
+- label: Rust Frontend OpenAI Coverage # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - rust/
+  - vllm/benchmarks/
+  - vllm/entrypoints/openai/
+  - vllm/entrypoints/serve/
+  - vllm/v1/sample/
+  - tests/utils.py
+  - tests/benchmarks/test_serve_cli.py
+  - tests/entrypoints/openai/chat_completion/test_chat_completion.py
+  - tests/entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
+  - tests/entrypoints/openai/completion/test_shutdown.py
+  - tests/entrypoints/openai/test_return_token_ids.py
+  - tests/entrypoints/openai/test_uds.py
+  - tests/v1/sample/test_logprobs_e2e.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s benchmarks/test_serve_cli.py -k "not insecure and not (test_bench_serve and not test_bench_serve_chat)"
+  - pytest -v -s entrypoints/openai/chat_completion/test_chat_completion.py -k "not test_invalid_json_schema and not test_invalid_regex"
+  - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py -k "not multiple"
+  - pytest -v -s entrypoints/openai/completion/test_shutdown.py -k "not engine_failure and not test_abort_timeout_exits_quickly"
+  - pytest -v -s entrypoints/openai/test_return_token_ids.py -k "not test_comparison"
+  - pytest -v -s entrypoints/openai/test_uds.py
+  - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
+
+- label: Rust Frontend Serve Admin Coverage # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - rust/
+  - vllm/entrypoints/openai/
+  - vllm/entrypoints/serve/
+  - vllm/v1/engine/
+  - tests/utils.py
+  - tests/entrypoints/serve/dev/rpc/test_collective_rpc.py
+  - tests/entrypoints/scale_out/token_in_token_out/test_serving_tokens.py
+  - tests/entrypoints/serve/instrumentator/test_basic.py
+  - tests/entrypoints/serve/instrumentator/test_metrics.py
+  - tests/entrypoints/serve/tokenize/test_tokenization.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py
+  - pytest -v -s entrypoints/serve/instrumentator/test_basic.py -k "not show_version and not server_load"
+  - pytest -v -s entrypoints/scale_out/token_in_token_out/test_serving_tokens.py -k "not stream and not lora and not test_generate_logprobs and not stop_string_workflow"
+  - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "text and not show and not run_batch and not test_metrics_counts and not test_metrics_exist"
+  - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info and not test_tokenize_chat"
+
+- label: Rust Frontend Core Correctness # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - rust/
+  - vllm/entrypoints/openai/
+  - tests/utils.py
+  - tests/entrypoints/openai/correctness/test_lmeval.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
+
+- label: Rust Frontend Tool Use # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - rust/
+  - vllm/entrypoints/openai/
+  - vllm/tool_parsers/
+  - tests/utils.py
+  - tests/tool_use/
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s tool_use --ignore=tool_use/mistral --models llama3.2 -k "not test_response_format_with_tool_choice_required and not test_parallel_tool_calls_false and not test_tool_call_and_choice"
+
+- label: Rust Frontend Distributed # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - rust/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/executor/
+  - vllm/v1/engine/
+  - vllm/v1/worker/
+  - tests/utils.py
+  - tests/v1/distributed/test_external_lb_dp.py
+  - tests/v1/distributed/test_hybrid_lb_dp.py
+  - tests/v1/distributed/test_internal_lb_dp.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py -k "not 4 and not server_info"
+  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py -k "not 4 and not server_info"
+  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py -k "not 4 and not server_info"
 
 #-------------------------------------------------------  mi300 · quantization  --------------------------------------------------------#
 
@@ -2782,15 +2941,19 @@ steps:
   - vllm/envs.py
   - examples/offline_inference/data_parallel.py
   - tests/distributed/test_context_parallel.py
+  - tests/distributed/test_rocm_aiter_custom_ar.py
   - tests/distributed/test_rocm_quick_reduce.py
   - tests/distributed/test_quick_all_reduce.py
+  - tests/v1/e2e/general/test_rocm_aiter_custom_ar.py
   - tests/v1/distributed/test_dbo.py
   - tests/utils.py
   commands:
   - pytest -v -s tests/distributed/test_context_parallel.py
-  - pytest -v -s tests/v1/distributed/test_dbo.py
+  - pytest -v -s tests/distributed/test_rocm_aiter_custom_ar.py
+  - pytest -v -s tests/v1/e2e/general/test_rocm_aiter_custom_ar.py
   - pytest -v -s tests/distributed/test_rocm_quick_reduce.py
   - pytest -v -s tests/distributed/test_quick_all_reduce.py
+  - pytest -v -s tests/v1/distributed/test_dbo.py
 
 #--------------------------------------------------------  mi355 · entrypoints  --------------------------------------------------------#
 
