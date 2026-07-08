@@ -1870,6 +1870,8 @@ class FlashInferImpl(AttentionImpl):
                 if needs_fp8_out:
                     out = self._nvfp4_fp8_out[:num_prefill_tokens]
 
+                prefill_bmm1_scale = self.bmm1_scale
+                prefill_bmm2_scale = self.bmm2_scale
                 prefill_kv_block_scales = None
                 if self.is_kvcache_nvfp4:
                     # NVFP4 trtllm-gen kernel requires FP8 query.
@@ -1908,6 +1910,11 @@ class FlashInferImpl(AttentionImpl):
                         layer._v_scale,
                         attn_metadata.q_data_type_prefill,
                     )
+                    # The mock KV cache is already dequantized and the query
+                    # stays in model dtype, so the kernel must not apply
+                    # q/k/v scales again.
+                    prefill_bmm1_scale = self.scale
+                    prefill_bmm2_scale = 1.0
                 else:
                     mock_kv_cache = kv_cache_permute
                     mock_block_table = block_tables_prefill
@@ -1920,8 +1927,8 @@ class FlashInferImpl(AttentionImpl):
                     seq_lens=seq_lens_prefill,
                     max_q_len=attn_metadata.prefill.max_q_len,
                     max_kv_len=attn_metadata.prefill.max_seq_len,
-                    bmm1_scale=self.bmm1_scale,
-                    bmm2_scale=self.bmm2_scale,
+                    bmm1_scale=prefill_bmm1_scale,
+                    bmm2_scale=prefill_bmm2_scale,
                     batch_size=attn_metadata.num_prefills,
                     cum_seq_lens_q=attn_metadata.prefill.cum_seq_lens_q,
                     cum_seq_lens_kv=attn_metadata.prefill.cum_seq_lens_kv,
@@ -2068,12 +2075,11 @@ class FlashInferImpl(AttentionImpl):
                         "FlashInfer XQA speculative decode is not wired in vLLM yet."
                     )
 
-                # XQA decode can use model-dtype Q with FP8 KV, so only include
-                # q_scale when the decode query is actually FP8.
-                bmm1_scale = (
-                    self.get_xqa_bmm1_scale(layer, attn_metadata.q_data_type_decode)
-                    if decode_with_xqa
-                    else self.bmm1_scale
+                # Both XQA (SM90) and trtllm-gen (with
+                # disable_flashinfer_q_quantization) can run model-dtype Q with
+                # FP8 KV, so only include q_scale when the query is actually FP8.
+                bmm1_scale = self.get_xqa_bmm1_scale(
+                    layer, attn_metadata.q_data_type_decode
                 )
 
                 trtllm_batch_decode_with_kv_cache(
