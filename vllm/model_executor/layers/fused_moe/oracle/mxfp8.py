@@ -21,6 +21,11 @@ _SUPPORTED_BACKENDS = (
     Fp8MoeBackend.DEEPGEMM,
     Fp8MoeBackend.MARLIN,
     Fp8MoeBackend.XPU,
+    # AITER FlyDSL (gfx950): auto-picked by select_mxfp8_moe_backend when
+    # is_supported_config passes (gfx950 + flydsl installed + not EP). On other
+    # devices / no flydsl / EP it is skipped and native is used.
+    Fp8MoeBackend.AITER_MXFP8,
+    Fp8MoeBackend.HUMMING,
 )
 
 _BACKEND_NAME_MAP: dict[str, Fp8MoeBackend] = {
@@ -28,6 +33,9 @@ _BACKEND_NAME_MAP: dict[str, Fp8MoeBackend] = {
     "deep_gemm": Fp8MoeBackend.DEEPGEMM,
     "marlin": Fp8MoeBackend.MARLIN,
     "xpu": Fp8MoeBackend.XPU,
+    "aiter": Fp8MoeBackend.AITER_MXFP8,
+    "triton": Fp8MoeBackend.TRITON_MXFP8,
+    "humming": Fp8MoeBackend.HUMMING,
 }
 
 
@@ -46,6 +54,27 @@ def _mxfp8_backend_to_kernel_cls(
         )
 
         return [DeepGemmExperts]
+    if backend == Fp8MoeBackend.AITER_MXFP8:
+        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (
+            AiterMxfp8Experts,
+        )
+
+        return [AiterMxfp8Experts]
+    if backend == Fp8MoeBackend.TRITON_MXFP8:
+        # Explicit ``--moe-backend triton``: the Triton mxfp8 path, i.e.
+        # dot_scaled on MX-capable HW (gfx950) and BF16 emulation otherwise.
+        # Mirrors the ROCm auto-fallback in ``_select_rocm_mxfp8_backend``.
+        if current_platform.supports_mx():
+            from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
+                Mxfp8NativeTritonExperts,
+            )
+
+            return [Mxfp8NativeTritonExperts]
+        from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (
+            Mxfp8EmulationTritonExperts,
+        )
+
+        return [Mxfp8EmulationTritonExperts]
     return backend_to_kernel_cls(backend)
 
 
@@ -77,7 +106,13 @@ def _select_kernel_cls(
 
 
 def _select_rocm_mxfp8_backend() -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
-    """ROCm fallback when vendor MXFP8 backends are unavailable."""
+    """ROCm fallback when no auto-selected MXFP8 backend is available.
+
+    The aiter FlyDSL backend (``AITER_MXFP8``) is auto-picked earlier by
+    ``select_mxfp8_moe_backend`` via ``_SUPPORTED_BACKENDS`` when usable, or
+    explicitly via ``--moe-backend aiter``; this fallback handles the rest
+    (native dot_scaled on gfx950, else BF16 emulation).
+    """
 
     if current_platform.supports_mx():
         from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
@@ -85,7 +120,7 @@ def _select_rocm_mxfp8_backend() -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts
         )
 
         logger.info_once("Using native CDNA4 (gfx950) MXFP8 dot_scaled MoE backend.")
-        return Fp8MoeBackend.NATIVE_MXFP8, Mxfp8NativeTritonExperts
+        return Fp8MoeBackend.TRITON_MXFP8, Mxfp8NativeTritonExperts
 
     from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (
         Mxfp8EmulationTritonExperts,

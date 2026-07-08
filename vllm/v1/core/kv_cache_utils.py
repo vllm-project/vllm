@@ -952,7 +952,9 @@ def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
     return num_blocks
 
 
-def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
+def _pool_bytes_per_block(
+    vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec]
+) -> int:
     """
     Bytes consumed by one block in the worker's shared KV cache pool, mirroring
     the divisor used by `get_kv_cache_config_from_groups` to convert
@@ -963,7 +965,7 @@ def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
         kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
     ):
         return kv_cache_groups[0].kv_cache_spec.page_size_bytes
-    if _use_packed_kv_cache_groups(kv_cache_groups):
+    if _use_packed_kv_cache_config(vllm_config, kv_cache_groups):
         # buckets = {page_size: [[layer_names], [layer_names], ...]}
         buckets = _bucket_layers_by_page_size(kv_cache_groups)
         return sum(ps * len(slots) for ps, slots in buckets.items())
@@ -1054,11 +1056,12 @@ def unify_kv_cache_spec_page_size(
 ) -> dict[str, KVCacheSpec]:
     """
     Unify the page size of the given KVCacheSpec. If the page size of all layers
-    are the same, return the original KVCacheSpec. If not same, first try to
-    unify page size by increasing the block size of layers with smaller page
-    size. If a smaller attention page does not evenly divide the maximum page
-    size, keep its logical block size and pad its physical page instead --- but
-    only for attention layers whose backend opts in via
+    are the same, return the original KVCacheSpec. If not same, unify the page
+    size by increasing the block size of layers with smaller page size. Two
+    cases cannot be unified by block size alone and pad their physical page to
+    the maximum instead: Mamba layers, whose page size comes from state shapes
+    and is independent of block size; and attention layers whose page does not
+    evenly divide the maximum and whose backend opts in via
     ``AttentionSpec.indexes_kv_by_block_stride`` (the padded page is read through
     a strided view, which not every backend handles). Raise NotImplementedError
     if failed to unify the page size.
@@ -1079,6 +1082,16 @@ def unify_kv_cache_spec_page_size(
     for layer_name, layer_spec in kv_cache_spec.items():
         if layer_spec.page_size_bytes == max_page_size:
             new_kv_cache_spec[layer_name] = layer_spec
+        elif isinstance(layer_spec, MambaSpec):
+            # MambaSpec's page size is determined by its state shapes and does
+            # not scale with block_size, so pad the page instead. This is the
+            # same padding mechanism the platform uses to align Mamba pages
+            # with the main model's attention page size; it is needed here
+            # when another layer (e.g. from a draft model) has a larger page
+            # than the already-aligned Mamba page.
+            new_spec: KVCacheSpec = replace(layer_spec, page_size_padded=max_page_size)
+            assert new_spec.page_size_bytes == max_page_size
+            new_kv_cache_spec[layer_name] = new_spec
         else:
             layer_page_size = layer_spec.page_size_bytes
             if max_page_size % layer_page_size == 0:
@@ -1255,16 +1268,26 @@ def _bucket_layers_by_page_size(
     return buckets
 
 
-def _use_packed_kv_cache_groups(
+def _use_packed_kv_cache_config(
+    vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> bool:
     is_dsv4 = all(
         isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
         for group in kv_cache_groups
     )
-    return is_dsv4 or (
-        bool(envs.VLLM_USE_PACKED_HMA_KV_CACHE) and len(kv_cache_groups) > 1
+    kv_transfer_config = vllm_config.kv_transfer_config
+    extra_config = (
+        kv_transfer_config.kv_connector_extra_config
+        if kv_transfer_config is not None
+        else {}
     )
+    # NOTE: enable_cross_layers_blocks is an experimental API and subject to change with
+    # https://github.com/vllm-project/vllm/issues/42082
+    enable_cross_layers = (
+        str(extra_config.get("enable_cross_layers_blocks", "False")).lower() == "true"
+    )
+    return is_dsv4 or (enable_cross_layers and len(kv_cache_groups) > 1)
 
 
 def _get_kv_cache_config_packed(
@@ -1303,9 +1326,6 @@ def _get_kv_cache_config_packed(
             byte_offset += ps
 
     return num_blocks, kv_cache_tensors
-
-
-_get_kv_cache_config_deepseek_v4 = _get_kv_cache_config_packed
 
 
 def get_kv_cache_config_from_groups(
@@ -1352,10 +1372,9 @@ def get_kv_cache_config_from_groups(
             )
             for layer_name in kv_cache_groups[0].layer_names
         ]
-    elif _use_packed_kv_cache_groups(kv_cache_groups):
-        # DeepSeek V4 keeps the existing packed layout. Other multi-group
-        # attention-only HMA layouts can opt in with
-        # VLLM_USE_PACKED_HMA_KV_CACHE=1.
+    elif _use_packed_kv_cache_config(vllm_config, kv_cache_groups):
+        # DeepSeek V4 uses the packed layout by default. Other multi-group
+        # layouts can opt in with --enable-cross-layers.
         num_blocks, kv_cache_tensors = _get_kv_cache_config_packed(
             vllm_config, kv_cache_groups, available_memory
         )
@@ -2074,7 +2093,7 @@ def get_kv_cache_configs(
             if not groups:
                 adjusted_memory.append(avail_mem)
                 continue
-            bytes_per_block = _pool_bytes_per_block(groups)
+            bytes_per_block = _pool_bytes_per_block(vllm_config, groups)
             logger.info(
                 "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
                 avail_mem // bytes_per_block,

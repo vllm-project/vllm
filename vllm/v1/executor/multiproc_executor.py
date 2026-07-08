@@ -280,9 +280,12 @@ class MultiprocExecutor(Executor):
                 logger.debug("MultiprocWorkerMonitor: shutdown already initiated")
                 return
             _self.is_failed = True
-            proc_name = next(h.proc.name for h in workers if h.proc.sentinel == died[0])
+            proc = next(h.proc for h in workers if h.proc.sentinel == died[0])
             logger.error(
-                "Worker proc %s died unexpectedly, shutting down executor.", proc_name
+                "Worker proc %s died unexpectedly (exit code: %s), "
+                "shutting down executor.",
+                proc.name,
+                proc.exitcode,
             )
             _self.shutdown()
             callback = _self.failure_callback
@@ -939,7 +942,11 @@ class WorkerProc:
         converted to a FAILURE response.
         """
         if isinstance(output, AsyncModelRunnerOutput):
-            output = output.get_output()
+            try:
+                output = output.get_output()
+            except Exception as e:
+                logger.exception("Error getting async model runner output")
+                output = e
 
         if isinstance(output, Exception):
             result = (WorkerProc.ResponseStatus.FAILURE, str(output))

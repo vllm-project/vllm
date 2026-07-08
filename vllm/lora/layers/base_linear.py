@@ -17,6 +17,7 @@ from vllm.forward_context import (
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     LinearBase,
+    QuantizeMethodBase,
     ReplicatedLinear,
     RowParallelLinear,
 )
@@ -182,6 +183,14 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             lora_b, non_blocking=True
         )
 
+    def _get_quant_method(self) -> QuantizeMethodBase:
+        quant_method = self.base_layer.quant_method
+        if quant_method is None:
+            raise RuntimeError(
+                f"{type(self.base_layer).__name__} must define quant_method for LoRA."
+            )
+        return quant_method
+
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         # is_forward_context_available for tower modules
         if self._enable_aux_cuda_stream and is_forward_context_available():
@@ -195,7 +204,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     def _apply_sync(
         self, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
+        output = self._get_quant_method().apply(self.base_layer, x, bias)
         return self._apply_lora_to_output(x, output)
 
     def _apply_base_forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -242,7 +251,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         output_size = sum(self.output_slices)
 
         def base_fn() -> torch.Tensor:
-            return self.base_layer.quant_method.apply(self.base_layer, x, bias)
+            return self._get_quant_method().apply(self.base_layer, x, bias)
 
         def lora_fn() -> torch.Tensor:
             # Must be zeros, not empty: _lora_expand_kernel exits early (without

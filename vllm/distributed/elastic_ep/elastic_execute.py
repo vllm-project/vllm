@@ -207,6 +207,9 @@ class ElasticEPScalingExecutor:
             )
         if new_dp_size > old_dp_size:
             self._set_eplb_suppressed(True)
+            eplb_state = self.worker.model_runner.eplb_state
+            if eplb_state is not None:
+                eplb_state.drain_async()
         elif new_dp_size < old_dp_size:
             self._stage_standby_moe_quant_methods()
 
@@ -455,7 +458,9 @@ class ElasticEPScalingExecutor:
                 eplb_model_state.logical_to_physical_map,
                 eplb_model_state.logical_replica_count,
             )
-            eplb_state._init_should_record_tensor(model)
+            eplb_state._propagate_shared_tensors(
+                model, eplb_model_state.num_unpadded_tokens_tensors
+            )
             model.update_physical_experts_metadata(
                 num_physical_experts=num_physical_experts,
                 num_local_physical_experts=num_local_experts,
@@ -540,6 +545,11 @@ class ElasticEPScalingExecutor:
             eplb_model_state.physical_to_logical_map.shape[1]
         )
         eplb_state.is_async = is_async_enabled
+        # Start the async worker thread if it doesn't exist yet (idempotent).
+        # This is needed for new workers after scale-up: they create EplbState
+        # in setup_eplb_from_mapping() but don't start the thread there because
+        # groups aren't ready yet.
+        eplb_state.start_async_loop()
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Expert resharding completed")
 
@@ -549,6 +559,9 @@ class ElasticEPScalingExecutor:
 
     def perform_scale_down_eplb_reshuffle(self, new_dp_size: int) -> None:
         self._set_eplb_suppressed(True)
+        eplb_state = self.worker.model_runner.eplb_state
+        if eplb_state is not None:
+            eplb_state.drain_async()
         parallel_config = self.worker.vllm_config.parallel_config
         tp_size = parallel_config.tensor_parallel_size
         old_ep_size = parallel_config.data_parallel_size * tp_size
