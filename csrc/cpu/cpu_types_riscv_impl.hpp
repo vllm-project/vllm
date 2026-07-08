@@ -517,8 +517,8 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
     const float inv_ln2 = 1.44269504088896341f;
     fixed_fp32x8_t x_scaled =
         RVVI(__riscv_vfmul_vf_f32, LMUL_256)(x, inv_ln2, VEC_ELEM_NUM);
-    fixed_i32x8_t n_int =
-        RVVI(__riscv_vfcvt_x_f_v_i32, LMUL_256)(x_scaled, VEC_ELEM_NUM);
+    fixed_i32x8_t n_int = RVVI3(__riscv_vfcvt_x_f_v_i32, LMUL_256, _rm)(
+        x_scaled, __RISCV_FRM_RNE, VEC_ELEM_NUM);
     fixed_fp32x8_t n_float =
         RVVI(__riscv_vfcvt_f_x_v_f32, LMUL_256)(n_int, VEC_ELEM_NUM);
 
@@ -783,8 +783,8 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     const float inv_ln2 = 1.44269504088896341f;
     fixed_fp32x16_t x_scaled =
         RVVI(__riscv_vfmul_vf_f32, LMUL_512)(x, inv_ln2, VEC_ELEM_NUM);
-    fixed_i32x16_t n_int =
-        RVVI(__riscv_vfcvt_x_f_v_i32, LMUL_512)(x_scaled, VEC_ELEM_NUM);
+    fixed_i32x16_t n_int = RVVI3(__riscv_vfcvt_x_f_v_i32, LMUL_512, _rm)(
+        x_scaled, __RISCV_FRM_RNE, VEC_ELEM_NUM);
     fixed_fp32x16_t n_float =
         RVVI(__riscv_vfcvt_f_x_v_f32, LMUL_512)(n_int, VEC_ELEM_NUM);
     fixed_fp32x16_t r =
@@ -882,8 +882,8 @@ struct INT8Vec16 : public Vec<INT8Vec16> {
   fixed_i8x16_t reg;
 
   explicit INT8Vec16(const FP32Vec16& vec) {
-    auto i32_vec =
-        RVVI(__riscv_vfcvt_x_f_v_i32, LMUL_512)(vec.reg, VEC_ELEM_NUM);
+    auto i32_vec = RVVI3(__riscv_vfcvt_x_f_v_i32, LMUL_512, _rm)(
+        vec.reg, __RISCV_FRM_RNE, VEC_ELEM_NUM);
     auto i16_vec = RVVI(__riscv_vnclip_wx_i16, LMUL_256)(
         i32_vec, 0, __RISCV_VXRM_RNU, VEC_ELEM_NUM);
     reg = RVVI(__riscv_vnclip_wx_i8, LMUL_128)(i16_vec, 0, __RISCV_VXRM_RNU,
