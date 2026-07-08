@@ -323,7 +323,7 @@ class ReqMeta:
     can_save: bool | None = None
     load_spec: LoadSpec | None = None
     is_last_chunk: bool | None = None
-    current_event: torch.Event | None = None
+    current_event: torch.cuda.Event | None = None
 
     token_ids: list[int] | None = None
     num_prompt_tokens: int | None = None

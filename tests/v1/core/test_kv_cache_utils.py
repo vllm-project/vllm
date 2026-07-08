@@ -2487,6 +2487,91 @@ def test_unify_hybrid_kv_cache_specs():
         kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
 
 
+def test_unify_kv_cache_spec_page_size_mamba():
+    """Regression test for https://github.com/vllm-project/vllm/issues/43626.
+
+    MambaSpec's page_size_bytes is determined by its state shapes and does not
+    change with block_size, so unify_kv_cache_spec_page_size must pad the Mamba
+    page instead of scaling its block_size. This situation arises when a layer
+    with a page larger than the (already platform-aligned) Mamba page joins the
+    specs, e.g. a dense draft model with more KV heads than the hybrid main
+    model.
+    """
+    # 1. Hybrid main model (Mamba + full attention, pages already aligned at
+    # 16KB) plus a dense draft model layer with a 2x larger page (32KB).
+    # Reproduces the bare AssertionError from #43626: 32768 % 16384 == 0, so
+    # the old code scaled the Mamba block_size, which left page_size_bytes
+    # unchanged at 16384.
+    mamba_spec = new_mamba_spec()  # page_size_bytes = 16384
+    main_attn_spec = new_kv_cache_spec()  # page_size_bytes = 16384
+    draft_attn_spec = new_kv_cache_spec(num_kv_heads=4)  # page_size_bytes = 32768
+    assert mamba_spec.page_size_bytes == main_attn_spec.page_size_bytes == 16384
+    assert draft_attn_spec.page_size_bytes == 32768
+
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {
+            "mamba_layer": mamba_spec,
+            "main_attn_layer": main_attn_spec,
+            "draft_attn_layer": draft_attn_spec,
+        }
+    )
+    # Mamba page is padded; block_size (caching granularity) is unchanged.
+    assert unified["mamba_layer"].page_size_bytes == 32768
+    assert unified["mamba_layer"].page_size_padded == 32768
+    assert unified["mamba_layer"].block_size == mamba_spec.block_size
+    # Attention layer with smaller page still unifies by scaling block_size.
+    assert unified["main_attn_layer"].page_size_bytes == 32768
+    assert unified["main_attn_layer"].block_size == 2 * main_attn_spec.block_size
+    assert unified["main_attn_layer"].page_size_padded is None
+    # Layer already at max page size is unchanged.
+    assert unified["draft_attn_layer"] == draft_attn_spec
+
+    # 2. Mamba page already padded by the platform (state smaller than the
+    # padded page); the padding is re-applied at the new maximum.
+    padded_mamba_spec = new_mamba_spec(
+        shapes=((2, 256), (3, 32, 32)), page_size_padded=16384
+    )
+    assert padded_mamba_spec.page_size_bytes == 16384
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {
+            "mamba_layer": padded_mamba_spec,
+            "draft_attn_layer": draft_attn_spec,
+        }
+    )
+    assert unified["mamba_layer"].page_size_bytes == 32768
+    assert unified["mamba_layer"].page_size_padded == 32768
+
+    # 3. Mamba page that does not evenly divide the maximum page size is
+    # padded as well (the divisibility constraint only applies to block_size
+    # scaling).
+    odd_mamba_spec = new_mamba_spec(shapes=((6144,),))
+    assert odd_mamba_spec.page_size_bytes == 24576
+    assert 32768 % odd_mamba_spec.page_size_bytes != 0
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {
+            "mamba_layer": odd_mamba_spec,
+            "draft_attn_layer": draft_attn_spec,
+        }
+    )
+    assert unified["mamba_layer"].page_size_bytes == 32768
+
+    # 4. Attention layers with non-divisible page sizes still raise.
+    with pytest.raises(NotImplementedError):
+        kv_cache_utils.unify_kv_cache_spec_page_size(
+            {
+                "attn_layer": new_kv_cache_spec(block_size=24),  # 24576
+                "draft_attn_layer": draft_attn_spec,  # 32768
+            }
+        )
+
+    # 5. Uniform page sizes are returned unchanged.
+    specs = {
+        "mamba_layer": new_mamba_spec(),
+        "attn_layer": new_kv_cache_spec(),
+    }
+    assert kv_cache_utils.unify_kv_cache_spec_page_size(specs) == specs
+
+
 def test_hma_not_disabled_when_kv_events_enabled():
     """
     Test enabling KV events must not force disable_hybrid_kv_cache_manager to True.
