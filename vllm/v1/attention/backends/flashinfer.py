@@ -369,6 +369,10 @@ class FlashInferBackend(AttentionBackend):
     def supports_non_causal(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_sliding_window(cls) -> bool:
+        return True
+
     @staticmethod
     def get_impl_cls() -> type["FlashInferImpl"]:
         return FlashInferImpl

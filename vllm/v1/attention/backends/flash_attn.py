@@ -89,6 +89,10 @@ class FlashAttentionBackend(AttentionBackend):
         return "FLASH_ATTN"
 
     @classmethod
+    def supports_sliding_window(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_batch_invariance(cls) -> bool:
         return True
 

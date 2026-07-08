@@ -746,6 +746,10 @@ class AiterFlashAttentionBackend(AttentionBackend):
     def get_name() -> str:
         return "FLASH_ATTN"
 
+    @classmethod
+    def supports_sliding_window(cls) -> bool:
+        return True
+
     @staticmethod
     def get_impl_cls() -> type["AiterFlashAttentionImpl"]:
         return AiterFlashAttentionImpl

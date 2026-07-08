@@ -101,6 +101,10 @@ class FlexAttentionBackend(AttentionBackend):
         return "FLEX_ATTENTION"
 
     @classmethod
+    def supports_sliding_window(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_non_causal(cls) -> bool:
         return True
 
