@@ -8,19 +8,21 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.platforms import current_platform
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.experts.cpu_int4_moe import (
+    CPUExpertsInt4,
+)
+from vllm.model_executor.layers.fused_moe.oracle.w4a8_int8 import (
+    convert_to_w4a8_int8_moe_format,
+)
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import set_random_seed
 
-if not current_platform.is_cpu():
-    pytest.skip("skipping CPU-only tests", allow_module_level=True)
-
-# Check if the dynamic_4bit_int_moe op is available
-if not hasattr(torch.ops._C, "dynamic_4bit_int_moe"):
-    pytest.skip("dynamic_4bit_int_moe op not available", allow_module_level=True)
-
-# Check if KleidiAI ops are available
-if not hasattr(torch.ops.aten, "_dyn_quant_pack_4bit_weight"):
-    pytest.skip("KleidiAI 4-bit ops not available", allow_module_level=True)
+if (
+    not current_platform.is_cpu()
+    or current_platform.get_cpu_architecture() != CpuArchEnum.ARM
+):
+    pytest.skip("skipping Arm CPU-only tests", allow_module_level=True)
 
 
 # Tolerance for INT4 W4A8
@@ -32,49 +34,6 @@ def _silu_and_mul(x: torch.Tensor) -> torch.Tensor:
     """SwiGLU activation: SiLU(gate) * up."""
     d = x.shape[-1] // 2
     return F.silu(x[..., :d]) * x[..., d:]
-
-
-def _pack_int4_weight_to_kleidi(
-    int4_as_int8: torch.Tensor,
-    scales: torch.Tensor,
-    bias: torch.Tensor | None,
-    group_size: int,
-    in_features: int,
-    out_features: int,
-) -> torch.Tensor:
-    """Pack INT4 weights (stored as int8 in [-8,7]) to KleidiAI format.
-
-    Args:
-        int4_as_int8: [out, in] int8 tensor with values in [-8, 7]
-        scales: [out, in//group_size] or [out, 1] for channel-wise
-        bias: [out] optional bias
-        group_size: Quantization group size (-1 for channel-wise)
-        in_features: Input dimension
-        out_features: Output dimension
-
-    Returns:
-        Packed weight tensor in KleidiAI format
-    """
-    # Shift to unsigned nibble [0, 15]
-    tmp = int4_as_int8.add(8)
-    # Pack pairs along input dimension
-    uint8_nibbles = ((tmp[:, 1::2] << 4) | tmp[:, ::2]).to(torch.uint8)
-
-    # Determine scale dtype based on group_size
-    scale_dtype = torch.float32 if group_size == -1 else torch.bfloat16
-    scales_typed = scales.to(scale_dtype)
-    bias_typed = None if bias is None else bias.to(torch.float32)
-
-    # Pack using KleidiAI op
-    actual_group_size = in_features if group_size == -1 else group_size
-    return torch.ops.aten._dyn_quant_pack_4bit_weight(
-        uint8_nibbles,
-        scales_typed,
-        bias_typed,
-        actual_group_size,
-        in_features,
-        out_features,
-    )
 
 
 def _make_int4_moe_weights(
@@ -124,59 +83,29 @@ def _make_int4_moe_weights(
         w13_bias = torch.randn(E, 2 * N, dtype=torch.float32) * 0.01
         w2_bias = torch.randn(E, K, dtype=torch.float32) * 0.01
 
-    # Pack weights for each expert
-    w13_packed_list = []
-    w2_packed_list = []
+    w13_packed, w2_packed, *_ = convert_to_w4a8_int8_moe_format(
+        w13_weight=w13_int4,
+        w2_weight=w2_int4,
+        w13_weight_scale=w13_scales,
+        w2_weight_scale=w2_scales,
+        group_size=group_size,
+        w13_bias=w13_bias if has_bias else None,
+        w2_bias=w2_bias if has_bias else None,
+    )
 
-    for e in range(E):
-        w13_packed_list.append(
-            _pack_int4_weight_to_kleidi(
-                w13_int4[e],
-                w13_scales[e],
-                w13_bias[e] if (has_bias and w13_bias is not None) else None,
-                group_size,
-                K,
-                2 * N,
-            )
-        )
-        w2_packed_list.append(
-            _pack_int4_weight_to_kleidi(
-                w2_int4[e],
-                w2_scales[e],
-                w2_bias[e] if (has_bias and w2_bias is not None) else None,
-                group_size,
-                N,
-                K,
-            )
-        )
+    if group_size == -1:
+        w13_scale = w13_scales.float()
+        w2_scale = w2_scales.float()
+    else:
+        w13_scale = w13_scales.float().repeat_interleave(group_size, dim=-1)
+        w2_scale = w2_scales.float().repeat_interleave(group_size, dim=-1)
 
-    w13_packed = torch.stack(w13_packed_list, dim=0)
-    w2_packed = torch.stack(w2_packed_list, dim=0)
-
-    # Create reference dequantized weights
-    w13_ref = torch.zeros(E, 2 * N, K, dtype=torch.float32)
-    w2_ref = torch.zeros(E, K, N, dtype=torch.float32)
-
-    for e in range(E):
-        # Dequantize w13
-        for i in range(2 * N):
-            for j in range(K):
-                group_idx = 0 if group_size == -1 else (j // group_size)
-                w13_ref[e, i, j] = (
-                    w13_int4[e, i, j].float() * w13_scales[e, i, group_idx].float()
-                )
-                if has_bias and w13_bias is not None:
-                    w13_ref[e, i, j] += w13_bias[e, i].float()
-
-        # Dequantize w2
-        for i in range(K):
-            for j in range(N):
-                group_idx = 0 if group_size == -1 else (j // group_size)
-                w2_ref[e, i, j] = (
-                    w2_int4[e, i, j].float() * w2_scales[e, i, group_idx].float()
-                )
-                if has_bias and w2_bias is not None:
-                    w2_ref[e, i, j] += w2_bias[e, i].float()
+    w13_ref = w13_int4.float() * w13_scale
+    w2_ref = w2_int4.float() * w2_scale
+    if has_bias and w13_bias is not None:
+        w13_ref = w13_ref + w13_bias.float().unsqueeze(-1)
+    if has_bias and w2_bias is not None:
+        w2_ref = w2_ref + w2_bias.float().unsqueeze(-1)
 
     return w13_packed, w2_packed, w13_ref, w2_ref, w13_bias, w2_bias
 
@@ -233,17 +162,20 @@ MoE_CONFIGS = [
     (768, 2048, 16, 4, 64),
 ]
 SEEDS = [0, 42]
+ACTIVATION_DTYPES = [torch.float32, torch.bfloat16, torch.float16]
 
 
 @pytest.mark.parametrize("M", NUM_TOKENS)
 @pytest.mark.parametrize("N,K,E,topk,group_size", MoE_CONFIGS)
 @pytest.mark.parametrize("seed", SEEDS)
-def test_cpu_int4_moe_kernel(M, N, K, E, topk, group_size, seed):
+@pytest.mark.parametrize("activation_dtype", ACTIVATION_DTYPES)
+def test_cpu_int4_moe_kernel(M, N, K, E, topk, group_size, seed, activation_dtype):
     """Test dynamic_4bit_int_moe kernel against dequantized torch reference."""
     set_random_seed(seed)
+    activation = MoEActivation.SILU
 
     # Generate input activations
-    a = torch.randn(M, K, dtype=torch.bfloat16) / (K**0.5)
+    a = torch.randn(M, K, dtype=activation_dtype) / (K**0.5)
 
     # Generate INT4 weights
     w13_packed, w2_packed, w13_ref, w2_ref, w13_bias, w2_bias = _make_int4_moe_weights(
@@ -266,8 +198,6 @@ def test_cpu_int4_moe_kernel(M, N, K, E, topk, group_size, seed):
     )
 
     # Test dynamic_4bit_int_moe kernel
-    # Activation kind: 1 = SwiGLU_Ug (SiLU(u)*g) for OAI-style
-    activation_kind = 1
     apply_router_weight_on_input = False
 
     out = torch.ops._C.dynamic_4bit_int_moe(
@@ -278,14 +208,14 @@ def test_cpu_int4_moe_kernel(M, N, K, E, topk, group_size, seed):
         w2_packed,
         K,  # H (hidden_size / w2_out_features)
         N,  # I (intermediate_size / w2_in_features)
-        2 * N,  # I2 (2*intermediate_size / w13_out_features)
         group_size,
         apply_router_weight_on_input,
-        activation_kind,
+        CPUExpertsInt4._activation_kind(activation),
     )
 
+    assert out.dtype == activation_dtype
     torch.testing.assert_close(
-        ref_out.bfloat16(),
+        ref_out,
         out,
         atol=INT4_W4A8_ATOL,
         rtol=INT4_W4A8_RTOL,
