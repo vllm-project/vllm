@@ -52,15 +52,19 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
 
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         if self.cache_config.use_replayssm_spec:
-            return MambaStateDtypeCalculator.gated_delta_net_spec_cached_state_dtype(
+            return MambaStateDtypeCalculator.gated_delta_net_replayssm_spec_state_dtype(
                 self.model_config.dtype,
                 self.cache_config.mamba_cache_dtype,
                 self.cache_config.mamba_ssm_cache_dtype,
-                self.cache_config.use_replayssm_spec,
             )
-        return MambaStateDtypeCalculator.gated_delta_net_cached_state_dtype(
+        elif self.cache_config.use_replayssm:
+            return MambaStateDtypeCalculator.gated_delta_net_replayssm_state_dtype(
+                self.model_config.dtype,
+                self.cache_config.mamba_cache_dtype,
+                self.cache_config.mamba_ssm_cache_dtype,
+            )
+        return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
             self.model_config.dtype,
             self.cache_config.mamba_cache_dtype,
             self.cache_config.mamba_ssm_cache_dtype,
-            self.cache_config.use_replayssm,
         )

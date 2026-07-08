@@ -515,17 +515,21 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, ...]:
         if vllm_config.cache_config.use_replayssm_spec:
-            return MambaStateDtypeCalculator.gated_delta_net_spec_cached_state_dtype(
+            return MambaStateDtypeCalculator.gated_delta_net_replayssm_spec_state_dtype(
                 vllm_config.model_config.dtype,
                 vllm_config.cache_config.mamba_cache_dtype,
                 vllm_config.cache_config.mamba_ssm_cache_dtype,
-                vllm_config.cache_config.use_replayssm_spec,
             )
-        return MambaStateDtypeCalculator.gated_delta_net_cached_state_dtype(
+        elif vllm_config.cache_config.use_replayssm:
+            return MambaStateDtypeCalculator.gated_delta_net_replayssm_state_dtype(
+                vllm_config.model_config.dtype,
+                vllm_config.cache_config.mamba_cache_dtype,
+                vllm_config.cache_config.mamba_ssm_cache_dtype,
+            )
+        return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
-            vllm_config.cache_config.use_replayssm,
         )
 
     @classmethod
@@ -541,26 +545,34 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
             else 0
         )
         if vllm_config.cache_config.use_replayssm_spec:
-            return MambaStateShapeCalculator.gated_delta_net_spec_cached_state_shape(
+            return MambaStateShapeCalculator.gated_delta_net_replayssm_spec_state_shape(
                 tp_size,
                 hf_config.linear_num_key_heads,
                 hf_config.linear_num_value_heads,
                 hf_config.linear_key_head_dim,
                 hf_config.linear_value_head_dim,
                 hf_config.linear_conv_kernel_dim,
-                vllm_config.cache_config.use_replayssm_spec,
                 vllm_config.cache_config.replayssm_buffer_len,
                 num_spec,
             )
-        return MambaStateShapeCalculator.gated_delta_net_cached_state_shape(
+        elif vllm_config.cache_config.use_replayssm:
+            return MambaStateShapeCalculator.gated_delta_net_replayssm_state_shape(
+                tp_size,
+                hf_config.linear_num_key_heads,
+                hf_config.linear_num_value_heads,
+                hf_config.linear_key_head_dim,
+                hf_config.linear_value_head_dim,
+                hf_config.linear_conv_kernel_dim,
+                vllm_config.cache_config.replayssm_buffer_len,
+                num_spec,
+            )
+        return MambaStateShapeCalculator.gated_delta_net_state_shape(
             tp_size,
             hf_config.linear_num_key_heads,
             hf_config.linear_num_value_heads,
             hf_config.linear_key_head_dim,
             hf_config.linear_value_head_dim,
             hf_config.linear_conv_kernel_dim,
-            vllm_config.cache_config.use_replayssm,
-            vllm_config.cache_config.replayssm_buffer_len,
             num_spec,
         )
 

@@ -26,8 +26,8 @@ from vllm.model_executor.layers.fla.ops import (
 )
 from vllm.model_executor.layers.fla.ops import (
     fused_post_conv_prep,
-    fused_recurrent_gated_delta_rule_replayssm,
     fused_recurrent_gated_delta_rule_packed_decode,
+    fused_recurrent_gated_delta_rule_replayssm,
     fused_sigmoid_gating_delta_rule_update,
 )
 from vllm.model_executor.layers.fla.ops.chunk import l2norm_fwd
@@ -423,26 +423,34 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self,
     ) -> tuple[tuple[int, ...], ...]:
         if self.cache_config.use_replayssm_spec:
-            return MambaStateShapeCalculator.gated_delta_net_spec_cached_state_shape(
+            return MambaStateShapeCalculator.gated_delta_net_replayssm_spec_state_shape(
                 self.tp_size,
                 self.num_k_heads,
                 self.num_v_heads,
                 self.head_k_dim,
                 self.head_v_dim,
                 self.conv_kernel_size,
-                self.cache_config.use_replayssm_spec,
                 self.cache_config.replayssm_buffer_len,
                 self.num_spec,
             )
-        return MambaStateShapeCalculator.gated_delta_net_cached_state_shape(
+        elif self.cache_config.use_replayssm:
+            return MambaStateShapeCalculator.gated_delta_net_replayssm_state_shape(
+                self.tp_size,
+                self.num_k_heads,
+                self.num_v_heads,
+                self.head_k_dim,
+                self.head_v_dim,
+                self.conv_kernel_size,
+                self.cache_config.replayssm_buffer_len,
+                self.num_spec,
+            )
+        return MambaStateShapeCalculator.gated_delta_net_state_shape(
             self.tp_size,
             self.num_k_heads,
             self.num_v_heads,
             self.head_k_dim,
             self.head_v_dim,
             self.conv_kernel_size,
-            self.cache_config.use_replayssm,
-            self.cache_config.replayssm_buffer_len,
             self.num_spec,
         )
 
@@ -580,9 +588,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # Cached-SPEC decode kernel (gdn_replayssm_spec_decode). When enabled, the
         # GDN page grows to the same 5-tuple (fp32 checkpoint) and the spec verify
         # path decodes through the circular cached kernel.
-        self.use_cache_spec_kernel = (
-            self.cache_config.use_replayssm_spec
-        )
+        self.use_cache_spec_kernel = self.cache_config.use_replayssm_spec
         self.max_spec_len = 1 + self.num_spec
 
         compilation_config = get_current_vllm_config().compilation_config
@@ -1393,7 +1399,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=spec_query_start_loc,
                 # Spec verify window = 1 + num_spec. Use the constant rather than
-                # the block-table width so the cached-spec path can request num_speculative_blocks=0 
+                # the block-table width so the cached-spec path can request
+                # num_speculative_blocks=0
                 max_query_len=self.max_spec_len,
                 validate_data=False,
             )
@@ -1438,9 +1445,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if spec_sequence_masks is not None and self.use_cache_spec_kernel:
             query_spec, key_spec, value_spec = None, None, None
         else:
-            query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(
-                mixed_qkv_spec
-            )
+            query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
 
         # Split mixed non-spec-decode+prefill to process independently
         split_non_spec = (

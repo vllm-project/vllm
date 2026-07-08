@@ -32,17 +32,17 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
-from vllm.model_executor.layers.mamba.ops.ssd_combined import (
-    mamba_chunk_scan_combined_varlen,
-)
-from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_state_and_output import (  # noqa: E501
-    selective_state_update_replayssm_state_and_output,
-)
 from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_output_only import (  # noqa: E501
     selective_state_update_replayssm_output_only,
 )
 from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_spec import (
     selective_state_update_replayssm_spec,
+)
+from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_state_and_output import (  # noqa: E501
+    selective_state_update_replayssm_state_and_output,
+)
+from vllm.model_executor.layers.mamba.ops.ssd_combined import (
+    mamba_chunk_scan_combined_varlen,
 )
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import selective_state_update
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -519,9 +519,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             else "state_and_output"
         )
         self.use_cache_spec_kernel = (
-            cache_config.use_replayssm_spec
-            if cache_config is not None
-            else False
+            cache_config.use_replayssm_spec if cache_config is not None else False
         )
         if (
             self.use_cache_kernel or self.use_cache_spec_kernel
@@ -755,8 +753,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             elif self.use_cache_kernel:
                 if len(self.kv_cache) != 5:
                     raise ValueError(
-                        "Mamba2 cached decode kernel requires five Mamba "
-                        "state tensors"
+                        "Mamba2 cached decode kernel requires five Mamba state tensors"
                     )
                 x_cache, dt_cache, B_cache = self.kv_cache[2:]
             else:
@@ -1142,8 +1139,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             elif self.use_cache_kernel:
                 if is_mamba_cache_all:
                     raise ValueError(
-                        "Mamba2 cached decode kernel requires "
-                        "mamba_cache_mode='none'"
+                        "Mamba2 cached decode kernel requires mamba_cache_mode='none'"
                     )
                 if num_accepted_tokens is not None or query_start_loc_d is not None:
                     raise ValueError(
@@ -1230,22 +1226,26 @@ class MambaMixer2(MambaBase, PluggableLayer):
         assert self.model_config is not None
         assert self.cache_config is not None
         if self.use_cache_spec_kernel:
-            return MambaStateDtypeCalculator.mamba2_spec_cached_state_dtype(
+            return MambaStateDtypeCalculator.mamba2_replayssm_spec_state_dtype(
                 self.model_config.dtype,
                 self.cache_config.mamba_cache_dtype,
                 self.cache_config.mamba_ssm_cache_dtype,
-                use_replayssm_spec=self.use_cache_spec_kernel,
             )
-        return MambaStateDtypeCalculator.mamba2_cached_state_dtype(
+        elif self.use_cache_kernel:
+            return MambaStateDtypeCalculator.mamba2_replayssm_state_dtype(
+                self.model_config.dtype,
+                self.cache_config.mamba_cache_dtype,
+                self.cache_config.mamba_ssm_cache_dtype,
+            )
+        return MambaStateDtypeCalculator.mamba2_state_dtype(
             self.model_config.dtype,
             self.cache_config.mamba_cache_dtype,
             self.cache_config.mamba_ssm_cache_dtype,
-            use_replayssm=self.use_cache_kernel,
         )
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
         if self.use_cache_spec_kernel:
-            return MambaStateShapeCalculator.mamba2_spec_cached_state_shape(
+            return MambaStateShapeCalculator.mamba2_replayssm_spec_state_shape(
                 intermediate_size=self.intermediate_size,
                 tp_world_size=get_tensor_model_parallel_world_size(),
                 n_groups=self.n_groups,
@@ -1254,10 +1254,21 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 state_size=self.ssm_state_size,
                 conv_kernel=self.conv_kernel_size,
                 num_spec=self.num_spec,
-                use_replayssm_spec=self.use_cache_spec_kernel,
                 replayssm_buffer_len=self.max_cache_len,
             )
-        return MambaStateShapeCalculator.mamba2_cached_state_shape(
+        elif self.use_cache_kernel:
+            return MambaStateShapeCalculator.mamba2_replayssm_state_shape(
+                intermediate_size=self.intermediate_size,
+                tp_world_size=get_tensor_model_parallel_world_size(),
+                n_groups=self.n_groups,
+                num_heads=self.num_heads,
+                head_dim=self.head_dim,
+                state_size=self.ssm_state_size,
+                conv_kernel=self.conv_kernel_size,
+                num_spec=self.num_spec,
+                replayssm_buffer_len=self.max_cache_len,
+            )
+        return MambaStateShapeCalculator.mamba2_state_shape(
             intermediate_size=self.intermediate_size,
             tp_world_size=get_tensor_model_parallel_world_size(),
             n_groups=self.n_groups,
@@ -1266,8 +1277,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
             state_size=self.ssm_state_size,
             conv_kernel=self.conv_kernel_size,
             num_spec=self.num_spec,
-            use_replayssm=self.use_cache_kernel,
-            replayssm_buffer_len=self.max_cache_len,
         )
 
     @property
