@@ -17,7 +17,7 @@ DEFAULT_REPO_SLUG="vllm-project/vllm"
 DEFAULT_CI_HCL_SOURCE="docker/ci-rocm.hcl"
 DEFAULT_CI_BASE_CONTENT_FILES="requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt docker/Dockerfile.rocm_base docker/ci-rocm.hcl docker/docker-bake-rocm.hcl tools/install_torchcodec_rocm.sh tools/install_protoc.sh rust-toolchain.toml tests/vllm_test_utils .buildkite/scripts/ci-bake-rocm.sh .buildkite/scripts/rocm/build-ci-base.sh"
 DEFAULT_CI_BASE_DOCKERFILE="docker/Dockerfile.rocm"
-DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_input_0 rust-toolchain build_rixl build_rocshmem build_deepep mori_base ci_base"
+DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust-toolchain-input rust-toolchain build_rixl build_rocshmem build_deepep mori_base ci_base"
 DEFAULT_CI_BASE_METADATA_VERSION="1"
 IMAGE_EXISTED_BEFORE_BUILD=0
 
@@ -1228,6 +1228,7 @@ compute_rocm_csrc_content_hash() {
     local -a content_paths=(
         "requirements/common.txt"
         "requirements/rocm.txt"
+        "pyproject.toml"
         "setup.py"
         "CMakeLists.txt"
         "cmake"
@@ -1276,7 +1277,10 @@ compute_rocm_rust_content_hash() {
     local dockerfile_rocm=""
     local -a content_paths=(
         "requirements/build/rust.txt"
-        "rust"
+        "rust/Cargo.lock"
+        "rust/Cargo.toml"
+        "rust/proto"
+        "rust/src"
         "rust-toolchain.toml"
         "tools/build_rust.py"
         "tools/install_protoc.sh"
@@ -1287,7 +1291,7 @@ compute_rocm_rust_content_hash() {
     bake_dir=$(dirname "${VLLM_BAKE_FILE}")
     dockerfile_rocm="${bake_dir}/Dockerfile.rocm"
     mapfile -t content_args < <(
-        get_content_arg_names "${dockerfile_rocm}" "base rust_input_1 rust-toolchain rust-build" "${ROCM_RUST_CONTENT_ARGS:-}"
+        get_content_arg_names "${dockerfile_rocm}" "base rust_toolchain_input_1 rust-toolchain-input rust_input_1 rust-input rust-toolchain rust-build" "${ROCM_RUST_CONTENT_ARGS:-}"
     )
 
     {
@@ -1295,9 +1299,9 @@ compute_rocm_rust_content_hash() {
         printf 'dockerfile:%s\n' "${dockerfile_rocm}"
         printf 'resolved-build-args:\n'
         hash_dockerfile_arg_values "${dockerfile_rocm}" "${content_args[@]}"
-        printf 'dockerfile-stages:base rust_input_0 rust_input_1 rust-toolchain rust-build\n'
+        printf 'dockerfile-stages:base rust_toolchain_input_0 rust_toolchain_input_1 rust-toolchain-input rust_input_0 rust_input_1 rust-input rust-toolchain rust-build\n'
         if [[ -f "${dockerfile_rocm}" ]]; then
-            hash_dockerfile_stages "${dockerfile_rocm}" "base rust_input_0 rust_input_1 rust-toolchain rust-build"
+            hash_dockerfile_stages "${dockerfile_rocm}" "base rust_toolchain_input_0 rust_toolchain_input_1 rust-toolchain-input rust_input_0 rust_input_1 rust-input rust-toolchain rust-build"
         else
             printf 'missing:%s\n' "${dockerfile_rocm}"
         fi
@@ -1375,7 +1379,7 @@ write_rocm_build_arg_override() {
                 "${CI_BASE_DOCKERFILE_STAGES:-${DEFAULT_CI_BASE_DOCKERFILE_STAGES}}" \
                 "${CI_BASE_CONTENT_ARGS:-}"
             get_content_arg_names "${dockerfile_rocm}" "base csrc-build" "${ROCM_CSRC_CONTENT_ARGS:-}"
-            get_content_arg_names "${dockerfile_rocm}" "base rust_input_1 rust-toolchain rust-build" "${ROCM_RUST_CONTENT_ARGS:-}"
+            get_content_arg_names "${dockerfile_rocm}" "base rust_toolchain_input_1 rust-toolchain-input rust_input_1 rust-input rust-toolchain rust-build" "${ROCM_RUST_CONTENT_ARGS:-}"
         } | awk 'NF && !seen[$0]++'
     )
 

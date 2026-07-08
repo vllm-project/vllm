@@ -124,16 +124,40 @@ ONBUILD RUN git clone ${VLLM_REPO} \
 FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 
 # -----------------------
+# Rust/protoc toolchain inputs
+#
+# Keep these separate from Rust source inputs so Rust source-only changes do not
+# invalidate the long-lived ci_base image that carries the toolchain.
+FROM scratch AS rust_toolchain_input_0
+COPY rust-toolchain.toml /rust-toolchain-input/vllm/rust-toolchain.toml
+COPY tools/install_protoc.sh /rust-toolchain-input/vllm/tools/install_protoc.sh
+
+FROM base AS rust_toolchain_input_1
+ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
+ARG VLLM_BRANCH="main"
+RUN git clone --no-checkout --filter=blob:none ${VLLM_REPO} /rust-toolchain-input/vllm \
+    && cd /rust-toolchain-input/vllm \
+    && git fetch -v --prune -- origin ${VLLM_BRANCH} \
+    && git sparse-checkout init --no-cone \
+    && git sparse-checkout set \
+        rust-toolchain.toml \
+        tools/install_protoc.sh \
+    && git checkout FETCH_HEAD
+
+FROM rust_toolchain_input_${REMOTE_VLLM} AS rust-toolchain-input
+
+# -----------------------
 # Rust build inputs
 #
 # REMOTE_VLLM=0: use only the local files that can affect Rust artifacts.
 # REMOTE_VLLM=1: fetch only those same files from the requested remote ref.
 FROM scratch AS rust_input_0
 COPY requirements/build/rust.txt /rust-input/vllm/requirements/build/rust.txt
-COPY rust /rust-input/vllm/rust
+COPY rust/Cargo.lock rust/Cargo.toml /rust-input/vllm/rust/
+COPY rust/proto /rust-input/vllm/rust/proto
+COPY rust/src /rust-input/vllm/rust/src
 COPY rust-toolchain.toml /rust-input/vllm/rust-toolchain.toml
 COPY tools/build_rust.py /rust-input/vllm/tools/build_rust.py
-COPY tools/install_protoc.sh /rust-input/vllm/tools/install_protoc.sh
 COPY build_rust.sh /rust-input/vllm/build_rust.sh
 
 FROM base AS rust_input_1
@@ -145,10 +169,12 @@ RUN git clone --no-checkout --filter=blob:none ${VLLM_REPO} /rust-input/vllm \
     && git sparse-checkout init --no-cone \
     && git sparse-checkout set \
         requirements/build/rust.txt \
-        rust \
+        rust/Cargo.lock \
+        rust/Cargo.toml \
+        rust/proto/** \
+        rust/src/** \
         rust-toolchain.toml \
         tools/build_rust.py \
-        tools/install_protoc.sh \
         build_rust.sh \
     && git checkout FETCH_HEAD
 
@@ -167,10 +193,10 @@ RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
         ca-certificates curl unzip \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=rust-input /rust-input/vllm/tools/install_protoc.sh /tmp/install_protoc.sh
+COPY --from=rust-toolchain-input /rust-toolchain-input/vllm/tools/install_protoc.sh /tmp/install_protoc.sh
 RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
 
-COPY --from=rust-input /rust-input/vllm/rust-toolchain.toml /tmp/rust-toolchain.toml
+COPY --from=rust-toolchain-input /rust-toolchain-input/vllm/rust-toolchain.toml /tmp/rust-toolchain.toml
 RUN TOOLCHAIN="$(grep '^channel' /tmp/rust-toolchain.toml | sed 's/.*= *"\(.*\)"/\1/')" \
     && if ! command -v rustup >/dev/null 2>&1; then \
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -242,8 +268,8 @@ COPY requirements/common.txt requirements/common.txt
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     uv pip install --system -r requirements/rocm.txt
 
-# pyproject.toml is bind-mounted in the RUN step so metadata-only changes do
-# not invalidate the expensive native build layer.
+# pyproject.toml is bind-mounted so it is not persisted in the csrc-build image,
+# but it still participates in the BuildKit cache key for this RUN step.
 COPY setup.py CMakeLists.txt ./
 COPY tools/build_rust.py tools/build_rust.py
 COPY cmake cmake/
