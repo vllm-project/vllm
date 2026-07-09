@@ -1,6 +1,5 @@
-use std::sync::Arc;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -48,6 +47,9 @@ pub struct AppState {
     model_path: Option<String>,
     /// Lazily initialized runtime for heavyweight request paths.
     request_runtime: OnceLock<BackgroundShutdownRuntime>,
+    /// Profiler mode that registers `/start_profile` and `/stop_profile`
+    /// routes when present.
+    pub profiler: Option<String>,
 }
 
 impl AppState {
@@ -75,6 +77,7 @@ impl AppState {
             lora_manager: LoraManager::new(),
             model_path: None,
             request_runtime: OnceLock::new(),
+            profiler: None,
         }
     }
 
@@ -93,6 +96,12 @@ impl AppState {
     /// Set the backend model path reported as `root` for base-model cards.
     pub fn with_model_path(mut self, model_path: String) -> Self {
         self.model_path = Some(model_path);
+        self
+    }
+
+    /// Set the profiler mode that enables `/start_profile` and `/stop_profile`.
+    pub fn with_profiler(mut self, profiler: Option<String>) -> Self {
+        self.profiler = profiler;
         self
     }
 

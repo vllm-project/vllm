@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from math import prod
 from typing import Any, cast
@@ -12,8 +12,10 @@ from vllm.config import (
     get_layers_from_vllm_config,
     set_current_vllm_config,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
@@ -23,7 +25,9 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
+    KVQuantMode,
     MambaSpec,
+    TQFullAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
@@ -33,6 +37,8 @@ from vllm.v1.worker.utils import (
     bind_kv_cache,
     prepare_kernel_block_sizes,
 )
+
+logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -300,12 +306,21 @@ def _reshape_kv_cache(
                     kv_cache_spec.storage_block_size // kernel_block_size
                 )
                 kernel_num_blocks = num_blocks * num_blocks_per_kv_block
+                # Skipped layers (--kv-cache-dtype-skip-layers) keep the
+                # unquantized shape; only the quantized primary uses the
+                # quantized cache dtype's (possibly packed) layout.
+                layer_cache_dtype = (
+                    "auto"
+                    if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
+                    and not isinstance(kv_cache_spec, TQFullAttentionSpec)
+                    else cache_dtype
+                )
                 kv_cache_shape = group.backend.get_kv_cache_shape(
                     kernel_num_blocks,
                     kernel_block_size,
                     kv_cache_spec.num_kv_heads,
                     kv_cache_spec.head_size,
-                    cache_dtype_str=cache_dtype,
+                    cache_dtype_str=layer_cache_dtype,
                 )
 
                 # FIXME(woosuk): Add kv_cache_stride_order to all attention backends.
@@ -356,12 +371,91 @@ def _reshape_kv_cache(
             kernel_block_sizes=kernel_block_sizes,
             cache_dtype=cache_dtype,
         )
+    elif has_attn and kv_cache_config is not None:
+        _align_mixed_attention_kv_cache_views(
+            attn_groups=attn_groups,
+            kv_caches=kv_caches,
+            kernel_block_sizes=kernel_block_sizes,
+            cache_dtype=cache_dtype,
+            kv_cache_config=kv_cache_config,
+        )
 
     # Map any sharing layers to their target layer's KV cache.
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
         kv_caches[layer_name] = kv_caches[target_layer_name]
 
     return kv_caches
+
+
+def _align_mixed_attention_kv_cache_views(
+    attn_groups: Iterable[AttentionGroup],
+    kv_caches: dict[str, Any],
+    kernel_block_sizes: list[int],
+    cache_dtype: str,
+    kv_cache_config: KVCacheConfig,
+) -> None:
+    """Align shared attention KV views when backends disagree on layout.
+
+    Encoder-decoder models can share one raw allocation between decoder
+    self-attention (K/V-first ROCM_ATTN, block dim 1) and cross-attention
+    (blocks-first backends, block dim 0). Keep the physical storage in the
+    K/V-first layout expected by ROCM_ATTN, and restride the blocks-first
+    logical views so block IDs address the same bytes.
+    """
+    block_dims_by_layer: dict[str, int] = {}
+    for group in attn_groups:
+        kv_cache_spec = group.kv_cache_spec
+        if not isinstance(kv_cache_spec, AttentionSpec):
+            continue
+        if group.kv_cache_group_id >= len(kernel_block_sizes):
+            continue
+        block_dim = group.backend.get_kv_cache_block_dim(
+            kernel_block_sizes[group.kv_cache_group_id],
+            kv_cache_spec.num_kv_heads,
+            kv_cache_spec.head_size,
+            cache_dtype_str=cache_dtype,
+        )
+        for layer_name in group.layer_names:
+            if layer_name in kv_caches:
+                block_dims_by_layer[layer_name] = block_dim
+
+    for kv_tensor in kv_cache_config.kv_cache_tensors:
+        if kv_tensor.block_stride > 0:
+            continue
+        shared_block_dims = {
+            block_dims_by_layer[layer_name]
+            for layer_name in kv_tensor.shared_by
+            if layer_name in block_dims_by_layer
+        }
+        if 0 not in shared_block_dims or 1 not in shared_block_dims:
+            continue
+
+        for layer_name in kv_tensor.shared_by:
+            if block_dims_by_layer.get(layer_name) == 0:
+                _restride_blocks_first_kv_cache_to_kv_first_storage(
+                    kv_caches[layer_name]
+                )
+
+
+def _restride_blocks_first_kv_cache_to_kv_first_storage(
+    kv_cache: torch.Tensor,
+) -> None:
+    assert kv_cache.ndim >= 3
+    assert kv_cache.shape[1] == 2
+    page_size = kv_cache.shape[2:].numel()
+    num_blocks = kv_cache.shape[0]
+    expected_tail_stride = torch.empty(kv_cache.shape[2:]).stride()
+    if kv_cache.stride()[2:] != expected_tail_stride:
+        logger.warning_once(
+            "Skipping mixed KV-cache layout alignment for a non-NHD "
+            "blocks-first attention view with stride %s.",
+            kv_cache.stride(),
+        )
+        return
+    kv_cache.as_strided_(
+        size=kv_cache.shape,
+        stride=(page_size, num_blocks * page_size, *expected_tail_stride),
+    )
 
 
 def _update_hybrid_attention_layout(
@@ -377,11 +471,21 @@ def _update_hybrid_attention_layout(
         kv_cache_spec = group.kv_cache_spec
         if not isinstance(kv_cache_spec, AttentionSpec):
             continue
+        # Mirror the per-layer dtype selection used when building the shape
+        # above. The block-dim index is dtype-independent for current backends
+        # (quantization only changes the last dim), so this is a no-op today,
+        # but it keeps both call sites consistent for skip layers.
+        layer_cache_dtype = (
+            "auto"
+            if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
+            and not isinstance(kv_cache_spec, TQFullAttentionSpec)
+            else cache_dtype
+        )
         block_dim = group.backend.get_kv_cache_block_dim(
             kernel_block_sizes[group.kv_cache_group_id],
             kv_cache_spec.num_kv_heads,
             kv_cache_spec.head_size,
-            cache_dtype_str=cache_dtype,
+            cache_dtype_str=layer_cache_dtype,
         )
         # if the first dim of the kvcache's layout is already num_blocks, continue
         if block_dim == 0:
@@ -466,9 +570,11 @@ def build_attn_metadata(
     seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     dcp_local_seq_lens: torch.Tensor | None = None,
     positions: torch.Tensor | None = None,
+    mm_req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None,
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
-    causal: bool = True,
+    causal: bool | Mapping[int, bool] = True,
+    rswa_prefix_lens: torch.Tensor | None = None,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
     if dcp_local_seq_lens is not None:
@@ -481,6 +587,8 @@ def build_attn_metadata(
     for i in range(num_kv_cache_groups):
         block_table = block_tables[i]
         slot_mapping = slot_mappings[i]
+        # Per-group causal for hybrid drafters (mixed SWA/full attention).
+        group_causal = causal if isinstance(causal, bool) else causal.get(i, True)
 
         common_attn_metadata_extra_kwargs = (
             model_specific_attn_metadata.get_extra_common_attn_kwargs(i, num_reqs)
@@ -498,9 +606,11 @@ def build_attn_metadata(
             max_query_len=max_query_len,
             block_table_tensor=block_table,
             slot_mapping=slot_mapping,
-            causal=causal,
+            causal=group_causal,
             dcp_local_seq_lens=dcp_local_seq_lens,
             positions=positions,
+            mm_req_doc_ranges=mm_req_doc_ranges,
+            rswa_prefix_lens=rswa_prefix_lens,
             **common_attn_metadata_extra_kwargs,
         )
 
@@ -527,3 +637,27 @@ def build_attn_metadata(
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
     return attn_metadata
+
+
+def compute_mm_prefix_ranges(
+    req_ids: list[str],
+    mm_features: dict[str, list[MultiModalFeatureSpec]],
+    sliding_window: int | None = None,
+) -> dict[int, list[tuple[int, int]]]:
+    """Compute PrefixLM bidirectional ranges for multimodal tokens.
+
+    Ranges exceeding sliding_window are skipped to prevent early tokens
+    from attending across the entire image span.
+    """
+    req_doc_ranges: dict[int, list[tuple[int, int]]] = {}
+    for req_idx, req_id in enumerate(req_ids):
+        image_doc_ranges = []
+        for mm_feature in mm_features.get(req_id, ()):
+            if mm_feature.modality not in ("image", "video"):
+                continue
+            for r in mm_feature.mm_position.extract_embeds_range():
+                if sliding_window is not None and (r[1] - r[0] + 1) > sliding_window:
+                    continue
+                image_doc_ranges.append(r)
+        req_doc_ranges[req_idx] = image_doc_ranges
+    return req_doc_ranges

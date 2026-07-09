@@ -53,14 +53,14 @@ def _make_runner(
 
 
 def _gather(runner: EncoderRunner, *, num_scheduled: int, draft_lookahead: int):
-    # Single prefilling request, computed_prefill=0, prefill_len large.
+    # Single prefilling request, num_computed_tokens=0, prefill_len large.
     return runner.gather_mm_embeddings(
         req_ids=["req0"],
         total_num_scheduled_tokens=num_scheduled,
         num_scheduled_tokens=np.array([num_scheduled]),
         query_start_loc=np.array([0]),
         prefill_lens=np.array([1000]),
-        computed_prefill_lens=np.array([0]),
+        num_computed_tokens=np.array([0]),
         draft_lookahead=draft_lookahead,
     )
 
@@ -147,7 +147,7 @@ def test_multi_request_batch_gathers_per_request(draft_lookahead):
         num_scheduled_tokens=np.array([8, 8]),
         query_start_loc=np.array([0, 8]),
         prefill_lens=np.array([1000, 1000]),
-        computed_prefill_lens=np.array([0, 0]),
+        num_computed_tokens=np.array([0, 0]),
         draft_lookahead=draft_lookahead,
     )
 

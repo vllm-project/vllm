@@ -267,7 +267,7 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
   TORCH_CHECK_EQ(output_size_2 % gemm_n_tile_size, 0);
   TORCH_CHECK_EQ(output_size_13 / 2, input_size_2);
 
-  const int32_t thread_num = omp_get_max_threads();
+  const int32_t thread_num = cpu_utils::get_max_threads();
 
   const int32_t w13_input_buffer_size = cpu_utils::round_up<64>(
       gemm_m_tile_size * input_size_13 * sizeof(scalar_t));

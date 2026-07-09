@@ -74,6 +74,17 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+impl Error {
+    /// Whether this error represents invalid user request parameters.
+    pub fn is_request_validation_error(&self) -> bool {
+        match self {
+            Self::PromptTooLong { .. } => true,
+            Self::Text(error) => error.is_request_validation_error(),
+            _ => false,
+        }
+    }
+}
+
 /// Format the available-parser suffix used in user-facing error messages.
 fn available_parser_hint(available_names: &[String]) -> String {
     if available_names.is_empty() {
