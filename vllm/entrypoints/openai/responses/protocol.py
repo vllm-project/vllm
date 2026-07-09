@@ -171,6 +171,7 @@ class ResponsesRequest(OpenAIBaseModel):
     top_logprobs: int | None = 0
     top_p: float | None = None
     top_k: int | None = None
+    min_p: float | None = None
     truncation: Literal["auto", "disabled"] | None = "disabled"
     user: str | None = None
     skip_special_tokens: bool = True
@@ -337,6 +338,7 @@ class ResponsesRequest(OpenAIBaseModel):
         "temperature": 1.0,
         "top_p": 1.0,
         "top_k": 0,
+        "min_p": 0.0,
     }
 
     def to_sampling_params(
@@ -361,6 +363,10 @@ class ResponsesRequest(OpenAIBaseModel):
         if (top_k := self.top_k) is None:
             top_k = default_sampling_params.get(
                 "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"]
+            )
+        if (min_p := self.min_p) is None:
+            min_p = default_sampling_params.get(
+                "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"]
             )
 
         if (repetition_penalty := self.repetition_penalty) is None:
@@ -405,6 +411,7 @@ class ResponsesRequest(OpenAIBaseModel):
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
+            min_p=min_p,
             max_tokens=max_tokens,
             logprobs=self.top_logprobs if self.is_include_output_logprobs() else None,
             stop=stop,
