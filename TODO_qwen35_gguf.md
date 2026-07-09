@@ -74,13 +74,14 @@ Remote geht direkt: `--model unsloth/Qwen3.5-2B-GGUF:Q8_0 --tokenizer Qwen/Qwen3
 | Qwen3.5-2B Q8_0, TP=1 und TP=2 | ✅ kohärent |
 | Qwen3.6-27B heretic-v2 Q6_K, TP=2 | ✅ kohärent, Load 11.5 GiB/Rank |
 | MTP-Spec-Decode (27B, num_speculative_tokens=3) | ✅ Acceptance 62–80 %, mean accepted len 2.85–3.39 |
-| Benchmark 27B+MTP (max-num-batched-tokens 1600) | Decode 43–57 tok/s, Prefill ~155 tok/s |
+| Benchmark 27B+MTP (max-num-batched-tokens 1600) | Decode 41–58 tok/s, Prefill 1120 tok/s (7k-Token-TTFT 6.3 s) |
 
 ## Bekannte Grenzen / offene Punkte
 
-- **Prefill-Durchsatz** (~155 tok/s) weit unter AWQ-Niveau — die
-  GGUF-MMQ/Dequant-Kernel sind nicht auf Marlin/Machete-Stand
-  ("under-optimized"). Größte Optimierungsbaustelle im Plugin.
+- ~~Prefill-Durchsatz~~ gefixt: MMQ-Kernel werden nur noch bis
+  `VLLM_GGUF_MMQ_MAX_TOKENS` (Default 16) genutzt, größere Batches gehen
+  über Dequant+cuBLAS → Prefill 156 → 1120 tok/s (7.2×) bei
+  unverändertem Decode.
 - `out_proj` muss blockaligniert quantisiert sein (Q8_0/Q4_0/...; Q6_K mit
   head_v_dim=128 nicht invertierbar → klarer Fehler mit Hinweis).
 - mmproj/Vision (multimodal) nicht unterstützt — Text-only.
