@@ -6434,7 +6434,36 @@ class GPUModelRunner(
         kv_cache_spec = self.get_kv_cache_spec()
         KVCacheSpecRegistry.check_kv_cache_spec_registry(kv_cache_spec)
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
-        min_blocks = self.compilation_config.max_cudagraph_capture_size or 1
+        max_capture_tokens = self.compilation_config.max_cudagraph_capture_size
+        if max_capture_tokens is None:
+            min_blocks = 1
+        else:
+            cp_size = get_total_cp_world_size()
+            block_requirements: list[int] = []
+            has_mamba_cache = False
+            for group in kv_cache_groups:
+                kv_cache_spec = group.kv_cache_spec
+                if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+                    continue
+                if isinstance(kv_cache_spec, MambaSpec):
+                    has_mamba_cache = True
+                    block_requirements.append(self.max_num_reqs)
+                else:
+                    block_requirements.append(
+                        cdiv(max_capture_tokens, kv_cache_spec.block_size * cp_size)
+                    )
+            min_blocks = max(
+                1,
+                *block_requirements,
+            )
+            logger.info(
+                "Using %d KV blocks for CUDA graph profiling "
+                "(max_capture_tokens=%d, cp_size=%d, has_mamba_cache=%s)",
+                min_blocks,
+                max_capture_tokens,
+                cp_size,
+                has_mamba_cache,
+            )
 
         # Temporarily change num_gpu_blocks_override to allocate a minimal KV cache
         saved_override = self.cache_config.num_gpu_blocks_override
