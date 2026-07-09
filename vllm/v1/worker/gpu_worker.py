@@ -1225,18 +1225,24 @@ class Worker(WorkerBase):
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
-    def start_weight_update(self, include_draft: bool = False) -> None:
+    def start_weight_update(self) -> None:
         """
         Start a new weight update session.
 
         Delegates engine-specific preparation (e.g. layerwise reload setup) to
         the configured weight transfer engine. The worker only tracks that a
         session is active.
-
-        Args:
-            include_draft: If True, load this session's chunks into the
-                speculative draft model instead of the target model.
         """
+        self._start_weight_update()
+
+    def start_draft_weight_update(self) -> None:
+        """
+        Like start_weight_update, but retargets the engine at the speculative
+        draft model for this session.
+        """
+        self._start_weight_update(is_draft=True)
+
+    def _start_weight_update(self, is_draft: bool = False) -> None:
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
 
@@ -1247,7 +1253,7 @@ class Worker(WorkerBase):
             )
 
         try:
-            if include_draft:
+            if is_draft:
                 self._set_draft_weight_update_target()
             self.weight_transfer_engine.start_weight_update()
         except BaseException:
@@ -1261,8 +1267,8 @@ class Worker(WorkerBase):
 
         start_weight_update must be called before update_weights and
         finish_weight_update must be called after all chunks have been sent.
-        Whether chunks load into the target or draft model is decided once by
-        start_weight_update(include_draft=...).
+        Every chunk loads into whichever model the session's start_weight_update
+        / start_draft_weight_update call selected.
 
         Args:
             update_info: Dictionary containing backend-specific update info

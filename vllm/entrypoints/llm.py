@@ -873,11 +873,13 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
         )
 
-    def start_weight_update(self, include_draft: bool = False) -> None:
+    def start_weight_update(self) -> None:
         """Start a new weight update."""
-        self.llm_engine.collective_rpc(
-            "start_weight_update", kwargs={"include_draft": include_draft}
-        )
+        self.llm_engine.collective_rpc("start_weight_update")
+
+    def start_draft_weight_update(self) -> None:
+        """Start a new weight update targeting the speculative draft model."""
+        self.llm_engine.collective_rpc("start_draft_weight_update")
 
     def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
         """
