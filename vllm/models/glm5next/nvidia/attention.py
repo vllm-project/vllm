@@ -416,7 +416,9 @@ class Glm5NextMLAAttention(nn.Module):
         else:
             self.rotary_emb = None
 
-        self.is_v32 = hasattr(config, "index_topk")
+        # `index_topk` is declared on Glm5NextTextConfig with a default of None,
+        # so hasattr() is True even for full-MLA configs (no kpool indexer).
+        self.is_v32 = getattr(config, "index_topk", None) is not None
         # self.is_v32 = False
 
         _skip_topk = False
