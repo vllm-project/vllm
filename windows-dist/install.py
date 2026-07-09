@@ -48,12 +48,18 @@ def main():
         rocm_ver = get_rocm_version(hip_path) or "7.13"
         print(f"[OK] ROCm at {hip_path} (version {rocm_ver})")
 
-    # sitecustomize.py
+    # Clean ALL stale sitecustomize.py files (from previous broken installers)
+    for p in sys.path:
+        f = Path(p) / "sitecustomize.py"
+        if f.exists():
+            try:
+                f.unlink()
+                print(f"  Removed stale: {f}")
+            except: pass
+    # Write fresh sitecustomize.py
     site_pkg = get_site_packages(python)
     if site_pkg:
         site_file = Path(site_pkg) / "sitecustomize.py"
-        if site_file.exists():
-            site_file.unlink()
         site_file.write_text(
             "import os\n"
             f"os.environ.setdefault('HIP_PATH', r'{hip_path}')\n"
@@ -65,22 +71,21 @@ def main():
     # Install PyTorch with ROCm
     if input(f"Install PyTorch with ROCm? (Y/N) [Y]: ").strip().upper() or "Y":
         torch_ver, tv_ver = get_torch_versions(rocm_ver)
-        print(f"Installing torch {torch_ver} from AMD repo...")
-        # Try AMD repo first
-        cmd = [pip, "install", f"torch=={torch_ver}", f"torchvision=={tv_ver}",
-               "--extra-index-url", "https://repo.amd.com/rocm/whl/gfx120X-all/",
-               "--timeout", "120"]
+        py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+        base_url = "https://repo.amd.com/rocm/whl/gfx120X-all/torch"
+        torch_url = f"{base_url}/torch-{torch_ver}-{py_tag}-{py_tag}-win_amd64.whl"
+        print(f"Downloading torch {torch_ver} from AMD repo...")
+        cmd = [pip, "install", torch_url, "--timeout", "120"]
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
-            # Fallback: direct wheel URL
-            py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
-            wheel_url = f"https://repo.amd.com/rocm/whl/gfx120X-all/torch/torch-{torch_ver}-{py_tag}-{py_tag}-win_amd64.whl"
-            print("AMD index failed, trying direct wheel...")
-            cmd = [pip, "install", wheel_url, "--timeout", "120"]
+            # Fallback: find-links with the torch directory
+            print("Direct download failed, trying find-links...")
+            cmd = [pip, "install", f"torch=={torch_ver}", f"torchvision=={tv_ver}",
+                   "--find-links", base_url, "--timeout", "120"]
             r = subprocess.run(cmd, capture_output=True, text=True)
             if r.returncode != 0:
                 # Last resort: official PyTorch ROCm repo
-                print("Direct wheel failed, trying PyTorch official repo...")
+                print("AMD repo failed, trying PyTorch official repo...")
                 cmd = [pip, "install", "torch", "torchvision",
                        f"--index-url=https://download.pytorch.org/whl/rocm{rocm_ver}",
                        "--timeout", "120"]
