@@ -4,7 +4,10 @@
 import pytest
 from pydantic import ValidationError
 
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.openai.responses.protocol import (
+    ResponsesRequest,
+    ResponsesResponse,
+)
 
 SAMPLE_TOOL = {
     "type": "function",
@@ -186,7 +189,8 @@ def test_responses_request_empty_tools_named_tool_choice():
 
 # Regression tests for parallel_tool_calls=null crash in Responses API
 # (from_request() passed None to ResponsesResponse.parallel_tool_calls,
-#  a non-optional bool field, causing an unhandled Pydantic 500)
+#  a non-optional bool field, causing a Pydantic ValidationError during
+#  response construction)
 @pytest.mark.parametrize(
     "value,expected",
     [
@@ -198,8 +202,6 @@ def test_responses_request_empty_tools_named_tool_choice():
 def test_responses_response_parallel_tool_calls_null_resolves_to_default(
     value, expected
 ):
-    from vllm.entrypoints.openai.responses.protocol import ResponsesResponse
-
     request = ResponsesRequest.model_validate(
         {"input": "Hello", "model": "test-model", "parallel_tool_calls": value}
     )
