@@ -404,13 +404,23 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     ):
         chosen_connector = self._requests_to_connector.get(request.request_id, -1)
         empty_blocks = blocks.new_empty()
+        # When a specific connector was chosen to load KV for this request,
+        # mask out kv_transfer_params for the others so they don't
+        # incorrectly start async transfers for a request they do not own.
+        # When no connector was chosen (e.g. producer side or no remote
+        # match), leave params intact so producer logic and full-prefix-hit
+        # handling still run.
+        masked_request = request
+        if chosen_connector >= 0:
+            masked_request = copy.copy(request)
+            masked_request.kv_transfer_params = None
         for i, c in enumerate(self._connectors):
             if i == chosen_connector:
                 # Forward call to the chosen connector (if any).
                 c.update_state_after_alloc(request, blocks, num_external_tokens)
             else:
                 # Call with empty blocks for other connectors.
-                c.update_state_after_alloc(request, empty_blocks, 0)
+                c.update_state_after_alloc(masked_request, empty_blocks, 0)
 
     def on_new_request(self, request: "Request") -> None:
         for c in self._connectors:
