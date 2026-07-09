@@ -1183,6 +1183,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
                 "ops.moe.mxfp4_gfx950_preprocess."
             ) from e
 
+        layer.w13_input_layout = "interleaved"
         preprocess_gluon_mxfp4_gfx950_moe_weights({}, layer, preshuffle=True)
         if not hasattr(layer, "w13_mx_scale"):
             layer.w13_mx_scale = layer.w13_precision_config.b_mx_scale
