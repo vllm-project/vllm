@@ -354,14 +354,17 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
         elif contains_type(type_hints, set):
             kwargs[name].update(collection_to_kwargs(type_hints, set))
         elif contains_type(type_hints, int):
+            # Arguments that accept human-readable integer strings (e.g., 1K, 2M, 1G)
+            human_readable_int_args = {
+                "max_num_batched_tokens",
+                "max_num_scheduled_tokens",
+                "kv_cache_memory_bytes",
+                "safetensors_prefetch_block_size",
+            }
             if name == "max_model_len":
                 kwargs[name]["type"] = human_readable_int_or_auto
                 kwargs[name]["help"] += f"\n\n{human_readable_int_or_auto.__doc__}"
-            elif name in (
-                "max_num_batched_tokens",
-                "kv_cache_memory_bytes",
-                "safetensors_prefetch_block_size",
-            ):
+            elif name in human_readable_int_args:
                 kwargs[name]["type"] = human_readable_int
                 kwargs[name]["help"] += f"\n\n{human_readable_int.__doc__}"
             else:
@@ -523,6 +526,7 @@ class EngineArgs:
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
     max_num_batched_tokens: int | None = None
+    max_num_scheduled_tokens: int | None = None
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
     max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
@@ -1413,6 +1417,13 @@ class EngineArgs:
             },
         )
         scheduler_group.add_argument(
+            "--max-num-scheduled-tokens",
+            **{
+                **scheduler_kwargs["max_num_scheduled_tokens"],
+                "default": None,
+            },
+        )
+        scheduler_group.add_argument(
             "--max-num-seqs",
             **{
                 **scheduler_kwargs["max_num_seqs"],
@@ -2151,6 +2162,7 @@ class EngineArgs:
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
+            max_num_scheduled_tokens=self.max_num_scheduled_tokens,
             max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
