@@ -466,8 +466,15 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["Exaone4_5_MTP"]}
             )
-        if hf_config.model_type in ("qwen3_5", "qwen3_5_moe"):
-            is_moe = hf_config.model_type == "qwen3_5_moe"
+        if hf_config.model_type in (
+            "qwen3_5",
+            "qwen3_5_moe",
+            "qwen3_5_text",
+            "qwen3_5_moe_text",
+        ):
+            # Text-only configs (e.g. GGUF checkpoints shipping only the
+            # text_config) carry the same mtp_num_hidden_layers field.
+            is_moe = hf_config.model_type in ("qwen3_5_moe", "qwen3_5_moe_text")
             hf_config.model_type = "qwen3_5_mtp"
             n_predict = getattr(hf_config, "mtp_num_hidden_layers", None)
             hf_config.update(
@@ -730,6 +737,14 @@ class SpeculativeConfig:
                     max_logprobs=self.target_model_config.max_logprobs,
                     hf_overrides=SpeculativeConfig.hf_config_override,
                     config_format=self.target_model_config.config_format,
+                    # A draft that reads the target checkpoint (e.g. MTP
+                    # layers in a GGUF file) must also inherit its resolved
+                    # weights location.
+                    model_weights=(
+                        self.target_model_config.model_weights
+                        if self.model == self.target_model_config.model
+                        else ""
+                    ),
                 )
 
                 # Automatically detect the method

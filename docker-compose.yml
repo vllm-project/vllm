@@ -1,0 +1,24 @@
+services:
+  vllm-gguf:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vllm-gguf:latest
+    container_name: vllm-gguf
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
+    volumes:
+      - /spinning/llm_stuff:/spinning/llm_stuff
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    shm_size: 32gb
+    stdin_open: true
+    tty: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
