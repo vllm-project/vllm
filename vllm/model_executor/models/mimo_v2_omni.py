@@ -12,7 +12,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BatchFeature, PretrainedConfig
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
-
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
@@ -664,15 +663,9 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> MiMoOmniProcessor:
         hf_config = self.get_hf_config()
         tokenizer = self.get_tokenizer()
-        # Thread --allowed-media-domains / --allowed-local-media-path from
-        # ModelConfig into MiMoVLProcessor (see its docstring for the SSRF /
-        # LFI hardening rationale).
-        model_config = self.ctx.model_config
         return MiMoOmniProcessor.from_hf_config(
             tokenizer,
             hf_config,
-            allowed_media_domains=model_config.allowed_media_domains,
-            allowed_local_media_path=model_config.allowed_local_media_path,
         )
 
     def get_image_processor(self, **kwargs: object):

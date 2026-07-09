@@ -7,7 +7,6 @@ Ported from SGLang's MiMoV2OmniProcessor / MiMoVLProcessor implementations.
 """
 
 import contextlib
-import io
 import logging
 import math
 from collections import OrderedDict
@@ -22,14 +21,6 @@ import torch.nn.functional as F
 from PIL import Image
 from transformers import BatchFeature, TensorType
 from transformers.processing_utils import ProcessorMixin
-
-try:
-    from torchcodec.decoders import AudioDecoder
-
-    _HAS_TORCHCODEC = True
-except ImportError:
-    AudioDecoder = None
-    _HAS_TORCHCODEC = False
 
 try:
     import torchaudio
@@ -59,7 +50,7 @@ _mean_std_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
 @dataclass
 class ImageInput:
-    # PIL.Image | str (path/url/base64) | torch.Tensor (C,H,W)
+    # PIL.Image | torch.Tensor (C,H,W)
     image: Any
     max_pixels: int | None = None
     min_pixels: int | None = None
@@ -84,7 +75,7 @@ class VideoInput:
 
 @dataclass
 class AudioInput:
-    # str (path/url/base64) | tuple[waveform_1D, sr]
+    # tuple[waveform_1D, sr]
     # | np.ndarray | torch.Tensor (T,n_vq)
     audio: Any
 
@@ -165,14 +156,6 @@ def _smart_resize(
     return int(h_bar), int(w_bar)
 
 
-def _to_rgb(img: Image.Image) -> Image.Image:
-    if img.mode == "RGBA":
-        bg = Image.new("RGB", img.size, (255, 255, 255))
-        bg.paste(img, mask=img.split()[3])
-        return bg
-    return img.convert("RGB")
-
-
 def _standardize(images: torch.Tensor) -> torch.Tensor:
     key = str(images.device)
     if key not in _mean_std_cache:
@@ -225,38 +208,6 @@ def _transform_single(
     return _standardize(out).squeeze(0), w_bar, h_bar
 
 
-def _normalize_media_str(src: str) -> str:
-    """Prepend ``file://`` to bare local paths so MediaConnector can route them.
-
-    Preserves backward-compat with offline ``LLM.generate`` callers that pass
-    raw filesystem paths (e.g. ``/data/img.jpg``). ``file://`` strings traverse
-    MediaConnector's ``_load_file_url`` which still enforces the deployer's
-    ``allowed_local_media_path`` policy, so the security guarantee is intact.
-    Pass-through for ``http://`` / ``https://`` / ``file://`` / ``data:``.
-    """
-    lo = src[:8].lower()
-    if (
-        lo.startswith("http://")
-        or lo.startswith("https://")
-        or lo.startswith("file://")
-        or src[:5].lower() == "data:"
-    ):
-        return src
-    return "file://" + src
-
-
-def _fetch_image(src: Any, media_connector: Any) -> Image.Image:
-    """Fetch an image, routing ``str`` inputs through MediaConnector.
-
-    See ``MiMoVLProcessor`` for the SSRF/LFI hardening rationale.
-    """
-    if isinstance(src, Image.Image):
-        return _to_rgb(src)
-    if isinstance(src, str):
-        return _to_rgb(media_connector.fetch_image(_normalize_media_str(src)))
-    raise ValueError(f"Unrecognized image source: {type(src)}")
-
-
 # ---------------------------------------------------------------------------
 # Core processor
 # ---------------------------------------------------------------------------
@@ -268,12 +219,9 @@ class MiMoVLProcessor:
     Handles image/video/audio preprocessing and token sequence construction.
     Ported from SGLang's MiMoVLProcessor.
 
-    Security: caller-supplied media strings (image / audio) are routed through
-    a single cached :class:`MediaConnector` so this surface inherits the
-    ``allowed_media_domains`` URL allowlist and the ``allowed_local_media_path``
-    policy that already harden the OpenAI chat path via ``chat_utils.py``.
-    Both settings are threaded in from ``ModelConfig`` by
-    :meth:`MiMoV2OmniProcessingInfo.get_hf_processor`.
+    Media strings (URL / path / data:) are resolved upstream in vLLM's media
+    pipeline; this processor accepts only already-decoded inputs (``PIL.Image``
+    for images, ``(waveform, sr)`` tuples for audio).
     """
 
     def __init__(
@@ -322,27 +270,11 @@ class MiMoVLProcessor:
         rope_type: str = "rope",
         video_process_num_threads: int = 16,
         device: Any | None = None,
-        allowed_media_domains: list[str] | None = None,
-        allowed_local_media_path: str | None = None,
         **kwargs: Any,
     ) -> None:
         self.tokenizer = tokenizer
         self.video_process_num_threads = video_process_num_threads
         self.device = torch.device(device) if isinstance(device, str) else device
-        # MediaConnector expects allowed_local_media_path as a non-None str
-        # (empty string = no-op policy); ModelConfig surfaces it as str | None.
-        self._allowed_media_domains = allowed_media_domains
-        self._allowed_local_media_path: str = allowed_local_media_path or ""
-        # Cache one MediaConnector instance — per-call construction defeats
-        # the connector's internal LRU byte cache for repeated URLs in a batch.
-        # Local import keeps the dependency confined and avoids a top-of-module
-        # cycle if a future refactor moves things around.
-        from vllm.multimodal.media.connector import MediaConnector
-
-        self._media_connector = MediaConnector(
-            allowed_local_media_path=self._allowed_local_media_path,
-            allowed_media_domains=self._allowed_media_domains,
-        )
 
         self.rope_type = "rope" if rope_type == "1d" else rope_type
         assert self.rope_type in ("rope", "mrope"), (
@@ -482,32 +414,14 @@ class MiMoVLProcessor:
         return kw
 
     def preprocess_audio(self, audio: Any) -> tuple[torch.Tensor, int]:
-        """Decode audio path/tuple → (mel_spec (T, n_mels), token_len)."""
-        if isinstance(audio, tuple):
-            waveform, original_sr = audio
-        else:
-            if AudioDecoder is None:
-                raise RuntimeError(
-                    "torchcodec is required for audio. "
-                    "Install with: pip install torchcodec"
-                )
-            if isinstance(audio, str):
-                if audio.startswith("data:"):
-                    import pybase64 as _b64
-
-                    file_obj: Any = io.BytesIO(_b64.b64decode(audio.split(",")[1]))
-                    samples = AudioDecoder(file_obj).get_all_samples()
-                    waveform = samples.data
-                    original_sr = samples.sample_rate
-                else:
-                    # URL or local-path strings go through the cached
-                    # MediaConnector — see class docstring for rationale.
-                    waveform_np, original_sr = self._media_connector.fetch_audio(
-                        _normalize_media_str(audio)
-                    )
-                    waveform = torch.from_numpy(waveform_np)
-            else:
-                raise ValueError(f"Unsupported audio source type: {type(audio)}")
+        """Convert a pre-loaded ``(waveform, sr)`` tuple into (mel_spec, token_len)."""
+        if not isinstance(audio, tuple):
+            raise ValueError(
+                f"Unsupported audio source type: {type(audio)}. Audio must be a "
+                "pre-decoded (waveform, sample_rate) tuple; URL/path/bytes "
+                "resolution is handled upstream in vLLM's media pipeline."
+            )
+        waveform, original_sr = audio
 
         if original_sr != self.audio_sampling_rate:
             if original_sr not in self._resamplers:
@@ -534,8 +448,6 @@ class MiMoVLProcessor:
     def process_image(self, image: ImageInput) -> torch.Tensor:
         kw = self._resolve_img_kw(image)
         src = image.image
-        if isinstance(src, str):
-            src = _fetch_image(src, self._media_connector)
         tensor, _, _ = _transform_single(
             src,
             factor=self.patch_size * self.merge_size,
@@ -614,7 +526,7 @@ class MiMoVLProcessor:
         src = audio.audio
         if isinstance(src, np.ndarray):
             src = (torch.from_numpy(src).float(), self.audio_sampling_rate)
-        if isinstance(src, (str, tuple)):
+        if isinstance(src, tuple):
             return self.preprocess_audio(src)
         # Pre-tokenized tensor (T, n_vq)
         assert isinstance(src, torch.Tensor) and src.ndim == 2
@@ -991,8 +903,6 @@ class MiMoOmniProcessor(ProcessorMixin):
         video_start_token_id: int | None = None,
         video_end_token_id: int | None = None,
         rope_type: str = "rope",
-        allowed_media_domains: list[str] | None = None,
-        allowed_local_media_path: str | None = None,
     ) -> None:
         self.tokenizer = tokenizer
 
@@ -1040,8 +950,6 @@ class MiMoOmniProcessor(ProcessorMixin):
             video_end_token_id=video_end_token_id,
             pad_token_id=tokenizer.pad_token_id,
             rope_type=rope_type,
-            allowed_media_domains=allowed_media_domains,
-            allowed_local_media_path=allowed_local_media_path,
         )
 
     @classmethod
@@ -1049,16 +957,8 @@ class MiMoOmniProcessor(ProcessorMixin):
         cls,
         tokenizer: Any,
         hf_config: Any,
-        *,
-        allowed_media_domains: list[str] | None = None,
-        allowed_local_media_path: str | None = None,
     ) -> "MiMoOmniProcessor":
-        """Convenience factory: instantiate directly from an HF model config object.
-
-        ``allowed_media_domains`` / ``allowed_local_media_path`` forward the
-        deployer's ModelConfig policy to ``MiMoVLProcessor`` (see its docstring
-        for the SSRF / LFI hardening rationale).
-        """
+        """Instantiate directly from an HF model config object."""
         vc = hf_config.vision_config
         if isinstance(vc, dict):
             patch_size = vc.get("patch_size", 14)
@@ -1114,8 +1014,6 @@ class MiMoOmniProcessor(ProcessorMixin):
             video_start_token_id=pc.get("video_start_token_id"),
             video_end_token_id=pc.get("video_end_token_id"),
             rope_type=rope_type,
-            allowed_media_domains=allowed_media_domains,
-            allowed_local_media_path=allowed_local_media_path,
         )
 
     @property
