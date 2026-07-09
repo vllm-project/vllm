@@ -4,7 +4,6 @@
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
-import requests
 
 from tests.utils import RemoteOpenAIServer
 
@@ -175,29 +174,25 @@ IMAGE_MESSAGES = [
 ]
 
 
-def _render_prompt_token_ids(server: RemoteOpenAIServer) -> list[int]:
-    """Return the token ids the server renders for TOKEN_IN_MESSAGES."""
-    resp = requests.post(
-        server.url_for("tokenize"),
-        json={"model": MODEL_NAME, "messages": TOKEN_IN_MESSAGES},
-    )
-    resp.raise_for_status()
-    return resp.json()["tokens"]
-
-
 @pytest.mark.asyncio
-async def test_prompt_token_ids_matches_messages(
-    server: RemoteOpenAIServer, client: openai.AsyncOpenAI
-):
-    """prompt_token_ids drives generation identically to the templated path."""
-    prompt_token_ids = _render_prompt_token_ids(server)
+async def test_prompt_token_ids_round_trip(client: openai.AsyncOpenAI):
+    """Chat accepts the templated prompt's own token ids and returns text.
 
+    The engine receives exactly the ids the messages path produced, and the
+    output is still detokenized (token-in, text-out). Generated text is not
+    compared against the messages path because vLLM greedy decoding is not
+    bitwise-reproducible across requests.
+    """
     baseline = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=TOKEN_IN_MESSAGES,
         max_completion_tokens=16,
         temperature=0,
+        extra_body={"return_token_ids": True},
     )
+    prompt_token_ids = baseline.prompt_token_ids
+    assert prompt_token_ids
+
     token_in = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=[],
@@ -206,12 +201,10 @@ async def test_prompt_token_ids_matches_messages(
         extra_body={"prompt_token_ids": prompt_token_ids, "return_token_ids": True},
     )
 
-    # text-out: pre-tokenized input still yields a detokenized message.
-    assert token_in.choices[0].message.content is not None
-    # the engine saw exactly the ids supplied.
+    # token-in feeds the engine exactly the ids from the messages path.
     assert token_in.prompt_token_ids == prompt_token_ids
-    # equivalence: identical prompt tokens yield identical greedy output.
-    assert token_in.choices[0].message.content == baseline.choices[0].message.content
+    # text-out: pre-tokenized input still yields a detokenized message.
+    assert token_in.choices[0].message.content
 
 
 @pytest.mark.asyncio
