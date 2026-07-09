@@ -1,17 +1,17 @@
 # GitLab CI for vLLM (fork)
 #
-# 流水线 (按 tag 前缀路由):
-#   普通提交(任意分支 push / MR): 只跑 lint -> unit-test(CPU)
-#   打 release* tag: lint -> unit-test -> image-build(kaniko, 推 release-<分支>-<sha>-<日期>)
-#                    -> image-test(在刚构建的镜像里跑测试) -> release(晋升 :<tag> + :latest)
-#   打 base* tag:     完整编译重建 base 镜像 (kaniko, 数小时)
-#   打 unittest* tag: 重建单测依赖镜像 (requirements 变化时)
+# 流水线 (提交与 tag 解耦):
+#   普通提交(任意分支 push / MR): 只跑 lint -> unit-test(CPU); tag 事件跳过
+#   打 release* tag:  只跑 image-build (kaniko, 基于 base-latest, 分钟级)
+#   打 base* tag:     只跑 base-image-build (完整编译重建 base 镜像, 数小时)
+#   打 unittest* tag: 只跑 unittest-image-build (重建单测依赖镜像)
+#
+# 每个 tag 事件只触发对应的一个 build job, 不跑 lint/unit-test/发布晋升;
+# 质量门禁在 push/MR 阶段完成, tag 只用于触发镜像构建。
 #
 # Runner: 全部 job 使用 iquest-inference-runner (kubernetes executor)。
-#   Pod 里没有 docker daemon, 因此:
-#   - 镜像构建用 kaniko (自动从 registry 拉 FROM 镜像、构建、推送)
-#   - image-test 直接以刚构建的镜像作为 job 运行镜像 (tag 经 dotenv 传递)
-#   - release 用 crane 远程打 tag (只改 manifest, 不搬数据)
+#   Pod 里没有 docker daemon, 镜像构建用 kaniko (自动从 registry 拉 FROM 镜像、
+#   构建、推送)。
 #   注意: base 镜像的 CUDA 编译在 Pod 里进行, 如果 runner 的 Pod 资源限额
 #   (CPU/内存) 太小会很慢甚至 OOM, 必要时请管理员调大或降低 MAX_JOBS
 #
@@ -42,8 +42,6 @@ stages:
   - lint
   - unittest
   - build
-  - image-e2e-test
-  - release
 
 # 避免 push + MR 触发重复流水线: 有开着的 MR 时只跑 MR 流水线
 workflow:
@@ -63,12 +61,11 @@ variables:
   #   base-<分支>-<sha9>-<日期>      完整编译的 base 镜像
   #   release-<分支>-<sha9>-<日期>   发版镜像
   #   unittest-<分支>-<sha9>-<日期>  单测依赖镜像
-  # 滑动 tag: base-latest / unittest-latest / latest(=最新通过测试的 release)
+  # 滑动 tag: base-latest / unittest-latest (release 不推滑动 tag, 每次用具体 tag)
   TEST_DEPS_IMAGE: ${REGISTRY_HOST}/${REGISTRY_IMAGE}:unittest-latest
   BASE_IMAGE_TAG: base-latest
-  # 构建工具镜像 (gcr/quay 的国内镜像源, kaniko 版本沿用前端项目已验证的)
+  # 构建工具镜像 (gcr 的国内镜像源, kaniko 版本沿用前端项目已验证的)
   KANIKO_IMAGE: gcr.m.daocloud.io/kaniko-project/executor:v1.23.2-debug
-  CRANE_IMAGE: gcr.m.daocloud.io/go-containerregistry/crane:debug
   # base 镜像构建的起点: pytorch 官方 devel 镜像 (自带 Python/torch/nvcc);
   # torch 版本须与 requirements/cuda.txt 钉版一致 (Dockerfile.base 里有断言)
   BUILD_BASE_IMAGE: pytorch/pytorch:2.10.0-cuda12.8-cudnn9-devel
@@ -213,6 +210,12 @@ lint:
     - iquest-inference-runner
   image: python:3.12
   timeout: 1h
+  # 只在 push/MR 上跑; tag 事件不跑 (tag 只用于触发镜像构建)
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
   variables:
     GIT_STRATEGY: clone
     GIT_DEPTH: "50"
@@ -260,6 +263,12 @@ unit-test:
     - iquest-inference-runner
   image: ${TEST_DEPS_IMAGE}
   timeout: 1h
+  # 只在 push/MR 上跑; tag 事件不跑
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
   variables:
     GIT_STRATEGY: clone
     GIT_DEPTH: "50"
@@ -315,9 +324,6 @@ base-image-build:
     - if: '$REGISTRY_USER == null || $REGISTRY_PASSWORD == null'
       when: never
     - if: $CI_COMMIT_TAG =~ /^base/
-    - if: $CI_COMMIT_BRANCH == "develop"
-      when: manual
-      allow_failure: true
 
 # ─── unittest 依赖镜像 (低频, unittest* tag) ─────────────────────────────────
 # 重建单测依赖镜像 (unit-test job 的运行环境, 预装全部测试依赖)。
@@ -357,8 +363,7 @@ unittest-image-build:
 
 # ─── image build (日常, 快速, release* tag) ──────────────────────────────────
 # kaniko 基于 base 镜像重新打包 Python 代码 (复用已编译 kernel), 分钟级,
-# 构建后立即推 release-<分支>-<sha>-<日期> tag (可追溯, 未经镜像内测试);
-# 同时通过 dotenv 把镜像名传给 image-test / release
+# 直接推 :release-<分支>-<sha>-<日期> tag; 无镜像内测试和发布晋升
 image-build:
   stage: build
   extends: .feishu-notify
@@ -381,8 +386,6 @@ image-build:
         *)      export VLLM_BUILD_VERSION="0.0.0.dev0+${SHORT_SHA}" ;;
       esac
       echo "VLLM_BUILD_VERSION = ${VLLM_BUILD_VERSION}"
-    # 把镜像名传给下游 job (image-test 用它做运行镜像, release 用它晋升)
-    - echo "RELEASE_IMAGE=${REGISTRY_HOST}/${REGISTRY_IMAGE}:${IMAGE_TAG}" > build.env
     - *kaniko-auth
     - |
       KANIKO_EXIT=0
@@ -395,64 +398,7 @@ image-build:
         --ignore-path=/workspace || KANIKO_EXIT=$?
       mkdir -p /workspace 2>/dev/null || /busybox/mkdir -p /workspace 2>/dev/null || true
       exit $KANIKO_EXIT
-  artifacts:
-    reports:
-      dotenv: build.env
   rules:
     - if: '$REGISTRY_USER == null || $REGISTRY_PASSWORD == null'
       when: never
     - if: $CI_COMMIT_TAG =~ /^release/
-
-# ─── image test (镜像内测试) ─────────────────────────────────────────────────
-# 直接以刚构建的 release 镜像作为 job 运行镜像 (RELEASE_IMAGE 来自 dotenv),
-# 验证 artifact 本身:
-#   1. import 冒烟: 镜像里编辑安装的 vllm 能正常加载
-#   2. 把 tests/ 拷到中立目录跑, 避免 clone 的源码 shadow 镜像里的 vllm
-image-test:
-  stage: image-e2e-test
-  tags:
-    - iquest-inference-runner
-  image:
-    name: ${RELEASE_IMAGE}
-    entrypoint: [""]
-  timeout: 2h
-  variables:
-    GIT_STRATEGY: clone
-  script:
-    - mkdir -p /itest && cp -r tests /itest/tests && cd /itest
-    - python3 -c "import vllm; print('vllm version =', vllm.__version__)"
-    - pip install -q pytest pytest-asyncio tblib pillow
-    - python3 -m pytest -v ${UNIT_TEST_PATHS}
-  rules:
-    - if: '$REGISTRY_USER == null || $REGISTRY_PASSWORD == null'
-      when: never
-    - if: $CI_COMMIT_TAG =~ /^release/
-  needs:
-    - job: image-build
-      artifacts: true
-
-# ─── release (镜像内测试通过后发布) ──────────────────────────────────────────
-# 用 crane 远程给已推送的 release 镜像追加正式 tag (:<git tag> 和 :latest),
-# 只改 registry 里的 manifest, 不搬镜像数据
-release:
-  stage: release
-  tags:
-    - iquest-inference-runner
-  image:
-    name: ${CRANE_IMAGE}
-    entrypoint: [""]
-  variables:
-    GIT_STRATEGY: none
-    IMAGE_TYPE: release
-  script:
-    - *export-image-tag
-    - crane auth login ${REGISTRY_HOST} -u ${REGISTRY_USER} -p ${REGISTRY_PASSWORD}
-    - crane tag ${REGISTRY_HOST}/${REGISTRY_IMAGE}:${IMAGE_TAG} ${CI_COMMIT_TAG}
-    - crane tag ${REGISTRY_HOST}/${REGISTRY_IMAGE}:${IMAGE_TAG} latest
-    - 'echo "已发布: ${REGISTRY_HOST}/${REGISTRY_IMAGE}:${CI_COMMIT_TAG} 和 :latest"'
-  rules:
-    - if: '$REGISTRY_USER == null || $REGISTRY_PASSWORD == null'
-      when: never
-    - if: $CI_COMMIT_TAG =~ /^release/
-  needs:
-    - image-test
