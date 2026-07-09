@@ -571,9 +571,6 @@ class ModelConfig:
             self.hf_text_config, "attention_chunk_size", None
         )
         self.encoder_config = self._get_encoder_config()
-        self.hf_image_processor_config = get_hf_image_processor_config(
-            self.model, hf_token=self.hf_token, revision=self.revision
-        )
 
         architectures = self.architectures
         registry = self.registry
@@ -617,6 +614,14 @@ class ModelConfig:
         self._model_info = model_info
         self._architecture = arch
         logger.info("Resolved architecture: %s", arch)
+        # Avoid Hub probes for optional processor files on text-only models.
+        self.hf_image_processor_config = (
+            get_hf_image_processor_config(
+                self.model, hf_token=self.hf_token, revision=self.revision
+            )
+            if self._model_info.supports_multimodal
+            else {}
+        )
 
         # Set default tokenizer modes based on model architecture
         if self.tokenizer_mode == "auto":
