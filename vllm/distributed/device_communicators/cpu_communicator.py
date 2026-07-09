@@ -19,6 +19,8 @@ logger = init_logger(__name__)
 
 
 class CpuCommunicator(DeviceCommunicatorBase):
+    _CPUSHM_GROUP_KINDS = {"tp", "pp", "dp", "ep"}
+
     def __init__(
         self,
         cpu_group: ProcessGroup,
@@ -28,6 +30,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
     ):
         super().__init__(cpu_group, device, device_group, unique_name)
         self.dist_module = torch.distributed
+        use_cpushm_group = self._is_cpushm_group_name(unique_name)
 
         if (
             (
@@ -36,19 +39,11 @@ class CpuCommunicator(DeviceCommunicatorBase):
                 or current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC
             )
             and hasattr(torch.ops._C, "init_shm_manager")
-            and (
-                unique_name.startswith("tp")
-                or unique_name.startswith("pp")
-                or unique_name.startswith("dp")
-            )
+            and use_cpushm_group
             and self._all_group_ranks_share_shm_group_name()
         ):
             self.dist_module = _CPUSHMDistributed(self)
-        elif (
-            unique_name.startswith("tp")
-            or unique_name.startswith("pp")
-            or unique_name.startswith("dp")
-        ):
+        elif use_cpushm_group:
             logger.info(
                 "CPU SHM communicator disabled for group %s: ranks do not share "
                 "the same SHM group name, falling back to torch.distributed.",
@@ -82,6 +77,11 @@ class CpuCommunicator(DeviceCommunicatorBase):
             self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
             logger.info("Using allgather_reducescatter all2all manager.")
             self._register_ep_custom_ops()
+
+    @classmethod
+    def _is_cpushm_group_name(cls, unique_name: str) -> bool:
+        group_kind = unique_name.split(":", maxsplit=1)[0]
+        return group_kind in cls._CPUSHM_GROUP_KINDS
 
     def _all_group_ranks_share_shm_group_name(self) -> bool:
         """
@@ -420,6 +420,15 @@ class CpuCommunicator(DeviceCommunicatorBase):
             with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
                 return fn()
 
+        def _with_sp_sizes(fn):
+            dp_metadata = get_forward_context().dp_metadata
+            assert dp_metadata is not None
+            dp_size = len(dp_metadata.num_tokens_across_dp_cpu)
+            assert self.world_size % dp_size == 0
+            sp_size = self.world_size // dp_size
+            with dp_metadata.sp_local_sizes(sp_size):
+                return fn()
+
         @torch.library.custom_op(
             f"vllm::cpu_ep_dispatch_rl_{safe_name}", mutates_args=()
         )
@@ -462,6 +471,33 @@ class CpuCommunicator(DeviceCommunicatorBase):
                 hidden_states.new_empty((pad_n,), dtype=torch.float32),
             )
 
+        @torch.library.custom_op(
+            f"vllm::cpu_ep_dispatch_rl_sp_{safe_name}", mutates_args=()
+        )
+        def _dispatch_rl_sp(
+            hidden_states: torch.Tensor,
+            router_logits: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            return _with_sp_sizes(
+                lambda: mgr.dispatch_router_logits(
+                    hidden_states,
+                    router_logits,
+                    is_sequence_parallel=True,
+                )
+            )
+
+        @_dispatch_rl_sp.register_fake
+        def _(
+            hidden_states: torch.Tensor,
+            router_logits: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            ctx = torch.library.get_ctx()
+            n = ctx.new_dynamic_size()
+            return (
+                hidden_states.new_empty((n,) + hidden_states.shape[1:]),
+                router_logits.new_empty((n,) + router_logits.shape[1:]),
+            )
+
         @torch.library.custom_op(f"vllm::cpu_ep_dispatch_{safe_name}", mutates_args=())
         def _dispatch(
             hidden_states: torch.Tensor,
@@ -492,6 +528,38 @@ class CpuCommunicator(DeviceCommunicatorBase):
                 topk_ids.new_empty((n,) + topk_ids.shape[1:]),
             )
 
+        @torch.library.custom_op(
+            f"vllm::cpu_ep_dispatch_sp_{safe_name}", mutates_args=()
+        )
+        def _dispatch_sp(
+            hidden_states: torch.Tensor,
+            topk_weights: torch.Tensor,
+            topk_ids: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            result = _with_sp_sizes(
+                lambda: mgr.dispatch(
+                    hidden_states,
+                    topk_weights,
+                    topk_ids,
+                    is_sequence_parallel=True,
+                )
+            )
+            return result[0], result[1], result[2]
+
+        @_dispatch_sp.register_fake
+        def _(
+            hidden_states: torch.Tensor,
+            topk_weights: torch.Tensor,
+            topk_ids: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            ctx = torch.library.get_ctx()
+            n = ctx.new_dynamic_size()
+            return (
+                hidden_states.new_empty((n,) + hidden_states.shape[1:]),
+                topk_weights.new_empty((n,) + topk_weights.shape[1:]),
+                topk_ids.new_empty((n,) + topk_ids.shape[1:]),
+            )
+
         @torch.library.custom_op(f"vllm::cpu_ep_combine_{safe_name}", mutates_args=())
         def _combine(hidden_states: torch.Tensor) -> torch.Tensor:
             return _with_non_sp_dp_sizes(lambda: mgr.combine(hidden_states))
@@ -502,9 +570,26 @@ class CpuCommunicator(DeviceCommunicatorBase):
             local_n = ctx.new_dynamic_size()
             return hidden_states.new_empty((local_n,) + hidden_states.shape[1:])
 
+        @torch.library.custom_op(
+            f"vllm::cpu_ep_combine_sp_{safe_name}", mutates_args=()
+        )
+        def _combine_sp(hidden_states: torch.Tensor) -> torch.Tensor:
+            return _with_sp_sizes(
+                lambda: mgr.combine(hidden_states, is_sequence_parallel=True)
+            )
+
+        @_combine_sp.register_fake
+        def _(hidden_states: torch.Tensor) -> torch.Tensor:
+            ctx = torch.library.get_ctx()
+            local_n = ctx.new_dynamic_size()
+            return hidden_states.new_empty((local_n,) + hidden_states.shape[1:])
+
         self._ep_dispatch_rl_op = _dispatch_rl
+        self._ep_dispatch_rl_sp_op = _dispatch_rl_sp
         self._ep_dispatch_op = _dispatch
+        self._ep_dispatch_sp_op = _dispatch_sp
         self._ep_combine_op = _combine
+        self._ep_combine_sp_op = _combine_sp
 
     def dispatch_router_logits(
         self,
@@ -517,6 +602,12 @@ class CpuCommunicator(DeviceCommunicatorBase):
         | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
         assert self.all2all_manager is not None
+        if (
+            extra_tensors is None
+            and is_sequence_parallel
+            and hasattr(self, "_ep_dispatch_rl_sp_op")
+        ):
+            return self._ep_dispatch_rl_sp_op(hidden_states, router_logits)
         if (
             extra_tensors is None
             and not is_sequence_parallel
@@ -553,6 +644,12 @@ class CpuCommunicator(DeviceCommunicatorBase):
         assert self.all2all_manager is not None
         if (
             extra_tensors is None
+            and is_sequence_parallel
+            and hasattr(self, "_ep_dispatch_sp_op")
+        ):
+            return self._ep_dispatch_sp_op(hidden_states, topk_weights, topk_ids)
+        if (
+            extra_tensors is None
             and not is_sequence_parallel
             and hasattr(self, "_ep_dispatch_op")
         ):
@@ -569,6 +666,8 @@ class CpuCommunicator(DeviceCommunicatorBase):
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
     ) -> torch.Tensor:
         assert self.all2all_manager is not None
+        if is_sequence_parallel and hasattr(self, "_ep_combine_sp_op"):
+            return self._ep_combine_sp_op(hidden_states)
         if not is_sequence_parallel and hasattr(self, "_ep_combine_op"):
             return self._ep_combine_op(hidden_states)
         return self.all2all_manager.combine(hidden_states, is_sequence_parallel)

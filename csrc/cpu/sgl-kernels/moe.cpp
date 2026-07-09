@@ -8,6 +8,9 @@
 #include "common.h"
 #include "gemm.h"
 
+#include <cstring>
+#include <vector>
+
 namespace {
 
 // [NOTE]: Fused MoE kernel with AMX
@@ -861,6 +864,101 @@ static inline void check_moe_scales_fp8(
   TORCH_CHECK(w2s.size(dim1) == div_up(N, block_size_K));
 }
 
+template <typename topk_t, typename map_t>
+inline int64_t count_local_expert_selections(
+    const topk_t* __restrict__ topk_ids,
+    const map_t* __restrict__ expert_map,
+    int64_t* __restrict__ token_starts,
+    int64_t M,
+    int64_t topk,
+    int64_t global_num_experts,
+    int64_t local_num_experts) {
+  int64_t selected_count = 0;
+  for (int64_t m = 0; m < M; ++m) {
+    int64_t token_count = 0;
+    for (int64_t k = 0; k < topk; ++k) {
+      int64_t global_expert_id = static_cast<int64_t>(topk_ids[m * topk + k]);
+      if (global_expert_id == -1) {
+        continue;
+      }
+      TORCH_CHECK(
+          0 <= global_expert_id && global_expert_id < global_num_experts,
+          "Invalid expert id ",
+          global_expert_id,
+          " for ",
+          global_num_experts,
+          " experts.");
+      int64_t local_expert_id = static_cast<int64_t>(expert_map[global_expert_id]);
+      if (local_expert_id == -1) {
+        continue;
+      }
+      TORCH_CHECK(
+          0 <= local_expert_id && local_expert_id < local_num_experts,
+          "Invalid local expert id ",
+          local_expert_id,
+          " for ",
+          local_num_experts,
+          " local experts.");
+      token_count++;
+    }
+    selected_count += token_count;
+    token_starts[m + 1] = selected_count;
+  }
+  return selected_count;
+}
+
+template <typename scalar_t, typename topk_t, typename map_t, typename weight_t>
+inline void compact_local_expert_selections(
+    scalar_t* __restrict__ selected_hidden,
+    weight_t* __restrict__ selected_weights,
+    int32_t* __restrict__ selected_ids,
+    const scalar_t* __restrict__ hidden_states,
+    const weight_t* __restrict__ topk_weights,
+    const topk_t* __restrict__ topk_ids,
+    const map_t* __restrict__ expert_map,
+    const int64_t* __restrict__ token_starts,
+    int64_t M,
+    int64_t K,
+    int64_t topk) {
+  for (int64_t m = 0; m < M; ++m) {
+    int64_t out_idx = token_starts[m];
+    for (int64_t k = 0; k < topk; ++k) {
+      int64_t global_expert_id = static_cast<int64_t>(topk_ids[m * topk + k]);
+      if (global_expert_id == -1) {
+        continue;
+      }
+      int64_t local_expert_id = static_cast<int64_t>(expert_map[global_expert_id]);
+      if (local_expert_id == -1) {
+        continue;
+      }
+      copy_stub(selected_hidden + out_idx * K, hidden_states + m * K, K);
+      selected_weights[out_idx] = topk_weights[m * topk + k];
+      selected_ids[out_idx] = static_cast<int32_t>(local_expert_id);
+      out_idx++;
+    }
+  }
+}
+
+template <typename scalar_t>
+inline void scatter_add_local_expert_outputs(
+    scalar_t* __restrict__ output,
+    const scalar_t* __restrict__ selected_output,
+    const int64_t* __restrict__ token_starts,
+    int64_t M,
+    int64_t K) {
+  at::parallel_for(0, M, 0, [&](int64_t begin, int64_t end) {
+    for (int64_t m = begin; m < end; ++m) {
+      scalar_t* __restrict__ out_row = output + m * K;
+      for (int64_t s = token_starts[m]; s < token_starts[m + 1]; ++s) {
+        const scalar_t* __restrict__ selected_row = selected_output + s * K;
+        for (int64_t h = 0; h < K; ++h) {
+          out_row[h] += selected_row[h];
+        }
+      }
+    }
+  });
+}
+
 // hidden_states: [M, K]
 // w1: [E, 2N, K] or [E, 2N, K / 2] for uint8
 // w2: [E, K, N] or [E, K, N / 2] for uint8
@@ -1250,6 +1348,200 @@ at::Tensor fused_experts_cpu(
     }
   });
   return out_hidden_states;
+}
+
+at::Tensor fused_experts_cpu_local_skip(
+    at::Tensor& hidden_states,
+    at::Tensor& w1,
+    at::Tensor& w2,
+    at::Tensor& topk_weights,
+    at::Tensor& topk_ids,
+    at::Tensor& expert_map,
+    int64_t moe_comp_method,
+    const std::optional<at::Tensor>& w1_scale,
+    const std::optional<at::Tensor>& w2_scale,
+    const std::optional<at::Tensor>& w1_zero,
+    const std::optional<at::Tensor>& w2_zero,
+    const std::optional<std::vector<int64_t>> block_size,
+    const std::optional<at::Tensor>& w1_bias,
+    const std::optional<at::Tensor>& w2_bias,
+    const std::optional<double>& alpha,
+    const std::optional<double>& limit,
+    bool is_vnni) {
+  CHECK_INPUT(hidden_states);
+  CHECK_INPUT(topk_weights);
+  CHECK_INPUT(topk_ids);
+  CHECK_INPUT(expert_map);
+  CHECK_DIM(2, hidden_states);
+  CHECK_DIM(2, topk_weights);
+  CHECK_DIM(2, topk_ids);
+  CHECK_DIM(1, expert_map);
+  CHECK_EQ(topk_weights.sizes(), topk_ids.sizes());
+  TORCH_CHECK(
+      topk_ids.scalar_type() == at::kInt || topk_ids.scalar_type() == at::kLong,
+      "topk_ids must be int32 or int64.");
+  TORCH_CHECK(
+      expert_map.scalar_type() == at::kInt || expert_map.scalar_type() == at::kLong,
+      "expert_map must be int32 or int64.");
+
+  const int64_t M = hidden_states.size(0);
+  const int64_t K = hidden_states.size(1);
+  const int64_t topk = topk_ids.size(1);
+  const int64_t global_num_experts = expert_map.size(0);
+  const int64_t local_num_experts = w1.size(0);
+
+  std::vector<int64_t> token_starts(M + 1, 0);
+  int64_t selected_count = 0;
+  if (topk_ids.scalar_type() == at::kInt) {
+    const int32_t* __restrict__ topk_ptr = topk_ids.data_ptr<int32_t>();
+    if (expert_map.scalar_type() == at::kInt) {
+      selected_count = count_local_expert_selections(
+          topk_ptr,
+          expert_map.data_ptr<int32_t>(),
+          token_starts.data(),
+          M,
+          topk,
+          global_num_experts,
+          local_num_experts);
+    } else {
+      selected_count = count_local_expert_selections(
+          topk_ptr,
+          expert_map.data_ptr<int64_t>(),
+          token_starts.data(),
+          M,
+          topk,
+          global_num_experts,
+          local_num_experts);
+    }
+  } else {
+    const int64_t* __restrict__ topk_ptr = topk_ids.data_ptr<int64_t>();
+    if (expert_map.scalar_type() == at::kInt) {
+      selected_count = count_local_expert_selections(
+          topk_ptr,
+          expert_map.data_ptr<int32_t>(),
+          token_starts.data(),
+          M,
+          topk,
+          global_num_experts,
+          local_num_experts);
+    } else {
+      selected_count = count_local_expert_selections(
+          topk_ptr,
+          expert_map.data_ptr<int64_t>(),
+          token_starts.data(),
+          M,
+          topk,
+          global_num_experts,
+          local_num_experts);
+    }
+  }
+
+  at::Tensor output = at::zeros_like(hidden_states);
+  if (selected_count == 0) {
+    return output;
+  }
+
+  auto topk_weights_float = topk_weights.to(at::kFloat);
+  auto selected_hidden = at::empty({selected_count, K}, hidden_states.options());
+  auto selected_weights = at::empty({selected_count, 1}, topk_weights_float.options());
+  auto selected_ids = at::empty({selected_count, 1}, topk_ids.options().dtype(at::kInt));
+
+  AT_DISPATCH_REDUCED_FLOATING_TYPES(hidden_states.scalar_type(), "compact_local_expert_selections", [&] {
+    scalar_t* __restrict__ selected_hidden_ptr = selected_hidden.data_ptr<scalar_t>();
+    const scalar_t* __restrict__ hidden_states_ptr = hidden_states.data_ptr<scalar_t>();
+    float* __restrict__ selected_weights_ptr = selected_weights.data_ptr<float>();
+    const float* __restrict__ topk_weights_ptr = topk_weights_float.data_ptr<float>();
+    int32_t* __restrict__ selected_ids_ptr = selected_ids.data_ptr<int32_t>();
+    if (topk_ids.scalar_type() == at::kInt) {
+      const int32_t* __restrict__ topk_ptr = topk_ids.data_ptr<int32_t>();
+      if (expert_map.scalar_type() == at::kInt) {
+        compact_local_expert_selections(
+            selected_hidden_ptr,
+            selected_weights_ptr,
+            selected_ids_ptr,
+            hidden_states_ptr,
+            topk_weights_ptr,
+            topk_ptr,
+            expert_map.data_ptr<int32_t>(),
+            token_starts.data(),
+            M,
+            K,
+            topk);
+      } else {
+        compact_local_expert_selections(
+            selected_hidden_ptr,
+            selected_weights_ptr,
+            selected_ids_ptr,
+            hidden_states_ptr,
+            topk_weights_ptr,
+            topk_ptr,
+            expert_map.data_ptr<int64_t>(),
+            token_starts.data(),
+            M,
+            K,
+            topk);
+      }
+    } else {
+      const int64_t* __restrict__ topk_ptr = topk_ids.data_ptr<int64_t>();
+      if (expert_map.scalar_type() == at::kInt) {
+        compact_local_expert_selections(
+            selected_hidden_ptr,
+            selected_weights_ptr,
+            selected_ids_ptr,
+            hidden_states_ptr,
+            topk_weights_ptr,
+            topk_ptr,
+            expert_map.data_ptr<int32_t>(),
+            token_starts.data(),
+            M,
+            K,
+            topk);
+      } else {
+        compact_local_expert_selections(
+            selected_hidden_ptr,
+            selected_weights_ptr,
+            selected_ids_ptr,
+            hidden_states_ptr,
+            topk_weights_ptr,
+            topk_ptr,
+            expert_map.data_ptr<int64_t>(),
+            token_starts.data(),
+            M,
+            K,
+            topk);
+      }
+    }
+  });
+
+  auto selected_output = fused_experts_cpu(
+      selected_hidden,
+      w1,
+      w2,
+      selected_weights,
+      selected_ids,
+      false,
+      moe_comp_method,
+      w1_scale,
+      w2_scale,
+      w1_zero,
+      w2_zero,
+      block_size,
+      w1_bias,
+      w2_bias,
+      alpha,
+      limit,
+      is_vnni);
+
+  AT_DISPATCH_REDUCED_FLOATING_TYPES(hidden_states.scalar_type(), "scatter_add_local_expert_outputs", [&] {
+    scatter_add_local_expert_outputs(
+        output.data_ptr<scalar_t>(),
+        selected_output.data_ptr<scalar_t>(),
+        token_starts.data(),
+        M,
+        K);
+  });
+
+  return output;
 }
 
 // shared expert kernel

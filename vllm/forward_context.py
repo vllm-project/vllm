@@ -61,12 +61,13 @@ class BatchDescriptor:
 def _compute_sp_num_tokens(
     num_tokens_across_dp_cpu: torch.Tensor, sequence_parallel_size: int
 ) -> list[int]:
-    sp_tokens = (
-        num_tokens_across_dp_cpu + sequence_parallel_size - 1
-    ) // sequence_parallel_size
-
-    sp_tokens = sp_tokens.repeat_interleave(sequence_parallel_size)
-    return sp_tokens.tolist()
+    local_sizes: list[int] = []
+    for num_tokens in num_tokens_across_dp_cpu.tolist():
+        local_size = (int(num_tokens) + sequence_parallel_size - 1) // (
+            sequence_parallel_size
+        )
+        local_sizes.extend([local_size] * sequence_parallel_size)
+    return local_sizes
 
 
 @dataclass
@@ -75,6 +76,7 @@ class DPMetadata:
 
     # NOTE: local_sizes should only be set by the chunked_sizes context manager
     local_sizes: list[int] | None = None
+    _sp_local_sizes_cache: dict[int, list[int]] = field(default_factory=dict)
 
     @staticmethod
     def make(
@@ -104,13 +106,16 @@ class DPMetadata:
         Context manager for setting self.local_sizes. Same as self.chunked_sizes
         but without any chunking.
         """
-        self.local_sizes = _compute_sp_num_tokens(
-            self.num_tokens_across_dp_cpu, sequence_parallel_size
-        )
+        previous_local_sizes = self.local_sizes
+        if sequence_parallel_size not in self._sp_local_sizes_cache:
+            self._sp_local_sizes_cache[sequence_parallel_size] = _compute_sp_num_tokens(
+                self.num_tokens_across_dp_cpu, sequence_parallel_size
+            )
+        self.local_sizes = self._sp_local_sizes_cache[sequence_parallel_size]
         try:
             yield self.local_sizes
         finally:
-            self.local_sizes = None
+            self.local_sizes = previous_local_sizes
 
     def get_chunk_sizes_across_dp_rank(self) -> list[int] | None:
         assert self.local_sizes is not None

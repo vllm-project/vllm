@@ -6,8 +6,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from vllm.config.parallel import ParallelConfig
+from vllm.forward_context import DPMetadata
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
 from vllm.v1.worker.cpu_worker import _get_cpushm_dist_ident
@@ -81,20 +83,30 @@ def test_get_cpushm_dist_ident_uses_dp_rendezvous(dp_ports, expected):
     assert (idents[0] == idents[1]) is expected
 
 
-def test_cpu_platform_rejects_only_hybrid_tp_dp_ep():
+def test_dp_metadata_sp_local_sizes_caches_python_sizes_and_restores():
+    metadata = DPMetadata(torch.tensor([7, 8, 9], dtype=torch.int32))
+
+    with metadata.sp_local_sizes(sequence_parallel_size=2) as sizes:
+        assert sizes == [4, 4, 4, 4, 5, 5]
+        assert metadata.local_sizes is sizes
+        with metadata.sp_local_sizes(sequence_parallel_size=3) as nested_sizes:
+            assert nested_sizes == [3, 3, 3, 3, 3, 3, 3, 3, 3]
+            assert metadata.local_sizes is nested_sizes
+        assert metadata.local_sizes is sizes
+
+    assert metadata.local_sizes is None
+    with metadata.sp_local_sizes(sequence_parallel_size=2) as cached_sizes:
+        assert cached_sizes is sizes
+
+
+def test_cpu_platform_allows_hybrid_tp_dp_ep():
     vllm_config = _make_platform_config(
         tensor_parallel_size=2,
-        data_parallel_size=2,
+        data_parallel_size=3,
         enable_expert_parallel=True,
     )
 
-    with (
-        patch.dict(os.environ, {"VLLM_CPU_KVCACHE_SPACE": ""}),
-        pytest.raises(
-            NotImplementedError,
-            match="tensor_parallel_size > 1 with data_parallel_size > 1",
-        ),
-    ):
+    with patch.dict(os.environ, {"VLLM_CPU_KVCACHE_SPACE": ""}):
         CpuPlatform.check_and_update_config(vllm_config)
 
 

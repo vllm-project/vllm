@@ -12,6 +12,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from vllm.platforms import current_platform
+from vllm.platforms.interface import CpuArchEnum
 from vllm.utils.network_utils import get_open_port
 
 if not current_platform.is_cpu():
@@ -21,9 +22,15 @@ import vllm._custom_ops as ops  # noqa: E402
 from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (  # noqa: E402
     fused_experts_cpu_local_skip,
 )
+from vllm.model_executor.models.utils import sequence_parallel_chunk  # noqa: E402
 
 if not hasattr(torch.ops._C, "fused_experts_cpu"):
     pytest.skip("fused_experts_cpu op not available", allow_module_level=True)
+
+HAS_CPU_SHM = hasattr(torch.ops._C, "init_shm_manager") and (
+    current_platform.get_cpu_architecture()
+    in (CpuArchEnum.X86, CpuArchEnum.ARM, CpuArchEnum.POWERPC)
+)
 
 
 def _ensure_spawn_start_method():
@@ -162,6 +169,14 @@ def _run_single_rank_reference(a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, E):
     )
 
 
+def _sequence_parallel_all_gather(
+    tensor: torch.Tensor,
+    tp_group,
+    num_tokens: int,
+) -> torch.Tensor:
+    return tp_group.all_gather(tensor, dim=0)[:num_tokens]
+
+
 # ---------------------------------------------------------------------------
 # Distributed environment setup
 # ---------------------------------------------------------------------------
@@ -239,6 +254,10 @@ def _moe_ep_worker(rank, world_size, tp_size, dp_size, port, dp_port, params, er
         os.environ.setdefault("VLLM_DIST_IDENT", f"test_cpu_moe_ep_{port}")
         _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
 
+        from vllm.distributed.device_communicators.cpu_communicator import (
+            CpuCommunicator,
+            _CPUSHMDistributed,
+        )
         from vllm.distributed.parallel_state import (
             get_ep_group,
             get_tp_group,
@@ -248,7 +267,7 @@ def _moe_ep_worker(rank, world_size, tp_size, dp_size, port, dp_port, params, er
             determine_expert_map,
         )
 
-        M_per_dp, N, K, E, topk, seed = params
+        M_per_dp, N, K, E, topk, seed, is_sequence_parallel = params
         torch.manual_seed(seed)
 
         dp_rank = rank // tp_size
@@ -277,8 +296,13 @@ def _moe_ep_worker(rank, world_size, tp_size, dp_size, port, dp_port, params, er
         topk_weight_local = topk_weight_all[lo:hi]
         topk_ids_local_global = topk_ids_all[lo:hi]
 
+        if is_sequence_parallel:
+            a_local = sequence_parallel_chunk(a_local)
+            topk_weight_local = sequence_parallel_chunk(topk_weight_local)
+            topk_ids_local_global = sequence_parallel_chunk(topk_ids_local_global)
+
         # Expert placement for this EP rank
-        ep_size = dp_size * tp_size  # always 6 in this test
+        ep_size = dp_size * tp_size
         local_num_experts, expert_map, _ = determine_expert_map(
             ep_size=ep_size,
             ep_rank=ep_rank,
@@ -294,15 +318,22 @@ def _moe_ep_worker(rank, world_size, tp_size, dp_size, port, dp_port, params, er
 
         with _make_forward_context(dp_rank, dp_size, M_per_dp):
             ep_group = get_ep_group()
+            ep_communicator = ep_group.device_communicator
+            assert isinstance(ep_communicator, CpuCommunicator)
+            if HAS_CPU_SHM:
+                assert isinstance(ep_communicator.dist_module, _CPUSHMDistributed)
             dp_metadata = get_forward_context().dp_metadata
             assert dp_metadata is not None
 
-            with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
-                # Dispatch: all-gather over DP group → [total_M, K]
+            sp_size = tp_size if is_sequence_parallel else 1
+            with dp_metadata.sp_local_sizes(sequence_parallel_size=sp_size):
+                # Non-SP dispatch gathers each TP lane's DP group. SP dispatch
+                # gathers the full EP group after sequence_parallel_chunk().
                 a_gathered, tw_gathered, tid_gathered = ep_group.dispatch(
                     a_local.clone(),
                     topk_weight_local.clone(),
                     topk_ids_local_global.clone().long(),
+                    is_sequence_parallel=is_sequence_parallel,
                 )
 
             # Expert compute: skip non-local selections (the shipped path).
@@ -327,12 +358,25 @@ def _moe_ep_worker(rank, world_size, tp_size, dp_size, port, dp_port, params, er
                 True,  # is_vnni
             )
 
-            with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
-                # Combine: reduce-scatter over DP group → [M_per_dp, K]
-                combined = ep_group.combine(expert_out)
+            with dp_metadata.sp_local_sizes(sequence_parallel_size=sp_size):
+                # Non-SP combines to the DP-local slice per TP lane. SP combines
+                # to the TP-local token chunk, then the TP all-gather below
+                # restores the DP-local slice.
+                combined = ep_group.combine(
+                    expert_out,
+                    is_sequence_parallel=is_sequence_parallel,
+                )
 
-        # TP all-reduce: sum TP-partner contributions (mirrors moe_runner.py:451)
-        dist.all_reduce(combined, group=get_tp_group().device_group)
+        tp_group = get_tp_group()
+        if is_sequence_parallel:
+            combined = _sequence_parallel_all_gather(
+                combined,
+                tp_group,
+                M_per_dp,
+            )
+        else:
+            # TP all-reduce merges complementary expert shards for each DP replica.
+            dist.all_reduce(combined, group=tp_group.device_group)
 
         # Gather results from all ranks at rank 0 for verification.
         # Each rank holds its DP-slice result [M_per_dp, K].
@@ -368,7 +412,11 @@ def _moe_ep_worker(rank, world_size, tp_size, dp_size, port, dp_port, params, er
 
 # (M_per_dp, N, K, E, topk, seed)
 _PARAMS = [
-    (8, 256, 512, 10, 2, 0),
+    (8, 256, 512, 10, 2, 0, False),
+]
+
+_SP_PARAMS = [
+    (7, 256, 512, 10, 2, 0, True),
 ]
 
 
@@ -377,3 +425,17 @@ _PARAMS = [
 def test_cpu_moe_ep_dp6_tp1(params):
     """TP=1, DP=6: pure expert parallelism baseline (EP=6)."""
     _spawn_workers(_moe_ep_worker, world_size=6, tp_size=1, dp_size=6, params=params)
+
+
+@pytest.mark.distributed
+@pytest.mark.parametrize("params", _PARAMS, ids=["E10-nondiv"])
+def test_cpu_moe_ep_tp2_dp3(params):
+    """TP=2, DP=3: DP-lane AgRs plus final TP all-reduce (EP=6)."""
+    _spawn_workers(_moe_ep_worker, world_size=6, tp_size=2, dp_size=3, params=params)
+
+
+@pytest.mark.distributed
+@pytest.mark.parametrize("params", _SP_PARAMS, ids=["E10-nondiv-sp"])
+def test_cpu_moe_ep_tp2_dp3_sequence_parallel(params):
+    """TP=2, DP=3: full EP-group AgRs plus TP all-gather restore."""
+    _spawn_workers(_moe_ep_worker, world_size=6, tp_size=2, dp_size=3, params=params)

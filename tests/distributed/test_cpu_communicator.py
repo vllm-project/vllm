@@ -28,6 +28,17 @@ HAS_CPU_SHM = hasattr(torch.ops._C, "init_shm_manager") and (
 )
 
 
+def test_cpu_shm_group_name_eligibility():
+    from vllm.distributed.device_communicators.cpu_communicator import CpuCommunicator
+
+    assert CpuCommunicator._is_cpushm_group_name("tp:0")
+    assert CpuCommunicator._is_cpushm_group_name("pp:0")
+    assert CpuCommunicator._is_cpushm_group_name("dp:0")
+    assert CpuCommunicator._is_cpushm_group_name("ep:0")
+    assert not CpuCommunicator._is_cpushm_group_name("eplb:0")
+    assert not CpuCommunicator._is_cpushm_group_name("anonymous:0")
+
+
 def _ensure_spawn_start_method():
     if mp.get_start_method(allow_none=True) is None:
         mp.set_start_method("spawn")
@@ -351,22 +362,37 @@ def _sequence_parallel_worker(
         os.environ.setdefault("VLLM_DIST_IDENT", f"test_cpu_ep_sp_{port}")
         _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
 
-        from vllm.distributed.parallel_state import get_ep_group
+        from vllm.distributed.device_communicators.cpu_communicator import (
+            CpuCommunicator,
+            _CPUSHMDistributed,
+        )
+        from vllm.distributed.parallel_state import get_ep_group, get_tp_group
         from vllm.forward_context import get_forward_context
 
-        local_sizes = _sp_local_sizes(dp_token_counts, tp_size)
+        expected_local_sizes = _sp_local_sizes(dp_token_counts, tp_size)
         dp_rank = rank // tp_size
-        local_rows = local_sizes[rank]
+        expected_tp_ranks = list(range(dp_rank * tp_size, (dp_rank + 1) * tp_size))
+
+        assert get_tp_group().ranks == expected_tp_ranks
+        ep_group = get_ep_group()
+        assert ep_group.ranks == list(range(world_size))
+
+        ep_communicator = ep_group.device_communicator
+        assert isinstance(ep_communicator, CpuCommunicator)
+        if HAS_CPU_SHM:
+            assert isinstance(ep_communicator.dist_module, _CPUSHMDistributed)
+
+        local_rows = expected_local_sizes[rank]
 
         hidden = _filled(local_rows, HIDDEN_SIZE, float(rank + 1))
         router = _filled(local_rows, NUM_EXPERTS, float((rank + 1) * 10))
         weights = _filled(local_rows, TOPK, float((rank + 1) * 100))
         ids = torch.full((local_rows, TOPK), rank, dtype=torch.long)
 
-        expected_hidden = _concat_rank_values(local_sizes, HIDDEN_SIZE, 1.0)
-        expected_router = _concat_rank_values(local_sizes, NUM_EXPERTS, 10.0)
-        expected_weights = _concat_rank_values(local_sizes, TOPK, 100.0)
-        expected_ids = _concat_rank_ids(local_sizes)
+        expected_hidden = _concat_rank_values(expected_local_sizes, HIDDEN_SIZE, 1.0)
+        expected_router = _concat_rank_values(expected_local_sizes, NUM_EXPERTS, 10.0)
+        expected_weights = _concat_rank_values(expected_local_sizes, TOPK, 100.0)
+        expected_ids = _concat_rank_ids(expected_local_sizes)
 
         with _make_forward_context(
             dp_rank,
@@ -377,42 +403,39 @@ def _sequence_parallel_worker(
             dp_metadata = get_forward_context().dp_metadata
             assert dp_metadata is not None
 
-            with dp_metadata.sp_local_sizes(sequence_parallel_size=tp_size):
-                gathered_hidden, gathered_router = (
-                    get_ep_group().dispatch_router_logits(
-                        hidden.clone(),
-                        router.clone(),
-                        is_sequence_parallel=True,
-                    )
+            with dp_metadata.sp_local_sizes(sequence_parallel_size=tp_size) as sizes:
+                assert sizes == expected_local_sizes
+                gathered_hidden, gathered_router = ep_group.dispatch_router_logits(
+                    hidden.clone(),
+                    router.clone(),
+                    is_sequence_parallel=True,
                 )
                 torch.testing.assert_close(gathered_hidden, expected_hidden)
                 torch.testing.assert_close(gathered_router, expected_router)
 
-                gathered_hidden2, gathered_weights, gathered_ids = (
-                    get_ep_group().dispatch(
-                        hidden.clone(),
-                        weights.clone(),
-                        ids.clone(),
-                        is_sequence_parallel=True,
-                    )
+                gathered_hidden2, gathered_weights, gathered_ids = ep_group.dispatch(
+                    hidden.clone(),
+                    weights.clone(),
+                    ids.clone(),
+                    is_sequence_parallel=True,
                 )
                 torch.testing.assert_close(gathered_hidden2, expected_hidden)
                 torch.testing.assert_close(gathered_weights, expected_weights)
                 torch.testing.assert_close(gathered_ids, expected_ids)
 
-                total_rows = sum(local_sizes)
+                total_rows = sum(expected_local_sizes)
                 expert_out = torch.arange(total_rows, dtype=torch.float32).unsqueeze(
                     1
                 ).expand(total_rows, HIDDEN_SIZE).contiguous() + float(
                     (rank + 1) * 1000
                 )
-                combined = get_ep_group().combine(
+                combined = ep_group.combine(
                     expert_out,
                     is_sequence_parallel=True,
                 )
                 torch.testing.assert_close(
                     combined,
-                    _expected_combined(rank, local_sizes, HIDDEN_SIZE),
+                    _expected_combined(rank, expected_local_sizes, HIDDEN_SIZE),
                 )
 
         dist.barrier()
@@ -714,6 +737,67 @@ def _dp_shm_group_name_worker(
         _report_worker_failure(rank, err_q, err)
 
 
+def _moe_ep_parallel_config_worker(
+    rank,
+    world_size,
+    tp_size,
+    dp_size,
+    port,
+    dp_port,
+    params,
+    err_q,
+):
+    try:
+        os.environ.setdefault("VLLM_DIST_IDENT", f"test_cpu_moe_ep_config_{port}")
+        _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
+
+        from vllm.config.parallel import ParallelConfig
+        from vllm.distributed.parallel_state import (
+            get_dp_group,
+            get_ep_group,
+            get_tp_group,
+        )
+        from vllm.model_executor.layers.fused_moe.config import (
+            FusedMoEParallelConfig,
+        )
+
+        dp_rank = rank // tp_size
+        tp_rank = rank % tp_size
+        expected_tp_ranks = list(range(dp_rank * tp_size, (dp_rank + 1) * tp_size))
+        expected_dp_ranks = list(range(tp_rank, world_size, tp_size))
+
+        assert get_tp_group().ranks == expected_tp_ranks
+        assert get_dp_group().ranks == expected_dp_ranks
+        assert get_dp_group().rank_in_group == dp_rank
+        assert get_ep_group().ranks == list(range(world_size))
+
+        parallel_config = ParallelConfig(
+            tensor_parallel_size=tp_size,
+            data_parallel_size=dp_size,
+            data_parallel_rank=dp_rank,
+            enable_expert_parallel=True,
+        )
+        moe_parallel_config = FusedMoEParallelConfig.make(
+            tp_size_=tp_size,
+            pcp_size_=1,
+            dp_size_=dp_size,
+            sp_size_=1,
+            vllm_parallel_config=parallel_config,
+        )
+
+        assert moe_parallel_config.tp_size == 1
+        assert moe_parallel_config.tp_rank == 0
+        assert moe_parallel_config.dp_size == dp_size
+        assert moe_parallel_config.dp_rank == dp_rank
+        assert moe_parallel_config.ep_size == world_size
+        assert moe_parallel_config.ep_rank == rank
+        assert moe_parallel_config.use_ep
+
+        dist.barrier()
+    except Exception as err:
+        _report_worker_failure(rank, err_q, err)
+
+
 def _dp_shm_all_reduce_worker(
     rank,
     world_size,
@@ -773,10 +857,10 @@ def test_cpu_ep_dispatch_propagates_padding_mask(sizes):
 def test_cpu_ep_sequence_parallel_uses_ep_group():
     _spawn_workers(
         _sequence_parallel_worker,
-        world_size=4,
+        world_size=6,
         tp_size=2,
-        dp_size=2,
-        params=[3, 1],
+        dp_size=3,
+        params=[3, 1, 5],
     )
 
 
@@ -802,6 +886,17 @@ def test_cpu_dp_group_ranks_share_shm_group_name():
         params=None,
         distributed_init_ports=[get_open_port(), get_open_port()],
         dp_port=get_open_port(),
+    )
+
+
+@pytest.mark.distributed
+def test_cpu_moe_ep_tp2_dp3_parallel_config():
+    _spawn_workers(
+        _moe_ep_parallel_config_worker,
+        world_size=6,
+        tp_size=2,
+        dp_size=3,
+        params=None,
     )
 
 
