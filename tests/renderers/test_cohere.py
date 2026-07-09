@@ -655,22 +655,34 @@ class TestBuildRenderConfig:
         # use_jinja is always True, regardless of caller input.
         assert cfg["use_jinja"] is True
 
-    def test_template_jinja_kwarg_is_ignored(self):
-        # Raw Jinja source used to be accepted through
-        # ``chat_template_kwargs.template_jinja`` / ``.template``; that
-        # path is intentionally dropped so callers can neither leak it as
-        # a template variable nor bypass the trust guard. It must not
-        # appear in the config, and it must not fall through to
-        # ``additional_template_fields`` either.
+    @pytest.mark.parametrize("cohere_only_key", ["template_jinja", "template"])
+    def test_cohere_only_template_kwargs_are_rejected(self, cohere_only_key):
+        # ``chat_template_kwargs.template_jinja`` / ``.template`` are
+        # accepted at Cohere's own API surface but not at vLLM's -- raw
+        # template source in vLLM must flow through the standard
+        # ``chat_template`` request field so the
+        # ``--trust-request-chat-template`` guard applies uniformly.
+        # Silently dropping these keys would hide client misconfiguration,
+        # so we reject them loudly instead.
+        with pytest.raises(
+            ValueError,
+            match=f"chat_template_kwargs.{cohere_only_key!r}",
+        ):
+            _build_render_config(
+                self._conv(),
+                {cohere_only_key: "raw {{ jinja }}"},
+            )  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("cohere_only_key", ["template_jinja", "template"])
+    def test_cohere_only_template_kwargs_none_is_tolerated(self, cohere_only_key):
+        # An explicit ``None`` (e.g. from ``.model_dump(exclude_none=False)``
+        # on an optional field) is treated as absent -- we neither raise
+        # nor let it fall through as a Jinja variable.
         _, cfg = _build_render_config(
             self._conv(),
-            {
-                "template_jinja": "raw {{ jinja }}",
-                "template": "raw {{ other }}",
-            },
+            {cohere_only_key: None},
         )  # type: ignore[arg-type]
-        assert "template_jinja" not in cfg
-        assert "template" not in cfg
+        assert cohere_only_key not in cfg
         assert "additional_template_fields" not in cfg
 
     def test_chat_template_arg_populates_template_jinja(self):

@@ -27,9 +27,11 @@ Raw Jinja template source is *not* accepted through
 standard vLLM ``chat_template`` request field (which must be enabled
 server-side with ``--trust-request-chat-template``); this renderer
 forwards that value to melody as its ``template_jinja`` config field.
-The legacy Cohere-only ``chat_template_kwargs.template_jinja`` /
-``chat_template_kwargs.template`` inputs are silently dropped so they
-can neither leak as Jinja variables nor bypass the trust guard.
+Requests that still set the Cohere-only
+``chat_template_kwargs.template_jinja`` / ``chat_template_kwargs.template``
+inputs (which are valid at Cohere's own API surface but not at vLLM's)
+are rejected with a ``ValueError`` so client misconfiguration
+surfaces loudly.
 
 Any *other* keys in ``chat_template_kwargs`` are forwarded verbatim to
 the melody render config as ``additional_template_fields`` -- i.e. they
@@ -104,12 +106,14 @@ _RENDERER_CONSUMED_KEYS = frozenset(
     {
         "cohere_format",
         "template_id",
-        # ``template_jinja`` / ``template`` used to be Cohere-only inputs
-        # for raw Jinja source. They are now driven exclusively by the
-        # standard vLLM ``chat_template`` request field, but we keep them
-        # in the consumed set so a stray value from an older client is
-        # silently dropped instead of becoming a template variable named
-        # ``template_jinja`` inside the cmd3 / cmd4 templates.
+        # ``template_jinja`` / ``template`` are Cohere-only inputs for
+        # raw Jinja source -- valid at Cohere's own API surface but not
+        # at vLLM's. In vLLM, raw template source must flow through the
+        # standard ``chat_template`` request field, so a non-``None``
+        # value here is rejected in ``_build_render_config``. The keys
+        # stay in the consumed set so an explicit ``None`` (e.g. from
+        # ``.model_dump(exclude_none=False)``) is dropped rather than
+        # surfacing as a stray ``{{ template_jinja }}`` Jinja variable.
         "template_jinja",
         "template",
         "use_jinja",
@@ -404,6 +408,19 @@ def _build_render_config(
         raise ValueError(
             f"Invalid cohere_format={fmt!r}; expected one of {_VALID_FORMATS}"
         )
+
+    # Reject Cohere-only inlets for raw Jinja source. These keys are
+    # valid at Cohere's own API surface but not at vLLM's: callers must
+    # use the standard vLLM ``chat_template`` request field so the
+    # ``--trust-request-chat-template`` guard applies uniformly.
+    for cohere_only_key in ("template_jinja", "template"):
+        if chat_template_kwargs.get(cohere_only_key) is not None:
+            raise ValueError(
+                f"chat_template_kwargs.{cohere_only_key!r} is not accepted "
+                "in vLLM (it is a Cohere-only field); pass the template "
+                "body via the standard 'chat_template' request field "
+                "instead (requires --trust-request-chat-template)."
+            )
 
     config: dict[str, Any] = {
         "messages": _conversation_to_melody_messages(conversation),
