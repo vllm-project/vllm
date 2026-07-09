@@ -19,6 +19,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_pp_group
 from vllm.inputs import MultiModalDataDict, MultiModalInput, mm_input
+from vllm.multimodal.inputs import PlaceholderRange
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
@@ -227,9 +228,73 @@ class ApertusMultiModalProcessor(BaseMultiModalProcessor[ApertusProcessingInfo])
         with timing_ctx.record("tokenize"):
             prompt_token_ids = list(tokenizer.encode(prompt_text, **dict(inputs.tokenization_kwargs)))
 
+        # mm_input() requires mm_hashes and mm_placeholders
+        # since upstream 08a8a4af. Placeholders are one PlaceholderRange per
+        # item spanning its layout tokens, with is_embed marking the dummy
+        # positions the GPU worker overwrites.
+        with timing_ctx.record("get_mm_hashes"):
+            mm_hashes = inputs.get_mm_hashes(self.info.model_id)
+
+        def _single_token_id(token_text: str) -> int:
+            ids = list(tokenizer.encode(token_text, add_special_tokens=False))
+            if len(ids) != 1:
+                raise ValueError(
+                    f"Apertus MM: expected {token_text!r} to be one special token, got {ids}"
+                )
+            return ids[0]
+
+        def _span_ranges(
+            start_token: str, end_token: str, dummy_token_id: int, count: int
+        ) -> list[PlaceholderRange]:
+            # Anchor on the atomic start/end special tokens directly in the
+            # prompt ids: unlike re-encoding the layout string standalone,
+            # special tokens cannot merge with surrounding text under BPE.
+            start_id = _single_token_id(start_token)
+            end_id = _single_token_id(end_token)
+            ranges: list[PlaceholderRange] = []
+            pos = 0
+            for _ in range(count):
+                try:
+                    s = prompt_token_ids.index(start_id, pos)
+                    e = prompt_token_ids.index(end_id, s)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Apertus MM: {start_token!r}/{end_token!r} pair not "
+                        f"found in prompt (search from {pos})"
+                    ) from exc
+                span = prompt_token_ids[s:e + 1]
+                is_embed = torch.tensor(
+                    [tok == dummy_token_id for tok in span], dtype=torch.bool
+                )
+                ranges.append(
+                    PlaceholderRange(offset=s, length=e - s + 1, is_embed=is_embed)
+                )
+                pos = e + 1
+            return ranges
+
+        mm_placeholders: dict[str, list[PlaceholderRange]] = {}
+        if num_images > 0:
+            mm_placeholders["image"] = _span_ranges(
+                self.image_tokenizer.boi_token,
+                self.image_tokenizer.eoi_token,
+                getattr(config, "dummy_image_token_id", 131272),
+                num_images,
+            )
+        if num_audios > 0:
+            mm_placeholders["audio"] = _span_ranges(
+                self.audio_tokenizer.audio_start_token,
+                self.audio_tokenizer.audio_end_token,
+                getattr(config, "dummy_audio_token_id", 262344),
+                num_audios,
+            )
+
         return mm_input(
                 prompt_token_ids=prompt_token_ids,
-                mm_kwargs=MultiModalKwargsItems(mm_kwargs),
+                mm_kwargs=MultiModalKwargsItems.from_hf_inputs(
+                    mm_kwargs, self._get_mm_fields_config(mm_kwargs, {})
+                ),
+                mm_hashes=mm_hashes,
+                mm_placeholders=mm_placeholders,
                 prompt=prompt_text,
                 )
 
