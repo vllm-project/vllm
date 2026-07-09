@@ -755,19 +755,10 @@ class Worker(WorkerBase):
                 if not any(x in compile_range for x in all_sizes):
                     warmup_sizes.append(compile_range.end)
 
-        # We skip EPLB here since we don't want to record dummy metrics.
-        # This loop only compiles/warms up shapes; CUDA graphs are captured
-        # later in capture_model(). Force cudagraph_runtime_mode=NONE so a
-        # warmup size that pads up to a capture size does not trigger a capture
-        # here (memory profiling has already disabled capturing at this point).
+        # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
-            self.model_runner._dummy_run(
-                size,
-                cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                skip_eplb=True,
-                remove_lora=False,
-            )
+            self.model_runner._dummy_run(size, skip_eplb=True, remove_lora=False)
         self.model_runner.maybe_remove_all_loras(self.model_runner.lora_config)
 
         # Warmup and tune the kernels used during model execution before
