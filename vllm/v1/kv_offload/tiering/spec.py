@@ -124,7 +124,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             # Create scheduler-side SharedOffloadRegion (rank=None) so the
             # primary tier can eagerly create a memoryview over _base.
             scheduler_mmap = SharedOffloadRegion(
-                instance_id=self._region_instance_id(),
+                instance_id=self.vllm_config.instance_id,
                 num_blocks=self.num_blocks,
                 rank=None,
                 kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
@@ -185,28 +185,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
         return self._manager
 
-    def _region_instance_id(self) -> str:
-        """Per-DP-replica id for the ``/dev/shm`` offload region.
-
-        Each data-parallel replica is a separate engine with its own KV
-        blocks, so its mmap file must be distinct — otherwise replicas
-        collide on one file and the rank-based offset runs out of bounds.
-        Mirrors the P2P tier's ``base_port + data_parallel_index`` scheme;
-        for DP=1 the index is 0.
-        """
-        dp_index = self.vllm_config.parallel_config.data_parallel_index
-        return f"{self.vllm_config.instance_id}_dp{dp_index}"
-
     @override
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
-        # Slot index within a block row is the TP rank in [0, world_size).
-        # current_device_index() returns the global physical device, so under
-        # DP (where each replica owns a contiguous world_size-sized device
-        # slice) fold it back into the replica-local range.
-        world_size = self.vllm_config.parallel_config.world_size
-        rank = torch.accelerator.current_device_index() % world_size
+        rank = torch.accelerator.current_device_index()
         worker_mmap = SharedOffloadRegion(
-            instance_id=self._region_instance_id(),
+            instance_id=self.vllm_config.instance_id,
             num_blocks=self.num_blocks,
             rank=rank,
             kv_bytes_per_block=self.kv_bytes_per_offloaded_block,

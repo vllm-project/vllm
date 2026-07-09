@@ -183,13 +183,13 @@ class TestNixlTransportWithMockedAgent:
         assert result.done == ()
         assert result.failed == ()
 
-    def test_poll_owner_scopes_to_peer(self):
-        """poll(owner) drains only that peer's transfers.
+    def test_poll_peer_id_scopes_to_peer(self):
+        """poll(peer_id) drains only that peer's transfers.
 
         Regression: the transport is shared across peer sessions (e.g. a
         single prefiller serving a DP>1 decoder). An unscoped poll by one
         session used to consume and discard sibling sessions' completions,
-        starving them until timeout. poll(owner) must leave other peers'
+        starving them until timeout. poll(peer_id) must leave other peers'
         transfers inflight.
         """
         transport = self._make_transport()
@@ -201,14 +201,14 @@ class TestNixlTransportWithMockedAgent:
         transport._agent.check_xfer_state.return_value = "DONE"
 
         # Polling peer:1 must not consume peer:2's completed transfer.
-        result = transport.poll(owner="peer:1")
+        result = transport.poll(peer_id="peer:1")
         assert tid1 in result.done
         assert tid2 not in result.done
         assert tid1 not in transport._inflight
         assert tid2 in transport._inflight
 
         # peer:2 sees its own completion when it polls.
-        result2 = transport.poll(owner="peer:2")
+        result2 = transport.poll(peer_id="peer:2")
         assert tid2 in result2.done
         assert tid2 not in transport._inflight
 

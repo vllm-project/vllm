@@ -180,8 +180,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 NIXL agent registers this region for RDMA transfers.
             tier_type: Tier identifier (defaults to ``"p2p"``).
             host: Address the ZMQ control socket binds to. Defaults to
-                ``VLLM_P2P_SIDE_CHANNEL_HOST`` (``0.0.0.0``) when not
-                set; override to the node IP for cross-host P/D.
+                ``VLLM_P2P_SIDE_CHANNEL_HOST`` (``localhost``) when not
+                set; must be overridden to the node IP for cross-host P2P
+                so remote peers can reach the socket.
             port: Base port for the ZMQ control socket. Must be
                 reachable from peers. Defaults to
                 ``VLLM_P2P_SIDE_CHANNEL_PORT`` (``5710``) when not set.
@@ -209,12 +210,13 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # NIXL). For DP=1 the index is 0, leaving the base port unchanged.
         dp_index = offloading_spec.vllm_config.parallel_config.data_parallel_index
         port = int(port) + dp_index
-        # The socket binds to ``host`` (may be a wildcard so it listens on
-        # every interface), but the advertised identity — used as the NIXL
-        # agent name and as the address peers dial back — must be unique and
-        # routable. Resolve a node IP when ``host`` is a wildcard/loopback so
-        # two peers binding 0.0.0.0 don't both claim ``0.0.0.0:<port>`` and
-        # collide (NIXL rejects a remote agent whose name equals the local).
+        # The socket binds to ``host`` (the ``localhost`` default listens on
+        # loopback only; a wildcard or node IP listens more broadly), but the
+        # advertised identity — used as the NIXL agent name and as the address
+        # peers dial back — must be unique and routable. Resolve a node IP when
+        # ``host`` is a wildcard/loopback so two peers sharing a non-routable
+        # bind host don't both claim ``<host>:<port>`` and collide (NIXL
+        # rejects a remote agent whose name equals the local).
         advertise_host = _resolve_advertise_host(host)
         self._local_id = f"{advertise_host}:{port}"
 

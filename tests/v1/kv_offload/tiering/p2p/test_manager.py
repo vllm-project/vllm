@@ -714,7 +714,7 @@ class _ShutdownFakeData:
             return list(self._still_queue[0])
         return []
 
-    def poll(self, owner=None):
+    def poll(self, peer_id=None):
         self.poll_calls += 1
 
         class _Empty:
@@ -947,7 +947,7 @@ class _FakeData:
         self._inflight_done.append(tid)
         return tid
 
-    def poll(self, owner=None):
+    def poll(self, peer_id=None):
         from vllm.v1.kv_offload.tiering.p2p.data.base import PollResult
 
         done = self._inflight_done[:]
@@ -1549,7 +1549,7 @@ class TestBindHostPortDefaults:
         monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
         monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_PORT", raising=False)
         mgr = self._construct(monkeypatch)
-        # 0.0.0.0 default binds all interfaces but the identity resolves to a
+        # localhost default binds loopback but the identity still resolves to a
         # routable node IP so peers can dial back and NIXL names stay unique.
         assert mgr._local_id == "203.0.113.9:5710"
 
