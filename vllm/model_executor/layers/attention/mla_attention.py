@@ -489,16 +489,30 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-        prefill_backend_cls = get_mla_prefill_backend(vllm_config)
-        self.prefill_backend = prefill_backend_cls(
-            num_heads=self.num_heads,
-            scale=self.scale,
-            kv_lora_rank=self.kv_lora_rank,
-            qk_nope_head_dim=self.qk_nope_head_dim,
-            qk_rope_head_dim=self.qk_rope_head_dim,
-            v_head_dim=self.v_head_dim,
-            vllm_config=vllm_config,
-        )
+        self.prefill_backend: MLAPrefillBackend | None
+        try:
+            prefill_backend_cls = get_mla_prefill_backend(vllm_config)
+        except ValueError:
+            if (
+                not self.impl.is_sparse
+                or vllm_config.attention_config.mla_prefill_backend is not None
+            ):
+                raise
+            logger.warning_once(
+                "No MLA prefill backend supports this model; sparse MLA will use the "
+                "top-k MQA path only (no dense-MHA prefill)."
+            )
+            self.prefill_backend = None
+        else:
+            self.prefill_backend = prefill_backend_cls(
+                num_heads=self.num_heads,
+                scale=self.scale,
+                kv_lora_rank=self.kv_lora_rank,
+                qk_nope_head_dim=self.qk_nope_head_dim,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                v_head_dim=self.v_head_dim,
+                vllm_config=vllm_config,
+            )
 
         self.kv_cache = torch.tensor([])
 
@@ -705,7 +719,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if self.impl.is_sparse and num_mha_tokens > 0:
             prefill_max_seq_len = attn_metadata.prefill_max_seq_len  # type: ignore[attr-defined]
             use_mha = (
-                prefill_max_seq_len <= attn_metadata.topk_tokens  # type: ignore[attr-defined]
+                self.prefill_backend is not None
+                and prefill_max_seq_len <= attn_metadata.topk_tokens  # type: ignore[attr-defined]
                 and not self._vllm_config.attention_config.sparse_mla_force_mqa
             )
             if not use_mha:
@@ -714,6 +729,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         mha_use_quant_output = (
             quant_key is not None
+            and self.prefill_backend is not None
             and self.prefill_backend.supports_quant_output(quant_key)
             and attn_metadata is not None
             and attn_metadata.prefill is not None

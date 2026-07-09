@@ -67,9 +67,12 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             dtype=self.model_config.dtype,
             device=device,
         )
-        self._prefill_backend = vllm_config.compilation_config.static_forward_context[
+        layer_prefill_backend = vllm_config.compilation_config.static_forward_context[
             layer_names[0]
-        ].prefill_backend.clone()
+        ].prefill_backend
+        self._prefill_backend = (
+            layer_prefill_backend.clone() if layer_prefill_backend is not None else None
+        )
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: "VllmConfig") -> int:
@@ -205,7 +208,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
 
         prefill_max_seq_len = 0
         prefill: MLACommonPrefillMetadata | None = None
-        if num_prefills > 0:
+        if num_prefills > 0 and self._prefill_backend is not None:
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             assert seq_lens_cpu is not None
             prefill_max_seq_len = int(
