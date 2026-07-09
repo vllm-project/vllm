@@ -27,6 +27,7 @@
 from collections.abc import Iterable
 from functools import partial
 from itertools import islice
+from typing import Any
 
 import torch
 from torch import nn
@@ -62,6 +63,19 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
+
+
+def _get_rope_parameters(
+    config: Olmo2Config | Olmo3Config,
+    sliding_window: int | None,
+) -> dict[str, Any]:
+    if sliding_window is None or isinstance(config, Olmo3Config):
+        return config.rope_parameters
+
+    return {
+        "rope_type": "default",
+        "rope_theta": config.rope_parameters["rope_theta"],
+    }
 
 
 class Olmo2Attention(nn.Module):
@@ -136,12 +150,9 @@ class Olmo2Attention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-        # Rotary embeddings. Rope scaling is only applied on full attention layers.
-        if sliding_window is None:
-            rope_parameters = self.config.rope_parameters
-        else:
-            rope_theta = self.config.rope_parameters["rope_theta"]
-            rope_parameters = {"rope_type": "default", "rope_theta": rope_theta}
+        # OLMo2 applies RoPE scaling only on full attention layers; OLMo3 uses
+        # its configured RoPE parameters for both full and sliding layers.
+        rope_parameters = _get_rope_parameters(self.config, sliding_window)
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=self.max_position_embeddings,
