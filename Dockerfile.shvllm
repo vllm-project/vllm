@@ -73,6 +73,14 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     pip wheel . --no-build-isolation --no-deps -w /wheels
 
 # --------------------------------------------------------------------------
+# Hilfs-Stage: nur die gebauten Wheels exportieren, z. B.
+#   docker buildx build --target wheels-export --output type=local,dest=./wheels .
+# Sichert das Compile-Ergebnis unabhängig vom BuildKit-Cache.
+# --------------------------------------------------------------------------
+FROM scratch AS wheels-export
+COPY --from=builder /wheels /
+
+# --------------------------------------------------------------------------
 # Stage 2: Runtime
 # --------------------------------------------------------------------------
 FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu24.04
