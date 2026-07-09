@@ -1432,8 +1432,7 @@ def build_mla_chunked_context_metadata(
 ) -> "MLACommonPrefillMetadata.ChunkedContextMetadata | None":
     """Build chunked-context metadata for an MLA prefill.
 
-    Shared by the dense (`MLACommonMetadataBuilder`) and sparse
-    (`SparseMLACommonMetadataBuilder`) builders. Splits each prefill's context
+    Shared by dense and sparse builders. Splits each prefill's context
     into workspace-sized chunks and, under DCP, plans the per-rank interleaved
     local chunks the all-gather reduction consumes.
 
