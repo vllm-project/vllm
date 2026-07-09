@@ -306,7 +306,37 @@ class VllmGui : Form
 
         try
         {
-            // Show model info
+            // Ensure vLLM is installed in the venv
+        Log("Setting up environment...");
+        try
+        {
+            Process setup = new Process();
+            setup.StartInfo.FileName = pythonExe;
+            setup.StartInfo.Arguments = "-m pip install -e .";
+            setup.StartInfo.WorkingDirectory = repoRoot;
+            setup.StartInfo.UseShellExecute = false;
+            setup.StartInfo.RedirectStandardOutput = true;
+            setup.StartInfo.RedirectStandardError = true;
+            setup.StartInfo.CreateNoWindow = true;
+            setup.Start();
+            string setupOut = setup.StandardOutput.ReadToEnd();
+            string setupErr = setup.StandardError.ReadToEnd();
+            setup.WaitForExit(60000);
+            if (setup.ExitCode != 0)
+            {
+                Log("WARNING: pip install exited with code " + setup.ExitCode);
+                if (!string.IsNullOrEmpty(setupErr)) Log("  " + setupErr.Replace("\n", "\n  "));
+            }
+            else
+                Log("vLLM environment ready.");
+        }
+        catch (Exception ex)
+        {
+            Log("WARNING: Environment setup failed: " + ex.Message);
+            Log("Continuing anyway...");
+        }
+
+        // Show model info
         if (File.Exists(Path.Combine(txtModel.Text, "config.json")))
             Log("Model config: " + Path.Combine(txtModel.Text, "config.json"));
         else
