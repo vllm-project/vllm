@@ -11,6 +11,9 @@ from tqdm import tqdm
 
 import vllm.envs as envs
 from vllm.distributed.parallel_state import get_dp_group, is_global_first_rank
+from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
+    DeepGemmFp8BlockScaledMMKernel,
+)
 from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
     compute_aligned_M_and_alignment,
@@ -144,6 +147,12 @@ def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
         and not isinstance(module.quant_method, Mxfp8OnlineLinearMethod)
         and getattr(module.quant_method, "block_quant", False)
         and not getattr(module.quant_method, "use_marlin", True)
+    ):
+        return False
+
+    if not isinstance(
+        getattr(module.quant_method, "fp8_linear", None),
+        DeepGemmFp8BlockScaledMMKernel,
     ):
         return False
 
