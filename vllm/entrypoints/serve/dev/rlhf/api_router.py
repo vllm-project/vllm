@@ -129,16 +129,14 @@ async def init_weight_transfer_engine(raw_request: Request):
 
 @router.post("/start_weight_update")
 async def start_weight_update(raw_request: Request):
-    include_draft = False
-    raw_body = await raw_request.body()
-    if raw_body:
-        try:
-            body = json.loads(raw_body)
-        except json.JSONDecodeError as e:
-            raise HTTPException(status_code=400, detail="Invalid JSON format") from e
-        include_draft = body.get("include_draft", False)
-    await engine_client(raw_request).start_weight_update(include_draft=include_draft)
+    await engine_client(raw_request).start_weight_update()
     return JSONResponse(content={"message": "Weight update started"})
+
+
+@router.post("/start_draft_weight_update")
+async def start_draft_weight_update(raw_request: Request):
+    await engine_client(raw_request).start_draft_weight_update()
+    return JSONResponse(content={"message": "Draft weight update started"})
 
 
 @router.post("/update_weights")
