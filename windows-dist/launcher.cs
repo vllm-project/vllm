@@ -48,14 +48,21 @@ class VllmGui : Form
     {
         scrollPanel = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
         Controls.Add(scrollPanel);
-        int col1 = 15, col2 = 340, y = 10;
+        int col1 = 15, col2 = 350;
+        int y = 10, startServer, startSampling, cw = 280;
 
-        AddSectionLabel("Model", col1, ref y);
-        AddField(col1, ref y, "Model path:", txtModel = new TextBox { Size = new Size(340, 22) });
-        btnBrowse = AddButton("Browse...", col1 + 480, y - 26, 80);
+        // ===== ROW 1: Model path (full width) =====
+        var lblModel = new Label { Text = "Model path:", Location = new Point(col1, y), Size = new Size(80, 22), TextAlign = ContentAlignment.MiddleLeft };
+        scrollPanel.Controls.Add(lblModel);
+        txtModel = new TextBox { Size = new Size(460, 22), Location = new Point(col1 + 85, y - 1) };
+        scrollPanel.Controls.Add(txtModel);
+        btnBrowse = AddButton("Browse...", col1 + 550, y - 2, 80);
         btnBrowse.Click += (s, e) => BrowseModel();
+        y += 32;
 
-        y += 6; AddSectionLabel("Server", col1, ref y);
+        // ===== ROW 2: Server (col1) | Sampling (col2) side by side =====
+        startServer = y;
+        AddSectionLabel("Server", col1, ref y);
         AddField(col1, ref y, "Port:", txtPort = MkTb("8001"));
         AddField(col1, ref y, "Max model len:", txtMaxModelLen = MkTb("4096"));
         AddField(col1, ref y, "GPU memory util:", txtGpuMem = MkTb("0.95"));
@@ -66,34 +73,39 @@ class VllmGui : Form
         AddField(col1, ref y, "Seed:", txtSeed = MkTb("0"));
         AddField(col1, ref y, "Max batched tokens:", txtMaxBatch = MkTb("8192"));
 
-        int sy = 10; AddSectionLabel("Sampling", col2, ref sy);
-        AddField(col2, ref sy, "Max tokens:", txtMaxTokens = MkTb("512"));
-        AddField(col2, ref sy, "Temperature:", txtTemp = MkTb("0.7"));
-        AddField(col2, ref sy, "Top P:", txtTopP = MkTb("0.95"));
-        AddField(col2, ref sy, "Top K:", txtTopK = MkTb("-1"));
-        AddField(col2, ref sy, "Repetition penalty:", txtRepPenalty = MkTb("1.0"));
-        AddField(col2, ref sy, "Frequency penalty:", txtFreqPenalty = MkTb("0.0"));
-        AddField(col2, ref sy, "Presence penalty:", txtPresPenalty = MkTb("0.0"));
-        AddField(col2, ref sy, "Min P:", txtMinP = MkTb("0.0"));
+        startSampling = startServer;
+        AddSectionLabel("Sampling", col2, ref startSampling);
+        AddField(col2, ref startSampling, "Max tokens:", txtMaxTokens = MkTb("512"));
+        AddField(col2, ref startSampling, "Temperature:", txtTemp = MkTb("0.7"));
+        AddField(col2, ref startSampling, "Top P:", txtTopP = MkTb("0.95"));
+        AddField(col2, ref startSampling, "Top K:", txtTopK = MkTb("-1"));
+        AddField(col2, ref startSampling, "Repetition penalty:", txtRepPenalty = MkTb("1.0"));
+        AddField(col2, ref startSampling, "Frequency penalty:", txtFreqPenalty = MkTb("0.0"));
+        AddField(col2, ref startSampling, "Presence penalty:", txtPresPenalty = MkTb("0.0"));
+        AddField(col2, ref startSampling, "Min P:", txtMinP = MkTb("0.0"));
 
-        int cy = y + 6, cw = 260;
-        AddSectionLabel("Options", col1, ref cy);
-        chkEager = AddChk("Enforce eager", col1, ref cy, cw, true);
-        chkPrefixCache = AddChk("Prefix caching", col1, ref cy, cw, true);
-        chkChunked = AddChk("Chunked prefill", col1, ref cy, cw, true);
-        chkNoStats = AddChk("Disable log stats", col1, ref cy, cw, true);
-        chkNoCustomReduce = AddChk("Disable custom all-reduce", col1, ref cy, cw, true);
-        chkTrust = AddChk("Trust remote code", col1, ref cy, cw, false);
-        chkLora = AddChk("Enable LoRA", col1, ref cy, cw, false);
-        chkReasoning = AddChk("Enable reasoning", col1, ref cy, cw, false);
-        chkHidden = AddChk("Return hidden states", col1, ref cy, cw, false);
-        chkFlashAttn = AddChk("Flashinfer attention", col1, ref cy, cw, false);
-        chkTritonAttn = AddChk("Triton attention", col1, ref cy, cw, true);
-        chkIgnoreEos = AddChk("Ignore EOS", col2, ref cy, cw, false);
-        chkSkipSpecial = AddChk("Skip special tokens", col2, ref cy, cw, true);
-        chkLogprobs = AddChk("Enable logprobs", col2, ref cy, cw, false);
+        // ===== ROW 3: Checkboxes in 2 columns =====
+        int c1y = y + 6;
+        AddSectionLabel("Options", col1, ref c1y);
+        chkEager = AddChk("Enforce eager", col1, ref c1y, cw, true);
+        chkPrefixCache = AddChk("Prefix caching", col1, ref c1y, cw, true);
+        chkChunked = AddChk("Chunked prefill", col1, ref c1y, cw, true);
+        chkNoStats = AddChk("Disable log stats", col1, ref c1y, cw, true);
+        chkNoCustomReduce = AddChk("Disable custom all-reduce", col1, ref c1y, cw, true);
+        chkTrust = AddChk("Trust remote code", col1, ref c1y, cw, false);
+        chkLora = AddChk("Enable LoRA", col1, ref c1y, cw, false);
+        chkReasoning = AddChk("Enable reasoning", col1, ref c1y, cw, false);
+        chkHidden = AddChk("Return hidden states", col1, ref c1y, cw, false);
+        chkFlashAttn = AddChk("Flashinfer attention", col1, ref c1y, cw, false);
+        chkTritonAttn = AddChk("Triton attention", col1, ref c1y, cw, true);
 
-        int by = Math.Max(cy, sy) + 10;
+        int c2y = y + 28;
+        AddSectionLabel("Decode", col2, ref c2y);
+        chkIgnoreEos = AddChk("Ignore EOS", col2, ref c2y, cw, false);
+        chkSkipSpecial = AddChk("Skip special tokens", col2, ref c2y, cw, true);
+        chkLogprobs = AddChk("Enable logprobs", col2, ref c2y, cw, false);
+
+        int by = Math.Max(c1y, c2y) + 10;
         btnStart = AddButton("Start Server", col1, by, 140);
         btnStart.ForeColor = Color.Green;
         btnStart.Font = new Font("Segoe UI", 10, FontStyle.Bold);
