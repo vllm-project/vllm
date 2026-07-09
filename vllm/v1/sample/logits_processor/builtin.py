@@ -260,13 +260,18 @@ class MinTokensLogitsProcessor(LogitsProcessor):
             logits.index_put_(logits_slice, self.neg_inf_tensor)
             return
 
+        preserve_rows, preserve_toks = preserve_logits_slice
         stop_logits = logits[preserve_logits_slice].clone()
         logits.index_put_(logits_slice, self.neg_inf_tensor)
 
-        restore_mask = torch.isneginf(logits[preserve_logits_slice[0]]).all(dim=-1)
+        unique_rows, inverse_indices = torch.unique_consecutive(
+            preserve_rows, return_inverse=True
+        )
+        row_needs_restore = torch.isneginf(logits[unique_rows]).all(dim=-1)
+        restore_mask = row_needs_restore[inverse_indices] & ~torch.isneginf(stop_logits)
         restore_slice = (
-            preserve_logits_slice[0][restore_mask],
-            preserve_logits_slice[1][restore_mask],
+            preserve_rows[restore_mask],
+            preserve_toks[restore_mask],
         )
         logits.index_put_(restore_slice, stop_logits[restore_mask])
 
