@@ -57,8 +57,14 @@ if HAS_TRITON:
             )
             HAS_TRITON = False
 
-        # Check Triton CPU
-        if "cpu" in version("vllm"):
+        # Check Triton CPU (vLLM may not be installed as a package, e.g.
+        # when running from source via PYTHONPATH -- skip the check in
+        # that case since PackageNotFoundError is a subclass of ImportError)
+        try:
+            _vllm_version = version("vllm")
+        except Exception:
+            _vllm_version = ""
+        if "cpu" in _vllm_version:
             if "cpu" in backends:
                 HAS_TRITON = True
             else:

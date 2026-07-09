@@ -290,6 +290,17 @@ def build_app(
             )
 
     app = sagemaker_standards_bootstrap(app)
+
+    from pathlib import Path
+    _frontend = Path(__file__).parent / "frontend" / "index.html"
+    if _frontend.exists():
+        from fastapi.responses import HTMLResponse
+        _html = _frontend.read_text(encoding="utf-8")
+
+        @app.get("/", include_in_schema=False)
+        async def _frontend_handler():
+            return HTMLResponse(_html)
+
     return app
 
 
