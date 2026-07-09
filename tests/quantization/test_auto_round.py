@@ -50,7 +50,7 @@ MODELS = [
         id="auto_round:auto_awq",
     ),
     pytest.param(
-        "OPEA/Qwen2.5-72B-Instruct-int2-sym-inc",
+        "Intel/Qwen3-8B-w2g64-for-ut",
         marks=pytest.mark.skipif(
             not (current_platform.is_cuda() or current_platform.is_xpu())
             or current_platform.device_count() < 2,
@@ -61,11 +61,10 @@ MODELS = [
 ]
 
 MODEL_RUNNER_KWARGS = {
-    "OPEA/Qwen2.5-72B-Instruct-int2-sym-inc": {
+    "Intel/Qwen3-8B-w2g64-for-ut": {
         "block_size": 64,
-        "gpu_memory_utilization": 0.15,
+        "gpu_memory_utilization": 0.8,
         "max_model_len": 512,
-        "tensor_parallel_size": 2,
     },
 }
 
