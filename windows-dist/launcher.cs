@@ -51,8 +51,8 @@ class VllmGui : Form
         int col1 = 15, col2 = 340, y = 10;
 
         AddSectionLabel("Model", col1, ref y);
-        AddField(col1, ref y, "Model path:", txtModel = new TextBox { Size = new Size(400, 22) });
-        btnBrowse = AddButton("Browse...", col1 + 485, y - 26, 80);
+        AddField(col1, ref y, "Model path:", txtModel = new TextBox { Size = new Size(340, 22) });
+        btnBrowse = AddButton("Browse...", col1 + 480, y - 26, 80);
         btnBrowse.Click += (s, e) => BrowseModel();
 
         y += 6; AddSectionLabel("Server", col1, ref y);
