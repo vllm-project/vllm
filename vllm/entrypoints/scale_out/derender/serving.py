@@ -209,7 +209,9 @@ class ServingDerender(BaseServing):
             total_prompt_tokens,
             total_completion_tokens,
         ) = await self.online_derenderer.derender_completion(
-            request.generate_responses, request.prompt_tokens
+            request.generate_responses,
+            request.prompt_tokens,
+            completion_request=request.completion_request,
         )
 
         first = request.generate_responses[0]
@@ -307,6 +309,7 @@ class ServingDerender(BaseServing):
                 generate_chunk=request.generate_chunk,
                 state=request.stream_state,
                 prompt_tokens=request.prompt_tokens,
+                completion_request=request.completion_request,
             )
         except ValueError as exc:
             return self.create_error_response(str(exc))
