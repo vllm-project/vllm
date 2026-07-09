@@ -562,12 +562,26 @@ class MoERunner(MoERunnerInterface):
         )
 
         if self.routed_experts.quant_method.is_monolithic:
+            # Monolithic kernels block the host thread (they need per-expert
+            # token counts on the CPU), so submitting shared experts *after*
+            # the routed kernel yields no overlap: the host can't enqueue the
+            # aux-stream work until the routed GPU work has already drained.
+            # Launch shared experts on the aux stream BEFORE forward_monolithic
+            # so they overlap the routed all-gather + fused MoE, then join
+            # after. Falls back to the post-routed call when overlap is off.
+            overlapped = (
+                self._shared_experts is not None
+                and self._shared_experts.launch_overlapped(shared_experts_input)
+            )
             # Monolithic kernels: pass router_logits to routed_experts
             fused_out = self.routed_experts.forward_monolithic(
                 x=hidden_states,
                 router_logits=router_logits,
                 input_ids=input_ids,
             )
+            if overlapped:
+                assert self._shared_experts is not None
+                self._shared_experts.join_overlapped()
         else:
             # Modular kernels: select experts first, then call routed_experts
             topk_weights, topk_ids = self.router.select_experts(
@@ -584,11 +598,13 @@ class MoERunner(MoERunnerInterface):
                 shared_experts=self._shared_experts,
                 shared_experts_input=shared_experts_input,
             )
+            overlapped = False
 
-        self._maybe_apply_shared_experts(
-            shared_experts_input,
-            SharedExpertsOrder.MULTI_STREAM_OVERLAPPED,
-        )
+        if not overlapped:
+            self._maybe_apply_shared_experts(
+                shared_experts_input,
+                SharedExpertsOrder.MULTI_STREAM_OVERLAPPED,
+            )
 
         return (
             self._shared_experts.output if self._shared_experts is not None else None,
@@ -688,9 +704,11 @@ class MoERunner(MoERunnerInterface):
             shared_experts_input,
             input_ids,
             self._encode_layer_name(),
-            self.moe_config.hidden_dim_unpadded
-            if self._quant_method.has_unpadded_output
-            else 0,
+            (
+                self.moe_config.hidden_dim_unpadded
+                if self._quant_method.has_unpadded_output
+                else 0
+            ),
         )
 
         #

@@ -141,6 +141,35 @@ class SharedExperts(torch.nn.Module):
 
         return output
 
+    def launch_overlapped(self, shared_experts_input: torch.Tensor) -> bool:
+        """Enqueue shared experts on the aux stream WITHOUT joining back.
+
+        Returns True if work was launched on the aux stream (the caller must
+        then call :meth:`join_overlapped` after enqueuing the routed kernel),
+        or False if the multi-stream order does not apply (caller should fall
+        back to sequential execution).
+
+        Used by the monolithic routed path to submit shared-expert work to the
+        aux stream *before* the host-blocking routed kernel, so it overlaps the
+        routed all-gather + fused MoE. :meth:`maybe_sync_shared_experts_stream`
+        must have run earlier to record the aux->main dependency.
+        """
+        if (
+            self._determine_shared_experts_order(shared_experts_input)
+            != SharedExpertsOrder.MULTI_STREAM_OVERLAPPED
+        ):
+            return False
+        assert self._stream is not None
+        assert self._output[self._output_idx] is None
+        with torch.cuda.stream(self._stream):
+            self._output[self._output_idx] = self._layer(shared_experts_input)
+        return True
+
+    def join_overlapped(self) -> None:
+        """Join the aux stream back after a :meth:`launch_overlapped` call."""
+        assert self._stream is not None
+        current_stream().wait_stream(self._stream)
+
     @property
     def _output_idx(self) -> int:
         return dbo_current_ubatch_id() if self.enable_dbo else 0
