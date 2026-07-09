@@ -54,24 +54,28 @@ setup.bat
 
 ## How to Run
 
-After install, activate your venv and set `HIP_PATH`, then:
+After `setup.bat` finishes, the installer created `sitecustomize.py` so `HIP_PATH` is already set. Just:
 
 ```powershell
-# Set your ROCm path
-$env:HIP_PATH = "C:\Program Files\AMD\ROCm\7.13"
+# 1. Activate your virtual environment
+.venv\Scripts\activate
 
-# Start the API server (chat UI at http://localhost:8001)
-python -m vllm.entrypoints.openai.api_server --model F:\VLLM-Models\Qwen2.5-3B-Instruct --enforce-eager --dtype float16 --port 8001
+# 2. Start the server
+python -m vllm.entrypoints.openai.api_server --model <path-to-your-model> --enforce-eager --dtype float16 --port 8001
 ```
 
-Open **http://localhost:8001/** for the chat UI, or use the OpenAI-compatible API at `http://localhost:8001/v1`.
+Then open **http://localhost:8001/** in your browser.
 
-You need a model downloaded first. Get Qwen2.5-3B-Instruct (~5.8 GB, works great on 16 GB VRAM):
+**Don't have a model yet?** Download one that works great on 16 GB VRAM:
 
 ```powershell
 pip install huggingface_hub
 python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='Qwen/Qwen2.5-3B-Instruct', local_dir=r'F:\VLLM-Models\Qwen2.5-3B-Instruct')"
 ```
+
+Then run the server with `--model F:\VLLM-Models\Qwen2.5-3B-Instruct`.
+
+That's it. Two commands. Chat UI at localhost:8001.
 
 ## How It Works
 
