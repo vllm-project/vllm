@@ -2411,6 +2411,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                     q, kv_c_and_k_pe_cache, attn_metadata, k_scale
                 )
 
+            context_output = context_output[..., : self.v_head_dim]
+            suffix_output = suffix_output[..., : self.v_head_dim]
+
             output = output.view(-1, self.num_heads, self.v_head_dim)
             merge_attn_states(
                 output=output,
@@ -2423,6 +2426,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         elif output_scale is None:
             # With output_scale set, backend already wrote into `output` in place.
             assert isinstance(output_prefill, torch.Tensor)
+            output_prefill = output_prefill[..., : self.v_head_dim]
             output_prefill = output_prefill.flatten(start_dim=-2)
             output.copy_(output_prefill)
 
