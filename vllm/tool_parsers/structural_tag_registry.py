@@ -18,7 +18,9 @@ from xgrammar.openai_tool_call_schema import (
 from xgrammar.structural_tag import (
     AnyTextFormat,
     ConstStringFormat,
+    Format,
     JSONSchemaFormat,
+    OrFormat,
     SequenceFormat,
     TagFormat,
     TagsWithSeparatorFormat,
@@ -134,6 +136,50 @@ def get_model_structural_tag(
         tool_choice=dumped_tool_choice,
         reasoning=reasoning,
     )
+
+
+def compose_tool_call_or_schema(
+    tool_tag: StructuralTag,
+    json_schema: dict[str, Any] | bool,
+) -> StructuralTag | None:
+    """Compose an auto tool-call structural tag with a response_format schema.
+
+    A ``tool_choice="auto"`` request that also sets a response_format wants two
+    things at once: the freedom to call a tool, and a final answer constrained
+    to the schema. This builds an ``OrFormat`` whose first branch is the tool
+    call (forced to require at least one, so the schema branch is reachable) and
+    whose second branch is the schema-constrained answer.
+
+    Args:
+        tool_tag: The auto tool-call structural tag from a registry builder.
+        json_schema: The response_format JSON schema (or ``True`` for any JSON).
+
+    Returns:
+        The composed structural tag, or ``None`` when ``tool_tag`` cannot be
+        forced to require a tool call, in which case callers fall back to
+        dropping the response_format.
+    """
+    tool_format = _require_tool_call(tool_tag.format)
+    if tool_format is None:
+        return None
+    return StructuralTag(
+        format=OrFormat(
+            elements=[tool_format, JSONSchemaFormat(json_schema=json_schema)]
+        )
+    )
+
+
+def _require_tool_call(fmt: Format) -> Format | None:
+    """Force an auto tool-call format to require at least one tool call.
+
+    Without this an auto ``TriggeredTagsFormat`` also matches free text with no
+    tool call, so an ``OrFormat`` schema branch would be unreachable and the
+    schema constraint vacuous. Returns ``None`` for formats that cannot express
+    this requirement.
+    """
+    if isinstance(fmt, TriggeredTagsFormat) and fmt.tags:
+        return fmt.model_copy(update={"at_least_one": True})
+    return None
 
 
 def _dump_tool_for_xgrammar(
