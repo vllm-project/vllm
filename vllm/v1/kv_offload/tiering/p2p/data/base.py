@@ -207,11 +207,11 @@ class DataTransport(ABC):
         ...
 
     @abstractmethod
-    def poll(self, owner: str | None = None) -> PollResult:
+    def poll(self, peer_id: str | None = None) -> PollResult:
         """Poll inflight transfers for completion.
 
         Args:
-            owner: If given, only poll (and drain) transfers submitted for
+            peer_id: If given, only poll (and drain) transfers submitted for
                 this peer_id — the value passed to ``write_blocks``. This is
                 required when a single transport is shared across multiple
                 peer sessions: ``poll()`` pops completed handles, so an
