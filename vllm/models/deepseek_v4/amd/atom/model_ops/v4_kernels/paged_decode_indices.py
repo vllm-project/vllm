@@ -38,7 +38,7 @@ import triton.language as tl
 
 @triton.jit
 def _v4_paged_decode_indices_kernel(
-    state_slot_per_seq_ptr,  # [bs] int32
+    state_slot_per_seq_ptr,  # [bs] int32 — unused (block-addressed SWA); kept for ABI
     batch_id_per_token_ptr,  # [T+pad] int — sentinel -1 in pad tail
     positions_ptr,  # [T+pad] int — global token position
     swa_indptr_ptr,  # [T+1] int32 — ragged SWA-prefix cumsum
@@ -47,8 +47,11 @@ def _v4_paged_decode_indices_kernel(
     swa_indices_ptr,  # [swa_total] int32, output
     csa_indices_ptr,  # [csa_total] int32, output (writes SWA-prefix segment only)
     hca_indices_ptr,  # [hca_total] int32, output (writes SWA-prefix segment only)
-    cs,  # win_with_spec — stride into unified_kv SWA region (paper §3.6.1)
+    block_tables_ptr,  # [bs, MAX_BLOCKS] int32 — per-seq paged block ids
+    bt_stride_bs,  # block_tables row stride (int32 elements)
+    cs,  # kept for ABI (unused: SWA now block-addressed)
     win: tl.constexpr,  # window_size — max SWA prefix slots
+    BS: tl.constexpr,  # SWA block size (== window == proxy block size)
     BLOCK_N: tl.constexpr,  # next_pow2(win)
 ):
     """One program per token. Writes `n = min(positions[t]+1, win)` paged
@@ -56,17 +59,20 @@ def _v4_paged_decode_indices_kernel(
     slice in the SWA/CSA/HCA index buffers (the compress section occupies
     the head).
 
+    Block-addressed SWA (prefix-cache safe): the SWA region is `num_blocks*BS`
+    rows and a token at absolute position `abs_pos` lives at
+    `block_tables[bid, abs_pos // BS] * BS + (abs_pos % BS)`. The read is
+    window-masked (only the last `win` positions), so full-reuse of old SWA
+    blocks under prefix caching is harmless (never gathered).
+
     For token `t`:
         bid = batch_id_per_token[t]                  # bail if -1 (CG pad)
-        slot = state_slot_per_seq[bid]
         pos = positions[t]
         n = min(pos + 1, win)
-        # i in [0, n) → abs_pos = pos - n + 1 + i ∈ [0, pos]; written at the
-        # slice tail (indptr[t+1] - n) so the compress section fills the head.
         for i in range(n):
             abs_pos = pos - n + 1 + i
-            ring = abs_pos % cs
-            paged = slot * cs + ring
+            phys = block_tables[bid, abs_pos // BS]
+            paged = phys * BS + (abs_pos % BS)
             swa_indices[swa_indptr[t+1] - n + i] = paged
             csa_indices[csa_indptr[t+1] - n + i] = paged
             hca_indices[hca_indptr[t+1] - n + i] = paged
@@ -76,7 +82,6 @@ def _v4_paged_decode_indices_kernel(
     if bid < 0:
         return  # CG-padded sentinel — leave outputs untouched
 
-    slot = tl.load(state_slot_per_seq_ptr + bid)
     pos = tl.load(positions_ptr + t)
     # `n` = actual valid SWA prefix count. Cast to match `win` (compile-time
     # int) — pos is i32/i64 from positions buffer.
@@ -91,8 +96,11 @@ def _v4_paged_decode_indices_kernel(
     i = tl.arange(0, BLOCK_N)
     mask = i < n
     abs_pos = pos - n + 1 + i  # ∈ [0, pos] for valid i
-    ring_idx = abs_pos % cs
-    paged = slot * cs + ring_idx
+    blk_in_seq = abs_pos // BS
+    phys = tl.load(
+        block_tables_ptr + bid * bt_stride_bs + blk_in_seq, mask=mask, other=0
+    )
+    paged = phys * BS + (abs_pos % BS)
 
     tl.store(swa_indices_ptr + swa_end - n + i, paged, mask=mask)
     tl.store(csa_indices_ptr + csa_end - n + i, paged, mask=mask)
@@ -110,9 +118,11 @@ def write_v4_paged_decode_indices(
     swa_indices: torch.Tensor,
     csa_indices: torch.Tensor,
     hca_indices: torch.Tensor,
+    block_tables: torch.Tensor,
     T: int,
     win: int,
     cs: int,
+    bs: int,
 ) -> None:
     """In-place fill SWA / CSA / HCA window-prefix offsets via a single
     Triton kernel. Replaces the prior `_build_window_topk_np` (CPU O(T·win))
@@ -172,8 +182,11 @@ def write_v4_paged_decode_indices(
         swa_indices,
         csa_indices,
         hca_indices,
+        block_tables,
+        block_tables.stride(0),
         cs,
         win=win,
+        BS=bs,
         BLOCK_N=BLOCK_N,
     )
 

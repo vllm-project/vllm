@@ -1792,6 +1792,7 @@ class DeepseekV4Attention(nn.Module):
             swa_write_per_batch=(
                 min(attn_md.max_seqlen_q, cache_size) if is_decode else None
             ),
+            swa_block_tables=block_tables_gpu if is_decode else None,
         )
         if _V4_USE_REF_QUANT:
             act_quant_inplace(kv[..., :-rd], 64, self.scale_fmt)
@@ -1874,6 +1875,7 @@ class DeepseekV4Attention(nn.Module):
                 self.swa_kv,
                 cache_size,
                 min(attn_md.max_seqlen_q, cache_size),
+                block_tables_gpu,
             )
 
         # Inverse RoPE on output's rope dims to remove absolute-position

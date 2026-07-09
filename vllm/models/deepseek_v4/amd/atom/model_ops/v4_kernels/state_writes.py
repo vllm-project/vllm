@@ -61,12 +61,15 @@ def _swa_write_kernel(
     kv_ptr,  # [T, head_dim]
     positions_ptr,  # [T] int — full positions
     cu_seqlens_q_ptr,  # [bs+1] int — per-seq cumulative seqlens
-    state_slot_per_seq_ptr,  # [bs] int — state_slot_mapping_gpu_i32
-    swa_kv_ptr,  # [num_slots, cache_size, head_dim]
-    swa_kv_slot_stride,  # = cache_size * head_dim
+    state_slot_per_seq_ptr,  # [bs] int — unused (block-addressed); kept for ABI
+    swa_kv_ptr,  # [num_blocks, BS, head_dim]
+    swa_kv_slot_stride,  # = BS * head_dim (per physical block)
     swa_kv_pos_stride,  # = head_dim
+    block_tables_ptr,  # [bs, MAX_BLOCKS] int — per-seq paged block ids
+    bt_stride_bs,  # block_tables row stride (elements)
     head_dim,
-    cache_size,
+    cache_size,  # kept for ABI (unused: SWA now block-addressed)
+    BS: tl.constexpr,  # SWA block size (== window == proxy block size)
     WRITE_PER_BATCH: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
@@ -77,6 +80,9 @@ def _swa_write_kernel(
 
     `src_id = cu_seqlens_q[b+1] - N + r` — selects directly from `kv` /
     `positions` with NO shared GPU index buffer (no DMA race window).
+
+    Block-addressed SWA (prefix-cache safe): the token at absolute position
+    `pos` is written to `swa_kv[block_tables[b, pos // BS], pos % BS, :]`.
     """
     batch_idx = tl.program_id(0)
     row_in_batch = tl.program_id(1)
@@ -92,9 +98,9 @@ def _swa_write_kernel(
 
     src_id = cu_end - write_n + row_in_batch
 
-    slot = tl.load(state_slot_per_seq_ptr + batch_idx)
     pos = tl.load(positions_ptr + src_id)
-    ring_idx = pos % cache_size
+    phys = tl.load(block_tables_ptr + batch_idx * bt_stride_bs + (pos // BS))
+    off_in_block = pos % BS
 
     d_offsets = tl.arange(0, BLOCK_D)
     d_mask = d_offsets < head_dim
@@ -105,8 +111,8 @@ def _swa_write_kernel(
     )
     dst = (
         swa_kv_ptr
-        + slot * swa_kv_slot_stride
-        + ring_idx * swa_kv_pos_stride
+        + phys * swa_kv_slot_stride
+        + off_in_block * swa_kv_pos_stride
         + d_offsets
     )
     tl.store(dst, src, mask=d_mask)
@@ -120,6 +126,7 @@ def swa_write(
     swa_kv: torch.Tensor,
     cache_size: int,
     write_per_batch: int,
+    block_tables: torch.Tensor,
 ) -> None:
     """In-place write `swa_kv[state_slot_per_seq[b], pos % cache_size, :] = kv[r, :]`
     for the last `min(tok_n_b, write_per_batch)` tokens of every seq
@@ -147,13 +154,16 @@ def swa_write(
     assert state_slot_per_seq.dim() == 1
     bs = state_slot_per_seq.shape[0]
     assert cu_seqlens_q.dim() == 1 and cu_seqlens_q.shape[0] >= bs + 1
-    assert swa_kv.dim() == 3, f"swa_kv must be [S, C, D], got {swa_kv.shape}"
+    assert swa_kv.dim() == 3, f"swa_kv must be [num_blocks, BS, D], got {swa_kv.shape}"
     T, head_dim = kv.shape
     assert positions.shape[0] >= T, f"positions {positions.shape[0]} < kv T={T}"
+    # swa_kv is [num_blocks, BS, head_dim]; BS == cache_size (== window).
+    swa_block_size = swa_kv.shape[1]
     assert (
-        swa_kv.shape[1] == cache_size
-    ), f"swa_kv ring dim {swa_kv.shape[1]} != cache_size {cache_size}"
+        swa_block_size == cache_size
+    ), f"swa_kv block dim {swa_block_size} != cache_size {cache_size}"
     assert swa_kv.shape[2] == head_dim
+    assert block_tables.dim() == 2, f"block_tables must be 2-D, got {block_tables.shape}"
     assert kv.is_contiguous() and swa_kv.is_contiguous()
     assert (
         bs > 0 and write_per_batch > 0
@@ -172,8 +182,11 @@ def swa_write(
         swa_kv,
         swa_kv.stride(0),
         swa_kv.stride(1),
+        block_tables,
+        block_tables.stride(0),
         head_dim,
         cache_size,
+        BS=swa_block_size,
         WRITE_PER_BATCH=write_per_batch,
         BLOCK_D=BLOCK_D,
     )

@@ -85,9 +85,10 @@ def _v4_decode_indices_fused_kernel(
     n_committed_hca_per_seq_ptr,  # [num_reqs] int32 — per-seq HCA entry count
     block_tables_ptr,  # [num_reqs, MAX_BLOCKS] int — per-seq paged block ids
     bt_stride_bs,  # block_tables row stride (elements)
-    cs,  # win_with_spec — ring-index modulo / SWA-region stride
-    swa_pages,  # num_slots * cs — boundary into compress region
+    cs,  # kept for ABI (unused: SWA now block-addressed)
+    swa_pages,  # num_blocks * BS — boundary into compress region
     win: tl.constexpr,  # SWA window — max prefix slots
+    BS: tl.constexpr,  # SWA block size (== window == proxy block size)
     BLOCK_N: tl.constexpr,  # next_pow2(win)
 ):
     """Fused decode index build: one program per token writes BOTH the SWA
@@ -96,13 +97,15 @@ def _v4_decode_indices_fused_kernel(
     ``_v4_decode_hca_compress_tail_kernel`` into one launch — the two write
     disjoint regions of each token's slice, so a single program covers both
     with no cross-program race.
+
+    Block-addressed SWA (prefix-cache safe): position ``abs_pos`` maps to
+    ``block_tables[bid, abs_pos // BS] * BS + (abs_pos % BS)``.
     """
     t = tl.program_id(0)
     bid = tl.load(batch_id_per_token_ptr + t)
     if bid < 0:
         return  # CG-padded sentinel — leave outputs untouched
 
-    slot = tl.load(state_slot_per_seq_ptr + bid)
     pos = tl.load(positions_ptr + t)
 
     # --- SWA window prefix (slice TAIL of swa / csa / hca) ---
@@ -113,8 +116,11 @@ def _v4_decode_indices_fused_kernel(
     i = tl.arange(0, BLOCK_N)
     mask = i < n
     abs_pos = pos - n + 1 + i
-    ring_idx = abs_pos % cs
-    paged = slot * cs + ring_idx
+    blk_in_seq = abs_pos // BS
+    phys = tl.load(
+        block_tables_ptr + bid * bt_stride_bs + blk_in_seq, mask=mask, other=0
+    )
+    paged = phys * BS + (abs_pos % BS)
     tl.store(swa_indices_ptr + swa_end - n + i, paged, mask=mask)
     tl.store(csa_indices_ptr + csa_end - n + i, paged, mask=mask)
     tl.store(hca_indices_ptr + hca_end - n + i, paged, mask=mask)
@@ -147,6 +153,7 @@ def write_v4_decode_indices_fused(
     win: int,
     cs: int,
     swa_pages: int,
+    bs: int,
 ) -> None:
     """Single-launch fusion of ``write_v4_paged_decode_indices`` (SWA window
     prefix) and ``write_v4_decode_hca_compress_tail`` (HCA compress section).
@@ -187,6 +194,7 @@ def write_v4_decode_indices_fused(
         cs,
         swa_pages,
         win=win,
+        BS=bs,
         BLOCK_N=BLOCK_N,
     )
 

@@ -72,9 +72,10 @@ def _v4_paged_prefill_indices_kernel(
     prefix_hca_indices_ptr,
     # Constants.
     win: tl.constexpr,
-    cs,  # win_with_spec — SWA ring stride (NOT constexpr because varies w/ mtp_k)
-    swa_pages,  # state_slot count * cs — boundary into HCA compress section
+    cs,  # kept for ABI (unused: SWA now block-addressed)
+    swa_pages,  # num_blocks * BS — boundary into HCA compress section
     HCA_RATIO: tl.constexpr,  # HCA compress ratio (128) for per-token causal cap
+    BS: tl.constexpr,  # SWA block size (== window == proxy block size)
     BLOCK_N: tl.constexpr,  # next_pow2(win) — covers SWA prefix and extend segments
 ):
     """One program per token. Writes four per-token segments:
@@ -124,13 +125,20 @@ def _v4_paged_prefill_indices_kernel(
     tl.store(extend_indices_ptr + ext_base + i, ext_start_row + i, mask=ext_mask)
 
     # ---- SWA prefix paged offsets: written to all three prefix buffers ----
-    # paged = state_slot * cs + ((swa_low + k) % cs), k in [0, prefix_swa_count)
+    # Block-addressed (prefix-cache safe):
+    #   paged = block_tables[bid, global_pos // BS] * BS + (global_pos % BS)
+    # for global_pos = swa_low + k, k in [0, prefix_swa_count).
     swa_base_swa = tl.load(prefix_swa_indptr_ptr + t)
     swa_base_hca = tl.load(prefix_hca_indptr_ptr + t)
     swa_mask = i < prefix_swa_count
     global_pos = swa_low + i
-    ring_idx = global_pos - (global_pos // cs) * cs  # global_pos % cs
-    paged = state_slot * cs + ring_idx
+    swa_blk_in_seq = global_pos // BS
+    swa_phys = tl.load(
+        block_tables_ptr + bid * bt_stride_bs + swa_blk_in_seq,
+        mask=swa_mask,
+        other=0,
+    )
+    paged = swa_phys * BS + (global_pos % BS)
     tl.store(prefix_swa_indices_ptr + swa_base_swa + i, paged, mask=swa_mask)
     # CSA buffer: the SWA prefix goes at the slice TAIL. `csa_translate_pack`
     # writes the CSA topk section at the slice HEAD
@@ -182,6 +190,7 @@ def write_v4_paged_prefill_indices(
     win: int,
     cs: int,
     swa_pages: int,
+    bs: int = 128,
     hca_ratio: int = 128,
 ) -> None:
     """One-shot GPU build of the V4 paged-prefill index buffers.
@@ -275,6 +284,7 @@ def write_v4_paged_prefill_indices(
         cs=cs,
         swa_pages=swa_pages,
         HCA_RATIO=hca_ratio,
+        BS=bs,
         BLOCK_N=BLOCK_N,
     )
 

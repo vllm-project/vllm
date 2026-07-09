@@ -52,28 +52,18 @@ def _proxy_page_bytes(vllm_config) -> int:
     hf = vllm_config.model_config.hf_config
     ratios, _dense, _csa, _hca = _layer_counts(hf)
     head_dim = int(getattr(hf, "head_dim", 512))
-    win = int(getattr(hf, "sliding_window", 128))
-    max_model_len = int(vllm_config.model_config.max_model_len)
-    min_blocks = max(
-        1,
-        (max_model_len + ATOM_DEEPSEEK_V4_BLOCK_SIZE - 1)
-        // ATOM_DEEPSEEK_V4_BLOCK_SIZE,
-    )
-    # The SWA ring is carved ONCE in the proxy tensor (slice_*): the full ring
-    # is `max_num_seqs` per-seq rings, but it lives once at the head, not per
-    # page. So amortize it over the *expected* pool size, not over one seq's
-    # blocks. A pool serving `max_num_seqs` concurrent max-len seqs holds
-    # ~`max_num_seqs * min_blocks` blocks, so amortizing the once-carved ring
-    # over that makes `max_num_seqs` cancel -> page_bytes is independent of it.
-    #
-    # The previous divisor `min_blocks` (one seq) over-reserved the SWA by
-    # `num_blocks / min_blocks` (= achievable concurrency), wasting ~87% of the
-    # proxy KV (see STEP2_KV_DECOUPLE.md). This form reserves ~one ring's worth,
-    # lifting classical-KV capacity ~num_blocks/min_blocks x. It requires
-    # `max_num_seqs <= achievable concurrency` (the slice would otherwise not fit
-    # the ring); bind() checks this and fails fast with a suggested value.
-    swa_per_seq = len(ratios) * win * head_dim * 2
-    return _classical_block_bytes(hf) + ((swa_per_seq + min_blocks - 1) // min_blocks)
+    # Prefix-caching layout (A1'): the SWA is BLOCK-addressed, so every proxy
+    # block owns `block_size` SWA token-slots per layer (indexed by the block
+    # table, same as the CSA/HCA compressed tails). This makes the SWA
+    # content-addressable and therefore shareable across requests — the
+    # per-slot ring (amortized once at the pool head) was not, which corrupted
+    # reuse under prefix caching. `window == block_size == 128`, so one SWA
+    # block exactly holds one window; the read is window-masked so full-reuse
+    # of out-of-window blocks is harmless. Memory cost: SWA is no longer
+    # window-evicted here (a single full-attention pool keeps every block); the
+    # follow-up (A2) gives SWA its own SlidingWindowMLASpec group to evict.
+    swa_per_block = len(ratios) * ATOM_DEEPSEEK_V4_BLOCK_SIZE * head_dim * 2
+    return _classical_block_bytes(hf) + swa_per_block
 
 
 def slice_deepseek_v4_proxy_cache_views(
@@ -121,13 +111,19 @@ def slice_deepseek_v4_proxy_cache_views(
         offset += n
         return out
 
+    # Prefix-caching layout (A1'): the SWA region is BLOCK-addressed —
+    # `num_blocks` physical blocks each owning `BS` token-slots, viewed as
+    # [num_blocks, BS, head_dim] and addressed by the block table (identical to
+    # the CSA/HCA compressed tails). `BS == window_size == 128`.
+    BS = ATOM_DEEPSEEK_V4_BLOCK_SIZE
+    swa_rows = num_blocks * BS
     for ratio in ratios:
-        swa_bytes = num_slots * window_size * head_dim * 2
+        swa_bytes = swa_rows * head_dim * 2
         layer_start = offset
         swa_view = (
             take_bytes(swa_bytes)
             .view(torch.bfloat16)
-            .view(num_slots, window_size, head_dim)
+            .view(num_blocks, BS, head_dim)
         )
         swa.append(swa_view)
         if ratio == 4:
@@ -143,7 +139,7 @@ def slice_deepseek_v4_proxy_cache_views(
             unified_bytes = raw[layer_start:offset]
             unified.append(
                 unified_bytes.view(torch.bfloat16).view(
-                    num_slots * window_size + num_blocks * k, head_dim
+                    swa_rows + num_blocks * k, head_dim
                 )
             )
             idx = (
@@ -169,12 +165,12 @@ def slice_deepseek_v4_proxy_cache_views(
             unified_bytes = raw[layer_start:offset]
             unified.append(
                 unified_bytes.view(torch.bfloat16).view(
-                    num_slots * window_size + num_blocks * k, head_dim
+                    swa_rows + num_blocks * k, head_dim
                 )
             )
             hca_main.append(main)
         else:
-            unified.append(swa_view.view(num_slots * window_size, head_dim))
+            unified.append(swa_view.view(swa_rows, head_dim))
 
     return {
         "unified": unified,
@@ -529,33 +525,19 @@ def _check_max_num_seqs_fits_kv(model, vllm_config, kv_cache, num_slots):
     if getattr(model, "_atom_v4_kv_checked", False):
         return
     model._atom_v4_kv_checked = True
+    # Block-addressed SWA layout (A1'): the SWA no longer lives in a per-slot
+    # ring sized to max_num_seqs, so the old "max_num_seqs must fit the ring"
+    # constraint is obsolete. SWA is now paged with the compressed tail (one
+    # block table), so concurrency is bounded by the block pool like any paged
+    # cache. Nothing to fail-fast on here.
     max_model_len = int(vllm_config.model_config.max_model_len)
     num_blocks = int(kv_cache.shape[1])
-    min_blocks = max(
-        1,
-        (max_model_len + ATOM_DEEPSEEK_V4_BLOCK_SIZE - 1)
-        // ATOM_DEEPSEEK_V4_BLOCK_SIZE,
-    )
-    achievable = num_blocks // min_blocks
-    if num_slots <= achievable:
-        logger.info(
-            "ATOM DeepSeek-V4 proxy KV: max_num_seqs=%d, ~%d concurrent seqs "
-            "supported at max_model_len=%d (%d blocks).",
-            num_slots,
-            achievable,
-            max_model_len,
-            num_blocks,
-        )
-        return
-    suggested = max(1, int(achievable * 0.95))
-    raise RuntimeError(
-        f"ATOM DeepSeek-V4: --max-num-seqs={num_slots} exceeds the ~{achievable} "
-        f"concurrent sequences the proxy KV can hold at "
-        f"max_model_len={max_model_len} (gpu_memory_utilization="
-        f"{vllm_config.cache_config.gpu_memory_utilization}); the per-seq SWA "
-        f"ring for {num_slots} slots does not fit. Set --max-num-seqs "
-        f"<= {suggested} (or raise --gpu-memory-utilization / lower "
-        f"--max-model-len)."
+    logger.info(
+        "ATOM DeepSeek-V4 proxy KV (block-addressed SWA): max_num_seqs=%d, "
+        "%d blocks at max_model_len=%d.",
+        num_slots,
+        num_blocks,
+        max_model_len,
     )
 
 
@@ -586,6 +568,10 @@ def bind_deepseek_v4_proxy_cache_views(model, vllm_config) -> bool:
         # matching the slicing above), so the ring stride cs == window_size.
         cs=int(model.args.window_size),
         index_topk=int(getattr(model.args, "index_topk", 1024)),
+        # Prefix-caching layout (A1'): the SWA region is block-addressed and
+        # spans `num_blocks * block_size` rows; the compressed tail starts at
+        # that boundary (swa_pages). `num_blocks` = proxy pool block count.
+        num_blocks=int(proxy.kv_cache.shape[1]),
     )
     views = slice_deepseek_v4_proxy_cache_views(
         proxy.kv_cache,
@@ -921,19 +907,27 @@ def build_atom_v4_attention_metadata(
         block_tables=common_attn_metadata.block_table_tensor,
         state=state,
     )
+    # SWA block size for the block-addressed (prefix-cache safe) layout ==
+    # window == proxy block size.
+    md.swa_block_size = ATOM_DEEPSEEK_V4_BLOCK_SIZE
     if meta_params is not None:
         md.swa_num_slots = int(meta_params.num_slots)
         md.swa_window = int(meta_params.window_size)
         md.swa_cs = int(meta_params.cs)
         md.index_topk = int(meta_params.index_topk)
+        md.swa_num_blocks = int(getattr(meta_params, "num_blocks", num_reqs))
     else:
         # Standalone/test fallback: per-forward request count is the ring pool,
         # default window/topk. Production always passes meta_params (bound at
-        # cache-bind time) so swa_pages tracks the real max_num_seqs boundary.
+        # cache-bind time) so swa_pages tracks the real pool boundary.
         md.swa_num_slots = num_reqs
         md.swa_window = 128
         md.swa_cs = 128
         md.index_topk = 512
+        md.swa_num_blocks = num_reqs
+    # Compressed tail starts after the block-addressed SWA region
+    # (`num_blocks * block_size` rows).
+    md.swa_pages_total = md.swa_num_blocks * md.swa_block_size
     # chunk_start == num_computed_tokens (== global position of each seq's first
     # token this forward); 0 for a fresh prompt / single-shot prefill.
     chunk_start_np = np.maximum(seq_np - lens, 0).astype(np.int32)
@@ -1107,7 +1101,8 @@ def _populate_decode_persistent(
     win = int(md.swa_window)
     cs = int(md.swa_cs)
     index_topk = int(md.index_topk)
-    swa_pages = int(md.swa_num_slots) * cs
+    # Block-addressed SWA: compressed tail begins after `num_blocks * BS` rows.
+    swa_pages = int(md.swa_pages_total)
     md.swa_pages = swa_pages
     n_csa_cpu = md.n_committed_csa_per_seq_cpu
     n_hca_cpu = md.n_committed_hca_per_seq_cpu
@@ -1161,6 +1156,7 @@ def _populate_decode_persistent(
         win=win,
         cs=cs,
         swa_pages=swa_pages,
+        bs=int(md.swa_block_size),
     )
     md.kv_indices_swa = swa_indices_gpu[: int(swa_indptr[total])]
     md.kv_indices_csa = csa_indices_gpu[: int(csa_indptr[total])]
@@ -1212,7 +1208,7 @@ def _populate_prefill(md, common, batch_np, pos_np, q_np, positions_gpu):
     win = int(md.swa_window)
     cs = int(md.swa_cs)
     index_topk = int(md.index_topk)
-    swa_pages = int(md.swa_num_slots) * cs
+    swa_pages = int(md.swa_pages_total)
     md.swa_pages = swa_pages
     if T == 0:
         empty = torch.empty(0, dtype=torch.int32, device=device)
@@ -1295,6 +1291,7 @@ def _populate_prefill(md, common, batch_np, pos_np, q_np, positions_gpu):
         win=win,
         cs=cs,
         swa_pages=swa_pages,
+        bs=int(md.swa_block_size),
     )
     md.kv_indices_extend = ext_indices[:ext_total]
     md.kv_indices_prefix_swa = swa_indices[:swa_total]
@@ -1312,11 +1309,8 @@ def _populate_decode(md, common, batch_np, pos_np, positions_gpu):
     device = md.state_slot_mapping.device
     win = int(md.swa_window)
     cs = int(md.swa_cs)
-    # SWA ring boundary in unified_kv is num_slots*cs (the real pool size, ==
-    # max_num_seqs), not the per-forward request count -- the HCA compress tail
-    # (swa_pages + block_id) lands in the wrong region otherwise once a sequence
-    # is long enough to commit HCA entries (>=128 tokens).
-    swa_pages = int(md.swa_num_slots) * cs
+    # Block-addressed SWA: compressed tail begins after `num_blocks * BS` rows.
+    swa_pages = int(md.swa_pages_total)
     index_topk = int(md.index_topk)
     swa_counts = np.minimum(pos_np + 1, win).astype(np.int32)
     csa_counts = np.minimum(
@@ -1357,9 +1351,11 @@ def _populate_decode(md, common, batch_np, pos_np, positions_gpu):
         swa_indices=swa_indices,
         csa_indices=csa_indices,
         hca_indices=hca_indices,
+        block_tables=common.block_table_tensor,
         T=T,
         win=win,
         cs=cs,
+        bs=int(md.swa_block_size),
     )
     write_v4_decode_hca_compress_tail(
         batch_id_per_token=md.batch_id_per_token,

@@ -336,6 +336,7 @@ def qk_norm_rope_maybe_quant(
     swa_cu_seqlens_q: Optional[torch.Tensor] = None,
     swa_cache_size: Optional[int] = None,
     swa_write_per_batch: Optional[int] = None,
+    swa_block_tables: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
     """Fused per-token RMSNorm + GPT-J interleaved RoPE (+ optional FP8 quant).
 
@@ -455,17 +456,11 @@ def qk_norm_rope_maybe_quant(
             if quant_k
             else None
         )
-        if _FLYDSL_HAS_SWA:
-            q_out, kv_out, q_scale, kv_scale = flydsl_qk_norm_rope_quant(
-                q, kv, kv_weight, cos_cache, sin_cache, positions,
-                num_q_heads=n_local_heads, head_dim=head_dim,
-                rope_head_dim=rope_head_dim, quant=quant_q,
-                q_out=q_out, kv_out=kv_out, q_scale=q_scale, kv_scale=kv_scale,
-                swa_kv=swa_kv, state_slot_mapping=state_slot_mapping,
-                batch_id_per_token=batch_id_per_token,
-                stream=torch.cuda.current_stream(),
-            )
-            return q_out, kv_out, q_scale, kv_scale
+        # NOTE: flydsl's fused SWA scatter uses the per-slot RING address
+        # (`swa_kv[slot, pos % cache]`), which is NOT prefix-cache safe. With the
+        # block-addressed SWA layout we must route the scatter through the
+        # standalone (block-addressed) `swa_write` below, so never fuse it into
+        # flydsl regardless of `_FLYDSL_HAS_SWA`.
         q_out, kv_out, q_scale, kv_scale = flydsl_qk_norm_rope_quant(
             q, kv, kv_weight, cos_cache, sin_cache, positions,
             num_q_heads=n_local_heads, head_dim=head_dim,
@@ -474,16 +469,17 @@ def qk_norm_rope_maybe_quant(
             q_out=q_out, kv_out=kv_out, q_scale=q_scale, kv_scale=kv_scale,
             stream=torch.cuda.current_stream(),
         )
-        # Separate SWA-ring write (decode), matching ATOM's flydsl decode path.
+        # Separate block-addressed SWA write (decode).
         if swa_kv is not None:
             if (
                 swa_cu_seqlens_q is None
                 or swa_cache_size is None
                 or swa_write_per_batch is None
+                or swa_block_tables is None
             ):
                 raise ValueError(
                     "swa_kv on the flydsl path requires swa_cu_seqlens_q, "
-                    "swa_cache_size, and swa_write_per_batch"
+                    "swa_cache_size, swa_write_per_batch, and swa_block_tables"
                 )
             swa_write(
                 kv_out,
@@ -493,6 +489,7 @@ def qk_norm_rope_maybe_quant(
                 swa_kv,
                 swa_cache_size,
                 swa_write_per_batch,
+                swa_block_tables,
             )
         return q_out, kv_out, q_scale, kv_scale
 
@@ -571,10 +568,12 @@ def qk_norm_rope_maybe_quant(
             swa_cu_seqlens_q is None
             or swa_cache_size is None
             or swa_write_per_batch is None
+            or swa_block_tables is None
         ):
             raise ValueError(
                 "swa_kv requested on the Triton fallback path requires "
-                "swa_cu_seqlens_q, swa_cache_size, and swa_write_per_batch"
+                "swa_cu_seqlens_q, swa_cache_size, swa_write_per_batch, and "
+                "swa_block_tables"
             )
         swa_write(
             kv_out,
@@ -584,6 +583,7 @@ def qk_norm_rope_maybe_quant(
             swa_kv,
             swa_cache_size,
             swa_write_per_batch,
+            swa_block_tables,
         )
 
     return q_out, kv_out, q_scale, kv_scale
