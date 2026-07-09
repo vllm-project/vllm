@@ -32,8 +32,10 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.kv_offload.tiering.base import (
+    LOOKUP_SCOPE_KEY,
     JobMetadata,
     JobResult,
+    LookupScope,
     SecondaryTierManager,
     TieringOffloadingMetrics,
 )
@@ -972,6 +974,52 @@ class TestTieringOffloadingManager:
         self.secondary_tier1.drain_jobs.assert_called_once()
         self.secondary_tier2.drain_jobs.assert_called_once()
         assert self.manager._transfer_jobs == {}
+
+    def test_lookup_scope_primary_skips_secondary(self, manager_setup):
+        """scope=primary queries only the primary tier; secondaries are
+        never called even when they hold the block."""
+        blocks = to_keys(range(2))
+        # Put one block in primary, one only in secondary
+        self._start_request()
+        self.manager.prepare_store(blocks[:1], _CTX)
+        self.manager.complete_store(blocks[:1], _CTX, success=True)
+        self.secondary_tier1.blocks[blocks[1]] = True
+
+        self.secondary_tier1.lookup = MagicMock(wraps=self.secondary_tier1.lookup)
+        self.secondary_tier2.lookup = MagicMock(wraps=self.secondary_tier2.lookup)
+
+        ctx = ReqContext(
+            req_id="r1",
+            kv_transfer_params={LOOKUP_SCOPE_KEY: LookupScope.PRIMARY.value},
+        )
+        assert self.manager.lookup(blocks[0], ctx) is LookupResult.HIT
+        assert self.manager.lookup(blocks[1], ctx) is LookupResult.MISS
+        self.secondary_tier1.lookup.assert_not_called()
+        self.secondary_tier2.lookup.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "kv_transfer_params",
+        [
+            None,
+            {},
+            {LOOKUP_SCOPE_KEY: LookupScope.ALL.value},
+            {LOOKUP_SCOPE_KEY: "bogus"},
+        ],
+        ids=["none", "empty", "explicit_all", "unknown_value"],
+    )
+    def test_lookup_scope_defaults_query_secondary(
+        self, manager_setup, kv_transfer_params
+    ):
+        """Absent, explicit 'all', or unknown scope defaults to querying
+        secondary tiers."""
+        blocks = to_keys(range(1))
+        self.secondary_tier1.blocks[blocks[0]] = True
+
+        self.secondary_tier1.lookup = MagicMock(wraps=self.secondary_tier1.lookup)
+
+        ctx = ReqContext(req_id="r2", kv_transfer_params=kv_transfer_params)
+        assert self.manager.lookup(blocks[0], ctx) is LookupResult.RETRY
+        self.secondary_tier1.lookup.assert_called()
 
 
 class TestTieringOffloadingWithoutSecondaryTiers:

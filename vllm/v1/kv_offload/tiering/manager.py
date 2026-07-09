@@ -47,8 +47,10 @@ from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.base import (
+    LOOKUP_SCOPE_KEY,
     JobId,
     JobMetadata,
+    LookupScope,
     ParentManager,
     SecondaryTierManager,
     TieringOffloadingMetrics,
@@ -318,6 +320,11 @@ class TieringOffloadingManager(OffloadingManager):
             return LookupResult.HIT
         if primary_hit is LookupResult.HIT_PENDING:
             return LookupResult.HIT_PENDING
+
+        params = req_context.kv_transfer_params
+        scope = params.get(LOOKUP_SCOPE_KEY) if params else None
+        if scope == LookupScope.PRIMARY.value:
+            return LookupResult.MISS
 
         lookup_start = time.monotonic()
         any_retry = False
