@@ -119,6 +119,14 @@ class _HfExamplesInfo:
     instead of minimal layers for testing.
     """
 
+    gpu_memory_utilization: float | None = None
+    """
+    Override for the fraction of GPU memory to reserve when initializing this
+    model. Defaults to the test's standard value when unset. Lower it for very
+    large models whose profiling/activation footprint would otherwise leave no
+    room for the KV cache on a single device (avoids an OOM during init).
+    """
+
     def check_transformers_version(
         self,
         *,
@@ -420,8 +428,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
     "MistralLarge3ForCausalLM": _HfExamplesInfo(
         "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",
-        # TODO: revert once figuring out OOM in CI
-        is_available_online=False,
+        # 675B NVFP4: the profiling forward's activation footprint is large, so
+        # at the default 0.8 utilization the KV cache cannot be allocated and
+        # init OOMs on a single 192 GiB GPU. A lower utilization leaves room for
+        # the KV cache and lets the model initialize on one device.
+        gpu_memory_utilization=0.2,
     ),
     "MixtralForCausalLM": _HfExamplesInfo(
         "mistralai/Mixtral-8x7B-Instruct-v0.1",
@@ -1469,6 +1480,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         trust_remote_code=True,
         speculative_model="AQ-MedAI/Kimi-K25-eagle3",
         tokenizer="moonshotai/Kimi-K2.5",
+        # Kimi-K2.5 + eagle3 draft: at the default 0.8 utilization the KV cache
+        # is budgeted from the post-profiling free memory, but the draft model
+        # and activations grow afterward, so the single KV allocation OOMs on a
+        # 192 GiB GPU. A lower utilization shrinks the KV target so it fits.
+        gpu_memory_utilization=0.5,
     ),
     "Eagle3LlamaForCausalLM": _HfExamplesInfo(
         "meta-llama/Llama-3.1-8B-Instruct",

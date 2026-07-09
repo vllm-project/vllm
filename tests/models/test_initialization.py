@@ -144,6 +144,13 @@ def can_initialize(
         kwargs = {}
         if not model_info.enable_prefix_caching:
             kwargs["enable_prefix_caching"] = False
+        # these tests seem to produce leftover memory, so default to 0.80 but
+        # allow a per-model override for very large models (see registry).
+        gpu_memory_utilization = (
+            model_info.gpu_memory_utilization
+            if model_info.gpu_memory_utilization is not None
+            else 0.80
+        )
 
         LLM(
             model_info.default,
@@ -165,8 +172,7 @@ def can_initialize(
             trust_remote_code=model_info.trust_remote_code,
             max_model_len=model_info.max_model_len,
             max_num_batched_tokens=model_info.max_num_batched_tokens,
-            # these tests seem to produce leftover memory
-            gpu_memory_utilization=0.80,
+            gpu_memory_utilization=gpu_memory_utilization,
             load_format="dummy",
             model_impl="transformers"
             if model_arch in _TRANSFORMERS_BACKEND_MODELS
