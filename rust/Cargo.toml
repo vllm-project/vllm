@@ -26,11 +26,12 @@ arc-swap = "1.9.0"
 async-openai = { version = "0.33.1", default-features = false, features = ["native-tls"] }
 async-trait = "0.1.89"
 asynk-strim-attr = "0.1.0"
+auto_enums = { version = "0.8.9", features = ["tokio1"] }
 axum = "0.8.8"
 base64 = "0.22.1"
 bytemuck = { version = "1.25.0", features = ["extern_crate_alloc"] }
 byteorder = "1.5.0"
-bytes = "1.11.1"
+bytes = "1.12.0"
 clap = { version = "4.5.38", features = ["derive", "env"] }
 criterion = "0.5.1"
 easy-ext = "1.0.3"
@@ -43,10 +44,16 @@ half = { version = "2.7.1", features = ["bytemuck"] }
 hex = "0.4.3"
 hf-hub = { version = "0.5.0", default-features = false, features = ["tokio"] }
 http-body = "1.0.1"
+hyper = { version = "1.10.1", features = ["http1", "server"] }
+hyper-util = { version = "0.1.20", features = [
+    "server-graceful",
+    "service",
+    "tokio",
+] }
 indexmap = "2.13.0"
 itertools = "0.14.0"
 libc = "0.2.177"
-llm-multimodal = { git = "https://github.com/vllm-project/llm-multimodal", rev = "046b669bd1c4faa2a7e05344d8cbf7b2befb37d5" }
+llm-multimodal = { git = "https://github.com/smg-project/llm-multimodal", rev = "7d74582aeaf0e4086a44964382655d22f1af0686" }
 mimalloc = "0.1.52"
 minijinja = { version = "2.0", features = ["unstable_machinery", "json", "builtins", "loader", "loop_controls", "preserve_order"] }
 minijinja-contrib = { version = "2.0", features = ["pycompat"] }
@@ -54,6 +61,7 @@ native-tls-vendored = { package = "native-tls", version = "0.2.18", features = [
 ndarray = { version = "0.16.1", features = ["serde"] }
 openai-harmony = { package = "oss-harmony", git = "https://github.com/oss-harmony/harmony", tag = "v0.0.11", default-features = false }
 openai-protocol = "1.6.0"
+openssl = "0.10"
 parking_lot = "0.12.5"
 paste = "1.0.15"
 prometheus-client = "0.24.0"
@@ -89,6 +97,7 @@ thiserror = "2.0.16"
 thiserror-ext = "0.3.0"
 tiktoken-rs = "0.9.1"
 time = { version = "0.3.47", features = ["formatting", "local-offset", "macros"] }
+tls-listener = { version = "0.11.2", default-features = false, features = ["openssl", "tokio-net", "axum"] }
 tokenizers = "0.22.0"
 tokio = { version = "1.47.1", features = [
     "macros",
@@ -97,6 +106,7 @@ tokio = { version = "1.47.1", features = [
     "sync",
     "time",
 ] }
+tokio-openssl = "0.6"
 tokio-stream = "0.1"
 tokio-util = { version = "0.7.18", features = ["rt"] }
 tonic = "0.14.5"
@@ -133,6 +143,13 @@ too_many_arguments = "allow"
 
 [profile.dev]
 panic = "abort"
+
+# Speed up cold tokenizer construction in tests.
+[profile.dev.package]
+fastokens = { opt-level = 3 }
+regex-automata = { opt-level = 3 }
+serde_json = { opt-level = 3 }
+tokenizers = { opt-level = 3 }
 
 [profile.release]
 lto = "thin"

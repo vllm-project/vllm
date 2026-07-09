@@ -71,8 +71,11 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
           2. ``--attention-config '{"backend": "FLEX_ATTENTION"}'``
              → FlexAttention R-SWA via Triton block mask.
 
-          3. ``--attention-config '{"backend": "auto"}'`` (or omitted)
-             → Auto-detect: FA4 if available (H20/H100 SM90), else FlexAttention.
+          3. ``--attention-config '{"backend": "TRITON_ATTN"}'``
+             → Triton unified attention with an R-SWA decode mask.
+
+          4. ``--attention-config '{"backend": "auto"}'`` (or omitted)
+             → Auto-detect: FA4 if available (H20/H100 SM90), else TritonAttention.
 
         Regardless of backend, prefix caching is disabled for this model: R-SWA
         decode-phase KV is not a pure causal function of the prefix (so decode
@@ -84,8 +87,8 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
             vllm serve baidu/Unlimited-OCR \\
                 --attention-config '{"backend": "FLEX_ATTENTION"}'
         """
+        from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
-        from vllm.vllm_flash_attn import is_fa_version_supported
 
         attn_config = vllm_config.attention_config
         fa4_available = is_fa_version_supported(4)
@@ -96,7 +99,7 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
             attn_config.backend = (
                 AttentionBackendEnum.FLASH_ATTN
                 if fa4_available
-                else AttentionBackendEnum.FLEX_ATTENTION
+                else AttentionBackendEnum.TRITON_ATTN
             )
             logger.info(
                 "Unlimited-OCR: auto-selected attention backend=%s (fa4_available=%s).",
@@ -110,8 +113,8 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
                 raise RuntimeError(
                     "Unlimited-OCR: --attention-config backend=FLASH_ATTN "
                     "requires FA4 (rswa_mask_mod), but FA4 is not available on "
-                    "this device/installation.  Use backend=FLEX_ATTENTION or "
-                    "upgrade vllm-flash-attn."
+                    "this device/installation. Use backend=TRITON_ATTN or "
+                    "FLEX_ATTENTION, or upgrade vllm-flash-attn."
                 )
             # On SM90 (H20), the default FA version is FA3 regardless of FA4
             # availability (FA4 is only auto-upgraded when head_size > 256).
@@ -130,6 +133,11 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
                 attn_config.flash_attn_version,
             )
 
+        elif attn_config.backend == AttentionBackendEnum.TRITON_ATTN:
+            logger.info(
+                "Unlimited-OCR: TritonAttention — R-SWA via unified attention mask."
+            )
+
         elif attn_config.backend == AttentionBackendEnum.FLEX_ATTENTION:
             logger.info(
                 "Unlimited-OCR: FlexAttention — R-SWA via Triton block mask%s.",
@@ -144,7 +152,7 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
             raise ValueError(
                 f"Unlimited-OCR: unsupported attention backend "
                 f"{attn_config.backend!r} for R-SWA. "
-                "Use FLASH_ATTN (FA4) or FLEX_ATTENTION."
+                "Use FLASH_ATTN (FA4), TRITON_ATTN or FLEX_ATTENTION."
             )
 
         # R-SWA windows the *generated* tokens, so a decode-token's KV is not a

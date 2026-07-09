@@ -71,10 +71,13 @@ async fn main() -> Result<()> {
         max_logprobs: None,
         api_server_options: ApiServerOptions::default(),
         cors: CorsConfig::default(),
+        tls: None,
         api_keys: Vec::new(),
         disable_log_stats: false,
         grpc_port: None,
         shutdown_timeout: Duration::ZERO,
+        keep_alive_timeout: Duration::from_secs(5),
+        profiler: None,
     };
 
     let bind_address = format!("127.0.0.1:{port}");

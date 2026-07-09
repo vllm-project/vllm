@@ -154,7 +154,7 @@ mod tests {
                 "flag": true,
                 "payload": { "nested": true },
                 "items": [1, 2],
-                "empty": null,
+                "empty": "null",
             })
         );
     }

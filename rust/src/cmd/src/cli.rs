@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 use educe::Educe;
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
@@ -25,7 +25,7 @@ use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
-    HttpListenerMode, ParserSelection, RendererSelection,
+    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, ParserSelection, RendererSelection, TlsConfig,
 };
 
 use crate::cli::unsupported::UnsupportedArgs;
@@ -154,6 +154,11 @@ pub struct SharedRuntimeArgs {
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
     pub shutdown_timeout: u64,
+    /// Maximum idle time (seconds) on a keep-alive HTTP connection before the
+    /// server closes it (default 5).
+    #[arg(long = "http-timeout-keep-alive", env = "VLLM_HTTP_TIMEOUT_KEEP_ALIVE")]
+    #[serde(default)]
+    pub http_timeout_keep_alive: Option<u64>,
 
     /// The file path to the chat template, or the template in single-line form
     /// for the specified model.
@@ -257,6 +262,43 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub allow_credentials: bool,
 
+    /// The file path to the SSL key file. When omitted, the key is read from
+    /// `--ssl-certfile` (combined PEM).
+    #[arg(long)]
+    #[serde(default)]
+    pub ssl_keyfile: Option<String>,
+
+    /// The file path to the SSL cert file. Enables TLS when set.
+    #[arg(long)]
+    #[serde(default)]
+    pub ssl_certfile: Option<String>,
+
+    /// The CA certificates file used to verify client certificates (mTLS).
+    #[arg(long)]
+    #[serde(default)]
+    pub ssl_ca_certs: Option<String>,
+
+    /// Whether a client certificate is required: 0 = none, 1 = optional,
+    /// 2 = required (mirrors Python's `ssl.CERT_*`).
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(i32).range(0..=2))]
+    #[serde(default)]
+    pub ssl_cert_reqs: i32,
+
+    /// OpenSSL cipher string for HTTPS (TLS 1.2 and below).
+    /// When unset, the linked OpenSSL's default suites are used.
+    #[arg(long)]
+    #[serde(default)]
+    pub ssl_ciphers: Option<String>,
+
+    /// Profiler configuration forwarded by the Python supervisor.
+    ///
+    /// When set with a non-null `profiler` type, the Rust frontend registers
+    /// the `/start_profile` and `/stop_profile` routes and forwards calls to
+    /// the engine via the `"profile"` utility RPC.
+    #[arg(long, value_parser = parse_json::<ProfilerConfig>, value_name = "JSON")]
+    #[serde(default)]
+    pub profiler_config: Option<ProfilerConfig>,
+
     /// Unsupported Python vLLM frontend arguments recognized but not yet
     /// implemented in Rust.
     #[educe(Debug(ignore))]
@@ -275,6 +317,27 @@ impl SharedRuntimeArgs {
     /// Maximum time to wait for active requests to drain during shutdown.
     pub fn shutdown_timeout(&self) -> Duration {
         Duration::from_secs(self.shutdown_timeout)
+    }
+
+    /// Maximum idle time on a keep-alive HTTP connection before the server
+    /// closes it.
+    pub fn keep_alive_timeout(&self) -> Duration {
+        self.http_timeout_keep_alive
+            .map_or(DEFAULT_KEEP_ALIVE_TIMEOUT, Duration::from_secs)
+    }
+
+    /// Return the configured profiler mode, when profiling is enabled.
+    pub fn profiler(&self) -> Option<String> {
+        self.profiler_config.as_ref().and_then(|c| c.profiler.clone())
+    }
+
+    /// Return the profiler config JSON for managed Python engine forwarding.
+    pub fn profiler_config_json(&self) -> Option<String> {
+        self.profiler_config
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .expect("profiler config serialization should not fail")
     }
 
     /// Apply fallback logic for API key configuration from env variables.
@@ -301,8 +364,11 @@ impl SharedRuntimeArgs {
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
+        let keep_alive_timeout = self.keep_alive_timeout();
         let api_server_options = self.api_server_options();
         let cors = self.cors_config();
+        let tls = self.tls_config();
+        let profiler = self.profiler();
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
@@ -329,10 +395,13 @@ impl SharedRuntimeArgs {
             max_logprobs: self.max_logprobs,
             api_server_options,
             cors,
+            tls,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
             shutdown_timeout,
+            keep_alive_timeout,
+            profiler,
         }
     }
 
@@ -349,8 +418,11 @@ impl SharedRuntimeArgs {
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
+        let keep_alive_timeout = self.keep_alive_timeout();
         let api_server_options = self.api_server_options();
         let cors = self.cors_config();
+        let tls = self.tls_config();
+        let profiler = self.profiler();
 
         Config {
             transport_mode: TransportMode::HandshakeOwner {
@@ -375,10 +447,13 @@ impl SharedRuntimeArgs {
             max_logprobs: self.max_logprobs,
             api_server_options,
             cors,
+            tls,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
             shutdown_timeout,
+            keep_alive_timeout,
+            profiler,
         }
     }
 
@@ -398,6 +473,23 @@ impl SharedRuntimeArgs {
             allow_credentials: self.allow_credentials,
         }
     }
+
+    /// Build the TLS config: `Some` when any `ssl_*` argument is set, else
+    /// `None` (plaintext). The combination is validated in [`Config::validate`].
+    fn tls_config(&self) -> Option<TlsConfig> {
+        let tls_requested = self.ssl_certfile.is_some()
+            || self.ssl_keyfile.is_some()
+            || self.ssl_ca_certs.is_some()
+            || self.ssl_cert_reqs != 0
+            || self.ssl_ciphers.is_some();
+        tls_requested.then(|| TlsConfig {
+            cert_file: self.ssl_certfile.clone(),
+            key_file: self.ssl_keyfile.clone(),
+            ca_certs: self.ssl_ca_certs.clone(),
+            cert_reqs: self.ssl_cert_reqs,
+            ciphers: self.ssl_ciphers.clone(),
+        })
+    }
 }
 
 fn default_engine_ready_timeout_secs() -> u64 {
@@ -410,6 +502,23 @@ fn default_cors_wildcard() -> JsonStringList {
 
 fn default_py_bootstrap_parser_selection() -> ParserSelection {
     ParserSelection::None
+}
+
+/// Minimal profiler configuration parsed from `--profiler-config`.
+///
+/// Only the `profiler` field is inspected by the Rust frontend to decide
+/// whether to register the `/start_profile` and `/stop_profile` routes.
+/// All other fields are accepted but ignored — they are consumed by the
+/// Python engine layer.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ProfilerConfig {
+    /// Profiler backend type (e.g. `"torch"`, `"cuda"`). When `null` or
+    /// absent, profiling is disabled.
+    #[serde(default)]
+    pub profiler: Option<String>,
+    /// Additional Python profiler config fields consumed by the engine layer.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
@@ -538,11 +647,13 @@ impl ServeArgs {
     pub fn to_managed_engine_config(&self, handshake_port: u16) -> ManagedEngineConfig {
         let reasoning_parser =
             effective_engine_reasoning_parser(&self.runtime.reasoning_parser, &self.runtime.model);
+        let profiler_config = self.runtime.profiler_config_json();
 
         self.managed_engine.clone().into_config(
             self.runtime.model.clone(),
             self.runtime.max_model_len,
             self.runtime.max_logprobs,
+            profiler_config,
             reasoning_parser.as_deref(),
             self.runtime.language_model_only,
             self.runtime.disable_log_stats,
