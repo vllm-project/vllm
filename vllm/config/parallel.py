@@ -311,6 +311,14 @@ class ParallelConfig:
     checks, and final CUDA device selection when needed. When None,
     logical IDs map to visible device IDs in order."""
 
+    rank_gpu_memory_mib: int | None = None
+    """Absolute MiB memory budget per rank when using --rank-gpu-id.
+
+    This value applies uniformly to every rank. The value is converted
+    to a per-GPU fraction at runtime based on each physical GPU's
+    NVML-reported total memory, so the same MiB value represents a
+    DIFFERENT fraction on different physical GPUs."""
+
     distributed_timeout_seconds: int | None = None
     """Timeout in seconds for distributed operations (e.g., init_process_group).
     If set, this value is passed to torch.distributed.init_process_group as the
@@ -881,6 +889,7 @@ class ParallelConfig:
             elif (
                 current_platform.is_cuda()
                 and current_platform.device_count() < self.world_size
+                and self.rank_gpu_memory_mib is None  # rank_gpu_id allows more ranks than GPUs
             ):
                 gpu_count = current_platform.device_count()
                 raise ValueError(
@@ -888,7 +897,8 @@ class ParallelConfig:
                     f"available GPUs ({gpu_count}) in this node. If this is "
                     "intentional and you are using:\n"
                     "- ray, set '--distributed-executor-backend ray'.\n"
-                    "- multiprocessing, set '--nnodes' appropriately."
+                    "- multiprocessing, set '--nnodes' appropriately.\n"
+                    "- --rank-gpu-id with --rank-gpu-memory-mib to share GPUs."
                 )
             elif self.data_parallel_backend == "ray":
                 logger.info(
