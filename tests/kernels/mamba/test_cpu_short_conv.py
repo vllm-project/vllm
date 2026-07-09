@@ -60,6 +60,12 @@ def test_short_conv_forward_native_prefill(vllm_config):
         layer = ShortConv(config=config, dim=dim, layer_idx=0, prefix=prefix)
 
     layer.to("cpu")
+    # vLLM Linear layers allocate weights with torch.empty (uninitialized).
+    # On ARM these come back as zero-filled pages, so in_proj output is zero and
+    # the prefill state stays zero. Seed + init to make the test platform-safe.
+    torch.manual_seed(0)
+    for p in layer.parameters():
+        torch.nn.init.normal_(p)
     dispatch_cpu_unquantized_gemm(layer.in_proj, remove_weight=False)
     dispatch_cpu_unquantized_gemm(layer.out_proj, remove_weight=False)
 
@@ -117,6 +123,9 @@ def test_short_conv_forward_native_decode(vllm_config):
         layer = ShortConv(config=config, dim=dim, layer_idx=0, prefix=prefix)
 
     layer.to("cpu")
+    torch.manual_seed(0)
+    for p in layer.parameters():
+        torch.nn.init.normal_(p)
     dispatch_cpu_unquantized_gemm(layer.in_proj, remove_weight=False)
     dispatch_cpu_unquantized_gemm(layer.out_proj, remove_weight=False)
 
