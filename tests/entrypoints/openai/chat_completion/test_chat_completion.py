@@ -208,6 +208,52 @@ async def test_prompt_token_ids_round_trip(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
+async def test_prompt_token_ids_streaming(client: openai.AsyncOpenAI):
+    """Token-in streams chat-formatted text-out.
+
+    The scale-out derender endpoint is non-streaming, so streaming output from
+    pre-tokenized input is only available on the chat completions endpoint.
+    """
+    baseline = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=TOKEN_IN_MESSAGES,
+        max_completion_tokens=16,
+        temperature=0,
+        extra_body={"return_token_ids": True},
+    )
+    prompt_token_ids = baseline.prompt_token_ids
+    assert prompt_token_ids
+
+    stream = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[],
+        max_completion_tokens=16,
+        temperature=0,
+        stream=True,
+        extra_body={"prompt_token_ids": prompt_token_ids, "return_token_ids": True},
+    )
+
+    content = ""
+    delta_token_ids: list[int] = []
+    first_chunk = True
+    async for chunk in stream:
+        if first_chunk:
+            # prompt_token_ids arrives once, on the first chunk.
+            assert chunk.prompt_token_ids == prompt_token_ids
+            first_chunk = False
+        if not chunk.choices:
+            continue
+        if chunk.choices[0].delta.content:
+            content += chunk.choices[0].delta.content
+        if chunk.choices[0].model_dump().get("token_ids"):
+            delta_token_ids.extend(chunk.choices[0].token_ids)
+
+    # streamed text-out, reconstructed from deltas, with generated token ids.
+    assert content
+    assert delta_token_ids
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "messages, extra_options",
     [
