@@ -23,8 +23,6 @@ class HummingLinearKernel(MPLinearKernel):
             return False, "Humming is not installed"
         if c.has_g_idx:
             return False, "Humming does not support act-order (g_idx)"
-        if c.zero_points:
-            return False, "Humming linear kernel only supports symmetric weights"
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
