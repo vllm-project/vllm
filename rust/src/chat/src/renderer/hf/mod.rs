@@ -489,7 +489,7 @@ fn append_continue_final_message_tag(message: &mut TemplateMessage) -> Result<St
         // Pick the last text part in the message.
         TemplateContent::OpenAi(parts) => parts.iter_mut().rev().find_map(|part| match part {
             TemplateContentPart::Text { text } => Some(text),
-            TemplateContentPart::Image => None,
+            TemplateContentPart::Image | TemplateContentPart::Video => None,
         }),
     };
     let text = text.ok_or_else(|| {
