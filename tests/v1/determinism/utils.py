@@ -53,9 +53,9 @@ if os.getenv("VLLM_TEST_MODEL"):
             backends=[],
         )
 
-# Union of all backends across devices; unsupported ones are skipped at runtime.
+# Only include backends for devices that are actually available.
 BACKENDS: list[str] = sorted(
-    {b for cfg in DEVICE_BACKENDS.values() for b in cfg.backends}
+    {b for cfg in DEVICE_BACKENDS.values() if cfg.available for b in cfg.backends}
 )
 
 skip_unsupported = pytest.mark.skipif(
@@ -67,13 +67,6 @@ skip_if_not_cuda = pytest.mark.skipif(
     not DEVICE_BACKENDS["cuda"].available,
     reason="Requires CUDA >= Ampere (SM80)",
 )
-
-
-def skip_unsupported_backend(backend: str):
-    """Skip if the current device does not support this backend."""
-    for device, cfg in DEVICE_BACKENDS.items():
-        if cfg.available and backend not in cfg.backends:
-            pytest.skip(f"Backend {backend} not supported on {device}")
 
 
 def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:

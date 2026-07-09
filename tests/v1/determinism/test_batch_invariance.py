@@ -13,7 +13,6 @@ from utils import (
     _random_prompt,
     skip_if_not_cuda,
     skip_unsupported,
-    skip_unsupported_backend,
 )
 
 import vllm.envs as envs
@@ -52,8 +51,6 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
       seed.
     - Keep max_tokens and max_model_len bounded for speed and memory use.
     """
-    skip_unsupported_backend(backend)
-
     # Not all batch-invariant kernels are registered on XPU yet
     # (e.g. attention, custom ops), so e2e determinism is not guaranteed.
     if current_platform.is_xpu():
@@ -167,8 +164,6 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     block_m,
     block_n,
 ):
-    skip_unsupported_backend(backend)
-
     # Not all batch-invariant kernels are registered on XPU yet
     # (e.g. attention, custom ops), so e2e determinism is not guaranteed.
     if current_platform.is_xpu():
@@ -402,8 +397,6 @@ def test_simple_generation(backend):
     Simple test that runs the model with a basic prompt and prints the output.
     Useful for quick smoke testing and debugging.
     """
-    skip_unsupported_backend(backend)
-
     model = TEST_MODEL
 
     llm = LLM(
@@ -461,8 +454,6 @@ def test_logprobs_without_batch_invariance_should_fail(
     The test will PASS if we detect differences (proving batch invariance matters).
     The test will FAIL if everything matches (suggesting batch invariance isn't needed).
     """
-    skip_unsupported_backend(backend)
-
     # CRITICAL: Disable batch invariance for this test
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
