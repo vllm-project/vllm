@@ -86,9 +86,7 @@ def _select_mhc_warmup_token_sizes(
     # those exact shapes are exercised at runtime.
     max_auto_tokens = min(max_tokens, _AUTO_WARMUP_MAX_TOKENS)
     candidates = [
-        size
-        for size in _DEFAULT_TOKEN_SIZE_CANDIDATES
-        if size <= max_auto_tokens
+        size for size in _DEFAULT_TOKEN_SIZE_CANDIDATES if size <= max_auto_tokens
     ]
     candidates.append(max_tokens)
     candidates.extend(cudagraph_capture_sizes)
@@ -170,9 +168,7 @@ def _warmup_layer_mhc(
     for size in token_sizes:
         residual_slice = residual[:size]
         # Dummy inputs for the fused post+pre variant.
-        x_dummy = torch.zeros(
-            size, hidden_size, dtype=torch.bfloat16, device=device
-        )
+        x_dummy = torch.zeros(size, hidden_size, dtype=torch.bfloat16, device=device)
         post_mix_dummy = torch.zeros(
             size, hc_mult, 1, dtype=torch.float32, device=device
         )
@@ -250,7 +246,6 @@ def _warmup_hc_head(
     # Exercise the same HCHeadOp instance used during inference, or on
     # NVIDIA the direct TileLang kernel that is called from the model.
     hc_head_op = getattr(model, "hc_head_op", None)
-    use_op = hc_head_op is None
 
     max_tokens = max(token_sizes)
     hidden_size = int(model.config.hidden_size)
@@ -266,7 +261,7 @@ def _warmup_hc_head(
 
     for size in token_sizes:
         hs_slice = hidden_states[:size]
-        if use_op:
+        if hc_head_op is None:
             torch.ops.vllm.hc_head_fused_kernel_tilelang(
                 hs_slice,
                 model.hc_head_fn,
