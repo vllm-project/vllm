@@ -13,8 +13,10 @@ from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    CrossAttentionSpec,
+    EncoderOnlyAttentionSpec,
     KVCacheConfig,
-    MambaSpec,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
 )
@@ -597,8 +599,9 @@ class KVCacheManager:
         clipped_block_ids: list[list[int]] = []
         for group, ids in zip(self.kv_cache_config.kv_cache_groups, block_ids):
             spec = group.kv_cache_spec
-            if isinstance(spec, MambaSpec):
-                # Mamba blocks carry recurrent state rather than per-token KV.
+            if not isinstance(spec, AttentionSpec) or isinstance(
+                spec, (CrossAttentionSpec, EncoderOnlyAttentionSpec)
+            ):
                 clipped_block_ids.append(ids)
                 continue
 
