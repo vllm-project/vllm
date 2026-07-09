@@ -546,6 +546,9 @@ class EngineArgs:
     code_revision: str | None = ModelConfig.code_revision
     hf_token: bool | str | None = ModelConfig.hf_token
     hf_overrides: HfOverrides = get_field(ModelConfig, "hf_overrides")
+    model_class_overrides: dict[str, str] = get_field(
+        ModelConfig, "model_class_overrides"
+    )
     tokenizer_revision: str | None = ModelConfig.tokenizer_revision
     quantization: QuantizationMethods | str | None = ModelConfig.quantization
     quantization_config: "dict[str, Any] | QuantizationConfigArgs | None" = None
@@ -873,6 +876,9 @@ class EngineArgs:
         model_group.add_argument("--config-format", **model_kwargs["config_format"])
         model_group.add_argument("--hf-token", **model_kwargs["hf_token"])
         model_group.add_argument("--hf-overrides", **model_kwargs["hf_overrides"])
+        model_group.add_argument(
+            "--model-class-overrides", **model_kwargs["model_class_overrides"]
+        )
         model_group.add_argument("--pooler-config", **model_kwargs["pooler_config"])
         model_group.add_argument(
             "--generation-config", **model_kwargs["generation_config"]
@@ -1644,6 +1650,7 @@ class EngineArgs:
             code_revision=self.code_revision,
             hf_token=self.hf_token,
             hf_overrides=self.hf_overrides,
+            model_class_overrides=self.model_class_overrides,
             tokenizer_revision=self.tokenizer_revision,
             max_model_len=self.max_model_len,
             quantization=self.quantization,

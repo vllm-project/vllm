@@ -811,8 +811,10 @@ class Scheduler(SchedulerInterface):
 
                     # Pad new decode requests to uniform spec decoding size to
                     # preserve full cudagraph for this step.
+                    # Not for diffusion where draft tokens can't be padded.
                     if (
                         (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
+                        and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
                         and (scheduled_running_reqs and not prefill_scheduled)
                     ):
@@ -1078,10 +1080,11 @@ class Scheduler(SchedulerInterface):
             self.prev_step_scheduled_req_ids.clear()
             self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
+        # Drain new attention block ids every step so the manager-side list
+        # does not grow unbounded; only kv-cache zeroing consumes them.
+        new_attn_block_ids = self.kv_cache_manager.take_new_block_ids()
         new_block_ids_to_zero = (
-            (self.kv_cache_manager.take_new_block_ids() or None)
-            if self.needs_kv_cache_zeroing
-            else None
+            (new_attn_block_ids or None) if self.needs_kv_cache_zeroing else None
         )
 
         # Dynamic speculative decoding: compute optimal K

@@ -31,6 +31,13 @@ try:
 except ImportError:
     av = PlaceholderModule("av")  # type: ignore[assignment]
 
+try:
+    from torchcodec.decoders import VideoDecoder
+except ImportError:
+    VideoDecoder = PlaceholderModule("torchcodec").placeholder_attr(  # type: ignore[assignment]
+        "decoders.VideoDecoder"
+    )
+
 
 logger = init_logger(__name__)
 
@@ -568,6 +575,53 @@ class PyAVVideoBackendMixin:
         return np.stack(frames_list), valid_indices
 
 
+class TorchCodecVideoBackendMixin:
+    """TorchCodec (FFmpeg-backed, PyTorch-native) codec utilities.
+
+    Builds a :class:`~torchcodec.decoders.VideoDecoder` over the in-memory
+    bytes and extracts the sampled indices with a single batched
+    ``get_frames_at`` call, while releasing the GIL during decode.
+    """
+
+    @staticmethod
+    def make_torchcodec_decoder(
+        data: bytes,
+        *,
+        num_ffmpeg_threads: int = 0,
+        seek_mode: Literal["exact", "approximate"] = "exact",
+    ) -> "VideoDecoder":
+        # NHWC matches the (num_frames, H, W, 3) uint8 RGB layout the rest
+        # of the pipeline expects, avoiding a transpose.
+        return VideoDecoder(
+            data,
+            dimension_order="NHWC",
+            num_ffmpeg_threads=num_ffmpeg_threads,
+            seek_mode=seek_mode,
+        )
+
+    @staticmethod
+    def get_torchcodec_metadata(decoder: "VideoDecoder") -> VideoSourceMetadata:
+        md = decoder.metadata
+        total_frames = md.num_frames or 0
+        fps = float(md.average_fps) if md.average_fps else 0.0
+        duration = float(md.duration_seconds) if md.duration_seconds else 0.0
+        if total_frames == 0 and duration > 0 and fps > 0:
+            total_frames = int(duration * fps)
+        return VideoSourceMetadata(total_frames, fps, duration)
+
+    @staticmethod
+    def decode_torchcodec_frames(
+        decoder: "VideoDecoder",
+        frame_indices: list[int],
+    ) -> tuple[npt.NDArray, list[int]]:
+        """Decode the requested indices in one batched, index-exact call."""
+        if not frame_indices:
+            return np.empty((0,), dtype=np.uint8), []
+        # Note: torchcodec releases the GIL for the entire call
+        batch = decoder.get_frames_at(frame_indices)
+        return batch.data.numpy(), list(frame_indices)
+
+
 class PyNvVideoCodecVideoBackendMixin:
     """PyNvVideoCodec utilities for GPU-backed frame decode."""
 
@@ -777,14 +831,15 @@ class VideoBackend(
     VideoLoader,
     OpenCVVideoBackendMixin,
     PyAVVideoBackendMixin,
+    TorchCodecVideoBackendMixin,
     PyNvVideoCodecVideoBackendMixin,
 ):
     """Uniform-sampling video backend.
 
     Samples ``num_frames`` uniformly across the video (or one frame every
     ``1/fps`` seconds, whichever produces fewer frames). The decoding codec
-    is selected via the ``backend`` kwarg (``"opencv"``, ``"pyav"``, or
-    ``"pynvvideocodec"``), which can be passed through
+    is selected via the ``backend`` kwarg (``"opencv"``, ``"pyav"``,
+    ``"torchcodec"`` or ``"pynvvideocodec"``), which can be passed through
     ``--media-io-kwargs``. Defaults to ``"opencv"``.
     """
 
@@ -830,7 +885,9 @@ class VideoBackend(
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav", "pynvvideocodec"] = "opencv",
+        backend: Literal["opencv", "pyav", "torchcodec", "pynvvideocodec"] = "opencv",
+        num_ffmpeg_threads: int = 0,
+        seek_mode: Literal["exact", "approximate"] = "exact",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """Load sampled frames from raw video bytes.
@@ -843,8 +900,20 @@ class VideoBackend(
                 dynamic subclass; ignored here.
             frame_recovery: Enable forward-scan recovery for failed frames.
                 Only honored by the OpenCV codec.
-            backend: Decoding codec — ``"opencv"``, ``"pyav"``, or
-                ``"pynvvideocodec"``.
+            backend: Decoding codec — ``"opencv"``, ``"pyav"``,
+                ``"torchcodec"`` or ``"pynvvideocodec"``.
+            num_ffmpeg_threads: Number of FFmpeg decoding threads, only used by
+                TorchCodec: ``0`` (default) relies on the FFmpeg default value
+                which is ``min(cpu_count + 1, 16)``.
+                OpenCV will always use ``min(cpu_count, 16)`` while pyav will
+                always use ``min(cpu_count, (height + 15) / 16)``.
+            seek_mode: Seek mode for the TorchCodec decoder, only used by
+                TorchCodec: ``"exact"`` (default) guarantees frame-accurate
+                sampling by scanning the file on creation, while
+                ``"approximate"`` skips that scan for faster decoder creation
+                at the cost of relying on the file's metadata. See
+                https://meta-pytorch.org/torchcodec/stable/generated_examples/decoding/approximate_mode.html
+                for details.
 
         Returns:
             Tuple of ``(frames_array, metadata_dict)``.
@@ -883,6 +952,24 @@ class VideoBackend(
                 frames, valid = cls.decode_frames(
                     container, frame_idx, source.original_fps, source.duration
                 )
+        elif backend == "torchcodec":
+            assert not frame_recovery, (
+                "frame_recovery is only available for `opencv` backend"
+            )
+            decoder = cls.make_torchcodec_decoder(
+                data,
+                num_ffmpeg_threads=num_ffmpeg_threads,
+                seek_mode=seek_mode,
+            )
+            _check_frame_pixel_limit(
+                decoder.metadata.width or 0,
+                decoder.metadata.height or 0,
+            )
+            source = cls._prepare_source(cls.get_torchcodec_metadata(decoder))
+            frame_idx = cls.compute_frames_index_to_sample(
+                source=source, target=target, **kwargs
+            )
+            frames, valid = cls.decode_torchcodec_frames(decoder, frame_idx)
         elif backend == PYNVVIDEOCODEC_VIDEO_BACKEND:
             if frame_recovery:
                 raise ValueError(
@@ -897,7 +984,8 @@ class VideoBackend(
         else:
             raise ValueError(
                 f"Unknown video codec backend {backend!r}; "
-                "valid options: 'opencv', 'pyav', 'pynvvideocodec'."
+                "valid options: 'opencv', 'pyav', 'torchcodec', "
+                "'pynvvideocodec'."
             )
 
         if len(valid) < len(frame_idx):
@@ -984,7 +1072,7 @@ class Qwen3VLVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav", "pynvvideocodec"] = "opencv",
+        backend: Literal["opencv", "pyav", "torchcodec", "pynvvideocodec"] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         return super().load_bytes(
@@ -1063,7 +1151,7 @@ class Qwen2VLVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav", "pynvvideocodec"] = "opencv",
+        backend: Literal["opencv", "pyav", "torchcodec", "pynvvideocodec"] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         return super().load_bytes(
@@ -1155,7 +1243,7 @@ class DynamicVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav", "pynvvideocodec"] = "opencv",
+        backend: Literal["opencv", "pyav", "torchcodec", "pynvvideocodec"] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         return super().load_bytes(
@@ -1280,7 +1368,7 @@ class GLM46VVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav", "pynvvideocodec"] = "opencv",
+        backend: Literal["opencv", "pyav", "torchcodec", "pynvvideocodec"] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         return super().load_bytes(
@@ -1378,7 +1466,7 @@ class GLMGAVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav", "pynvvideocodec"] = "opencv",
+        backend: Literal["opencv", "pyav", "torchcodec", "pynvvideocodec"] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         frames, metadata = super().load_bytes(
@@ -1701,7 +1789,7 @@ class NemotronVLVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav", "pynvvideocodec"] = "opencv",
+        backend: Literal["opencv", "pyav", "torchcodec", "pynvvideocodec"] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         frames, metadata = super().load_bytes(

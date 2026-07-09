@@ -276,13 +276,13 @@ class Base(
         - Any quantization config specific mappings
         """
         self.hf_to_vllm_mapper = WeightsMapper()
-        orig_to_new_renamings = self.hf_to_vllm_mapper.orig_to_new_renamings
+        orig_to_new_renaming = self.hf_to_vllm_mapper.orig_to_new_renaming
         orig_to_new_regex = self.hf_to_vllm_mapper.orig_to_new_regex
 
         for mapping in get_model_conversion_mapping(self.model):
             # Handle weights which have been renamed in Transformers
             if isinstance(mapping, WeightRenaming):
-                orig_to_new_renamings.append(mapping)
+                orig_to_new_renaming.append(mapping)
             # TODO: Handle WeightConverter to enable layer merging
 
         # Handle unexpected weights which should be ignored
