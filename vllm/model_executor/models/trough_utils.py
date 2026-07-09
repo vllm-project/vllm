@@ -35,7 +35,9 @@ def read_trough_config(vllm_config: "VllmConfig") -> dict:
         return default
 
     return {
-        "enable_trough_decoding": bool(_cfg("enable_multi_layer_entropy_selection", False)),
+        "enable_trough_decoding": bool(
+            _cfg("enable_multi_layer_entropy_selection", False)
+        ),
         "trough_max_backtrack_layers": int(_cfg("trough_max_backtrack_layers", 0)),
         "trough_backtrack_ratio": float(_cfg("trough_backtrack_ratio", 0.0)),
         "trough_select_method": str(_cfg("select_method", "trough")),
@@ -149,7 +151,7 @@ def prepare_trough_layer_states(
             return None, "indices_out_of_range"
         return layer_states[:, last_logits_indices], None
 
-    if B == S_buf:
+    if S_buf == B:
         return layer_states, None
 
     # Do not guess with ``[:, -B:]`` — that misaligns prompt-logprobs and
@@ -357,7 +359,12 @@ def vectorized_entropy_select(
     gather_idx = selected_layer_idx.unsqueeze(0).unsqueeze(-1).expand(1, B, V)
     selected_logits = all_logits.gather(0, gather_idx).squeeze(0)
 
-    if B > 0 and trough_log_interval > 0 and trough_call_count % trough_log_interval == 0:
+    should_log = (
+        B > 0
+        and trough_log_interval > 0
+        and trough_call_count % trough_log_interval == 0
+    )
+    if should_log:
         with torch.no_grad():
             sel = selected_layer_idx
             backtrack_depth = (L - 1) - sel
