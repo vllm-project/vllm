@@ -57,6 +57,9 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert len(scheduler.finished_req_ids) == 0
     assert len(scheduler.finished_recving_kv_req_ids) == 0
     assert len(scheduler._inflight_prefills) == 0
+    assert not scheduler._shared_external_prefix_loads.has_unresolved_loads()
+    assert not scheduler._draining_shared_external_prefix_owners
+    assert not scheduler._force_local_recompute_once
 
     # EncoderCacheManager.
     assert len(scheduler.encoder_cache_manager.freed) == 0

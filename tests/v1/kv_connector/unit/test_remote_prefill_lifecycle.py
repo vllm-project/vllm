@@ -740,3 +740,467 @@ def test_async_loads_both_admitted_when_pool_fits():
 
     for req in reqs:
         assert req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+
+def _make_external_prefix_dedupe_scheduler(
+    monkeypatch, kv_load_failure_policy="fail", matched_tokens=None
+):
+    block_size = 16
+    matched_tokens = matched_tokens or 2 * block_size
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        max_num_batched_tokens=128,
+        kv_connector="MockKVConnector",
+        kv_connector_extra_config={
+            "matched_tokens": matched_tokens,
+            "is_async": True,
+        },
+        kv_load_failure_policy=kv_load_failure_policy,
+    )
+    scheduler = create_scheduler(vllm_config, num_blocks=64)
+    connector = scheduler.connector
+    assert connector is not None
+
+    def get_num_new_matched_tokens(request, num_computed_tokens):
+        num_external_tokens = max(matched_tokens - num_computed_tokens, 0)
+        return num_external_tokens, num_external_tokens > 0
+
+    nonzero_allocs = []
+    original_update_state_after_alloc = connector.update_state_after_alloc
+
+    def record_update_state_after_alloc(request, blocks, num_external_tokens):
+        if num_external_tokens:
+            nonzero_allocs.append(
+                (request.request_id, blocks.get_block_ids(), num_external_tokens)
+            )
+        return original_update_state_after_alloc(request, blocks, num_external_tokens)
+
+    monkeypatch.setattr(
+        connector,
+        "get_num_new_matched_tokens",
+        get_num_new_matched_tokens,
+    )
+    monkeypatch.setattr(
+        connector,
+        "get_shared_kv_load_namespace",
+        lambda request: ("mock",),
+    )
+    monkeypatch.setattr(
+        connector,
+        "update_state_after_alloc",
+        record_update_state_after_alloc,
+    )
+    return scheduler, block_size, matched_tokens, nonzero_allocs
+
+
+def _make_external_prefix_requests(block_size, matched_tokens, same_prefix=True):
+    common_prefix_len = matched_tokens if same_prefix else 0
+    return [
+        create_request(
+            request_id=request_id,
+            block_size=block_size,
+            num_tokens=3 * block_size,
+            common_prefix_len=common_prefix_len,
+        )
+        for request_id in (101, 102)
+    ]
+
+
+def _finish_owner_load(scheduler, owner, initial_output):
+    scheduler.update_from_output(initial_output, EMPTY_MODEL_RUNNER_OUTPUT)
+    waiting_output = scheduler.schedule()
+    scheduler.update_from_output(
+        waiting_output,
+        create_model_runner_output(
+            reqs=[],
+            finished_recving={owner.request_id},
+        ),
+    )
+    return scheduler.schedule()
+
+
+@pytest.mark.skip_global_cleanup
+def test_shared_external_prefix_materializes_once(monkeypatch):
+    """Concurrent exact-prefix hits use one pending materialization."""
+    (
+        scheduler,
+        block_size,
+        matched_tokens,
+        nonzero_allocs,
+    ) = _make_external_prefix_dedupe_scheduler(monkeypatch)
+    owner, follower = _make_external_prefix_requests(
+        block_size, matched_tokens, same_prefix=True
+    )
+    initial_num_free_blocks = (
+        scheduler.kv_cache_manager.block_pool.get_num_free_blocks()
+    )
+
+    scheduler.add_request(owner)
+    scheduler.add_request(follower)
+    initial_output = scheduler.schedule()
+
+    assert owner.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert follower.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert owner.num_computed_tokens == matched_tokens
+    assert follower.num_computed_tokens == 0
+    assert owner in scheduler._inflight_prefills
+    assert follower not in scheduler._inflight_prefills
+    assert [alloc[0] for alloc in nonzero_allocs] == [owner.request_id]
+
+    manager = scheduler.kv_cache_manager.coordinator.single_type_managers[0]
+    assert owner.request_id in manager.req_to_blocks
+    assert follower.request_id not in manager.req_to_blocks
+    owner_prefix_ids = scheduler.kv_cache_manager.get_block_ids(owner.request_id)[0]
+    assert len(owner_prefix_ids) == matched_tokens // block_size
+    assert all(
+        scheduler.kv_cache_manager.block_pool.blocks[block_id].block_hash is None
+        for block_id in owner_prefix_ids
+    )
+    assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == (
+        initial_num_free_blocks - len(owner_prefix_ids)
+    )
+
+    resumed_output = _finish_owner_load(scheduler, owner, initial_output)
+
+    assert owner.status == RequestStatus.RUNNING
+    assert follower.status == RequestStatus.RUNNING
+    owner_block_ids = scheduler.kv_cache_manager.get_block_ids(owner.request_id)[0]
+    follower_block_ids = scheduler.kv_cache_manager.get_block_ids(follower.request_id)[
+        0
+    ]
+    num_prefix_blocks = matched_tokens // block_size
+    assert owner_block_ids[:num_prefix_blocks] == owner_prefix_ids
+    assert follower_block_ids[:num_prefix_blocks] == owner_prefix_ids
+    assert set(owner_block_ids[num_prefix_blocks:]).isdisjoint(
+        follower_block_ids[num_prefix_blocks:]
+    )
+    assert all(
+        scheduler.kv_cache_manager.block_pool.blocks[block_id].ref_cnt == 2
+        for block_id in owner_prefix_ids
+    )
+    assert set(resumed_output.num_scheduled_tokens) == {
+        owner.request_id,
+        follower.request_id,
+    }
+    assert len(nonzero_allocs) == 1
+
+
+@pytest.mark.skip_global_cleanup
+def test_pending_shared_external_prefix_blocks_connector_reset(monkeypatch):
+    """A connector reset cannot invalidate a source with parked followers."""
+    scheduler, block_size, matched_tokens, _ = _make_external_prefix_dedupe_scheduler(
+        monkeypatch
+    )
+    owner, follower = _make_external_prefix_requests(
+        block_size, matched_tokens, same_prefix=True
+    )
+    scheduler.add_request(owner)
+    scheduler.add_request(follower)
+    initial_output = scheduler.schedule()
+
+    assert scheduler.connector is not None
+
+    def unexpected_reset():
+        raise AssertionError("connector reset must be rejected before delegation")
+
+    monkeypatch.setattr(scheduler.connector, "reset_cache", unexpected_reset)
+    assert not scheduler.reset_connector_cache()
+
+    resumed_output = _finish_owner_load(scheduler, owner, initial_output)
+    scheduler.update_from_output(
+        resumed_output,
+        create_model_runner_output([owner, follower]),
+    )
+    decode_output = scheduler.schedule()
+    scheduler.update_from_output(
+        decode_output,
+        create_model_runner_output([owner, follower], use_eos=True),
+    )
+    scheduler.schedule()
+    assert_scheduler_empty(scheduler)
+
+
+@pytest.mark.skip_global_cleanup
+def test_distinct_external_prefixes_do_not_dedupe(monkeypatch):
+    """Different exact-prefix hashes retain independent materializations."""
+    (
+        scheduler,
+        block_size,
+        matched_tokens,
+        nonzero_allocs,
+    ) = _make_external_prefix_dedupe_scheduler(monkeypatch)
+    requests = _make_external_prefix_requests(
+        block_size, matched_tokens, same_prefix=False
+    )
+    initial_num_free_blocks = (
+        scheduler.kv_cache_manager.block_pool.get_num_free_blocks()
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    scheduler.schedule()
+
+    assert all(
+        request.status == RequestStatus.WAITING_FOR_REMOTE_KVS for request in requests
+    )
+    assert {alloc[0] for alloc in nonzero_allocs} == {
+        request.request_id for request in requests
+    }
+    block_id_sets = [
+        set(scheduler.kv_cache_manager.get_block_ids(request.request_id)[0])
+        for request in requests
+    ]
+    assert block_id_sets[0].isdisjoint(block_id_sets[1])
+    assert all(
+        scheduler.kv_cache_manager.block_pool.blocks[block_id].ref_cnt == 1
+        for block_ids in block_id_sets
+        for block_id in block_ids
+    )
+    assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == (
+        initial_num_free_blocks - 2 * matched_tokens // block_size
+    )
+
+
+@pytest.mark.parametrize("case", ["unaligned", "namespace", "full_prompt"])
+@pytest.mark.skip_global_cleanup
+def test_external_prefix_dedupe_fails_closed(monkeypatch, case):
+    """Unsupported spans and different connector namespaces never coalesce."""
+    requested_match = {"unaligned": 17, "namespace": None, "full_prompt": 48}[case]
+    scheduler, block_size, matched_tokens, nonzero_allocs = (
+        _make_external_prefix_dedupe_scheduler(
+            monkeypatch, matched_tokens=requested_match
+        )
+    )
+    if case == "namespace":
+        assert scheduler.connector is not None
+        monkeypatch.setattr(
+            scheduler.connector,
+            "get_shared_kv_load_namespace",
+            lambda request: ("mock", request.request_id),
+        )
+
+    requests = _make_external_prefix_requests(
+        block_size, matched_tokens, same_prefix=True
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    scheduler.schedule()
+
+    assert len(nonzero_allocs) == 2
+    assert all(
+        request.status == RequestStatus.WAITING_FOR_REMOTE_KVS for request in requests
+    )
+    manager = scheduler.kv_cache_manager.coordinator.single_type_managers[0]
+    assert all(request.request_id in manager.req_to_blocks for request in requests)
+
+
+@pytest.mark.skip_global_cleanup
+def test_shared_external_prefix_follower_abort_does_not_leak(monkeypatch):
+    """A follower with no transfer or blocks detaches immediately on abort."""
+    (
+        scheduler,
+        block_size,
+        matched_tokens,
+        nonzero_allocs,
+    ) = _make_external_prefix_dedupe_scheduler(monkeypatch)
+    owner, follower = _make_external_prefix_requests(
+        block_size, matched_tokens, same_prefix=True
+    )
+    initial_num_free_blocks = (
+        scheduler.kv_cache_manager.block_pool.get_num_free_blocks()
+    )
+    scheduler.add_request(owner)
+    scheduler.add_request(follower)
+    initial_output = scheduler.schedule()
+    scheduler.update_from_output(initial_output, EMPTY_MODEL_RUNNER_OUTPUT)
+
+    scheduler.finish_requests(
+        follower.request_id,
+        RequestStatus.FINISHED_ABORTED,
+    )
+
+    manager = scheduler.kv_cache_manager.coordinator.single_type_managers[0]
+    assert follower.request_id not in scheduler.requests
+    assert follower.request_id not in manager.req_to_blocks
+    assert owner.request_id in scheduler.requests
+    assert owner.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    owner_block_ids = scheduler.kv_cache_manager.get_block_ids(owner.request_id)[0]
+    assert all(
+        scheduler.kv_cache_manager.block_pool.blocks[block_id].ref_cnt == 1
+        for block_id in owner_block_ids
+    )
+    assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == (
+        initial_num_free_blocks - len(owner_block_ids)
+    )
+    assert len(nonzero_allocs) == 1
+
+    waiting_output = scheduler.schedule()
+    scheduler.update_from_output(
+        waiting_output,
+        create_model_runner_output(
+            reqs=[],
+            finished_recving={owner.request_id},
+        ),
+    )
+    owner_output = scheduler.schedule()
+    scheduler.update_from_output(
+        owner_output,
+        create_model_runner_output([owner]),
+    )
+    decode_output = scheduler.schedule()
+    scheduler.update_from_output(
+        decode_output,
+        create_model_runner_output([owner], use_eos=True),
+    )
+    scheduler.schedule()
+    assert_scheduler_empty(scheduler)
+
+
+@pytest.mark.skip_global_cleanup
+def test_shared_external_prefix_owner_abort_releases_follower(monkeypatch):
+    """Owner abort releases followers to recompute while its load drains."""
+    (
+        scheduler,
+        block_size,
+        matched_tokens,
+        nonzero_allocs,
+    ) = _make_external_prefix_dedupe_scheduler(monkeypatch)
+    owner, follower = _make_external_prefix_requests(
+        block_size, matched_tokens, same_prefix=True
+    )
+    scheduler.add_request(owner)
+    scheduler.add_request(follower)
+    initial_output = scheduler.schedule()
+    scheduler.update_from_output(initial_output, EMPTY_MODEL_RUNNER_OUTPUT)
+    owner_block_ids = set(scheduler.kv_cache_manager.get_block_ids(owner.request_id)[0])
+
+    scheduler.finish_requests(owner.request_id, RequestStatus.FINISHED_ABORTED)
+    assert owner.request_id in scheduler.requests
+
+    fallback_output = scheduler.schedule()
+
+    assert follower.status == RequestStatus.RUNNING
+    assert fallback_output.num_scheduled_tokens[follower.request_id] == (
+        follower.num_prompt_tokens
+    )
+    follower_block_ids = set(
+        scheduler.kv_cache_manager.get_block_ids(follower.request_id)[0]
+    )
+    assert owner_block_ids.isdisjoint(follower_block_ids)
+    assert len(nonzero_allocs) == 1
+
+    scheduler.update_from_output(
+        fallback_output,
+        create_model_runner_output(
+            [follower],
+            finished_recving={owner.request_id},
+        ),
+    )
+    assert owner.request_id not in scheduler.requests
+    decode_output = scheduler.schedule()
+    scheduler.update_from_output(
+        decode_output,
+        create_model_runner_output([follower], use_eos=True),
+    )
+    scheduler.schedule()
+    assert_scheduler_empty(scheduler)
+
+
+@pytest.mark.skip_global_cleanup
+def test_shared_external_prefix_load_failure_fails_followers(monkeypatch):
+    """The fail policy applies one materialization outcome to every waiter."""
+    scheduler, block_size, matched_tokens, _ = _make_external_prefix_dedupe_scheduler(
+        monkeypatch
+    )
+    owner, follower = _make_external_prefix_requests(
+        block_size, matched_tokens, same_prefix=True
+    )
+    scheduler.add_request(owner)
+    scheduler.add_request(follower)
+    initial_output = scheduler.schedule()
+    owner_block_ids = scheduler.kv_cache_manager.get_block_ids(owner.request_id)[0]
+
+    outputs = scheduler.update_from_output(
+        initial_output,
+        create_model_runner_output(
+            reqs=[],
+            invalid_block_ids={owner_block_ids[-1]},
+        ),
+    )
+
+    assert owner.status == RequestStatus.FINISHED_ERROR
+    assert follower.status == RequestStatus.FINISHED_ERROR
+    assert follower.request_id not in scheduler.requests
+    assert owner.request_id in scheduler.requests  # Transfer target is draining.
+    assert {
+        output.request_id
+        for engine_output in outputs.values()
+        for output in engine_output.outputs
+    } == {owner.request_id, follower.request_id}
+
+    drain_output = scheduler.schedule()
+    scheduler.update_from_output(
+        drain_output,
+        create_model_runner_output(
+            reqs=[],
+            finished_recving={owner.request_id},
+        ),
+    )
+    scheduler.schedule()
+    assert_scheduler_empty(scheduler)
+
+
+@pytest.mark.skip_global_cleanup
+def test_shared_external_prefix_load_failure_recomputes_safely(monkeypatch):
+    """Recompute publishes only the valid prefix, never shared failed blocks."""
+    scheduler, block_size, matched_tokens, nonzero_allocs = (
+        _make_external_prefix_dedupe_scheduler(
+            monkeypatch, kv_load_failure_policy="recompute"
+        )
+    )
+    owner, follower = _make_external_prefix_requests(
+        block_size, matched_tokens, same_prefix=True
+    )
+    scheduler.add_request(owner)
+    scheduler.add_request(follower)
+    initial_output = scheduler.schedule()
+    owner_block_ids = scheduler.kv_cache_manager.get_block_ids(owner.request_id)[0]
+
+    scheduler.update_from_output(
+        initial_output,
+        create_model_runner_output(
+            reqs=[],
+            invalid_block_ids={owner_block_ids[1]},
+            finished_recving={owner.request_id},
+        ),
+    )
+    retry_output = scheduler.schedule()
+
+    assert owner.status == RequestStatus.RUNNING
+    assert follower.status == RequestStatus.RUNNING
+    assert owner.num_computed_tokens == owner.num_prompt_tokens
+    assert follower.num_computed_tokens == follower.num_prompt_tokens
+    assert len(nonzero_allocs) == 1
+
+    owner_retry_ids = scheduler.kv_cache_manager.get_block_ids(owner.request_id)[0]
+    follower_retry_ids = scheduler.kv_cache_manager.get_block_ids(follower.request_id)[
+        0
+    ]
+    # The valid block is published, but followers bypass APC for this retry so
+    # they cannot observe blocks optimistically hashed by the owner's recompute.
+    assert owner_retry_ids[0] == owner_block_ids[0]
+    assert scheduler.kv_cache_manager.block_pool.blocks[owner_block_ids[0]].ref_cnt == 1
+    assert set(owner_retry_ids).isdisjoint(follower_retry_ids)
+
+    scheduler.update_from_output(
+        retry_output,
+        create_model_runner_output([owner, follower]),
+    )
+    decode_output = scheduler.schedule()
+    scheduler.update_from_output(
+        decode_output,
+        create_model_runner_output([owner, follower], use_eos=True),
+    )
+    scheduler.schedule()
+    assert_scheduler_empty(scheduler)

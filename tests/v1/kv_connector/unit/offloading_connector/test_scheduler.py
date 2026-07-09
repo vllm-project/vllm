@@ -19,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
 )
+from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -423,6 +424,83 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner, async_scheduling:
 
     # Fence index drained: stores completed before request_finished ran.
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+@pytest.mark.skip_global_cleanup
+def test_core_coalesces_concurrent_partial_prefix_loads(
+    request_runner, async_scheduling: bool, monkeypatch
+):
+    # RequestRunner explicitly exercises HMA. The production path supports it,
+    # but CPU/MPS test platforms disable it before connector validation.
+    monkeypatch.setattr(current_platform, "support_hybrid_kv_cache", lambda: True)
+    block_size = 4
+    block_size_factor = 3
+    offloaded_block_size = block_size * block_size_factor
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=async_scheduling,
+        block_size_factor=block_size_factor,
+        extra_config_overrides={"enable_core_load_coalescing": True},
+    )
+
+    common_prefix = [0] * offloaded_block_size
+    runner.new_request(token_ids=common_prefix)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=(0, 1, 2),
+    )
+
+    runner.scheduler.reset_prefix_cache()
+    runner.connector_scheduler._maximal_prefix_lookup = lambda keys, context: 1
+
+    runner.new_request(token_ids=common_prefix + [1])
+    runner.run(decoded_tokens=[], complete_transfers=False)
+    transfer_jobs = list(runner.offloading_spec.handler.transfer_specs)
+
+    runner.new_request(token_ids=common_prefix + [2])
+    runner.run(decoded_tokens=[], complete_transfers=False)
+
+    owner_id, follower_id = "1", "2"
+    assert transfer_jobs == list(runner.offloading_spec.handler.transfer_specs)
+    assert runner.scheduler._shared_external_prefix_loads.is_follower(follower_id)
+    assert runner.scheduler.requests[owner_id].status == (
+        RequestStatus.WAITING_FOR_REMOTE_KVS
+    )
+    assert runner.scheduler.requests[follower_id].status == (
+        RequestStatus.WAITING_FOR_REMOTE_KVS
+    )
+    cache_manager = runner.scheduler.kv_cache_manager.coordinator.single_type_managers[
+        0
+    ]
+    assert follower_id not in cache_manager.req_to_blocks
+
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output([])
+    )
+    runner.run(
+        decoded_tokens=[],
+        complete_transfers=True,
+        expected_loaded=(0, 1, 2),
+    )
+    # Promote the owner after transfer completion and the follower after the
+    # owner's blocks have been published into the ordinary GPU prefix cache.
+    runner.run(decoded_tokens=[], complete_transfers=True)
+
+    owner_blocks = runner.scheduler.kv_cache_manager.get_block_ids(owner_id)[0]
+    follower_blocks = runner.scheduler.kv_cache_manager.get_block_ids(follower_id)[0]
+    assert owner_blocks[:block_size_factor] == follower_blocks[:block_size_factor]
+    assert all(
+        runner.scheduler.kv_cache_manager.block_pool.blocks[block_id].ref_cnt == 2
+        for block_id in owner_blocks[:block_size_factor]
+    )
+
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+    assert not runner.scheduler._shared_external_prefix_loads.has_unresolved_loads()
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])

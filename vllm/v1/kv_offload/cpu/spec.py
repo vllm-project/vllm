@@ -26,6 +26,15 @@ from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 class CPUOffloadingSpec(OffloadingSpec):
     BLOCK_SIZE_ALIGNMENT = 1
 
+    @property
+    @override
+    def shared_kv_load_namespace(self) -> tuple[str] | None:
+        # Subclasses may replace the global CPU manager with request-scoped or
+        # remote sources and must opt in independently.
+        if type(self) is CPUOffloadingSpec:
+            return ("cpu-offloading",)
+        return None
+
     @classmethod
     def build_metric_definitions(
         cls, extra_config: dict[str, Any]

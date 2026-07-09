@@ -10,6 +10,8 @@ The class provides the following primitives:
         get_num_new_matched_tokens() - get number of new tokens
             that exist in the remote KV cache. Might be called multiple
             times for a given request and should be side-effect free.
+        get_shared_kv_load_namespace() - optionally identify async loads
+            that may share one exact local materialization.
         update_state_after_alloc() - update KVConnector state after
             temporary buffer alloc by the CacheManager.
         update_connector_output() - update KVConnector state after
@@ -42,7 +44,7 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Hashable, Iterable
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -439,6 +441,22 @@ class KVConnectorBase_V1(ABC):
     # ==============================
     # Scheduler-side methods
     # ==============================
+
+    def get_shared_kv_load_namespace(self, request: "Request") -> Hashable | None:
+        """Return an identity namespace for coalescing exact async loads.
+
+        Returning ``None`` disables load coalescing for this request. Connectors
+        that opt in must return equal, hashable values only when two requests'
+        external prefix loads use the same source and materialization semantics.
+        The scheduler additionally verifies the exact target block-hash range.
+
+        This method is called after :meth:`get_num_new_matched_tokens` reports a
+        positive asynchronous hit and must not mutate connector state. For a
+        coalesced follower, the scheduler may defer
+        :meth:`update_state_after_alloc` until the request resumes through the
+        local prefix cache, or call :meth:`request_finished` first if it aborts.
+        """
+        return None
 
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         """

@@ -71,6 +71,12 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
     BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
 
+    @property
+    @override
+    def shared_kv_load_namespace(self) -> None:
+        # A tiering lookup may select a request-scoped P2P source.
+        return None
+
     @classmethod
     @override
     def build_metric_definitions(

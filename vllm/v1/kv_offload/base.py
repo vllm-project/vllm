@@ -5,7 +5,7 @@ Core abstractions for KV cache offloading in vLLM v1.
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Hashable, Iterable, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, NamedTuple, NewType
@@ -474,6 +474,16 @@ class OffloadingWorker(ABC):
 
 class OffloadingSpec(ABC):
     """Spec for an offloading connector"""
+
+    @property
+    def shared_kv_load_namespace(self) -> Hashable | None:
+        """Identity of a global source safe for exact load coalescing.
+
+        Specs return ``None`` by default. An opt-in namespace must describe a
+        source whose lookup and materialization semantics are identical for all
+        requests using the spec.
+        """
+        return None
 
     @classmethod
     def build_metric_definitions(

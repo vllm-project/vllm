@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
+from collections.abc import Hashable, Iterable
 from typing import Any
 
 import torch
@@ -57,6 +57,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         super().__init__(vllm_config, role, kv_cache_config)
 
         spec = OffloadingSpecFactory.create_spec(vllm_config, kv_cache_config)
+        self._shared_kv_load_namespace = spec.shared_kv_load_namespace
 
         self.connector_scheduler: OffloadingConnectorScheduler | None = None
         self.connector_worker: OffloadingConnectorWorker | None = None
@@ -135,6 +136,9 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_scheduler.get_num_new_matched_tokens(
             request, num_computed_tokens
         )
+
+    def get_shared_kv_load_namespace(self, request: "Request") -> Hashable | None:
+        return self._shared_kv_load_namespace
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int

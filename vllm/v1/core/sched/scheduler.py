@@ -50,9 +50,14 @@ from vllm.v1.core.sched.request_queue import (
     SchedulingPolicy,
     create_request_queue,
 )
+from vllm.v1.core.sched.shared_external_prefix import (
+    PendingExternalPrefixLoad,
+    SharedExternalPrefixKey,
+    SharedExternalPrefixLoadManager,
+)
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
@@ -259,6 +264,7 @@ class Scheduler(SchedulerInterface):
         # Create the KV cache manager.
         if hash_block_size is None:
             hash_block_size = block_size
+        self.hash_block_size = hash_block_size
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
@@ -334,6 +340,118 @@ class Scheduler(SchedulerInterface):
         # In-flight requests still prefilling (prefill chunks + in-progress
         # async KV loads). Their remaining-block reservation gates async loads.
         self._inflight_prefills: set[Request] = set()
+
+        # Exact external-prefix loads that can be coalesced. Pending followers
+        # own no blocks; they re-enter normal local APC lookup only after the
+        # owner's blocks have been published.
+        self._shared_external_prefix_loads = SharedExternalPrefixLoadManager()
+        # Aborted owners retain their transfer target until the connector
+        # reports completion, even though their followers have been released.
+        self._draining_shared_external_prefix_owners: set[str] = set()
+        # Followers of a failed or abandoned materialization bypass both local
+        # APC and the external source once. This prevents them from observing
+        # the owner's optimistic hashes or immediately retrying the same load.
+        self._force_local_recompute_once: set[str] = set()
+
+    def _make_shared_external_prefix_key(
+        self,
+        request: Request,
+        num_local_tokens: int,
+        num_external_tokens: int,
+    ) -> SharedExternalPrefixKey | None:
+        """Build a fail-closed identity for a coalescible external load."""
+        if (
+            self.connector is None
+            or not self.kv_cache_manager.enable_caching
+            or request.skip_reading_prefix_cache
+            or request.status != RequestStatus.WAITING
+            or self.use_eagle
+            or len(self.kv_cache_config.kv_cache_groups) != 1
+            or not isinstance(
+                self.kv_cache_config.kv_cache_groups[0].kv_cache_spec,
+                FullAttentionSpec,
+            )
+        ):
+            return None
+
+        num_total_tokens = num_local_tokens + num_external_tokens
+        if (
+            num_external_tokens <= 0
+            # A full-prompt hit must recompute its final token. APC may drop
+            # that entire block, so it cannot preserve exact block sharing.
+            or num_total_tokens >= request.num_tokens
+            or num_local_tokens % self.block_size != 0
+            or num_external_tokens % self.block_size != 0
+            or num_total_tokens % self.block_size != 0
+        ):
+            return None
+
+        namespace = self.connector.get_shared_kv_load_namespace(request)
+        if namespace is None:
+            return None
+
+        local_hash_index = num_local_tokens // self.hash_block_size - 1
+        external_hash_index = num_total_tokens // self.hash_block_size - 1
+        if external_hash_index >= len(request.block_hashes):
+            return None
+        local_end_hash = (
+            request.block_hashes[local_hash_index] if local_hash_index >= 0 else None
+        )
+        key = SharedExternalPrefixKey(
+            connector_namespace=namespace,
+            hash_block_size=self.hash_block_size,
+            num_local_tokens=num_local_tokens,
+            num_external_tokens=num_external_tokens,
+            local_end_hash=local_end_hash,
+            external_end_hash=request.block_hashes[external_hash_index],
+        )
+        try:
+            hash(key)
+        except TypeError:
+            logger.warning_once(
+                "KV connector returned an unhashable shared-load namespace; "
+                "external-prefix load coalescing is disabled for that request."
+            )
+            return None
+        return key
+
+    def _park_shared_external_prefix_follower(
+        self,
+        load: PendingExternalPrefixLoad,
+        request: Request,
+    ) -> None:
+        """Park a follower without allocating or exposing owner blocks."""
+        assert request.num_computed_tokens == 0
+        self._shared_external_prefix_loads.add_follower(load, request.request_id)
+        request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    def _release_shared_external_prefix_followers(
+        self, owner_request_id: str, force_local_recompute: bool = False
+    ) -> None:
+        """Publish barrier: release followers back through ordinary APC lookup."""
+        load = self._shared_external_prefix_loads.pop_owner(owner_request_id)
+        if load is None:
+            return
+
+        for follower_id in load.follower_request_ids:
+            follower = self.requests.get(follower_id)
+            if (
+                follower is None
+                or follower.status != RequestStatus.WAITING_FOR_REMOTE_KVS
+            ):
+                continue
+            # Followers never owned blocks or a connector transfer. Keeping the
+            # count at zero forces a fresh local-prefix lookup after publication.
+            follower.num_computed_tokens = 0
+            follower.status = (
+                RequestStatus.PREEMPTED
+                if follower.num_preemptions
+                else RequestStatus.WAITING
+            )
+            self.finished_recving_kv_req_ids.discard(follower_id)
+            self.failed_recving_kv_req_ids.discard(follower_id)
+            if force_local_recompute:
+                self._force_local_recompute_once.add(follower_id)
 
     def _mamba_block_aligned_split(
         self,
@@ -682,11 +800,18 @@ class Scheduler(SchedulerInterface):
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
                 num_uncached_common_prefix_tokens = 0
+                shared_external_prefix_key: SharedExternalPrefixKey | None = None
+                force_local_recompute = request_id in self._force_local_recompute_once
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
-                    if (
+                    if force_local_recompute:
+                        new_computed_blocks = (
+                            self.kv_cache_manager.empty_kv_cache_blocks
+                        )
+                        num_new_local_computed_tokens = 0
+                    elif (
                         self.connector is not None
                         and self.has_mamba_layers
                         and isinstance(
@@ -734,7 +859,7 @@ class Scheduler(SchedulerInterface):
                         )
 
                     # Get externally-cached tokens if using a KVConnector.
-                    if self.connector is not None:
+                    if self.connector is not None and not force_local_recompute:
                         ext_tokens, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(
                                 request, num_new_local_computed_tokens
@@ -788,6 +913,25 @@ class Scheduler(SchedulerInterface):
                     new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
+
+                if load_kv_async:
+                    shared_external_prefix_key = self._make_shared_external_prefix_key(
+                        request,
+                        num_new_local_computed_tokens,
+                        num_external_computed_tokens,
+                    )
+                    if shared_external_prefix_key is not None:
+                        pending_load = self._shared_external_prefix_loads.find(
+                            shared_external_prefix_key
+                        )
+                        if pending_load is not None:
+                            request = request_queue.pop_request()
+                            self._force_local_recompute_once.discard(request_id)
+                            self._park_shared_external_prefix_follower(
+                                pending_load, request
+                            )
+                            step_skipped_waiting.prepend_request(request)
+                            continue
 
                 encoder_inputs_to_schedule = None
                 external_load_encoder_input = []
@@ -935,6 +1079,10 @@ class Scheduler(SchedulerInterface):
                         self.kv_cache_manager.get_blocks(request_id),
                         num_external_computed_tokens,
                     )
+                    if load_kv_async and shared_external_prefix_key is not None:
+                        self._shared_external_prefix_loads.register_owner(
+                            shared_external_prefix_key, request_id
+                        )
                     if (
                         self.connector_prefix_cache_stats is not None
                         and connector_prefix_cache_queries != 0
@@ -944,6 +1092,8 @@ class Scheduler(SchedulerInterface):
                             num_hits=connector_prefix_cache_hits,
                             preempted=request.num_preemptions > 0,
                         )
+
+                self._force_local_recompute_once.discard(request_id)
 
                 request = request_queue.pop_request()
                 if load_kv_async:
@@ -2091,11 +2241,32 @@ class Scheduler(SchedulerInterface):
         for request in valid_requests:
             delay_free_blocks = False
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                delay_free_blocks = (
-                    request.request_id not in self.finished_recving_kv_req_ids
+                request_id = request.request_id
+                is_shared_follower = self._shared_external_prefix_loads.is_follower(
+                    request_id
                 )
-                self.finished_recving_kv_req_ids.discard(request.request_id)
-                self.failed_recving_kv_req_ids.discard(request.request_id)
+                if is_shared_follower:
+                    # A follower owns neither blocks nor a connector transfer,
+                    # so waiting for its own completion would leak the request.
+                    self._shared_external_prefix_loads.detach_follower(request_id)
+                else:
+                    pending_load = self._shared_external_prefix_loads.get_by_owner(
+                        request_id
+                    )
+                    if pending_load is not None:
+                        transfer_is_pending = (
+                            request_id not in self.finished_recving_kv_req_ids
+                        )
+                        self._release_shared_external_prefix_followers(
+                            request_id, force_local_recompute=True
+                        )
+                        if transfer_is_pending:
+                            self._draining_shared_external_prefix_owners.add(request_id)
+                    delay_free_blocks = (
+                        request_id not in self.finished_recving_kv_req_ids
+                    )
+                self.finished_recving_kv_req_ids.discard(request_id)
+                self.failed_recving_kv_req_ids.discard(request_id)
 
             request.status = finished_status
             self._free_request(request, delay_free_blocks=delay_free_blocks)
@@ -2108,6 +2279,7 @@ class Scheduler(SchedulerInterface):
         assert request.is_finished()
 
         self._inflight_prefills.discard(request)
+        self._force_local_recompute_once.discard(request.request_id)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
@@ -2261,6 +2433,16 @@ class Scheduler(SchedulerInterface):
                 "treating as no-op success."
             )
             return True
+
+        if (
+            self._shared_external_prefix_loads.has_unresolved_loads()
+            or self._draining_shared_external_prefix_owners
+        ):
+            logger.warning(
+                "Cannot reset connector cache while shared external-prefix "
+                "loads are pending or draining."
+            )
+            return False
 
         if self.connector.reset_cache() is False:
             return False
@@ -2422,7 +2604,8 @@ class Scheduler(SchedulerInterface):
         """
         assert self.connector is not None
 
-        if request.request_id in self.failed_recving_kv_req_ids:
+        load_failed = request.request_id in self.failed_recving_kv_req_ids
+        if load_failed:
             # Request had KV load failures; num_computed_tokens was already
             # updated in _update_requests_with_invalid_blocks
             if request.num_computed_tokens:
@@ -2444,6 +2627,11 @@ class Scheduler(SchedulerInterface):
             if request.num_computed_tokens == request.num_tokens:
                 request.num_computed_tokens = request.num_tokens - 1
 
+        # Publication must happen before followers are released. Successful
+        # followers use ordinary APC; failed loads bypass APC for one retry.
+        self._release_shared_external_prefix_followers(
+            request.request_id, force_local_recompute=load_failed
+        )
         self.finished_recving_kv_req_ids.remove(request.request_id)
 
     def _try_promote_blocked_waiting_request(self, request: Request) -> bool:
@@ -2502,10 +2690,12 @@ class Scheduler(SchedulerInterface):
                 self.finished_recving_kv_req_ids.add(req_id)
             else:
                 assert RequestStatus.is_finished(req.status)
+                self._draining_shared_external_prefix_owners.discard(req_id)
                 self._free_blocks(self.requests[req_id])
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
             assert req_id in self.requests
+            self._draining_shared_external_prefix_owners.discard(req_id)
             self._free_blocks(self.requests[req_id])
 
     def _update_requests_with_invalid_blocks(
@@ -2636,6 +2826,24 @@ class Scheduler(SchedulerInterface):
                 evict_blocks=False,
             )
         )
+
+        for owner_id in async_failed_req_ids:
+            self._shared_external_prefix_loads.stop_accepting_followers(owner_id)
+
+        if should_fail:
+            # Followers have no blocks to intersect with invalid_block_ids, but
+            # under the fail policy they depend on the same materialization and
+            # must observe the same terminal outcome.
+            coalesced_followers: set[str] = set()
+            for owner_id in tuple(async_failed_req_ids):
+                load = self._shared_external_prefix_loads.get_by_owner(owner_id)
+                if load is None:
+                    continue
+                coalesced_followers.update(load.follower_request_ids)
+                num_failed_tokens += len(load.follower_request_ids) * (
+                    load.key.num_local_tokens + load.key.num_external_tokens
+                )
+            async_failed_req_ids |= coalesced_followers
 
         total_failed_requests = len(async_failed_req_ids)
         total_failed_tokens = num_failed_tokens

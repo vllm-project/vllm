@@ -133,6 +133,12 @@ class MockOffloadingSpec(OffloadingSpec):
         self.manager.on_new_request.return_value = RequestOffloadingContext()
         self.handler = MockOffloadingWorker()
 
+    @property
+    def shared_kv_load_namespace(self) -> tuple[str] | None:
+        if self.extra_config.get("enable_core_load_coalescing", False):
+            return ("mock-offloading",)
+        return None
+
     def get_manager(self) -> OffloadingManager:
         return self.manager
 

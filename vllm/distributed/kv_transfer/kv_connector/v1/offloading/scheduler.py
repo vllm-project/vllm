@@ -48,7 +48,7 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.outputs import KVConnectorOutput
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
 
@@ -356,6 +356,7 @@ class OffloadingConnectorScheduler:
         spec: OffloadingSpec,
     ):
         self.config = SchedulerOffloadConfig.from_spec(spec)
+        self._shared_kv_load_namespace = spec.shared_kv_load_namespace
         self.manager: OffloadingManager = spec.get_manager()
         self._connector_stats = OffloadingConnectorStats()
 
@@ -406,6 +407,37 @@ class OffloadingConnectorScheduler:
         self._block_id_to_pending_jobs: dict[int, set[int]] = {}
 
         self._events_tracker = OffloadingEventsTracker(spec.kv_events_config)
+
+    def _can_coalesce_in_core(
+        self, req_status: RequestOffloadState, num_hit_tokens: int
+    ) -> bool:
+        """Whether the core's stricter exact-prefix gate will accept this hit."""
+        namespace = self._shared_kv_load_namespace
+        if namespace is None:
+            return False
+        try:
+            hash(namespace)
+        except TypeError:
+            return False
+        if (
+            req_status.req.status != RequestStatus.WAITING
+            or len(self.config.kv_group_configs) != 1
+        ):
+            return False
+
+        group_config = self.config.kv_group_configs[0]
+        num_local_tokens = req_status.num_locally_computed_tokens
+        num_total_tokens = num_local_tokens + num_hit_tokens
+        block_size = group_config.gpu_block_size
+        return (
+            num_hit_tokens > 0
+            and group_config.sliding_window_size_in_blocks is None
+            and not group_config.is_eagle_group
+            and num_total_tokens < req_status.req.num_tokens
+            and num_local_tokens % block_size == 0
+            and num_hit_tokens % block_size == 0
+            and num_total_tokens % block_size == 0
+        )
 
     def _maybe_observe_lookup_async_delay(
         self, req_status: RequestOffloadState
@@ -660,6 +692,10 @@ class OffloadingConnectorScheduler:
                 if sliding_window_size_in_blocks is not None:
                     offload_keys = offload_keys[-sliding_window_size_in_blocks:]
                 if any(key in self._blocks_being_loaded for key in offload_keys):
+                    if self._can_coalesce_in_core(req_status, num_hit_tokens):
+                        # Let the core park this request behind the owner. The
+                        # follower gets no GPU blocks and creates no load job.
+                        continue
                     # hit blocks are being loaded, delay request
                     logger.debug(
                         "Delaying request %s since some of its"
