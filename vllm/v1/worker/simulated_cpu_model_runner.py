@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-import numpy as np
 import torch
 
 from vllm.logger import init_logger
@@ -12,6 +11,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
 from vllm.model_executor.model_loader.utils import initialize_model
+from vllm.sequence import IntermediateTensors
 from vllm.tracing import instrument
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import set_default_torch_dtype
@@ -29,6 +29,11 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+
+
+class _NoOpKVBlockZeroer:
+    def zero_block_ids(self, block_ids: list[int]) -> None:
+        pass
 
 
 class SimulatedCPUModelRunner(CPUModelRunner):
@@ -94,8 +99,14 @@ class SimulatedCPUModelRunner(CPUModelRunner):
                 req_index, new_req_data.block_ids, overwrite=True
             )
             self.lora_state.add_request(req_id, req_index, new_req_data.lora_request)
+            extra_args = sampling_params.extra_args if sampling_params else None
+            token_ids = (
+                None
+                if extra_args is None
+                else extra_args.get("simulated_output_token_ids")
+            )
             self._simulated_token_ids_by_req[req_id] = self._parse_simulated_token_ids(
-                sampling_params.extra_args if sampling_params else None
+                token_ids
             )
 
         # No staged writes: simulated execution reads CPU-side mirrors only and
@@ -109,11 +120,11 @@ class SimulatedCPUModelRunner(CPUModelRunner):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-        intermediate_tensors: Any | None = None,
+        intermediate_tensors: IntermediateTensors | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
-    ) -> Any:
+    ) -> ModelRunnerOutput:
         if self.execute_model_state is not None:
             raise RuntimeError(
                 "State error: sample_tokens() must be called "
@@ -158,25 +169,6 @@ class SimulatedCPUModelRunner(CPUModelRunner):
             sampled_token_ids=sampled_token_ids,
         )
 
-    def update_requests(self, scheduler_output: "SchedulerOutput") -> None:
-        reqs = scheduler_output.scheduled_cached_reqs
-        num_computed_tokens_np = self.req_states.num_computed_tokens_np
-        for req_id, num_computed_tokens, req_new_block_ids in zip(
-            reqs.req_ids, reqs.num_computed_tokens, reqs.new_block_ids
-        ):
-            req_index = self.req_states.req_id_to_index[req_id]
-            num_computed_tokens_np[req_index] = num_computed_tokens
-            if req_new_block_ids is not None:
-                self.block_tables.append_block_ids(
-                    req_index, req_new_block_ids, overwrite=False
-                )
-
-        np.minimum(
-            self.req_states.num_computed_tokens_np,
-            self.req_states.prefill_len.np,
-            out=self.req_states.num_computed_prefill_tokens,
-        )
-
     def _advance_request(
         self,
         req_id: str,
@@ -219,11 +211,8 @@ class SimulatedCPUModelRunner(CPUModelRunner):
 
     @staticmethod
     def _parse_simulated_token_ids(
-        extra_args: dict[str, Any] | None,
+        token_ids: list[int | str] | str | None,
     ) -> list[int] | None:
-        token_ids = (
-            None if extra_args is None else extra_args.get("simulated_output_token_ids")
-        )
         if isinstance(token_ids, list):
             return [int(token_id) for token_id in token_ids]
         if isinstance(token_ids, str):
@@ -287,6 +276,7 @@ class SimulatedCPUModelRunner(CPUModelRunner):
             self.vllm_config.mamba_config, self.kv_cache_config
         )
         self.kv_caches = []
+        self.kv_block_zeroer = _NoOpKVBlockZeroer()  # type: ignore[assignment]
         logger.info(
             "Initialized virtual KV cache with %d groups and %d blocks; "
             "skipped KV tensor allocation.",
