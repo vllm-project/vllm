@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BatchFeature, PretrainedConfig
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
+
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
