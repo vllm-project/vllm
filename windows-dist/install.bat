@@ -65,14 +65,21 @@ if "!HIP_PATH!"=="" (
     echo [OK] ROCm !ROCVER! at !HIP_PATH!
 )
 
-:: Choose matching torch version based on ROCm version
+:: Detect Python version (major.minor e.g. 3.12)
+for /f "tokens=2 delims= " %%V in ('python --version 2^>nul') do set "PY_VER=%%V"
+if "!PY_VER!"=="" set "PY_VER=3.12"
+for /f "tokens=1,2 delims=." %%a in ("!PY_VER!") do set "PY_TAG=cp%%a%%b"
+echo Python: !PY_VER! (!PY_TAG!)
+
+:: Choose matching torch version based on ROCm version + Python version
+set "TORCH_VER=2.11.0+rocm7.13.0"
+set "TV_VER=0.22.0+rocm7.13.0"
 if "!ROCVER!"=="7.13" set "TORCH_VER=2.11.0+rocm7.13.0" & set "TV_VER=0.22.0+rocm7.13.0"
 if "!ROCVER!"=="7.12" set "TORCH_VER=2.10.0+rocm7.12.0" & set "TV_VER=0.21.0+rocm7.12.0"
 if "!ROCVER!"=="7.11" set "TORCH_VER=2.9.1+rocm7.11.0" & set "TV_VER=0.20.1+rocm7.11.0"
 if "!ROCVER!"=="7.10" set "TORCH_VER=2.9.1+rocm7.10.0" & set "TV_VER=0.20.1+rocm7.10.0"
-if "!TORCH_VER!"=="" set "TORCH_VER=2.11.0+rocm7.13.0" & set "TV_VER=0.22.0+rocm7.13.0"
 
-echo Detected: ROCm !ROCVER! -> torch !TORCH_VER!
+echo Detected: ROCm !ROCVER! + Python !PY_TAG! -> torch !TORCH_VER!
 echo.
 
 :: ===== PYTORCH WITH ROCM =====
