@@ -67,30 +67,33 @@ if "!HIP_PATH!"=="" (
         )
     )
 )
-:: Extract version number from path
+:: Extract version number from path (e.g. "7.13" from "ROCM-7.13.0-Windows")
 if NOT "!HIP_PATH!"=="" (
     for %%I in ("!HIP_PATH!") do set "ROCVER=%%~nxI"
-    :: Remove non-numeric chars from version
+    :: Extract just X.Y where X and Y are the first two numbers found
+    for /f "tokens=1,2,3 delims=-." %%a in ("!ROCVER!") do set "ROCVER=%%a.%%b"
+    :: Remove any remaining non-numeric characters after the version
     set "ROCVER=!ROCVER:ROCM_=!"
     set "ROCVER=!ROCVER:rocm=!"
-    set "ROCVER=!ROCVER:-=!"
+    set "ROCVER=!ROCVER:Rocm=!"
+    :: Ensure it's just X.Y format
+    for /f "tokens=1,2 delims=." %%a in ("!ROCVER!") do set "ROCVER=%%a.%%b"
     echo [OK] ROCm at !HIP_PATH! (version !ROCVER!)
 ) else (
     echo [WARN] ROCm not detected. Will attempt to install anyway.
     set "ROCVER=7.13"
 )
 
-:: Detect Python version (major.minor e.g. 3.12)
-for /f "tokens=2 delims= " %%V in ('python --version 2^>nul') do set "PY_VER=%%V"
-if "!PY_VER!"=="" set "PY_VER=3.12"
-for /f "tokens=1,2 delims=." %%a in ("!PY_VER!") do set "PY_TAG=cp%%a%%b"
-for /f "tokens=2 delims=." %%b in ("!PY_VER!") do set "PY_MINOR=%%b"
-echo Python: !PY_VER! (!PY_TAG!)
-if !PY_MINOR! GEQ 14 (
-    echo [WARN] Python !PY_VER! detected. ROCm PyTorch wheels only support up to Python 3.13.
-    echo [WARN] Install Python 3.12 or 3.13 for best compatibility.
-    echo [WARN] Continuing anyway - install may fail.
+:: Require Python 3.12
+python --version 2>nul | findstr "3.12" >nul
+if ERRORLEVEL 1 (
+    echo [ERROR] Python 3.12 required. You have:
+    python --version
+    echo Install Python 3.12 from python.org then re-run.
+    pause
+    exit /b 1
 )
+echo Python: 3.12
 
 :: Choose matching torch version based on ROCm version + Python version
 set "TORCH_VER=2.11.0+rocm7.13.0"
@@ -107,11 +110,11 @@ echo.
 set /p "DO_TORCH=Install PyTorch !TORCH_VER! with ROCm? (Y/N) [Y]: "
 if "!DO_TORCH!"=="" set "DO_TORCH=Y"
 if /i "!DO_TORCH!"=="Y" (
-    echo Installing from https://repo.amd.com/rocm/whl/gfx120X-all/ ...
-    pip install torch==!TORCH_VER! torchvision==!TV_VER! --find-links https://repo.amd.com/rocm/whl/gfx120X-all/ --timeout 120
+    echo Installing from PyTorch official ROCm repo...
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm!ROCVER! --timeout 120
     if ERRORLEVEL 1 (
-        echo AMD repo failed. Trying PyTorch official repo...
-        pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm!ROCVER! --timeout 120
+        echo Official repo failed. Trying AMD repo...
+        pip install torch==!TORCH_VER! torchvision==!TV_VER! --find-links https://repo.amd.com/rocm/whl/gfx120X-all/torch/ --timeout 120
         if ERRORLEVEL 1 (
             echo PyTorch install failed.
             pause
