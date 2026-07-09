@@ -550,29 +550,21 @@ class MoERunner(MoERunnerInterface):
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
+        shared_launched: bool = False,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
         """Run expert routing and the fused MoE kernel via the quant method.
 
         Orchestrates shared expert execution (before/after), expert selection
         via the router, and the actual fused MoE computation. Returns
         (shared_expert_output, fused_expert_output).
+
+        ``shared_launched`` is True when the caller already launched the shared
+        experts on the aux stream (multi-stream overlap); in that case we only
+        join the aux stream back after the routed kernel instead of running the
+        shared experts here.
         """
         self._maybe_apply_shared_experts(
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
-        )
-
-        # Launch shared experts on the aux stream BEFORE the routed kernel so
-        # they overlap the routed fused MoE (and expert selection, for modular
-        # kernels). Submitting them *after* the routed kernel yields no overlap:
-        # the routed kernels occupy the main stream / block the host, so the
-        # aux-stream work only starts once the routed GPU work has drained.
-        # No-op (returns False) unless the order is MULTI_STREAM_OVERLAPPED:
-        # MK_INTERNAL_OVERLAPPED does its own overlap inside forward_modular,
-        # and NO_OVERLAP already ran above. maybe_sync_shared_experts_stream
-        # must have recorded the aux->main dependency earlier.
-        overlapped = (
-            self._shared_experts is not None
-            and self._shared_experts.launch_overlapped(shared_experts_input)
         )
 
         if self.routed_experts.quant_method.is_monolithic:
@@ -599,7 +591,7 @@ class MoERunner(MoERunnerInterface):
                 shared_experts_input=shared_experts_input,
             )
 
-        if overlapped:
+        if shared_launched:
             assert self._shared_experts is not None
             self._shared_experts.join_overlapped()
         else:
@@ -834,6 +826,18 @@ class MoERunner(MoERunnerInterface):
         # Sync aux and main stream for shared expert multi-stream overlap.
         self._maybe_sync_shared_experts_stream(shared_experts_input)
 
+        # Launch shared experts on the aux stream BEFORE dispatch + the routed
+        # kernel so they overlap the DP all-gather, gate, and fused MoE. The
+        # shared expert input is the local (pre-gather) hidden state, so it does
+        # not depend on the dispatch collective. Joined back after the routed
+        # kernel inside _apply_quant_method. No-op (returns False) unless the
+        # order is MULTI_STREAM_OVERLAPPED (MK_INTERNAL_OVERLAPPED overlaps
+        # inside the modular kernel; NO_OVERLAP runs sequentially there).
+        shared_launched = (
+            self._shared_experts is not None
+            and self._shared_experts.launch_overlapped(shared_experts_input)
+        )
+
         # If the Runner holds the gate, apply it after the stream sync,
         # so it can run overlapped with the
         # NOTE: in future PR, MoE runner will always hold the gate.
@@ -858,6 +862,7 @@ class MoERunner(MoERunnerInterface):
                 router_logits=router_logits,
                 shared_experts_input=shared_experts_input,
                 input_ids=input_ids,
+                shared_launched=shared_launched,
             )
 
             return self._maybe_combine(
