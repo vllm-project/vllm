@@ -1,0 +1,121 @@
+# shvllm-qwen35-gguf — vLLM-Fork (rank-gpu-id + qwen35-GGUF) + vllm-gguf-plugin
+#
+# Build:  docker build -f Dockerfile.shvllm -t shvllm-qwen35-gguf:cu129 .
+# Archs:  sm75–sm120 (Turing bis Blackwell); via --build-arg reduzierbar.
+# NCCL:   >= 2.30 zwingend (Multi-Rank-per-GPU, NCCL_MULTI_RANK_GPU_ENABLE);
+#         torch-Wheels pinnen 2.29.x, deshalb explizites Upgrade + Build-Assert.
+# MPS:    Für co-located Ranks (--rank-gpu-id mit Duplikaten) muss CUDA MPS
+#         auf dem HOST laufen und /tmp/nvidia-mps in den Container gemountet
+#         werden:  -v /tmp/nvidia-mps:/tmp/nvidia-mps
+#
+# Beispiel-Run:
+#   docker run --gpus all --ipc=host -p 8000:8000 \
+#     -v /modelle:/models -v /tmp/nvidia-mps:/tmp/nvidia-mps \
+#     shvllm-qwen35-gguf:cu129 \
+#     --model /models/foo-Q6_K.gguf --tensor-parallel-size 4 \
+#     --rank-gpu-id 0,0,1,2 --rank-gpu-memory-mib 14500 \
+#     --max-model-len -1 --mamba-cache-mode align --enable-prefix-caching \
+#     --kv-cache-dtype fp8 \
+#     --speculative-config '{"method":"mtp","num_speculative_tokens":3}'
+
+ARG CUDA_VERSION=12.9.1
+
+# --------------------------------------------------------------------------
+# Stage 1: Builder — kompiliert vLLM-Fork + GGUF-Plugin für sm75–sm120
+# --------------------------------------------------------------------------
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS builder
+
+ARG TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 8.9 9.0 10.0 12.0"
+ARG TORCH_VERSION=2.13.0
+ARG VLLM_REPO=https://github.com/efschu/shvllm.git
+ARG VLLM_BRANCH=qwen35-gguf-rankgpu
+ARG PLUGIN_REPO=https://github.com/efschu/vllm-gguf-plugin.git
+ARG PLUGIN_BRANCH=qwen35-support
+ARG MAX_JOBS=24
+ARG NVCC_THREADS=2
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -q && apt-get install -y -q --no-install-recommends \
+        python3 python3-venv python3-dev git curl ccache ninja-build \
+        build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+# Rust für den vLLM-Tool-Parser (_rust_tool_parser)
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+ENV PATH="/root/.cargo/bin:/opt/venv/bin:${PATH}"
+
+RUN python3 -m venv /opt/venv && pip install -U pip wheel
+
+# torch-Trio als eigener Layer (0.9 GB Download, cached gut).
+# Offizielle cu129-Wheels sind für {75,80,86,90,100,120} gebaut.
+RUN pip install torch==${TORCH_VERSION} torchvision torchaudio \
+        --index-url https://download.pytorch.org/whl/cu129
+
+# ---- vLLM-Fork bauen (der teure Schritt) ----
+WORKDIR /src
+RUN git clone --depth 1 -b ${VLLM_BRANCH} ${VLLM_REPO} vllm
+WORKDIR /src/vllm
+RUN python3 use_existing_torch.py && \
+    pip install -r requirements/build/cuda.txt --no-cache-dir
+ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
+    MAX_JOBS=${MAX_JOBS} \
+    NVCC_THREADS=${NVCC_THREADS} \
+    CCACHE_DIR=/root/.cache/ccache
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    pip wheel . --no-build-isolation --no-deps -w /wheels -v 2>&1 | tail -50
+
+# ---- GGUF-Plugin bauen (Minuten) ----
+WORKDIR /src
+RUN git clone --depth 1 -b ${PLUGIN_BRANCH} ${PLUGIN_REPO} plugin
+WORKDIR /src/plugin
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    pip wheel . --no-build-isolation --no-deps -w /wheels
+
+# --------------------------------------------------------------------------
+# Stage 2: Runtime
+# --------------------------------------------------------------------------
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu24.04
+
+ARG TORCH_VERSION=2.13.0
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -q && apt-get install -y -q --no-install-recommends \
+        python3 python3-venv curl && \
+    rm -rf /var/lib/apt/lists/*
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+
+# torch-Trio (eigener Layer, identisch zum Builder)
+RUN pip install -U pip && \
+    pip install torch==${TORCH_VERSION} torchvision torchaudio \
+        --index-url https://download.pytorch.org/whl/cu129
+
+# vLLM-Wheel + Abhängigkeiten (eigener Layer)
+COPY --from=builder /wheels/vllm-*.whl /tmp/wheels/
+RUN pip install /tmp/wheels/vllm-*.whl --no-cache-dir
+
+# GGUF-Plugin + gguf-py
+COPY --from=builder /wheels/vllm_gguf_plugin-*.whl /tmp/wheels/
+RUN pip install /tmp/wheels/vllm_gguf_plugin-*.whl "gguf>=0.19" --no-cache-dir && \
+    rm -rf /tmp/wheels
+
+# --- NCCL >= 2.30: Kernstück für Multi-Rank-per-GPU ---
+# torch pinnt nvidia-nccl-cu12==2.29.x; libnccl.so.2 ist ABI-stabil, daher
+# bewusstes Upgrade. Der Assert bricht den Build bei falscher Version ab.
+RUN pip install --no-cache-dir "nvidia-nccl-cu12==2.30.7" && \
+    python3 -c "import torch; v = torch.cuda.nccl.version(); \
+assert v >= (2, 30), f'NCCL zu alt: {v}'; print('NCCL ok:', v)"
+
+# Registrierung des Plugins + Kern-Importe verifizieren (ohne GPU möglich)
+RUN python3 - <<'EOF'
+from importlib.metadata import entry_points
+eps = [e.name for e in entry_points(group="vllm.general_plugins")]
+assert "gguf" in eps, f"GGUF-Plugin nicht registriert: {eps}"
+import vllm_gguf_plugin.weights_adapter as wa
+assert any("Qwen35" in c.__name__ for c in wa._ADAPTER_REGISTRY)
+print("Plugin ok, Adapter registriert")
+EOF
+
+ENV VLLM_USAGE_SOURCE=docker-shvllm
+EXPOSE 8000
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server", "--host", "0.0.0.0"]
