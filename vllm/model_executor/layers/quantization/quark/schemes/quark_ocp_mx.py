@@ -4,13 +4,12 @@
 from collections.abc import Callable
 from fractions import Fraction
 from functools import partial
-from importlib.util import find_spec
 from typing import Any
 
 import torch
 import torch.nn.functional as F
 
-from vllm._aiter_ops import rocm_aiter_ops
+from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     dequant_mxfp4,
@@ -39,11 +38,13 @@ logger = init_logger(__name__)
 
 # NOTE: Do not import aiter at module scope. Importing aiter eagerly initializes HIP
 # which can force the engine core to spawn instead of fork.
-# find_spec locates the package without executing its __init__, so it stays HIP-free.
-# Actual `aiter` imports are deferred to the functions/methods that need them.
-_AITER_FOUND = find_spec("aiter") is not None
+# is_aiter_found_and_supported() checks platform + arch + library availability via
+# find_spec/amdsmi, so it stays HIP-free.
+# Actual aiter imports are deferred to the functions/methods that need them,
+# where HIP initialization is expected.
+_AITER_SUPPORTED = is_aiter_found_and_supported()
 
-if _AITER_FOUND:
+if _AITER_SUPPORTED:
     from vllm.utils.torch_utils import direct_register_custom_op
 
     def gemm_with_dynamic_quant(
@@ -215,7 +216,7 @@ class QuarkOCP_MX(QuarkScheme):
             rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()
         )
 
-        if not self.emulate and not _AITER_FOUND:
+        if not self.emulate and not _AITER_SUPPORTED:
             # Currently need AITER kernels if not emulating
             raise NotImplementedError(
                 f"{self.__class__.__name__} requires AITER to be installed "
