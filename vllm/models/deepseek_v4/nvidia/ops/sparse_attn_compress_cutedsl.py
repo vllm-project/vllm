@@ -1965,6 +1965,98 @@ def split_kv_compress_norm_rope_insert_sparse_attn_cutedsl(
     )
 
 
+def store_compressed_kv_cutedsl(
+    compressed_kv: torch.Tensor,
+    positions: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    block_size: int,
+    rms_norm_weight: torch.Tensor,
+    rms_norm_eps: float,
+    cos_sin_cache: torch.Tensor,
+    k_cache: torch.Tensor,
+    kv_slot_mapping: torch.Tensor,
+    kv_cache_block_size: int,
+    kv_block_stride: int,
+    head_size: int = 512,
+    state_width: int = 512,
+    rope_head_dim: int = 64,
+    fp8_max: float = 448.0,
+    quant_block: int = 64,
+    token_stride: int = 576,
+    scale_dim: int = 8,
+    compress_ratio: int = 128,
+    overlap: bool = False,
+    store_full_kv: bool = False,
+    store_full_fp8: bool = False,
+    fp8_scale: torch.Tensor | None = None,
+) -> None:
+    """Run only the C128 norm/RoPE/store kernel for online compression."""
+    if k_cache.ndim != 3:
+        raise ValueError(
+            "CuTe DSL sparse-attn store expects the real DeepSeek V4 "
+            f"3D k_cache layout [num_blocks, block_size, 584], got ndim={k_cache.ndim}."
+        )
+    if not store_full_kv and kv_cache_block_size != k_cache.shape[1]:
+        raise ValueError(
+            "CuTe DSL store wrapper expected kv_cache_block_size to match "
+            f"k_cache.shape[1], got {kv_cache_block_size} and {k_cache.shape[1]}."
+        )
+    if positions.numel() == 0:
+        return
+    if rms_norm_weight.dtype not in _TORCH_TO_CUTE:
+        raise ValueError(
+            "CuTe DSL sparse-attn store supports rms_norm_weight dtype "
+            f"bf16/fp32, got {rms_norm_weight.dtype}."
+        )
+    if store_full_fp8 and not store_full_kv:
+        raise ValueError("store_full_fp8 requires store_full_kv.")
+
+    _, store = compile_split_sparse_attn_cutedsl(
+        head_size,
+        state_width,
+        block_size,
+        rope_head_dim,
+        fp8_max,
+        quant_block,
+        token_stride,
+        scale_dim,
+        kv_cache_block_size,
+        kv_block_stride,
+        compress_ratio,
+        overlap,
+        rms_norm_weight.dtype,
+        store_full_kv=store_full_kv,
+        store_full_fp8=store_full_fp8,
+    )
+    if store_full_kv:
+        if fp8_scale is None:
+            fp8_scale = torch.ones(1, dtype=torch.float32, device=k_cache.device)
+        store(
+            compressed_kv,
+            positions,
+            slot_mapping,
+            rms_norm_weight,
+            rms_norm_eps,
+            cos_sin_cache,
+            k_cache.view(torch.uint8),
+            kv_slot_mapping,
+            kv_cache_block_size,
+            fp8_scale,
+        )
+        return
+
+    store(
+        compressed_kv,
+        positions,
+        slot_mapping,
+        rms_norm_weight,
+        rms_norm_eps,
+        cos_sin_cache,
+        k_cache,
+        kv_slot_mapping,
+    )
+
+
 def fused_kv_compress_norm_rope_insert_sparse_attn_cutedsl(
     state_cache: torch.Tensor,
     token_to_req_indices: torch.Tensor,

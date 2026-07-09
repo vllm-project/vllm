@@ -156,6 +156,7 @@ if TYPE_CHECKING:
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
+    VLLM_USE_ONLINE_C128_COMPRESS: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: str | None = None
@@ -1881,6 +1882,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # for the default value of 1024 tokens.
     "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD": lambda: int(
         os.getenv("VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", "1024")
+    ),
+    # Opt-in DeepSeek V4 C128 online compression path.
+    "VLLM_USE_ONLINE_C128_COMPRESS": lambda: bool(
+        int(os.getenv("VLLM_USE_ONLINE_C128_COMPRESS", "0"))
     ),
     # Format for saving torch.compile cache artifacts
     # - "binary": saves as binary file
