@@ -1297,7 +1297,7 @@ def causal_conv1d_update(
                 _conv_state_indices = _conv_state_indices[:, 0]
 
         pad_slot_id = int(NULL_BLOCK_ID)
-        return ops.causal_conv1d_update_cpu(
+        return ops.causal_conv1d_update_cpu_vec(
             x,
             conv_state,
             weight,

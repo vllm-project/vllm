@@ -98,7 +98,7 @@ def cpu_gdn_attention_core(
         decode_a = a[:num_decode_tokens]
         decode_state_indices = state_indices_tensor[:num_decodes]
         if is_amx:
-            decode_mixed_qkv = ops.causal_conv1d_update_cpu_amx(
+            decode_mixed_qkv = ops.causal_conv1d_update_cpu(
                 x=decode_mixed_qkv,
                 conv_states=conv_state,
                 weight=layer.conv1d.weight,

@@ -491,11 +491,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor");
   ops.impl("causal_conv1d_fwd_cpu", torch::kCPU, &causal_conv1d_fwd_cpu);
   ops.def(
-      "causal_conv1d_update_cpu_amx(Tensor x, Tensor(a!) conv_states, Tensor "
+      "causal_conv1d_update_cpu(Tensor x, Tensor(a!) conv_states, Tensor "
       "weight, Tensor? bias, bool silu_activation,"
       "Tensor? cache_seqlens, Tensor? conv_state_indices, int pad_slot_id, "
       "bool is_vnni) -> Tensor");
-  ops.impl("causal_conv1d_update_cpu_amx", torch::kCPU,
+  ops.impl("causal_conv1d_update_cpu", torch::kCPU,
            &causal_conv1d_update_cpu);
 #endif
 
@@ -605,7 +605,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Mamba CPU kernels
   ops.def(
-      "causal_conv1d_update_cpu("
+      "causal_conv1d_update_cpu_vec("
       "Tensor(a0!) x, Tensor(a1!) conv_state, Tensor weight, "
       "Tensor? bias, str? activation, Tensor? conv_state_indices, "
       "Tensor? query_start_loc, SymInt pad_slot_id) -> Tensor",

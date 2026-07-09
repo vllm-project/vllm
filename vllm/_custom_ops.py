@@ -2129,7 +2129,7 @@ def selective_scan_fwd(
     )
 
 
-def causal_conv1d_update_cpu(
+def causal_conv1d_update_cpu_vec(
     x: torch.Tensor,
     conv_state: torch.Tensor,
     weight: torch.Tensor,
@@ -2139,7 +2139,7 @@ def causal_conv1d_update_cpu(
     query_start_loc: torch.Tensor | None = None,
     pad_slot_id: int = 0,
 ) -> torch.Tensor:
-    return torch.ops._C.causal_conv1d_update_cpu(
+    return torch.ops._C.causal_conv1d_update_cpu_vec(
         x,
         conv_state,
         weight,
@@ -3422,7 +3422,7 @@ def causal_conv1d_fwd_cpu(
     )
 
 
-def causal_conv1d_update_cpu_amx(
+def causal_conv1d_update_cpu(
     x: torch.Tensor,
     conv_states: torch.Tensor,
     weight: torch.Tensor,
@@ -3434,7 +3434,7 @@ def causal_conv1d_update_cpu_amx(
     from vllm.platforms import CpuArchEnum
 
     if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
-        return torch.ops._C.causal_conv1d_update_cpu_amx(
+        return torch.ops._C.causal_conv1d_update_cpu(
             x,
             conv_states,
             weight,

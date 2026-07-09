@@ -159,7 +159,9 @@ void selective_state_update_cpu_impl(
   int64_t nheads = state.size(1);
   int64_t dim = state.size(2);
   int64_t dstate = state.size(3);
-  int64_t N = x_in.size(0);
+  int64_t N = (cu_seqlens.has_value() && cu_seqlens.value().defined())
+                  ? cu_seqlens.value().size(0) - 1
+                  : x_in.size(0);
   int64_t ngroups = B_in.size(1);
 
   // Strides

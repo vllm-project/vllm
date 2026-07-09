@@ -71,13 +71,7 @@ def _causal_conv1d_fn_cpu(
                 state[:, :-1] = state[:, 1:].clone()
             state[:, -1] = x_t
 
-        if seq_len >= state_len:
-            conv_states[cache_idx, :, :state_len] = x_seq[:, -state_len:]
-        else:
-            conv_states[cache_idx, :, : state_len - seq_len] = conv_states[
-                cache_idx, :, seq_len:state_len
-            ].clone()
-            conv_states[cache_idx, :, state_len - seq_len :] = x_seq
+        conv_states[cache_idx].copy_(state)
 
     return out.to(original_x_dtype)
 
