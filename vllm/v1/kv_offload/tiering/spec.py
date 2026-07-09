@@ -194,7 +194,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
     @override
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
-        rank = torch.accelerator.current_device_index()
+        # Fold the global physical device index into the replica-local
+        # [0, world_size) slot range.
+        world_size = self.vllm_config.parallel_config.world_size
+        rank = torch.accelerator.current_device_index() % world_size
         worker_mmap = SharedOffloadRegion(
             engine_id=self._engine_id,
             num_blocks=self.num_blocks,
