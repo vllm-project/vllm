@@ -89,7 +89,7 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
-        # mtp_block's MoE output is left un-reduced (skip_final_all_reduce); the
+        # mtp_block's MoE output is left un-reduced (reduce_results=False); the
         # main model fuses that all-reduce into the next norm, but here the
         # recycle hidden is consumed directly, so reduce it now.
         hidden_states = tensor_model_parallel_all_reduce(hidden_states)
