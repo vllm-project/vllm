@@ -12,7 +12,6 @@ from vllm import LLM, ModelRegistry, SamplingParams
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     example_hidden_states_connector,
 )
-from vllm.platforms import current_platform
 
 
 def get_and_check_output(output, expected_shape):
