@@ -39,7 +39,6 @@ ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /workspace/
 
 ARG PYTHON_VERSION=3.12
-ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/xpu"
 
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
@@ -122,16 +121,12 @@ CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
 WORKDIR /workspace/vllm
 
 ENV UV_HTTP_TIMEOUT=500
-
-# Configure package index for XPU
-ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
-ENV UV_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
-ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE="copy"
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,src=requirements/common.txt,target=/workspace/vllm/requirements/common.txt \
     --mount=type=bind,src=requirements/xpu.txt,target=/workspace/vllm/requirements/xpu.txt \
+    --mount=type=bind,src=requirements/xpu-torch.txt,target=/workspace/vllm/requirements/xpu-torch.txt \
     uv pip install --upgrade pip
 
 
@@ -211,12 +206,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,src=requirements/common.txt,target=/workspace/vllm/requirements/common.txt \
     --mount=type=bind,src=requirements/xpu.txt,target=/workspace/vllm/requirements/xpu.txt \
+    --mount=type=bind,src=requirements/xpu-torch.txt,target=/workspace/vllm/requirements/xpu-torch.txt \
     --mount=type=bind,src=requirements/test/xpu.txt,target=/workspace/vllm/requirements/test/xpu.txt \
     uv pip install grpcio-tools protobuf nanobind && \
-    uv pip install -r /workspace/vllm/requirements/xpu.txt && \
+    uv pip install --extra-index-url https://download.pytorch.org/whl/xpu -r /workspace/vllm/requirements/xpu.txt && \
     uv pip install --no-build-isolation -r /workspace/vllm/requirements/test/xpu.txt && \
     uv pip uninstall triton triton-xpu && \
-    uv pip install triton-xpu==3.7.1 && \
+    uv pip install --extra-index-url https://download.pytorch.org/whl/xpu triton-xpu==3.7.1 && \
     uv pip uninstall oneccl oneccl-devel
 
 # Keep source-dependent layers near the end so frequent code-only changes
