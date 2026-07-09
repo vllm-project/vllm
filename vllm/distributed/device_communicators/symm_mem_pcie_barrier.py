@@ -48,11 +48,14 @@ Known constraints:
     today.
   * **Sequence state is keyed by the handle's signal-pad address.** If an
     allocation is freed and a new symm-mem handle reuses the same VA with
-    a zeroed pad, call :func:`reset_pcie_barrier_state`. vLLM's fused ops
-    use per-group workspace handles that live for the process, so this
-    does not occur in practice.
+    a zeroed pad, call :func:`reset_pcie_barrier_state`. torch's fused
+    ops DO re-allocate their workspace when an op requests more space —
+    unsafely (see the workspace-guard notes below); the installed guard
+    floors the first allocation and keeps retired workspaces alive, so
+    VA reuse does not occur.
 """
 
+import os
 import threading
 
 import torch
@@ -61,6 +64,23 @@ from torch._C._distributed_c10d import _SymmetricMemory
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+# torch's get_symm_mem_workspace() re-allocates and re-rendezvous's the
+# fused-op workspace whenever an op requests more than the current size,
+# dropping the old workspace tensor with NO synchronization. Device-side
+# work still targeting the old workspace (parked barrier waits on its
+# signal pads, in-flight P2P chunk copies from peers) then polls freed /
+# recyclable memory and can park its stream forever. Two defenses:
+#   * floor the first allocation high enough that growth never happens
+#     in practice;
+#   * if growth does happen, drain the device and keep the old tensor
+#     alive forever (bounded leak, rare) so parked ops keep polling
+#     stable memory.
+_WORKSPACE_FLOOR = int(
+    os.getenv("VLLM_SYMM_MEM_WORKSPACE_FLOOR_MB", "256")
+) * 1024 * 1024
+_workspace_graveyard: list = []
+_orig_get_workspace = None
 
 _MAX_CHANNELS = 8
 _RING = 4
@@ -125,6 +145,34 @@ def reset_pcie_barrier_state() -> None:
         _seq_state.clear()
 
 
+def _guarded_get_workspace(group_name, min_size):
+    import torch.distributed._symmetric_memory as tsm
+
+    tensor = tsm._group_name_to_workspace_tensor.get(group_name)
+    size = tensor.numel() * tensor.element_size() if tensor is not None else 0
+    need = max(min_size, _WORKSPACE_FLOOR)
+    if tensor is not None and size < need:
+        logger.warning(
+            "symm-mem workspace grows %d -> %d bytes; draining the device "
+            "and retiring the old workspace without freeing it",
+            size,
+            need,
+        )
+        torch.cuda.synchronize()
+        _workspace_graveyard.append(tensor)
+    return _orig_get_workspace(group_name, need)
+
+
+def _install_workspace_guard() -> None:
+    global _orig_get_workspace
+    import torch.distributed._symmetric_memory as tsm
+
+    if _orig_get_workspace is not None:
+        return
+    _orig_get_workspace = tsm.get_symm_mem_workspace
+    tsm.get_symm_mem_workspace = _guarded_get_workspace
+
+
 def install_pcie_safe_barrier() -> None:
     """Replace ``_SymmetricMemory.barrier`` process-wide. Idempotent."""
     global _installed, _orig_barrier, _drv
@@ -135,8 +183,11 @@ def install_pcie_safe_barrier() -> None:
     _drv = drv
     _orig_barrier = _SymmetricMemory.barrier
     _SymmetricMemory.barrier = _pcie_safe_barrier
+    _install_workspace_guard()
     _installed = True
     logger.info_once(
         "torch symm-mem group barrier replaced with the PCIe-safe "
-        "stream-memops protocol (no native P2P atomics on this platform)."
+        "stream-memops protocol (no native P2P atomics on this platform); "
+        "fused-op workspace floored at %d MiB with growth guard."
+        % (_WORKSPACE_FLOOR // (1024 * 1024))
     )
