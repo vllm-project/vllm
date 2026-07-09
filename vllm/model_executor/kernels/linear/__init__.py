@@ -1009,6 +1009,10 @@ def register_linear_kernel(
         if platform not in _POSSIBLE_FP8_KERNELS:
             _POSSIBLE_FP8_KERNELS[platform] = []
         _POSSIBLE_FP8_KERNELS[platform].append(kernel_class)
+    elif kernel_type == "fp8_block":
+        if platform not in _POSSIBLE_FP8_BLOCK_KERNELS:
+            _POSSIBLE_FP8_BLOCK_KERNELS[platform] = []
+        _POSSIBLE_FP8_BLOCK_KERNELS[platform].append(kernel_class)
     elif kernel_type == "mxfp8":
         if platform not in _POSSIBLE_MXFP8_KERNELS:
             _POSSIBLE_MXFP8_KERNELS[platform] = []
