@@ -6,11 +6,12 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
@@ -83,9 +84,32 @@ class DFlashSpeculator(DraftModelSpeculator):
         self.query_cudagraph_manager: DFlashCudaGraphManager | None = None
         self.draft_kv_cache_group_id: int = -1
 
+    @property
+    def attn_vllm_config(self) -> VllmConfig:
+        # The draft's attention differs from the target's in causality.
+        return replace(
+            self.vllm_config,
+            attention_config=replace(
+                self.vllm_config.attention_config,
+                use_non_causal=not self.dflash_causal,
+            ),
+        )
+
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        # PIECEWISE cudagraphs are not supported for dflash
-        if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
+        wants_full = cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+        supports_full = (
+            self.attn_cg_support.min_cg_support.value
+            >= AttentionCGSupport.UNIFORM_BATCH.value
+        )
+        if wants_full and not supports_full:
+            logger.warning(
+                "%s draft attention (%s) does not support full CUDA graphs; "
+                "running the draft eagerly.",
+                self._speculator_name,
+                self.attn_cg_support.min_cg_attn_backend,
+            )
+        # PIECEWISE cudagraphs are not supported for dflash.
+        if wants_full and supports_full:
             cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
         else:
             cudagraph_mode = CUDAGraphMode.NONE

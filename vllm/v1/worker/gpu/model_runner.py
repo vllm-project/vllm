@@ -466,15 +466,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             decode_query_len=self.decode_query_len,
             lora_capture_cases=self.lora_capture_cases,
         )
-        if self.speculator is not None:
-            self.speculator.init_cudagraph_manager(cudagraph_mode)
-
         check_attention_cp_compatibility(self.vllm_config)
         if isinstance(self.speculator, DraftModelSpeculator):
             # HACK(woosuk)
             self.speculator.set_attn(
                 self.model_state, self.kv_cache_config, self.block_tables
             )
+        if self.speculator is not None:
+            # After set_attn, so the speculator can size its cudagraph mode
+            # to its own attention support.
+            self.speculator.init_cudagraph_manager(cudagraph_mode)
 
         self.kv_caches: list[torch.Tensor] = []
         kv_caches_dict = init_kv_cache(

@@ -9,17 +9,17 @@ from typing import ClassVar
 
 import numpy as np
 import torch
+from flashinfer.decode import fast_decode_plan, trtllm_batch_decode_with_kv_cache
+from flashinfer.prefill import trtllm_batch_context_with_kv_cache
+from flashinfer.utils import FP4Tensor
+from typing_extensions import override
+
 from flashinfer import (
     BatchDecodeWithPagedKVCacheWrapper,
     BatchPrefillWithPagedKVCacheWrapper,
     BatchPrefillWithRaggedKVCacheWrapper,
     MultiLevelCascadeAttentionWrapper,
 )
-from flashinfer.decode import fast_decode_plan, trtllm_batch_decode_with_kv_cache
-from flashinfer.prefill import trtllm_batch_context_with_kv_cache
-from flashinfer.utils import FP4Tensor
-from typing_extensions import override
-
 from vllm import _custom_ops as custom_ops
 from vllm import envs
 from vllm.config import (
@@ -885,7 +885,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 has_trtllm_support = False
                 break
 
-        if has_trtllm_support:
+        # trtllm-gen only supports causal attention.
+        if has_trtllm_support and not vllm_config.attention_config.use_non_causal:
             return AttentionCGSupport.UNIFORM_BATCH
         else:
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
