@@ -395,6 +395,19 @@ async def main():
     print(f"[sync] {len(names)} params -> {len(layer_groups)} gather groups "
           f"(max {max(len(g) for g in layer_groups)} params/group).", flush=True)
 
+    # Re-order the init metadata into group-major order + a group_lens partition
+    # so the engine can PRE-BUILD its (static) chunk plan at bake time. The plan
+    # never changes across syncs, so update_weights can then be called with an
+    # EMPTY update info (only the weight DATA changes, not the plan). The bake
+    # itself is order-insensitive (it keys by name); the ordering only matters so
+    # group_lens slices `names` back into the same groups the trainers gather.
+    _dt = dict(zip(names, dtype_names))
+    _sh = dict(zip(names, shapes))
+    grouped_names = [n for g in layer_groups for n in g]
+    grouped_dtypes = [_dt[n] for n in grouped_names]
+    grouped_shapes = [_sh[n] for n in grouped_names]
+    group_lens = [len(g) for g in layer_groups]
+
     consumer_file = "/tmp/rdt_profile/consumer.jsonl"
     read_consumer, truncate_consumer = make_consumer_file_tasks(
         inference_ip, consumer_file)
@@ -405,7 +418,10 @@ async def main():
         init_info=asdict(ShardedRDTWeightTransferInitInfo(
             trainer_actor_names=producer_names,
             trainer_actor_namespace=RAY_NAMESPACE,
-            names=names, dtype_names=dtype_names, shapes=shapes,
+            names=grouped_names, dtype_names=grouped_dtypes, shapes=grouped_shapes,
+            # Pre-build the static chunk plan at init (group-major names above):
+            # update_weights below sends an empty update info every sync.
+            group_lens=group_lens,
             # [RDT-RING] receive/serve ring depth K x chunk split S: keep
             # K x (layer_bytes / S) under the fabric's address-translation
             # reach (~2-3 GB/flow here). The producer reads NUM_RDT_BUFFERS
@@ -440,12 +456,12 @@ async def main():
         # 8-worker rejoin, and the chunk pipeline never drains until the sync
         # ends.
         run_refs = [w.run_gather_plan.remote(layer_groups) for w in workers]
-        gi = ShardedRDTWeightTransferUpdateInfo(
-            names=[n for g in layer_groups for n in g],
-            group_lens=[len(g) for g in layer_groups])
+        # EMPTY update info: the engine pre-built the static chunk plan at init
+        # (from init_info.names + group_lens). Only the weight DATA changes per
+        # sync, not the plan — so nothing needs to be re-sent here.
         with cp.timed("update_weights"):
-            await engine.update_weights(
-                WeightTransferUpdateRequest(update_info=asdict(gi)))
+            await engine.update_weights(WeightTransferUpdateRequest(
+                update_info=asdict(ShardedRDTWeightTransferUpdateInfo())))
         # Surfaces gather errors; ~0s (all gathers precede the last chunks).
         with cp.timed("gather_tail"):
             ray.get(run_refs)

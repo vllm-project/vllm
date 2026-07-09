@@ -126,20 +126,72 @@ class _BakedGroup:
 
 
 @dataclass
-class _CallCtx:
-    """Per-``receive_weights``-call state shared by that call's chunk items.
+class _Scatter:
+    """One self-contained scatter: pull ``src`` and copy the received slice into
+    ``layer``'s ``param_name`` at the recorded strided region.
 
-    Built on the RPC thread before the first chunk is dispatched; mutated only
-    by the (single) background thread, which processes chunks in queue order.
-    ``remaining`` counts each baked module's not-yet-scattered copies for THIS
-    call — a module is quantized/kernel-copied/reset exactly when its count hits
-    zero (its copies may span several chunks under layerwise_split).
-    ``materialized`` guards materialize-once (re-materializing would clobber
-    slices scattered by an earlier chunk).
+    Enriched form of ``_BakedCopy`` for the runtime plan — it carries its own
+    produced ``dtype`` / ``nbytes`` (so the pack layout and byte-balancing need
+    no side-table lookup) and a strong ref to its leaf ``layer``. The param is
+    resolved at RUNTIME (``getattr(layer, param_name)``), not baked: every sync
+    re-materializes fresh param tensors, so a param handle captured at plan time
+    would be stale.
     """
 
-    remaining: "dict[int, int]"  # id(_BakedGroup) -> copies left this call
-    materialized: "set[int]" = field(default_factory=set)
+    layer: Any
+    param_name: str
+    src: FetchKey
+    offset: int
+    shape: tuple[int, ...]
+    stride: tuple[int, ...]
+    dtype: torch.dtype
+    nbytes: int
+
+
+@dataclass
+class _Chunk:
+    """One packed pull + its post-processing, fully described at plan time.
+
+    ``scatters`` is the flat list of copies this chunk pulls (byte-balanced cut
+    of the gather group's copies; a module's copies may span chunks).
+    ``keys``/``pack_layout``/``pack_bytes`` are the deduped source keys and the
+    byte-exact packed arena layout (16B-aligned, keys order) mirroring the
+    producer — precomputed so the pull path does no per-call arithmetic.
+    ``materialize`` = leaf modules whose FIRST scatter is in this chunk (empty
+    HF params allocated before the scatter loop, once per module by
+    construction). ``quant`` = modules whose LAST scatter is in this chunk (run
+    ``process_weights_after_loading`` / kernel-copy / ``info.reset()`` after the
+    scatter). ``free`` = gather-group name lists whose last chunk this is (fire
+    ``free_gather`` after the pull returns).
+    """
+
+    scatters: "list[_Scatter]"
+    keys: "list[FetchKey]"
+    pack_layout: "list[tuple[int, torch.dtype, int, tuple[int, ...]]]"  # off,dt,n,shape
+    pack_bytes: int
+    materialize: "list[Any]"
+    quant: "list[Any]"
+    free: "list[list[str]]"
+
+
+@dataclass
+class _CallPlan:
+    """The STATIC plan for one sync — a pure function of the baked plan
+    (``_name_to_group`` / ``_live_names`` / ``_name_meta``) and the driver's
+    group partition, both fixed for the engine's lifetime. Built ONCE (at init
+    when the driver passes ``group_lens`` on the init info, else lazily on the
+    first ``update_weights``) and reused every sync: each self-describing
+    ``_Chunk`` carries its own scatter/pack/materialize/quant/free actions, so
+    runtime is pure execution — no per-sync counters or side-tables.
+
+    ``pre_free`` = gather groups with NO chunk on this worker but which the
+    trainer still gathered under the lockstep plan (freed before the pipeline).
+    ``residual`` = live-but-unbaked names for the plain-load fallback.
+    """
+
+    chunks: "list[_Chunk]"
+    pre_free: "list[list[str]]"
+    residual: "list[str]"
 
 
 @dataclass
@@ -170,17 +222,15 @@ class _ProcItem:
     """One chunk of deferred post-processing handed from the RPC thread (which
     did the synchronous pull) to the background process thread.
 
-    ``chunk`` lists (baked module, the subset of its copies pulled by this
-    chunk) — with layerwise_split=1 that is every module with all its copies.
-    ``results`` are views aliasing the ring arena ``slot``; they are held as
-    strong refs here so they outlive the RPC-thread frame until the background
-    scatter consumes them. The timing fields were measured on the RPC thread
-    during the pull and are logged (together with the process-phase split) by the
-    background thread after it finishes the item.
+    ``chunk`` is the self-describing ``_Chunk`` (scatters + materialize/quant
+    module lists). ``results`` are views aliasing the ring arena ``slot``; they
+    are held as strong refs here so they outlive the RPC-thread frame until the
+    background scatter consumes them. The timing fields were measured on the RPC
+    thread during the pull and are logged (together with the process-phase
+    split) by the background thread after it finishes the item.
     """
 
-    chunk: "list[tuple[_BakedGroup, list[_BakedCopy]]]"
-    ctx: "_CallCtx"
+    chunk: "_Chunk"
     results: "dict[FetchKey, torch.Tensor]"
     slot: int
     t_recv: float
@@ -529,6 +579,15 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     shapes: list[list[int]] = field(default_factory=list)
     """Full HF shape for each entry of ``names``."""
 
+    group_lens: list[int] = field(default_factory=list)
+    """Optional partition of ``names`` into gather groups (same meaning as
+    ``ShardedRDTWeightTransferUpdateInfo.group_lens``). When set, ``names`` must
+    be in group-major order matching this partition, and the engine PRE-BUILDS
+    the whole static chunk/free plan once at init (it never changes across
+    syncs) so ``update_weights`` can be called with an EMPTY update info. When
+    empty, the plan is instead built lazily from the first ``update_weights``
+    call and cached (back-compat: the driver keeps passing names+group_lens)."""
+
     num_rdt_buffers: int = 2
     """[RDT-RING] Depth of the consumer receive-arena ring (the producer mirrors
     it from the NUM_RDT_BUFFERS env var). 2 = double buffer: chunk i+1's
@@ -568,9 +627,13 @@ class ShardedRDTWeightTransferUpdateInfo(WeightTransferUpdateInfo):
 
     ONE ``update_weights`` per sync carries ALL of the sync's names in
     gather-group order; the engine chunk-plans each group and pipelines the
-    packed pulls over the receive ring (see ``receive_weights``)."""
+    packed pulls over the receive ring (see ``receive_weights``).
 
-    names: list[str]
+    Both fields are optional: when the driver supplied ``group_lens`` on the
+    INIT info, the engine pre-built the (static) plan and this update info can
+    be left empty."""
+
+    names: list[str] = field(default_factory=list)
 
     group_lens: list[int] = field(default_factory=list)
     """Partition of ``names`` into gather groups (group-major;
@@ -615,7 +678,7 @@ class ShardedRDTWeightTransferEngine(
     update_info_cls = ShardedRDTWeightTransferUpdateInfo
     # receive_weights pulls synchronously but defers the GPU post-processing
     # (materialize/scatter/quant/kernel-copy) to a background thread so it
-    # overlaps the next chunk's pull. See _receive_single_call / _process_item.
+    # overlaps the next chunk's pull. See _run_chunk_pipeline / _process_item.
     defers_processing = True
 
     def __init__(
@@ -642,10 +705,8 @@ class ShardedRDTWeightTransferEngine(
         self._live_names: set[str] = set()
 
         # ---- Consumer-side pre-registered receive arena (no per-pull register) --
-        # The baked source slice metadata, so _replay can size receive views:
-        #   src FetchKey -> produced slice shape / torch dtype.
-        self._src_shapes: dict[FetchKey, tuple[int, ...]] = {}
-        self._src_dtypes: dict[FetchKey, torch.dtype] = {}
+        # (Produced slice shape/dtype per copy now lives on each ``_Scatter`` in
+        # the cached plan; no separate FetchKey side-table is needed.)
         # Persistent receive arenas, ONE PER DTYPE (1-D), DOUBLE-BUFFERED. We
         # register each arena's STORAGE once with NIXL (register_nixl_memory) and
         # carve a contiguous view per slice as the set_target_for_ref target.
@@ -676,6 +737,12 @@ class ShardedRDTWeightTransferEngine(
         self._split = 1  # [RDT-SPLIT] chunk pulls per group; set from init_info
         self._arena_presize = 0  # [RDT-RING] bytes; set from init_info
         self._pending_frees: list[Any] = []  # free_gather refs, drained per sync
+        # The STATIC plan (see _CallPlan): built once — at init from
+        # init_info.group_lens, else lazily on the first update_weights — and
+        # reused every sync (each _Chunk self-describes its work; nothing is
+        # rebuilt per sync). Non-None means update_weights ignores its (empty or
+        # redundant) per-sync names.
+        self._cached_plan: "_CallPlan | None" = None
         # Completed sync iterations (bumped in drain_pending). The FIRST sync
         # still grows/registers arenas on both sides; a producer-side
         # registration churns its NIXL agent-metadata version, and with pulls
@@ -789,6 +856,27 @@ class ShardedRDTWeightTransferEngine(
         # model. Every later update_weights is a replay.
         self._bake(init_info)
 
+        # If the driver supplied the gather-group partition at init, PRE-BUILD
+        # the (static) chunk/free plan now — it never changes across syncs — so
+        # update_weights needs no per-sync names. init_info.names must then be
+        # in group-major order matching group_lens (the same flat list the
+        # driver would otherwise send every sync).
+        if init_info.group_lens:
+            if sum(init_info.group_lens) != len(init_info.names):
+                raise ValueError(
+                    f"init_info.group_lens sums to {sum(init_info.group_lens)} "
+                    f"but {len(init_info.names)} names were given."
+                )
+            self._cached_plan = self._build_call_plan(
+                init_info.names, init_info.group_lens
+            )
+            logger.info(
+                "[RDT-PLAN] pre-built static call plan at init: %d chunks, "
+                "%d residual name(s)",
+                len(self._cached_plan.chunks),
+                len(self._cached_plan.residual),
+            )
+
         # Start the background post-processing worker (pull/process pipelining).
         self._ensure_proc_worker()
 
@@ -819,12 +907,15 @@ class ShardedRDTWeightTransferEngine(
         update_info: ShardedRDTWeightTransferUpdateInfo,
         load_weights: Callable[[list[tuple[str, torch.Tensor]]], None],
     ) -> None:
-        """Pull + replay the baked leaf modules the call's names cover.
+        """Pull + replay the baked leaf modules the sync covers.
 
-        Single-call design: the driver passes ALL of the sync's names (in
-        gather-group order, partitioned by ``group_lens``) in ONE call; the
-        engine chunk-plans each group and runs the pipelined packed pulls over
-        the receive ring (see _receive_single_call). Residual names with no
+        The chunk/free plan is STATIC across syncs (a pure function of the baked
+        plan + the driver's group partition), so it is built once and cached:
+        from ``init_info.group_lens`` at init if the driver supplied it — in
+        which case this ``update_info`` may be EMPTY — else lazily from the
+        first non-empty ``update_info`` (the driver keeps passing names +
+        group_lens). Either way every sync just re-runs the pipeline over the
+        self-describing chunks — no per-sync bookkeeping. Residual names with no
         baked plan — attention scales, padded/partial layers — take the plain
         per-slice load; ``load_weights`` is used only by that path.
 
@@ -838,17 +929,18 @@ class ShardedRDTWeightTransferEngine(
             )
         # Surface any error the background thread hit on a prior item promptly.
         self._raise_proc_error()
-        names = update_info.names
-        # group_lens partitions names into gather groups (single-call mode); a
-        # call without it is treated as one group (e.g. a per-group driver or a
-        # gather-free trainer serving everything).
-        group_lens = list(update_info.group_lens) or [len(names)]
-        if sum(group_lens) != len(names):
-            raise ValueError(
-                f"group_lens sums to {sum(group_lens)} but "
-                f"{len(names)} names were passed."
-            )
-        residual = self._receive_single_call(names, group_lens)
+        if self._cached_plan is None:
+            # First call and no init-time plan: build from this call's names +
+            # group_lens (group_lens absent => one group), then cache and reuse.
+            names = update_info.names
+            group_lens = list(update_info.group_lens) or [len(names)]
+            if sum(group_lens) != len(names):
+                raise ValueError(
+                    f"group_lens sums to {sum(group_lens)} but "
+                    f"{len(names)} names were passed."
+                )
+            self._cached_plan = self._build_call_plan(names, group_lens)
+        residual = self._run_call_plan(self._cached_plan)
         if residual:
             # Rare/absent path (0% once unbaked-skip prunes dead names); runs
             # inline after the pipeline. It touches only non-baked layers, so it
@@ -901,7 +993,7 @@ class ShardedRDTWeightTransferEngine(
             )
         return dict(zip(keys, tensors))
 
-    def _issue_pull(self, keys: list[FetchKey], slot: int) -> "_PendingPull":
+    def _issue_pull(self, chunk: "_Chunk", slot: int) -> "_PendingPull":
         """Reserve ``slot``, lay the targets out in its arena, dispatch the
         produce RPC and point the transfer at the arena — WITHOUT the blocking
         ``ray.get`` (that is ``_complete_pull``). The chunked pipeline issues
@@ -931,20 +1023,13 @@ class ShardedRDTWeightTransferEngine(
             _slot_wait = _t2 - _t
 
         # [RDT-PACK] Byte-pack every slice into ONE uint8 arena (16B-aligned,
-        # keys order) so the pull is ONE contiguous NIXL descriptor. The
-        # producer computes the identical layout from the same rule, so the
-        # bytes land at these exact offsets; ``targets`` carves the dtype
-        # views back out for the scatter.
+        # keys order) so the pull is ONE contiguous NIXL descriptor. The packed
+        # layout was precomputed at plan time (``chunk.pack_layout``, byte-exact
+        # mirror of the producer's rule); ``targets`` carves the dtype views back
+        # out for the scatter.
+        keys = chunk.keys
+        cur = chunk.pack_bytes
         arenas = self._dest_arenas[slot]
-        playout: list[tuple[int, torch.dtype, int, Any]] = []  # off,dt,n,shape
-        cur = 0
-        for k in keys:
-            dt = self._src_dtypes[k]
-            shape = self._src_shapes[k]
-            n = prod(shape) or 1
-            off = (cur + 15) & ~15
-            playout.append((off, dt, n, shape))
-            cur = off + n * dt.itemsize
         arena = arenas.get(torch.uint8)
         if arena is None or arena.numel() < cur:
             # Size ONCE with headroom (presize + coarse round-up): repeated
@@ -962,7 +1047,7 @@ class ShardedRDTWeightTransferEngine(
             arenas[torch.uint8] = arena
         targets = [
             arena[off : off + n * dt.itemsize].view(dt).reshape(shape)
-            for off, dt, n, shape in playout
+            for off, dt, n, shape in chunk.pack_layout
         ]
         blob = [arena[:cur]]
         pack_arena, pack_span = arena, cur
@@ -1134,13 +1219,6 @@ class ShardedRDTWeightTransferEngine(
                 group = _BakedGroup(layer=module, copies=copies)
                 for c in copies:
                     self._name_to_group[c.src[0]] = group
-                    # Record the produced slice's shape/dtype so _replay can size
-                    # pre-registered receive views. The produced slice matches the
-                    # destination region (c.shape); its dtype is the source name's.
-                    self._src_shapes[c.src] = tuple(c.shape)
-                    self._src_dtypes[c.src] = _dtype_from_name(
-                        self._name_meta[c.src[0]][0]
-                    )
             self._restore_after_dry_run(model)
 
         # Names whose copy_ fired during the bake (baked + unbaked-but-live).
@@ -1351,66 +1429,73 @@ class ShardedRDTWeightTransferEngine(
         assert self._proc_queue is not None
         self._proc_queue.put(item)
 
-    def _copy_bytes(self, c: "_BakedCopy") -> int:
-        return prod(self._src_shapes[c.src]) * self._src_dtypes[c.src].itemsize
+    def _scatter_of(self, layer: Any, c: "_BakedCopy") -> "_Scatter":
+        """Build a self-contained ``_Scatter`` from a bake-time ``_BakedCopy``,
+        folding in the produced slice's dtype/nbytes (dtype from the source
+        name's metadata; produced shape == the destination region ``c.shape``)."""
+        dtype = _dtype_from_name(self._name_meta[c.src[0]][0])
+        return _Scatter(
+            layer=layer,
+            param_name=c.param_name,
+            src=c.src,
+            offset=c.offset,
+            shape=tuple(c.shape),
+            stride=tuple(c.stride),
+            dtype=dtype,
+            nbytes=prod(c.shape) * dtype.itemsize,
+        )
 
-    def _plan_chunks(
+    def _chunk_group_scatters(
         self, groups: "list[_BakedGroup]"
-    ) -> "list[list[tuple[_BakedGroup, list[_BakedCopy]]]]":
-        """Cut the call's copies (group-major, order-stable) into at most
-        ``layerwise_split`` byte-balanced chunks. Copies are atomic — a single
-        huge copy (e.g. lm_head) simply becomes its own oversized chunk — and a
-        group's copies may span chunks (handled by the _CallCtx completion
-        counters)."""
+    ) -> "list[list[_Scatter]]":
+        """Cut the groups' copies (group-major, order-stable) into at most
+        ``layerwise_split`` byte-balanced chunks of flat ``_Scatter``s. Copies
+        are atomic — a single huge copy (e.g. lm_head) becomes its own oversized
+        chunk — and a module's copies may span chunks (materialize/quant fire on
+        its first/last chunk; see ``_build_call_plan``)."""
         s = self._split
-        entries = [(g, c, self._copy_bytes(c)) for g in groups for c in g.copies]
+        entries = [(g.layer, c) for g in groups for c in g.copies]
         if s <= 1 or len(entries) <= 1:
-            return [[(g, list(g.copies)) for g in groups]]
-        total = sum(b for _, _, b in entries)
-        target = -(-total // s)  # ceil
-        cuts: list[list[tuple[Any, _BakedCopy]]] = []
-        cur: list[tuple[Any, _BakedCopy]] = []
+            return [[self._scatter_of(layer, c) for layer, c in entries]]
+        weighted = [(layer, c, prod(c.shape)) for layer, c in entries]
+        total = sum(b for _, _, b in weighted)
+        target = -(-total // s)  # ceil (numel is a fine byte proxy for balance)
+        cuts: list[list[_Scatter]] = []
+        cur: list[_Scatter] = []
         cur_b = 0
-        for g, c, b in entries:
+        for layer, c, b in weighted:
             if cur and cur_b + b > target and len(cuts) < s - 1:
                 cuts.append(cur)
                 cur, cur_b = [], 0
-            cur.append((g, c))
+            cur.append(self._scatter_of(layer, c))
             cur_b += b
         if cur:
             cuts.append(cur)
-        # Regroup each chunk's (group, copy) pairs into (group, [copies]) runs
-        # (entries are group-major, so same-group copies are consecutive).
-        out = []
-        for ch in cuts:
-            grouped: list[tuple[Any, list[_BakedCopy]]] = []
-            for g, c in ch:
-                if grouped and grouped[-1][0] is g:
-                    grouped[-1][1].append(c)
-                else:
-                    grouped.append((g, [c]))
-            out.append(grouped)
-        return out
+        return cuts
 
-    def _receive_single_call(
+    def _build_call_plan(
         self, names: list[str], group_lens: list[int]
-    ) -> list[str]:
-        """[RDT-SINGLE-CALL] One update_weights for the whole sync.
+    ) -> "_CallPlan":
+        """[RDT-SINGLE-CALL] Build the STATIC plan for one whole-sync call.
 
-        Splits ``names`` into the driver's gather groups, chunk-plans EACH group
-        separately (layerwise_split chunks per group — same chunk sizes and
-        working-set/reach math as the per-call mode), and runs ONE pipeline over
-        the concatenation: no per-group call boundaries, so the first chunk of
-        group L+1 is issued while group L's chunks still stream (its produce
-        blocks producer-side on gather(L+1), which the trainer's self-paced
-        gather plan provides). After a group's LAST chunk completes, fires
-        free_gather on the bound producer (releases its gather buffers + its
-        lookahead semaphore). Returns the residual (unbaked-but-live) names.
+        PURE — no pulls, no side effects — so the result is cached and reused
+        every sync (see ``_run_call_plan`` / ``_CallPlan``). Three passes:
+          1. Split ``names`` into the driver's gather groups; chunk-plan EACH
+             group into flat ``_Scatter`` chunks (layerwise_split chunks/group,
+             same working-set/reach math); record each group's last chunk index
+             for ``free_gather`` (or ``pre_free`` for groups this worker doesn't
+             pull). The concatenated stream has no per-group call boundaries, so
+             group L+1's first chunk issues while group L's chunks still stream.
+          2. For each leaf module, find its FIRST and LAST chunk (materialize on
+             the first, quant/kernel/reset on the last — replaces the runtime
+             remaining-copy counters, correct materialize-once by construction).
+          3. Assemble ``_Chunk``s: dedup keys + precompute the packed byte layout
+             (16B-aligned, keys order) so the pull path does no per-call work.
         """
-        chunks: list[Any] = []
-        # chunk index -> [group names] to free_gather after that chunk drains
-        free_after: dict[int, list[list[str]]] = {}
-        all_baked: list[_BakedGroup] = []
+        # --- pass 1: gather groups -> flat scatter chunks + free timing --------
+        raw_chunks: list[list[_Scatter]] = []
+        free_at: dict[int, list[list[str]]] = {}  # last-chunk idx -> groups to free
+        pre_free: list[list[str]] = []  # groups with no chunk on this worker
         residual: list[str] = []
         pos = 0
         for glen in group_lens:
@@ -1428,18 +1513,67 @@ class ShardedRDTWeightTransferEngine(
                     groups.append(g)
             if not groups:
                 # Nothing to pull for this group on this worker; still free its
-                # gather (after whatever chunk is currently last, or right away).
-                if chunks:
-                    free_after.setdefault(len(chunks) - 1, []).append(gnames)
+                # gather — after the current last chunk, or before the pipeline.
+                if raw_chunks:
+                    free_at.setdefault(len(raw_chunks) - 1, []).append(gnames)
                 else:
-                    self._fire_free_gather(gnames)
+                    pre_free.append(gnames)
                 continue
-            all_baked.extend(groups)
-            chunks.extend(self._plan_chunks(groups))
-            free_after.setdefault(len(chunks) - 1, []).append(gnames)
-        ctx = _CallCtx(remaining={id(g): len(g.copies) for g in all_baked})
-        self._run_chunk_pipeline(chunks, ctx, free_after)
-        return residual
+            group_chunks = self._chunk_group_scatters(groups)
+            raw_chunks.extend(group_chunks)
+            free_at.setdefault(len(raw_chunks) - 1, []).append(gnames)
+
+        # --- pass 2: per-module first/last chunk -> materialize/quant ----------
+        first_at: dict[int, int] = {}
+        last_at: dict[int, int] = {}
+        layer_by_id: dict[int, Any] = {}
+        for ci, scatters in enumerate(raw_chunks):
+            for sc in scatters:
+                lid = id(sc.layer)
+                layer_by_id[lid] = sc.layer
+                first_at.setdefault(lid, ci)
+                last_at[lid] = ci
+        materialize_at: dict[int, list[Any]] = {}
+        quant_at: dict[int, list[Any]] = {}
+        for lid, ci in first_at.items():
+            materialize_at.setdefault(ci, []).append(layer_by_id[lid])
+        for lid, ci in last_at.items():
+            quant_at.setdefault(ci, []).append(layer_by_id[lid])
+
+        # --- pass 3: assemble _Chunks (dedup keys + precompute pack layout) ----
+        chunks: list[_Chunk] = []
+        for ci, scatters in enumerate(raw_chunks):
+            keys: list[FetchKey] = []
+            kmeta: dict[FetchKey, tuple[torch.dtype, tuple[int, ...]]] = {}
+            for sc in scatters:
+                if sc.src not in kmeta:
+                    kmeta[sc.src] = (sc.dtype, sc.shape)
+                    keys.append(sc.src)
+            pack_layout: list[tuple[int, torch.dtype, int, tuple[int, ...]]] = []
+            cur = 0
+            for k in keys:
+                dt, shape = kmeta[k]
+                n = prod(shape) or 1
+                off = (cur + 15) & ~15
+                pack_layout.append((off, dt, n, shape))
+                cur = off + n * dt.itemsize
+            chunks.append(_Chunk(
+                scatters=scatters,
+                keys=keys,
+                pack_layout=pack_layout,
+                pack_bytes=cur,
+                materialize=materialize_at.get(ci, []),
+                quant=quant_at.get(ci, []),
+                free=free_at.get(ci, []),
+            ))
+        return _CallPlan(chunks=chunks, pre_free=pre_free, residual=residual)
+
+    def _run_call_plan(self, plan: "_CallPlan") -> list[str]:
+        """Execute a (cached) call plan: run the chunk pipeline (each chunk
+        self-describes its scatter/materialize/quant/free work), return the
+        residual names for the plain-load fallback."""
+        self._run_chunk_pipeline(plan)
+        return plan.residual
 
     def _fire_free_gather(self, gnames: list[str]) -> None:
         """Fire-and-forget free of one gather group on the bound producer (the
@@ -1452,12 +1586,7 @@ class ShardedRDTWeightTransferEngine(
             self._trainer_actor.free_gather.remote(list(gnames))
         )
 
-    def _run_chunk_pipeline(
-        self,
-        chunks: "list[Any]",
-        ctx: "_CallCtx",
-        free_after: "dict[int, list[list[str]]] | None" = None,
-    ) -> None:
+    def _run_chunk_pipeline(self, plan: "_CallPlan") -> None:
         """[RDT-RING] Pipelined chunk pulls over the ring of receive slots.
 
         Issues up to ``_NSLOTS`` produce RPCs ahead of the blocking gets, so
@@ -1477,10 +1606,16 @@ class ShardedRDTWeightTransferEngine(
 
         from vllm.distributed.weight_transfer import _nixl_profile
 
-        inflight: "deque[tuple[_PendingPull, Any, int]]" = deque()
+        inflight: "deque[tuple[_PendingPull, _Chunk]]" = deque()
+
+        # Gather groups with no chunk on this worker (plan.pre_free): free before
+        # the pipeline — the trainer gathered them under the lockstep plan but
+        # there is no chunk of theirs to hang the free on (fire-and-forget).
+        for gnames in plan.pre_free:
+            self._fire_free_gather(gnames)
 
         def drain_one() -> None:
-            pending, chunk, idx = inflight.popleft()
+            pending, chunk = inflight.popleft()
             _t_recv = time.perf_counter()
             _before = _nixl_profile.snapshot()
             _t0 = time.perf_counter()
@@ -1493,35 +1628,25 @@ class ShardedRDTWeightTransferEngine(
             delta["slot_sync_seconds"] = pending.slot_sync_seconds
             self._dispatch_item(_ProcItem(
                 chunk=chunk,
-                ctx=ctx,
                 results=results,
                 slot=pending.slot,
                 t_recv=_t_recv,
                 pull_seconds=pull_seconds,
                 nixl_delta=delta,
-                pull_bytes=sum(self._copy_bytes(c) for _g, cs in chunk for c in cs),
+                pull_bytes=sum(sc.nbytes for sc in chunk.scatters),
             ))
-            if free_after:
-                # This chunk was a gather group's last: its read is done, so
-                # every serve of that group is done -> the producer can drop the
-                # gather buffers (fire-and-forget, off the critical path).
-                for gnames in free_after.get(idx, ()):
-                    self._fire_free_gather(gnames)
+            # Each gather group whose LAST chunk this is: its read is done, so
+            # every serve of that group is done -> the producer can drop the
+            # gather buffers (fire-and-forget, off the critical path).
+            for gnames in chunk.free:
+                self._fire_free_gather(gnames)
 
-        for idx, chunk in enumerate(chunks):
-            keys: list[FetchKey] = []
-            seen: set[FetchKey] = set()
-            for _g, copies in chunk:
-                for c in copies:
-                    if c.src not in seen:
-                        seen.add(c.src)
-                        keys.append(c.src)
-            if not keys:
-                # _plan_chunks never emits empty chunks; keep the frees safe
-                # anyway if this ever changes.
-                if free_after:
-                    for gnames in free_after.get(idx, ()):
-                        self._fire_free_gather(gnames)
+        for chunk in plan.chunks:
+            if not chunk.keys:
+                # _chunk_group_scatters never emits empty chunks; keep the frees
+                # safe anyway if this ever changes.
+                for gnames in chunk.free:
+                    self._fire_free_gather(gnames)
                 continue
             # Drain BEFORE issue once the ring is full: frees this chunk's slot
             # (generation-wise) and guarantees the producer-slot invariant above.
@@ -1533,14 +1658,14 @@ class ShardedRDTWeightTransferEngine(
                 drain_one()
             slot = self._pull_slot
             self._pull_slot = (slot + 1) % self._NSLOTS
-            inflight.append((self._issue_pull(keys, slot), chunk, idx))
+            inflight.append((self._issue_pull(chunk, slot), chunk))
         while inflight:
             drain_one()
 
     def _process_item(self, item: "_ProcItem") -> None:
-        """Scatter-thread half: materialize (once per module per call) + scatter
-        this chunk's slices on the process stream, publish the slot, then hand
-        any COMPLETED modules to the quant thread (see _run_quant).
+        """Scatter-thread half: materialize this chunk's first-seen modules +
+        scatter its slices on the process stream, publish the slot, then hand
+        the modules this chunk COMPLETES to the quant thread (see _run_quant).
 
         Mirrors ``_layerwise_process`` minus the loader replay; the quant /
         kernel-copy / ``info.reset()`` tail runs on the quant thread, ordered
@@ -1557,7 +1682,7 @@ class ShardedRDTWeightTransferEngine(
         from vllm.model_executor.model_loader.reload.meta import materialize_layer
 
         results = item.results
-        ctx = item.ctx
+        chunk = item.chunk
         ph = PhaseTimer(self._proc_stream)  # stream-scoped syncs, not global
         _t_proc = time.perf_counter()
         with (
@@ -1565,38 +1690,32 @@ class ShardedRDTWeightTransferEngine(
             torch.cuda.stream(self._proc_stream),
             torch.device(self.device),
         ):
-            # PASS 1 — slot readers: materialize (once per module per call) +
-            # scatter this chunk's copies. The scatter copies are the ONLY reads
-            # of the receive arena; quant and kernel-copy operate on the
+            # PASS 1 — slot readers: materialize the modules whose FIRST scatter
+            # is in this chunk (empty HF params, once per module by construction)
+            # then scatter this chunk's copies. The scatter copies are the ONLY
+            # reads of the receive arena; quant and kernel-copy operate on the
             # scattered params. Releasing the slot right after the scatters lets
             # the NEXT chunk's RDMA overwrite the arena while quant still runs.
-            completed: list[Any] = []
             try:
-                for g, copies in item.chunk:
-                    layer = g.layer
-                    info = LAYERWISE_INFO.get(layer)
-                    if id(g) not in ctx.materialized:
-                        if info is None or not info.can_load():
-                            raise RuntimeError(
-                                f"Baked replay: layer {type(layer).__name__} was "
-                                "not set up for reload this sync "
-                                "(start_weight_update must run before "
-                                "update_weights)."
-                            )
-                        with ph.phase("materialize_seconds"):
-                            materialize_layer(layer, info)  # empty HF params
-                        ctx.materialized.add(id(g))
+                if chunk.materialize:
+                    with ph.phase("materialize_seconds"):
+                        for layer in chunk.materialize:
+                            info = LAYERWISE_INFO.get(layer)
+                            if info is None or not info.can_load():
+                                raise RuntimeError(
+                                    f"Baked replay: layer {type(layer).__name__} "
+                                    "was not set up for reload this sync "
+                                    "(start_weight_update must run before "
+                                    "update_weights)."
+                                )
+                            materialize_layer(layer, info)
+                if chunk.scatters:
                     with ph.phase("scatter_seconds"):
-                        for c in copies:
-                            param = getattr(layer, c.param_name)
-                            dst = param.as_strided(c.shape, c.stride, c.offset)
+                        for sc in chunk.scatters:
+                            param = getattr(sc.layer, sc.param_name)
+                            dst = param.as_strided(sc.shape, sc.stride, sc.offset)
                             with torch._C.DisableTorchFunctionSubclass():
-                                dst.copy_(results[c.src])
-                    # Module completeness (its copies may span chunks under
-                    # layerwise_split): quant only when the LAST copy landed.
-                    ctx.remaining[id(g)] -= len(copies)
-                    if ctx.remaining[id(g)] == 0:
-                        completed.append(g)
+                                dst.copy_(results[sc.src])
                 # All reads of this slot's arena are now enqueued on the process
                 # stream; record + publish so the RPC thread can reuse the slot.
                 self._slot_read_done[item.slot].record(self._proc_stream)
@@ -1606,18 +1725,19 @@ class ShardedRDTWeightTransferEngine(
                 self._mark_slot_done(item.slot)
 
             # PASS 2 — param readers only: quant / kernel-copy / reset for the
-            # modules this chunk COMPLETED. Handed to the DEDICATED quant thread
-            # (own CUDA stream, event-chained after this chunk's scatters) so it
-            # never delays this thread's next pass-1 — an in-order pass 2 here
-            # was measured to stall the RPC thread's slot handshake ~0.5-0.75s/
-            # iter (every group's quant postponed the next item's publication).
-            if completed:
+            # modules whose LAST scatter is in this chunk. Handed to the
+            # DEDICATED quant thread (own CUDA stream, event-chained after this
+            # chunk's scatters) so it never delays this thread's next pass-1 — an
+            # in-order pass 2 here was measured to stall the RPC thread's slot
+            # handshake ~0.5-0.75s/iter (every group's quant postponed the next
+            # item's publication).
+            if chunk.quant:
                 ready = torch.cuda.Event()
                 ready.record(self._proc_stream)
                 if self._quant_queue is None:
-                    self._run_quant(completed, ready)
+                    self._run_quant(chunk.quant, ready)
                 else:
-                    self._quant_queue.put((completed, ready))
+                    self._quant_queue.put((chunk.quant, ready))
         process_seconds = time.perf_counter() - _t_proc
         self._log_timing(
             "replay",
@@ -1630,8 +1750,8 @@ class ShardedRDTWeightTransferEngine(
             item.pull_bytes,
         )
 
-    def _run_quant(self, completed: "list[Any]", ready: "torch.cuda.Event") -> None:
-        """Quant/kernel-copy/reset the given COMPLETED modules, exactly as
+    def _run_quant(self, layers: "list[Any]", ready: "torch.cuda.Event") -> None:
+        """Quant/kernel-copy/reset the given COMPLETED leaf modules, exactly as
         _layerwise_process. Runs on the quant thread's own stream, ordered after
         the modules' scatters via ``ready``; touches only the scattered params
         (never a receive slot), so it can overlap subsequent chunks' RDMA and
@@ -1655,8 +1775,7 @@ class ShardedRDTWeightTransferEngine(
             torch.device(self.device),
         ):
             stream.wait_event(ready)
-            for g in completed:
-                layer = g.layer
+            for layer in layers:
                 info = LAYERWISE_INFO.get(layer)
                 quant_method = getattr(layer, "quant_method", None)
                 if isinstance(quant_method, QuantizeMethodBase):
@@ -1789,9 +1908,9 @@ class ShardedRDTWeightTransferEngine(
         # Drop strong references to baked modules so the model can be freed.
         self._name_to_group.clear()
         self._name_meta.clear()
-        self._src_shapes.clear()
-        self._src_dtypes.clear()
         self._live_names.clear()
+        # Drop the cached plan (holds _Scatter refs to the baked layers).
+        self._cached_plan = None
         # Release the receive arenas (their NIXL registration is pinned for the
         # process lifetime; freeing the tensors just drops our strong refs).
         self._dest_arenas = [{} for _ in range(self._NSLOTS)]
