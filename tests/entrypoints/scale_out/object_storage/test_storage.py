@@ -20,8 +20,7 @@ MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 @pytest.fixture(scope="module")
 def server():
     """Start a vLLM render server with the object storage routes enabled."""
-    args: list[str] = ["--trust-request-chat-template"]
-    with RemoteLaunchRenderServer(MODEL_NAME, args) as remote_server:
+    with RemoteLaunchRenderServer(MODEL_NAME, []) as remote_server:
         yield remote_server
 
 

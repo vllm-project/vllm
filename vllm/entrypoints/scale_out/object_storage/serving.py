@@ -42,7 +42,6 @@ class ServingObjectStorage:
         try:
             await self.client.write(uid, content)
         except RuntimeError as e:
-            # The server may raise an error if the write fails (e.g., out of memory)
             raise HTTPException(
                 status_code=500, detail=f"Failed to write to shared memory: {e}"
             )
@@ -54,10 +53,9 @@ class ServingObjectStorage:
 
         async def stream_data() -> AsyncGenerator[bytes, None]:
             try:
-                # Acquire read lock and iterate over blocks as NumPy arrays
                 async with self.client.get_iterator_numpy(uuid) as it:
-                    for block in it:
-                        yield block.tobytes()
+                    for array, offset in it:
+                        yield array[:offset].tobytes()
             except RuntimeError as e:
                 # Map server-side "not found" errors to 404
                 if "not found" in str(e).lower():
