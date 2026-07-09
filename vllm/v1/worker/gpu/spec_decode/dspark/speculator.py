@@ -63,18 +63,22 @@ class DSparkSpeculator(DFlashSpeculator):
             * self.num_query_per_req
         )
 
-        self.draft_logits_index_mapping: torch.Tensor | None = None
+        self._step_cols = torch.arange(
+            self.num_speculative_steps, dtype=torch.int32, device=device
+        )
         if self.speculative_config.draft_sample_method == "probabilistic":
-            # DSpark keeps only the current step's dense [req, step, vocab]
-            # logits. Rejection kernels still index by req_state_idx, so this
-            # maps req_state_idx -> dense row for the active request batch.
-            self.draft_logits_index_mapping = torch.empty(
-                self.max_num_reqs, dtype=torch.int32, device=device
+            # DSpark draft generation is CUDA-graph replayed, so Python-side
+            # reassignment of self.draft_logits to an intermediate base_logits
+            # tensor would not run per replay. Keep a persistent graph-written
+            # buffer keyed by request-state index for probabilistic rejection.
+            self.draft_logits = torch.zeros(
+                self.max_num_reqs,
+                self.num_speculative_steps,
+                self.vocab_size,
+                dtype=torch.float32,
+                device=device,
             )
-            self._dense_req_indices = torch.arange(
-                self.max_num_reqs, dtype=torch.int32, device=device
-            )
-            logger.info("Using DSpark current-step draft logits for rejection.")
+            logger.info("Using DSpark preallocated draft logits for rejection.")
 
     def load_draft_model(
         self,
@@ -84,8 +88,9 @@ class DSparkSpeculator(DFlashSpeculator):
         return load_dspark_model(target_model, self.vllm_config)
 
     def clear_runtime_draft_logits(self) -> None:
-        if self.draft_logits_index_mapping is not None:
-            self.draft_logits = None
+        # The persistent draft_logits buffer is graph-written every draft step.
+        # Do not clear it; rejection only reads rows selected by idx_map.
+        pass
 
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
         # Sequential Markov sampling over the backbone's output hidden states.
@@ -99,13 +104,6 @@ class DSparkSpeculator(DFlashSpeculator):
 
         idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
         sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
-        if self.draft_logits_index_mapping is not None:
-            self.draft_logits = base_logits
-            # idx_map is repeated for all speculative steps for a request, so
-            # the first column identifies the request state for each dense row.
-            self.draft_logits_index_mapping[idx_map[:, 0].long()] = (
-                self._dense_req_indices[:num_reqs]
-            )
 
         # Anchor (bonus) token per request = the input id at query offset 0,
         # read via the precomputed persistent index (fixed buffer for capture).
@@ -120,7 +118,7 @@ class DSparkSpeculator(DFlashSpeculator):
                 logits_i.add_(bias)
             else:
                 logits_i.copy_(logits_i + bias)
-            if self.draft_logits_index_mapping is not None:
+            if self.draft_logits is not None:
                 # sample_pos is the predicted token's position Q; the target
                 # verifies it with the predecessor's Gumbel key (Q-1). Pass Q-1.
                 draft_i = gumbel_sample(
@@ -130,7 +128,8 @@ class DSparkSpeculator(DFlashSpeculator):
                     self.seeds,
                     sample_pos[:, i] - 1,
                     apply_temperature=True,
-                    output_processed_logits_inplace=True,
+                    output_processed_logits=self.draft_logits,
+                    output_processed_logits_col=self._step_cols[i],
                     use_fp64=self.use_fp64_gumbel,
                 )
             else:
