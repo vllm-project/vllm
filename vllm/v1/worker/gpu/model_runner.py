@@ -862,9 +862,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_tokens_per_req = scheduler_output.num_scheduled_tokens
         num_reqs = len(num_tokens_per_req)
 
-        # Decode first, then prefill.
         # batch_idx -> req_id
-        req_ids = sorted(num_tokens_per_req, key=num_tokens_per_req.get)  # type: ignore[arg-type]
+        req_ids = sort_batch_req_ids(num_tokens_per_req, self.decode_query_len)
         numtoks_iter = map(num_tokens_per_req.get, req_ids)
         num_scheduled_tokens = np.fromiter(numtoks_iter, dtype=np.int32, count=num_reqs)
 
@@ -1615,3 +1614,12 @@ class ExecuteModelState(NamedTuple):
     hidden_states: torch.Tensor | None
     aux_hidden_states: list[torch.Tensor] | None
     finished_req_ids: set[str]
+
+
+def sort_batch_req_ids(
+    num_tokens_per_req: dict[str, int], decode_query_len: int
+) -> list[str]:
+    # Order decode -> short_extend -> prefill; split_decodes_and_prefills
+    # relies on uniform decodes (query_len == decode_query_len) leading.
+    key = lambda r: ((num := num_tokens_per_req[r]) != decode_query_len, num)
+    return sorted(num_tokens_per_req, key=key)
