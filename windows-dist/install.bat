@@ -71,17 +71,10 @@ if "!HIP_PATH!"=="" (
         )
     )
 )
-:: Extract version number from path (e.g. "7.13" from "ROCM-7.13.0-Windows")
+:: Extract version from hipcc --version output (e.g. "HIP version: 7.13.26176...")
 if NOT "!HIP_PATH!"=="" (
-    for %%I in ("!HIP_PATH!") do set "ROCVER=%%~nxI"
-    :: Extract just X.Y where X and Y are the first two numbers found
-    for /f "tokens=1,2,3 delims=-." %%a in ("!ROCVER!") do set "ROCVER=%%a.%%b"
-    :: Remove any remaining non-numeric characters after the version
-    set "ROCVER=!ROCVER:ROCM_=!"
-    set "ROCVER=!ROCVER:rocm=!"
-    set "ROCVER=!ROCVER:Rocm=!"
-    :: Ensure it's just X.Y format
-    for /f "tokens=1,2 delims=." %%a in ("!ROCVER!") do set "ROCVER=%%a.%%b"
+    for /f "tokens=3,4 delims=:. " %%V in ('"!HIP_PATH!\bin\hipcc.exe" --version 2^>nul ^| findstr /i "hip version"') do set "ROCVER=%%V.%%W"
+    if "!ROCVER!"=="" set "ROCVER=7.13"
     echo [OK] ROCm at !HIP_PATH! (version !ROCVER!)
 ) else (
     echo [WARN] ROCm not detected. Will attempt to install anyway.
