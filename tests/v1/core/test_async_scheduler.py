@@ -326,6 +326,62 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     assert not scheduler.running
 
 
+def test_requires_kv_delivery_reflects_connector():
+    # No connector: nothing owed, so no preemption-time discard.
+    assert create_scheduler(async_scheduling=True).requires_kv_delivery is False
+    # A connector defaults to requiring reliable delivery (e.g. P/D).
+    scheduler = create_scheduler(async_scheduling=True, use_kv_connector=True)
+    assert scheduler.requires_kv_delivery is True
+
+
+def _schedule_prefill_in_flight(scheduler):
+    """Add one request and schedule its single-step prefill so its first
+    output frame (the P-side hand-off token) is in flight."""
+    req = create_requests(num_requests=1, max_tokens=1)[0]
+    scheduler.add_request(req)
+    sched_output = scheduler.schedule()
+    assert req.status == RequestStatus.RUNNING
+    assert req.num_output_placeholders == 1
+    return req, sched_output
+
+
+def test_preempt_mid_handoff_discards_inflight_output():
+    # Simulates the P/D race: a request is preempted while its final prefill
+    # chunk's output is in flight. With delivery required, the stale frame must
+    # be discarded so the request recomputes rather than finishing with no KV.
+    scheduler = create_scheduler(async_scheduling=True)
+    req, sched_output = _schedule_prefill_in_flight(scheduler)
+
+    scheduler._preempt_request(req, 0.0, discard_inflight_output=True)
+    assert req.status == RequestStatus.PREEMPTED
+    assert req.async_tokens_to_discard == 1
+    assert req.num_output_placeholders == 0
+
+    scheduler.update_from_output(sched_output, _make_model_runner_output(sched_output))
+
+    assert not req.is_finished()
+    assert req.status == RequestStatus.PREEMPTED
+    assert req.num_output_tokens == 0
+    assert req.async_tokens_to_discard == 0
+    assert req.request_id in scheduler.requests
+
+
+def test_preempt_mid_handoff_keeps_inflight_output_when_not_required():
+    # Best-effort connector (or none): the in-flight frame is not discarded, so
+    # the stale token is applied and finishes the request as before.
+    scheduler = create_scheduler(async_scheduling=True)
+    req, sched_output = _schedule_prefill_in_flight(scheduler)
+
+    scheduler._preempt_request(req, 0.0, discard_inflight_output=False)
+    assert req.async_tokens_to_discard == 0
+    assert req.num_output_placeholders == 1
+
+    scheduler.update_from_output(sched_output, _make_model_runner_output(sched_output))
+
+    assert req.is_finished()
+    assert req.num_output_tokens == 1
+
+
 def test_no_placeholder_underflow_on_discarded_spec_frame():
     num_spec = 5
     scheduler = create_scheduler(
