@@ -296,7 +296,13 @@ async def handle_request(api: str, request: Request):
             )
         )
 
-        req_data["max_tokens"] -= 1
+        # max_completion_tokens takes precedence when present (that's the limit
+        # the backend enforces); fall back to max_tokens. If neither is set
+        # (e.g. benchmark clients that omit it), leave the request unchanged.
+        if "max_completion_tokens" in req_data:
+            req_data["max_completion_tokens"] -= 1
+        elif "max_tokens" in req_data:
+            req_data["max_tokens"] -= 1
 
         req_data["kv_transfer_params"] = {
             "do_remote_decode": False,
