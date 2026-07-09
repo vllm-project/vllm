@@ -333,6 +333,12 @@ class AnthropicServingMessages(OpenAIServingChat):
             finish_reason = None
             content_block_index = 0
             content_block_started = False
+            # The opt-in raw-output / rendered-prompt echoes now ride along on
+            # the underlying chat-completion finish-reason chunk (not a separate
+            # trailing ``choices=[]`` chunk), so capture them from whichever
+            # origin chunk carries them and forward on the final message_delta.
+            captured_rendered_prompts = None
+            captured_raw_output_texts = None
             # Track current block type to handle transitions between
             # thinking / text / tool_use blocks correctly.
             current_block_type: str | None = None
@@ -353,6 +359,13 @@ class AnthropicServingMessages(OpenAIServingChat):
                         origin_chunk = ChatCompletionStreamResponse.model_validate_json(
                             data_str
                         )
+
+                        # Echoes may arrive on the finish-reason chunk or the
+                        # trailing usage chunk; keep the latest non-None values.
+                        if origin_chunk.rendered_prompts is not None:
+                            captured_rendered_prompts = origin_chunk.rendered_prompts
+                        if origin_chunk.raw_output_texts is not None:
+                            captured_raw_output_texts = origin_chunk.raw_output_texts
 
                         if first_item:
                             chunk = AnthropicStreamEvent(
@@ -397,11 +410,12 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     if origin_chunk.usage
                                     else 0,
                                 ),
-                                # Forward the opt-in echoes attached by the
-                                # underlying chat completion final chunk.
-                                # Both are None when the caller didn't ask.
-                                rendered_prompts=origin_chunk.rendered_prompts,
-                                raw_output_texts=origin_chunk.raw_output_texts,
+                                # Forward the opt-in echoes captured from the
+                                # underlying chat completion chunks (finish or
+                                # trailing usage chunk). Both are None when the
+                                # caller didn't ask.
+                                rendered_prompts=captured_rendered_prompts,
+                                raw_output_texts=captured_raw_output_texts,
                             )
                             data = chunk.model_dump_json(exclude_unset=True)
                             yield wrap_data_with_event(data, "message_delta")

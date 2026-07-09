@@ -824,6 +824,16 @@ class OpenAIServingChat(OpenAIServing):
             stream_options, self.enable_force_include_usage
         )
 
+        # The pristine raw output / rendered prompt echoes ride along on the
+        # finish-reason chunk (see below) rather than a separate trailing
+        # ``choices=[]`` chunk, so enabling them does not change the shape of
+        # the stream the client observes. ``raw_attached`` tracks whether that
+        # already happened; if it didn't (e.g. the stream aborted before any
+        # finish chunk) we fall back to a trailing chunk after the loop.
+        attach_rendered = bool(request.return_rendered_prompts)
+        attach_raw_output = bool(request.return_raw_output)
+        raw_attached = False
+
         try:
             async for res in result_generator:
                 if res.prompt_token_ids is not None:
@@ -1514,6 +1524,29 @@ class OpenAIServingChat(OpenAIServing):
                         model=model_name,
                     )
 
+                    # Piggy-back the opt-in raw-output / rendered-prompt echoes
+                    # onto the finish-reason chunk instead of a separate
+                    # trailing ``choices=[]`` chunk. This keeps the last chunk
+                    # the client sees identical in shape (still carries the
+                    # finished choice), so enabling ``return_raw_output`` does
+                    # not force any client-side changes.
+                    if (
+                        (attach_rendered or attach_raw_output)
+                        and output.finish_reason is not None
+                        and all(finish_reason_sent)
+                        and not raw_attached
+                    ):
+                        raw_output_texts = [
+                            _decode_raw_output(tokenizer, raw_output_token_ids[j])
+                            for j in range(num_choices)
+                        ]
+                        request_metadata.raw_output_texts = raw_output_texts
+                        if attach_rendered:
+                            chunk.rendered_prompts = request_metadata.rendered_prompts
+                        if attach_raw_output:
+                            chunk.raw_output_texts = raw_output_texts
+                        raw_attached = True
+
                     # handle usage stats if requested & if continuous
                     if include_continuous_usage:
                         completion_tokens = previous_num_tokens[i]
@@ -1526,22 +1559,25 @@ class OpenAIServingChat(OpenAIServing):
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
 
-            # Compute pristine raw output now so it can ride along on the
-            # final stream chunk (when the caller asked for it) AND get
-            # written to request_metadata for the request-log hub.
-            raw_output_texts = [
-                _decode_raw_output(tokenizer, raw_output_token_ids[i])
-                for i in range(num_choices)
-            ]
-            request_metadata.raw_output_texts = raw_output_texts
+            # Make sure request_metadata carries the pristine raw output for
+            # the request-log hub even if it was never attached to a stream
+            # chunk (e.g. the stream ended without a finish-reason chunk).
+            if request_metadata.raw_output_texts is None:
+                request_metadata.raw_output_texts = [
+                    _decode_raw_output(tokenizer, raw_output_token_ids[i])
+                    for i in range(num_choices)
+                ]
 
-            # Decide whether to emit a final chunk. include_usage drives
-            # the OpenAI-compatible usage chunk; the two return-* flags
-            # piggyback on the same chunk, and force one out even when
-            # include_usage is false so the fields are never lost.
-            attach_rendered = bool(request.return_rendered_prompts)
-            attach_raw_output = bool(request.return_raw_output)
-            need_final_chunk = include_usage or attach_rendered or attach_raw_output
+            # Decide whether to emit a trailing ``choices=[]`` chunk. The
+            # standard OpenAI-compatible usage chunk (``include_usage``) always
+            # gets one. The raw-output / rendered-prompt echoes normally ride
+            # along on the finish-reason chunk above (``raw_attached``); we only
+            # fall back to a trailing chunk here if that never happened, so the
+            # fields are never silently lost.
+            raw_needs_fallback = (attach_rendered or attach_raw_output) and (
+                not raw_attached
+            )
+            need_final_chunk = include_usage or raw_needs_fallback
             if need_final_chunk:
                 final_usage: UsageInfo | None = None
                 if include_usage:
@@ -1564,9 +1600,15 @@ class OpenAIServingChat(OpenAIServing):
                     model=model_name,
                     usage=final_usage,
                     rendered_prompts=(
-                        request_metadata.rendered_prompts if attach_rendered else None
+                        request_metadata.rendered_prompts
+                        if attach_rendered and raw_needs_fallback
+                        else None
                     ),
-                    raw_output_texts=raw_output_texts if attach_raw_output else None,
+                    raw_output_texts=(
+                        request_metadata.raw_output_texts
+                        if attach_raw_output and raw_needs_fallback
+                        else None
+                    ),
                 )
                 final_usage_data = final_usage_chunk.model_dump_json(
                     exclude_unset=True, exclude_none=True
