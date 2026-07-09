@@ -532,6 +532,9 @@ class VllmConfig:
         if use_v2_model_runner is not None:
             return use_v2_model_runner
 
+        if self.cache_config is not None and self.cache_config.simulate_forward:
+            return True
+
         # DSpark is implemented only by the V2 GPU model runner, and DeepSeek-V4
         # is not otherwise a default-V2 architecture, so force V2 for it. If V2
         # is unsupported for the rest of the config, _validate_v2_model_runner
@@ -2184,7 +2187,7 @@ class VllmConfig:
 
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
-        if not HAS_TRITON:
+        if not HAS_TRITON and not self.cache_config.simulate_forward:
             raise ValueError("Model Runner V2 requires Triton.")
 
         unsupported = self._get_v2_model_runner_unsupported_features()

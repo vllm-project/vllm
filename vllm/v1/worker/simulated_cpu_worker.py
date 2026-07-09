@@ -35,7 +35,9 @@ class SimulatedCPUWorker(Worker):
             current_platform.dist_backend,
         )
         set_random_seed(self.model_config.seed)
-        self.model_runner = SimulatedCPUModelRunner(self.vllm_config, self.device)
+        self.model_runner: SimulatedCPUModelRunner = SimulatedCPUModelRunner(  # type: ignore
+            self.vllm_config, self.device
+        )
 
     def determine_available_memory(self) -> int:
         simulated_kv_cache_size = self.cache_config.kv_cache_memory_bytes
