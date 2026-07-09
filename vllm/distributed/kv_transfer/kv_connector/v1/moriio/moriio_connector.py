@@ -1030,6 +1030,16 @@ class MoRIIOConnectorWorker:
             use_mla=self.use_mla,
         )
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
+        # READ-mode producer: a decode release-ACK can arrive BEFORE
+        # start_load_kv populates transfer_id_to_request_id (the notify races
+        # ahead of the scheduler->worker sync). Buffer such ACKs and retry them
+        # next get_finished tick instead of dropping them -- dropping loses the
+        # completion, so the request is never marked done_sending, its KV blocks
+        # leak, and the prefill KV cache wedges at high concurrency. Buffered
+        # BEFORE resolve_moriio_transfer_ack, so each ACK is counted exactly once
+        # (on the tick its mapping exists) -- the heterogeneous-TP ack-counting
+        # is preserved.
+        self._pending_unmapped_acks: list = []
 
         # TODO: consider the integration of flashinfer or other backends.
         self.backend_name = backend.get_name()
@@ -1542,16 +1552,22 @@ class MoRIIOConnectorWorker:
             # pop_finished_req_ids returns release ACKs sent by decode. Keep
             # duplicate ACKs because heterogeneous TP can fan multiple decode
             # ranks into one prefill rank for the same transfer_id.
-            finished_acks = self.moriio_wrapper.pop_finished_req_ids()
+            # Combine freshly-arrived ACKs with any buffered from prior ticks
+            # whose transfer_id wasn't mapped yet (notify raced ahead of
+            # start_load_kv); retry the lookup every tick. Buffered before
+            # resolve_moriio_transfer_ack so each ACK is counted exactly once.
+            finished_acks = self._pending_unmapped_acks + list(
+                self.moriio_wrapper.pop_finished_req_ids()
+            )
+            self._pending_unmapped_acks = []
             resolved_transfer_ids: set[TransferId] = set()
             for ack in finished_acks:
                 transfer_id = ack if isinstance(ack, str) else ack.transfer_id
                 if transfer_id not in self.transfer_id_to_request_id:
-                    logger.warning(
-                        "Could not find %s in transfer_id_to_request_id "
-                        "lookup table. This could lead to a possible hang.",
-                        transfer_id,
-                    )
+                    # Mapping not populated yet -- buffer and retry next tick,
+                    # do NOT drop (dropping leaks producer KV at high conc and
+                    # wedges the prefill).
+                    self._pending_unmapped_acks.append(ack)
                     continue
                 resolved_transfer_id = resolve_moriio_transfer_ack(
                     ack,
