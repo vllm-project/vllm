@@ -1,42 +1,69 @@
 # vLLM Windows ROCm Distribution
 
-Pre-built `_C.pyd` binary + installers for vLLM on Windows with AMD ROCm.
+Pre-built `_C.pyd` (13.8 MB) — the only part of vLLM that requires C++ compilation.
+Drop it in and skip the 80s build + Visual Studio + ROCm toolchain.
 
-## Contents
+## What's in the Box
 
-| File | Size | Purpose |
-|------|------|---------|
-| `_C.pyd` | 13.8 MB | Pre-built C++ extension (no compilation required) |
-| `install.ps1` | — | PowerShell installer (auto-detects ROCm + vLLM path) |
-| `setup.bat` | — | Batch installer (simpler, for cmd.exe users) |
-| `build-harness/` | — | Source files to rebuild `_C.pyd` |
-| `INSTALL.md` | — | Full installation guide |
-| `README.md` | — | This file |
+| File | Size | What It Does |
+|------|------|------|
+| `_C.pyd` | 13.8 MB | vLLM C++ extension — 21 source files, pre-compiled for ROCm 7.13 |
+| `setup.bat` | — | One-shot installer for `cmd.exe` |
+| `install.ps1` | — | One-shot installer for PowerShell |
+| `build-harness/` | — | Source + scripts to rebuild `_C.pyd` yourself |
 
-## How to Distribute
+## How It Works
 
-Users need to:
+1. User installs **Python 3.12**, **PyTorch with ROCm**, and **git** from the internet
+2. User clones `https://github.com/Maxritz/vllm-windows.git`
+3. User runs `setup.bat` — it copies `_C.pyd` into place and configures paths
 
-1. **Install prerequisites** — Python 3.12, PyTorch+ROCm, git
-2. **Clone vLLM Windows port** — `git clone https://github.com/Maxritz/vllm-windows.git`
-3. **Run installer** — from the cloned repo or extracted zip:
-   ```
-   setup.bat
-   ```
+That's it. The installer does not download anything — it only places the pre-built binary.
 
-The installer copies `_C.pyd` into place, sets up `sitecustomize.py`, and verifies PyTorch.
+## Why This Exists
 
-## What's NOT included
+Building `_C.pyd` from source requires:
+- Visual Studio 2022 (Desktop C++ workload, ~6 GB)
+- ROCm 7.13 SDK (~3 GB)
+- ninja build system
+- 80+ seconds compile time
+- 21 `.cu`/`.cpp` source files with correct paths and flags
 
-- Python interpreter — download from python.org
-- PyTorch with ROCm — install with:
-  ```
-  pip install torch --index-url https://repo.amd.com/rocm/whl/gfx120X-all/
-  ```
-- vLLM Python source — clone from:
-  ```
-  git clone https://github.com/Maxritz/vllm-windows.git
-  ```
-- ROCm SDK — download from https://rocm.docs.amd.com
+This distribution eliminates all of that.
 
-The installer only handles what must be pre-compiled: the `_C.pyd` C++ extension.
+## What the User Still Gets From the Internet
+
+| Thing | Where From |
+|-------|-----------|
+| Python 3.12 | python.org or `winget install Python.Python.3.12` |
+| PyTorch + ROCm | `pip install torch --index-url https://repo.amd.com/rocm/whl/gfx120X-all/` — this repo has both PyTorch wheels AND ROCm runtime packages |
+| vLLM Python source | `git clone https://github.com/Maxritz/vllm-windows.git` |
+
+## Quick Start
+
+```powershell
+# 1. Prerequisites
+winget install Python.Python.3.12
+pip install torch --index-url https://repo.amd.com/rocm/whl/gfx120X-all/
+
+# 2. Get vLLM
+git clone https://github.com/Maxritz/vllm-windows.git
+cd vllm-windows
+git checkout WINDOWS-PORT
+
+# 3. Install the pre-built binary
+#    Extract vllm-windows-rocm-dist.zip into the repo, then:
+setup.bat
+
+# 4. Run
+$env:HIP_PATH = "C:\Program Files\AMD\ROCm\7.13"
+python -m vllm.entrypoints.openai.api_server --model F:\VLLM-Models\Qwen2.5-3B-Instruct --enforce-eager
+```
+
+## Upstream PR
+
+https://github.com/vllm-project/vllm/pull/48139
+
+## License
+
+Apache 2.0
