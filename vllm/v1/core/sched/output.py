@@ -244,6 +244,12 @@ class SchedulerOutput:
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
 
+    # Scheduled requests whose drafts proposed at the end of this step can
+    # never be scheduled (non-final prefill chunk, or guaranteed to finish
+    # at max_tokens), so the drafter may skip proposing for them. For
+    # autoregressive speculators no lookahead KV slots are allocated.
+    no_draft_req_ids: set[str] | None = None
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(

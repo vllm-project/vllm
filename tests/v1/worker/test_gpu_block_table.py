@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
 
 pytestmark = pytest.mark.skipif(
@@ -130,3 +131,43 @@ def test_block_tables_apply_staged_writes_single_group():
         block_tables.block_tables[0].gpu[0, :2],
         torch.tensor([1, 2], dtype=torch.int32, device=device),
     )
+
+
+def test_compute_slot_mappings_skip_rows():
+    """skip_rows must map the masked request's tokens to PAD_SLOT_ID so its
+    KV writes are dropped (drafter rows without lookahead slots), while
+    other rows keep their real slot ids."""
+    device = torch.device("cuda")
+    block_size = 16
+    block_tables = BlockTables(
+        block_sizes=[block_size],
+        max_num_reqs=4,
+        max_num_batched_tokens=64,
+        max_num_blocks_per_group=[8],
+        device=device,
+        kernel_block_sizes=[block_size],
+    )
+    block_tables.append_block_ids(req_index=0, new_block_ids=([1, 2],), overwrite=True)
+    block_tables.append_block_ids(req_index=1, new_block_ids=([3],), overwrite=True)
+    block_tables.apply_staged_writes()
+
+    idx_mapping = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    # One query token per request (draft decode step shape).
+    query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32, device=device)
+    positions = torch.tensor([17, 5], dtype=torch.int64, device=device)
+    expected = [2 * block_size + 1, 3 * block_size + 5]
+
+    slot_mappings = block_tables.compute_slot_mappings(
+        idx_mapping, query_start_loc, positions, num_tokens_padded=2
+    )
+    assert slot_mappings[0, :2].tolist() == expected
+
+    skip_rows = torch.tensor([1, 0], dtype=torch.int8, device=device)
+    slot_mappings = block_tables.compute_slot_mappings(
+        idx_mapping,
+        query_start_loc,
+        positions,
+        num_tokens_padded=2,
+        skip_rows=skip_rows,
+    )
+    assert slot_mappings[0, :2].tolist() == [PAD_SLOT_ID, expected[1]]

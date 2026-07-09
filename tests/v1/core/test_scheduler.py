@@ -5246,3 +5246,178 @@ def test_async_load_reservation_prevents_wedge_e2e():
     assert b.status == RequestStatus.WAITING
     assert b.num_preemptions == 0
     assert b.request_id not in req_to_blocks
+
+
+def _create_skip_lookahead_scheduler(num_spec_tokens: int, **kwargs) -> Scheduler:
+    """Scheduler emulating an eagle-style drafter (with its own KV cache)
+    on the V2 model runner, the config gated into lookahead skipping.
+
+    create_scheduler's ngram spec config keeps num_lookahead_tokens at 0,
+    so set the eagle-equivalent values directly.
+    """
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec_tokens,
+        use_v2_model_runner=True,
+        **kwargs,
+    )
+    scheduler.num_lookahead_tokens = num_spec_tokens
+    scheduler.report_unusable_drafts = True
+    scheduler.can_skip_lookahead = True
+    return scheduler
+
+
+def test_no_lookahead_slots_for_nonfinal_prefill_chunk():
+    """Non-final prefill chunks sample no token, so the drafter proposes
+    nothing; no lookahead KV slots should be allocated for them and they
+    must be reported in no_draft_req_ids."""
+    block_size = 16
+    scheduler = _create_skip_lookahead_scheduler(
+        num_spec_tokens=2,
+        max_num_batched_tokens=64,
+        block_size=block_size,
+    )
+    (request,) = create_requests(num_requests=1, num_tokens=128, block_size=block_size)
+    req_id = request.request_id
+    scheduler.add_request(request)
+
+    # First chunk: 64 of 128 prompt tokens, no lookahead block.
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[req_id] == 64
+    assert output.no_draft_req_ids == {req_id}
+    # Exactly 64/16 = 4 blocks; the 2 lookahead tokens would need a 5th.
+    assert len(output.scheduled_new_reqs[0].block_ids[0]) == 4
+
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[req_id],
+        req_id_to_index={req_id: 0},
+        sampled_token_ids=[[]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_runner_output)
+
+    # Final chunk: the request samples, so lookahead slots are allocated.
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[req_id] == 64
+    assert output.no_draft_req_ids is None
+    block_ids = scheduler.kv_cache_manager.get_blocks(req_id).get_block_ids()
+    # 128 prompt + 2 lookahead tokens -> 9 blocks.
+    assert len(block_ids[0]) == 9
+
+
+def test_no_lookahead_slots_for_guaranteed_final_decode():
+    """A decode step that is guaranteed to reach max_tokens cannot have its
+    drafts scheduled; no lookahead KV slots should be allocated for it."""
+    block_size = 16
+    num_spec_tokens = 4
+    scheduler = _create_skip_lookahead_scheduler(
+        num_spec_tokens=num_spec_tokens,
+        block_size=block_size,
+    )
+    (request,) = create_requests(
+        num_requests=1, num_tokens=27, max_tokens=2, block_size=block_size
+    )
+    req_id = request.request_id
+    scheduler.add_request(request)
+
+    # Prefill: samples the first of max_tokens=2 tokens, so the drafter
+    # runs and lookahead slots are needed.
+    output = scheduler.schedule()
+    assert output.no_draft_req_ids is None
+
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[req_id],
+        req_id_to_index={req_id: 0},
+        sampled_token_ids=[[100]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_runner_output)
+    scheduler.update_draft_token_ids(DraftTokenIds([req_id], [[1, 2, 3, 4]]))
+
+    # Decode: guaranteed to reach max_tokens=2, so drafts are unusable.
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[req_id] == 1 + num_spec_tokens
+    assert output.no_draft_req_ids == {req_id}
+    block_ids = scheduler.kv_cache_manager.get_blocks(req_id).get_block_ids()
+    # 27 prompt + 1 sampled + 4 spec = 32 tokens -> 2 blocks; the 4
+    # lookahead tokens would need a 3rd.
+    assert len(block_ids[0]) == 2
+
+
+def test_lookahead_kept_without_v2_gate():
+    """With can_skip_lookahead unset (e.g. V1 runner), prefill chunks keep
+    their lookahead slots and no_draft_req_ids stays None."""
+    block_size = 16
+    scheduler = create_scheduler(
+        num_speculative_tokens=2,
+        max_num_batched_tokens=64,
+        block_size=block_size,
+    )
+    scheduler.num_lookahead_tokens = 2
+    assert not scheduler.can_skip_lookahead
+
+    (request,) = create_requests(num_requests=1, num_tokens=128, block_size=block_size)
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.no_draft_req_ids is None
+    # 64 chunk tokens + 2 lookahead tokens -> 5 blocks.
+    assert len(output.scheduled_new_reqs[0].block_ids[0]) == 5
+
+
+def test_drafts_unusable_async_placeholder_arithmetic():
+    """Unit-test the _drafts_unusable predicate, including the async
+    scheduling worst-case (all drafts rejected) placeholder arithmetic."""
+    scheduler = _create_skip_lookahead_scheduler(num_spec_tokens=2)
+    (request,) = create_requests(num_requests=1, num_tokens=16, max_tokens=3)
+
+    # Non-final prefill chunk: no sample, drafts unusable.
+    assert scheduler._drafts_unusable(request, 0, 8)
+    # Final prefill chunk with max_tokens=3: drafts usable.
+    assert not scheduler._drafts_unusable(request, 0, 16)
+
+    # Sync decode: 2 of 3 output tokens verified; this step must finish.
+    request.append_output_token_ids(100)
+    request.append_output_token_ids(101)
+    assert request.num_tokens == 18
+    assert scheduler._drafts_unusable(request, 17, 1)
+    # Only 1 verified output: this step may or may not finish.
+    (request,) = create_requests(num_requests=1, num_tokens=16, max_tokens=3)
+    request.append_output_token_ids(100)
+    assert not scheduler._drafts_unusable(request, 16, 1)
+
+    # Async decode, 1 verified output and one in-flight step (1 sample +
+    # 1 draft placeholder): worst case still reaches 3 = max_tokens.
+    request.num_output_placeholders = 2
+    assert scheduler._drafts_unusable(request, 18, 3)
+    # 0 verified outputs: worst case gives only 2 tokens, not guaranteed.
+    (request,) = create_requests(num_requests=1, num_tokens=16, max_tokens=3)
+    request.num_output_placeholders = 2
+    assert not scheduler._drafts_unusable(request, 17, 3)
+
+
+def test_unusable_drafts_reported_without_lookahead_skip():
+    """DFlash/DSpark-style: drafts-unusable requests are reported so the
+    drafter can skip proposing, but their lookahead slots stay allocated
+    (the query forward's KV writes into them are not masked)."""
+    block_size = 16
+    scheduler = create_scheduler(
+        num_speculative_tokens=2,
+        max_num_batched_tokens=64,
+        block_size=block_size,
+        use_v2_model_runner=True,
+    )
+    scheduler.num_lookahead_tokens = 3  # dflash: num_spec_tokens + 1
+    scheduler.report_unusable_drafts = True
+    assert not scheduler.can_skip_lookahead
+
+    (request,) = create_requests(num_requests=1, num_tokens=128, block_size=block_size)
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.no_draft_req_ids == {request.request_id}
+    # 64 chunk tokens + 3 lookahead tokens -> 5 blocks (lookahead kept).
+    assert len(output.scheduled_new_reqs[0].block_ids[0]) == 5
