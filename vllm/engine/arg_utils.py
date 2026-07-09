@@ -1511,13 +1511,7 @@ class EngineArgs:
         )
         kernel_group.add_argument(
             "--enable-bf16x3-router-gemm",
-            action=argparse.BooleanOptionalAction,
-            default=None,
-            help=(
-                "Enable the experimental SM100 BF16x3 CuteDSL router GEMM "
-                "for medium/large router batches not handled by the native "
-                "FP32 router GEMM kernel."
-            ),
+            **kernel_kwargs["enable_bf16x3_router_gemm"],
         )
         moe_backend_kwargs = kernel_kwargs["moe_backend"]
         moe_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
