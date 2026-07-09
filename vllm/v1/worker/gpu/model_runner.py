@@ -1330,6 +1330,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # prompt_lens is only used in R-SWA case.
             prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
 
+        no_draft_mask_np = None
+        no_draft_req_ids = scheduler_output.no_draft_req_ids
+        if no_draft_req_ids:
+            mask_iter = (req_id in no_draft_req_ids for req_id in req_ids)
+            no_draft_mask_np = np.fromiter(mask_iter, dtype=np.bool_, count=num_reqs)
+
         input_batch = InputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -1353,6 +1359,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_computed_prefill_tokens_np=batch_req_state.num_computed_prefill_tokens_np,
             is_prefilling_np=batch_req_state.is_prefilling_np,
             has_prefill=batch_req_state.has_prefill,
+            no_draft_mask_np=no_draft_mask_np,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],

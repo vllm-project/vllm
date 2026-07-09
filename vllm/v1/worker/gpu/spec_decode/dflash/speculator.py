@@ -427,6 +427,13 @@ class DFlashSpeculator(DraftModelSpeculator):
             context_slots,
         )
 
+        no_draft_mask = input_batch.no_draft_mask_np
+        if no_draft_mask is not None and self.dp_size == 1 and no_draft_mask.all():
+            # No request's drafts can be scheduled next step; the context KV written
+            # above keeps the drafter in sync, so skip the query forward and draft
+            # sampling. With DP, the query phase must still run on every rank.
+            return self.draft_tokens[:num_reqs]
+
         batch_sync, num_batch_tokens = (
             self._build_uniform_batch_dp_sync(dp_sync, num_reqs, self.num_query_per_req)
             if dp_sync is not None
