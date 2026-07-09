@@ -4796,7 +4796,10 @@ async fn reset_prefix_cache_route_sends_expected_utility_call() {
     let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    assert!(body.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("json body"),
+        json!({"success": true})
+    );
     engine_task.await.expect("mock engine task");
 }
 

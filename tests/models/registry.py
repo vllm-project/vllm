@@ -933,7 +933,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "HunYuanVLForConditionalGeneration": _HfExamplesInfo(
         "tencent/HunyuanOCR",
         hf_overrides={"num_experts": 0},
-        is_available_online=False,
+        min_transformers_version="5.13",
     ),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo(
         "HuggingFaceM4/Idefics3-8B-Llama3",
@@ -1123,6 +1123,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "8b-thinking": "OpenMOSS-Team/MOSS-Audio-8B-Thinking",
         },
         trust_remote_code=True,
+    ),
+    "MossTranscribeDiarizeForConditionalGeneration": _HfExamplesInfo(
+        "OpenMOSS-Team/MOSS-Transcribe-Diarize",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "HfMoondream": _HfExamplesInfo(
         "moondream/moondream3-preview",

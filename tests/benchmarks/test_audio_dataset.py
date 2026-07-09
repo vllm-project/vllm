@@ -123,15 +123,22 @@ def test_asr_dataset_sample_handles_local_audio_paths(tmp_path: Path) -> None:
     )
 
 
-def test_asr_dataset_sample_handles_embedded_audio_bytes(tmp_path: Path) -> None:
+@pytest.mark.parametrize("has_filepath", [True, False])
+def test_asr_dataset_sample_handles_embedded_audio_bytes(
+    tmp_path: Path, has_filepath: bool
+) -> None:
     audio_path = tmp_path / "earnings.wav"
     _write_wav(audio_path, duration_s=0.1)
+
+    test_path = None
+    if has_filepath:
+        test_path = audio_path
 
     dataset = object.__new__(datasets_module.ASRDataset)
     dataset.data = [
         {
             "audio": {
-                "path": None,
+                "path": test_path,
                 "bytes": audio_path.read_bytes(),
             },
             "text": "quarterly earnings call",
