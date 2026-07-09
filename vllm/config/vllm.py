@@ -502,6 +502,17 @@ class VllmConfig:
         return pp_size
 
     @property
+    def max_in_flight_tokens(self) -> int:
+        # Upper bound on tokens that are scheduled but not yet settled (freed):
+        # every concurrent batch may hold up to a full `max_num_batched_tokens`.
+        # Recycling-aware KV cache specs (sliding-window, chunked-local) reserve
+        # for this because out-of-window blocks are freed on the processed-token
+        # basis, so in-flight steps transiently keep their blocks.
+        return (
+            self.max_concurrent_batches * self.scheduler_config.max_num_batched_tokens
+        )
+
+    @property
     def num_speculative_tokens(self) -> int:
         if (
             self.speculative_config is not None
@@ -531,6 +542,11 @@ class VllmConfig:
         ):
             return True
 
+        # Mixed sliding/full DFlash drafts need multiple KV groups (V2 only);
+        # force V2 as for dspark, since a hybrid target otherwise defaults to V1.
+        if self._dflash_needs_multi_kv_group():
+            return True
+
         if self.model_config is not None and self.model_config.is_diffusion:
             return True
 
@@ -553,6 +569,18 @@ class VllmConfig:
             return False
 
         return True
+
+    def _dflash_needs_multi_kv_group(self) -> bool:
+        """Whether a DFlash draft mixes sliding-window and full attention."""
+        spec = self.speculative_config
+        if spec is None or spec.method != "dflash":
+            return False
+        draft_config = getattr(spec, "draft_model_config", None)
+        if draft_config is None:
+            return False
+        layer_types = getattr(draft_config.hf_config, "layer_types", None) or []
+        num_sliding = sum(lt == "sliding_attention" for lt in layer_types)
+        return 0 < num_sliding < len(layer_types)
 
     def _is_default_v2_model_runner_model(self) -> bool:
         model_config = self.model_config
