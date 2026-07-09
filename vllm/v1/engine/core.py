@@ -108,6 +108,37 @@ HANDSHAKE_TIMEOUT_MINS = 5
 _R = TypeVar("_R")  # Return type for collective_rpc
 
 
+def _dtype_str(dtype: Any) -> str | None:
+    return None if dtype is None else str(dtype).removeprefix("torch.")
+
+
+def _serialize_kv_cache_spec(spec: KVCacheSpec) -> dict[str, Any]:
+    """Return msgspec serializable fields describing KVCacheSpec."""
+    shapes = getattr(spec, "shapes", None)
+    dtypes = getattr(spec, "dtypes", None)
+    mamba_type = getattr(spec, "mamba_type", None)
+    return {
+        "kind": get_kv_cache_spec_kind(spec).value,
+        "block_size": spec.block_size,
+        "sliding_window": getattr(spec, "sliding_window", None),
+        "attention_chunk_size": getattr(spec, "attention_chunk_size", None),
+        "num_kv_heads": getattr(spec, "num_kv_heads", None),
+        "head_size": getattr(spec, "head_size", None),
+        "head_size_v": getattr(spec, "head_size_v", None),
+        "dtype": _dtype_str(getattr(spec, "dtype", None)),
+        "page_size_bytes": spec.page_size_bytes,
+        # MLA specific
+        "cache_dtype_str": getattr(spec, "cache_dtype_str", None),
+        # Sink attention specific
+        "sink_len": getattr(spec, "sink_len", None),
+        # Mamba specific
+        "shapes": None if shapes is None else [list(shape) for shape in shapes],
+        "dtypes": None if dtypes is None else [_dtype_str(d) for d in dtypes],
+        "mamba_type": None if mamba_type is None else mamba_type.name.lower(),
+        "mamba_cache_mode": getattr(spec, "mamba_cache_mode", None),
+    }
+
+
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
