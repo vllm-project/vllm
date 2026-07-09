@@ -249,6 +249,8 @@ class SimulatedCPUModelRunner(CPUModelRunner):
             max_num_blocks = cdiv(
                 block_table_max_model_len, spec.block_size * self.dcp_size
             )
+            # Align to a multiple of (128 / block_size) as required by some
+            # attention backends such as TRTLLM (#39324).
             if spec.block_size <= 128:
                 alignment = 128 // spec.block_size
                 max_num_blocks = cdiv(max_num_blocks, alignment) * alignment
