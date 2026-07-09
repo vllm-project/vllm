@@ -306,6 +306,17 @@ class ApertusMultiModalProcessor(BaseMultiModalProcessor[ApertusProcessingInfo])
         dummy_inputs=ApertusDummyInputsBuilder,
         )
 class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
+    # Required by vLLM's chat serving to insert the
+    # modality placeholder when flattening OpenAI content parts. Without it
+    # image/audio parts silently vanish from the prompt.
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
+        if modality.startswith("image"):
+            return "<|image|>"
+        if modality.startswith("audio"):
+            return "<|audio|>"
+        raise ValueError(f"Unsupported modality: {modality}")
+
     """
     GPU Worker Domain.
     Heavy inference executes natively on GPU. Returns embeddings of substituted tokens.
