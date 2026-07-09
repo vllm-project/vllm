@@ -47,6 +47,9 @@ Nur Core-Fixes, kein GGUF-spezifischer Code:
   Mamba-State-Klassenmethoden) und `SupportsMRoPE` (Text-only-Positionen)
 - `speculative.py`: MTP-Konvertierung auch für `qwen3_5_text`/
   `qwen3_5_moe_text`; Draft-ModelConfig erbt `model_weights` vom Target
+- `qwen3_5_mtp.py`: Multimodal-Prozessor auf `Qwen3_5MTP` registriert
+  (Klasse deklarierte `SupportsMultiModal`, ohne Registrierung crashte
+  MTP + Vision beim Dummy-Profiling)
 
 ## Nutzung
 
@@ -84,7 +87,13 @@ Remote geht direkt: `--model unsloth/Qwen3.5-2B-GGUF:Q8_0 --tokenizer Qwen/Qwen3
   unverändertem Decode.
 - `out_proj` muss blockaligniert quantisiert sein (Q8_0/Q4_0/...; Q6_K mit
   head_v_dim=128 nicht invertierbar → klarer Fehler mit Hinweis).
-- mmproj/Vision (multimodal) nicht unterstützt — Text-only.
+- ~~mmproj/Vision~~ unterstützt: liegt eine `*mmproj*.gguf` neben dem
+  Modell und enthält die config.json eine `vision_config`, wird
+  `Qwen3_5ForConditionalGeneration` serviert und der Vision-Encoder aus
+  der mmproj-Datei geladen (getestet: Q4_K_M + mmproj-BF16, Bildbeschreibung
+  korrekt, auch in Kombination mit MTP). Für Vision braucht die config.json
+  die M-RoPE-Felder (volle Original-Config verwenden) sowie
+  `preprocessor_config.json` neben dem Modell.
 - MTP + CUDA-Graph-Profiling braucht Headroom: mit
   `--max-num-batched-tokens 1600` und `--gpu-memory-utilization 0.86`
   stabil auf 20-GB-Karten; Default-Werte OOMen knapp.
