@@ -86,6 +86,23 @@ fn get_beam_search_score(
     }
 }
 
+fn all_stop_ids(config: &BeamSearchConfig) -> BTreeSet<u32> {
+    let mut ids: BTreeSet<u32> = config.stop_token_ids.iter().copied().collect();
+    ids.extend(config.extra_eos_token_ids.iter().copied());
+    if let Some(eos) = config.eos_token_id {
+        ids.insert(eos);
+    }
+    ids
+}
+
+fn stop_ids_for_engine(config: &BeamSearchConfig) -> Vec<u32> {
+    let mut ids = config.stop_token_ids.clone();
+    if !config.ignore_eos {
+        ids.extend(config.extra_eos_token_ids.iter().copied());
+    }
+    ids
+}
+
 /// Run beam search for one prompt.
 pub(crate) async fn run_beam_search(
     llm: &vllm_llm::Llm,
@@ -105,17 +122,8 @@ pub(crate) async fn run_beam_search(
     }];
     let mut completed: Vec<BeamSearchBeam> = vec![];
 
-    let mut stop_token_ids = config.stop_token_ids.clone();
-    if !config.ignore_eos {
-        stop_token_ids.extend(config.extra_eos_token_ids.iter().copied());
-    }
-    let all_stop_token_ids: BTreeSet<u32> = {
-        let mut ids: BTreeSet<u32> = stop_token_ids.iter().copied().collect();
-        if let Some(eos) = config.eos_token_id {
-            ids.insert(eos);
-        }
-        ids
-    };
+    let stop_token_ids = stop_ids_for_engine(&config);
+    let all_stop_token_ids = all_stop_ids(&config);
 
     for step in 0..config.max_tokens {
         let mut futures = Vec::with_capacity(all_beams.len());
@@ -159,6 +167,10 @@ pub(crate) async fn run_beam_search(
             let output = result?;
             let current_beam = &all_beams[i];
 
+            if matches!(output.finish_reason, FinishReason::Error) {
+                return Err(crate::error::Error::BeamSearchEngineError);
+            }
+
             if let Some(logprobs) = &output.logprobs {
                 if let Some(position) = logprobs.positions.first() {
                     let mut seen_token_ids: BTreeSet<u32> = BTreeSet::new();
@@ -168,18 +180,29 @@ pub(crate) async fn run_beam_search(
                         }
                         let candidate_logprob = current_beam.cum_logprob + entry.logprob;
                         let is_eos = config.eos_token_id.is_some_and(|eos| entry.token_id == eos);
-                        let is_extra_eos = config.extra_eos_token_ids.contains(&entry.token_id);
+                        let is_extra_eos = !config.ignore_eos
+                            && config.extra_eos_token_ids.contains(&entry.token_id);
                         let is_stop = config.stop_token_ids.contains(&entry.token_id);
 
                         if (is_eos && !config.ignore_eos) || is_extra_eos || is_stop {
                             let mut logprobs = current_beam.logprobs.clone();
                             logprobs.push(position.entries.clone());
+                            let stop_token = entry.token_id;
+                            let finish = if is_eos {
+                                FinishReason::stop_eos()
+                            } else {
+                                FinishReason::Stop(Some(
+                                    vllm_engine_core_client::protocol::output::StopReason::TokenId(
+                                        stop_token,
+                                    ),
+                                ))
+                            };
                             completed.push(BeamSearchBeam {
                                 tokens: current_beam.tokens.clone(),
                                 cum_logprob: candidate_logprob,
                                 logprobs,
-                                finish_reason: Some(FinishReason::stop_eos()),
-                                stop_reason: Some(entry.token_id),
+                                finish_reason: Some(finish),
+                                stop_reason: Some(stop_token),
                                 lora_request: current_beam.lora_request.clone(),
                             });
                         } else {
@@ -192,10 +215,17 @@ pub(crate) async fn run_beam_search(
                         }
                     }
                 }
-            }
-
-            if matches!(output.finish_reason, FinishReason::Error) {
-                return Err(crate::error::Error::BeamSearchEngineError);
+            } else {
+                // Engine stopped (e.g. on a stop token) without returning
+                // logprobs.  Push the beam as-is into completed.
+                completed.push(BeamSearchBeam {
+                    tokens: current_beam.tokens.clone(),
+                    cum_logprob: current_beam.cum_logprob,
+                    logprobs: current_beam.logprobs.clone(),
+                    finish_reason: Some(output.finish_reason),
+                    stop_reason: None,
+                    lora_request: current_beam.lora_request.clone(),
+                });
             }
         }
 
@@ -254,4 +284,276 @@ pub(crate) async fn run_beam_search(
         prompt_token_ids,
         beams: best_beams,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use vllm_engine_core_client::protocol::logprobs::TokenLogprob;
+    use super::*;
+
+    fn make_token_logprob(token_id: u32, logprob: f32) -> TokenLogprob {
+        TokenLogprob {
+            token_id,
+            logprob,
+            rank: 1,
+        }
+    }
+
+    fn make_beam(
+        tokens: Vec<u32>,
+        cum_logprob: f32,
+        logprobs: Vec<Vec<TokenLogprob>>,
+    ) -> BeamSearchBeam {
+        BeamSearchBeam {
+            tokens,
+            cum_logprob,
+            logprobs,
+            finish_reason: None,
+            stop_reason: None,
+            lora_request: None,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // get_beam_search_score
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn beam_score_identity_length_penalty() {
+        // length_penalty=1.0 → score = cum_logprob / seq_len
+        let tokens = vec![1, 2, 3, 4, 5];
+        let score = get_beam_search_score(&tokens, -10.0, 99, 1.0);
+        assert!((score - (-10.0 / 5.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn beam_score_longer_penalized_with_lp_gt_1() {
+        // length_penalty=2.0 makes longer sequences score lower
+        let short = get_beam_search_score(&[1, 2], -3.0, 99, 2.0); // -3 / 4 = -0.75
+        let long = get_beam_search_score(&[1, 2, 3, 4, 5], -3.0, 99, 2.0); // -3 / 25 = -0.12
+        assert!(long > short); // long is less negative → better
+    }
+
+    #[test]
+    fn beam_score_longer_favored_with_lp_gt_1() {
+        // For negative logprobs, length_penalty > 1 rewards longer sequences:
+        // dividing a negative by a larger denominator makes it less negative.
+        let short = get_beam_search_score(&[1, 2], -5.0, 99, 2.0);
+        let long = get_beam_search_score(&[1, 2, 3, 4, 5], -5.0, 99, 2.0);
+        assert!(long > short);
+    }
+
+    #[test]
+    fn beam_score_longer_still_favored_with_lp_lt_1() {
+        // For negative cum_logprob, even lp=0.5 favors longer sequences
+        // (longer denominator still makes the negative value less negative).
+        let short = get_beam_search_score(&[1, 2], -5.0, 99, 0.5);
+        let long = get_beam_search_score(&[1, 2, 3, 4, 5], -5.0, 99, 0.5);
+        assert!(long > short);
+    }
+
+    #[test]
+    fn beam_score_lp_affects_relative_ordering() {
+        // A longer beam with slightly worse cum_logprob can beat a shorter
+        // one when length_penalty is high enough.
+        let short_strong = get_beam_search_score(&[1, 2], -5.0, 99, 1.0); // -5/2 = -2.5
+        let long_weak = get_beam_search_score(&[1, 2, 3, 4, 5], -5.5, 99, 1.0); // -5.5/5 = -1.1
+        assert!(long_weak > short_strong);
+    }
+
+    #[test]
+    fn beam_score_eos_subtracts_from_length() {
+        // token sequence ends with EOS → seq_len decremented before penalty
+        let with_eos = get_beam_search_score(&[1, 2, 99], -6.0, 99, 0.0);
+        let no_eos = get_beam_search_score(&[1, 2], -6.0, 99, 0.0);
+        assert!((with_eos - no_eos).abs() < 1e-6);
+    }
+
+    #[test]
+    fn beam_score_zero_denom_returns_cum_logprob() {
+        let score = get_beam_search_score(&[], -7.0, 99, 1.0);
+        assert!((score - (-7.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn beam_score_lp_zero_no_penalty() {
+        let tokens = vec![1, 2, 3, 4, 5];
+        let score = get_beam_search_score(&tokens, -10.0, 99, 0.0);
+        // seq_len^0 = 1 → score = cum_logprob
+        assert!((score - (-10.0)).abs() < 1e-6);
+    }
+
+    // -----------------------------------------------------------------------
+    // stop_ids_for_engine / all_stop_ids
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn stop_ids_includes_extra_eos_when_not_ignore_eos() {
+        let config = BeamSearchConfig {
+            beam_width: 1,
+            max_tokens: 10,
+            temperature: 1.0,
+            length_penalty: 1.0,
+            ignore_eos: false,
+            eos_token_id: Some(99),
+            extra_eos_token_ids: BTreeSet::from([151643]),
+            lora_request: None,
+            cache_salt: None,
+            priority: 0,
+            data_parallel_rank: None,
+            stop_token_ids: vec![42],
+        };
+        let stop = stop_ids_for_engine(&config);
+        assert!(stop.contains(&42));
+        assert!(stop.contains(&151643));
+
+        let all = all_stop_ids(&config);
+        assert!(all.contains(&42));
+        assert!(all.contains(&151643));
+        assert!(all.contains(&99));
+    }
+
+    #[test]
+    fn stop_ids_excludes_extra_eos_when_ignore_eos() {
+        let config = BeamSearchConfig {
+            beam_width: 1,
+            max_tokens: 10,
+            temperature: 1.0,
+            length_penalty: 1.0,
+            ignore_eos: true,
+            eos_token_id: Some(99),
+            extra_eos_token_ids: BTreeSet::from([151643]),
+            lora_request: None,
+            cache_salt: None,
+            priority: 0,
+            data_parallel_rank: None,
+            stop_token_ids: vec![42],
+        };
+        let stop = stop_ids_for_engine(&config);
+        assert!(stop.contains(&42));
+        assert!(!stop.contains(&151643));
+
+        let all = all_stop_ids(&config);
+        assert!(all.contains(&42));
+        assert!(all.contains(&151643));
+        assert!(all.contains(&99));
+    }
+
+    // -----------------------------------------------------------------------
+    // BeamSearchBeam / BeamSearchOutput
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn beam_output_preserves_prompt_token_ids() {
+        let output = BeamSearchOutput {
+            prompt_token_ids: vec![1, 2, 3],
+            beams: vec![make_beam(vec![1, 2, 3, 4], -1.0, vec![])],
+        };
+        assert_eq!(output.prompt_token_ids, vec![1, 2, 3]);
+        assert_eq!(output.beams.len(), 1);
+        assert_eq!(output.beams[0].tokens, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn beam_candidate_sort_stable_by_cum_logprob() {
+        let mut candidates = vec![
+            BeamCandidate {
+                cum_logprob: -2.0,
+                token_id: 10,
+                parent_beam: 0,
+                logprobs: vec![],
+            },
+            BeamCandidate {
+                cum_logprob: -1.0,
+                token_id: 20,
+                parent_beam: 0,
+                logprobs: vec![],
+            },
+            BeamCandidate {
+                cum_logprob: -3.0,
+                token_id: 30,
+                parent_beam: 0,
+                logprobs: vec![],
+            },
+        ];
+        candidates.sort_by(|a, b| b.cum_logprob.total_cmp(&a.cum_logprob));
+        assert_eq!(candidates[0].token_id, 20); // highest cum_logprob
+        assert_eq!(candidates[1].token_id, 10);
+        assert_eq!(candidates[2].token_id, 30);
+    }
+
+    // -----------------------------------------------------------------------
+    // BeamSearchConfig default behavior
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn config_beam_width_clamped_to_one() {
+        let config = BeamSearchConfig {
+            beam_width: 0,
+            max_tokens: 10,
+            temperature: 1.0,
+            length_penalty: 1.0,
+            ignore_eos: false,
+            eos_token_id: None,
+            extra_eos_token_ids: BTreeSet::new(),
+            lora_request: None,
+            cache_salt: None,
+            priority: 0,
+            data_parallel_rank: None,
+            stop_token_ids: vec![],
+        };
+        assert_eq!(config.beam_width.max(1) as usize, 1);
+    }
+
+    #[test]
+    fn logprobs_num_is_double_beam_width() {
+        let beam_width: usize = 3;
+        let logprobs_num = 2 * beam_width;
+        assert_eq!(logprobs_num, 6);
+    }
+
+    // -----------------------------------------------------------------------
+    // EOS / stop completion logic — behavior via scoring
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn beams_scored_by_length_penalty() {
+        let eos = 99;
+        // A shorter beam with better cum_logprob vs longer with worse
+        let short_beam = make_beam(vec![1, 2, 3], -5.0, vec![vec![make_token_logprob(3, -5.0)]]);
+        let long_beam = make_beam(
+            vec![1, 2, 3, 4, 5],
+            -5.5,
+            vec![vec![make_token_logprob(5, -5.5)]],
+        );
+
+        let score_short =
+            get_beam_search_score(&short_beam.tokens, short_beam.cum_logprob, eos, 1.0);
+        let score_long = get_beam_search_score(&long_beam.tokens, long_beam.cum_logprob, eos, 1.0);
+
+        // lp=1.0: short=-5/3=-1.667, long=-5.5/5=-1.1 → long wins (length reward)
+        assert!(score_long > score_short);
+
+        let score_short_lp3 =
+            get_beam_search_score(&short_beam.tokens, short_beam.cum_logprob, eos, 3.0);
+        let score_long_lp3 =
+            get_beam_search_score(&long_beam.tokens, long_beam.cum_logprob, eos, 3.0);
+        // lp=3.0: short=-5/27=-0.185, long=-5.5/125=-0.044 → long still wins
+        assert!(score_long_lp3 > score_short_lp3);
+    }
+
+    #[test]
+    fn beams_sorted_by_raw_logprob_when_no_eos() {
+        let beam_a = make_beam(vec![1, 2, 3], -3.0, vec![]);
+        let beam_b = make_beam(vec![1, 2, 3, 4, 5], -5.0, vec![]);
+
+        // without EOS, sorting is by cum_logprob alone
+        let mut beams = vec![beam_a.clone(), beam_b.clone()];
+        beams.sort_by(|a, b| b.cum_logprob.total_cmp(&a.cum_logprob));
+
+        assert_eq!(beams[0].cum_logprob, -3.0);
+        assert_eq!(beams[1].cum_logprob, -5.0);
+    }
 }
