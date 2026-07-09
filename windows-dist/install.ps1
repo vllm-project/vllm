@@ -100,15 +100,22 @@ if (Test-Path $harnessSrc) {
 # --- Create sitecustomize.py in active venv ---
 if (-not $SkipVenv) {
     try {
-        $pythonLib = python -c "import sys; print([p for p in sys.path if p.endswith('site-packages')][0])" 2>$null
+        # Use Python file to avoid PowerShell parsing conflicts with brackets
+        $pyCode = @'
+import sys
+for p in sys.path:
+    if p.endswith("site-packages"):
+        print(p)
+        break
+'@
+        $pythonLib = python -c $pyCode 2>$null
         if ($pythonLib) {
             $siteCust = Join-Path $pythonLib "sitecustomize.py"
             if (-not (Test-Path $siteCust)) {
-                Set-Content -Path $siteCust -Value @"
-import os
-os.environ.setdefault("HIP_PATH", r"$HipPath")
-os.environ.setdefault("VLLM_NO_USAGE_STATS", "true")
-"@
+                $scContent = 'import os' + [Environment]::NewLine + `
+                    'os.environ.setdefault("HIP_PATH", r"' + $HipPath + '")' + [Environment]::NewLine + `
+                    'os.environ.setdefault("VLLM_NO_USAGE_STATS", "true")'
+                Set-Content -Path $siteCust -Value $scContent
                 Write-Host "[OK] Created sitecustomize.py in $pythonLib" -ForegroundColor Green
             } else {
                 Write-Host "[OK] sitecustomize.py already exists" -ForegroundColor Green
