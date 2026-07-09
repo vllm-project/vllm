@@ -2,14 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
+from typing import ClassVar, Literal
 
 import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import (
-    VllmConfig,
-)
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -44,6 +43,11 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLP as Glm5NextMLP
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2MoE as Glm5NextMoE
+from vllm.model_executor.models.glm4_1v import (
+    Glm4vDummyInputsBuilder,
+    Glm4vForConditionalGeneration,
+    Glm4vMultiModalProcessor,
+)
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsHybrid,
@@ -53,15 +57,18 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    init_vllm_registered_model,
     is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
 )
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 
 from .attention import Glm5NextLinearAttention, Glm5NextMLAAttention
+from .multimodal import Glm5NextProcessingInfo, Glm5NextVisionTransformer
 
 logger = init_logger(__name__)
 
@@ -646,6 +653,83 @@ class Glm5NextForCausalLM(
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    Glm4vMultiModalProcessor,
+    info=Glm5NextProcessingInfo,
+    dummy_inputs=Glm4vDummyInputsBuilder,
+)
+class Glm5NextForConditionalGeneration(
+    Glm4vForConditionalGeneration, HasInnerState, IsHybrid
+):
+    # The text model (KDA + dense-MLA + MoE) is a hybrid mamba model. The
+    # multimodal wrapper must declare the same interfaces so vLLM treats it as
+    # hybrid (auto-aligns mamba/attention block sizes, sizes the mamba state
+    # cache); the mamba-state classmethods delegate to the text model.
+    has_inner_state: ClassVar[Literal[True]] = True
+    is_hybrid: ClassVar[Literal[True]] = True
+
+    # NOTE: weight-prefix mapping is inherited from Glm4vForConditionalGeneration
+    # (``model.visual.`` -> ``visual.``, ``model.language_model.`` ->
+    # ``language_model.model.``, ``lm_head.`` -> ``language_model.lm_head.``),
+    # matching the GLM-OCR / GLM-4V serialization convention. If the real
+    # checkpoint's safetensors keys differ (e.g. ``language_model.model.`` with
+    # no outer ``model.``), override ``hf_to_vllm_mapper`` accordingly.
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig):
+        from .model import Glm5NextForCausalLM
+
+        return Glm5NextForCausalLM.get_mamba_state_dtype_from_config(vllm_config)
+
+    @classmethod
+    def get_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
+        from .model import Glm5NextForCausalLM
+
+        return Glm5NextForCausalLM.get_mamba_state_shape_from_config(vllm_config)
+
+    @classmethod
+    def get_mamba_state_copy_func(cls):
+        from .model import Glm5NextForCausalLM
+
+        return Glm5NextForCausalLM.get_mamba_state_copy_func()
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super(Glm4vForConditionalGeneration, self).__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
+        assert multimodal_config is not None
+
+        self.config = config
+        self.model_config = vllm_config.model_config
+        self.multimodal_config = multimodal_config
+        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
+        self.is_multimodal_pruning_enabled = (
+            multimodal_config.is_multimodal_pruning_enabled()
+        )
+
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.visual = Glm5NextVisionTransformer(
+                config.text_config,
+                config.vision_config,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-5),
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "visual"),
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["Glm5NextForCausalLM"],
+            )
+
+        # Glm5NextForCausalLM does not implement make_empty_intermediate_tensors,
+        # so pipeline parallelism is gated off (consistent with the text-only
+        # model) and we intentionally do not alias it here.
 
 
 def get_spec_layer_idx_from_weight_name(
