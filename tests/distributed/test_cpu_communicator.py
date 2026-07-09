@@ -502,6 +502,21 @@ def _get_dp_shm_communicator():
     return dp_group, communicator
 
 
+def _get_tp_shm_communicator():
+    from vllm.distributed.device_communicators.cpu_communicator import (
+        CpuCommunicator,
+        _CPUSHMDistributed,
+    )
+    from vllm.distributed.parallel_state import get_tp_group
+
+    tp_group = get_tp_group()
+    communicator = tp_group.device_communicator
+    assert isinstance(communicator, CpuCommunicator)
+    assert communicator.unique_name.startswith("tp:")
+    assert isinstance(communicator.dist_module, _CPUSHMDistributed)
+    return tp_group, communicator
+
+
 def _get_ragged_buffer_capacity(communicator, tensor, buffers, *, per_rank=False):
     buffer = buffers.get(communicator._ragged_buffer_key(tensor))
     if buffer is None:
@@ -737,6 +752,62 @@ def _dp_shm_group_name_worker(
         _report_worker_failure(rank, err_q, err)
 
 
+def _moe_no_ep_parallel_config_worker(
+    rank,
+    world_size,
+    tp_size,
+    dp_size,
+    port,
+    dp_port,
+    params,
+    err_q,
+):
+    try:
+        os.environ.setdefault("VLLM_DIST_IDENT", f"test_cpu_moe_no_ep_{port}")
+        _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
+
+        from vllm.config.parallel import ParallelConfig
+        from vllm.distributed.parallel_state import (
+            get_dp_group,
+            get_tp_group,
+        )
+        from vllm.model_executor.layers.fused_moe.config import (
+            FusedMoEParallelConfig,
+        )
+
+        dp_rank = rank // tp_size
+        expected_tp_ranks = list(range(dp_rank * tp_size, (dp_rank + 1) * tp_size))
+
+        assert get_tp_group().ranks == expected_tp_ranks
+        assert get_dp_group().rank_in_group == dp_rank
+
+        parallel_config = ParallelConfig(
+            tensor_parallel_size=tp_size,
+            data_parallel_size=dp_size,
+            data_parallel_rank=dp_rank,
+            enable_expert_parallel=False,
+        )
+        moe_parallel_config = FusedMoEParallelConfig.make(
+            tp_size_=tp_size,
+            pcp_size_=1,
+            dp_size_=dp_size,
+            sp_size_=1,
+            vllm_parallel_config=parallel_config,
+        )
+
+        assert moe_parallel_config.tp_size == world_size
+        assert moe_parallel_config.tp_rank == rank
+        assert moe_parallel_config.dp_size == dp_size
+        assert moe_parallel_config.dp_rank == dp_rank
+        assert moe_parallel_config.ep_size == 1
+        assert moe_parallel_config.ep_rank == 0
+        assert not moe_parallel_config.use_ep
+
+        dist.barrier()
+    except Exception as err:
+        _report_worker_failure(rank, err_q, err)
+
+
 def _moe_ep_parallel_config_worker(
     rank,
     world_size,
@@ -792,6 +863,45 @@ def _moe_ep_parallel_config_worker(
         assert moe_parallel_config.ep_size == world_size
         assert moe_parallel_config.ep_rank == rank
         assert moe_parallel_config.use_ep
+
+        dist.barrier()
+    except Exception as err:
+        _report_worker_failure(rank, err_q, err)
+
+
+def _tp_shm_all_reduce_worker(
+    rank,
+    world_size,
+    tp_size,
+    dp_size,
+    port,
+    dp_port,
+    params,
+    err_q,
+):
+    """Confirm the TP all-reduce path uses SHM and matches gloo."""
+    try:
+        os.environ.setdefault("VLLM_DIST_IDENT", f"test_cpu_tp_shm_all_reduce_{port}")
+        _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
+
+        tp_group, _ = _get_tp_shm_communicator()
+        tensor = torch.arange(12, dtype=torch.float32).reshape(3, 4) + float(rank)
+
+        ref = tensor.clone()
+        dist.all_reduce(ref, group=tp_group.cpu_group)
+
+        orig_all_reduce = dist.all_reduce
+
+        def forbidden_all_reduce(*args, **kwargs):
+            raise AssertionError("TP SHM all_reduce fell back to torch.distributed")
+
+        dist.all_reduce = forbidden_all_reduce
+        try:
+            shm_result = tp_group.all_reduce(tensor.clone())
+        finally:
+            dist.all_reduce = orig_all_reduce
+
+        torch.testing.assert_close(shm_result, ref)
 
         dist.barrier()
     except Exception as err:
@@ -901,6 +1011,17 @@ def test_cpu_moe_ep_tp2_dp3_parallel_config():
 
 
 @pytest.mark.distributed
+def test_cpu_moe_no_ep_tp2_dp3_parallel_config():
+    _spawn_workers(
+        _moe_no_ep_parallel_config_worker,
+        world_size=6,
+        tp_size=2,
+        dp_size=3,
+        params=None,
+    )
+
+
+@pytest.mark.distributed
 @pytest.mark.skipif(not HAS_CPU_SHM, reason="CPU SHM communicator required")
 def test_cpu_dp_all_gatherv_ragged_shm_buffers_reuse_and_grow():
     _spawn_workers(
@@ -954,5 +1075,17 @@ def test_cpu_dp_shm_all_reduce_matches_gloo():
         world_size=6,
         tp_size=1,
         dp_size=6,
+        params=None,
+    )
+
+
+@pytest.mark.distributed
+@pytest.mark.skipif(not HAS_CPU_SHM, reason="CPU SHM communicator required")
+def test_cpu_tp_shm_all_reduce_matches_gloo_without_fallback():
+    _spawn_workers(
+        _tp_shm_all_reduce_worker,
+        world_size=6,
+        tp_size=2,
+        dp_size=3,
         params=None,
     )

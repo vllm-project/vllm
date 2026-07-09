@@ -121,6 +121,17 @@ def test_cpu_platform_allows_tp_only_ep():
         CpuPlatform.check_and_update_config(vllm_config)
 
 
+def test_cpu_platform_allows_hybrid_tp_dp_without_ep():
+    vllm_config = _make_platform_config(
+        tensor_parallel_size=2,
+        data_parallel_size=3,
+        enable_expert_parallel=False,
+    )
+
+    with patch.dict(os.environ, {"VLLM_CPU_KVCACHE_SPACE": ""}):
+        CpuPlatform.check_and_update_config(vllm_config)
+
+
 def test_cpu_platform_allows_dp_only_ep():
     vllm_config = _make_platform_config(
         tensor_parallel_size=1,

@@ -19,9 +19,6 @@ if not current_platform.is_cpu():
     pytest.skip("CPU-only test", allow_module_level=True)
 
 import vllm._custom_ops as ops  # noqa: E402
-from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (  # noqa: E402
-    fused_experts_cpu_local_skip,
-)
 from vllm.model_executor.models.utils import sequence_parallel_chunk  # noqa: E402
 
 if not hasattr(torch.ops._C, "fused_experts_cpu"):
@@ -338,7 +335,7 @@ def _moe_ep_worker(rank, world_size, tp_size, dp_size, port, dp_port, params, er
 
             # Expert compute: skip non-local selections (the shipped path).
             pw1, pw2 = _prepack_experts(w1_local), _prepack_experts(w2_local)
-            expert_out = fused_experts_cpu_local_skip(
+            expert_out = ops.fused_experts_cpu_local_skip(
                 a_gathered.clone(),
                 pw1,
                 pw2,
@@ -376,7 +373,7 @@ def _moe_ep_worker(rank, world_size, tp_size, dp_size, port, dp_port, params, er
             )
         else:
             # TP all-reduce merges complementary expert shards for each DP replica.
-            dist.all_reduce(combined, group=tp_group.device_group)
+            combined = tp_group.all_reduce(combined)
 
         # Gather results from all ranks at rank 0 for verification.
         # Each rank holds its DP-slice result [M_per_dp, K].
