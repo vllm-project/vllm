@@ -73,7 +73,9 @@ if "!HIP_PATH!"=="" (
 )
 :: Extract version from hipcc --version output (e.g. "HIP version: 7.13.26176...")
 if NOT "!HIP_PATH!"=="" (
-    for /f "tokens=3,4 delims=:. " %%V in ('"!HIP_PATH!\bin\hipcc.exe" --version 2^>nul ^| findstr /i "hip version"') do set "ROCVER=%%V.%%W"
+    "!HIP_PATH!\bin\hipcc.exe" --version >"%TEMP%\hipver.txt" 2>nul
+    for /f "tokens=3,4 delims=:. " %%V in ('findstr /i "hip version" "%TEMP%\hipver.txt" 2^>nul') do set "ROCVER=%%V.%%W"
+    del "%TEMP%\hipver.txt" 2>nul
     if "!ROCVER!"=="" set "ROCVER=7.13"
     echo [OK] ROCm at !HIP_PATH! (version !ROCVER!)
 ) else (
