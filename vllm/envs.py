@@ -271,6 +271,7 @@ if TYPE_CHECKING:
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
+    VLLM_SHM_OBJECT_STORAGE_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
     VLLM_WSL2_ENABLE_PIN_MEMORY: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
@@ -1908,6 +1909,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disable using pytorch's pin memory for CPU offloading.
     "VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY": lambda: bool(
         int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY", "0"))
+    ),
+    # Disable pinning host memory when deserializing tensors / multimodal
+    # kwargs read out of the shared-memory object storage. Pinned (page-locked)
+    # copies are never returned to the OS by the CUDA host allocator, so on
+    # multimodal workloads with variable tensor sizes the pinned pool grows
+    # without bound. When set, use pageable copies (clone) instead, trading a
+    # small H2D-transfer cost for reclaimable host memory.
+    "VLLM_SHM_OBJECT_STORAGE_DISABLE_PIN_MEMORY": lambda: bool(
+        int(os.getenv("VLLM_SHM_OBJECT_STORAGE_DISABLE_PIN_MEMORY", "0"))
     ),
     # Disable using UVA (Unified Virtual Addressing) for CPU offloading.
     "VLLM_WEIGHT_OFFLOADING_DISABLE_UVA": lambda: bool(
