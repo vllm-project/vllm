@@ -5246,3 +5246,32 @@ def test_async_load_reservation_prevents_wedge_e2e():
     assert b.status == RequestStatus.WAITING
     assert b.num_preemptions == 0
     assert b.request_id not in req_to_blocks
+
+
+@pytest.mark.parametrize("kv_role", ["kv_producer", "kv_consumer", "kv_both"])
+def test_kv_producer_zeroes_lookahead_tokens(kv_role: str):
+    """A kv_producer never decodes speculatively, so num_lookahead_tokens must
+    be 0 to avoid allocating extra blocks that cause the connector's
+    prefix-cache trimming to drop the wrong block (issue #43996).
+
+    We monkeypatch SpeculativeConfig.uses_draft_model to force the scheduler
+    init to set num_lookahead_tokens = num_spec_tokens, then verify the
+    producer role zeroes it out."""
+    from unittest.mock import patch
+
+    with patch("vllm.config.SpeculativeConfig.uses_draft_model", return_value=True):
+        scheduler = create_scheduler(
+            use_kv_connector=True,
+            kv_role=kv_role,
+            num_speculative_tokens=5,
+        )
+    if kv_role == "kv_producer":
+        # Producer: config validator reduces spec tokens to 1, scheduler
+        # zeroes lookahead.
+        assert scheduler.num_lookahead_tokens == 0
+        assert scheduler.num_spec_tokens == 1
+    else:
+        # Consumer/both: lookahead is set to num_spec_tokens by the
+        # uses_draft_model() path.
+        assert scheduler.num_lookahead_tokens == 5
+        assert scheduler.num_spec_tokens == 5

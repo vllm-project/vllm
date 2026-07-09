@@ -2272,6 +2272,27 @@ class VllmConfig:
             )
         return self
 
+    @model_validator(mode="after")
+    def validate_kv_producer_speculative_tokens(self) -> "VllmConfig":
+        """P/D + speculative decoding: a kv_producer only does prefill and
+        transfers KV -- it never runs verification or autoregressive drafting.
+        Reduce num_speculative_tokens to 1 so the drafter runs a single
+        prefill pass (populating its KV cache for transfer) while skipping
+        all multi-step decode work."""
+        if (
+            self.speculative_config is not None
+            and self.kv_transfer_config is not None
+            and self.kv_transfer_config.is_kv_producer
+            and self.speculative_config.num_speculative_tokens > 1
+        ):
+            logger.info_once(
+                "kv_role is 'kv_producer' in a PD setup: reducing "
+                "num_speculative_tokens from %d to 1.",
+                self.speculative_config.num_speculative_tokens,
+            )
+            self.speculative_config.num_speculative_tokens = 1
+        return self
+
 
 _current_vllm_config: VllmConfig | None = None
 _current_prefix: str | None = None

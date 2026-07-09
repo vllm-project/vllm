@@ -51,6 +51,7 @@ def create_scheduler(
     long_prefill_token_threshold: int = 0,
     disable_chunked_mm_input: bool = False,
     use_kv_connector: None | bool | str | MockKVConfig = None,
+    kv_role: str = "kv_both",
     num_blocks: int = 10000,
     block_size: int = 16,
     max_model_len: int | None = None,
@@ -111,7 +112,7 @@ def create_scheduler(
     if isinstance(use_kv_connector, MockKVConfig):
         kv_transfer_config = KVTransferConfig(
             kv_connector="MockKVConnector",
-            kv_role="kv_both",
+            kv_role=kv_role,
             kv_connector_extra_config={
                 "matched_tokens": use_kv_connector.matched_tokens,
                 "is_async": use_kv_connector.is_async,
@@ -120,12 +121,12 @@ def create_scheduler(
     elif isinstance(use_kv_connector, str):
         kv_transfer_config = KVTransferConfig(
             kv_connector=use_kv_connector,
-            kv_role="kv_both",
+            kv_role=kv_role,
         )
     elif use_kv_connector:
         kv_transfer_config = KVTransferConfig(
             kv_connector="ExampleConnector",
-            kv_role="kv_both",
+            kv_role=kv_role,
             kv_connector_extra_config={"shared_storage_path": "local_storage"},
         )
 

@@ -256,6 +256,18 @@ class Scheduler(SchedulerInterface):
                 # query), so it needs exactly num_spec_tokens lookahead slots.
                 self.num_lookahead_tokens = self.num_spec_tokens
 
+        # P/D: producers never run speculative decoding — they only prefill
+        # and transfer KV.  Zero out lookahead so no extra blocks are
+        # allocated, avoiding the trimming bug in _apply_prefix_caching
+        # where the connector drops a data block instead of the lookahead
+        # block (https://github.com/vllm-project/vllm/issues/43996).
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if (
+            kv_transfer_config is not None
+            and kv_transfer_config.kv_role == "kv_producer"
+        ):
+            self.num_lookahead_tokens = 0
+
         # Create the KV cache manager.
         if hash_block_size is None:
             hash_block_size = block_size
@@ -874,14 +886,11 @@ class Scheduler(SchedulerInterface):
                     if num_new_tokens == 0:
                         break
 
-                # Handles an edge case when P/D Disaggregation
-                # is used with Spec Decoding where an
-                # extra block gets allocated which
-                # creates a mismatch between the number
-                # of local and remote blocks.
-                limit_lookahead_tokens = load_kv_async and self.use_eagle
+                # When loading KV from a remote producer (ie on D), allocate without
+                # lookahead slots: the producer never reserves speculative token blocks
+                # so D must match to avoid a block-count mismatch in the connector.
                 effective_lookahead_tokens = (
-                    0 if limit_lookahead_tokens else self.num_lookahead_tokens
+                    0 if load_kv_async else self.num_lookahead_tokens
                 )
 
                 # Determine if we need to allocate cross-attention blocks.

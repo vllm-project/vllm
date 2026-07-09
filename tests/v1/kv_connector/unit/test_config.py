@@ -5,7 +5,13 @@
 
 import pytest
 
-from vllm.config import CacheConfig, KVTransferConfig, ParallelConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    KVTransferConfig,
+    ParallelConfig,
+    SpeculativeConfig,
+    VllmConfig,
+)
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 
 pytestmark = pytest.mark.cpu_test
@@ -181,3 +187,28 @@ def test_kv_offloading_size_only_uses_native_default():
     assert kv_transfer_config.kv_connector == "OffloadingConnector"
     assert kv_transfer_config.kv_role == "kv_both"
     assert kv_connector_extra_config["cpu_bytes_to_use"] == 4.0 * (1 << 30)
+
+
+@pytest.mark.parametrize("kv_role", ["kv_producer", "kv_consumer", "kv_both"])
+def test_kv_producer_reduces_speculative_tokens(kv_role: str):
+    """A kv_producer only prefills and transfers KV — it never runs multi-step
+    speculative decoding. The validator should reduce num_speculative_tokens
+    to 1 (single prefill pass) only for producers (issue #43996)."""
+    original_num_spec_tokens = 5
+    vllm_config = VllmConfig(
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="NixlConnector",
+            kv_role=kv_role,
+        ),
+        speculative_config=SpeculativeConfig(
+            model="ngram",
+            num_speculative_tokens=original_num_spec_tokens,
+        ),
+    )
+    if kv_role == "kv_producer":
+        assert vllm_config.speculative_config.num_speculative_tokens == 1
+    else:
+        assert (
+            vllm_config.speculative_config.num_speculative_tokens
+            == original_num_spec_tokens
+        )
