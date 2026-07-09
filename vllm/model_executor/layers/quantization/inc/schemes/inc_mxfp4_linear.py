@@ -33,7 +33,7 @@ class INCMxfp4LinearMethod(INCLinearScheme):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 60
+        return 80
 
     def create_weights(
         self,

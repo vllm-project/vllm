@@ -39,6 +39,7 @@ class INCConfig(QuantizationConfig):
     SUPPORTED_FORMATS = {
         "auto_round:auto_gptq",
         "auto_round:auto_awq",
+        "auto_round:llm_compressor",
     }
     SUPPORTED_BACKENDS = {
         "auto",
@@ -74,7 +75,7 @@ class INCConfig(QuantizationConfig):
                 f"Unsupported data_type: {data_type},"
                 f" currently only support  {self.SUPPORTED_DTYPES}."
             )
-        if packing_format not in self.SUPPORTED_FORMATS and not is_mxfp:
+        if packing_format not in self.SUPPORTED_FORMATS:
             raise ValueError(
                 f"Unsupported packing_format: {packing_format}, "
                 f"currently only support {self.SUPPORTED_FORMATS}."

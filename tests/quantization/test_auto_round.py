@@ -81,6 +81,12 @@ QWEN3_AUTOROUND_MODELS = [
     ),
 ]
 
+MODEL_RUNNER_KWARGS = {
+    "INCModel/Qwen3-1.7B-AutoRound-MXFP4-W4A4": {"enforce_eager": True},
+    "INCModel/Qwen3-30B-A3B-AutoRound-MXFP4-W4A4": {"enforce_eager": True},
+}
+
+
 @pytest.mark.skipif(
     not (
         current_platform.is_cpu()
@@ -91,11 +97,7 @@ QWEN3_AUTOROUND_MODELS = [
 )
 @pytest.mark.parametrize("model", MODELS + QWEN3_AUTOROUND_MODELS)
 def test_auto_round_model(vllm_runner, model):
-    # default value
-    enforce_eager = False
-    if "MXFP4" in model and current_platform.is_xpu():
-        enforce_eager = True
-    with vllm_runner(model, enforce_eager=enforce_eager) as llm:
+    with vllm_runner(model, **MODEL_RUNNER_KWARGS.get(model, {})) as llm:
         output = llm.generate_greedy(["The capital of France is"], max_tokens=8)
 
     assert output
@@ -485,7 +487,7 @@ def test_qwen3_30b_a3b_mxfp4_autoround_routes_to_mxfp4_moe(
             self.moe_config = moe_config
 
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.inc_moe.INCMxfp4MoEMethod",
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe.INCMxfp4MoEMethod",
         DummyMxfp4MoEMethod,
     )
 
@@ -509,7 +511,7 @@ def test_qwen3_30b_a3b_mxfp4_autoround_routes_to_mxfp4_moe(
 
 
 
-def test_inc_mxfp4_linear_method_registers_weights_and_delegates(
+def test_inc_mxfp4_linear_method_registers_and_processes_weights(
     monkeypatch,
 ) -> None:
     captured = {}
@@ -517,10 +519,6 @@ def test_inc_mxfp4_linear_method_registers_weights_and_delegates(
     class DummyKernel:
         def process_weights_after_loading(self, layer) -> None:
             captured["processed_layer"] = layer
-
-        def apply_weights(self, layer, x, bias=None):
-            captured["apply"] = (layer, x, bias)
-            return "mxfp4-output"
 
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes."
@@ -569,11 +567,6 @@ def test_inc_mxfp4_linear_method_registers_weights_and_delegates(
     assert not hasattr(layer, "weight_packed")
     assert captured["processed_layer"] is layer
 
-    result = method.apply_weights(layer, "x", "bias")
-
-    assert result == "mxfp4-output"
-    assert captured["apply"] == (layer, "x", "bias")
-
 
 def test_inc_mxfp4_moe_method_registers_weights_and_builds_kernel(
     monkeypatch,
@@ -583,24 +576,24 @@ def test_inc_mxfp4_moe_method_registers_weights_and_builds_kernel(
     expected_kernel = object()
 
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.inc_moe."
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
         "CutlassExpertsMxfp4._supports_current_device",
         lambda: False,
     )
     monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.inc_moe."
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
         "make_mxfp4_moe_quant_config",
         lambda **kwargs: captured.update({"quant_config_kwargs": kwargs})
         or expected_quant_config,
     )
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.inc_moe."
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
         "make_mxfp4_moe_kernel",
         lambda **kwargs: captured.update({"kernel_kwargs": kwargs}) or expected_kernel,
     )
 
-    from vllm.model_executor.layers.quantization.inc.inc_moe import (
+    from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe import (
         INCMxfp4MoEMethod,
         XPUExpertsMxFp4,
     )
@@ -640,33 +633,26 @@ def test_inc_mxfp4_moe_method_registers_weights_and_builds_kernel(
     assert method.moe_kernel is expected_kernel
 
 
-def test_wna16_xpu_moe_routes_to_xpu_method(monkeypatch) -> None:
+def test_wna16_xpu_moe_routes_to_gptq_moe(monkeypatch) -> None:
     captured = {}
     expected_method = object()
 
     class DummyMoeConfig:
         pass
 
-    class DummyMethod:
-        def __new__(cls, cfg, moe):
-            captured["cfg"] = cfg
-            captured["moe"] = moe
-            return expected_method
-
     monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
     monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.moe_wna16."
-        "MoeWNA16Config.from_config",
-        lambda cfg: captured.update({"from_config": cfg}) or "built-config",
-    )
-    monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.inc_moe.INCXPUWNA16MoEMethod",
-        DummyMethod,
+        "vllm.model_executor.layers.quantization.inc.schemes."
+        "inc_wna16_scheme._resolve_gptq_moe",
+        lambda layer, layer_config: captured.update(
+            {"layer": layer, "layer_config": layer_config}
+        )
+        or expected_method,
     )
 
     layer = object.__new__(RoutedExperts)
-    setattr(layer, "moe_config", DummyMoeConfig())
+    layer.moe_config = DummyMoeConfig()
     method = INCWna16Scheme().get_moe_method(
         make_config(),
         layer,
@@ -675,15 +661,8 @@ def test_wna16_xpu_moe_routes_to_xpu_method(monkeypatch) -> None:
     )
 
     assert method is expected_method
-    assert captured["from_config"] == {
-        "quant_method": "gptq",
-        "bits": 4,
-        "group_size": 32,
-        "sym": True,
-        "lm_head": False,
-    }
-    assert captured["cfg"] == "built-config"
-    assert captured["moe"] is layer.moe_config
+    assert captured["layer"] is layer
+    assert captured["layer_config"].is_gptq is True
 
 
 class DummyLinearScheme(INCLinearScheme):
@@ -950,7 +929,8 @@ def test_resolve_gptq_moe_falls_back_to_moe_wna16(monkeypatch) -> None:
             captured["moe"] = moe
 
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.utils.marlin_utils.check_marlin_supported",
+        "vllm.model_executor.layers.quantization.utils.marlin_utils."
+        "check_moe_marlin_supports_layer",
         lambda *args, **kwargs: False,
     )
     monkeypatch.setattr(
@@ -1000,10 +980,6 @@ def test_resolve_gptq_moe_uses_auto_gptq_when_supported(monkeypatch) -> None:
             captured["moe"] = moe
 
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.utils.marlin_utils.check_marlin_supported",
-        lambda *args, **kwargs: True,
-    )
-    monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.utils.marlin_utils."
         "check_moe_marlin_supports_layer",
         lambda *args, **kwargs: True,
@@ -1036,10 +1012,6 @@ def test_resolve_awq_moe_uses_marlin_when_supported(monkeypatch) -> None:
             captured["cfg"] = cfg
             captured["moe"] = moe
 
-    monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.utils.marlin_utils.check_marlin_supported",
-        lambda *args, **kwargs: True,
-    )
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.utils.marlin_utils.check_moe_marlin_supports_layer",
         lambda *args, **kwargs: True,

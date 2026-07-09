@@ -26,7 +26,6 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
 )
-from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Method
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,
 )
@@ -34,66 +33,6 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
-
-
-class INCXPUWNA16MoEMethod(MoeWNA16Method):
-    """W4A16 INT4-symmetric group MoE executed by the native XPU kernel.
-
-    Inherits weight creation / loading (GPTQ-named uint8 layout) from
-    :class:`MoeWNA16Method` and overrides :meth:`apply` to dispatch to
-    :class:`XPUExpertsWNA16`, which wraps ``xpu_fused_moe(is_int4=True)``.
-    """
-
-    def __init__(self, quant_config, moe) -> None:
-        super().__init__(quant_config, moe)
-        self._xpu_experts = None
-
-    def _get_xpu_experts(self):
-        if self._xpu_experts is None:
-            from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
-                XPUExpertsWNA16,
-            )
-
-            assert self.moe_quant_config is not None, (
-                "moe_quant_config must be initialised before apply(); it is "
-                "populated from get_fused_moe_quant_config() after weight load."
-            )
-            self._xpu_experts = XPUExpertsWNA16(self.moe, self.moe_quant_config)
-        return self._xpu_experts
-
-    def apply(
-        self,
-        layer: RoutedExperts,
-        x: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        shared_experts: SharedExperts | None,
-        shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
-
-        experts = self._get_xpu_experts()
-        output = torch.empty_like(x)
-        # XPUExpertsWNA16 runs the full fused MoE inside xpu_fused_moe, so the
-        # modular workspaces are unused; pass empty placeholders.
-        empty = x.new_empty(0)
-        experts.apply(
-            output=output,
-            hidden_states=x,
-            w1=layer.w13_qweight,
-            w2=layer.w2_qweight,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            activation=layer.activation,
-            global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
-            a1q_scale=None,
-            a2_scale=None,
-            workspace13=empty,
-            workspace2=empty,
-            expert_tokens_meta=None,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
-        )
-        return output
 
 
 class INCMxfp4MoEMethod(FusedMoEMethodBase):

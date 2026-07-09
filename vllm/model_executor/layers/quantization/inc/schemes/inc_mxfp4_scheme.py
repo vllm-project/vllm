@@ -49,6 +49,6 @@ class INCMxfp4Scheme(INCScheme):
         layer_config: "INCLayerConfig",
     ):
         del config, prefix, layer_config
-        from ..inc_moe import INCMxfp4MoEMethod
+        from .inc_mxfp4_moe import INCMxfp4MoEMethod
 
         return INCMxfp4MoEMethod(layer.moe_config)
