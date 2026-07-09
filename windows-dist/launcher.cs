@@ -258,26 +258,15 @@ class VllmGui : Form
             Log("_C.pyd: OK (" + (new FileInfo(pydPath).Length / 1048576) + " MB)");
         }
 
-        // Check Python
-        try
+        // Find Python — prefer venv Python over system Python
+        string pythonExe = FindPythonExe(repoRoot);
+        if (pythonExe == null)
         {
-            System.Diagnostics.Process p = new System.Diagnostics.Process();
-            p.StartInfo.FileName = "python";
-            p.StartInfo.Arguments = "--version";
-            p.StartInfo.UseShellExecute = false;
-            p.StartInfo.RedirectStandardOutput = true;
-            p.StartInfo.CreateNoWindow = true;
-            p.Start();
-            string ver = p.StandardOutput.ReadToEnd().Trim();
-            p.WaitForExit(3000);
-            Log("Python: " + ver);
-        }
-        catch (Exception ex)
-        {
-            Log("ERROR: Python not found! " + ex.Message);
+            Log("ERROR: No Python found. Install Python 3.12 and create a venv.");
             SetStatus("Error");
             return;
         }
+        Log("Python: " + pythonExe);
 
         List<string> args = new List<string>();
         args.Add("-m"); args.Add("vllm.entrypoints.openai.api_server");
@@ -317,7 +306,13 @@ class VllmGui : Form
 
         try
         {
-            // Set environment
+            // Show model info
+        if (File.Exists(Path.Combine(txtModel.Text, "config.json")))
+            Log("Model config: " + Path.Combine(txtModel.Text, "config.json"));
+        else
+            Log("WARNING: No config.json found in model path. Select a model folder (e.g. Qwen2.5-3B-Instruct), not a model directory.");
+
+        // Set environment
             string[] rocmPaths = {
                 @"C:\Program Files\AMD\ROCm\7.13",
                 @"E:\ROCM-7.13.0-Windows",
@@ -330,7 +325,7 @@ class VllmGui : Form
             Environment.SetEnvironmentVariable("VLLM_NO_USAGE_STATS", "true");
 
             serverProcess = new Process();
-            serverProcess.StartInfo.FileName = "python";
+            serverProcess.StartInfo.FileName = pythonExe;
             serverProcess.StartInfo.Arguments = argStr;
             serverProcess.StartInfo.WorkingDirectory = repoRoot;
             serverProcess.StartInfo.UseShellExecute = false;
@@ -420,6 +415,47 @@ class VllmGui : Form
                 return dir.FullName;
             dir = dir.Parent;
         }
+        return null;
+    }
+
+    private string FindPythonExe(string repoRoot)
+    {
+        // 1. Look for venv Python in various common locations
+        string[] venvChecks = new string[] {
+            Path.Combine(repoRoot, ".venv", "Scripts", "python.exe"),
+            Path.Combine(repoRoot, "venv", "Scripts", "python.exe"),
+            Path.Combine(repoRoot, ".venv", "bin", "python.exe"),
+            Path.Combine(repoRoot, "..", ".venv", "Scripts", "python.exe"),
+        };
+        foreach (string v in venvChecks)
+            if (File.Exists(v)) return v;
+
+        // 2. Try "python" on PATH
+        try
+        {
+            Process p = new Process();
+            p.StartInfo.FileName = "python";
+            p.StartInfo.Arguments = "--version";
+            p.StartInfo.UseShellExecute = false;
+            p.StartInfo.RedirectStandardOutput = true;
+            p.StartInfo.CreateNoWindow = true;
+            p.Start();
+            string ver = p.StandardOutput.ReadToEnd().Trim();
+            p.WaitForExit(2000);
+            if (p.ExitCode == 0 && ver.Contains("3.12"))
+                return "python";
+        }
+        catch {}
+
+        // 3. Try common Python 3.12 install paths
+        string[] fixedPaths = new string[] {
+            @"C:\Users\rr\AppData\Local\Programs\Python\Python312\python.exe",
+            @"C:\Python312\python.exe",
+            @"C:\Program Files\Python312\python.exe",
+        };
+        foreach (string f in fixedPaths)
+            if (File.Exists(f)) return f;
+
         return null;
     }
 }
