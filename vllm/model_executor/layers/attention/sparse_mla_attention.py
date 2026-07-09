@@ -8,15 +8,16 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 import numpy as np
 import torch
 
+from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBaseImpl,
     MLACommonPrefillMetadata,
+    build_mla_chunked_context_metadata,
     get_mla_dims,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
-from vllm.utils.math_utils import cdiv, round_down
 from vllm.utils.torch_utils import np_to_pinned_tensor
 from vllm.v1.attention.backend import (
     AttentionMetadata,
@@ -56,14 +57,31 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             dtype=torch.int32,
             device=device,
         )
+        parallel_config = vllm_config.parallel_config
+        try:
+            self.dcp_world_size = get_dcp_group().world_size
+            self.dcp_rank = get_dcp_group().rank_in_group
+        except AssertionError:
+            # DCP might not be initialized in testing
+            self.dcp_world_size = 1
+            self.dcp_rank = 0
+        self.dcp_local_block_size = parallel_config.cp_kv_cache_interleave_size
+        self.dcp_virtual_block_size = self.dcp_local_block_size * self.dcp_world_size
+
         self.chunked_prefill_workspace_size = (
             self.determine_chunked_prefill_workspace_size(vllm_config)
         )
         workspace_head_size = (
             self.mla_dims.kv_lora_rank + self.mla_dims.qk_rope_head_dim
         )
+        workspace_rows = self.chunked_prefill_workspace_size
+        if self.dcp_world_size > 1:
+            # DCP gathers each rank's local KV shard into the workspace, so it
+            # needs an extra 1/DCP rows beyond the TP allocation.
+            assert self.chunked_prefill_workspace_size % self.dcp_world_size == 0
+            workspace_rows += self.chunked_prefill_workspace_size // self.dcp_world_size
         self.chunked_prefill_workspace = torch.empty(
-            (self.chunked_prefill_workspace_size, workspace_head_size),
+            (workspace_rows, workspace_head_size),
             dtype=self.model_config.dtype,
             device=device,
         )
@@ -126,66 +144,21 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             seq_lens_cpu[num_decodes : num_decodes + num_prefills]
             - prefill_query_lens_cpu
         )
-        max_context_len = context_lens_cpu.max().item()
-        if max_context_len <= 0:
-            return None
-
-        num_prefills_with_context = (context_lens_cpu > 0).sum().item()
-        assert num_prefills_with_context > 0
-
-        max_context_chunk = (
-            self.chunked_prefill_workspace_size // num_prefills_with_context
-        )
-        if current_platform.is_cuda():
-            max_context_chunk = round_down(
-                max_context_chunk, self.kv_cache_spec.block_size
-            )
-        assert max_context_chunk > 0
-
-        num_chunks = cdiv(max_context_len, max_context_chunk)
-        chunk_starts = torch.empty(
-            num_chunks, num_prefills, dtype=torch.int32, pin_memory=True
-        ).copy_(
-            torch.arange(num_chunks, dtype=torch.int32)
-            .multiply_(max_context_chunk)
-            .unsqueeze(1)
-        )
-        chunk_ends = torch.min(
-            context_lens_cpu.unsqueeze(0), chunk_starts + max_context_chunk
-        )
-        chunk_seq_lens = (chunk_ends - chunk_starts).clamp(min=0)
-
-        cu_seq_lens_cpu = torch.zeros(
-            num_chunks, num_prefills + 1, dtype=torch.int32, pin_memory=True
-        )
-        torch.cumsum(
-            chunk_seq_lens, dim=1, out=cu_seq_lens_cpu[:, 1:], dtype=torch.int32
-        )
-        chunk_total_token = cu_seq_lens_cpu[:, -1]
-
-        max_tokens_over_chunk = chunk_total_token.max().item()
-        token_to_seq_cpu = torch.zeros(
-            (num_chunks, max_tokens_over_chunk), dtype=torch.int32, pin_memory=True
-        )
-        req_indices = torch.arange(num_prefills, dtype=torch.int32)
-        for i in range(num_chunks):
-            token_to_seq = torch.repeat_interleave(req_indices, chunk_seq_lens[i])
-            token_to_seq_cpu[i, : token_to_seq.shape[0]] = token_to_seq
-
         qsl_cpu = common_attn_metadata.query_start_loc_cpu
-        prefill_qsl_cpu = qsl_cpu[num_decodes:] - qsl_cpu[num_decodes]
-        prefill_tokens_with_context = prefill_qsl_cpu[num_prefills_with_context].item()
+        prefill_query_start_loc_cpu = qsl_cpu[num_decodes:] - qsl_cpu[num_decodes]
 
-        return MLACommonPrefillMetadata.ChunkedContextMetadata(
-            cu_seq_lens=cu_seq_lens_cpu.to(self.device, non_blocking=True),
-            starts=chunk_starts.to(self.device, non_blocking=True),
-            seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
-            max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
-            seq_lens=chunk_seq_lens,
-            workspace=self.chunked_prefill_workspace,
-            token_to_seq=token_to_seq_cpu.to(self.device, non_blocking=True),
-            chunk_total_token=chunk_total_token,
-            prefill_tokens_with_context=prefill_tokens_with_context,
+        return build_mla_chunked_context_metadata(
+            context_lens_cpu=context_lens_cpu,
+            prefill_query_start_loc_cpu=prefill_query_start_loc_cpu,
+            num_prefills=num_prefills,
+            chunked_prefill_workspace=self.chunked_prefill_workspace,
+            chunked_prefill_workspace_size=self.chunked_prefill_workspace_size,
+            block_size=self.kv_cache_spec.block_size,
+            align_chunk_to_block=current_platform.is_cuda(),
+            device=self.device,
+            dcp_world_size=self.dcp_world_size,
+            dcp_local_block_size=self.dcp_local_block_size,
+            dcp_virtual_block_size=self.dcp_virtual_block_size,
         )
 
     def build(
