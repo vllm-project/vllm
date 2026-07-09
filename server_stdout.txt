@@ -1,0 +1,75 @@
+WARNING 07-09 22:45:29 [__init__.py:28] The vLLM package was not found, so its version could not be inspected. This may cause platform detection to fail.
+WARNING 07-09 22:45:29 [rocm.py:53] Failed to import from vllm._C with ModuleNotFoundError("No module named 'vllm._C'")
+(APIServer pid=10356) INFO 07-09 22:45:45 [api_utils.py:339] 
+(APIServer pid=10356) (APIServer pid=10356) INFO 07-09 22:45:45 [api_utils.py:273] non-default args: {'port': 8001, 'model': 'facebook/opt-125m', 'enforce_eager': True}
+(APIServer pid=10356) INFO 07-09 22:45:45 [system_utils.py:292] Windows detected, skipping ulimit adjustment.
+(APIServer pid=10356) INFO 07-09 22:45:47 [model.py:601] Resolved architecture: OPTForCausalLM
+(APIServer pid=10356) INFO 07-09 22:45:47 [model.py:1731] Using max model len 2048
+(APIServer pid=10356) INFO 07-09 22:45:47 [vllm.py:1006] Asynchronous scheduling is enabled.
+(APIServer pid=10356) WARNING 07-09 22:45:47 [vllm.py:1062] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(APIServer pid=10356) WARNING 07-09 22:45:47 [vllm.py:1110] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(APIServer pid=10356) INFO 07-09 22:45:47 [kernel.py:278] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'])
+(APIServer pid=10356) INFO 07-09 22:45:47 [vllm.py:1288] Cudagraph is disabled under eager mode
+(APIServer pid=10356) INFO 07-09 22:45:47 [compilation.py:310] Enabled custom fusions: norm_quant, act_quant
+WARNING 07-09 22:45:51 [__init__.py:28] The vLLM package was not found, so its version could not be inspected. This may cause platform detection to fail.
+WARNING 07-09 22:45:51 [rocm.py:53] Failed to import from vllm._C with ModuleNotFoundError("No module named 'vllm._C'")
+(EngineCore pid=14668) INFO 07-09 22:46:02 [core.py:115] Initializing a V1 LLM engine (v0.1.dev1+g3483240b7.d20260629) with config: model='facebook/opt-125m', speculative_config=None, tokenizer='facebook/opt-125m', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.float16, max_seq_len=2048, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=True, quantization=None, quantization_config=None, enforce_eager=True, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False, jit_monitor_mode='warn', jit_monitor_verbose=False), seed=0, served_model_name=facebook/opt-125m, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.NONE: 0>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['+sparse_attn_indexer', 'all'], 'ir_enable_torch_wrap': False, 'splitting_ops': [], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': [], 'compile_ranges_endpoints': [2048], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_rope_kvcache_cat_mla': False, 'fuse_act_padding': False}, 'max_cudagraph_capture_size': 0, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': False, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native']), enable_flashinfer_autotune=True, moe_backend='auto', linear_backend='auto')
+(EngineCore pid=14668) WARNING 07-09 22:46:02 [interface.py:358] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+(EngineCore pid=14668) WARNING 07-09 22:46:02 [interface.py:358] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+(EngineCore pid=14668) WARNING 07-09 22:46:02 [interface.py:358] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+(EngineCore pid=14668) WARNING 07-09 22:46:02 [interface.py:358] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+(EngineCore pid=14668) INFO 07-09 22:46:02 [parallel_state.py:1588] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://192.168.29.79:61658 backend=nccl
+(EngineCore pid=14668) INFO 07-09 22:46:02 [parallel_state.py:1923] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
+(EngineCore pid=14668) INFO 07-09 22:46:03 [gpu_model_runner.py:5175] Starting to load model facebook/opt-125m...
+(EngineCore pid=14668) INFO 07-09 22:46:03 [rocm.py:608] Found incompatible backend(s) [TURBOQUANT] with AttentionType.DECODER. Overriding with ROCM_ATTN out of potential backends: ['ROCM_ATTN', 'TRITON_ATTN'].
+(EngineCore pid=14668) WARNING 07-09 22:46:04 [weight_utils.py:498] Failed to get file list for 'facebook/opt-125m'. Trying each pattern in allow_patterns individually until weights have been downloaded. Error: Invalid HF URI 'hf://facebook/opt-125m\'. Repo id must use alphanumeric chars, '-', '_' or '.'. The name cannot start or end with '-' or '.' and the maximum length is 96: 'facebook/opt-125m\'.
+(EngineCore pid=14668) INFO 07-09 22:46:04 [default_loader.py:430] Loading weights took 0.15 seconds
+(EngineCore pid=14668) INFO 07-09 22:46:05 [gpu_model_runner.py:5272] Model loading took 0.24 GiB memory and 1.353770 seconds
+(EngineCore pid=14668) INFO 07-09 22:46:07 [gpu_worker.py:515] Available KV cache memory: 14.06 GiB
+(EngineCore pid=14668) INFO 07-09 22:46:07 [kv_cache_utils.py:2146] GPU KV cache size: 409,504 tokens
+(EngineCore pid=14668) INFO 07-09 22:46:07 [kv_cache_utils.py:2147] Maximum concurrency for 2,048 tokens per request: 199.95x
+(EngineCore pid=14668) INFO 07-09 22:46:08 [jit_monitor.py:71] Kernel JIT monitor activated; monitored JIT compilations during inference will use mode=warn.
+(EngineCore pid=14668) INFO 07-09 22:46:08 [core.py:345] init engine (profile, create kv cache, warmup model) took 3.10 s
+(EngineCore pid=14668) INFO 07-09 22:46:10 [vllm.py:1006] Asynchronous scheduling is enabled.
+(EngineCore pid=14668) WARNING 07-09 22:46:10 [vllm.py:1062] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore pid=14668) WARNING 07-09 22:46:10 [vllm.py:1110] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore pid=14668) INFO 07-09 22:46:10 [kernel.py:278] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'])
+(EngineCore pid=14668) INFO 07-09 22:46:10 [vllm.py:1288] Cudagraph is disabled under eager mode
+(EngineCore pid=14668) INFO 07-09 22:46:10 [compilation.py:310] Enabled custom fusions: norm_quant, act_quant
+(APIServer pid=10356) INFO 07-09 22:46:10 [api_server.py:618] Supported tasks: ['generate']
+(APIServer pid=10356) INFO 07-09 22:46:14 [hf.py:548] Detected the chat template content format to be 'string'. You can set `--chat-template-content-format` to override this.
+(APIServer pid=10356) INFO 07-09 22:46:15 [api_server.py:622] Starting vLLM server on http://0.0.0.0:8001
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:37] Available routes are:
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /openapi.json, Methods: GET, HEAD
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /docs, Methods: GET, HEAD
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /docs/oauth2-redirect, Methods: GET, HEAD
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /redoc, Methods: GET, HEAD
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /load, Methods: GET
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /version, Methods: GET
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /health, Methods: GET
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /metrics, Methods: GET
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /tokenize, Methods: POST
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /detokenize, Methods: POST
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /v1/models, Methods: GET
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /ping, Methods: GET
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /ping, Methods: POST
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /invocations, Methods: POST
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /v1/chat/completions, Methods: POST
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /v1/chat/completions/batch, Methods: POST
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /v1/responses, Methods: POST
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /v1/responses/{response_id}, Methods: GET
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /v1/responses/{response_id}/cancel, Methods: POST
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /v1/completions, Methods: POST
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /v1/messages, Methods: POST
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /v1/messages/count_tokens, Methods: POST
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /generative_scoring, Methods: POST
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /scale_elastic_ep, Methods: POST
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /is_scaling_elastic_ep, Methods: POST
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /v1/chat/completions/render, Methods: POST
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /v1/completions/render, Methods: POST
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /v1/chat/completions/derender, Methods: POST
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /v1/completions/derender, Methods: POST
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /inference/v1/generate, Methods: POST
+(APIServer pid=10356) INFO 07-09 22:46:15 [launcher.py:46] Route: /, Methods: GET
+(APIServer pid=10356) INFO:     127.0.0.1:56660 - "GET / HTTP/1.1" 200 OK
+(APIServer pid=10356) INFO:     127.0.0.1:56660 - "GET /v1/models HTTP/1.1" 200 OK

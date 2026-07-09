@@ -1,0 +1,40 @@
+(APIServer pid=10356) --- Logging error ---
+(APIServer pid=10356) Traceback (most recent call last):
+(APIServer pid=10356)   File "C:\Users\rr\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+(APIServer pid=10356)     stream.write(msg + self.terminator)
+(APIServer pid=10356)   File "C:\Users\rr\Desktop\vllm\vllm\utils\system_utils.py", line 223, in write_with_prefix
+(APIServer pid=10356)     file_write(s[idx:next_idx])
+(APIServer pid=10356)   File "C:\Users\rr\AppData\Local\Programs\Python\Python312\Lib\encodings\cp1252.py", line 19, in encode
+(APIServer pid=10356)     return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+(APIServer pid=10356)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=10356) UnicodeEncodeError: 'charmap' codec can't encode character '\u2588' in position 46: character maps to <undefined>
+(APIServer pid=10356) Call stack:
+(APIServer pid=10356)   File "<frozen runpy>", line 198, in _run_module_as_main
+(APIServer pid=10356)   File "<frozen runpy>", line 88, in _run_code
+(APIServer pid=10356)   File "C:\Users\rr\Desktop\vllm\vllm\entrypoints\openai\api_server.py", line 744, in <module>
+(APIServer pid=10356)     uvloop.run(run_server(args))
+(APIServer pid=10356)   File "C:\Users\rr\.unsloth\studio\unsloth_studio\Lib\site-packages\winloop\__init__.py", line 96, in run
+(APIServer pid=10356)     return __asyncio.run(
+(APIServer pid=10356)   File "C:\Users\rr\AppData\Local\Programs\Python\Python312\Lib\asyncio\runners.py", line 194, in run
+(APIServer pid=10356)     return runner.run(main)
+(APIServer pid=10356)   File "C:\Users\rr\AppData\Local\Programs\Python\Python312\Lib\asyncio\runners.py", line 118, in run
+(APIServer pid=10356)     return self._loop.run_until_complete(task)
+(APIServer pid=10356)   File "C:\Users\rr\.unsloth\studio\unsloth_studio\Lib\site-packages\winloop\__init__.py", line 48, in wrapper
+(APIServer pid=10356)     return await main
+(APIServer pid=10356)   File "C:\Users\rr\Desktop\vllm\vllm\entrypoints\openai\api_server.py", line 703, in run_server
+(APIServer pid=10356)     listen_address, sock = setup_server(args)
+(APIServer pid=10356)   File "C:\Users\rr\Desktop\vllm\vllm\tracing\otel.py", line 178, in sync_wrapper
+(APIServer pid=10356)     return func(*args, **kwargs)
+(APIServer pid=10356)   File "C:\Users\rr\Desktop\vllm\vllm\entrypoints\openai\api_server.py", line 564, in setup_server
+(APIServer pid=10356)     log_version_and_model(logger, VLLM_VERSION, args.model)
+(APIServer pid=10356)   File "C:\Users\rr\Desktop\vllm\vllm\entrypoints\serve\utils\api_utils.py", line 339, in log_version_and_model
+(APIServer pid=10356)     lgr.info(message, version, model_name)
+(APIServer pid=10356) Message: '\n       \u2588     \u2588     \u2588\u2584   \u2584\u2588\n \u2584\u2584 \u2584\u2588 \u2588     \u2588     \u2588 \u2580\u2584\u2580 \u2588  version %s\n  \u2588\u2584\u2588\u2580 \u2588     \u2588     \u2588     \u2588  model   %s\n   \u2580\u2580  \u2580\u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580\u2580 \u2580     \u2580\n'
+(APIServer pid=10356) Arguments: ('0.1.dev1+g3483240b7.d20260629', 'facebook/opt-125m')
+(EngineCore pid=14668) Loading pt checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+(EngineCore pid=14668) Loading pt checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  6.80it/s]
+(EngineCore pid=14668) Loading pt checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  6.80it/s]
+(EngineCore pid=14668) 
+(APIServer pid=10356) INFO:     Started server process [10356]
+(APIServer pid=10356) INFO:     Waiting for application startup.
+(APIServer pid=10356) INFO:     Application startup complete.
