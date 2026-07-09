@@ -129,3 +129,33 @@ def test_v2_thinking_budget_ignores_plain_request():
     out = _apply(state, logits, input_ids=[12], local_pos=[0])
 
     assert torch.all(out == 0)
+
+
+def test_v2_thinking_budget_latest_prefill_end_disables_forcing():
+    req_states = _make_req_states(
+        [1, START, 10, 11, 12, END, 13],
+        prompt_len=1,
+    )
+    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[13], local_pos=[0])
+
+    assert torch.all(out == 0)
+
+
+def test_v2_thinking_budget_uses_latest_prefill_start_boundary():
+    req_states = _make_req_states(
+        [1, START, 10, 11, 12, END, 13, START, 14, 15, 16],
+        prompt_len=1,
+    )
+    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[16], local_pos=[0])
+
+    assert out[0, END] == pytest.approx(1.0e9)

@@ -168,28 +168,60 @@ def _update_committed_marker_cache_kernel(
         last_start = -1
         last_end = -1
 
-    for i in tl.range(scan_pos, total_len):
-        if i + START_LEN <= total_len:
-            start_match = True
-            for j in tl.static_range(0, START_LEN):
-                expected = tl.load(reasoning_start_token_ids_ptr + j)
-                actual = tl.load(
-                    all_token_ids_ptr + req_state_idx * all_token_ids_stride + i + j
-                )
-                start_match = start_match & (actual == expected)
+    if scan_pos == 0 and last_start < 0 and last_end < 0:
+        r = 0
+        found = False
+        while r < total_len and not found:
+            i = total_len - 1 - r
+            start_match = False
+            if i + START_LEN <= total_len:
+                start_match = True
+                for j in tl.static_range(0, START_LEN):
+                    expected = tl.load(reasoning_start_token_ids_ptr + j)
+                    actual = tl.load(
+                        all_token_ids_ptr + req_state_idx * all_token_ids_stride + i + j
+                    )
+                    start_match = start_match & (actual == expected)
+
+            end_match = False
+            if i + END_LEN <= total_len:
+                end_match = True
+                for j in tl.static_range(0, END_LEN):
+                    expected = tl.load(reasoning_end_token_ids_ptr + j)
+                    actual = tl.load(
+                        all_token_ids_ptr + req_state_idx * all_token_ids_stride + i + j
+                    )
+                    end_match = end_match & (actual == expected)
+
             if start_match:
                 last_start = i
-
-        if i + END_LEN <= total_len:
-            end_match = True
-            for j in tl.static_range(0, END_LEN):
-                expected = tl.load(reasoning_end_token_ids_ptr + j)
-                actual = tl.load(
-                    all_token_ids_ptr + req_state_idx * all_token_ids_stride + i + j
-                )
-                end_match = end_match & (actual == expected)
             if end_match:
                 last_end = i
+            found = start_match | end_match
+            r += 1
+    else:
+        for i in tl.range(scan_pos, total_len):
+            if i + START_LEN <= total_len:
+                start_match = True
+                for j in tl.static_range(0, START_LEN):
+                    expected = tl.load(reasoning_start_token_ids_ptr + j)
+                    actual = tl.load(
+                        all_token_ids_ptr + req_state_idx * all_token_ids_stride + i + j
+                    )
+                    start_match = start_match & (actual == expected)
+                if start_match:
+                    last_start = i
+
+            if i + END_LEN <= total_len:
+                end_match = True
+                for j in tl.static_range(0, END_LEN):
+                    expected = tl.load(reasoning_end_token_ids_ptr + j)
+                    actual = tl.load(
+                        all_token_ids_ptr + req_state_idx * all_token_ids_stride + i + j
+                    )
+                    end_match = end_match & (actual == expected)
+                if end_match:
+                    last_end = i
 
     tl.store(cached_last_start_ptr + req_state_idx, last_start)
     tl.store(cached_last_end_ptr + req_state_idx, last_end)
