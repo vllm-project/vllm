@@ -98,12 +98,35 @@ if EXIST "%~dp0_C.pyd" (
     echo   WARNING: _C.pyd not found in zip.
 )
 
-:: ===== 7. CREATE sitecustomize.py =====
+:: ===== 7. DETECT ROCm =====
+set "HIP_PATH="
+if EXIST "C:\Program Files\AMD\ROCm\7.13\bin\hipcc.exe" set "HIP_PATH=C:\Program Files\AMD\ROCm\7.13"
+if EXIST "C:\Program Files\AMD\ROCm\7.12\bin\hipcc.exe" set "HIP_PATH=C:\Program Files\AMD\ROCm\7.12"
+if EXIST "C:\Program Files\AMD\ROCm\7.11\bin\hipcc.exe" set "HIP_PATH=C:\Program Files\AMD\ROCm\7.11"
+if "!HIP_PATH!"=="" (
+    for /f "delims=" %%D in ('dir /b "C:\Program Files\AMD\ROCm\*" 2^>nul') do (
+        if EXIST "C:\Program Files\AMD\ROCm\%%D\bin\hipcc.exe" set "HIP_PATH=C:\Program Files\AMD\ROCm\%%D"
+    )
+)
+if "!HIP_PATH!"=="" (
+    for /f "delims=" %%D in ('dir /b "C:\ROCm\*" 2^>nul') do (
+        if EXIST "C:\ROCm\%%D\bin\hipcc.exe" set "HIP_PATH=C:\ROCm\%%D"
+    )
+)
+if "!HIP_PATH!"=="" (
+    if NOT "!ROCM_HOME!"=="" set "HIP_PATH=!ROCM_HOME!"
+    if NOT "!ROCM_PATH!"=="" set "HIP_PATH=!ROCM_PATH!"
+    if NOT "!HIP_PATH!"=="" if EXIST "!HIP_PATH!\bin\hipcc.exe" set "HIP_PATH=!HIP_PATH!"
+)
+if "!HIP_PATH!"=="" set "HIP_PATH=C:\Program Files\AMD\ROCm\7.13"
+echo   ROCm: !HIP_PATH!
+
+:: ===== 8. CREATE sitecustomize.py =====
 for /f "delims=" %%P in ('python -c "import sys; [print(p) for p in sys.path if p.endswith('site-packages')]" 2^>nul') do set "SITE_PKG=%%P"
 if not "!SITE_PKG!"=="" (
     if not EXIST "!SITE_PKG!\sitecustomize.py" (
         echo import os > "!SITE_PKG!\sitecustomize.py"
-        echo os.environ.setdefault('HIP_PATH', 'C:\Program Files\AMD\ROCm\7.13') >> "!SITE_PKG!\sitecustomize.py"
+        echo os.environ.setdefault('HIP_PATH', '!HIP_PATH!') >> "!SITE_PKG!\sitecustomize.py"
         echo os.environ.setdefault('VLLM_NO_USAGE_STATS', 'true') >> "!SITE_PKG!\sitecustomize.py"
         echo [OK] sitecustomize.py created
     )

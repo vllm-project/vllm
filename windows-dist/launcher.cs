@@ -235,11 +235,10 @@ class VllmGui : Form
             Log("Port: " + o.Port);
             Log("Starting server...");
 
-            // 5. Set env
-            string[] rocmPaths = { @"C:\Program Files\AMD\ROCm\7.13", @"E:\ROCM-7.13.0-Windows", @"C:\ROCm\7.13" };
-            foreach (string rp in rocmPaths)
-                if (File.Exists(rp + "/bin/hipcc.exe"))
-                    Environment.SetEnvironmentVariable("HIP_PATH", rp);
+            // 5. Set env — auto-detect ROCm
+            string rocmPath = DetectRocm();
+            if (rocmPath != null)
+                Environment.SetEnvironmentVariable("HIP_PATH", rocmPath);
             Environment.SetEnvironmentVariable("PYTHONPATH", repoRoot);
             Environment.SetEnvironmentVariable("VLLM_NO_USAGE_STATS", "true");
 
@@ -350,6 +349,39 @@ class VllmGui : Form
             p.Start(); string ver = p.StandardOutput.ReadToEnd().Trim();
             p.WaitForExit(2000);
             if (p.ExitCode == 0) return "python";
+        } catch {}
+        return null;
+    }
+
+    private string DetectRocm() {
+        // Check environment variables first
+        string[] envVars = { "ROCM_HOME", "ROCM_PATH", "HIP_PATH" };
+        foreach (string env in envVars) {
+            string v = Environment.GetEnvironmentVariable(env);
+            if (!string.IsNullOrEmpty(v) && File.Exists(v + "/bin/hipcc.exe"))
+                return v;
+        }
+        // Check common install paths
+        string[] paths = {
+            @"C:\Program Files\AMD\ROCm\7.13",
+            @"C:\Program Files\AMD\ROCm\7.12",
+            @"C:\Program Files\AMD\ROCm\7.11",
+            @"E:\ROCM-7.13.0-Windows",
+            @"C:\ROCm\7.13",
+        };
+        foreach (string p in paths)
+            if (File.Exists(p + "/bin/hipcc.exe"))
+                return p;
+        // Scan for any ROCm version
+        try {
+            string baseDir = @"C:\Program Files\AMD\ROCm";
+            if (Directory.Exists(baseDir)) {
+                foreach (string dir in Directory.GetDirectories(baseDir)) {
+                    string candidate = dir + @"\bin\hipcc.exe";
+                    if (File.Exists(candidate))
+                        return dir;
+                }
+            }
         } catch {}
         return null;
     }
