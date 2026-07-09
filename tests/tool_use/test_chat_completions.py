@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
 import openai
 import pytest
 
@@ -198,3 +200,63 @@ async def test_response_format_with_tool_choice_required(
     assert choice.finish_reason == "tool_calls"
     assert choice.message.tool_calls is not None
     assert len(choice.message.tool_calls) > 0
+
+
+def _tool_call_parser(server_config: ServerConfig) -> str | None:
+    arguments = server_config.get("arguments", [])
+    if "--tool-call-parser" not in arguments:
+        return None
+    return arguments[arguments.index("--tool-call-parser") + 1]
+
+
+# Composed tool-call-or-schema grammar for tool_choice="auto" + response_format.
+# See https://github.com/vllm-project/vllm/issues/39929.
+@pytest.mark.asyncio
+@pytest.mark.timeout(120)
+async def test_response_format_with_tool_choice_auto(
+    client: openai.AsyncOpenAI, server_config: ServerConfig
+):
+    """
+    Test that combining response_format: json_schema with tool_choice: auto
+    doesn't crash the engine and, for models with a composable structural tag
+    (hermes, minimax), still calls the tool or answers within the schema
+    instead of silently dropping the response_format.
+    """
+    models = await client.models.list()
+    model_name: str = models.data[0].id
+
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+
+    chat_completion = await client.chat.completions.create(
+        messages=ensure_system_prompt(
+            [{"role": "user", "content": "What is the weather in Dallas, Texas?"}],
+            server_config,
+        ),
+        temperature=0,
+        max_completion_tokens=150,
+        model=model_name,
+        tools=[WEATHER_TOOL],
+        tool_choice="auto",
+        response_format={
+            "type": "json_schema",
+            "json_schema": {"name": "final_answer", "schema": schema},
+        },
+    )
+
+    choice = chat_completion.choices[0]
+    if _tool_call_parser(server_config) in ("hermes", "minimax_m2"):
+        # Either branch of the composed grammar is valid: a tool call, or a
+        # final answer constrained to the schema.
+        if choice.finish_reason == "tool_calls":
+            assert choice.message.tool_calls
+        else:
+            json.loads(choice.message.content)
+    else:
+        # Non-composable models fall back to unchanged behavior and must not
+        # crash the engine.
+        assert choice.finish_reason is not None

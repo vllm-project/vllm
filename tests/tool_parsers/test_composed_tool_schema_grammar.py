@@ -20,6 +20,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.tool_parsers.structural_tag_registry import (
     compose_tool_call_or_schema,
+    get_composed_structural_tag,
     get_model_structural_tag,
 )
 
@@ -43,6 +44,7 @@ SCHEMA_VALID_JSON = '{"answer": "sunny in Dallas"}'
 SCHEMA_INVALID_KEY = '{"wrong": 1}'
 SCHEMA_INVALID_TYPE = '{"answer": 5}'
 FREE_TEXT = "The weather is sunny."
+ANY_JSON = '{"anything": [1, 2, 3]}'
 
 
 @pytest.fixture
@@ -53,6 +55,23 @@ def strict_tools() -> list[ChatCompletionToolsParam]:
             function={
                 "name": "get_weather",
                 "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            },
+        )
+    ]
+
+
+@pytest.fixture
+def non_strict_tools() -> list[ChatCompletionToolsParam]:
+    return [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_weather",
                 "parameters": {
                     "type": "object",
                     "properties": {"city": {"type": "string"}},
@@ -146,3 +165,88 @@ def test_compose_returns_none_for_non_triggered_format():
     )
     assert isinstance(forced, StructuralTag)
     assert compose_tool_call_or_schema(forced, RESPONSE_SCHEMA) is None
+
+
+def test_compose_json_object_accepts_any_json_answer(
+    strict_tools: list[ChatCompletionToolsParam],
+):
+    """response_format: {"type": "json_object"} maps to json_schema=True, so
+    the answer branch accepts any well-formed JSON rather than a fixed shape.
+    """
+    composed = compose_tool_call_or_schema(_auto_tag("hermes", strict_tools), True)
+    assert composed is not None
+    grammar = _grammar(composed)
+
+    assert _is_grammar_accept_string(grammar, HERMES_TOOL_CALL)
+    assert _is_grammar_accept_string(grammar, SCHEMA_VALID_JSON)
+    assert _is_grammar_accept_string(grammar, ANY_JSON)
+    assert not _is_grammar_accept_string(grammar, FREE_TEXT)
+
+
+@pytest.mark.parametrize("model", ["hermes", "minimax"])
+def test_get_composed_structural_tag_bypasses_strict_short_circuit(
+    model: str, non_strict_tools: list[ChatCompletionToolsParam]
+):
+    """get_composed_structural_tag must compose even for non-strict tools:
+    get_model_structural_tag drops an auto request with non-strict tools
+    (see test_auto_tool_choice_skips_structural_tag_without_strict in
+    test_structural_tag_registry.py), but the whole point of this entry
+    point is to make non-strict auto tool calling work alongside a schema.
+    """
+    bare_auto = get_model_structural_tag(
+        model=model, tools=non_strict_tools, tool_choice="auto", reasoning=False
+    )
+    assert bare_auto is None
+
+    composed = get_composed_structural_tag(
+        model=model,
+        tools=non_strict_tools,
+        tool_choice="auto",
+        response_format_schema=RESPONSE_SCHEMA,
+    )
+    assert composed is not None
+    grammar = _grammar(composed)
+    assert _is_grammar_accept_string(grammar, SCHEMA_VALID_JSON)
+    assert not _is_grammar_accept_string(grammar, FREE_TEXT)
+
+
+def test_get_composed_structural_tag_returns_none_for_non_composable_model(
+    non_strict_tools: list[ChatCompletionToolsParam],
+):
+    """Models without a vLLM-owned registry builder (e.g. the opaque xgrammar
+    builtins) are out of scope for this PR; callers fall back unchanged."""
+    assert (
+        get_composed_structural_tag(
+            model="llama",
+            tools=non_strict_tools,
+            tool_choice="auto",
+            response_format_schema=RESPONSE_SCHEMA,
+        )
+        is None
+    )
+
+
+def test_get_composed_structural_tag_returns_none_for_non_auto_tool_choice(
+    non_strict_tools: list[ChatCompletionToolsParam],
+):
+    assert (
+        get_composed_structural_tag(
+            model="hermes",
+            tools=non_strict_tools,
+            tool_choice="required",
+            response_format_schema=RESPONSE_SCHEMA,
+        )
+        is None
+    )
+
+
+def test_get_composed_structural_tag_returns_none_without_tools():
+    assert (
+        get_composed_structural_tag(
+            model="hermes",
+            tools=None,
+            tool_choice="auto",
+            response_format_schema=RESPONSE_SCHEMA,
+        )
+        is None
+    )

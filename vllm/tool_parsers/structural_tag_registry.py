@@ -97,6 +97,34 @@ def _any_tool_strict(
     return False
 
 
+def _build_vllm_registry_tag(
+    model: str,
+    tools: Sequence[ChatCompletionToolsParam | ResponsesTool],
+    tool_choice: ToolChoice,
+    reasoning: bool,
+) -> StructuralTag | None:
+    """Build a structural tag with a vLLM-owned registry builder.
+
+    Returns ``None`` when ``model`` has no builder registered, in which case
+    callers fall back to the xgrammar builtin templates.
+    """
+    if model not in _VLLM_STRUCTURAL_TAG_REGISTRY:
+        return None
+
+    dumped_tools = [_dump_tool_for_xgrammar(tool) for tool in tools]
+    dumped_tool_choice = _dump_tool_choice_for_xgrammar(tool_choice)
+    function_tools, builtin_tools, simplified_tool_choice = normalize_tool_choice(
+        dumped_tools,
+        dumped_tool_choice,
+    )
+    return _VLLM_STRUCTURAL_TAG_REGISTRY[model](
+        function_tools,
+        builtin_tools,
+        simplified_tool_choice,
+        reasoning,
+    )
+
+
 def get_model_structural_tag(
     model: str,
     tools: Sequence[ChatCompletionToolsParam | ResponsesTool] | None,
@@ -111,31 +139,59 @@ def get_model_structural_tag(
     if tool_choice == "auto" and not _any_tool_strict(tools):
         return None
 
-    dumped_tools = [_dump_tool_for_xgrammar(tool) for tool in tools]
-    dumped_tool_choice = _dump_tool_choice_for_xgrammar(tool_choice)
-
     if model in _VLLM_STRUCTURAL_TAG_REGISTRY:
-        function_tools, builtin_tools, simplified_tool_choice = normalize_tool_choice(
-            dumped_tools,
-            dumped_tool_choice,
-        )
-        return _VLLM_STRUCTURAL_TAG_REGISTRY[model](
-            function_tools,
-            builtin_tools,
-            simplified_tool_choice,
-            reasoning,
-        )
+        return _build_vllm_registry_tag(model, tools, tool_choice, reasoning)
 
     if model not in XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS:
         supported = sorted(SUPPORTED_STRUCTURAL_TAG_MODELS)
         raise ValueError(f"Unknown format type: {model}, supported types: {supported}")
 
+    dumped_tools = [_dump_tool_for_xgrammar(tool) for tool in tools]
+    dumped_tool_choice = _dump_tool_choice_for_xgrammar(tool_choice)
     return get_xgrammar_model_structural_tag(
         model=model,
         tools=dumped_tools,
         tool_choice=dumped_tool_choice,
         reasoning=reasoning,
     )
+
+
+def get_composed_structural_tag(
+    model: str,
+    tools: Sequence[ChatCompletionToolsParam | ResponsesTool] | None,
+    tool_choice: ToolChoice,
+    response_format_schema: dict[str, Any] | bool,
+) -> StructuralTag | None:
+    """Build a structural tag that composes an auto tool call with a
+    response_format schema.
+
+    This is the entry point for a ``tool_choice="auto"`` request that also
+    sets response_format: it wants both the freedom to call a tool and a
+    final answer constrained to the schema. Unlike ``get_model_structural_tag``,
+    this bypasses the strict-tools short circuit, since the whole point of this
+    path is to compose non-strict auto tool calling with a schema. Only the
+    vLLM-owned registry builders (hermes, minimax) can express the "at least
+    one tool call" branch that ``compose_tool_call_or_schema`` needs, so any
+    other model returns ``None`` and callers fall back to unchanged behavior.
+
+    Args:
+        model: The tool parser's ``structural_tag_model`` key.
+        tools: The request's tools.
+        tool_choice: The request's tool_choice. Only ``"auto"`` composes.
+        response_format_schema: The response_format JSON schema (or ``True``
+            for a bare json_object, i.e. any JSON).
+
+    Returns:
+        The composed structural tag, or ``None`` when composition is not
+        possible for this model or tool_choice.
+    """
+    if not tools or tool_choice != "auto":
+        return None
+
+    tool_tag = _build_vllm_registry_tag(model, tools, tool_choice, reasoning=False)
+    if tool_tag is None:
+        return None
+    return compose_tool_call_or_schema(tool_tag, response_format_schema)
 
 
 def compose_tool_call_or_schema(
