@@ -49,7 +49,9 @@ class ECCPUConnector(ECConnectorBase):
     def _make_worker(self, vllm_config: "VllmConfig"):
         # Deferred import: the worker module touches torch/CUDA at import time
         # via the region, so keep that cost off the scheduler path.
-        from vllm.distributed.ec_transfer.ec_connector.cpu.worker import ECCPUWorker
+        from vllm.distributed.ec_transfer.ec_connector.cpu.worker import (
+            ECCPUWorker,
+        )
 
         return ECCPUWorker(vllm_config)
 
@@ -103,6 +105,13 @@ class ECCPUConnector(ECConnectorBase):
     ) -> ECCPUConnectorMetadata:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
+
+    def get_finished(
+        self, finished_req_ids: set[str]
+    ) -> tuple[set[str] | None, set[str] | None]:
+        if self.connector_worker is not None:
+            self.connector_worker.flush_saves()
+        return None, None
 
     # Shared.
     def shutdown(self) -> None:
