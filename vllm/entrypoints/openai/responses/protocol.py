@@ -730,7 +730,7 @@ class ResponsesResponse(OpenAIBaseModel):
             output_messages=output_messages,
             parallel_tool_calls=request.parallel_tool_calls
             if request.parallel_tool_calls is not None
-            else True,
+            else ResponsesRequest.model_fields["parallel_tool_calls"].default,
             temperature=sampling_params.temperature,
             tool_choice=request.tool_choice,
             tools=request.tools,
