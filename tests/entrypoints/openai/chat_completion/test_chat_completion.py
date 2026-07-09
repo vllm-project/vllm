@@ -164,15 +164,6 @@ async def test_empty_grammar(client: openai.AsyncOpenAI, model_name: str) -> Non
 
 TOKEN_IN_MESSAGES = [{"role": "user", "content": "Hello, how are you today?"}]
 
-IMAGE_MESSAGES = [
-    {
-        "role": "user",
-        "content": [
-            {"type": "image_url", "image_url": {"url": "http://example.com/x.png"}}
-        ],
-    }
-]
-
 
 @pytest.mark.asyncio
 async def test_prompt_token_ids_round_trip(client: openai.AsyncOpenAI):
@@ -245,8 +236,8 @@ async def test_prompt_token_ids_streaming(client: openai.AsyncOpenAI):
             continue
         if chunk.choices[0].delta.content:
             content += chunk.choices[0].delta.content
-        if chunk.choices[0].model_dump().get("token_ids"):
-            delta_token_ids.extend(chunk.choices[0].token_ids)
+        if tids := getattr(chunk.choices[0], "token_ids", None):
+            delta_token_ids.extend(tids)
 
     # streamed text-out, reconstructed from deltas, with generated token ids.
     assert content
@@ -254,22 +245,31 @@ async def test_prompt_token_ids_streaming(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
+async def test_prompt_token_ids_requires_a_prompt(client: openai.AsyncOpenAI):
+    """Neither messages nor prompt_token_ids provided is a 400."""
+    with pytest.raises(openai.BadRequestError):
+        await client.chat.completions.create(
+            model=MODEL_NAME, messages=[], max_completion_tokens=4
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "messages, extra_options",
     [
+        # Pre-tokenized input is exclusive with messages.
+        (TOKEN_IN_MESSAGES, {}),
         # A chat-template option cannot apply to pre-tokenized input.
         ([], {"add_generation_prompt": True}),
         # Truncation would desync the max_tokens budget from the real prompt.
         ([], {"truncate_prompt_tokens": 8}),
-        # Token ids carry no multimodal features.
-        (IMAGE_MESSAGES, {}),
     ],
-    ids=["template-option", "truncate-option", "multimodal-content"],
+    ids=["messages-present", "template-option", "truncate-option"],
 )
 async def test_prompt_token_ids_rejects_incompatible_input(
     client: openai.AsyncOpenAI, messages, extra_options
 ):
-    """Options and message content that cannot apply are rejected, not ignored."""
+    """Anything that conflicts with pre-tokenized input is rejected."""
     # Rejection happens during request validation, so the ids need only be
     # non-empty; no need to render real ones.
     with pytest.raises(openai.BadRequestError):
