@@ -720,24 +720,11 @@ def kv_layouts_compatible(
     if decode_shape != prefill_shape:
         return False
 
-    def _stride_order(
-        backend: type[AttentionBackend], include_layers: bool
-    ) -> tuple[int, ...] | None:
-        try:
-            return backend.get_kv_cache_stride_order(
-                include_num_layers_dimension=include_layers
-            )
-        except (NotImplementedError, AttributeError):
-            # No custom stride order: physical layout matches the logical shape.
-            return None
-
-    for include_layers in (False, True):
-        if _stride_order(decode_backend, include_layers) != _stride_order(
-            prefill_backend, include_layers
-        ):
-            return False
-
-    return True
+    # Only the per-layer stride order must match; the cross-layer order is used
+    # solely by KV-connector/offloading paths, which are orthogonal to routing.
+    return decode_backend.get_kv_cache_stride_order(
+        include_num_layers_dimension=False
+    ) == prefill_backend.get_kv_cache_stride_order(include_num_layers_dimension=False)
 
 
 def split_prefill_chunks(
