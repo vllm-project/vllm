@@ -1180,6 +1180,10 @@ class OffloadingConnectorScheduler:
 
         for job_id, count in meta.completed_jobs.items():
             assert count > 0
+            # Invariant: job_ids are monotonically increasing. After
+            # reset_cache(), all pre-reset jobs have job_id < threshold,
+            # so this comparison filters out stale completions from workers
+            # that finished jobs before the reset but report after.
             if job_id < self._stale_job_threshold:
                 logger.debug(
                     "Skipping stale completed job %d (pre-reset counter: %d)",
@@ -1193,28 +1197,30 @@ class OffloadingConnectorScheduler:
                 continue
             assert job_status.pending_count == 0
 
-            req_status = self._req_status[job_status.req_id]
-            if job_status.is_store:
-                self.manager.complete_store(job_status.keys, req_status.req_context)
-            else:
-                self.manager.complete_load(job_status.keys, req_status.req_context)
-                if self._blocks_being_loaded:
-                    self._blocks_being_loaded.difference_update(job_status.keys)
+            req_status = self._req_status.get(job_status.req_id)
+            if req_status is not None:
+                if job_status.is_store:
+                    self.manager.complete_store(job_status.keys, req_status.req_context)
+                else:
+                    self.manager.complete_load(job_status.keys, req_status.req_context)
+                    if self._blocks_being_loaded:
+                        self._blocks_being_loaded.difference_update(job_status.keys)
             if self._block_id_to_pending_jobs:
                 # Sliding window blocks are tracked from store creation
                 # and must be cleaned up unconditionally.
                 self._remove_pending_job(job_id, job_status.sliding_window_block_ids)
                 # Non-sliding-window blocks are only tracked after
                 # request_finished, so only clean up for finished requests.
-                if req_status.req.is_finished():
+                if req_status is not None and req_status.req.is_finished():
                     self._remove_pending_job(
                         job_id, job_status.non_sliding_window_block_ids
                     )
 
             del self._jobs[job_id]
-            req_status.transfer_jobs.remove(job_id)
-            if not req_status.transfer_jobs and req_status.req.is_finished():
-                del self._req_status[job_status.req_id]
+            if req_status is not None:
+                req_status.transfer_jobs.discard(job_id)
+                if not req_status.transfer_jobs and req_status.req.is_finished():
+                    del self._req_status[job_status.req_id]
 
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats: OffloadingConnectorStats | None = None

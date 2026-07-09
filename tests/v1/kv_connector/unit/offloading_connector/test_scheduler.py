@@ -11,6 +11,9 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     to_keys,
 )
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    OffloadingWorkerMetadata,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
     _ConnectorMetricName,
@@ -18,6 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
+    TransferJobStatus,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -33,6 +37,7 @@ from vllm.v1.kv_offload.base import (
     get_offload_block_hash,
     make_offload_key,
 )
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
 
@@ -2757,3 +2762,183 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
     # Verify fence is empty after full lifecycle (cleanup happened).
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
     assert len(runner.connector_scheduler._jobs) == 0
+
+
+def _make_scheduler_for_job_completion():
+    """Create a minimal scheduler for job-completion unit tests."""
+    scheduler = object.__new__(OffloadingConnectorScheduler)
+    scheduler.manager = MagicMock(spec=OffloadingManager)
+    scheduler._req_status = {}
+    scheduler._jobs = {}
+    scheduler._blocks_being_loaded = set()
+    scheduler._block_id_to_pending_jobs = {}
+    scheduler._stale_job_threshold = 0
+    scheduler._connector_stats = OffloadingConnectorStats()
+    return scheduler
+
+
+def _complete_job_via_update(scheduler, job_id):
+    """Trigger job completion through update_connector_output."""
+    output = KVConnectorOutput(
+        kv_connector_worker_meta=OffloadingWorkerMetadata(
+            completed_jobs={job_id: 1},
+        ),
+    )
+    scheduler.update_connector_output(output)
+
+
+def test_job_completion_load_clears_blocks_being_loaded():
+    """A completed load job releases its keys from _blocks_being_loaded.
+
+    Scenario: GPU prefix caching is enabled, so _blocks_being_loaded tracks
+    keys currently being loaded from offload storage. When a load job
+    completes, its keys should be removed so the blocks can be reused.
+    """
+    scheduler = _make_scheduler_for_job_completion()
+    keys = set(to_keys([1, 2]))
+    scheduler._blocks_being_loaded = set(keys)
+
+    req_status = SimpleNamespace(
+        req_context=MagicMock(),
+        req=SimpleNamespace(is_finished=lambda: False),
+        transfer_jobs={42},
+    )
+    scheduler._req_status["req-0"] = req_status
+    scheduler._jobs[42] = TransferJobStatus(
+        req_id="req-0",
+        pending_count=1,
+        keys=keys,
+        is_store=False,
+    )
+
+    _complete_job_via_update(scheduler, 42)
+
+    assert scheduler._blocks_being_loaded & keys == set()
+    scheduler.manager.complete_load.assert_called_once_with(
+        keys, req_status.req_context)
+    scheduler.manager.complete_store.assert_not_called()
+    assert 42 not in scheduler._jobs
+    assert 42 not in req_status.transfer_jobs
+
+
+def test_job_completion_last_job_deletes_req_status():
+    """Completing the last job of a finished request removes _req_status.
+
+    Scenario: A request has finished (e.g. EOS) and its last in-flight
+    store job completes. Since no more jobs need req_context, the
+    _req_status entry should be deleted to free memory.
+    """
+    scheduler = _make_scheduler_for_job_completion()
+    keys = set(to_keys([1]))
+
+    req_status = SimpleNamespace(
+        req_context=MagicMock(),
+        req=SimpleNamespace(is_finished=lambda: True),
+        transfer_jobs={42},
+    )
+    scheduler._req_status["req-0"] = req_status
+    scheduler._jobs[42] = TransferJobStatus(
+        req_id="req-0",
+        pending_count=1,
+        keys=keys,
+        is_store=True,
+    )
+
+    _complete_job_via_update(scheduler, 42)
+
+    assert "req-0" not in scheduler._req_status
+    assert 42 not in scheduler._jobs
+
+
+def test_job_completion_clears_block_id_to_pending_jobs():
+    """Job completion removes the job from _block_id_to_pending_jobs.
+
+    Scenario: A store job has sliding window block IDs registered in
+    _block_id_to_pending_jobs (the "fence"). This fence prevents block
+    reuse until the store completes. When the job finishes, its entries
+    should be removed so blocks can be safely reused.
+    """
+    scheduler = _make_scheduler_for_job_completion()
+    keys = set(to_keys([1]))
+
+    req_status = SimpleNamespace(
+        req_context=MagicMock(),
+        req=SimpleNamespace(is_finished=lambda: False),
+        transfer_jobs={42},
+    )
+    scheduler._req_status["req-0"] = req_status
+    scheduler._block_id_to_pending_jobs = {
+        10: {42},
+        20: {42, 99},
+    }
+    scheduler._jobs[42] = TransferJobStatus(
+        req_id="req-0",
+        pending_count=1,
+        keys=keys,
+        is_store=True,
+        sliding_window_block_ids=[10, 20],
+    )
+
+    _complete_job_via_update(scheduler, 42)
+
+    assert 10 not in scheduler._block_id_to_pending_jobs
+    assert scheduler._block_id_to_pending_jobs[20] == {99}
+    assert 42 not in scheduler._jobs
+
+
+def test_job_completion_missing_req_status_does_not_raise():
+    """Job completion tolerates a missing _req_status entry.
+
+    Scenario: reset_cache() clears _req_status before the worker reports
+    job completion. The old code used self._req_status[req_id] which
+    raised KeyError. The fix uses .get() with is-not-None guards.
+
+    Before fix: KeyError: 'req-gone'
+    After fix: passes silently.
+    """
+    scheduler = _make_scheduler_for_job_completion()
+    keys = set(to_keys([1]))
+    scheduler._jobs[42] = TransferJobStatus(
+        req_id="req-gone",
+        pending_count=1,
+        keys=keys,
+        is_store=True,
+    )
+
+    _complete_job_via_update(scheduler, 42)
+
+    assert 42 not in scheduler._jobs
+    scheduler.manager.complete_store.assert_not_called()
+    scheduler.manager.complete_load.assert_not_called()
+
+
+def test_job_completion_discard_tolerates_missing_job_id():
+    """Job completion uses discard() to tolerate a missing job_id.
+
+    Scenario: transfer_jobs set does not contain the job_id (e.g. due to
+    a prior inconsistent state or double-report). The old code used
+    set.remove(job_id) which raised KeyError. The fix uses discard().
+
+    Before fix: KeyError: 42
+    After fix: passes silently.
+    """
+    scheduler = _make_scheduler_for_job_completion()
+    keys = set(to_keys([1]))
+
+    req_status = SimpleNamespace(
+        req_context=MagicMock(),
+        req=SimpleNamespace(is_finished=lambda: False),
+        transfer_jobs=set(),  # job 42 already removed (e.g. double-report)
+    )
+    scheduler._req_status["req-0"] = req_status
+    scheduler._jobs[42] = TransferJobStatus(
+        req_id="req-0",
+        pending_count=1,
+        keys=keys,
+        is_store=True,
+    )
+
+    _complete_job_via_update(scheduler, 42)
+
+    assert 42 not in scheduler._jobs
+    assert req_status.transfer_jobs == set()
