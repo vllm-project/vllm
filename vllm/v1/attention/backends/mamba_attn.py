@@ -243,43 +243,41 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         of prefix caching for mamba (wip). We need to take care
         of the interaction with chunked prefill in order to
         satisfy constraint (2).
+
+        Returns (cu_chunk_seqlen, seq_idx, last_chunk_indices).
         """
-        # TODO (tdoublep): This code could probably be optimized.
-        cu_chunk_seqlen = []
-        seq_idx = []
-        last_chunk_indices = []
+        num_computed_tokens = num_computed_tokens_p_cpu.tolist()
+        query_start_loc = query_start_loc_p_cpu.tolist()
+
+        cu_chunk_seqlen: list[int] = []
+        seq_idx: list[int] = []
+        last_chunk_indices: list[int] = []
         seqlen_pos = 0
 
         for req_idx in range(num_prefills):
-            this_num_computed = num_computed_tokens_p_cpu[req_idx].item()
-            this_new_tokens = (
-                query_start_loc_p_cpu[req_idx + 1].item()
-                - query_start_loc_p_cpu[req_idx].item()
-            )
+            this_num_computed = num_computed_tokens[req_idx]
+            this_new_tokens = query_start_loc[req_idx + 1] - query_start_loc[req_idx]
+            first_chunk = len(cu_chunk_seqlen)
 
             # if computed tokens are not chunk-aligned, use the first
             # chunk to finish it off
             if this_num_computed % chunk_size != 0:
-                seq_idx.append(req_idx)
                 cu_chunk_seqlen.append(seqlen_pos)
                 # how many tokens to finish the chunk?
-                chunk_len = (
-                    cdiv(this_num_computed, chunk_size) * chunk_size - this_num_computed
-                )
+                tokens_to_align = chunk_size - this_num_computed % chunk_size
                 # we can only use at most this_new_tokens
-                chunk_len = min(chunk_len, this_new_tokens)
+                chunk_len = min(tokens_to_align, this_new_tokens)
                 seqlen_pos += chunk_len
                 this_new_tokens -= chunk_len
 
-            n_chunks = cdiv(this_new_tokens, chunk_size)
-            for chunk in range(n_chunks):
-                seq_idx.append(req_idx)
-                cu_chunk_seqlen.append(seqlen_pos)
-                chunk_len = min(chunk_size, this_new_tokens)
-                seqlen_pos += chunk_len
-                this_new_tokens -= chunk_len
+            # the remaining chunks start every chunk_size tokens
+            cu_chunk_seqlen.extend(
+                range(seqlen_pos, seqlen_pos + this_new_tokens, chunk_size)
+            )
+            seqlen_pos += this_new_tokens
 
-            assert this_new_tokens == 0
+            this_num_chunks = len(cu_chunk_seqlen) - first_chunk
+            seq_idx.extend([req_idx] * this_num_chunks)
             last_chunk_indices.append(len(cu_chunk_seqlen) - 1)
 
         cu_chunk_seqlen.append(seqlen_pos)
