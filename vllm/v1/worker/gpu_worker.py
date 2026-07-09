@@ -731,6 +731,11 @@ class Worker(WorkerBase):
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
         warmup_sizes: list[int] = []
+        cg_capture_sizes: list[int] = []
+
+        if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            cg_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
+            cg_capture_sizes = [] if cg_sizes is None else cg_sizes
 
         if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
             # warm up sizes that are not in cudagraph capture sizes,
@@ -738,11 +743,8 @@ class Worker(WorkerBase):
             # e.g. for the max-num-batched token size in chunked prefill.
             compile_sizes = self.vllm_config.compilation_config.compile_sizes
             warmup_sizes = compile_sizes.copy() if compile_sizes is not None else []  # type: ignore[assignment]
-            cg_capture_sizes: list[int] = []
 
             if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-                cg_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
-                cg_capture_sizes = [] if cg_sizes is None else cg_sizes
                 warmup_sizes = [x for x in warmup_sizes if x not in cg_capture_sizes]
 
             compile_ranges = self.vllm_config.compilation_config.get_compile_ranges()
@@ -754,6 +756,23 @@ class Worker(WorkerBase):
             for compile_range in compile_ranges:
                 if not any(x in compile_range for x in all_sizes):
                     warmup_sizes.append(compile_range.end)
+
+        # TODO(LucasWilkinson, akaratza): Remove when MRV1 is deprecated
+        if (
+            current_platform.is_rocm()
+            and not self.use_v2_model_runner
+            and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            and get_pp_group().is_last_rank
+        ):
+            max_num_reqs = min(
+                self.scheduler_config.max_num_seqs,
+                self.scheduler_config.max_num_batched_tokens,
+            )
+            if (
+                max_num_reqs not in cg_capture_sizes
+                and max_num_reqs not in warmup_sizes
+            ):
+                warmup_sizes.append(max_num_reqs)
 
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):
