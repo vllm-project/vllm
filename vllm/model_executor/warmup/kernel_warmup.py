@@ -23,6 +23,32 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_LL_BF16_WARMUP_MODEL_SHAPES: tuple[tuple[int, int], ...] = (
+    (7168, 256),  # DSV3
+    (7168, 384),  # DSV4-Pro
+    (14400, 256),  # DSV4-Flash
+)
+_LL_BF16_WARMUP_M_RANGE = range(1, 17)
+
+
+def _warmup_ll_bf16_router_gemm(vllm_config: object) -> None:
+    from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+        is_available as is_ll_bf16_gemm_available,
+    )
+    from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+        ll_bf16_gemm_kernel,
+    )
+
+    if not is_ll_bf16_gemm_available():
+        return
+
+    logger.info("Warming up ll_bf16 router GEMM kernels.")
+    ll_bf16_gemm_kernel.warmup(
+        vllm_config,
+        shapes=_LL_BF16_WARMUP_MODEL_SHAPES,
+        m_values=_LL_BF16_WARMUP_M_RANGE,
+    )
+
 
 def kernel_warmup(worker: "Worker"):
     # Deep GEMM warmup
@@ -44,6 +70,9 @@ def kernel_warmup(worker: "Worker"):
         logger.info("Skipping FlashInfer autotune because it is disabled.")
     elif has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
+
+    if current_platform.has_device_capability(100):
+        _warmup_ll_bf16_router_gemm(worker.vllm_config)
 
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups

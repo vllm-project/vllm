@@ -40,11 +40,32 @@ def _assert_close(out, ref, *, min_cos_sim=0.99, context=""):
     )
 
 
+def _can_precompile(a, b):
+    return (
+        a.dim() == 2
+        and b.dim() == 2
+        and a.dtype == torch.bfloat16
+        and b.dtype == torch.bfloat16
+        and a.device.type == "cuda"
+        and b.device.type == "cuda"
+        and a.device == b.device
+        and a.shape[1] == b.shape[1]
+        and a.is_contiguous()
+        and b.is_contiguous()
+    )
+
+
 def _gemm(a, b):
     from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
         ll_bf16_gemm,
+        ll_bf16_gemm_kernel,
     )
 
+    if _can_precompile(a, b):
+        compile_key = ll_bf16_gemm_kernel.dispatch(
+            M=a.shape[0], K=a.shape[1], N=b.shape[0]
+        )
+        ll_bf16_gemm_kernel.compile(compile_key)
     return ll_bf16_gemm(a, b)
 
 

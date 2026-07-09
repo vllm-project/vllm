@@ -19,19 +19,8 @@ from cutlass.pipeline import sm90 as pipeline
 # Takes a shared memory address in this CTA and maps it to the same offset in a peer CTA.
 @dsl_user_op
 def set_block_rank(smem_ptr, peer_rank, *, loc=None, ip=None):
-    i32 = _ir.IntegerType.get_signless(32)
-    ptr_i32 = smem_ptr.toint(loc=loc, ip=ip).ir_value()
-    rank_ir = peer_rank.ir_value(loc=loc, ip=ip)
-    res = _llvm.inline_asm(
-        i32,
-        [ptr_i32, rank_ir],
-        "mapa.shared::cluster.u32 $0, $1, $2;",
-        "=r,r,r",
-        has_side_effects=False,
-        loc=loc,
-        ip=ip,
-    )
-    return cutlass.Int32(res)
+    dsmem_ptr = cute.arch.map_dsmem_ptr(smem_ptr, peer_rank, loc=loc, ip=ip)
+    return cutlass.Int32(dsmem_ptr.toint(loc=loc, ip=ip))
 
 
 # Writes an FP32 value to a REMOTE CTA's shared memory via the mapped address from set_block_rank.
