@@ -67,18 +67,25 @@ def main():
         print(f"[OK] ROCm {rocm_ver}")
 
     # 5. Generate requirements.txt with AMD wheel URLs
-    # AMD ROCm Windows wheels repo (NOT repo.amd.com - that one blocks downloads)
-    base_url = "https://repo.radeon.com/rocm/windows/.rocm-rel-7.2_a"
+    # List wheels the user needs to download
     py_tag = "cp312"
+    base_amd = "https://repo.amd.com/rocm/whl/gfx120X-all"
+    torch_ver, tv_ver = get_torch_versions(rocm_ver)
+    wheel_dir = install_dir / "wheels"
+    wheel_dir.mkdir(exist_ok=True)
 
-    req_lines = [
-        f"{base_url}/torch-2.9.1+rocmsdk20260116-{py_tag}-{py_tag}-win_amd64.whl",
-        f"{base_url}/torchvision-0.24.1+rocmsdk20260116-{py_tag}-{py_tag}-win_amd64.whl",
-        f"{base_url}/rocm_sdk_core-7.2.0.dev0-py3-none-win_amd64.whl",
-        f"{base_url}/rocm_sdk_devel-7.2.0.dev0-py3-none-win_amd64.whl",
+    wheels = [
+        f"{base_amd}/rocm-sdk-core/rocm_sdk_core-7.13.0-py3-none-win_amd64.whl",
+        f"{base_amd}/rocm-sdk-devel/rocm_sdk_devel-7.13.0-py3-none-win_amd64.whl",
+        f"{base_amd}/torch/torch-{torch_ver}-{py_tag}-{py_tag}-win_amd64.whl",
+        f"{base_amd}/torchvision/torchvision-{tv_ver}-{py_tag}-{py_tag}-win_amd64.whl",
     ]
-    req_file = install_dir / "requirements.txt"
-    req_file.write_text("\n".join(req_lines) + "\n")
+    dl_file = install_dir / "download_urls.txt"
+    content = "Open each URL in your browser and save the .whl file.\n"
+    content += "Save all files into a folder (e.g. C:\\wheels).\n"
+    content += "Then run: pip install --no-index --find-links C:\\wheels torch torchvision rocm-sdk-core rocm-sdk-devel\n\n"
+    content += "\n".join(wheels) + "\n"
+    dl_file.write_text(content)
 
     # 6. Check if GPU shows up
     print("\n[..] Checking for AMD GPU...")
@@ -99,12 +106,18 @@ def main():
     print()
     print("Run these commands in your terminal (as administrator):")
     print()
-    print(f"  1. {pip} install -r \"{req_file}\"")
+    for w in wheels:
+        print(f"  {w}")
     print()
-    print("This will download and install PyTorch with ROCm support")
-    print("from the AMD repository. It may take a few minutes.")
+    print("Open each URL in your browser, right-click -> Save As.")
+    print("Save all .whl files into a folder (e.g. C:\\wheels).")
     print()
-    input("Type DONE after the install finishes, or ENTER to skip: ")
+    print(f"Then in your terminal, run:")
+    print(f"  {pip} install --no-index --find-links C:\\wheels torch torchvision rocm-sdk-core rocm-sdk-devel")
+    print()
+    print("See download_urls.txt for the full list.")
+    print()
+    input("Type DONE after installing the wheels, or ENTER to skip: ")
 
     # 8. Clean stale sitecustomize.py
     for p in sys.path:
