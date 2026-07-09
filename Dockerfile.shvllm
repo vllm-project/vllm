@@ -101,10 +101,26 @@ RUN pip install /tmp/wheels/vllm_gguf_plugin-*.whl "gguf>=0.19" --no-cache-dir &
 
 # --- NCCL >= 2.30: Kernstück für Multi-Rank-per-GPU ---
 # torch pinnt nvidia-nccl-cu12==2.29.x; libnccl.so.2 ist ABI-stabil, daher
-# bewusstes Upgrade. Der Assert bricht den Build bei falscher Version ab.
+# bewusstes Upgrade. Geprüft wird die tatsächlich geladene Bibliothek per
+# ncclGetVersion() — torch.cuda.nccl.version() meldet nur die
+# Compile-Zeit-Headerversion des torch-Builds und wäre hier irreführend.
 RUN pip install --no-cache-dir "nvidia-nccl-cu12==2.30.7" && \
-    python3 -c "import torch; v = torch.cuda.nccl.version(); \
-assert v >= (2, 30), f'NCCL zu alt: {v}'; print('NCCL ok:', v)"
+    python3 - <<'EOF'
+import ctypes
+import glob
+import sys
+
+paths = glob.glob(sys.prefix + "/lib/python*/site-packages/nvidia/nccl/lib/libnccl.so.2")
+assert paths, "libnccl.so.2 aus nvidia-nccl-cu12 nicht gefunden"
+lib = ctypes.CDLL(paths[0])
+v = ctypes.c_int()
+lib.ncclGetVersion(ctypes.byref(v))
+code = v.value
+major, rest = divmod(code, 10000)
+minor, patch = divmod(rest, 100)
+assert (major, minor) >= (2, 30), f"NCCL zu alt: {major}.{minor}.{patch} ({code})"
+print(f"NCCL Laufzeit-Version ok: {major}.{minor}.{patch}")
+EOF
 
 # Registrierung des Plugins + Kern-Importe verifizieren (ohne GPU möglich)
 RUN python3 - <<'EOF'
