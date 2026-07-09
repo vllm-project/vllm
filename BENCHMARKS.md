@@ -57,6 +57,14 @@ stabil (~2.3 GiB Luft).
 Lokale GGUF-Dateien brauchen `config.json` + Tokenizer-/Prozessor-Dateien
 im selben Verzeichnis (hier aus dem AWQ-Repo übernommen).
 
+Vision-Encoder: Q4/Q6 (mmproj-BF16 im Verzeichnis), AWQ und FP8 liefen
+als multimodale `Qwen3_5ForConditionalGeneration` inkl. geladenem
+Vision-Tower; **nur Q8_0 lief text-only** (keine mmproj-Datei im
+Huihui-Verzeichnis). Auf die Text-Speed-Werte hat das praktisch keinen
+Einfluss (Vision-Tower ist bei Text-Requests inaktiv), aber die
+KV-Kapazität des Q8-Laufs ist dadurch leicht begünstigt
+(~0.5–1 GB/Rank mehr Budget frei).
+
 ## GGUF Q4_K_M (heretic-v2) — KV-Cache bf16
 
 - max_model_len: **182400** (Auto-Fit: 182400)
