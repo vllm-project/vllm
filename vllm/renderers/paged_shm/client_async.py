@@ -240,43 +240,23 @@ class AsyncPagedShmClient(_AsyncBaseClient):
     # ------------------------------------------------------------------
 
     @asynccontextmanager
-    async def get_iterator_numpy(self, uuid: str, size: int):
+    async def get_iterator_numpy(self, uuid: str):
         """
         Async context manager providing a NumPy iterator over the blocks.
         The read lock is held during the whole iteration.
-
-        Usage::
-
-            async with client.get_iterator_numpy(uuid, data_size) as it:
-                for block_array, valid_length in it:
-                    ...
         """
         async with self.read_context(uuid) as ctx:
-            if ctx.size < size:
-                raise ValueError(
-                    f"Requested size {size} exceeds available data size {ctx.size}"
-                )
-            it = self._storage.get_iterator_numpy(size, ctx.blocks)()
+            it = self._storage.get_iterator_numpy(ctx.size, ctx.blocks)()
             yield it
 
     @asynccontextmanager
-    async def get_iterator_tensor(self, uuid: str, size: int):
+    async def get_iterator_tensor(self, uuid: str):
         """
         Async context manager providing a tensor iterator over the blocks.
         The read lock is held during the whole iteration.
-
-        Usage::
-
-            async with client.get_iterator_tensor(uuid, data_size) as it:
-                for block_tensor, valid_length in it:
-                    ...
         """
         async with self.read_context(uuid) as ctx:
-            if ctx.size < size:
-                raise ValueError(
-                    f"Requested size {size} exceeds available data size {ctx.size}"
-                )
-            it = self._storage.get_iterator_tensor(size, ctx.blocks)()
+            it = self._storage.get_iterator_tensor(ctx.size, ctx.blocks)()
             yield it
 
     # ------------------------------------------------------------------
@@ -330,19 +310,21 @@ class AsyncPagedShmClient(_AsyncBaseClient):
         return info["name"]
 
     async def close(self) -> None:
-        """
-        Close all async sockets, terminate context, and detach from shared
-        memory.
-        """
-        # Close all pooled sockets
+        """Close all async sockets, terminate context,
+        and detach from shared memory."""
+
+        # 1. Close all pooled sockets
         while not self._pool.empty():
             try:
                 sock = self._pool.get_nowait()
                 sock.close()
             except asyncio.QueueEmpty:
                 break
-        self._ctx.term()
 
+        # 2. Destroy context without blocking the event loop
+        self._ctx.destroy(linger=0)
+
+        # 3. Detach shared memory
         if hasattr(self, "_storage"):
             self._storage.close()
             logger.debug("Shared memory storage closed.")

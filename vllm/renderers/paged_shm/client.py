@@ -263,43 +263,23 @@ class PagedShmClient(_BaseClient):
     # ------------------------------------------------------------------
 
     @contextmanager
-    def get_iterator_numpy(self, uuid: str, size: int):
+    def get_iterator_numpy(self, uuid: str):
         """
         Provide a NumPy iterator over the blocks of an item while holding
         a read lock.
-
-        Usage::
-
-            with client.get_iterator_numpy(uuid, data_size) as it:
-                for block_array, valid_length in it:
-                    # process block_array (np.ndarray) of length valid_length
         """
         with self.read_context(uuid) as ctx:
-            if ctx.size < size:
-                raise ValueError(
-                    f"Requested size {size} exceeds available data size {ctx.size}"
-                )
-            it = self._storage.get_iterator_numpy(size, ctx.blocks)()
+            it = self._storage.get_iterator_numpy(ctx.size, ctx.blocks)()
             yield it
 
     @contextmanager
-    def get_iterator_tensor(self, uuid: str, size: int):
+    def get_iterator_tensor(self, uuid: str):
         """
         Provide a PyTorch tensor iterator over the blocks of an item while
         holding a read lock.
-
-        Usage::
-
-            with client.get_iterator_tensor(uuid, data_size) as it:
-                for block_tensor, valid_length in it:
-                    # process block_tensor (torch.Tensor) of length valid_length
         """
         with self.read_context(uuid) as ctx:
-            if ctx.size < size:
-                raise ValueError(
-                    f"Requested size {size} exceeds available data size {ctx.size}"
-                )
-            it = self._storage.get_iterator_tensor(size, ctx.blocks)()
+            it = self._storage.get_iterator_tensor(ctx.size, ctx.blocks)()
             yield it
 
     # ------------------------------------------------------------------
@@ -356,16 +336,19 @@ class PagedShmClient(_BaseClient):
         Close all ZMQ sockets, terminate the context, and detach from
         the shared memory segment.
         """
-        # Close all pooled sockets
+
+        # 1. Close all pooled sockets
         while not self._pool.empty():
             try:
                 sock = self._pool.get_nowait()
                 sock.close()
             except queue.Empty:
                 break
-        self._ctx.term()
 
-        # Detach from the shared memory segment
+        # 2. Destroy context
+        self._ctx.destroy(linger=0)
+
+        # 3. Detach shared memory
         if hasattr(self, "_storage"):
             self._storage.close()
             logger.debug("Shared memory storage closed.")

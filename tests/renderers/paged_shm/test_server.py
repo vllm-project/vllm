@@ -357,7 +357,7 @@ class TestContextManagers:
         original = np.random.randint(0, 256, 10000, dtype=np.uint8)
         client.write(uuid, original)
 
-        with client.get_iterator_numpy(uuid, len(original)) as it:
+        with client.get_iterator_numpy(uuid) as it:
             blocks = []
             for arr, valid_len in it:
                 blocks.append(arr[:valid_len])
@@ -371,7 +371,7 @@ class TestContextManagers:
         original = torch.randint(0, 256, (10000,), dtype=torch.uint8)
         client.write(uuid, original)
 
-        with client.get_iterator_tensor(uuid, len(original)) as it:
+        with client.get_iterator_tensor(uuid) as it:
             blocks = []
             for tensor, valid_len in it:
                 blocks.append(tensor[:valid_len])
@@ -402,17 +402,6 @@ class TestErrors:
         state_after = client.get_manager_state()
         assert state_after["free_blocks_count"] == state_before["free_blocks_count"]
         assert uuid not in client.get_manager_state().get("cached_items", [])
-
-    def test_read_request_exceeding_data_size(self, client):
-        uuid = _unique_uuid()
-        data = b"short"
-        client.write(uuid, data)
-
-        with pytest.raises(ValueError, match="exceeds available data size"):
-            with client.get_iterator_tensor(uuid, 100):
-                pass
-
-        client.delete(uuid)
 
     def test_delete_and_read(self, client):
         uuid = _unique_uuid()
@@ -547,7 +536,6 @@ class TestConcurrency:
             t.join()
 
         state_after = client.get_manager_state()
-        total_bytes = sum(len(d) for d in datas)
         needed_blocks = sum(math.ceil(len(d) / 4096) for d in datas)
         assert state_after["cached_items_count"] == state_before[
             "cached_items_count"

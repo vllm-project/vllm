@@ -352,7 +352,7 @@ class TestAsyncContextManagers:
         original = np.random.randint(0, 256, 10000, dtype=np.uint8)
         await async_client.write(uuid, original)
 
-        async with async_client.get_iterator_numpy(uuid, len(original)) as it:
+        async with async_client.get_iterator_numpy(uuid) as it:
             blocks = []
             for arr, valid_len in it:
                 blocks.append(arr[:valid_len])
@@ -366,7 +366,7 @@ class TestAsyncContextManagers:
         original = torch.randint(0, 256, (10000,), dtype=torch.uint8)
         await async_client.write(uuid, original)
 
-        async with async_client.get_iterator_tensor(uuid, len(original)) as it:
+        async with async_client.get_iterator_tensor(uuid) as it:
             blocks = []
             for tensor, valid_len in it:
                 blocks.append(tensor[:valid_len])
@@ -395,15 +395,6 @@ class TestErrors:
             await async_client.write(uuid, too_large)
         state_after = await async_client.get_manager_state()
         assert state_after["free_blocks_count"] == state_before["free_blocks_count"]
-
-    async def test_read_request_exceeding_data_size(self, async_client):
-        uuid = _unique_uuid()
-        data = b"short"
-        await async_client.write(uuid, data)
-        with pytest.raises(ValueError, match="exceeds available data size"):
-            async with async_client.get_iterator_tensor(uuid, 100):
-                pass
-        await async_client.delete(uuid)
 
     async def test_delete_and_read(self, async_client):
         uuid = _unique_uuid()
