@@ -848,23 +848,6 @@ steps:
       DOCKER_BUILDKIT: "1"
       S3_BUCKET: "vllm-wheels"
 
-  - label: "Publish nightly XPU image to DockerHub"
-    depends_on:
-      - create-manifest-xpu
-    if: build.env("NIGHTLY") == "1"
-    agents:
-      queue: small_cpu_queue_release
-    commands:
-      - "bash .buildkite/scripts/xpu/push-nightly-builds-xpu.sh"
-      - "bash .buildkite/scripts/cleanup-nightly-builds.sh nightly- vllm/vllm-openai-xpu"
-    plugins:
-      - docker-login#v3.0.0:
-          username: vllmbot
-          password-env: DOCKERHUB_TOKEN
-    env:
-      DOCKER_BUILDKIT: "1"
-      DOCKERHUB_USERNAME: "vllmbot"
-
   - label: "Publish nightly ROCm image to DockerHub"
     depends_on:
       - build-rocm-release-image
@@ -895,7 +878,6 @@ steps:
       - create-multi-arch-manifest-cuda-12-9
       - create-multi-arch-manifest-ubuntu2404
       - create-multi-arch-manifest-cuda-12-9-ubuntu2404
-      - create-manifest-xpu
       - build-rocm-release-image
       - input-release-version
       # Wait for CPU builds if their block steps were unblocked, so publish

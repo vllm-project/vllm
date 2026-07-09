@@ -130,22 +130,6 @@ docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${ROCM_BASE_CACHE_KEY}-rocm
 docker push vllm/vllm-openai-rocm:latest-base
 docker push vllm/vllm-openai-rocm:v${RELEASE_VERSION}-base
 
-# ---- XPU ----
-
-docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-xpu
-
-docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-xpu vllm/vllm-openai-xpu:latest-x86_64
-docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-xpu vllm/vllm-openai-xpu:v${RELEASE_VERSION}-x86_64
-docker push vllm/vllm-openai-xpu:latest-x86_64
-docker push vllm/vllm-openai-xpu:v${RELEASE_VERSION}-x86_64
-
-docker manifest rm vllm/vllm-openai-xpu:latest || true
-docker manifest rm vllm/vllm-openai-xpu:v${RELEASE_VERSION} || true
-docker manifest create vllm/vllm-openai-xpu:latest vllm/vllm-openai-xpu:latest-x86_64 --amend
-docker manifest create vllm/vllm-openai-xpu:v${RELEASE_VERSION} vllm/vllm-openai-xpu:v${RELEASE_VERSION}-x86_64 --amend
-docker manifest push vllm/vllm-openai-xpu:latest
-docker manifest push vllm/vllm-openai-xpu:v${RELEASE_VERSION}
-
 # ---- CPU ----
 # CPU images are behind separate block steps and may not have been built.
 # All-or-nothing: inspect both arches first, then either publish everything
