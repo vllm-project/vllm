@@ -98,6 +98,103 @@ async def generate(
     return count, request_id
 
 
+async def collect_parallel_sampling_outputs(
+    engine: AsyncLLM,
+    request_id: str,
+    prompt: PromptType,
+    output_kind: RequestOutputKind,
+    *,
+    max_tokens: int,
+    n: int,
+) -> list[RequestOutput]:
+    sampling_params = SamplingParams(
+        max_tokens=max_tokens,
+        ignore_eos=True,
+        output_kind=output_kind,
+        temperature=0.5,
+        seed=33,
+        n=n,
+    )
+    return [
+        out
+        async for out in engine.generate(
+            request_id=request_id,
+            prompt=prompt,
+            sampling_params=sampling_params,
+        )
+    ]
+
+
+def assert_parallel_sampling_outputs(
+    request_id: str,
+    outputs: list[RequestOutput],
+    output_kind: RequestOutputKind,
+    *,
+    max_tokens: int,
+    n: int,
+) -> None:
+    assert outputs
+    assert outputs[-1].finished
+
+    token_counts = dict.fromkeys(range(n), 0)
+    finished_indices: set[int] = set()
+
+    for request_output in outputs:
+        assert request_output.request_id == request_id
+
+        if output_kind == RequestOutputKind.FINAL_ONLY:
+            assert request_output.finished
+            assert len(request_output.outputs) == n
+        else:
+            assert 1 <= len(request_output.outputs) <= n
+
+        for completion in request_output.outputs:
+            assert completion.index in token_counts
+            num_tokens = len(completion.token_ids)
+
+            if output_kind == RequestOutputKind.DELTA:
+                token_counts[completion.index] += num_tokens
+            else:
+                assert num_tokens >= token_counts[completion.index]
+                token_counts[completion.index] = num_tokens
+
+            if completion.finished():
+                finished_indices.add(completion.index)
+
+    assert token_counts == dict.fromkeys(range(n), max_tokens)
+    assert finished_indices == set(range(n))
+
+
+@pytest.mark.parametrize("output_kind", list(RequestOutputKind))
+@pytest.mark.asyncio
+async def test_parallel_sampling_output_kind(output_kind: RequestOutputKind):
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        after.callback(engine.shutdown)
+
+        n = 3
+        max_tokens = 8
+        request_id = f"parallel-sampling-{output_kind.name.lower()}"
+        outputs = await collect_parallel_sampling_outputs(
+            engine,
+            request_id,
+            TEXT_PROMPT,
+            output_kind,
+            max_tokens=max_tokens,
+            n=n,
+        )
+
+        assert_parallel_sampling_outputs(
+            request_id,
+            outputs,
+            output_kind,
+            max_tokens=max_tokens,
+            n=n,
+        )
+        assert not engine.output_processor.has_unfinished_requests()
+
+
 @pytest.mark.parametrize(
     "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
 )
