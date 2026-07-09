@@ -10,13 +10,14 @@ from typing import TYPE_CHECKING, NamedTuple
 from vllm.distributed.nixl_utils import NixlWrapper as nixl_agent
 from vllm.distributed.nixl_utils import nixl_agent_config
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext
+from vllm.v1.kv_offload.base import LookupResult, OffloadKey, ReqContext
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
     RequestOffloadingContext,
+    ScheduleEndContext,
     SecondaryTierManager,
 )
 from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
@@ -156,8 +157,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         except Exception as e:
             raise RuntimeError(
                 f"Object store tier connectivity probe failed — check bucket, "
-                f"endpoint_override, access_key, secret_key, and scheme. "
-                f"Error: {e}"
+                f"endpoint_override, and scheme. If using explicit credentials "
+                f"verify access_key and secret_key; otherwise ensure the AWS "
+                f"SDK default credential chain is configured (IAM role, env "
+                f"vars, credential file). Error: {e}"
             ) from e
 
     def _exists(self, obj_key: str) -> bool:
@@ -221,8 +224,11 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
         self._transfers[job_id] = TransferEntry(xfer_handle, files_desc, obj_handle)
 
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
-        return self._lookup_manager.lookup(key, req_context)
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        result = self._lookup_manager.lookup(key, req_context)
+        if result is None:
+            return LookupResult.RETRY
+        return LookupResult.HIT if result else LookupResult.MISS
 
     def submit_store(self, job_metadata: JobMetadata) -> None:
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
@@ -239,7 +245,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     def on_request_finished(self, req_context: ReqContext) -> None:
         self._lookup_manager.cleanup(req_context.req_id)
 
-    def on_schedule_end(self) -> None:
+    def on_schedule_end(self, context: ScheduleEndContext) -> None:
         self._lookup_manager.flush()
 
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:

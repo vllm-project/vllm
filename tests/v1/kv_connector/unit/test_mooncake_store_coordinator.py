@@ -246,6 +246,20 @@ def test_store_mask_swa_wider_window_covers_more_blocks_per_lcm():
     assert masks[1] == [False, False, True, True, False, False, True, True]
 
 
+def test_store_mask_swa_prefix_stable_as_aligned_length_grows():
+    full = _full(32)
+    swa = _swa(block_size=8, sliding_window=8)
+    groups = [KVCacheGroupSpec(["L0"], full), KVCacheGroupSpec(["L1"], swa)]
+    coord = _make_coord(groups, hash_block_size=8)
+
+    shorter = coord.store_mask(64)[1]
+    longer = coord.store_mask(128)[1]
+
+    assert shorter is not None
+    assert longer is not None
+    assert longer[: len(shorter)] == shorter
+
+
 def test_store_mask_dsv4_5_groups_full_mla_plus_4_swa():
     """DSV4-shaped: full-MLA(B=256) + 4 SWA groups with B in {64, 64, 4, 8}
     and varied sliding windows. lcm=256, hash_block_size=4. Two lcm segments
@@ -353,6 +367,33 @@ def test_store_mask_retention_interval_keeps_segment_and_replay_tails():
     coord = _make_coord(_retention_groups(), hash_block_size=8, retention_interval=64)
     masks = coord.store_mask(128, num_prompt_tokens=100)
     assert masks[1] == [i in (7, 11, 15) for i in range(16)]
+
+
+def test_store_mask_suffix_matches_full_mask_tail():
+    coord = _make_coord(_retention_groups(), hash_block_size=8, retention_interval=64)
+    full = coord.store_mask(128, num_prompt_tokens=100)
+    suffix = coord.store_mask(128, start_token=64, num_prompt_tokens=100)
+
+    for g_idx, cache_group in enumerate(coord.kv_cache_groups):
+        block_size = cache_group.kv_cache_spec.block_size
+        start_chunk = 64 // block_size
+        end_chunk = 128 // block_size
+        full_mask = full[g_idx]
+        if full_mask is None:
+            assert suffix[g_idx] is None
+        else:
+            assert suffix[g_idx] == full_mask[start_chunk:end_chunk]
+
+
+def test_store_mask_retention_prefix_stable_as_aligned_length_grows():
+    coord = _make_coord(_retention_groups(), hash_block_size=8, retention_interval=0)
+
+    shorter = coord.store_mask(64, num_prompt_tokens=100)[1]
+    longer = coord.store_mask(128, num_prompt_tokens=100)[1]
+
+    assert shorter is not None
+    assert longer is not None
+    assert longer[: len(shorter)] == shorter
 
 
 # ----- Eagle / MTP interaction with load_mask -----
