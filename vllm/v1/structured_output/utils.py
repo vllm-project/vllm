@@ -489,9 +489,23 @@ def convert_lark_to_ebnf(grammar_str: str) -> str:
 
 def choice_as_grammar(choice: list[str]) -> str:
     def escape_ebnf_string(s: str) -> str:
-        """Escape special characters in a EBNF string."""
-        # Escape double quotes and backslashes
-        return re.sub(r'(["\\])', r"\\\1", s)
+        """Escape special characters in a EBNF string literal.
+
+        xgrammar's EBNF string literals are single-line, so control
+        characters (e.g. a raw newline) terminate the literal and fail
+        to compile. Emit them as escape sequences instead of raw bytes,
+        alongside double quotes and backslashes.
+        """
+        escapes = {"\\": r"\\", '"': r"\"", "\n": r"\n", "\r": r"\r", "\t": r"\t"}
+
+        def escape_char(ch: str) -> str:
+            if ch in escapes:
+                return escapes[ch]
+            if ord(ch) < 0x20 or ord(ch) == 0x7F:
+                return f"\\u{ord(ch):04x}"
+            return ch
+
+        return "".join(escape_char(ch) for ch in s)
 
     escaped_choices = (escape_ebnf_string(c) for c in choice)
     grammar = "root ::= " + " | ".join(f'"{c}"' for c in escaped_choices)
