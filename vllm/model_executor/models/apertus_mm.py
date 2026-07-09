@@ -174,8 +174,9 @@ class ApertusMultiModalProcessor(BaseMultiModalProcessor[ApertusProcessingInfo])
 
                     rows = [dummy_img_token * w_tok for _ in range(h_tok)]
                     imgstr = self.image_tokenizer.eol_token.join(rows)
+                    # Size header must be in token-grid units, not pixels.
                     layout = (
-                        f"{self.image_tokenizer.boi_token}{h_tok * 16}*{w_tok * 16}"
+                        f"{self.image_tokenizer.boi_token}{h_tok}*{w_tok}"
                         f"{self.image_tokenizer.img_token}{imgstr}{self.image_tokenizer.eoi_token}"
                     )
                     image_layouts.append(layout)
