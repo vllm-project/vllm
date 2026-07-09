@@ -1341,7 +1341,9 @@ def _get_backends_from_return(stmts: list) -> list[str]:
 
 
 def _is_sm100_check(test: ast.expr) -> bool:
-    """Check if test is `something.major == 10`."""
+    """Check if test is `something.major == 10`, possibly inside an `and`."""
+    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
+        return any(_is_sm100_check(value) for value in test.values)
     return (
         isinstance(test, ast.Compare)
         and isinstance(test.left, ast.Attribute)
