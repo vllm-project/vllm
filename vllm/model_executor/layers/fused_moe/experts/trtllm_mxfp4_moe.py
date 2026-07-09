@@ -79,11 +79,7 @@ class TrtLlmMxfp4ExpertsBase:
         else:
             self.gemm1_clamp_limit = None
 
-        from vllm.config import get_current_vllm_config
-
-        self.max_capture_size = (
-            get_current_vllm_config().compilation_config.max_cudagraph_capture_size
-        )
+        self.max_capture_size = moe_config.max_capture_size
 
     @staticmethod
     def _supports_current_device() -> bool:

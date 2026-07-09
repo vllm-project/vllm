@@ -115,7 +115,7 @@ def test_online_quantization(
             # because of how we craft the test case inputs
             assert isinstance(o_proj.quant_method, expected_linear_cls)
             if moe is not None:
-                assert isinstance(moe.quant_method, expected_moe_cls)
+                assert isinstance(moe._quant_method, expected_moe_cls)
 
             if current_platform.is_cuda():
                 assert o_proj.weight.dtype == torch.float8_e4m3fn

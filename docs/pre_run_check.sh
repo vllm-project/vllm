@@ -3,6 +3,26 @@ if [ "$READTHEDOCS_VERSION_TYPE" != "external" ]; then
   exit 0
 fi
 
+# Use a GitHub token if provided to raise the API rate limit (60 -> 5000
+# requests/hour). Set GITHUB_TOKEN in the Read the Docs environment variables.
+CURL_AUTH=()
+if [ -n "$GITHUB_TOKEN" ]; then
+  CURL_AUTH=(-H "Authorization: Bearer $GITHUB_TOKEN")
+fi
+
+# Docs builds are now manually enabled via the 'build-docs' label.
+echo "Checking for the 'build-docs' label on PR #${READTHEDOCS_VERSION_NAME}..."
+LABELS=$(curl -sS "${CURL_AUTH[@]}" "https://api.github.com/repos/vllm-project/vllm/issues/${READTHEDOCS_VERSION_NAME}/labels" | python3 -c "import sys, json; print('\n'.join(l.get('name', '') for l in json.load(sys.stdin)))")
+if printf '%s\n' "$LABELS" | grep -qx "build-docs"; then
+  echo "PR has the 'build-docs' label; continuing build."
+  exit 0
+else
+  echo "PR does not have the 'build-docs' label; cancelling build."
+  # See https://docs.readthedocs.com/platform/latest/guides/build/skip-build.html for info on exit code
+  exit 183
+fi
+
+# Everything below this line is effectively disabled as a temporary measure.
 echo "Checking for changes to docs-affecting files vs origin/main..."
 DOCS_PATHS=(
   docs/                       # Actual docs content
@@ -25,7 +45,7 @@ MAX_WAIT=300
 INTERVAL=60
 ELAPSED=0
 while :; do
-  RAW=$(curl -sS -w "\n%{http_code}" "https://api.github.com/repos/vllm-project/vllm/commits/${READTHEDOCS_GIT_COMMIT_HASH}/check-runs?check_name=pre-run-check&filter=latest")
+  RAW=$(curl -sS "${CURL_AUTH[@]}" -w "\n%{http_code}" "https://api.github.com/repos/vllm-project/vllm/commits/${READTHEDOCS_GIT_COMMIT_HASH}/check-runs?check_name=pre-run-check&filter=latest")
   HTTP_CODE=$(printf %s "$RAW" | tail -n1)
   BODY=$(printf %s "$RAW" | sed '$d')
   if [ "$HTTP_CODE" != "200" ]; then

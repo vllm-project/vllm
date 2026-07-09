@@ -503,6 +503,13 @@ impl Tokenizer for TiktokenTokenizer {
     fn is_special_id(&self, token_id: u32) -> bool {
         self.metadata.is_special_id(token_id)
     }
+
+    fn vocab_size(&self) -> usize {
+        // Exclusive upper bound on token ids the tokenizer can decode (BPE base
+        // tokens plus the registered special/reserved slots), used to range-check
+        // `allowed_token_ids` so tiktoken models are not exempt from validation.
+        self.metadata.vocab_upper_bound as usize
+    }
 }
 
 /// Select the BPE regex pattern for a tiktoken model based on `config.json`.
@@ -611,6 +618,17 @@ mod tests {
                 let result = backend.decode(&[id], false);
                 assert!(result.is_ok(), "decode of token {id} should not error");
             }
+        }
+    }
+
+    #[test]
+    fn tiktoken_vocab_size_reports_upper_bound() {
+        // The synthetic BPE file has 256 base tokens (bytes 0..=255) and ships no
+        // sibling config, so the constructor uses the 256-slot reserved fallback,
+        // giving a vocab upper bound of 512.
+        let (backends, _dir) = tiktoken_backends();
+        for backend in backends {
+            assert_eq!(backend.vocab_size(), 512);
         }
     }
 

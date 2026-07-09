@@ -2,12 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """TRT-LLM Ragged backend for MLA prefill."""
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
 import vllm.envs as envs
-from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+from vllm.v1.attention.backends.mla.prefill.base import (
+    MLADimensions,
+    MLAPrefillBackend,
+)
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -21,7 +24,18 @@ if TYPE_CHECKING:
 class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
     """TRT-LLM Ragged backend for MLA prefill."""
 
-    requires_r1_mla_dimensions = True
+    supported_mla_dimensions: ClassVar[list[MLADimensions]] = [
+        MLADimensions(
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+        ),
+        MLADimensions(
+            qk_nope_head_dim=192,
+            qk_rope_head_dim=64,
+            v_head_dim=256,
+        ),
+    ]
 
     @staticmethod
     def get_name() -> str:
@@ -83,6 +97,8 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
         k: torch.Tensor,
         v: torch.Tensor,
         return_softmax_lse: bool,
+        out: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
 

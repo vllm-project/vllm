@@ -30,6 +30,8 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         self,
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
     ):
         super().__init__(moe_config, quant_config)
         self.topk = moe_config.experts_per_token
@@ -66,8 +68,10 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        # FlashInfer MxInt4 uses a fused SwiGLU activation.
-        return activation == MoEActivation.SWIGLUOAI
+        # FlashInfer MxInt4 names the standard gated SiLU path "SwiGLU".
+        # In vLLM MoE configs that maps to SILU/silu_and_mul; SWIGLUOAI is
+        # kept as an alias for consistency with other FlashInfer backends.
+        return activation in (MoEActivation.SILU, MoEActivation.SWIGLUOAI)
 
     @staticmethod
     def _supports_parallel_config(

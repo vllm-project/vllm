@@ -60,6 +60,9 @@ pub type DynChatTextBackend = Arc<dyn ChatTextBackend>;
 pub struct LoadModelBackendsOptions {
     /// Which chat renderer implementation to use.
     pub renderer: RendererSelection,
+    /// Disable frontend-side multimodal preprocessing and render the model as
+    /// language-only.
+    pub language_model_only: bool,
     /// How to serialize `message.content` when rendering the chat template.
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     /// Optional server-default chat template override, provided either as an

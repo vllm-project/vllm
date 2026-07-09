@@ -56,6 +56,10 @@ impl Tokenizer for TekkenTokenizer {
         self.inner.id_to_piece(id).ok()
     }
 
+    fn vocab_size(&self) -> usize {
+        self.inner.vocab_size()
+    }
+
     fn is_special_id(&self, token_id: u32) -> bool {
         self.inner.is_special_token(token_id)
     }

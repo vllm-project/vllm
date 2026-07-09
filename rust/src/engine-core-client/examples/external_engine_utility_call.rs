@@ -3,6 +3,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
+use vllm_engine_core_client::protocol::utility::PauseMode;
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, TransportMode};
 
 #[derive(Debug, Parser)]
@@ -32,8 +33,8 @@ struct Args {
     reset_external: bool,
     #[arg(long, default_value_t = 1)]
     sleep_level: u32,
-    #[arg(long, default_value = "abort")]
-    sleep_mode: String,
+    #[arg(long, default_value_t = PauseMode::Abort)]
+    sleep_mode: PauseMode,
     #[arg(
         long,
         default_value_t = false,
@@ -106,7 +107,7 @@ async fn main() -> Result<()> {
     if args.skip_sleep_wake {
         println!("sleep_wake=skipped");
     } else {
-        client.sleep(args.sleep_level, &args.sleep_mode).await.with_context(|| {
+        client.sleep(args.sleep_level, args.sleep_mode).await.with_context(|| {
             format!(
                 "failed to call sleep utility with level={} mode={}",
                 args.sleep_level, args.sleep_mode
