@@ -56,6 +56,23 @@ else()
     )
   endif()
   message(STATUS "DeepGEMM is available at ${deepgemm_SOURCE_DIR}")
+
+  # DG_KEY: make DeepGEMM's JIT cache key portable across install layouts so a
+  # prebuilt kernel cache relocates (tools/deepgemm_cache_key.patch). Applied to
+  # the fetched upstream tree only (not a user-provided DEEPGEMM_SRC_DIR). The
+  # reverse --check makes repeated cmake configures idempotent.
+  execute_process(
+    COMMAND git apply --reverse --check "${CMAKE_SOURCE_DIR}/tools/deepgemm_cache_key.patch"
+    WORKING_DIRECTORY "${deepgemm_SOURCE_DIR}"
+    RESULT_VARIABLE _dg_key_reverse_rc
+    OUTPUT_QUIET ERROR_QUIET)
+  if(NOT _dg_key_reverse_rc EQUAL 0)
+    execute_process(
+      COMMAND git apply "${CMAKE_SOURCE_DIR}/tools/deepgemm_cache_key.patch"
+      WORKING_DIRECTORY "${deepgemm_SOURCE_DIR}"
+      COMMAND_ERROR_IS_FATAL ANY)
+    message(STATUS "Applied deepgemm_cache_key.patch (portable JIT cache key)")
+  endif()
 endif()
 
 # DeepGEMM requires CUDA 12.3+ for SM90, 12.9+ for SM100 (official upstream),
