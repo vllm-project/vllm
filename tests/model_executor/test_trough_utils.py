@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from unittest.mock import Mock
+
 import torch
 
 from vllm.model_executor.models.trough_utils import (
     compute_trough_layer_range,
     prepare_trough_layer_states,
+    read_trough_config,
     vectorized_entropy_select,
 )
 
@@ -38,6 +41,42 @@ def test_compute_trough_layer_range_all_layers_by_default() -> None:
     start, count = compute_trough_layer_range(12, config)
     assert start == 0
     assert count == 12
+
+
+def test_read_trough_config_from_additional_config() -> None:
+    vllm_config = Mock()
+    vllm_config.additional_config = {
+        "enable_multi_layer_entropy_selection": True,
+        "select_method": "trough-m1",
+        "p": 0.5,
+        "trough_max_backtrack_layers": 8,
+        "trough_backtrack_ratio": 0.25,
+        "trough_log_interval": 100,
+    }
+    vllm_config.model_config.hf_overrides = {}
+
+    config = read_trough_config(vllm_config)
+
+    assert config["enable_trough_decoding"] is True
+    assert config["trough_select_method"] == "trough-m1"
+    assert config["trough_p"] == 0.5
+    assert config["trough_max_backtrack_layers"] == 8
+    assert config["trough_backtrack_ratio"] == 0.25
+    assert config["trough_log_interval"] == 100
+
+
+def test_read_trough_config_hf_overrides_fallback() -> None:
+    vllm_config = Mock()
+    vllm_config.additional_config = {}
+    vllm_config.model_config.hf_overrides = {
+        "enable_multi_layer_entropy_selection": True,
+        "select_method": "last-m1",
+    }
+
+    config = read_trough_config(vllm_config)
+
+    assert config["enable_trough_decoding"] is True
+    assert config["trough_select_method"] == "last-m1"
 
 
 def test_prepare_trough_layer_states_requires_indices_when_misaligned() -> None:
