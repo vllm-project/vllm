@@ -8,11 +8,25 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from vllm.config import ModelConfig
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import is_mixture_of_experts
+from vllm.model_executor.models.interfaces import (
+    SupportsMultiModal,
+    is_mixture_of_experts,
+)
 
 logger = init_logger(__name__)
+
+
+def _unwrap_moe(model: nn.Module) -> nn.Module:
+    # VLM wrappers (e.g. KimiK25ForConditionalGeneration) hold the MoE
+    # language model under `.language_model` but don't implement
+    # MixtureOfExperts themselves. Mirror the V1 path
+    # (see vllm/v1/worker/gpu_model_runner.py, PR #39805).
+    if not is_mixture_of_experts(model) and isinstance(model, SupportsMultiModal):
+        return model.get_language_model()
+    return model
 
 
 def step_eplb_after(*, is_dummy: bool = False) -> Callable:
@@ -77,6 +91,7 @@ class EPLBController:
             draft_model,
             speculative_config.draft_model_config,
         )
+        speculator.set_eplb_state(self.state)
         self._has_registered_models = True
         return True
 
@@ -89,6 +104,7 @@ class EPLBController:
         if not self.parallel_config.enable_eplb or load_dummy_weights:
             return False
 
+        model = _unwrap_moe(model)
         if not is_mixture_of_experts(model):
             return False
 
@@ -121,6 +137,16 @@ class EPLBController:
             log_stats=self.parallel_config.eplb_config.log_balancedness,
         )
 
+    def prepare_forward(
+        self,
+        model_config: ModelConfig,
+        num_unpadded_tokens: int,
+        ubatch_slices: list | None = None,
+    ) -> None:
+        if self.state is None or not self.parallel_config.enable_eplb:
+            return
+        self.state.prepare_forward(model_config, num_unpadded_tokens, ubatch_slices)
+
     def setup_from_mapping(
         self,
         model: nn.Module,
@@ -128,6 +154,7 @@ class EPLBController:
         expanded_physical_to_logical: torch.Tensor,
         old_num_physical_experts: int,
     ) -> None:
+        model = _unwrap_moe(model)
         assert is_mixture_of_experts(model)
 
         self.state = EplbState.from_mapping(

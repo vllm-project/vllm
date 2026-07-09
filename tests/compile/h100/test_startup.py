@@ -34,7 +34,10 @@ def _run_vllm(vllm_runner):
             mode=CompilationMode.VLLM_COMPILE,
             cudagraph_mode=CUDAGraphMode.NONE,
         ),
-        num_gpu_blocks_override=8,
+        # Phi-tiny-MoE uses SWA, whose admission cap is `cdiv(L, block_size) + 1`
+        # at default block_size=16 — i.e. 17 blocks for max_model_len=256. Use
+        # 32 for headroom.
+        num_gpu_blocks_override=32,
     ):
         pass
 
@@ -135,10 +138,10 @@ MODEL_SPECS = [
         ModelStartupSpec(
             model="deepseek-ai/DeepSeek-V3.2",
             hf_overrides=_SMALL_MOE_OVERRIDES,
-            cold_artifacts_saved=4,
+            cold_artifacts_saved=9,
             # https://github.com/vllm-project/vllm/issues/38051
-            warm_artifacts_saved=0 if is_torch_equal_or_newer("2.12.0") else 4,
-            warm_artifacts_loaded=4 if is_torch_equal_or_newer("2.12.0") else 0,
+            warm_artifacts_saved=0 if is_torch_equal_or_newer("2.12.0") else 9,
+            warm_artifacts_loaded=9 if is_torch_equal_or_newer("2.12.0") else 0,
         ),
         id="deepseek_v3.2",
     ),
@@ -190,7 +193,7 @@ def _run_model(vllm_runner, spec: ModelStartupSpec):
             cudagraph_mode=CUDAGraphMode.NONE,
             pass_config=PassConfig(fuse_allreduce_rms=False),
         ),
-        num_gpu_blocks_override=8,
+        num_gpu_blocks_override=16,
     ):
         pass
 

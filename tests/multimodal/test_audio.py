@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # test_audio.py
+import math
 from unittest.mock import patch
 
 import numpy as np
@@ -45,7 +46,6 @@ def test_resample_audio_scipy(dummy_audio):
     assert np.all(out_same == dummy_audio)
 
 
-@pytest.mark.xfail(reason="resample_audio_scipy is buggy for non-integer ratios")
 def test_resample_audio_scipy_non_integer_ratio(dummy_audio):
     out = resample_audio_scipy(dummy_audio, orig_sr=5, target_sr=3)
 
@@ -53,6 +53,26 @@ def test_resample_audio_scipy_non_integer_ratio(dummy_audio):
     assert len(out) == expected_len
 
     assert isinstance(out, np.ndarray)
+    assert np.isfinite(out).all()
+
+
+def test_resample_audio_scipy_non_divisible_sample_rates():
+    audio = np.arange(441, dtype=float)
+    out = resample_audio_scipy(audio, orig_sr=44100, target_sr=16000)
+
+    expected_len = math.ceil(len(audio) * 16000 / 44100)
+    assert len(out) == expected_len
+
+    assert isinstance(out, np.ndarray)
+    assert np.isfinite(out).all()
+
+
+def test_resample_audio_scipy_resamples_last_axis_for_multichannel():
+    audio = np.arange(2 * 441, dtype=float).reshape(2, 441)
+    out = resample_audio_scipy(audio, orig_sr=44100, target_sr=16000)
+
+    expected_len = math.ceil(audio.shape[-1] * 16000 / 44100)
+    assert out.shape == (2, expected_len)
     assert np.isfinite(out).all()
 
 
@@ -739,6 +759,42 @@ class TestAudioChunking:
 
         assert chunks[0][0] == audio[0]
         assert chunks[-1][-1] == audio[-1]
+
+    def test_find_split_point_nan_input(self):
+        """find_split_point must not return 0 for all-NaN input."""
+        from vllm.multimodal.audio import find_split_point
+
+        nan_audio = np.full(32000, float("nan"), dtype=np.float32)
+        start_idx = 16000
+        end_idx = 32000
+
+        split_idx = find_split_point(
+            wav=nan_audio,
+            start_idx=start_idx,
+            end_idx=end_idx,
+            min_energy_window=1600,
+        )
+
+        # Must return start_idx (the safe fallback), not 0
+        assert split_idx == start_idx
+
+    def test_split_audio_nan_input_terminates(self):
+        """split_audio must terminate on all-NaN audio (no infinite loop)."""
+        # 31 seconds of NaN at 16kHz — longer than max_clip_duration_s
+        nan_audio = np.full(16000 * 31, float("nan"), dtype=np.float32)
+
+        chunks = split_audio(
+            audio_data=nan_audio,
+            sample_rate=16000,
+            max_clip_duration_s=30.0,
+            overlap_duration_s=1.0,
+            min_energy_window_size=1600,
+        )
+
+        # Must produce at least 2 chunks and cover all samples
+        assert len(chunks) >= 2
+        total_samples = sum(c.shape[-1] for c in chunks)
+        assert total_samples == nan_audio.shape[-1]
 
     def test_split_audio_with_different_sample_rates(self):
         """Test chunking works with different sample rates."""

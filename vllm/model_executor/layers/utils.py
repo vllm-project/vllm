@@ -150,6 +150,7 @@ def rocm_unquantized_gemm_impl(
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and on_gfx950()
         and x.dtype in [torch.float16, torch.bfloat16]
+        and x.dim() == 2
         and (
             10 <= n <= 128
             and k % 8 == 0
@@ -159,6 +160,7 @@ def rocm_unquantized_gemm_impl(
             and weight.is_contiguous()
         )
     )
+
     if use_skinny_reduce_counting:
         return ops.wvSplitKrc(x, weight, cu_count, bias)
 
@@ -174,17 +176,21 @@ def rocm_unquantized_gemm_impl(
         and k % 8 == 0
     )
 
-    if not use_skinny:
-        return torch.nn.functional.linear(x, weight, bias)
+    if use_skinny:
+        x_view = x.reshape(-1, x.size(-1))
+        if m > 8 and 0 < n <= 5:
+            cu_count = num_compute_units()
+            out = ops.wvSplitK(weight, x_view, cu_count, bias)
+            return out.reshape(*x.shape[:-1], weight.shape[0])
+        elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
+            out = ops.LLMM1(weight, x_view, 4)
+            return out.reshape(*x.shape[:-1], weight.shape[0])
 
-    x_view = x.reshape(-1, x.size(-1))
-    if m > 8 and 0 < n <= 4:
-        cu_count = num_compute_units()
-        out = ops.wvSplitK(weight, x_view, cu_count, bias)
-        return out.reshape(*x.shape[:-1], weight.shape[0])
-    elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
-        out = ops.LLMM1(weight, x_view, 4)
-        return out.reshape(*x.shape[:-1], weight.shape[0])
+    if rocm_aiter_ops.is_tgemm_enabled():
+        from aiter.tuned_gemm import tgemm
+
+        return tgemm.mm(x, weight, bias)
+
     return torch.nn.functional.linear(x, weight, bias)
 
 
@@ -228,6 +234,19 @@ def dispatch_cpu_unquantized_gemm(
         layer.cpu_linear = torch.nn.functional.linear
         return
 
+    if layer.weight.ndim != 2:
+        # this is not a linear layer
+        # For now it should be a causal_conv1d op
+        if torch.cpu._is_amx_tile_supported():
+            # prepack conv weight
+            layer.weight.data = ops.causal_conv1d_weight_pack(
+                layer.weight.view(
+                    layer.weight.size(0),
+                    layer.weight.size(2),
+                )
+            )
+        return
+
     N, K = layer.weight.size()
     dtype = layer.weight.dtype
 
@@ -253,6 +272,10 @@ def dispatch_cpu_unquantized_gemm(
         )
         if remove_weight:
             layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+        logger.debug_once(
+            "CPU unquantized GEMM dispatch: using zentorch_linear_unary (prepacked=%s)",
+            is_prepacked,
+        )
         return
 
     if envs.VLLM_CPU_SGL_KERNEL and check_cpu_sgl_kernel(N, K, dtype):
@@ -266,6 +289,9 @@ def dispatch_cpu_unquantized_gemm(
         )
         if remove_weight:
             layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+        logger.debug_once(
+            "CPU unquantized GEMM dispatch: using sgl-kernel weight_packed_linear"
+        )
         return
     elif (
         ops._supports_onednn
@@ -277,6 +303,7 @@ def dispatch_cpu_unquantized_gemm(
             layer.cpu_linear = lambda x, weight, bias: ops.onednn_mm(handler, x, bias)
             if remove_weight:
                 layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+            logger.debug_once("CPU unquantized GEMM dispatch: using oneDNN onednn_mm")
             return
         except RuntimeError as e:
             logger.warning_once(
@@ -288,6 +315,9 @@ def dispatch_cpu_unquantized_gemm(
     layer.cpu_linear = lambda x, weight, bias: torch.nn.functional.linear(
         x, weight, bias
     )
+    logger.debug_once(
+        "CPU unquantized GEMM dispatch: using torch.nn.functional.linear (fallback)"
+    )
 
 
 def cpu_unquantized_gemm(
@@ -297,13 +327,6 @@ def cpu_unquantized_gemm(
     bias: torch.Tensor | None = None,
 ):
     return layer.cpu_linear(x, weight, bias)
-
-
-def cublas_gemm_bf16_bf16_fp32(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-):
-    return ops.router_gemm_bf16_fp32(x, weight)
 
 
 def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:

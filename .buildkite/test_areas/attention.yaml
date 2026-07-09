@@ -2,7 +2,8 @@ group: Attention
 depends_on: 
   - image-build
 steps:
-- label: V1 attention (H100)
+- label: V1 attention (H100-MI300)
+  key: v1-attention-h100-mi300
   timeout_in_minutes: 30
   device: h100
   source_file_dependencies:
@@ -12,10 +13,25 @@ steps:
     - tests/v1/attention
   commands:
     - pytest -v -s v1/attention
+  mirror:
+    amd:
+      device: mi325_1
+      timeout_in_minutes: 70
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/config/attention.py
+      - vllm/model_executor/layers/attention
+      - vllm/v1/attention
+      - tests/v1/attention
+      - vllm/_aiter_ops.py
+      - vllm/envs.py
+      - vllm/platforms/rocm.py
 
 - label: V1 attention (B200)
+  key: v1-attention-b200
   timeout_in_minutes: 30
-  device: b200
+  device: b200-k8s
   source_file_dependencies:
     - vllm/config/attention.py
     - vllm/model_executor/layers/attention

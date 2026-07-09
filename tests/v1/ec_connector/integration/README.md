@@ -13,7 +13,7 @@ The test ensures that disaggregated encoding produces **identical** outputs to t
 
 Note that currently PD disaggregation set up may give slightly different results from a single instance. Therefore, we need the result from 1P+1D as the baseline for 1E+1P+1D
 
-Please refer to [Disaggregated Encoder Feature](../../../docs/features/disagg_encoder.md) for the detailed explanation for the EPD features.
+Please refer to [Disaggregated Encoder Feature](../../../../docs/features/disagg_encoder.md) for the detailed explanation for the EPD features.
 
 ## Files
 
@@ -122,7 +122,7 @@ Quick sanity check:
 - Encoder cache should enable exact output reproduction
 - Test cleans up all instances and cache files after completion
 - Safe to run multiple times (idempotent)
-- We setup the PD disagg part with NixlConnector. Please read details about EPD in `examples/online_serving/disaggregated_encoder/README.md`
+- We setup the PD disagg part with NixlConnector. Please read details about EPD in `examples/disaggregated/disaggregated_encoder/README.md`
 
 ## Requirements
 

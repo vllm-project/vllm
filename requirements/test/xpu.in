@@ -1,3 +1,5 @@
+-r ../common.txt
+
 # --- Test Infrastructure ---
 tblib
 pytest
@@ -13,8 +15,9 @@ pytest-shard
 absl-py
 accelerate
 arctic-inference
-lm_eval[api]
-modelscope
+lm_eval[api]>=0.4.12
+modelscope<1.38
+transformers==5.10.4
 
 # --- Audio Processing ---
 librosa
@@ -31,7 +34,7 @@ schemathesis
 jiwer
 bm25s
 pystemmer
-mteb[bm25s]
+mteb[bm25s]>=2, <3 # required for mteb test
 num2words
 pqdm
 

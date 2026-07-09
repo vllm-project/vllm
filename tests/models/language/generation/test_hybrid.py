@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
+from contextlib import contextmanager, nullcontext
 
 import pytest
 
@@ -36,7 +37,6 @@ HYBRID_MODELS = [
     "ai21labs/Jamba-tiny-dev",
     "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
-    "hmellor/tiny-random-BambaForCausalLM",
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
     "LiquidAI/LFM2-1.2B",
@@ -404,6 +404,12 @@ def _get_vllm_runner_params(
     }
 
 
+@contextmanager
+def _owned_vllm_runner(vllm_runner, kwargs):
+    with vllm_runner(**kwargs) as runner:
+        yield runner
+
+
 def _get_vLLM_output(
     vllm_runner,
     kwargs,
@@ -413,22 +419,26 @@ def _get_vLLM_output(
     num_repetitions=1,
     vllm_model=None,
 ):
-    outs = []
-    if vllm_model is None:
-        vllm_model = vllm_runner(**kwargs)
-    for _ in range(num_repetitions):
-        if num_logprobs < 0:
-            vllm_output = vllm_model.generate_greedy(prompts, max_tokens)
-        else:
-            vllm_output = vllm_model.generate_greedy_logprobs(
-                prompts, max_tokens, num_logprobs
-            )
-        outs.append(vllm_output)
+    runner_context = (
+        _owned_vllm_runner(vllm_runner, kwargs)
+        if vllm_model is None
+        else nullcontext(vllm_model)
+    )
+    with runner_context as runner:
+        outs = []
+        for _ in range(num_repetitions):
+            if num_logprobs < 0:
+                vllm_output = runner.generate_greedy(prompts, max_tokens)
+            else:
+                vllm_output = runner.generate_greedy_logprobs(
+                    prompts, max_tokens, num_logprobs
+                )
+            outs.append(vllm_output)
 
     return outs, vllm_model
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0], HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -492,7 +502,7 @@ def test_apc_single_prompt(
         )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0], HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -573,7 +583,7 @@ def test_apc_single_prompt_block_align_alignment(
             )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0], HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -642,7 +652,7 @@ def test_apc_multiple_prompts_all_cached_outputs(
         )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0], HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -727,7 +737,7 @@ def test_apc_multiple_prompts_block_align_alignment(
             )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0], HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -772,37 +782,43 @@ def test_apc_multiple_prompts_partial_cached_outputs(
 
     # Cache only part of all the prompts
     vllm_runner_kwargs["enable_prefix_caching"] = True
-    vllm_outputs_partial_cache, vllm_model = _get_vLLM_output(
-        vllm_runner, vllm_runner_kwargs, generated_prompts[:3], max_tokens, num_logprobs
-    )
-
-    compare_operator(
-        outputs_0_lst=vllm_outputs_no_cache[0][:3],
-        outputs_1_lst=vllm_outputs_partial_cache[0],
-        name_0="vllm_no_cache",
-        name_1="vllm_partial_cache",
-    )
-
-    vllm_outputs_cache_rep, _ = _get_vLLM_output(
-        vllm_runner,
-        vllm_runner_kwargs,
-        generated_prompts,
-        max_tokens,
-        num_logprobs,
-        n_repetitions,
-        vllm_model=vllm_model,
-    )
-
-    for r_idx, vllm_outputs_cache_itn in enumerate(vllm_outputs_cache_rep):
-        # In the first repetition, the caches are filled
-        # In the second repetition, these caches are reused
+    with _owned_vllm_runner(vllm_runner, vllm_runner_kwargs) as vllm_model:
+        vllm_outputs_partial_cache, _ = _get_vLLM_output(
+            vllm_runner,
+            vllm_runner_kwargs,
+            generated_prompts[:3],
+            max_tokens,
+            num_logprobs,
+            vllm_model=vllm_model,
+        )
 
         compare_operator(
-            outputs_0_lst=vllm_outputs_no_cache[0],
-            outputs_1_lst=vllm_outputs_cache_itn,
+            outputs_0_lst=vllm_outputs_no_cache[0][:3],
+            outputs_1_lst=vllm_outputs_partial_cache[0],
             name_0="vllm_no_cache",
-            name_1=f"vllm_cache_it_{r_idx + 1}",
+            name_1="vllm_partial_cache",
         )
+
+        vllm_outputs_cache_rep, _ = _get_vLLM_output(
+            vllm_runner,
+            vllm_runner_kwargs,
+            generated_prompts,
+            max_tokens,
+            num_logprobs,
+            n_repetitions,
+            vllm_model=vllm_model,
+        )
+
+        for r_idx, vllm_outputs_cache_itn in enumerate(vllm_outputs_cache_rep):
+            # In the first repetition, the caches are filled
+            # In the second repetition, these caches are reused
+
+            compare_operator(
+                outputs_0_lst=vllm_outputs_no_cache[0],
+                outputs_1_lst=vllm_outputs_cache_itn,
+                name_0="vllm_no_cache",
+                name_1=f"vllm_cache_it_{r_idx + 1}",
+            )
 
 
 # Test that outputs match whether prefix caching is enabled or not for mamba.
@@ -881,7 +897,7 @@ def test_apc_common_prefix_same_batch(
         "hello what is one plus one what is one plus one what is one plus one the answer is",  # noqa: E501
         "hello what is one plus one what is one plus one what is one plus one the answer is",  # noqa: E501
     ]
-    sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=20)
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=20)
     outputs = llm.generate(prompts, sampling_params)
     for output in outputs:
         assert "two" in output.outputs[0].text

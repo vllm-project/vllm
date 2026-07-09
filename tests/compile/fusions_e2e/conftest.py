@@ -79,6 +79,7 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
     ):
         monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "1" if use_deepgemm else "0")
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_aiter else "0")
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER_CUSTOM_AR", "1" if use_aiter else "0")
         from vllm._aiter_ops import rocm_aiter_ops
 
         rocm_aiter_ops.refresh_env_variables()
@@ -97,12 +98,16 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
                 f"attention backend '{attn_backend.backend.name}'"
             )
 
-        # TODO: remove this after finishing migration from envs to model kwargs
-        if model_name == "openai/gpt-oss-20b":
-            from .common import is_blackwell
+        if backend_name == "rocm_attn" and model_name == "openai/gpt-oss-20b":
+            pytest.skip(
+                "ROCM_ATTN does not support attention sinks (required by gpt-oss-20b)"
+            )
 
-            if is_blackwell():
-                monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "1")
+        if attn_backend.backend.name == "FLASHINFER":
+            from vllm.utils.flashinfer import supports_trtllm_attention
+
+            if not supports_trtllm_attention():
+                matches = matches._replace(attn_quant_fusion=0)
 
         # Disable, compile cache to make sure custom passes run.
         # Otherwise, we can't verify fusion happened through the logs.

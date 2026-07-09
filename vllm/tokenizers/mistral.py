@@ -13,7 +13,6 @@ from mistral_common.protocol.instruct.request import (
 from mistral_common.protocol.instruct.request import (
     ReasoningEffort,
 )
-from mistral_common.protocol.instruct.tool_calls import Function, Tool
 from mistral_common.protocol.instruct.validator import ValidationMode
 from mistral_common.tokens.tokenizers.base import (
     SpecialTokenPolicy,
@@ -32,20 +31,12 @@ from mistral_common.tokens.tokenizers.sentencepiece import (
 )
 from mistral_common.tokens.tokenizers.tekken import Tekkenizer
 from pydantic import ValidationError
+from transformers.tokenization_mistral_common import MistralCommonBackend
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.logger import init_logger
 from vllm.tokenizers.protocol import TokenizerLike
-
-try:
-    # Transformers v5
-    from transformers.tokenization_mistral_common import MistralCommonBackend
-except ImportError:
-    # Transformers v4
-    from transformers.tokenization_mistral_common import (
-        MistralCommonTokenizer as MistralCommonBackend,
-    )
 
 if TYPE_CHECKING:
     import llguidance
@@ -66,36 +57,6 @@ def _pop_unallowed_keys_and_warn(
                 f"for {err_dict_name}. It has been popped from the "
                 "object."
             )
-
-
-# TODO(juliendenize): remove this once OpenAI API is better supported by
-# `mistral-common`.
-def adapt_inplace_to_mistral_tool(
-    tool: dict[str, Any],
-) -> dict[str, Any]:
-    tools_fields = set(Tool.model_fields.keys())
-    function_fields = set(Function.model_fields.keys())
-
-    # The Mistral client, in comparison to the OpenAI client, requires the
-    # "parameters" dict and the "description" string to be present
-    # even if they are empty.
-    if function := tool.get("function"):
-        if function.get("parameters") is None:
-            function["parameters"] = {}
-        if function.get("description") is None:
-            function["description"] = ""
-
-        _pop_unallowed_keys_and_warn(
-            dictionary=function,
-            allowed_keys=function_fields,
-            err_dict_name="function",
-        )
-
-    _pop_unallowed_keys_and_warn(
-        dictionary=tool, allowed_keys=tools_fields, err_dict_name="tools"
-    )
-
-    return tool
 
 
 def maybe_serialize_tool_calls(request: "MistralChatCompletionRequest"):
@@ -167,12 +128,11 @@ def truncate_tool_call_ids(request: "MistralChatCompletionRequest"):
                 request.messages[i]["tool_call_id"] = tool_call_id
 
 
-def _prepare_apply_chat_template_tools_and_messages(
+def _validate_apply_chat_template_args(
     messages: list["ChatCompletionMessageParam"],
-    tools: list[dict[str, Any]] | None = None,
     continue_final_message: bool = False,
     add_generation_prompt: bool = False,
-) -> tuple[list["ChatCompletionMessageParam"], list[dict[str, Any]] | None]:
+) -> None:
     if add_generation_prompt and continue_final_message:
         raise ValueError(
             "Cannot set both `add_generation_prompt` and "
@@ -195,21 +155,6 @@ def _prepare_apply_chat_template_tools_and_messages(
             "Cannot set `continue_final_message` to True when "
             "the last message is not from the assistant."
         )
-
-    # mistral-common requires AssistantMessage content to be string [1].
-    #
-    # [1]: https://github.com/mistralai/mistral-common/blob/f4a06998b75ed78bbf5aaf569590b772ea26c9f6/src/mistral_common/protocol/instruct/messages.py#L80
-    for message in messages:
-        # Remove reasoning as unsupported by Mistral
-        _ = message.pop("reasoning", None)  # type: ignore
-
-    tools = (
-        [adapt_inplace_to_mistral_tool(tool=tool) for tool in tools]
-        if tools is not None
-        else None
-    )
-
-    return messages, tools
 
 
 def validate_request_params(request: "ChatCompletionRequest"):
@@ -241,6 +186,39 @@ def _tekken_token_to_id(tokenizer: "Tekkenizer", t: str | bytes) -> int:
             "Failed to convert token %s to id, replacing with <unk>", t_bytes
         )
         return tokenizer.unk_id
+
+
+def mistral_common_tekkenizer(tokenizer: object) -> "Tekkenizer | None":
+    """Return the underlying `Tekkenizer` for a `MistralCommonBackend`."""
+    mistral = getattr(tokenizer, "tokenizer", None)
+    instruct = getattr(mistral, "instruct_tokenizer", None)
+    tekken = getattr(instruct, "tokenizer", None)
+    return tekken if isinstance(tekken, Tekkenizer) else None
+
+
+def tekken_convert_ids_to_tokens(
+    tokenizer: "Tekkenizer", ids: Sequence[int]
+) -> list[str | bytes]:
+    """Convert ids to pieces, using raw `bytes` for byte-fallback tokens."""
+    tokens: list[str | bytes] = [tokenizer.id_to_piece(i) for i in ids]
+    if any("�" in t for t in tokens):
+        tokens = [
+            tokenizer.id_to_byte_piece(i, SpecialTokenPolicy.KEEP)
+            if i >= tokenizer.num_special_tokens
+            else tokenizer.decode([i], SpecialTokenPolicy.KEEP)
+            for i in ids
+        ]
+    return tokens
+
+
+def tekken_convert_tokens_to_string(
+    tokenizer: "Tekkenizer", tokens: Sequence[str | bytes]
+) -> str:
+    """Reassemble pieces from `tekken_convert_ids_to_tokens` into text."""
+    if any(isinstance(t, bytes) for t in tokens):
+        ids = [_tekken_token_to_id(tokenizer, t) for t in tokens]
+        return tokenizer.decode(ids, SpecialTokenPolicy.KEEP)
+    return "".join(cast(Sequence[str], tokens))
 
 
 class MistralTokenizer(TokenizerLike):
@@ -449,8 +427,8 @@ class MistralTokenizer(TokenizerLike):
         if self.version >= 15:
             version_kwargs["reasoning_effort"] = kwargs.get("reasoning_effort")
 
-        messages, tools = _prepare_apply_chat_template_tools_and_messages(
-            messages, tools, continue_final_message, add_generation_prompt
+        _validate_apply_chat_template_args(
+            messages, continue_final_message, add_generation_prompt
         )
 
         return self.transformers_tokenizer.apply_chat_template(
@@ -508,14 +486,8 @@ class MistralTokenizer(TokenizerLike):
                 if (t in to_decode_special_tokens or t not in self._special_tokens_set)
             ]
 
-            if any(isinstance(t, bytes) for t in tokens):
-                # we need to encode and decode all tokens again
-                ids = [_tekken_token_to_id(self.tokenizer, t) for t in tokens]
-                # We filtered unwanted special tokens before
-                # so we can decode the rest.
-                decoded = self.tokenizer.decode(ids, SpecialTokenPolicy.KEEP)
-            else:
-                decoded = "".join(tokens)
+            # We filtered unwanted special tokens before so we can decode the rest.
+            decoded = tekken_convert_tokens_to_string(self.tokenizer, tokens)
         else:
             # make sure certain special tokens like Tool calls are
             # not decoded

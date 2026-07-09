@@ -21,6 +21,9 @@ pull_request_rules:
     - check-failure=pre-commit
     - -closed
     - -draft
+    - or:
+      - label=ready
+      - label=verified
   actions:
     comment:
       message: |
@@ -35,18 +38,6 @@ pull_request_rules:
         Then, commit the changes and push to your branch.
 
         For future commits, `pre-commit` will run automatically on changed files before each commit.
-
-        > [!TIP]
-        > <details>
-        > <summary>Is <code>mypy</code> failing?</summary>
-        > <br/>
-        > <code>mypy</code> is run differently in CI. If the failure is related to this check, please use the following command to run it locally:
-        >
-        > ```bash
-        > # For mypy (substitute "3.10" with the failing version if needed)
-        > pre-commit run --hook-stage manual mypy-3.10
-        > ```
-        > </details>
 
 - name: comment-dco-failure
   description: Comment on PR when DCO check fails
@@ -103,6 +94,19 @@ pull_request_rules:
       add:
         - frontend
 
+- name: label-rust
+  description: Automatically apply rust label
+  conditions:
+    - label != stale
+    - or:
+      - files~=(?i)rust
+      - title~=(?i)rust
+      - title~=(?i)vllm-rs
+  actions:
+    label:
+      add:
+        - rust
+
 - name: label-llama
   description: Automatically apply llama label
   conditions:
@@ -140,12 +144,12 @@ pull_request_rules:
     - label != stale
     - or:
       - files~=^examples/.*mistral.*\.py
-      - files~=^tests/.*mistral.*\.py
-      - files~=^vllm/model_executor/models/.*mistral.*\.py
+      - files~=^tests/.*(?:mistral|voxtral|mixtral|pixtral).*\.py
+      - files~=^vllm/model_executor/models/.*(?:mistral|voxtral|mixtral|pixtral).*\.py
       - files~=^vllm/reasoning/.*mistral.*\.py
       - files~=^vllm/tool_parsers/.*mistral.*\.py
-      - files~=^vllm/transformers_utils/.*mistral.*\.py
-      - title~=(?i)Mistral
+      - files~=^vllm/transformers_utils/.*(?:mistral|voxtral|pixtral).*\.py
+      - title~=(?i)(?:mistral|ministral|voxtral|mixtral|pixtral)
   actions:
     label:
       add:
@@ -308,8 +312,7 @@ pull_request_rules:
       - files=benchmarks/benchmark_serving_structured_output.py
       - files=benchmarks/run_structured_output_benchmark.sh
       - files=docs/features/structured_outputs.md
-      - files=examples/offline_inference/structured_outputs.py
-      - files=examples/online_serving/structured_outputs/structured_outputs.py
+      - files=^examples/features/structured_outputs/
       - files~=^tests/v1/structured_output/
       - files=tests/entrypoints/llm/test_struct_output_generate.py
       - files~=^vllm/v1/structured_output/
@@ -325,7 +328,7 @@ pull_request_rules:
     - or:
       - files~=^vllm/v1/spec_decode/
       - files~=^tests/v1/spec_decode/
-      - files~=^examples/.*(spec_decode|mlpspeculator|eagle|speculation).*\.py
+      - files=^examples/features/speculative_decoding/
       - files~=^vllm/model_executor/models/.*eagle.*\.py
       - files=vllm/model_executor/models/mlp_speculator.py
       - files~=^vllm/transformers_utils/configs/(eagle|medusa|mlp_speculator)\.py
@@ -385,9 +388,13 @@ pull_request_rules:
     - or:
       - files~=^tests/tool_use/
       - files~=^tests/tool_parsers/
+      - files~=^tests/parser/
+      - files~=^tests/reasoning/
       - files~=^tests/entrypoints/openai/.*tool.*
       - files~=^tests/entrypoints/anthropic/.*tool.*
       - files~=^vllm/tool_parsers/
+      - files~=^vllm/parser/
+      - files~=^vllm/reasoning/
       - files=docs/features/tool_calling.md
       - files~=^examples/tool_calling/
   actions:
@@ -478,9 +485,7 @@ pull_request_rules:
   conditions:
     - label != stale
     - or:
-      - files~=^examples/online_serving/disaggregated[^/]*/.*
-      - files~=^examples/offline_inference/disaggregated[^/]*/.*
-      - files~=^examples/others/lmcache/
+      - files~=^examples/disaggregated/
       - files~=^tests/v1/kv_connector/
       - files~=^vllm/distributed/kv_transfer/
       - title~=(?i)\bP/?D\b
