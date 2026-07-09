@@ -5,179 +5,153 @@ import torch
 
 from vllm.utils.torch_utils import direct_register_custom_op
 
+# ---------------------------------------------------------------------------
+# Multi-slice ops: process all LoRA slices in a single kernel launch.
+# ---------------------------------------------------------------------------
 
-def _bgmv_shrink_impl(
-    inputs: torch.Tensor,
-    lora_a_weights: torch.Tensor,
-    output_tensor: torch.Tensor,
-    lora_indices_tensor: torch.Tensor,
+
+@torch.inference_mode()
+def _lora_shrink(
+    inputs: torch.Tensor,  #  shape [num_tokens, hidden_size]
+    lora_a_weights: list[torch.Tensor],  # shape [num_loras, lora_rank, hidden_size]
+    output_tensor: torch.Tensor,  # shape [num_slices, num_tokens, lora_rank]
+    token_lora_mapping: torch.Tensor,  # shape [num_tokens]
+    token_indices_sorted_by_lora_ids: torch.Tensor,  # shape [num_tokens]
+    num_tokens_per_lora: torch.Tensor,  # shape [max-loras + 1]
+    lora_token_start_loc: torch.Tensor,  # shape [max-loras + 2]
+    lora_ids: torch.Tensor,  # shape [max-loras + 1]
+    no_lora_flag_cpu: torch.Tensor,  # shape [1]
+    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     scaling: float,
 ) -> None:
-    torch.ops._xpu_C.bgmv_shrink(
-        output_tensor, inputs, lora_a_weights, lora_indices_tensor, scaling
+    """Shrink op with triton-compatible signature.
+    Extra metadata args are accepted but unused on XPU."""
+    if no_lora_flag_cpu is not None:
+        assert no_lora_flag_cpu.numel() == 1
+        if no_lora_flag_cpu.item():
+            return
+
+    if isinstance(lora_a_weights, torch.Tensor):
+        lora_a_weights = [lora_a_weights]
+        if output_tensor.dim() == 2:
+            output_tensor = output_tensor.unsqueeze(0)
+
+    assert inputs.dtype in [torch.float16, torch.bfloat16]
+    assert inputs.dtype == lora_a_weights[0].dtype
+    for weight in lora_a_weights:
+        assert weight.dtype in [torch.float16, torch.bfloat16]
+    assert inputs.size(1) == lora_a_weights[0].size(-1)
+    assert inputs.is_contiguous()
+    assert output_tensor.is_contiguous()
+
+    M = inputs.size(0)
+    assert token_lora_mapping.size(0) >= M
+
+    torch.ops._xpu_C.lora_shrink(
+        inputs, list(lora_a_weights), output_tensor, token_lora_mapping, scaling
     )
 
 
-def _bgmv_expand_impl(
+def _lora_shrink_fake(
     inputs: torch.Tensor,
-    lora_b_weights: torch.Tensor,
+    lora_a_weights: list[torch.Tensor],
     output_tensor: torch.Tensor,
-    lora_indices_tensor: torch.Tensor,
-    add_inputs: bool,
+    token_lora_mapping: torch.Tensor,
+    token_indices_sorted_by_lora_ids: torch.Tensor,
+    num_tokens_per_lora: torch.Tensor,
+    lora_token_start_loc: torch.Tensor,
+    lora_ids: torch.Tensor,
+    no_lora_flag_cpu: torch.Tensor,
+    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
+    scaling: float,
 ) -> None:
-    weight_out_dim = lora_b_weights.size(-2)
-    output_dim = output_tensor.size(1)
-
-    if weight_out_dim == output_dim:
-        torch.ops._xpu_C.bgmv_expand(
-            output_tensor,
-            inputs,
-            lora_b_weights,
-            lora_indices_tensor,
-            add_inputs,
-        )
-    elif weight_out_dim < output_dim:
-        # LoRA weight output dim can be smaller than the output tensor
-        # (e.g. vocab_size vs padded logits). Use expand_slice to write
-        # only the matching portion, mirroring torch_ops common_len logic.
-        torch.ops._xpu_C.bgmv_expand_slice(
-            output_tensor,
-            inputs,
-            lora_b_weights,
-            lora_indices_tensor,
-            0,
-            weight_out_dim,
-            add_inputs,
-        )
-    else:
-        # Weight output dim larger than output tensor: truncate weights.
-        lora_b_weights = lora_b_weights[..., :output_dim, :].contiguous()
-        torch.ops._xpu_C.bgmv_expand_slice(
-            output_tensor,
-            inputs,
-            lora_b_weights,
-            lora_indices_tensor,
-            0,
-            output_dim,
-            add_inputs,
-        )
+    return
 
 
-def _bgmv_expand_slice_impl(
-    inputs: torch.Tensor,
-    lora_b_weights: torch.Tensor,
-    output_tensor: torch.Tensor,
-    lora_indices_tensor: torch.Tensor,
-    slice_offset: int,
-    slice_size: int,
-    add_inputs: bool,
+try:
+    direct_register_custom_op(
+        op_name="xpu_lora_shrink",
+        op_func=_lora_shrink,
+        mutates_args=["output_tensor"],
+        fake_impl=_lora_shrink_fake,
+    )
+    lora_shrink = torch.ops.vllm.xpu_lora_shrink
+
+except AttributeError:
+    lora_shrink = _lora_shrink
+
+
+@torch.inference_mode()
+def _lora_expand(
+    inputs: torch.Tensor,  # shape [num_slices, num_tokens, lora_rank]
+    lora_b_weights: list[torch.Tensor],  # shape [num_lora, hidden_size, lora_rank]
+    output_tensor: torch.Tensor,  # shape [num_tokens, hidden_size * num_slices]
+    token_lora_mapping: torch.Tensor,  # shape [num_tokens]
+    token_indices_sorted_by_lora_ids: torch.Tensor,  # shape [num_tokens]
+    num_tokens_per_lora: torch.Tensor,  # shape [max-loras + 1]
+    lora_token_start_loc: torch.Tensor,  # shape [max-loras + 2]
+    lora_ids: torch.Tensor,  # shape [max-loras + 1]
+    no_lora_flag_cpu: torch.Tensor,  # shape [1]
+    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
+    offset_start: int = 0,
+    add_inputs: bool = False,
 ) -> None:
-    assert slice_size == lora_b_weights.size(-2)
-    assert slice_offset + slice_size <= output_tensor.size(1)
-    torch.ops._xpu_C.bgmv_expand_slice(
-        output_tensor,
+    """Expand op with triton-compatible signature.
+    Extra metadata args are accepted but unused on XPU."""
+    if no_lora_flag_cpu is not None:
+        assert no_lora_flag_cpu.numel() == 1
+        if no_lora_flag_cpu.item():
+            return
+
+    if isinstance(lora_b_weights, torch.Tensor):
+        lora_b_weights = [lora_b_weights]
+        if inputs.dim() == 2:
+            inputs = inputs.unsqueeze(0)
+
+    assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]
+    for weight in lora_b_weights:
+        assert weight.dtype in [torch.float16, torch.bfloat16]
+    assert inputs.size(0) == len(lora_b_weights)
+    assert output_tensor.is_contiguous()
+
+    M = inputs.size(1)
+    assert token_lora_mapping.size(0) >= M
+
+    torch.ops._xpu_C.lora_expand(
         inputs,
         lora_b_weights,
-        lora_indices_tensor,
-        slice_offset,
-        slice_size,
+        output_tensor,
+        token_lora_mapping,
+        offset_start,
         add_inputs,
     )
 
 
-def _bgmv_shrink_fake(
+def _lora_expand_fake(
     inputs: torch.Tensor,
-    lora_a_weights: torch.Tensor,
+    lora_b_weights: list[torch.Tensor],
     output_tensor: torch.Tensor,
-    lora_indices_tensor: torch.Tensor,
-    scaling: float,
+    token_lora_mapping: torch.Tensor,
+    token_indices_sorted_by_lora_ids: torch.Tensor,
+    num_tokens_per_lora: torch.Tensor,
+    lora_token_start_loc: torch.Tensor,
+    lora_ids: torch.Tensor,
+    no_lora_flag_cpu: torch.Tensor,
+    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
+    offset_start: int = 0,
+    add_inputs: bool = False,
 ) -> None:
-    return None
+    return
 
 
-def _bgmv_expand_fake(
-    inputs: torch.Tensor,
-    lora_b_weights: torch.Tensor,
-    output_tensor: torch.Tensor,
-    lora_indices_tensor: torch.Tensor,
-    add_inputs: bool,
-) -> None:
-    return None
-
-
-def _bgmv_expand_slice_fake(
-    inputs: torch.Tensor,
-    lora_b_weights: torch.Tensor,
-    output_tensor: torch.Tensor,
-    lora_indices_tensor: torch.Tensor,
-    slice_offset: int,
-    slice_size: int,
-    add_inputs: bool,
-) -> None:
-    return None
-
-
-direct_register_custom_op(
-    op_name="xpu_bgmv_shrink",
-    op_func=_bgmv_shrink_impl,
-    mutates_args=["output_tensor"],
-    fake_impl=_bgmv_shrink_fake,
-)
-
-direct_register_custom_op(
-    op_name="xpu_bgmv_expand",
-    op_func=_bgmv_expand_impl,
-    mutates_args=["output_tensor"],
-    fake_impl=_bgmv_expand_fake,
-)
-
-direct_register_custom_op(
-    op_name="xpu_bgmv_expand_slice",
-    op_func=_bgmv_expand_slice_impl,
-    mutates_args=["output_tensor"],
-    fake_impl=_bgmv_expand_slice_fake,
-)
-
-
-def bgmv_shrink(
-    inputs: torch.Tensor,
-    lora_a_weights: torch.Tensor,
-    output_tensor: torch.Tensor,
-    lora_indices_tensor: torch.Tensor,
-    scaling: float = 1.0,
-) -> None:
-    torch.ops.vllm.xpu_bgmv_shrink(
-        inputs, lora_a_weights, output_tensor, lora_indices_tensor, scaling
+try:
+    direct_register_custom_op(
+        op_name="xpu_lora_expand",
+        op_func=_lora_expand,
+        mutates_args=["output_tensor"],
+        fake_impl=_lora_expand_fake,
     )
+    lora_expand = torch.ops.vllm.xpu_lora_expand
 
-
-def bgmv_expand(
-    inputs: torch.Tensor,
-    lora_b_weights: torch.Tensor,
-    output_tensor: torch.Tensor,
-    lora_indices_tensor: torch.Tensor,
-    add_inputs: bool = True,
-) -> None:
-    torch.ops.vllm.xpu_bgmv_expand(
-        inputs, lora_b_weights, output_tensor, lora_indices_tensor, add_inputs
-    )
-
-
-def bgmv_expand_slice(
-    inputs: torch.Tensor,
-    lora_b_weights: torch.Tensor,
-    output_tensor: torch.Tensor,
-    lora_indices_tensor: torch.Tensor,
-    slice_offset: int,
-    slice_size: int,
-    add_inputs: bool = True,
-) -> None:
-    torch.ops.vllm.xpu_bgmv_expand_slice(
-        inputs,
-        lora_b_weights,
-        output_tensor,
-        lora_indices_tensor,
-        slice_offset,
-        slice_size,
-        add_inputs,
-    )
+except AttributeError:
+    lora_expand = _lora_expand

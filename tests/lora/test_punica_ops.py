@@ -5,7 +5,6 @@ from threading import Lock
 import pytest
 import torch
 
-import vllm.lora.ops.triton_ops as triton_ops
 from vllm.lora.ops.triton_ops import LoRAKernelMeta
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
 from vllm.platforms import current_platform
@@ -14,6 +13,11 @@ from vllm.utils.torch_utils import set_random_seed
 from .utils import PunicaTensors, assert_close, generate_data_for_nslices
 
 DEVICE_TYPE = current_platform.device_type
+
+if current_platform.is_xpu():
+    import vllm.lora.ops.xpu_ops as lora_ops
+else:
+    import vllm.lora.ops.triton_ops as lora_ops
 
 # On XPU, oneDNN/oneMKL can return wrong results for these reference matmuls
 # after many Triton kernel launches, so the reference stays on CPU there.
@@ -202,7 +206,7 @@ def check_lora_shrink_kernel(
     with _dict_lock:
         # lora_shrink kernel
         _LORA_A_PTR_DICT.clear()
-        triton_ops.lora_shrink(
+        lora_ops.lora_shrink(
             data.inputs_tensor,
             data.lora_weights,
             out_tensor,
@@ -277,7 +281,7 @@ def check_lora_expand_kernel(
     with _dict_lock:
         # lora_expand kernel
         _LORA_B_PTR_DICT.clear()
-        triton_ops.lora_expand(
+        lora_ops.lora_expand(
             data.inputs_tensor,
             data.lora_weights,
             out_tensor,

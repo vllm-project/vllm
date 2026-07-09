@@ -1,6 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.lora.ops.xpu_ops.lora_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
+from vllm.lora.ops.xpu_ops.lora_ops import (
+    lora_expand,
+    lora_shrink,
+)
 
-__all__ = ["bgmv_expand", "bgmv_expand_slice", "bgmv_shrink"]
+__all__ = [
+    "lora_expand",
+    "lora_shrink",
+]
