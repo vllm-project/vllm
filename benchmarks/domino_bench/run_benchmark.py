@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Benchmark Domino vs DFlash speculative decoding on HumanEval.
 
 Usage (from repo root):
@@ -17,13 +19,15 @@ import argparse
 import gc
 import json
 import os
+
+# -- make domino_inference importable from benchmarks/domino_bench --
+import sys
 import time
+
 import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# -- make domino_inference importable from benchmarks/domino_bench --
-import sys
 _here = os.path.dirname(os.path.abspath(__file__))
 if _here not in sys.path:
     sys.path.insert(0, _here)
@@ -34,7 +38,9 @@ from domino_inference import load_draft_model
 def chat_prompt(question: str, tokenizer) -> str:
     messages = [{"role": "user", "content": question}]
     return tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True,
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
     )
 
 
@@ -47,7 +53,9 @@ def run_benchmark(args):
     # ------------------------------------------------------------------
     print("Loading verifier:", args.verifier)
     verifier = AutoModelForCausalLM.from_pretrained(
-        args.verifier, torch_dtype=torch.bfloat16, device_map="cuda",
+        args.verifier,
+        torch_dtype=torch.bfloat16,
+        device_map="cuda",
     )
     verifier.eval()
     n = sum(p.numel() for p in verifier.parameters()) / 1e6
@@ -68,9 +76,9 @@ def run_benchmark(args):
     results = {}
     for model_name in args.models:
         ckpt_dir = args.checkpoints[model_name]
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"Model: {model_name}  ({ckpt_dir})")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         # Load draft
         print("Loading draft model...")
@@ -80,7 +88,11 @@ def run_benchmark(args):
         print("Warm-up run...")
         warm_ids = tokenizer.encode("Hello", return_tensors="pt").to(device)
         draft.spec_generate(
-            warm_ids, verifier, max_new_tokens=16, temperature=0.0, return_metrics=False,
+            warm_ids,
+            verifier,
+            max_new_tokens=16,
+            temperature=0.0,
+            return_metrics=False,
         )
         torch.cuda.synchronize()
 
@@ -100,7 +112,8 @@ def run_benchmark(args):
             torch.cuda.synchronize()
             t0 = time.perf_counter()
             result = draft.spec_generate(
-                input_ids, verifier,
+                input_ids,
+                verifier,
                 max_new_tokens=args.max_new_tokens,
                 temperature=0.0,
                 return_metrics=True,
@@ -109,8 +122,8 @@ def run_benchmark(args):
             elapsed = time.perf_counter() - t0
 
             n_out = int(result.num_output_tokens)
-            avg_accept = (
-                sum(result.acceptance_lengths) / max(len(result.acceptance_lengths), 1)
+            avg_accept = sum(result.acceptance_lengths) / max(
+                len(result.acceptance_lengths), 1
             )
             tps = n_out / elapsed if elapsed > 0 else 0.0
 
@@ -124,17 +137,19 @@ def run_benchmark(args):
                     all_pos_accept.append([])
                 all_pos_accept[p].extend(acc_list)
 
-            per_prompt.append({
-                "idx": int(idx),
-                "acceptance_length": round(avg_accept, 3),
-                "output_tokens": n_out,
-                "time_s": round(elapsed, 3),
-                "tokens_per_sec": round(tps, 1),
-            })
+            per_prompt.append(
+                {
+                    "idx": int(idx),
+                    "acceptance_length": round(avg_accept, 3),
+                    "output_tokens": n_out,
+                    "time_s": round(elapsed, 3),
+                    "tokens_per_sec": round(tps, 1),
+                }
+            )
 
             if (idx + 1) % 20 == 0 or idx == 0:
                 print(
-                    f"  [{idx+1}/{len(dataset)}] "
+                    f"  [{idx + 1}/{len(dataset)}] "
                     f"accept={avg_accept:.2f}  tokens={n_out}  tps={tps:.1f}"
                 )
 
@@ -176,10 +191,12 @@ def run_benchmark(args):
     print(f"\nResults saved to {out_path}")
 
     # Summary table
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("SUMMARY")
-    print(f"{'='*60}")
-    header = f"{'Model':<12} {'Accept len':>10} {'TPS':>10} {'Tokens':>8} {'Time(s)':>10}"
+    print(f"{'=' * 60}")
+    header = (
+        f"{'Model':<12} {'Accept len':>10} {'TPS':>10} {'Tokens':>8} {'Time(s)':>10}"
+    )
     print(header)
     print("-" * len(header))
     for name, r in results.items():
@@ -190,9 +207,9 @@ def run_benchmark(args):
         )
 
     # Per-position acceptance rates
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("Per-position acceptance rate")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     all_pos = sorted(
         {p for r in results.values() for p in r["pos_acceptance"]},
         key=lambda x: int(x.split("_")[1]),
@@ -225,15 +242,24 @@ DEFAULT_CHECKPOINTS = {
 def main():
     parser = argparse.ArgumentParser(description="Domino vs DFlash benchmark")
     parser.add_argument(
-        "--models", nargs="+", choices=sorted(DEFAULT_CHECKPOINTS), default=["dflash", "domino"],
+        "--models",
+        nargs="+",
+        choices=sorted(DEFAULT_CHECKPOINTS),
+        default=["dflash", "domino"],
         help="Models to benchmark",
     )
-    parser.add_argument("--num-prompts", type=int, default=164,
-                        help="Number of HumanEval prompts (default: 164)")
-    parser.add_argument("--max-new-tokens", type=int, default=512,
-                        help="Max new tokens per prompt")
-    parser.add_argument("--verifier", type=str, default="Qwen/Qwen3-0.6B",
-                        help="Verifier model name")
+    parser.add_argument(
+        "--num-prompts",
+        type=int,
+        default=164,
+        help="Number of HumanEval prompts (default: 164)",
+    )
+    parser.add_argument(
+        "--max-new-tokens", type=int, default=512, help="Max new tokens per prompt"
+    )
+    parser.add_argument(
+        "--verifier", type=str, default="Qwen/Qwen3-0.6B", help="Verifier model name"
+    )
     parser.add_argument("--output", type=str, default="benchmark_results.json")
     args = parser.parse_args()
     args.checkpoints = DEFAULT_CHECKPOINTS
