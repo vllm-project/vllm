@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class INCLayerConfig:
     bits: int
-    group_size: int | tuple[int, int]
+    group_size: int
     sym: bool
     packing_format: str
     backend: str
@@ -63,13 +63,13 @@ class INCConfigParser:
 
     def get_layer_config(
         self, layer: "torch.nn.Module", layer_name: str
-    ) -> tuple[int, int | tuple[int, int], bool]:
+    ) -> tuple[int, int, bool]:
         layer_config = self.resolve(layer, layer_name)
         return layer_config.bits, layer_config.group_size, layer_config.sym
 
     def _resolve_raw(
         self, layer: "torch.nn.Module", layer_name: str
-    ) -> tuple[int, int | tuple[int, int], bool]:
+    ) -> tuple[int, int, bool]:
         REGEX_SPECIAL_CHARS = set(r"*+?^$()[]{}|\\")
 
         def is_explicitly_configured(name: str) -> bool:
@@ -91,9 +91,7 @@ class INCConfigParser:
                     continue
             return False
 
-        def get_config(
-            name: str, quantized: bool = True
-        ) -> tuple[int, int | tuple[int, int], bool]:
+        def get_config(name: str, quantized: bool = True) -> tuple[int, int, bool]:
             if not self._config.extra_config:
                 return (
                     self._config.weight_bits if quantized else 16,
@@ -105,12 +103,7 @@ class INCConfigParser:
                 cfg = self._config.extra_config[name]
                 return (
                     cfg.get("bits", self._config.weight_bits if quantized else 16),
-                    self._normalize_group_size(
-                        cfg.get(
-                            "group_size",
-                            self._config.group_size if quantized else -1,
-                        )
-                    ),
+                    cfg.get("group_size", self._config.group_size if quantized else -1),
                     cfg.get("sym", self._config.sym if quantized else True),
                 )
 
@@ -128,11 +121,9 @@ class INCConfigParser:
                                 "bits",
                                 self._config.weight_bits if quantized else 16,
                             ),
-                            self._normalize_group_size(
-                                cfg.get(
-                                    "group_size",
-                                    self._config.group_size if quantized else -1,
-                                )
+                            cfg.get(
+                                "group_size",
+                                self._config.group_size if quantized else -1,
                             ),
                             cfg.get("sym", self._config.sym if quantized else True),
                         )
@@ -192,26 +183,3 @@ class INCConfigParser:
                     )
 
         return get_config(layer_name, quantized)
-
-    @staticmethod
-    def _normalize_group_size(
-        group_size: int | list[int] | tuple[int, int],
-    ) -> int | tuple[int, int]:
-        """Normalize INC group_size into either an int or a 2-D int tuple."""
-        if isinstance(group_size, (list, tuple)):
-            if len(group_size) != 2 or not all(
-                isinstance(value, int) for value in group_size
-            ):
-                raise ValueError(
-                    "INC block-wise FP8 requires group_size to be a 2-D "
-                    f"integer sequence, but found {group_size!r}."
-                )
-            return (group_size[0], group_size[1])
-
-        if not isinstance(group_size, int):
-            raise ValueError(
-                "INC group_size must be an int or a 2-D integer sequence, "
-                f"but found {type(group_size).__name__}."
-            )
-
-        return group_size

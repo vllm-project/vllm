@@ -115,12 +115,6 @@ def _resolve_gptq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
         check_moe_marlin_supports_layer,
     )
 
-    group_size = layer_config.group_size
-    if not isinstance(group_size, int):
-        raise ValueError(
-            f"INC WNA16 MoE requires scalar group_size, but found {group_size!r}."
-        )
-
     gptq_type_map = {
         (4, True): scalar_types.uint4b8,
         (8, True): scalar_types.uint8b128,
@@ -129,15 +123,15 @@ def _resolve_gptq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
     if use_marlin:
         use_marlin = check_marlin_supported(
             gptq_type_map[(layer_config.bits, layer_config.sym)],
-            group_size,
+            layer_config.group_size,
             has_zp=not layer_config.sym,
-        ) and check_moe_marlin_supports_layer(layer, group_size)
+        ) and check_moe_marlin_supports_layer(layer, layer_config.group_size)
 
     if use_marlin:
         return AutoGPTQMoEMethod(
             AutoGPTQConfig(
                 weight_bits=layer_config.bits,
-                group_size=group_size,
+                group_size=layer_config.group_size,
                 desc_act=False,
                 is_sym=layer_config.sym,
                 lm_head_quantized=False,
@@ -151,7 +145,7 @@ def _resolve_gptq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
         {
             "quant_method": "gptq",
             "bits": layer_config.bits,
-            "group_size": group_size,
+            "group_size": layer_config.group_size,
             "sym": layer_config.sym,
             "lm_head": False,
         }
@@ -170,12 +164,6 @@ def _resolve_awq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
         check_moe_marlin_supports_layer,
     )
 
-    group_size = layer_config.group_size
-    if not isinstance(group_size, int):
-        raise ValueError(
-            f"INC WNA16 MoE requires scalar group_size, but found {group_size!r}."
-        )
-
     awq_type_map = {
         4: scalar_types.uint4,
         8: scalar_types.uint8,
@@ -184,15 +172,15 @@ def _resolve_awq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
     if use_marlin:
         use_marlin = check_marlin_supported(
             awq_type_map[layer_config.bits],
-            group_size,
+            layer_config.group_size,
             not layer_config.sym,
-        ) and check_moe_marlin_supports_layer(layer, group_size)
+        ) and check_moe_marlin_supports_layer(layer, layer_config.group_size)
 
     if use_marlin:
         return AutoAWQMoEMethod(
             AutoAWQConfig(
                 weight_bits=layer_config.bits,
-                group_size=group_size,
+                group_size=layer_config.group_size,
                 zero_point=not layer_config.sym,
                 lm_head_quantized=False,
                 modules_to_not_convert=[],
@@ -205,7 +193,7 @@ def _resolve_awq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
         {
             "quant_method": "awq",
             "bits": layer_config.bits,
-            "group_size": group_size,
+            "group_size": layer_config.group_size,
             "zero_point": not layer_config.sym,
             "lm_head": False,
         }
