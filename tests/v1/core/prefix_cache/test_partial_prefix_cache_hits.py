@@ -678,3 +678,139 @@ def test_free_cow_retained_blocks_defers_until_copy_step_processed():
     mock.processed_step_seq = 0
     free(mock, list(blocks))
     assert freed == blocks
+
+
+def test_full_attention_eagle_drops_one_hash_unit():
+    """With fine-grained partial hits, eagle rewinds the hit by one hash unit
+    instead of a whole cache block: the tail block's KV is append-only, so it
+    still covers the reduced length and stays in the hit as a partial block."""
+    from vllm.v1.core.block_pool import BlockPool
+    from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+
+    hash_block_size = 2
+    block_size = 4
+    pool = BlockPool(
+        num_gpu_blocks=10, enable_caching=True, hash_block_size=hash_block_size
+    )
+    spec = FullAttentionSpec(
+        block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+    )
+    req = make_request("0", [0, 0, 1, 1, 2, 2, 3, 3], hash_block_size, sha256)
+
+    def find(drop_eagle_block):
+        return FullAttentionManager.find_longest_cache_hit(
+            block_hashes=req.block_hashes,
+            max_length=8,
+            kv_cache_group_ids=[0],
+            block_pool=pool,
+            kv_cache_spec=spec,
+            drop_eagle_block=drop_eagle_block,
+            alignment_tokens=hash_block_size,
+        )
+
+    # Two full cached blocks (hit 8): eagle rewinds to 6, keeping the last
+    # block as a partial hit instead of dropping it to 4.
+    blocks = pool.get_new_blocks(2)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks,
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=block_size,
+        kv_cache_group_id=0,
+    )
+    hit_blocks, hit_length = find(drop_eagle_block=False)
+    assert (hit_length, len(hit_blocks[0])) == (8, 2)
+    hit_blocks, hit_length = find(drop_eagle_block=True)
+    assert (hit_length, len(hit_blocks[0])) == (6, 2)
+
+    # A partial tail at 6 (block 1 not fully cached): eagle rewinds to the
+    # block boundary and trims the tail block.
+    pool2 = BlockPool(
+        num_gpu_blocks=10, enable_caching=True, hash_block_size=hash_block_size
+    )
+    pool = pool2
+    blocks = pool.get_new_blocks(2)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks[:1],
+        num_cached_blocks=0,
+        num_full_blocks=1,
+        block_size=block_size,
+        kv_cache_group_id=0,
+    )
+    assert (
+        pool.cache_partial_block(
+            request=req,
+            block=blocks[1],
+            num_tokens=6,
+            kv_cache_group_id=0,
+            block_size=block_size,
+        )
+        is not None
+    )
+    hit_blocks, hit_length = find(drop_eagle_block=False)
+    assert (hit_length, len(hit_blocks[0])) == (6, 2)
+    hit_blocks, hit_length = find(drop_eagle_block=True)
+    assert (hit_length, len(hit_blocks[0])) == (4, 1)
+
+
+def test_hybrid_partial_hit_with_eagle_stays_within_group_blocks():
+    """Regression: with eagle, the mamba group must not receive the eagle
+    lookup margin — its finder never applies the drop, so it could return a
+    hit past the blocks the (dropped) full-attention group covers, crashing
+    the consumer's CoW with block_idx >= len(req_blocks)."""
+    hash_block_size = 2
+    block_size = 2 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        use_eagle=True,
+    )
+
+    # The owner prefills in scheduler-split style: stop at the block boundary
+    # (4), then at the prompt's last hash boundary (6, partial entries).
+    req0 = make_request("0", [7] * 6, hash_block_size, sha256)
+    computed_blocks, num_computed = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 4, num_computed, computed_blocks) is not None
+    req0.num_computed_tokens = 4
+    manager.new_step_starts()
+    assert manager.allocate_slots(req0, 2) is not None
+    req0.num_computed_tokens = 6
+    manager.new_step_starts()
+
+    # A longer request with eagle: full attention drops the partial tail, so
+    # the joint hit must fall back to the block boundary the FA blocks cover.
+    req1 = make_request("1", [7] * 6 + [9] * 2, hash_block_size, sha256)
+    computed_blocks, num_computed = manager.get_computed_blocks(req1)
+    assert num_computed == 4
+    assert all(
+        len(group) * block_size >= num_computed for group in computed_blocks.blocks
+    )
+    assert manager.allocate_slots(req1, 4, num_computed, computed_blocks) is not None

@@ -733,22 +733,19 @@ class FullAttentionManager(SingleTypeKVCacheManager):
                 hit_length = (fine_idx + 1) * alignment_tokens
                 break
 
-        if drop_eagle_block and computed_blocks[0]:
-            # Eagle needs the last matched block recomputed; drop it (a
-            # fine-grained partial tail collapses back to the full-block
-            # boundary here too).
-            for computed in computed_blocks:
-                computed.pop()
-            hit_length = len(computed_blocks[0]) * block_size
-        # Coarse alignment round-down (alignment_tokens > block_size); a no-op
-        # for fine-grained since block_size is a multiple of alignment_tokens.
-        while (
-            block_size != alignment_tokens
-            and len(computed_blocks[0]) * block_size % alignment_tokens != 0
-        ):
-            for computed in computed_blocks:
-                computed.pop()
-            hit_length -= block_size
+        # Eagle needs the tokens right before the generation point recomputed:
+        # drop one hash unit when fine-grained (the tail block's KV is
+        # append-only, so it still covers the reduced length), else one cache
+        # block.
+        if drop_eagle_block and hit_length > 0:
+            hit_length -= min(alignment_tokens, block_size)
+        # Round down to the alignment; a no-op when fine-grained (hits land on
+        # hash boundaries by construction) and when alignment_tokens ==
+        # block_size. Then trim blocks past the new tail.
+        hit_length -= hit_length % alignment_tokens
+        num_blocks = cdiv(hit_length, block_size)
+        for computed in computed_blocks:
+            del computed[num_blocks:]
         return computed_blocks, hit_length
 
     def cache_blocks(
@@ -1461,12 +1458,6 @@ class MambaManager(SingleTypeKVCacheManager):
             num_required_blocks = (
                 cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
             )
-            if (
-                num_tokens % self.block_size != 0
-                and self.block_size != self.block_pool.hash_block_size
-                and num_tokens % self.block_pool.hash_block_size == 0
-            ):
-                num_required_blocks += 1
             num_new_blocks = (
                 num_required_blocks
                 - len(new_computed_blocks)

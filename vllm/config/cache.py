@@ -62,6 +62,8 @@ class CacheConfig:
     `block_size` is divisible by it, enabling cache hits at boundaries
     inside a physical block. It controls matching granularity only, not how
     often states are stored.
+
+    This equals to the `hash_block_size` used throughout the KV cache code.
     """
     gpu_memory_utilization: float = Field(default=0.92, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
