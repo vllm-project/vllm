@@ -4383,10 +4383,19 @@ class GPUModelRunner(
                     )
 
                 sample_hidden_states = hidden_states[logits_indices]
+                actual_model = self.get_model()
+                if getattr(actual_model, "enable_trough_decoding", False):
+                    actual_model._last_seq_len = hidden_states.shape[0]
+                    actual_model._last_logits_indices = logits_indices
                 logits = self.model.compute_logits(sample_hidden_states)
             else:
                 # Rare case.
                 assert not self.is_pooling_model
+
+                actual_model = self.get_model()
+                trough_enabled = getattr(actual_model, "enable_trough_decoding", False)
+                if trough_enabled and get_pp_group().is_last_rank:
+                    actual_model._last_seq_len = hidden_states.shape[0]
 
                 sample_hidden_states = hidden_states[logits_indices]
                 if not get_pp_group().is_last_rank:
@@ -4402,6 +4411,8 @@ class GPUModelRunner(
                     )
                     logits = None
                 else:
+                    if trough_enabled:
+                        actual_model._last_logits_indices = logits_indices
                     logits = self.model.compute_logits(sample_hidden_states)
 
                 model_output_broadcast_data: dict[str, Any] = {}
@@ -5584,7 +5595,16 @@ class GPUModelRunner(
             # then there is prompt logprob generated for each index.
             req_idx = self.input_batch.req_id_to_index[req_id]
             offset = self.query_start_loc.np[req_idx].item()
+            actual_model = self.get_model()
             prompt_hidden_states = hidden_states[offset : offset + num_logits]
+            if getattr(actual_model, "enable_trough_decoding", False):
+                actual_model._last_seq_len = hidden_states.shape[0]
+                actual_model._last_logits_indices = torch.arange(
+                    offset,
+                    offset + num_logits,
+                    device=hidden_states.device,
+                    dtype=torch.int64,
+                )
             logits = self.model.compute_logits(prompt_hidden_states)
 
             # Get the "target" tokens for each index. For prompt at index i,
@@ -6106,6 +6126,10 @@ class GPUModelRunner(
 
         hidden_states = torch.rand_like(hidden_states)
 
+        actual_model = self.get_model()
+        if getattr(actual_model, "enable_trough_decoding", False):
+            actual_model._last_logits_indices = None
+            actual_model._last_seq_len = hidden_states.shape[0]
         logits = self.model.compute_logits(hidden_states)
         num_reqs = logits.size(0)
 
@@ -6701,6 +6725,13 @@ class GPUModelRunner(
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
         cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
+
+        actual_model = self.get_model()
+        if getattr(actual_model, "enable_trough_decoding", False):
+            clear_fn = getattr(actual_model, "clear_trough_buffers", None)
+            if clear_fn is not None:
+                clear_fn()
+
         # This usually takes 5~20 seconds.
         logger.info_once(
             "Graph capturing finished in %.0f secs, took %.2f GiB",
