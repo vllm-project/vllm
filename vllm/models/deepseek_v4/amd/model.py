@@ -108,15 +108,25 @@ class DeepseekV4MLP(nn.Module):
         return x
 
 
-def _fuse_shared_experts_enabled(config) -> bool:
+def _fuse_shared_experts_enabled(config, prefix: str = "") -> bool:
     """Whether to fuse the shared expert into the routed MXFP4 grouped GEMM.
+
+    Fusion fuses the shared expert into the routed experts' MXFP4 grouped GEMM,
+    so it only applies where the shared expert is the same precision as the
+    routed experts. MTP layers (index >= num_hidden_layers) may carry a
+    shared expert in a different quantization than the routed experts; when so,
+    it runs as its own linear and must not be fused.
     """
-    return bool(
+    if not (
         current_platform.is_rocm()
         and getattr(config, "n_shared_experts", None)
         and envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         and not get_current_vllm_config().parallel_config.enable_expert_parallel
-    )
+    ):
+        return False
+    if prefix and extract_layer_index(prefix) >= config.num_hidden_layers:
+        return False
+    return True
 
 
 class DeepseekV4MoE(nn.Module):
@@ -175,7 +185,7 @@ class DeepseekV4MoE(nn.Module):
 
         self.n_shared_experts = config.n_shared_experts
 
-        self.fuse_shared_experts = _fuse_shared_experts_enabled(config)
+        self.fuse_shared_experts = _fuse_shared_experts_enabled(config, prefix)
 
         if config.n_shared_experts is None or self.fuse_shared_experts:
             self.shared_experts = None
