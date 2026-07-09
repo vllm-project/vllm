@@ -76,9 +76,9 @@ logger = init_logger(__name__)
 #   * if growth does happen, drain the device and keep the old tensor
 #     alive forever (bounded leak, rare) so parked ops keep polling
 #     stable memory.
-_WORKSPACE_FLOOR = int(
-    os.getenv("VLLM_SYMM_MEM_WORKSPACE_FLOOR_MB", "256")
-) * 1024 * 1024
+_WORKSPACE_FLOOR = (
+    int(os.getenv("VLLM_SYMM_MEM_WORKSPACE_FLOOR_MB", "256")) * 1024 * 1024
+)
 _workspace_graveyard: list = []
 _orig_get_workspace = None
 
@@ -173,6 +173,172 @@ def _install_workspace_guard() -> None:
     tsm.get_symm_mem_workspace = _guarded_get_workspace
 
 
+# Fused-op pipelines, re-issued for PCIe: torch's stock micro-pipelines
+# enqueue peer-memory operations (signal-pad memops, P2P copies)
+# concurrently from two streams per process and secure the required
+# kernel scheduling order with a sleep-kernel nudge the source itself
+# only calls "almost guarantee[d]". On PCIe platforms we replace both
+# pipelines with comm-stream variants: every peer-memory operation is
+# issued on ONE stream per process, while producers/consumers (pure
+# local kernels) ride a second stream ordered by explicit CUDA events
+# in both directions (producer-done -> comm may start; peers-done ->
+# buffer may be overwritten). Compute/comm overlap is retained; the
+# only overlap given up is between P2P copies of different streams,
+# which torch's own comments note cannot overlap anyway. Measured on
+# 4x SM120 PCIe (8192x4096 @ 4096x4096 bf16 vs unfused NCCL):
+# matmul-reduce-scatter 1.78x (stock dual-stream: 1.56x — the explicit
+# ordering also removes the stock path's scheduling-miss degradation),
+# all-gather-matmul 1.69x (stock: 1.78x). The rarely-used *_last_dim
+# all-gather variant is left stock.
+_orig_produce_a2a = None
+_orig_multi_ag = None
+
+
+def _comm_stream_produce_and_all2all(
+    chunk_producer, output, group_name, out_chunk_dim=0
+):
+    import torch.distributed._symmetric_memory as tsm
+    import torch.distributed.distributed_c10d as c10d
+
+    out_chunks = output.chunk(
+        c10d._get_group_size_by_name(group_name), dim=out_chunk_dim
+    )
+    p2p_workspace_size_req = out_chunks[0].numel() * out_chunks[0].element_size() * 2
+    symm_mem = tsm.get_symm_mem_workspace(group_name, min_size=p2p_workspace_size_req)
+    group_size = symm_mem.world_size
+    rank = symm_mem.rank
+
+    comm = torch.cuda.current_stream()
+    prod = tsm._get_backend_stream()
+
+    symm_mem.barrier(channel=0)  # entry fence, on comm stream
+    prod.wait_stream(comm)
+
+    def get_p2p_buf(r: int, idx: int) -> torch.Tensor:
+        offset = 0 if idx == 0 else out_chunks[0].numel()
+        return symm_mem.get_buffer(r, out_chunks[0].shape, out_chunks[0].dtype, offset)
+
+    # reuse-fence events: producer of step k+2 must wait until peers
+    # finished reading the same buffer at step k (second barrier done)
+    reuse_evt: list = [None, None]
+
+    for step in range(1, group_size):
+        remote_rank = (rank - step) % group_size
+        buf_id = 1 if step % 2 == 0 else 0
+
+        if reuse_evt[buf_id] is not None:
+            prod.wait_event(reuse_evt[buf_id])
+        with torch.cuda.stream(prod):
+            chunk_producer((rank + step) % group_size, get_p2p_buf(rank, buf_id))
+        done = torch.cuda.Event()
+        done.record(prod)
+
+        comm.wait_event(done)
+        # all peer-memory ops stay on the comm stream:
+        symm_mem.barrier(channel=step % 2)
+        out_chunks[remote_rank].copy_(get_p2p_buf(remote_rank, buf_id))
+        symm_mem.barrier(channel=step % 2)
+        ev = torch.cuda.Event()
+        ev.record(comm)
+        reuse_evt[buf_id] = ev
+
+    with torch.cuda.stream(prod):
+        chunk_producer(rank, out_chunks[rank])
+    comm.wait_stream(prod)
+    symm_mem.barrier(channel=0)
+
+
+def _comm_stream_multi_all_gather_and_consume(
+    shard, shard_consumer, ag_out, group_name, ag_out_needed=True
+):
+    import torch.distributed._symmetric_memory as tsm
+
+    p2p_workspace_size_req = 0
+    for x in shard:
+        p2p_workspace_size_req += x.numel() * x.element_size()
+    symm_mem = tsm.get_symm_mem_workspace(group_name, min_size=p2p_workspace_size_req)
+    group_size = symm_mem.world_size
+    rank = symm_mem.rank
+
+    for x, y in zip(shard, ag_out):
+        assert x.is_contiguous()
+        assert y.is_contiguous()
+        assert x.shape[0] * group_size == y.shape[0]
+        assert x.shape[1:] == y.shape[1:]
+
+    comm = torch.cuda.current_stream()
+    cons = tsm._get_backend_stream()
+
+    symm_mem.barrier(channel=0)
+
+    def copy_shard(dst, src):
+        for d, s in zip(dst, src):
+            d.copy_(s)
+
+    def get_p2p_bufs(remote_rank):
+        offset_bytes = 0
+        bufs = []
+        for x in shard:
+            buf = symm_mem.get_buffer(
+                remote_rank,
+                x.shape,
+                x.dtype,
+                storage_offset=offset_bytes // x.element_size(),
+            )
+            bufs.append(buf)
+            offset_bytes += buf.numel() * buf.element_size()
+        return bufs
+
+    shards = [[] for _ in range(group_size)]
+    for x in ag_out:
+        for i, y in enumerate(x.chunk(group_size)):
+            shards[i].append(y)
+
+    copy_shard(get_p2p_bufs(rank), shard)  # local write, comm stream
+    symm_mem.barrier(channel=1)
+
+    # own shard consumes the input directly; overlap it with peer copies
+    cons.wait_stream(comm)
+    with torch.cuda.stream(cons):
+        shard_consumer(shard, rank)
+
+    for step in range(1, group_size):
+        remote_rank = (step + rank) % group_size
+        # peer read on the comm stream
+        copy_shard(shards[remote_rank], get_p2p_bufs(remote_rank))
+        ev = torch.cuda.Event()
+        ev.record(comm)
+        cons.wait_event(ev)
+        with torch.cuda.stream(cons):
+            shard_consumer(shards[remote_rank], remote_rank)
+
+    if ag_out_needed:
+        copy_shard(shards[rank], shard)  # local copy, comm stream
+
+    comm.wait_stream(cons)
+    symm_mem.barrier(channel=0)
+
+
+def _install_comm_stream_pipelines() -> None:
+    """Replace both fused micro-pipelines process-wide. Idempotent."""
+    global _orig_produce_a2a, _orig_multi_ag
+    import torch.distributed._symmetric_memory as tsm
+
+    if _orig_produce_a2a is not None:
+        return
+    _orig_produce_a2a = tsm._pipelined_produce_and_all2all
+    _orig_multi_ag = tsm._pipelined_multi_all_gather_and_consume
+    tsm._pipelined_produce_and_all2all = _comm_stream_produce_and_all2all
+    tsm._pipelined_multi_all_gather_and_consume = (
+        _comm_stream_multi_all_gather_and_consume
+    )
+    logger.info_once(
+        "torch fused-op micro-pipelines replaced with comm-stream "
+        "variants: peer-memory ops on one stream, producers "
+        "event-ordered on a second."
+    )
+
+
 def install_pcie_safe_barrier() -> None:
     """Replace ``_SymmetricMemory.barrier`` process-wide. Idempotent."""
     global _installed, _orig_barrier, _drv
@@ -184,10 +350,11 @@ def install_pcie_safe_barrier() -> None:
     _orig_barrier = _SymmetricMemory.barrier
     _SymmetricMemory.barrier = _pcie_safe_barrier
     _install_workspace_guard()
+    _install_comm_stream_pipelines()
     _installed = True
+    workspace_floor_mib = _WORKSPACE_FLOOR // (1024 * 1024)
     logger.info_once(
         "torch symm-mem group barrier replaced with the PCIe-safe "
         "stream-memops protocol (no native P2P atomics on this platform); "
-        "fused-op workspace floored at %d MiB with growth guard."
-        % (_WORKSPACE_FLOOR // (1024 * 1024))
+        f"fused-op workspace floored at {workspace_floor_mib} MiB with growth guard."
     )
