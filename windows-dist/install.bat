@@ -45,11 +45,15 @@ if /i "!DO_VENV!"=="Y" (
 echo.
 
 :: ===== DETECT ROCm VERSION =====
+:: Save system env vars before clearing local ones
+set "ENV_ROCM_HOME=%ROCM_HOME%"
+set "ENV_ROCM_PATH=%ROCM_PATH%"
+set "ENV_HIP_PATH=%HIP_PATH%"
 set "HIP_PATH="
-:: Check environment variables
-if NOT "!ROCM_HOME!"=="" if EXIST "!ROCM_HOME!\bin\hipcc.exe" set "HIP_PATH=!ROCM_HOME!"
-if "!HIP_PATH!"=="" if NOT "!ROCM_PATH!"=="" if EXIST "!ROCM_PATH!\bin\hipcc.exe" set "HIP_PATH=!ROCM_PATH!"
-if "!HIP_PATH!"=="" if NOT "!HIP_PATH_ENV!"=="" if EXIST "!HIP_PATH_ENV!\bin\hipcc.exe" set "HIP_PATH=!HIP_PATH_ENV!"
+:: Check environment variables (from saved system values)
+if NOT "!ENV_ROCM_HOME!"=="" if EXIST "!ENV_ROCM_HOME!\bin\hipcc.exe" set "HIP_PATH=!ENV_ROCM_HOME!"
+if "!HIP_PATH!"=="" if NOT "!ENV_ROCM_PATH!"=="" if EXIST "!ENV_ROCM_PATH!\bin\hipcc.exe" set "HIP_PATH=!ENV_ROCM_PATH!"
+if "!HIP_PATH!"=="" if NOT "!ENV_HIP_PATH!"=="" if EXIST "!ENV_HIP_PATH!\bin\hipcc.exe" set "HIP_PATH=!ENV_HIP_PATH!"
 :: Check common paths
 if "!HIP_PATH!"=="" if EXIST "C:\Program Files\AMD\ROCm\7.13\bin\hipcc.exe" set "HIP_PATH=C:\Program Files\AMD\ROCm\7.13"
 if "!HIP_PATH!"=="" if EXIST "C:\Program Files\AMD\ROCm\7.12\bin\hipcc.exe" set "HIP_PATH=C:\Program Files\AMD\ROCm\7.12"
@@ -84,16 +88,35 @@ if NOT "!HIP_PATH!"=="" (
     set "ROCVER=7.13"
 )
 
-:: Require Python 3.12
-python --version 2>nul | findstr "3.12" >nul
+:: Check Python - prefer 3.12, but any version works for the venv
+python --version >nul 2>&1
 if ERRORLEVEL 1 (
-    echo [ERROR] Python 3.12 required. You have:
-    python --version
-    echo Install Python 3.12 from python.org then re-run.
+    echo Python not found. Download Python 3.12 from python.org first.
     pause
     exit /b 1
 )
-echo Python: 3.12
+
+:: Check Python version - warn if not 3.12
+for /f "tokens=2 delims= " %%V in ('python --version 2^>nul') do set "PY_VER=%%V"
+for /f "tokens=1,2 delims=." %%a in ("!PY_VER!") do set "PY_MAJ=%%a" & set "PY_MIN=%%b"
+echo Python: !PY_VER!
+
+if NOT "!PY_MAJ!"=="3" (
+    echo Python 3 required. You have !PY_VER!. Install Python 3.12.
+    pause
+    exit /b 1
+)
+if !PY_MIN! GTR 13 (
+    echo WARNING: Python !PY_VER! may not have ROCm torch wheels.
+    echo ROCm wheels support Python 3.10-3.13. Try Python 3.12 instead.
+    echo Continuing anyway...
+)
+if !PY_MIN! LSS 10 (
+    echo Python !PY_VER! is too old. Use Python 3.12.
+    pause
+    exit /b 1
+)
+echo.
 
 :: Choose matching torch version based on ROCm version + Python version
 set "TORCH_VER=2.11.0+rocm7.13.0"
