@@ -49,13 +49,16 @@ else
   KV_EXTRA_CONFIG=''
 fi
 
+# Connector: default pull NixlConnector; NixlPushConnector enables PP prefill.
+KV_CONNECTOR=${KV_CONNECTOR:-NixlConnector}
+
 # Build the kv-transfer-config for P and D
 if [[ "$KV_BUFFER_DEVICE" == "cuda" ]]; then
-  KV_CONFIG_P='{"kv_connector":"NixlConnector","kv_role":"kv_producer"'${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}'}'
-  KV_CONFIG_D='{"kv_connector":"NixlConnector","kv_role":"kv_consumer"'${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}'}'
+  KV_CONFIG_P='{"kv_connector":"'"$KV_CONNECTOR"'","kv_role":"kv_producer"'${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}'}'
+  KV_CONFIG_D='{"kv_connector":"'"$KV_CONNECTOR"'","kv_role":"kv_consumer"'${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}'}'
 else
-  KV_CONFIG_P="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_producer\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}"}"
-  KV_CONFIG_D="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_consumer\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}"}"
+  KV_CONFIG_P="{\"kv_connector\":\"$KV_CONNECTOR\",\"kv_role\":\"kv_producer\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}"}"
+  KV_CONFIG_D="{\"kv_connector\":\"$KV_CONNECTOR\",\"kv_role\":\"kv_consumer\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}"}"
 fi
 
 # Models to run
@@ -72,6 +75,7 @@ fi
 NUM_PREFILL_INSTANCES=${NUM_PREFILL_INSTANCES:-1} # Default to 1
 NUM_DECODE_INSTANCES=${NUM_DECODE_INSTANCES:-1}   # Default to 1
 PREFILLER_TP_SIZE=${PREFILLER_TP_SIZE:-1}
+PREFILLER_PP_SIZE=${PREFILLER_PP_SIZE:-1} # >1 requires NixlPushConnector
 DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.2}
 PREFILL_BLOCK_SIZE=${PREFILL_BLOCK_SIZE:-128}
@@ -138,8 +142,9 @@ run_tests_for_model() {
     # Calculate GPU ID - we'll distribute across available GPUs
     GPU_ID=$((i % $(get_num_gpus)))
     NEXT_GPU=${GPU_ID}
-    # If PREFILLER_TP_SIZE is more than 1
-    for (( j=1; j < PREFILLER_TP_SIZE; j++ )); do
+    # Reserve TP*PP GPUs for the prefiller (TP shards across PP stages).
+    PREFILLER_WORLD_SIZE=$((PREFILLER_TP_SIZE * PREFILLER_PP_SIZE))
+    for (( j=1; j < PREFILLER_WORLD_SIZE; j++ )); do
       NEXT_GPU=$(((GPU_ID + j) % $(get_num_gpus)))
       GPU_ID="${GPU_ID},${NEXT_GPU}"
     done
@@ -161,6 +166,7 @@ run_tests_for_model() {
     --block-size ${PREFILL_BLOCK_SIZE} \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
+    --pipeline-parallel-size $PREFILLER_PP_SIZE \
     --kv-transfer-config '$KV_CONFIG_P'"
     if [[ "$ENFORCE_EAGER" == "1" ]]; then
       BASE_CMD="${BASE_CMD} --enforce-eager"
