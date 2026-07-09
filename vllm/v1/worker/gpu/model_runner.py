@@ -193,7 +193,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.is_last_pp_rank:
                 self.speculator = init_speculator(self.vllm_config, self.device)
 
-            if self.speculative_config.method in ("eagle3", "dflash"):
+            if self.speculative_config.method in ("eagle3", "dflash", "dspark"):
                 # Drafting may require auxiliary hidden states from target model outputs
                 self.use_aux_hidden_state_outputs = True
                 if self.use_pp:
@@ -377,12 +377,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         GPUModelRunnerV1.reload_weights(self, *args, **kwargs)  # type: ignore[arg-type]
 
-    def apply_sparse_weight_patches(self, *args, **kwargs) -> None:
-        # TODO: Use full version instead of import when fully migrated to v2
-        from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
-
-        GPUModelRunnerV1.apply_sparse_weight_patches(self, *args, **kwargs)  # type: ignore[arg-type]
-
     def update_config(self, *args, **kwargs) -> None:
         # TODO(Wentao): Use full version instead of import when fully migrated to v2
         from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
@@ -460,9 +454,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             attn_cg_support.min_cg_support,
             attn_cg_support.min_cg_attn_backend,
             self.decode_query_len,
-            self.parallel_config.tensor_parallel_size,
-            self.kv_cache_config,
-            self.max_num_reqs,
+            use_v2_model_runner=True,
+            tensor_parallel_size=self.parallel_config.tensor_parallel_size,
+            kv_cache_config=self.kv_cache_config,
+            max_num_reqs=self.max_num_reqs,
         )
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
@@ -1561,6 +1556,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if hasattr(self, "kv_cache_config"):
             del self.kv_cache_config
         free_before_shutdown(self.vllm_config)
+        if hasattr(self, "model_state"):
+            del self.model_state
+        if getattr(self, "speculator", None) is not None:
+            self.speculator = None
         if hasattr(self, "model"):
             del self.model
 

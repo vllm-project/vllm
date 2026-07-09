@@ -745,6 +745,7 @@ class SamplingParams(
         self._validate_logits_processors(model_config)
         self._validate_allowed_token_ids(tokenizer)
         self._validate_spec_decode(speculative_config)
+        self._validate_diffusion(model_config)
         self._validate_structured_outputs(
             model_config, structured_outputs_config, tokenizer
         )
@@ -878,6 +879,28 @@ class SamplingParams(
                 "are not yet supported with speculative decoding."
             )
 
+    def _validate_diffusion(self, model_config: ModelConfig) -> None:
+        if not model_config.is_diffusion:
+            return
+
+        # Diffusion models denoise a whole canvas per step with a fixed
+        # temperature schedule, so per-request sampling parameters are not
+        # supported. Penalties are ignored by the sampler with a warning.
+        if (
+            self.temperature != 1.0
+            or self.min_p > _SAMPLING_EPS
+            or self.seed is not None
+            or self.min_tokens > 0
+            or self.logit_bias
+            or self.bad_words
+            or self.allowed_token_ids
+        ):
+            raise ValueError(
+                "The temperature, min_p, seed, min_tokens, logit_bias, "
+                "bad_words, and allowed_token_ids sampling parameters "
+                "are not yet supported with diffusion models."
+            )
+
     def _validate_structured_outputs(
         self,
         model_config: ModelConfig,
@@ -938,6 +961,18 @@ class SamplingParams(
             and self.structured_outputs.grammar.strip() == ""
         ):
             raise ValueError("structured_outputs.grammar cannot be an empty string")
+        # Reject empty string json schema early to avoid engine-side crashes
+        if (
+            isinstance(self.structured_outputs.json, str)
+            and self.structured_outputs.json.strip() == ""
+        ):
+            raise ValueError("structured_outputs.json cannot be an empty string")
+        # Reject json_object=False early to avoid engine-side crashes
+        if self.structured_outputs.json_object is False:
+            raise ValueError(
+                "structured_outputs.json_object must be True if set; omit "
+                "structured_outputs to disable structured outputs"
+            )
 
         from vllm.v1.structured_output.backend_guidance import (
             has_guidance_unsupported_json_features,

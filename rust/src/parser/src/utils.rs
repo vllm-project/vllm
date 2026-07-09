@@ -395,9 +395,9 @@ pub fn parse_buffered_event<E>(
         Ok(event) => event,
         Err(ErrMode::Incomplete(_)) => return Ok(None),
         Err(ErrMode::Backtrack(e) | ErrMode::Cut(e)) => {
-            // TODO: enrich context for error reporting
+            let snippet = buffer.char_indices().nth(80).map_or(buffer, |(i, _)| &buffer[..i]);
             return Err(ToolParserError::ParsingFailed {
-                message: e.to_string(),
+                message: format!("near {snippet:?}: {e}"),
             });
         }
     };
@@ -423,8 +423,9 @@ mod tests {
     use winnow::stream::{Offset, Partial, Stream};
 
     use super::{
-        JsonObjectScanState, JsonStringScanState, MarkerScanState, json_str, partial_prefix_len,
-        safe_text_len, safe_text_len_mul, take_json_object, take_json_string, take_until_marker,
+        JsonObjectScanState, JsonStringScanState, MarkerScanState, json_str, parse_buffered_event,
+        partial_prefix_len, safe_text_len, safe_text_len_mul, take_json_object, take_json_string,
+        take_until_marker,
     };
 
     #[test]
@@ -831,5 +832,28 @@ mod tests {
         let error = json_str(&mut input).unwrap_err();
 
         assert!(matches!(error, ErrMode::Incomplete(_)));
+    }
+
+    #[test]
+    fn parse_buffered_event_error_includes_input_snippet() {
+        let result = parse_buffered_event(" {\"x\":1}", |input| {
+            take_json_object(input, &mut JsonObjectScanState::default())
+        });
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("near \""), "error must include snippet");
+    }
+
+    #[test]
+    fn parse_buffered_event_error_truncates_long_input() {
+        let long_input = format!(" {}", "x".repeat(100));
+        let result = parse_buffered_event(&long_input, |input| {
+            take_json_object(input, &mut JsonObjectScanState::default())
+        });
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("near \""), "error must include snippet");
+        assert!(
+            !err.contains(&long_input),
+            "snippet must be truncated for long input"
+        );
     }
 }

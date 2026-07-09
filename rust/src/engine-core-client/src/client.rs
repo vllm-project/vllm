@@ -11,10 +11,11 @@ use tracing::{debug, info, trace};
 use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop};
 use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result};
+use crate::protocol::dtype::ModelDtype;
 use crate::protocol::handshake::EngineCoreReadyResponse;
 use crate::protocol::lora::LoraRequest;
+use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::utility::{EngineCoreUtilityRequest, PauseMode};
-use crate::protocol::{EngineCoreRequest, EngineCoreRequestType, ModelDtype};
 use crate::runtime::{BackgroundShutdownRuntime, build_zmq_runtime};
 use crate::transport::{self, ConnectedEngine};
 
@@ -371,6 +372,14 @@ impl EngineCoreClient {
         self.engines.len()
     }
 
+    /// Return the engine-side indices connected to this client.
+    pub fn engine_indices(&self) -> Vec<u32> {
+        self.engines
+            .iter()
+            .map(|engine| engine.engine_id.engine_index().expect("engine id must encode as u16"))
+            .collect()
+    }
+
     /// Return the engine identities of all engines connected to this client.
     pub fn engine_identities(&self) -> Vec<&[u8]> {
         self.engines.iter().map(|engine| &*engine.engine_id).collect()
@@ -503,6 +512,7 @@ impl EngineCoreClient {
 
         Ok(EngineCoreOutputStream::new(
             request_id,
+            engine_id.engine_index().unwrap_or(0),
             self.abort_tx.clone(),
             rx,
         ))
@@ -735,6 +745,18 @@ impl EngineCoreClient {
     /// Return whether the scheduler is currently in any pause state.
     pub async fn is_scheduler_paused(&self) -> Result<bool> {
         self.call_utility_consensus("is_scheduler_paused", ()).await
+    }
+
+    /// Start profiling the engine.
+    pub async fn start_profile(&self, profile_prefix: Option<&str>) -> Result<()> {
+        self.call_utility::<(), _>("profile", (true, profile_prefix)).await?;
+        Ok(())
+    }
+
+    /// Stop profiling the engine.
+    pub async fn stop_profile(&self, profile_prefix: Option<&str>) -> Result<()> {
+        self.call_utility::<(), _>("profile", (false, profile_prefix)).await?;
+        Ok(())
     }
 
     /// Shut down local client tasks and close transport state.

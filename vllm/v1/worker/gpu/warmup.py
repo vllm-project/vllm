@@ -10,6 +10,7 @@ import torch
 
 from vllm import PoolingParams, SamplingParams
 from vllm.logger import init_logger
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -17,7 +18,7 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import CrossAttentionSpec, MambaSpec
 from vllm.v1.request import Request
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
@@ -34,7 +35,7 @@ def run_mixed_prefill_decode_warmup(
     req_id_prefix: str = "_v2_mixed_warmup",
 ) -> bool:
     """Run a V2 mixed prefill+decode step through normal scheduler inputs."""
-    if model_runner.is_pooling_model or num_tokens < 3:
+    if model_runner.is_pooling_model or model_runner.max_num_reqs < 2 or num_tokens < 3:
         return False
 
     decode_req_id = f"{req_id_prefix}_decode_"
@@ -177,8 +178,26 @@ def warmup_kernels(
     kv_cache_groups = model_runner.kv_cache_config.kv_cache_groups
     num_kv_cache_groups = len(kv_cache_groups)
 
+    # Encoder-decoder models: give each warmup request a dummy encoder input so
+    # cross-attention warms up over a realistic, non-empty key sequence.
+    # The dummy mm_feature is registered in the encoder cache and only its encoder
+    # length is read (not the inputs themselves); the encoder itself is not scheduled.
+    max_encoder_len = getattr(model_runner.model_state, "max_encoder_len", 0)
+    warmup_mm_features: list[MultiModalFeatureSpec] = []
+    if model_runner.is_encoder_decoder and max_encoder_len:
+        warmup_mm_features = [
+            MultiModalFeatureSpec(
+                data=None,
+                modality="",
+                identifier="_warmup_encoder",
+                mm_position=PlaceholderRange(offset=0, length=max_encoder_len),
+            )
+        ]
+
     # Compute per-request block counts for each KV cache group.
     def _warmup_block_count(num_tokens: int, spec: Any) -> int:
+        if isinstance(spec, CrossAttentionSpec):
+            num_tokens = max_encoder_len
         num_blocks = cdiv(num_tokens, spec.block_size)
         if isinstance(spec, MambaSpec) and spec.mamba_cache_mode == "align":
             # Align mode reserves extra blocks beyond the token range for the
@@ -222,7 +241,13 @@ def warmup_kernels(
     # Step 1: Prefill all requests with 1 + decode_query_len prompt tokens each.
     new_reqs = [
         NewRequestData.from_request(
-            Request(req_ids[i], prompt_token_ids, sampling_params, pooling_params),
+            Request(
+                req_ids[i],
+                prompt_token_ids,
+                sampling_params,
+                pooling_params,
+                mm_features=warmup_mm_features,
+            ),
             block_ids=tuple(_alloc_blocks(n) for n in prefill_block_counts),
             prefill_token_ids=prompt_token_ids,
         )

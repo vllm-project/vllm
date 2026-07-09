@@ -424,6 +424,12 @@ class DelegatingParser(Parser):
         if tool_parser is None:
             return [], content
 
+        if request.tool_choice == "none":
+            if self._engine_based:
+                result = self.extract_tool_calls(content or "", request=request)
+                return [], result.content
+            return [], content
+
         supports_required_and_named = tool_parser.supports_required_and_named
         is_named_tool_choice = request.tool_choice and isinstance(
             request.tool_choice,

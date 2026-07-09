@@ -27,6 +27,8 @@ pub enum Error {
     MinTokensExceedsMaxTokens { min_tokens: u32, max_tokens: u32 },
     #[error("`thinking_token_budget` must be a non-negative integer or -1 for unlimited.")]
     InvalidThinkingTokenBudget,
+    #[error("invalid repetition detection params: {message}")]
+    InvalidRepetitionDetection { message: String },
     #[error("text request stream `{request_id}` closed before terminal output")]
     StreamClosedBeforeTerminalOutput { request_id: String },
     #[error(transparent)]
@@ -47,6 +49,7 @@ impl Error {
             | Self::TokenIds(_)
             | Self::MinTokensExceedsMaxTokens { .. }
             | Self::InvalidThinkingTokenBudget
+            | Self::InvalidRepetitionDetection { .. }
             // An empty tokenized prompt detected later, at request prepare
             // time, surfaces through the transparent Llm wrapper.
             | Self::Llm(LlmError::EmptyPromptTokenIds { .. }) => true,

@@ -10,10 +10,9 @@ use zeromq::{XPubSocket, ZmqMessage};
 use crate::client::imp::ClientInner;
 use crate::coordinator::handle::{CoordinatorCommand, CoordinatorState};
 use crate::error::{Error, Result, bail_unexpected_coordinator_output};
-use crate::protocol::{
-    ClassifiedEngineCoreOutputs, DpControlMessage, EngineCoreOutputs, EngineCoreRequestType,
-    encode_msgpack,
-};
+use crate::protocol::encode_msgpack;
+use crate::protocol::output::{DpControlMessage, DpControlOutput, EngineCoreOutputs};
+use crate::protocol::request::EngineCoreRequestType;
 
 /// Coordinator-to-engine `START_DP_WAVE` control payload encoded on the
 /// engine-facing coordinator socket.
@@ -110,19 +109,19 @@ impl InProcCoordinatorRunner {
     /// Apply one engine-originated control output to the coordinator state
     /// machine.
     async fn handle_outputs(&mut self, outputs: EngineCoreOutputs) -> Result<()> {
-        match outputs.classify() {
-            ClassifiedEngineCoreOutputs::RequestBatch(batch)
+        match outputs {
+            EngineCoreOutputs::RequestBatch(batch)
                 if batch.outputs.is_empty() && batch.finished_requests.is_none() =>
             {
                 // Stats-only output for coordinator.
                 // Ignore since the Rust coordinator doesn't track stats for
                 // routing decisions.
             }
-            ClassifiedEngineCoreOutputs::DpControl {
+            EngineCoreOutputs::DpControl(DpControlOutput {
                 engine_index,
                 control,
                 ..
-            } => match control {
+            }) => match control {
                 // The engines signals they completed the current wave and are now paused.
                 // Advance the current wave and mark the state as paused.
                 DpControlMessage::WaveComplete(wave) => {
