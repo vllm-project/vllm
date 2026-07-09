@@ -378,7 +378,7 @@ mod tests {
         fs::write(dir.path().join("tokenizer.json"), "{}").expect("write tokenizer");
         fs::write(
             dir.path().join("tokenizer_config.json"),
-            r#"{"tokenizer_class":"PreTrainedTokenizerFast"}"#,
+            r#"{"tokenizer_class":"TokenizersBackend"}"#,
         )
         .expect("write tokenizer config");
         fs::write(dir.path().join("config.json"), "{}").expect("write config");
