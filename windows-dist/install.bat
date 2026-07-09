@@ -77,7 +77,15 @@ if NOT "!HIP_PATH!"=="" (
     if "!ROCVER!"=="" set "ROCVER=7.13"
     echo [OK] ROCm at !HIP_PATH! (version !ROCVER!)
 ) else (
-    echo [WARN] ROCm not detected. Will attempt to install anyway.
+    echo [!!] ROCm not found.
+    set /p "HIP_PATH=Enter ROCm install path [C:\Program Files\AMD\ROCm\7.13]: "
+    if "!HIP_PATH!"=="" set "HIP_PATH=C:\Program Files\AMD\ROCm\7.13"
+    if not EXIST "!HIP_PATH!\bin\hipcc.exe" (
+        echo [!!] hipcc.exe not found at !HIP_PATH!
+        echo [!!] Install ROCm 7.13 from https://rocm.docs.amd.com
+        pause
+        exit /b 1
+    )
     set "ROCVER=7.13"
 )
 
