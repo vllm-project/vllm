@@ -9,7 +9,6 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_pp_group,
@@ -108,6 +107,19 @@ class DeepseekV4MLP(nn.Module):
         return x
 
 
+def _mtp_shared_experts_are_fp4(config, layer_idx: int) -> bool:
+    """Check if the MTP layer's shared experts are MXFP4 (fusable)."""
+    quant_cfg = getattr(config, "quantization_config", None) or {}
+    mtp_idx = layer_idx - config.num_hidden_layers
+    entry = (quant_cfg.get("layer_quant_config") or {}).get(
+        f"mtp.{mtp_idx}.ffn.shared_experts.w1"
+    )
+    if entry is None:
+        entry = quant_cfg.get("global_quant_config")
+    weight = (entry or {}).get("weight") or {}
+    return weight.get("dtype") == "fp4"
+
+
 def _fuse_shared_experts_enabled(config, prefix: str = "") -> bool:
     """Whether to fuse the shared expert into the routed MXFP4 grouped GEMM.
 
@@ -125,7 +137,7 @@ def _fuse_shared_experts_enabled(config, prefix: str = "") -> bool:
     ):
         return False
     if prefix and extract_layer_index(prefix) >= config.num_hidden_layers:
-        return False
+        return _mtp_shared_experts_are_fp4(config, extract_layer_index(prefix))
     return True
 
 
@@ -792,7 +804,7 @@ def _make_deepseek_v4_weights_mapper(
             re.compile(r"\.scale$"): ".weight_scale_inv",
         }
     # When shared experts are fused into the routed MXFP4 grouped GEMM, the
-    # shared_experts tensors are redirected to routed expert slots ; leave 
+    # shared_experts tensors are redirected to routed expert slots ; leave
     # their names untouched here.
     substr_map = (
         {}

@@ -336,7 +336,7 @@ class DeepSeekV4MTP(nn.Module):
             # but block-FP8 layers register them as ``.weight_scale_inv``
             # while MXFP4 experts register ``.weight_scale``. Auto-detect:
             # rename to ``_inv`` only when that variant exists and the plain
-            # one does not. 
+            # one does not.
             if name.endswith(".weight_scale") and name not in params_dict:
                 inv = name.removesuffix(".weight_scale") + ".weight_scale_inv"
                 if inv in params_dict:

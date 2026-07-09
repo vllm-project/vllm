@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe import (
@@ -119,8 +119,7 @@ class DeepseekV4FP8Config(Fp8Config):
 
     @staticmethod
     def _is_quark_mxfp4_ocp(hf_quant_cfg: dict) -> bool:
-        """True for AMD-Quark exports whose global scheme is MXFP4.
-        """
+        """True for AMD-Quark exports whose global scheme is MXFP4."""
         weight = (hf_quant_cfg.get("global_quant_config") or {}).get("weight") or {}
         return (
             weight.get("dtype") == "fp4"
@@ -149,9 +148,9 @@ class DeepseekV4FP8Config(Fp8Config):
         return None
 
     @classmethod
-    def from_config(cls, config: dict) -> "DeepseekV4FP8Config":
-        # Reroute AMD-Quark fused shared expert MXFP4 checkpoints onto the fp8 
-        # path: the runtime layout matches the DeepSeek-native fp8 checkpoint, 
+    def from_config(cls, config: dict) -> DeepseekV4FP8Config:
+        # Reroute AMD-Quark fused shared expert MXFP4 checkpoints onto the fp8
+        # path: the runtime layout matches the DeepSeek-native fp8 checkpoint,
         # so translate the schema into format Fp8Config.from_config expects.
         if config.get("quant_method") == "quark":
             quark_exclude = config.get("exclude") or []
@@ -165,7 +164,7 @@ class DeepseekV4FP8Config(Fp8Config):
                     name for name in quark_exclude if isinstance(name, str)
                 ],
             }
-        return super().from_config(config)
+        return cast("DeepseekV4FP8Config", super().from_config(config))
 
     def get_quant_method(self, layer, prefix):
         if isinstance(layer, RoutedExperts):
