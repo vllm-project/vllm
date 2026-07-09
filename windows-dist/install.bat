@@ -46,30 +46,51 @@ echo.
 
 :: ===== DETECT ROCm VERSION =====
 set "HIP_PATH="
-if EXIST "C:\Program Files\AMD\ROCm\7.13\bin\hipcc.exe" set "HIP_PATH=C:\Program Files\AMD\ROCm\7.13" & set "ROCVER=7.13"
-if EXIST "C:\Program Files\AMD\ROCm\7.12\bin\hipcc.exe" set "HIP_PATH=C:\Program Files\AMD\ROCm\7.12" & set "ROCVER=7.12"
-if EXIST "C:\Program Files\AMD\ROCm\7.11\bin\hipcc.exe" set "HIP_PATH=C:\Program Files\AMD\ROCm\7.11" & set "ROCVER=7.11"
+:: Check environment variables
+if NOT "!ROCM_HOME!"=="" if EXIST "!ROCM_HOME!\bin\hipcc.exe" set "HIP_PATH=!ROCM_HOME!"
+if "!HIP_PATH!"=="" if NOT "!ROCM_PATH!"=="" if EXIST "!ROCM_PATH!\bin\hipcc.exe" set "HIP_PATH=!ROCM_PATH!"
+if "!HIP_PATH!"=="" if NOT "!HIP_PATH_ENV!"=="" if EXIST "!HIP_PATH_ENV!\bin\hipcc.exe" set "HIP_PATH=!HIP_PATH_ENV!"
+:: Check common paths
+if "!HIP_PATH!"=="" if EXIST "C:\Program Files\AMD\ROCm\7.13\bin\hipcc.exe" set "HIP_PATH=C:\Program Files\AMD\ROCm\7.13"
+if "!HIP_PATH!"=="" if EXIST "C:\Program Files\AMD\ROCm\7.12\bin\hipcc.exe" set "HIP_PATH=C:\Program Files\AMD\ROCm\7.12"
+:: Scan C:\Program Files\AMD\ROCm\* for any version
 if "!HIP_PATH!"=="" (
     for /f "delims=" %%D in ('dir /b "C:\Program Files\AMD\ROCm\*" 2^>nul') do (
-        if EXIST "C:\Program Files\AMD\ROCm\%%D\bin\hipcc.exe" set "HIP_PATH=C:\Program Files\AMD\ROCm\%%D" & set "ROCVER=%%D"
+        if EXIST "C:\Program Files\AMD\ROCm\%%D\bin\hipcc.exe" set "HIP_PATH=C:\Program Files\AMD\ROCm\%%D"
     )
 )
+:: Scan E:\ROCM-* and other drive roots
 if "!HIP_PATH!"=="" (
-    if NOT "!ROCM_HOME!"=="" set "HIP_PATH=!ROCM_HOME!"
-    if NOT "!HIP_PATH!"=="" if EXIST "!HIP_PATH!\bin\hipcc.exe" for %%I in ("!HIP_PATH!") do set "ROCVER=%%~nxI"
+    for %%D in (C D E F G) do (
+        for /f "delims=" %%R in ('dir /b "%%D:\ROCM-*" 2^>nul') do (
+            if EXIST "%%D:\%%R\bin\hipcc.exe" set "HIP_PATH=%%D:\%%R"
+        )
+    )
 )
-if "!HIP_PATH!"=="" (
+:: Extract version number from path
+if NOT "!HIP_PATH!"=="" (
+    for %%I in ("!HIP_PATH!") do set "ROCVER=%%~nxI"
+    :: Remove non-numeric chars from version
+    set "ROCVER=!ROCVER:ROCM_=!"
+    set "ROCVER=!ROCVER:rocm=!"
+    set "ROCVER=!ROCVER:-=!"
+    echo [OK] ROCm at !HIP_PATH! (version !ROCVER!)
+) else (
     echo [WARN] ROCm not detected. Will attempt to install anyway.
     set "ROCVER=7.13"
-) else (
-    echo [OK] ROCm !ROCVER! at !HIP_PATH!
 )
 
 :: Detect Python version (major.minor e.g. 3.12)
 for /f "tokens=2 delims= " %%V in ('python --version 2^>nul') do set "PY_VER=%%V"
 if "!PY_VER!"=="" set "PY_VER=3.12"
 for /f "tokens=1,2 delims=." %%a in ("!PY_VER!") do set "PY_TAG=cp%%a%%b"
+for /f "tokens=2 delims=." %%b in ("!PY_VER!") do set "PY_MINOR=%%b"
 echo Python: !PY_VER! (!PY_TAG!)
+if !PY_MINOR! GEQ 14 (
+    echo [WARN] Python !PY_VER! detected. ROCm PyTorch wheels only support up to Python 3.13.
+    echo [WARN] Install Python 3.12 or 3.13 for best compatibility.
+    echo [WARN] Continuing anyway - install may fail.
+)
 
 :: Choose matching torch version based on ROCm version + Python version
 set "TORCH_VER=2.11.0+rocm7.13.0"
