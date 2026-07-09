@@ -37,6 +37,8 @@ except ImportError:
 _fi_ar_workspace = None
 # Extra workspace for quant fusion patterns (only supported by trtllm backend)
 _fi_ar_quant_workspace = None
+# NVLink multicast probe results, keyed by process group
+_fi_ar_multicast_supported: dict[str, bool] = {}
 
 
 def _create_workspace(
@@ -112,12 +114,42 @@ def _resolve_fi_ar_backend() -> tuple[str, bool]:
     # FlashInfer (>= 0.6.12, vLLM pins 0.6.13), so mnnvl is safe here. trtllm
     # does not support multi-node allreduce, so mnnvl is required there anyway.
     # mnnvl needs NVSwitch multicast; on single-node topologies without it,
-    # fall back to trtllm so fused allreduce stays enabled.
+    # get_fi_ar_workspace() disables fused allreduce (plain NCCL is faster).
     backend = "mnnvl"
     allow_trtllm_fallback = get_node_count() == 1
 
     logger.info_once(f"Auto-selected flashinfer allreduce backend: {backend}")
     return backend, allow_trtllm_fallback
+
+
+def _node_supports_nvlink_multicast(group: ProcessGroup, device: torch.device) -> bool:
+    """Return True if ``group`` has NVLink multicast across all ranks.
+
+    mnnvl fused allreduce requires this; FlashInfer workspace creation alone
+    does not reliably detect its absence on bridged NVLink topologies. Uses the
+    same ``multicast_ptr`` probe as ``SymmMemCommunicator``. The result is cached
+    per process group.
+    """
+    key = getattr(group, "group_name", None) or str(id(group))
+    cached = _fi_ar_multicast_supported.get(key)
+    if cached is not None:
+        return cached
+    supported = False
+    try:
+        import torch.distributed._symmetric_memory as torch_symm_mem
+
+        probe = torch_symm_mem.empty(8, device=device, dtype=torch.uint8)
+        handle = torch_symm_mem.rendezvous(probe, group.group_name)
+        supported = handle.multicast_ptr != 0
+    except Exception as e:
+        logger.warning_once(
+            "FlashInfer allreduce: multicast capability probe failed (%s); "
+            "assuming NVLink multicast is unavailable.",
+            e,
+        )
+        supported = False
+    _fi_ar_multicast_supported[key] = supported
+    return supported
 
 
 def get_fi_ar_workspace(
@@ -140,6 +172,21 @@ def get_fi_ar_workspace(
         return _fi_ar_workspace
 
     backend, allow_trtllm_fallback = _resolve_fi_ar_backend()
+
+    # Probe before workspace creation; init alone does not reliably detect
+    # missing multicast support on bridged single-node topologies.
+    if backend == "mnnvl" and allow_trtllm_fallback:
+        device = torch.device(
+            current_platform.device_type, torch.accelerator.current_device_index()
+        )
+        if not _node_supports_nvlink_multicast(group, device):
+            logger.warning_once(
+                "FlashInfer allreduce: NVLink multicast unavailable on this "
+                "single-node topology; disabling fused allreduce (plain NCCL "
+                "allreduce + native RMSNorm). The trtllm fused fallback is "
+                "much slower on bridged NVLink topologies."
+            )
+            return None
 
     if get_node_count() > 1 and backend == "trtllm":
         raise ValueError(
