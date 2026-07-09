@@ -6,7 +6,6 @@ steps:
   key: basic-models-tests-initialization
   timeout_in_minutes: 45
   device: h200_18gb
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/test_initialization.py
@@ -14,8 +13,6 @@ steps:
   commands:
     # Run a subset of model initialization tests
     - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
-  mirror:
-    torch_nightly: {}
 
 - label: Basic Models Tests (Extra Initialization) %N
   device: h200_35gb
@@ -31,8 +28,6 @@ steps:
     # test.) Also run if model initialization test file is modified
     - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 2
-  mirror:
-    torch_nightly: {}
 
 - label: Basic Models Tests (Other)
   device: h200_35gb
@@ -41,10 +36,10 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/models/test_terratorch.py
-  - tests/models/test_transformers.py
+  - tests/models/transformers/test_backend.py
   - tests/models/test_registry.py
   commands:
-    - pytest -v -s models/test_terratorch.py models/test_transformers.py models/test_registry.py
+    - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py
   mirror:
     amd:
       device: mi325_1
@@ -60,6 +55,7 @@ steps:
   - vllm/
   - tests/models/test_utils.py
   - tests/models/test_vision.py
+  - tests/models/transformers/fusers/
   device: cpu-small
   commands:
-    - pytest -v -s models/test_utils.py models/test_vision.py
+    - pytest -v -s models/test_utils.py models/test_vision.py models/transformers/fusers/

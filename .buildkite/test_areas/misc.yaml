@@ -103,7 +103,7 @@ steps:
     - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
     - pytest -v -s -m 'not cpu_test' v1/metrics
     # Integration test for streaming correctness (requires special branch).
-    - pip install -U git+https://github.com/robertgshaw2-redhat/lm-evaluation-harness.git@streaming-api
+    - pip install -U git+https://github.com/vllm-project/lm-evaluation-harness.git@streaming-api
     - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
   mirror:
     amd:
@@ -188,7 +188,7 @@ steps:
   - vllm/v1/
   - tests/test_regression
   commands:
-  - pip install modelscope
+  - pip install 'modelscope<1.38'
   - pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
 
@@ -351,6 +351,7 @@ steps:
   - tests/test_outputs.py
   - tests/test_pooling_params.py
   - tests/test_ray_env.py
+  - tests/test_sampling_params.py
   - tests/multimodal
   - tests/renderers
   - tests/standalone_tests/lazy_imports.py
@@ -368,6 +369,7 @@ steps:
   - pytest -v -s test_outputs.py
   - pytest -v -s test_pooling_params.py
   - pytest -v -s test_ray_env.py
+  - pytest -v -s test_sampling_params.py
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s renderers
   - pytest -v -s reasoning
