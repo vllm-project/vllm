@@ -1,20 +1,43 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the MoEKernelOracle ABC and UnquantizedOracle."""
+"""Tests for the MoEKernelOracle ABC and UnquantizedMoEKernelOracle."""
 
 from unittest.mock import patch
 
 import pytest
+import torch
 
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    RoutingMethodType,
+)
 from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
-    UnquantizedOracle,
+    UnquantizedMoEKernelOracle,
 )
 
 
+def make_moe_config() -> FusedMoEConfig:
+    return FusedMoEConfig(
+        num_experts=8,
+        experts_per_token=2,
+        hidden_dim=16,
+        intermediate_size=32,
+        num_local_experts=8,
+        num_logical_experts=8,
+        activation=MoEActivation.SILU,
+        device="cpu",
+        routing_method=RoutingMethodType.TopK,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        in_dtype=torch.bfloat16,
+    )
+
+
 class TestMoEKernelOracleABC:
-    """Verify the ABC enforces the 4-method contract."""
+    """Verify the ABC enforces the oracle contract."""
 
     def test_cannot_instantiate_abc(self):
         """MoEKernelOracle is abstract and cannot be instantiated."""
@@ -31,79 +54,64 @@ class TestMoEKernelOracleABC:
             IncompleteOracle()  # type: ignore[abstract]
 
     def test_full_subclass_instantiates(self):
-        """UnquantizedOracle implements all abstract methods."""
+        """UnquantizedMoEKernelOracle implements all abstract methods."""
 
-        oracle = UnquantizedOracle()
+        oracle = UnquantizedMoEKernelOracle()
         assert oracle is not None
 
     def test_abstract_methods_present(self):
-        """All 4 core methods are available on the concrete class."""
-        oracle = UnquantizedOracle()
+        """Core methods are available on the concrete class."""
+        oracle = UnquantizedMoEKernelOracle()
+        assert hasattr(oracle, "backend_enum_cls")
+        assert hasattr(oracle, "get_priority_backends")
+        assert hasattr(oracle, "backend_to_kernel_cls")
+        assert hasattr(oracle, "map_backend")
         assert hasattr(oracle, "select_backend")
         assert hasattr(oracle, "convert_to_kernel_format")
         assert hasattr(oracle, "make_quant_config")
         assert hasattr(oracle, "make_kernel")
 
 
-class TestUnquantizedOracleSharedHelpers:
-    """Shared helper methods from the base class."""
+class TestUnquantizedOracleBaseDefaults:
+    """Base/default behaviour exposed by the concrete oracle."""
 
-    def test_oracle_name(self):
-        assert UnquantizedOracle._oracle_name() == "Unquantized"
+    def test_backend_enum_cls(self):
+        oracle = UnquantizedMoEKernelOracle()
+        assert oracle.backend_enum_cls() is UnquantizedMoeBackend
 
-    def test_make_log_backend_basic(self):
-        msg = UnquantizedOracle._make_log_backend(UnquantizedMoeBackend.TRITON)
-        assert "TRITON" in msg
-        assert "Unquantized" in msg
-
-    def test_make_log_backend_with_available_list(self):
-        msg = UnquantizedOracle._make_log_backend(
-            UnquantizedMoeBackend.TRITON,
-            available_backends=[
-                UnquantizedMoeBackend.TRITON,
-                UnquantizedMoeBackend.FLASHINFER_TRTLLM,
-            ],
-        )
-        assert "TRITON" in msg
-        assert "potential backends" in msg
-        assert "FlashInfer TRTLLM" in msg
-
-    def test_make_log_unsupported_with_reason(self):
-        msg = UnquantizedOracle._make_log_unsupported(
-            UnquantizedMoeBackend.CPU, "CPU-only platform"
-        )
-        assert "CPU" in msg
-        assert "CPU-only platform" in msg
-
-    def test_make_log_unsupported_without_reason(self):
-        msg = UnquantizedOracle._make_log_unsupported(UnquantizedMoeBackend.CPU, None)
-        assert "CPU" in msg
-        assert "does not support the deployment configuration" in msg
+    def test_unquantized_oracle_has_no_quant_config(self):
+        oracle = UnquantizedMoEKernelOracle()
+        with pytest.raises(NotImplementedError, match="UnquantizedMoEKernelOracle"):
+            oracle.make_quant_config()
 
 
 class TestUnquantizedOracleStaticMethods:
-    """Static utility methods on UnquantizedOracle."""
+    """Utility methods on UnquantizedMoEKernelOracle."""
 
     def test_backend_to_kernel_cls_known_backend(self):
-        cls = UnquantizedOracle.backend_to_kernel_cls(UnquantizedMoeBackend.TRITON)
-        assert cls is not None
+        oracle = UnquantizedMoEKernelOracle()
+        classes = oracle.backend_to_kernel_cls(UnquantizedMoeBackend.TRITON)
+
         from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
             TritonExperts,
         )
 
-        assert cls is TritonExperts
+        assert classes == [TritonExperts]
 
     def test_backend_to_kernel_cls_unknown_backend_raises(self):
+        oracle = UnquantizedMoEKernelOracle()
         with pytest.raises(ValueError, match="Unknown"):
-            UnquantizedOracle.backend_to_kernel_cls(UnquantizedMoeBackend.CPU)
+            oracle.backend_to_kernel_cls(UnquantizedMoeBackend.CPU)
 
     def test_map_backend_known(self):
-        backend = UnquantizedOracle.map_backend("triton")
+        oracle = UnquantizedMoEKernelOracle()
+        backend = oracle.map_backend("triton")
         assert backend == UnquantizedMoeBackend.TRITON
 
-    def test_map_backend_unknown(self):
-        backend = UnquantizedOracle.map_backend("nonexistent")
-        assert backend is None
+    def test_map_backend_unknown_raises(self):
+        oracle = UnquantizedMoEKernelOracle()
+        with pytest.raises(ValueError, match="not supported for unquantized MoE"):
+            oracle.map_backend("nonexistent")  # type: ignore[arg-type]
 
 
 class TestUnquantizedOracleModuleWrappers:
@@ -140,17 +148,8 @@ class TestUnquantizedOracleSelectBackend:
         mock_platform.is_tpu.return_value = False
         mock_platform.is_out_of_tree.return_value = False
 
-        from vllm.model_executor.layers.fused_moe.config import (
-            FusedMoEConfig,
-            FusedMoEParallelConfig,
-        )
-
-        moe_config = FusedMoEConfig(
-            num_experts=8,
-            top_k=2,
-            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
-        )
-        oracle = UnquantizedOracle()
+        moe_config = make_moe_config()
+        oracle = UnquantizedMoEKernelOracle()
         backend, experts_cls = oracle.select_backend(moe_config)
 
         assert backend == UnquantizedMoeBackend.CPU
@@ -162,17 +161,8 @@ class TestUnquantizedOracleSelectBackend:
         mock_platform.is_tpu.return_value = True
         mock_platform.is_out_of_tree.return_value = False
 
-        from vllm.model_executor.layers.fused_moe.config import (
-            FusedMoEConfig,
-            FusedMoEParallelConfig,
-        )
-
-        moe_config = FusedMoEConfig(
-            num_experts=8,
-            top_k=2,
-            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
-        )
-        oracle = UnquantizedOracle()
+        moe_config = make_moe_config()
+        oracle = UnquantizedMoEKernelOracle()
         backend, experts_cls = oracle.select_backend(moe_config)
 
         assert backend == UnquantizedMoeBackend.TPU
