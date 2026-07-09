@@ -822,6 +822,25 @@ class SpeculativeConfig:
                     config_format=self.target_model_config.config_format,
                 )
 
+                # If the target model was resolved from object storage
+                # (e.g. --load-format runai_streamer with an s3:// model),
+                # target_model_config.model points at a local config-only
+                # cache dir (it never contains safetensors) while
+                # target_model_config.model_weights keeps the original
+                # object-storage URL. A draft that shares the target
+                # checkpoint (e.g. MTP, DSpark) must inherit that weight
+                # source, otherwise draft weight loading falls back to the
+                # config-only cache dir and fails with "Cannot find any
+                # safetensors model weights".
+                if (
+                    not self.draft_model_config.model_weights
+                    and self.target_model_config.model_weights
+                    and self.draft_model_config.model == self.target_model_config.model
+                ):
+                    self.draft_model_config.model_weights = (
+                        self.target_model_config.model_weights
+                    )
+
                 # Old-format Medusa checkpoints (e.g. FasterDecoding/medusa-*)
                 # omit vocab_size in config.json, so MedusaConfig falls back to
                 # its default (32001). Align with the target model's vocab size
