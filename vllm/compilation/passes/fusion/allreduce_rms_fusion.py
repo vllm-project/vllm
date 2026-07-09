@@ -128,6 +128,29 @@ _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB: dict[int, dict[int, float]] = {
     },
 }
 
+MiB = 1024 * 1024
+
+
+def _select_flashinfer_allreduce_use_oneshot(
+    workspace_backend: str,
+    device_capability: int | None,
+    world_size: int,
+    current_tensor_size: int,
+) -> bool | None:
+    if workspace_backend == "mnnvl":
+        # FlashInfer sizes MNNVL workspaces around its own AUTO strategy.
+        # Forcing vLLM's per-rank threshold can request one-shot for tensors
+        # larger than the MNNVL one-shot workspace.
+        return None
+
+    if device_capability is None:
+        max_one_shot_size = None
+    else:
+        max_one_shot_size = _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB.get(
+            device_capability, {}
+        ).get(world_size)
+    return max_one_shot_size is None or current_tensor_size <= max_one_shot_size * MiB
+
 
 if flashinfer_comm is not None:
     from vllm.distributed.device_communicators.flashinfer_all_reduce import (
@@ -137,8 +160,6 @@ if flashinfer_comm is not None:
     )
 
     ar_fusion_patterns = flashinfer_comm.AllReduceFusionPattern
-
-    MiB = 1024 * 1024
 
     def call_trtllm_fused_allreduce_norm(
         allreduce_in: torch.Tensor,
@@ -174,16 +195,6 @@ if flashinfer_comm is not None:
         )
         curr_device = current_platform.get_device_capability()
         device_capability = curr_device.to_int() if curr_device is not None else None
-        # Get one shot input size limit for the current world size
-        # for the current device capability
-        max_one_shot_size = _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB.get(
-            device_capability,  # type: ignore[arg-type, unused-ignore]
-            {},
-        ).get(world_size, None)
-        # Use one shot if no max size is specified
-        use_oneshot = (
-            max_one_shot_size is None or current_tensor_size <= max_one_shot_size * MiB
-        )
 
         # Select workspace based on pattern: quant patterns use the
         # trtllm quant workspace, non-quant patterns use the primary workspace.
@@ -204,6 +215,12 @@ if flashinfer_comm is not None:
         )
         assert workspace is not None, (
             "Flashinfer allreduce workspace must be initialized when using flashinfer"
+        )
+        use_oneshot = _select_flashinfer_allreduce_use_oneshot(
+            workspace.backend,
+            device_capability,
+            world_size,
+            current_tensor_size,
         )
         assert flashinfer_comm is not None
         if norm_out is None:
@@ -248,7 +265,7 @@ if flashinfer_comm is not None:
             # the end for the one-shot path; the two-shot path is synchronized
             # and keeps the early completion. Related one-shot instability in
             # the same kernel: flashinfer-ai/flashinfer#1223.
-            trigger_completion_at_end=use_oneshot
+            trigger_completion_at_end=(use_oneshot is True)
             or num_tokens > PDL_ADVANCE_LAUNCH_TOKENS,
         )
 
