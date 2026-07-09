@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.utils import get_mm_features_in_window
+from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -62,7 +63,6 @@ from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
-from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
 
@@ -361,10 +361,10 @@ class Scheduler(SchedulerInterface):
 
     def _get_encoder_cache_manager_cls(self):
         ec_manager_config = self.vllm_config.ec_manager_config
-        if ec_manager_config is None :
+        if ec_manager_config is None:
             return None
         cls_path = ec_manager_config.encoder_cache_manager_cls
-        if cls_path is None :
+        if cls_path is None:
             return None
         return resolve_obj_by_qualname(cls_path)
 

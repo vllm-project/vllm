@@ -5,9 +5,9 @@ from collections import OrderedDict
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
+from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.logger import init_logger
 from vllm.v1.request import Request
-from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 
 if TYPE_CHECKING:
     from vllm.config import SchedulerConfig

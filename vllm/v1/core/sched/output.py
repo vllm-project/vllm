@@ -4,6 +4,7 @@
 from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING
+
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 
 if TYPE_CHECKING:
