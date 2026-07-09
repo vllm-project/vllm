@@ -1461,7 +1461,10 @@ class DeepseekV2Model(nn.Module):
                 )
                 # fused_add_rms_norm requires a contiguous residual
                 residual = residual.contiguous()
-            if idx in self.aux_hidden_state_layers:
+            hidden_states, residual = layer(
+                positions, hidden_states, residual, llama_4_scaling
+            )
+            if idx + 1 in self.aux_hidden_state_layers:
                 aux_hidden_state = hidden_states + residual
                 if aux_hidden_state.shape[0] != positions.shape[0]:
                     aux_hidden_state = tensor_model_parallel_all_gather(
@@ -1469,9 +1472,6 @@ class DeepseekV2Model(nn.Module):
                     )
                     aux_hidden_state = aux_hidden_state[: positions.shape[0]]
                 aux_hidden_states.append(aux_hidden_state)
-            hidden_states, residual = layer(
-                positions, hidden_states, residual, llama_4_scaling
-            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
