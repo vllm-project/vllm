@@ -561,27 +561,27 @@ class MoERunner(MoERunnerInterface):
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
 
+        # Launch shared experts on the aux stream BEFORE the routed kernel so
+        # they overlap the routed fused MoE (and expert selection, for modular
+        # kernels). Submitting them *after* the routed kernel yields no overlap:
+        # the routed kernels occupy the main stream / block the host, so the
+        # aux-stream work only starts once the routed GPU work has drained.
+        # No-op (returns False) unless the order is MULTI_STREAM_OVERLAPPED:
+        # MK_INTERNAL_OVERLAPPED does its own overlap inside forward_modular,
+        # and NO_OVERLAP already ran above. maybe_sync_shared_experts_stream
+        # must have recorded the aux->main dependency earlier.
+        overlapped = (
+            self._shared_experts is not None
+            and self._shared_experts.launch_overlapped(shared_experts_input)
+        )
+
         if self.routed_experts.quant_method.is_monolithic:
-            # Monolithic kernels block the host thread (they need per-expert
-            # token counts on the CPU), so submitting shared experts *after*
-            # the routed kernel yields no overlap: the host can't enqueue the
-            # aux-stream work until the routed GPU work has already drained.
-            # Launch shared experts on the aux stream BEFORE forward_monolithic
-            # so they overlap the routed all-gather + fused MoE, then join
-            # after. Falls back to the post-routed call when overlap is off.
-            overlapped = (
-                self._shared_experts is not None
-                and self._shared_experts.launch_overlapped(shared_experts_input)
-            )
             # Monolithic kernels: pass router_logits to routed_experts
             fused_out = self.routed_experts.forward_monolithic(
                 x=hidden_states,
                 router_logits=router_logits,
                 input_ids=input_ids,
             )
-            if overlapped:
-                assert self._shared_experts is not None
-                self._shared_experts.join_overlapped()
         else:
             # Modular kernels: select experts first, then call routed_experts
             topk_weights, topk_ids = self.router.select_experts(
@@ -598,9 +598,11 @@ class MoERunner(MoERunnerInterface):
                 shared_experts=self._shared_experts,
                 shared_experts_input=shared_experts_input,
             )
-            overlapped = False
 
-        if not overlapped:
+        if overlapped:
+            assert self._shared_experts is not None
+            self._shared_experts.join_overlapped()
+        else:
             self._maybe_apply_shared_experts(
                 shared_experts_input,
                 SharedExpertsOrder.MULTI_STREAM_OVERLAPPED,
