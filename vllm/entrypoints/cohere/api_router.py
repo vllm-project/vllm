@@ -48,6 +48,7 @@ if _SDK_AVAILABLE:
     from vllm.entrypoints.openai.engine.protocol import ErrorResponse
     from vllm.entrypoints.serve.utils.api_utils import (
         load_aware_call,
+        sanitize_message,
         validate_json_request,
         with_cancellation,
     )
