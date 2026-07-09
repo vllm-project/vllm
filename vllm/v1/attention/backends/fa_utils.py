@@ -291,9 +291,9 @@ def flash_attn_supports_kv_cache_dtype(
         head_size_v=head_size_v,
         has_sinks=has_sinks,
     )
-    return (fa_version == 3 and current_platform.is_device_capability_family(90)) or (
-        fa_version == 4 and current_platform.is_device_capability_family(100)
-    )
+    return (
+        fa_version in (3, 4) and current_platform.is_device_capability_family(90)
+    ) or (fa_version == 4 and current_platform.is_device_capability_family(100))
 
 
 def flash_attn_supports_quant_query_input() -> bool:

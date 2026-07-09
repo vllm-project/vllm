@@ -390,9 +390,9 @@ def flash_attn_varlen_func(
 
         # The new SM90 FA4 kernel shares the bf16 code path but adds in-kernel dequant:
         # it consumes fp16 Q + fp8 e4m3 paged K/V, dequantizes K/V to fp16, and computes
-        # attention in fp16. 
-        # As a temp WAR, for the fp8-KV path we cast Q bf16->fp16, pass q_descale=None 
-        # (the cute interface materializes an identity descale for fp16 Q), and forward the 
+        # attention in fp16.
+        # As a temp WAR, for the fp8-KV path we cast Q bf16->fp16, pass q_descale=None
+        # (the cute interface materializes an identity descale for fp16 Q), and forward the
         # (batch, num_kv_heads) float32 k/v descales.
         fa4_fp8_kv_dequant = (
             k.dtype == torch.float8_e4m3fn
@@ -403,7 +403,7 @@ def flash_attn_varlen_func(
             if q.dtype != torch.float16:
                 q = q.to(torch.float16)
             fa4_q_descale = None
-            
+
             # vLLM .expand()s the scalar descales into stride-0 broadcasts, but the
             # cute interface needs stride-1 on num_kv_heads. A (1, 1) descale (TP>1:
             # 1 KV head/rank + batch=1 decode) counts as "contiguous", so .contiguous()
@@ -446,7 +446,7 @@ def flash_attn_varlen_func(
             page_table=block_table,
             softmax_scale=softmax_scale,
             causal=causal,
-            dynamic_causal=dynamic_causal,
+            # dynamic_causal omitted: fork FA4 cute _flash_attn_fwd has no such param (always None for causal LMs like gemma4)
             softcap=softcap,
             window_size_left=real_window_size[0] if real_window_size[0] >= 0 else None,
             window_size_right=real_window_size[1] if real_window_size[1] >= 0 else None,
