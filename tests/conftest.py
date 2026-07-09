@@ -489,11 +489,12 @@ class HfRunner:
             )
         else:
             if trust_remote_code and hasattr(self.config, "auto_map"):
-                from vllm.transformers_utils.dynamic_module import (
-                    try_get_class_from_dynamic_module,
-                )
+                cls_ref = self.config.auto_map.get(auto_cls.__name__)
+                if cls_ref is not None:
+                    from vllm.transformers_utils.dynamic_module import (
+                        try_get_class_from_dynamic_module,
+                    )
 
-                for cls_ref in self.config.auto_map.values():
                     model_cls = try_get_class_from_dynamic_module(
                         cls_ref,
                         model_name,
