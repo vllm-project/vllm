@@ -485,7 +485,7 @@ class Worker(WorkerBase):
             # XPU stays excluded (see #39977).
             cudagraph_memory_estimate = 0
             if (
-                (current_platform.is_cuda() or current_platform.is_rocm())
+                current_platform.is_cuda_alike()
                 and self.vllm_config.compilation_config.cudagraph_mode
                 != CUDAGraphMode.NONE
             ):
