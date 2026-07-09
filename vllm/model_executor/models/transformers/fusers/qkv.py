@@ -26,8 +26,7 @@ from vllm.model_executor.models.transformers.utils import (
 from vllm.model_executor.models.utils import ShardId, maybe_prefix
 
 if TYPE_CHECKING:
-    from vllm.config.model import ModelConfig
-    from vllm.model_executor.layers.quantization import QuantizationConfig
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -149,12 +148,12 @@ class QKVFuser(StackedFuser):
             replace_expr(funcdef, call, ast.Name(id=temp, ctx=ast.Load()))
         self.fused_forward = compile_forward(funcdef, fn)
 
-    def validate(self, module: nn.Module, model_config: "ModelConfig") -> bool:
+    def validate(self, module: nn.Module, vllm_config: "VllmConfig") -> bool:
         """Shapes must be compatible for a single merged, head-sharded GEMM."""
         q = module.get_submodule(self.q_name)
         k = module.get_submodule(self.k_name)
         v = module.get_submodule(self.v_name)
-        head_size = model_config.get_head_size()
+        head_size = vllm_config.model_config.get_head_size()
         compatible = (
             q.in_features == k.in_features == v.in_features
             and len({proj.bias is None for proj in (q, k, v)}) == 1
@@ -170,10 +169,10 @@ class QKVFuser(StackedFuser):
         self,
         module: nn.Module,
         prefix: str,
-        model_config: "ModelConfig",
-        quant_config: "QuantizationConfig",
+        vllm_config: "VllmConfig",
     ) -> None:
-        head_size = model_config.get_head_size()
+        quant_config = vllm_config.quant_config
+        head_size = vllm_config.model_config.get_head_size()
         q = module.get_submodule(self.q_name)
         k = module.get_submodule(self.k_name)
         merged = QKVParallelLinear(

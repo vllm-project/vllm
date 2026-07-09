@@ -460,8 +460,7 @@ def test_unfusable_modules_are_not_fused(cls, default_vllm_config):
     fuser = get_fuser(module)
     # Either no pattern matches the class, or this instance fails validation
     # (`recursive_replace` gates fusion and its weight mappings on `validate`)
-    model_config = default_vllm_config.model_config
-    assert fuser is None or not fuser.validate(module, model_config)
+    assert fuser is None or not fuser.validate(module, default_vllm_config)
 
 
 def test_act_and_mul_derived_from_module(default_vllm_config):

@@ -26,8 +26,7 @@ from vllm.model_executor.models.transformers.fx_utils import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config.model import ModelConfig
-    from vllm.model_executor.layers.quantization import QuantizationConfig
+    from vllm.config import VllmConfig
 
 
 def _is_squared(node: object, x: fx.Node) -> bool:
@@ -185,17 +184,17 @@ class RMSNormFuser(BaseFuser):
                 return eps
         return None
 
-    def validate(self, module: nn.Module, model_config: "ModelConfig") -> bool:
+    def validate(self, module: nn.Module, vllm_config: "VllmConfig") -> bool:
         return True
 
     def fuse(
         self,
         module: nn.Module,
         prefix: str,
-        model_config: "ModelConfig",
-        quant_config: "QuantizationConfig",
+        vllm_config: "VllmConfig",
     ) -> nn.Module:
         """Fuse the matched RMSNorm pattern into a vLLM fused RMSNorm CustomOp."""
+        model_config = vllm_config.model_config
         weight = getattr(module, "weight", None)
         hidden_size = (
             weight.size(0) if weight is not None else model_config.get_hidden_size()
