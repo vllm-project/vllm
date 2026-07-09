@@ -591,7 +591,12 @@ def create_server_socket(
         family = socket.AF_INET6
 
     sock = socket.socket(family=family, type=socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        # On Windows, SO_REUSEADDR allows unprivileged port hijacking.
+        # Use SO_EXCLUSIVEADDRUSE to prevent this.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    else:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     if hasattr(socket, "SO_REUSEPORT"):
     if reuse_port:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
