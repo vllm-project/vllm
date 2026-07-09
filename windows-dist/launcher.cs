@@ -264,6 +264,7 @@ class VllmGui : Form
             System.Diagnostics.Process p = new System.Diagnostics.Process();
             p.StartInfo.FileName = "python";
             p.StartInfo.Arguments = "--version";
+            p.StartInfo.UseShellExecute = false;
             p.StartInfo.RedirectStandardOutput = true;
             p.StartInfo.CreateNoWindow = true;
             p.Start();
