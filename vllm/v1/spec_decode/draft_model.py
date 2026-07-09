@@ -6,10 +6,12 @@ import torch.nn as nn
 from typing_extensions import override
 
 from vllm.config import VllmConfig
+from vllm.config.utils import replace
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
-from vllm.v1.spec_decode.eagle import SpecDecodeBaseProposer
-from vllm.v1.spec_decode.utils import create_vllm_config_for_draft_model
+from vllm.tokenizers.registry import get_tokenizer
+from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
+from vllm.v1.spec_decode.vocab_mapping import VocabMapping
 
 logger = init_logger(__name__)
 
@@ -27,8 +29,33 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             pass_hidden_states_to_model=False,
             runner=runner,
         )
-        self._raise_if_vocab_size_mismatch()
         self._raise_if_draft_tp_mismatch()
+
+        self.use_heterogeneous_vocab = self.speculative_config.use_heterogeneous_vocab
+
+        spec = self.speculative_config
+        if self.use_heterogeneous_vocab:
+            # Heterogeneous vocabularies: build a VocabMapping to translate
+            # token IDs between the two tokenizers and constrain draft logits
+            # to the intersection so rejection sampling stays lossless.
+            target_tokenizer = get_tokenizer(
+                spec.target_model_config.tokenizer,
+                trust_remote_code=spec.target_model_config.trust_remote_code,
+            )
+            draft_tokenizer = get_tokenizer(
+                spec.draft_model_config.model,
+                trust_remote_code=spec.draft_model_config.trust_remote_code,
+            )
+            self.vocab_mapping: VocabMapping | None = VocabMapping(
+                target_tokenizer=target_tokenizer,
+                draft_tokenizer=draft_tokenizer,
+                target_vocab_size=spec.target_model_config.get_vocab_size(),
+                draft_vocab_size=spec.draft_model_config.get_vocab_size(),
+                device=device,
+            )
+        else:
+            self._raise_if_vocab_size_mismatch()
+            self.vocab_mapping = None
 
     def _raise_if_vocab_size_mismatch(self):
         self.speculative_config.verify_equal_vocab_size_if_draft_model()
@@ -51,15 +78,28 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             )
 
     @override
+    def _create_draft_vllm_config(self) -> VllmConfig:
+        base = super()._create_draft_vllm_config()
+        spec = self.speculative_config
+
+        return replace(
+            base,
+            quant_config=None,
+            parallel_config=replace(
+                spec.draft_parallel_config,
+                rank=self.vllm_config.parallel_config.rank,
+            ),
+            model_config=spec.draft_model_config,
+        )
+
+    @override
     def _get_model(self) -> nn.Module:
-        # Draft models may be quantized or on different parallelism,
-        # so we load them with a modified vllm config
         from vllm.compilation.backends import set_model_tag
 
-        temp_vllm_config = create_vllm_config_for_draft_model(self.vllm_config)
+        draft_vllm_config = self._create_draft_vllm_config()
         with set_model_tag("draft_model"):
             model = get_model(
-                vllm_config=temp_vllm_config,
+                vllm_config=draft_vllm_config,
                 prefix="draft_model",
             )
         return model

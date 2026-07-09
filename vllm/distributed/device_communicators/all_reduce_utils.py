@@ -19,8 +19,8 @@ import torch.multiprocessing as mp
 import vllm.envs as envs
 from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
-from vllm.utils.torch_utils import cuda_device_count_stateless
 
 logger = init_logger(__name__)
 
@@ -132,6 +132,18 @@ def should_nccl_symm_mem_allreduce(world_size: int, input_tensor: torch.Tensor) 
         # Use custom_AR (not symm_mem) for mid-range sizes
         return tensor_size <= lower_bound or tensor_size >= upper_bound
     return world_size > NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["always_use_above_world_size"]
+
+
+def should_nccl_symm_mem_ag_rs() -> bool:
+    """Check whether NCCL symmetric memory should be used for
+    AllGather / ReduceScatter collectives."""
+    from vllm.distributed.device_communicators.pynccl_allocator import (
+        is_symmetric_memory_enabled,
+    )
+
+    if envs.VLLM_BATCH_INVARIANT:
+        return False
+    return is_symmetric_memory_enabled()
 
 
 def producer(
@@ -320,13 +332,21 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
 
     is_distributed = dist.is_initialized()
 
-    num_dev = cuda_device_count_stateless()
-    cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
-    if cuda_visible_devices is None:
-        cuda_visible_devices = ",".join(str(i) for i in range(num_dev))
+    from vllm.platforms.interface import get_assigned_physical_gpu_ids
+
+    assigned_physical_gpu_ids = get_assigned_physical_gpu_ids()
+    if assigned_physical_gpu_ids is not None:
+        # Key by the ordered list: the cache stores directed local-index
+        # pairs, so permutations of the same set are distinct mappings.
+        cache_key = ",".join(str(i) for i in assigned_physical_gpu_ids)
+        num_dev = len(assigned_physical_gpu_ids)
+    else:
+        num_dev = current_platform.device_count()
+        cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
+        cache_key = cuda_visible_devices or ",".join(str(i) for i in range(num_dev))
 
     path = os.path.join(
-        envs.VLLM_CACHE_ROOT, f"gpu_p2p_access_cache_for_{cuda_visible_devices}.json"
+        envs.VLLM_CACHE_ROOT, f"gpu_p2p_access_cache_for_{cache_key}.json"
     )
     os.makedirs(os.path.dirname(path), exist_ok=True)
     from vllm.distributed.parallel_state import get_world_group
@@ -338,7 +358,15 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
         #  enter this block to calculate the cache
         logger.info("generating GPU P2P access cache in %s", path)
         cache: dict[str, bool] = {}
-        ids = list(range(num_dev))
+        # The probe subprocesses inherit this process's device-control env
+        # var, so they must be given visible ordinals, not physical IDs.
+        if assigned_physical_gpu_ids is not None:
+            ids = [
+                current_platform.logical_device_id_to_visible_device_id(local)
+                for local in range(num_dev)
+            ]
+        else:
+            ids = list(range(num_dev))
         # batch of all pairs of GPUs
         batch_src, batch_tgt = zip(*list(product(ids, ids)))
         # NOTE: we use `subprocess` rather than `multiprocessing` here
@@ -368,8 +396,11 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
                 ) from e
             with open(output_file.name, "rb") as f:
                 result = pickle.load(f)
+        # Cache entries must be keyed by local indices (0..N-1) because
+        # gpu_p2p_access_check() is called with local ranks.
+        id_to_local = {device_id: local for local, device_id in enumerate(ids)}
         for _i, _j, r in zip(batch_src, batch_tgt, result):
-            cache[f"{_i}->{_j}"] = r
+            cache[f"{id_to_local[_i]}->{id_to_local[_j]}"] = r
         with open(path, "w") as f:
             json.dump(cache, f, indent=4)
     if is_distributed:

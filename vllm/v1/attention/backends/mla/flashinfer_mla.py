@@ -16,18 +16,36 @@ from vllm.model_executor.layers.attention.mla_attention import (
     QueryLenSupport,
 )
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
     AttentionType,
     MultipleOf,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
 logger = init_logger(__name__)
 
 FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
+FLASHINFER_MLA_LSE_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
+
+_fi_workspace: torch.Tensor | None = None
+
+
+def _get_workspace_buffer(return_lse: bool) -> torch.Tensor:
+    global _fi_workspace
+
+    buffer_size = (
+        FLASHINFER_MLA_LSE_WORKSPACE_BUFFER_SIZE
+        if return_lse
+        else FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE
+    )
+    if _fi_workspace is None or _fi_workspace.numel() < buffer_size:
+        # FlashInfer's CuteDSL MLA-decode tactic requires an int8 workspace;
+        # the trtllm-gen path views it as uint8, so int8 is safe for all backends.
+        _fi_workspace = torch.zeros(buffer_size, dtype=torch.int8, device="cuda")
+    return _fi_workspace
 
 
 class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
@@ -48,6 +66,14 @@ class FlashInferMLABackend(MLACommonBackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [32, 64]
+
+    @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        if include_num_layers_dimension:
+            return (1, 0, 2, 3)
+        return (0, 1, 2)
 
     @staticmethod
     def get_name() -> str:
@@ -75,6 +101,7 @@ class FlashInferMLABackend(MLACommonBackend):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
         # FlashInfer MLA kernel requires qk_nope_head_dim in [64, 128, 192]
@@ -96,14 +123,16 @@ class FlashInferMLABackend(MLACommonBackend):
         return "HND"
 
 
-g_fi_workspace = torch.zeros(
-    FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE,
-    dtype=torch.uint8,
-    device="cuda",
-)
-
-
 class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
+    can_return_lse_for_decode: bool = True
+    # trtllm-gen MLA decode emits LSE in log2 (per flashinfer's own
+    # reference at flashinfer/trace/templates/attention.py:81:
+    # `logsumexp / log(2.0)`). Override the AttentionImplBase default
+    # so MLAAttention's DCP combine branches on the correct base
+    # (IS_BASE_E=False uses tl.exp2/tl.log2 natively, avoiding an FP
+    # multiply per decode step).
+    lse_base_on_e: bool = False
+
     def __init__(
         self,
         num_heads: int,
@@ -148,14 +177,8 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "FlashInferMLAImpl"
             )
 
-        self._workspace_buffer = g_fi_workspace
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
-
-        # Pre-allocated output buffer, lazily sized on first call.
-        # Zero-init once to prevent NaN in padding slots (seq_lens=0)
-        # from contaminating downstream per-tensor reductions.
-        self._decode_out: torch.Tensor | None = None
 
     def forward_mqa(
         self,
@@ -184,49 +207,20 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         if self.bmm1_scale is None:
             self.bmm1_scale = self.scale
-            if self.kv_cache_dtype.startswith("fp8"):
+            if is_quantized_kv_cache(self.kv_cache_dtype):
                 self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
 
         if self.bmm2_scale is None:
             self.bmm2_scale = 1.0
-            if self.kv_cache_dtype.startswith("fp8"):
+            if is_quantized_kv_cache(self.kv_cache_dtype):
                 self.bmm2_scale *= layer._k_scale_float
 
-        # Reuse pre-allocated zero-init output buffer to avoid a memset
-        # kernel on every CUDA graph replay.
-        # q is 4D: (batch, q_len_per_req, num_heads, head_dim)
-        # FlashInfer has a bug where out= validation hardcodes 3D shape
-        # (batch, num_heads, kv_lora_rank), but the kernel writes 4D
-        # (batch, q_len, num_heads, kv_lora_rank) when q_len > 1.
-        # So we can only pass out= for single-token decode (q_len == 1).
-        # For q_len > 1, we zero padding slots after the kernel returns.
-        # TODO: upstream fix to FlashInfer
-        B, q_len_per_req = q.shape[0], q.shape[1]
-        out_kwargs: dict[str, torch.Tensor] = {}
-        if q_len_per_req == 1:
-            dtype = (
-                torch.bfloat16
-                if is_quantized_kv_cache(self.kv_cache_dtype)
-                else q.dtype
-            )
-            if (
-                self._decode_out is None
-                or self._decode_out.shape[0] < B
-                or self._decode_out.dtype != dtype
-            ):
-                self._decode_out = torch.zeros(
-                    B,
-                    q.shape[2],
-                    self.kv_lora_rank,
-                    dtype=dtype,
-                    device=q.device,
-                )
-            out_kwargs["out"] = self._decode_out[:B]
-
-        o = trtllm_batch_decode_with_kv_cache_mla(
+        return_lse = self.need_to_return_lse_for_decode
+        workspace_buffer = _get_workspace_buffer(return_lse)
+        kernel_out = trtllm_batch_decode_with_kv_cache_mla(
             query=q,
             kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
-            workspace_buffer=self._workspace_buffer,
+            workspace_buffer=workspace_buffer,
             qk_nope_head_dim=self.qk_nope_head_dim,
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
@@ -235,18 +229,14 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             max_seq_len=attn_metadata.max_seq_len,
             bmm1_scale=self.bmm1_scale,
             bmm2_scale=self.bmm2_scale,
-            **out_kwargs,
+            return_lse=return_lse,
         )
-
-        # For q_len > 1, we can't pass out= so we work around by zeroing padding slots
-        if not out_kwargs:
-            num_real = attn_metadata.num_decodes
-            if num_real < o.shape[0]:
-                o[num_real:] = 0
+        if return_lse:
+            o, lse = kernel_out
+        else:
+            o, lse = kernel_out, None
 
         # Flatten the output for consistent shape
         o = o.view(-1, o.shape[-2], o.shape[-1])
 
-        # TODO: Return LSE pending support from Flashinfer API:
-        # https://github.com/flashinfer-ai/flashinfer/pull/1566
-        return o, None
+        return o, lse

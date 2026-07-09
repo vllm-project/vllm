@@ -10,96 +10,67 @@ import builtins
 import struct
 import time
 from collections.abc import Sequence
-from typing import Literal, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias
 
 import pybase64 as base64
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from vllm import PoolingParams
-from vllm.config import ModelConfig
+from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
-from vllm.entrypoints.pooling.base.protocol import (
+from vllm.utils import random_uuid
+
+from ..base.protocol import (
     ChatRequestMixin,
+    ChatRequestOptionsMixin,
     CompletionRequestMixin,
+    EmbeddingTokenizeParamsMixin,
     EmbedRequestMixin,
     PoolingBasicRequestMixin,
 )
-from vllm.renderers import TokenizeParams
-from vllm.utils import random_uuid
-
-# ---------------------------------------------------------------------------
-# OpenAI /v1/embeddings — request models
-# ---------------------------------------------------------------------------
-
-
-def _get_max_total_output_tokens(
-    model_config: ModelConfig,
-) -> tuple[int | None, int]:
-    max_total_tokens = model_config.max_model_len
-    pooler_config = model_config.pooler_config
-
-    if pooler_config is None:
-        return max_total_tokens, 0
-
-    if pooler_config.enable_chunked_processing:
-        return None, 0
-
-    max_embed_len = pooler_config.max_embed_len or max_total_tokens
-    max_output_tokens = max_total_tokens - max_embed_len
-    return max_total_tokens, max_output_tokens
 
 
 class EmbeddingCompletionRequest(
-    PoolingBasicRequestMixin, CompletionRequestMixin, EmbedRequestMixin
+    PoolingBasicRequestMixin,
+    CompletionRequestMixin,
+    EmbedRequestMixin,
+    EmbeddingTokenizeParamsMixin,
 ):
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
-        encoder_config = model_config.encoder_config or {}
-
-        (
-            max_total_tokens,
-            max_output_tokens,
-        ) = _get_max_total_output_tokens(model_config)
-
-        return TokenizeParams(
-            max_total_tokens=max_total_tokens,
-            max_output_tokens=max_output_tokens,
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
-            truncation_side=self.truncation_side,
-            do_lower_case=encoder_config.get("do_lower_case", False),
-            add_special_tokens=self.add_special_tokens,
-            max_total_tokens_param="max_model_len",
-            max_output_tokens_param="max_model_len - max_embed_len",
-        )
-
     def to_pooling_params(self):
         return PoolingParams(
             task="embed",
             dimensions=self.dimensions,
             use_activation=self.use_activation,
         )
+
+
+def _is_chat_message(value: Any) -> bool:
+    return isinstance(value, dict) and isinstance(value.get("role"), str)
+
+
+def _is_chat_messages(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(_is_chat_message(item) for item in value)
+    )
+
+
+def _is_batched_chat_messages(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(_is_chat_messages(item) for item in value)
+    )
 
 
 class EmbeddingChatRequest(
-    PoolingBasicRequestMixin, ChatRequestMixin, EmbedRequestMixin
+    PoolingBasicRequestMixin,
+    ChatRequestMixin,
+    EmbedRequestMixin,
+    EmbeddingTokenizeParamsMixin,
 ):
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
-        encoder_config = model_config.encoder_config or {}
-
-        (
-            max_total_tokens,
-            max_output_tokens,
-        ) = _get_max_total_output_tokens(model_config)
-
-        return TokenizeParams(
-            max_total_tokens=max_total_tokens,
-            max_output_tokens=max_output_tokens,
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
-            truncation_side=self.truncation_side,
-            do_lower_case=encoder_config.get("do_lower_case", False),
-            add_special_tokens=self.add_special_tokens,
-            max_total_tokens_param="max_model_len",
-            max_output_tokens_param="max_model_len - max_embed_len",
-        )
+    """OpenAI embeddings request with one top-level chat conversation."""
 
     def to_pooling_params(self):
         return PoolingParams(
@@ -109,7 +80,87 @@ class EmbeddingChatRequest(
         )
 
 
-EmbeddingRequest: TypeAlias = EmbeddingCompletionRequest | EmbeddingChatRequest
+class EmbeddingBatchChatRequest(
+    PoolingBasicRequestMixin,
+    ChatRequestOptionsMixin,
+    EmbedRequestMixin,
+    EmbeddingTokenizeParamsMixin,
+):
+    """OpenAI embeddings request with batched top-level chat conversations.
+
+    Mirrors ``BatchChatCompletionRequest`` by keeping batched conversations in
+    ``messages`` instead of introducing a separate batch-specific field.
+    """
+
+    messages: list[Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]] = (
+        Field(..., min_length=1)
+    )
+
+    def to_pooling_params(self):
+        return PoolingParams(
+            task="embed",
+            dimensions=self.dimensions,
+            use_activation=self.use_activation,
+        )
+
+
+class EmbeddingChatInputRequest(
+    EmbeddingChatRequest,
+):
+    """OpenAI embeddings request with one chat conversation in ``input``."""
+
+    input: list[ChatCompletionMessageParam]
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_input_messages(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        if "messages" in data or "input" not in data:
+            return data
+
+        input_data = data["input"]
+        if not _is_chat_messages(input_data):
+            return data
+
+        normalized = dict(data)
+        normalized["messages"] = input_data
+        return normalized
+
+
+class EmbeddingBatchChatInputRequest(EmbeddingBatchChatRequest):
+    """OpenAI embeddings request with batched chat conversations in ``input``."""
+
+    input: list[Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]] = (
+        Field(..., min_length=1)
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_input_messages(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        if "messages" in data or "input" not in data:
+            return data
+
+        input_data = data["input"]
+        if not _is_batched_chat_messages(input_data):
+            return data
+
+        normalized = dict(data)
+        normalized["messages"] = input_data
+        return normalized
+
+
+EmbeddingRequest: TypeAlias = (
+    EmbeddingCompletionRequest
+    | EmbeddingChatRequest
+    | EmbeddingBatchChatRequest
+    | EmbeddingChatInputRequest
+    | EmbeddingBatchChatInputRequest
+)
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +207,17 @@ class CohereEmbedContent(BaseModel):
     text: str | None = None
     image_url: dict[str, str] | None = None
 
+    @model_validator(mode="after")
+    def validate_content_payload(self):
+        if self.type == "text":
+            if self.text is None:
+                raise ValueError("CohereEmbedContent with type='text' requires text")
+        elif not self.image_url or not self.image_url.get("url"):
+            raise ValueError(
+                "CohereEmbedContent with type='image_url' requires image_url.url"
+            )
+        return self
+
 
 class CohereEmbedInput(BaseModel):
     content: list[CohereEmbedContent]
@@ -172,6 +234,17 @@ class CohereEmbedRequest(BaseModel):
     truncate: CohereTruncate = "END"
     max_tokens: int | None = None
     priority: int = 0
+
+    @model_validator(mode="after")
+    def validate_input_fields(self):
+        input_fields = (self.texts, self.images, self.inputs)
+        provided_fields = [field for field in input_fields if field is not None]
+        if len(provided_fields) != 1 or not provided_fields[0]:
+            raise ValueError(
+                "Exactly one of texts, images, or inputs must be provided, "
+                "and it must be non-empty"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------

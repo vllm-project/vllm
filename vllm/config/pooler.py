@@ -77,10 +77,19 @@ class PoolerConfig:
     Defaults to None (i.e. set to max_model_len).
     """
 
-    ## for classification models
-    logit_bias: float | None = None
+    ## for classification models — affine score calibration
+    logit_mean: float | None = None
     """
-    If provided, apply classification logit biases. Defaults to None.
+    If provided, subtract this value from classification logits before
+    activation. Used for affine score calibration (Platt scaling):
+    activation((logit - logit_mean) / logit_sigma). Defaults to None.
+    """
+
+    logit_sigma: float | None = None
+    """
+    If provided, divide the classification logits by this value after
+    mean subtraction. Used for affine score calibration (Platt scaling):
+    activation((logit - logit_mean) / logit_sigma). Defaults to None.
     """
 
     ## for reward models
@@ -98,6 +107,9 @@ class PoolerConfig:
     """
 
     def __post_init__(self) -> None:
+        if self.logit_sigma is not None and self.logit_sigma == 0:
+            raise ValueError("logit_sigma cannot be 0 (division by zero)")
+
         if pooling_type := self.pooling_type:
             if self.seq_pooling_type is not None:
                 raise ValueError(
@@ -126,11 +138,19 @@ class PoolerConfig:
                 raise NotImplementedError(pooling_type)
 
     def get_seq_pooling_type(self) -> SequencePoolingType:
-        assert self.seq_pooling_type is not None, "Should be resolved by ModelConfig"
+        if self.seq_pooling_type is None:
+            raise ValueError(
+                "seq_pooling_type is not set; it should be resolved by"
+                " ModelConfig before calling get_seq_pooling_type()"
+            )
         return self.seq_pooling_type
 
     def get_tok_pooling_type(self) -> TokenPoolingType:
-        assert self.tok_pooling_type is not None, "Should be resolved by ModelConfig"
+        if self.tok_pooling_type is None:
+            raise ValueError(
+                "tok_pooling_type is not set; it should be resolved by"
+                " ModelConfig before calling get_tok_pooling_type()"
+            )
         return self.tok_pooling_type
 
     def compute_hash(self) -> str:

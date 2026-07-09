@@ -6,11 +6,13 @@ pynvml. However, it should not initialize cuda context.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import platform
 from collections.abc import Callable
 from datetime import timedelta
-from functools import cache, wraps
-from typing import TYPE_CHECKING, TypeVar
+from functools import cache, lru_cache, wraps
+from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
 import torch
 from torch.distributed import PrefixStore, ProcessGroup
@@ -18,18 +20,22 @@ from torch.distributed.distributed_c10d import is_nccl_available
 from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
-import vllm._C  # noqa
 import vllm._C_stable_libtorch  # noqa
+
+with contextlib.suppress(ImportError):
+    import vllm._qutlass_C  # noqa
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
-from vllm.utils.torch_utils import cuda_device_count_stateless
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from .interface import DeviceCapability, Platform, PlatformEnum
+from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
+    from vllm.config.kernel import IrOpPriorityConfig
+    from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
@@ -47,6 +53,32 @@ pynvml = import_pynvml()
 torch.backends.cuda.enable_cudnn_sdp(False)
 
 
+@lru_cache(maxsize=8)
+def _cuda_device_count_stateless(cuda_visible_devices: str | None = None) -> int:
+    """Get number of CUDA devices, caching based on the value of CUDA_VISIBLE_DEVICES
+    at the time of call.
+
+    This should be used instead of torch.accelerator.device_count() unless
+    CUDA_VISIBLE_DEVICES has already been set to the desired value.
+
+    # This can be removed and simply replaced with torch.cuda.get_device_count
+    # after https://github.com/pytorch/pytorch/pull/122815 is released."""
+    # Note: cuda_visible_devices is not used, but we keep it as an argument for
+    # LRU Cache purposes.
+
+    # Code below is based on
+    # https://github.com/pytorch/pytorch/blob/
+    # c1cd946818442aca8c7f812b16d187ce1586c3bc/
+    # torch/cuda/__init__.py#L831C1-L831C17
+    import torch.cuda
+
+    if not torch.cuda._is_compiled():
+        return 0
+    raw_count = torch.cuda._device_count_nvml()
+    r = torch._C._cuda_getDeviceCount() if raw_count < 0 else raw_count
+    return r
+
+
 @cache
 def _get_backend_priorities(
     use_mla: bool,
@@ -55,12 +87,14 @@ def _get_backend_priorities(
     kv_cache_dtype: CacheDType | None = None,
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
+    from vllm.utils.torch_utils import is_quantized_kv_cache
+
     if use_mla:
         if device_capability.major == 10:
             # Sparse MLA backend priorities
             # See https://github.com/vllm-project/vllm/issues/35807 for
             # benchmark results
-            if kv_cache_dtype is not None and kv_cache_dtype.startswith("fp8"):
+            if kv_cache_dtype is not None and is_quantized_kv_cache(kv_cache_dtype):
                 # Prefer FlashInfer for fp8 kv cache
                 sparse_backends = [
                     AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
@@ -82,11 +116,20 @@ def _get_backend_priorities(
 
             return [
                 AttentionBackendEnum.FLASHINFER_MLA,
+                # R1 dims + FP8 KV only; rejected by supports_combination
+                # otherwise. Behind FLASHINFER_MLA: wins past bs≈8, regresses
+                # at bs≤2.
+                AttentionBackendEnum.TOKENSPEED_MLA,
                 AttentionBackendEnum.CUTLASS_MLA,
                 AttentionBackendEnum.FLASH_ATTN_MLA,
                 AttentionBackendEnum.FLASHMLA,
                 AttentionBackendEnum.TRITON_MLA,
                 *sparse_backends,
+            ]
+        elif device_capability.major == 12:
+            return [
+                AttentionBackendEnum.TRITON_MLA,
+                AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM120,
             ]
         else:
             return [
@@ -94,6 +137,7 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASHMLA,
                 AttentionBackendEnum.FLASHINFER_MLA,
                 AttentionBackendEnum.TRITON_MLA,
+                AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE,
                 AttentionBackendEnum.FLASHMLA_SPARSE,
             ]
     else:
@@ -103,6 +147,7 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASH_ATTN,
                 AttentionBackendEnum.TRITON_ATTN,
                 AttentionBackendEnum.FLEX_ATTENTION,
+                AttentionBackendEnum.TURBOQUANT,
             ]
         else:
             return [
@@ -110,7 +155,23 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASHINFER,
                 AttentionBackendEnum.TRITON_ATTN,
                 AttentionBackendEnum.FLEX_ATTENTION,
+                AttentionBackendEnum.TURBOQUANT,
             ]
+
+
+def _backend_cls_path(backend_cls: type[AttentionBackend]) -> str:
+    module, qualname = backend_cls.full_cls_name()
+    return f"{module}.{qualname}"
+
+
+def _get_attn_backend_class(backend: AttentionBackendEnum) -> type[AttentionBackend]:
+    return backend.get_class()
+
+
+class _BackendCandidate(NamedTuple):
+    backend_class: type[AttentionBackend]
+    backend: AttentionBackendEnum
+    priority: int
 
 
 def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
@@ -125,6 +186,21 @@ def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
     return wrapper
 
 
+@cache
+def _get_wsl_kernel_version() -> tuple[int, ...] | None:
+    """Return the WSL2 kernel version as a tuple, or None on parse failure.
+
+    platform.uname().release on WSL2 looks like
+    "5.15.167.4-microsoft-standard-WSL2"; we take the numeric prefix.
+    """
+    try:
+        release = platform.uname().release
+        parts = release.split("-")[0].split(".")
+        return tuple(int(x) for x in parts[:3])
+    except Exception:
+        return None
+
+
 class CudaPlatformBase(Platform):
     _enum = PlatformEnum.CUDA
     device_name: str = "cuda"
@@ -136,6 +212,18 @@ class CudaPlatformBase(Platform):
     ray_noset_device_env_vars: list[str] = [
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
     ]
+
+    @classmethod
+    def import_kernels(cls) -> None:
+        """Import CUDA kernel extensions (_C_stable_libtorch, optional _qutlass_C)."""
+        try:
+            import vllm._C_stable_libtorch  # noqa: F401
+        except ImportError as e:
+            logger.warning_once("Failed to import from vllm._C_stable_libtorch: %r", e)
+        with contextlib.suppress(ImportError):
+            import vllm._moe_C_stable_libtorch  # noqa: F401
+        with contextlib.suppress(ImportError):
+            import vllm._qutlass_C  # noqa: F401
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -161,8 +249,18 @@ class CudaPlatformBase(Platform):
         _ = torch.zeros(1, device=device)
 
     @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        torch.cuda.manual_seed_all(seed)
+
+    @classmethod
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
         raise NotImplementedError
+
+    @classmethod
+    def get_cuda_runtime_major(cls) -> int:
+        """Major ``torch.version.cuda`` version, or ``0`` if undetermined."""
+        major = (torch.version.cuda or "0").split(".", 1)[0]
+        return int(major) if major.isdigit() else 0
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
@@ -181,6 +279,27 @@ class CudaPlatformBase(Platform):
         pass
 
     @classmethod
+    def is_pin_memory_available(cls) -> bool:
+        if in_wsl():
+            # WSL1 has no CUDA support, so being on the CUDA platform under
+            # WSL implies WSL2. Gate on kernel >= 4.19.121, the first WSL2
+            # kernel with limited pinned memory support for CUDA.
+            version = _get_wsl_kernel_version()
+            if version is None or version < (4, 19, 121):
+                logger.warning_once(
+                    "Using 'pin_memory=False' as WSL is detected and the "
+                    "WSL2 kernel version is below 4.19.121. This may slow "
+                    "down performance. Please run `wsl --update`."
+                )
+                return False
+            # On compatible WSL2 kernels, pinned memory is supported but
+            # disabled by default. Enable it via VLLM_WSL2_ENABLE_PIN_MEMORY=1.
+            import vllm.envs as envs
+
+            return envs.VLLM_WSL2_ENABLE_PIN_MEMORY
+        return True
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
@@ -196,11 +315,32 @@ class CudaPlatformBase(Platform):
             and scheduler_config.is_multimodal_model
             and not scheduler_config.disable_chunked_mm_input
         ):
-            logger.warning(
+            logger.warning_once(
                 "Forcing --disable_chunked_mm_input for models "
                 "with multimodal-bidirectional attention."
             )
             scheduler_config.disable_chunked_mm_input = True
+
+        if (
+            in_wsl()
+            and vllm_config.offload_config.uva.cpu_offload_gb > 0
+            and bool(vllm_config.compilation_config.cudagraph_mode)
+        ):
+            logger.warning_once(
+                "--cpu-offload-gb is enabled with CUDA graphs on WSL2. "
+                "This combination requires pinned (page-locked) memory "
+                "allocations. WARNING: Windows (WDDM) enforces a hard "
+                "system-wide cap of roughly 50%% of physical RAM on pinned "
+                "memory shared across ALL processes by default (limit can "
+                "changed via %%USERPROFILE%%\\.wslconfig). "
+                "Excessive use of page-locked memory can prevent Windows "
+                "from reclaiming memory under load, which can cause the "
+                "entire host OS to become unresponsive and may require a "
+                "hard reboot to recover. Proceed at your own risk. "
+                "To raise the WSL2 VM memory ceiling, increase the `memory` "
+                "setting in %%USERPROFILE%%\\.wslconfig and run "
+                "`wsl --shutdown`."
+            )
 
     @classmethod
     def get_current_memory_usage(
@@ -217,7 +357,7 @@ class CudaPlatformBase(Platform):
         attn_selector_config: AttentionSelectorConfig,
         num_heads: int | None = None,
     ) -> tuple[
-        list[tuple[AttentionBackendEnum, int]],
+        list[_BackendCandidate],
         dict[AttentionBackendEnum, tuple[int, list[str]]],
     ]:
         valid_backends_priorities = []
@@ -231,7 +371,7 @@ class CudaPlatformBase(Platform):
         )
         for priority, backend in enumerate(backend_priorities):
             try:
-                backend_class = backend.get_class()
+                backend_class = _get_attn_backend_class(backend)
                 invalid_reasons_i = backend_class.validate_configuration(
                     device_capability=device_capability,
                     **attn_selector_config._asdict(),
@@ -241,7 +381,9 @@ class CudaPlatformBase(Platform):
             if invalid_reasons_i:
                 invalid_reasons[backend] = (priority, invalid_reasons_i)
             else:
-                valid_backends_priorities.append((backend, priority))
+                valid_backends_priorities.append(
+                    _BackendCandidate(backend_class, backend, priority)
+                )
 
         return valid_backends_priorities, invalid_reasons
 
@@ -258,7 +400,7 @@ class CudaPlatformBase(Platform):
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
             try:
-                backend_class = selected_backend.get_class()
+                backend_class = _get_attn_backend_class(selected_backend)
                 invalid_reasons = backend_class.validate_configuration(
                     device_capability=device_capability,
                     **attn_selector_config._asdict(),
@@ -272,7 +414,7 @@ class CudaPlatformBase(Platform):
                 )
             else:
                 logger.info("Using %s backend.", selected_backend)
-                return selected_backend.get_path()
+                return _backend_cls_path(backend_class)
 
         # No selected backend or the selected backend is invalid,
         # so we try finding a valid backend.
@@ -302,13 +444,13 @@ class CudaPlatformBase(Platform):
 
         # We have found some valid backends. Select the one with the
         # highest priority.
-        sorted_indices = sorted(
-            range(len(valid_backends_priorities)),
-            key=lambda i: valid_backends_priorities[i][1],
+        selected_candidate = min(
+            valid_backends_priorities,
+            key=lambda candidate: candidate.priority,
         )
-        selected_index = sorted_indices[0]
-        selected_backend = valid_backends_priorities[selected_index][0]
-        selected_priority = valid_backends_priorities[selected_index][1]
+        selected_backend_class = selected_candidate.backend_class
+        selected_backend = selected_candidate.backend
+        selected_priority = selected_candidate.priority
 
         # If the user specified --block-size (but not --attention-backend),
         # check whether that constraint precluded any higher-priority backends.
@@ -334,11 +476,14 @@ class CudaPlatformBase(Platform):
         logger.info_once(
             "Using %s attention backend out of potential backends: %s.",
             selected_backend.name,
-            "[" + ", ".join(f"'{b[0].name}'" for b in valid_backends_priorities) + "]",
-            scope="local",
+            "["
+            + ", ".join(
+                f"'{candidate.backend.name}'" for candidate in valid_backends_priorities
+            )
+            + "]",
         )
 
-        return selected_backend.get_path()
+        return _backend_cls_path(selected_backend_class)
 
     @classmethod
     def get_supported_vit_attn_backends(cls) -> list[AttentionBackendEnum]:
@@ -389,7 +534,6 @@ class CudaPlatformBase(Platform):
                 if is_backend_supported:
                     logger.info_once(
                         f"Using backend {vit_attn_backend} for vit attention",
-                        scope="local",
                     )
                     return vit_attn_backend
             except ImportError:
@@ -456,7 +600,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def device_count(cls) -> int:
-        return cuda_device_count_stateless()
+        return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
 
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
@@ -488,8 +632,8 @@ class CudaPlatformBase(Platform):
         dst_block_indices: torch.Tensor,
     ) -> None:
         """Copy blocks from src_cache to dst_cache on GPU."""
-        _src_cache = src_cache[:, src_block_indices]
-        dst_cache[:, dst_block_indices] = _src_cache.to(dst_cache.device)
+        _src_cache = src_cache[src_block_indices]
+        dst_cache[dst_block_indices] = _src_cache.to(dst_cache.device)
 
     @classmethod
     def swap_out_blocks_to_host(
@@ -500,8 +644,8 @@ class CudaPlatformBase(Platform):
         dst_block_indices: torch.Tensor,
     ) -> None:
         """Copy blocks from GPU to host (CPU)."""
-        _src_cache = src_cache[:, src_block_indices]
-        dst_cache[:, dst_block_indices] = _src_cache.cpu()
+        _src_cache = src_cache[src_block_indices]
+        dst_cache[dst_block_indices] = _src_cache.cpu()
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
@@ -514,7 +658,15 @@ class CudaPlatformBase(Platform):
     @classmethod
     def support_deep_gemm(cls) -> bool:
         """Currently, only Hopper and Blackwell GPUs are supported."""
-        return cls.is_device_capability(90) or cls.is_device_capability_family(100)
+        return (
+            cls.is_device_capability(90)
+            or cls.is_device_capability_family(100)
+            or cls.is_device_capability_family(120)
+        )
+
+    @classmethod
+    def is_integrated_gpu(cls, device_id: int = 0) -> bool:
+        return bool(torch.cuda.get_device_properties(device_id).is_integrated)
 
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
@@ -524,6 +676,37 @@ class CudaPlatformBase(Platform):
     def use_custom_op_collectives(cls) -> bool:
         return True
 
+    @classmethod
+    def get_default_ir_op_priority(cls, vllm_config: VllmConfig) -> IrOpPriorityConfig:
+        from vllm.config.compilation import CompilationMode
+        from vllm.config.kernel import IrOpPriorityConfig
+
+        # Native used by default when compiling,
+        # use vllm_c kernels where available when no codegen
+        cc = vllm_config.compilation_config
+        using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
+        default = ["native"] if using_inductor else ["vllm_c", "native"]
+
+        # Use oink if enabled for rms_norm
+        # TODO(Laurawly/luka): remove this env var,
+        #  users can just use IR op priority directly
+        rms_norm = default
+        if envs.VLLM_USE_OINK_OPS:
+            rms_norm = ["oink"] + default
+
+        return IrOpPriorityConfig.with_default(
+            default, rms_norm=rms_norm, fused_add_rms_norm=rms_norm
+        )
+
+    @classmethod
+    def is_arch_support_pdl(cls) -> bool:
+        try:
+            device = torch.cuda.current_device()
+            major, _ = torch.cuda.get_device_capability(device)
+        except Exception:
+            return False
+        return major >= 9
+
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
@@ -531,11 +714,20 @@ class CudaPlatformBase(Platform):
 # the major benefit of using NVML is that it will not initialize CUDA
 class NvmlCudaPlatform(CudaPlatformBase):
     @classmethod
+    @with_nvml_context
+    def device_control_id_to_physical_device_id(cls, device_id: str) -> int:
+        try:
+            return int(device_id)
+        except ValueError:
+            handle = pynvml.nvmlDeviceGetHandleByUUID(device_id)
+            return pynvml.nvmlDeviceGetIndex(handle)
+
+    @classmethod
     @cache
     @with_nvml_context
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
         try:
-            physical_device_id = cls.device_id_to_physical_device_id(device_id)
+            physical_device_id = cls.visible_device_id_to_physical_device_id(device_id)
             handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
             major, minor = pynvml.nvmlDeviceGetCudaComputeCapability(handle)
             return DeviceCapability(major=major, minor=minor)
@@ -607,6 +799,149 @@ class NvmlCudaPlatform(CudaPlatformBase):
 
     @classmethod
     @with_nvml_context
+    def get_device_numa_node(cls, device_id: int = 0) -> int | None:
+        """Get the NUMA node ID for a GPU device."""
+        physical_device_id = cls.device_id_to_physical_device_id(device_id)
+        handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+
+        try:
+            numa_node = pynvml.nvmlDeviceGetNumaNodeId(handle)
+            if cls._numa_node_has_cpus(numa_node):
+                return numa_node
+            # On non-CDMM Grace-Blackwell systems (e.g. GB200), each GPU's HBM
+            # is a separate NUMA node with no CPUs.  Fall through to
+            # CPU-affinity-based detection to find the nearest CPU node.
+            logger.debug(
+                "NUMA node %d for GPU %d has no CPUs (non-CDMM topology), "
+                "falling back to CPU-affinity-based detection",
+                numa_node,
+                device_id,
+            )
+        except Exception:
+            pass
+
+        try:
+            cpu_ids = cls._get_device_cpu_affinity(handle)
+            if cpu_ids:
+                numa_node = cls._get_numa_node_for_cpu(cpu_ids[0])
+                if numa_node is not None:
+                    logger.debug(
+                        "Determined NUMA node %d for GPU %d via CPU affinity",
+                        numa_node,
+                        device_id,
+                    )
+                    return numa_node
+        except Exception as e:
+            logger.warning("Failed to get NUMA node for GPU %d: %s", device_id, e)
+
+        return None
+
+    @classmethod
+    def _numa_node_has_cpus(cls, node_id: int) -> bool:
+        """Check whether a NUMA node has any CPUs assigned to it."""
+        from pathlib import Path
+
+        cpulist_file = Path(f"/sys/devices/system/node/node{node_id}/cpulist")
+        try:
+            return cpulist_file.read_text().strip() != ""
+        except (OSError, ValueError):
+            return False
+
+    @classmethod
+    def _get_device_cpu_affinity(cls, handle) -> list[int]:
+        """Get the list of CPU IDs associated with a GPU via NVML."""
+        cpu_count = os.cpu_count()
+        if cpu_count is None:
+            return []
+
+        cpu_set_size = (cpu_count + 63) // 64
+        cpu_affinity_mask = pynvml.nvmlDeviceGetCpuAffinity(handle, cpu_set_size)
+
+        cpu_ids = []
+        for i, mask in enumerate(cpu_affinity_mask):
+            for bit in range(64):
+                cpu_id = i * 64 + bit
+                if cpu_id >= cpu_count:
+                    break
+                if mask & (1 << bit):
+                    cpu_ids.append(cpu_id)
+        return cpu_ids
+
+    @classmethod
+    def _get_numa_node_for_cpu(cls, cpu_id: int) -> int | None:
+        """Determine which NUMA node a CPU belongs to."""
+        from pathlib import Path
+
+        node_path = Path("/sys/devices/system/node")
+        if not node_path.exists():
+            return None
+
+        for node_dir in node_path.iterdir():
+            if not node_dir.name.startswith("node"):
+                continue
+            try:
+                node_id = int(node_dir.name[4:])
+                cpulist_file = node_dir / "cpulist"
+                if cpulist_file.exists():
+                    cpulist = cpulist_file.read_text().strip()
+                    if cls._cpu_in_cpulist(cpu_id, cpulist):
+                        return node_id
+            except (ValueError, OSError):
+                continue
+        return None
+
+    @classmethod
+    def _cpu_in_cpulist(cls, cpu_id: int, cpulist: str) -> bool:
+        """Check if a CPU ID is in a cpulist string such as '0-3,8-11'."""
+        for part in cpulist.split(","):
+            part = part.strip()
+            if "-" in part:
+                start, end = part.split("-", 1)
+                if int(start) <= cpu_id <= int(end):
+                    return True
+            elif part.isdigit() and int(part) == cpu_id:
+                return True
+        return False
+
+    @classmethod
+    @with_nvml_context
+    def get_all_device_numa_nodes(cls) -> list[int] | None:
+        """Get NUMA nodes for all visible GPU devices."""
+        try:
+            numa_nodes = []
+            for device_id in range(cls.device_count()):
+                numa_node = cls.get_device_numa_node(device_id)
+                if numa_node is None:
+                    logger.warning(
+                        "Could not detect NUMA node for GPU %d, "
+                        "disabling automatic NUMA binding",
+                        device_id,
+                    )
+                    return None
+                numa_nodes.append(numa_node)
+            return numa_nodes
+        except Exception as e:
+            logger.warning("Failed to get NUMA nodes for GPUs: %s", e)
+            return None
+
+    @classmethod
+    @with_nvml_context
+    def get_all_gpu_pci_bus_ids(cls) -> dict[int, str]:
+        """Query NVML for GPU index -> PCI bus ID mapping."""
+        out: dict[int, str] = {}
+        for idx in range(pynvml.nvmlDeviceGetCount()):
+            handle = pynvml.nvmlDeviceGetHandleByIndex(idx)
+            pci_info = pynvml.nvmlDeviceGetPciInfo(handle)
+            bus_id = pci_info.busId
+            if isinstance(bus_id, bytes):
+                bus_id = bus_id.decode("utf-8")
+            out[idx] = bus_id.rstrip("\x00")
+        if not out:
+            raise RuntimeError("NVML returned no GPU PCI bus ID rows")
+        return out
+
+    @classmethod
+    @with_nvml_context
     def log_warnings(cls):
         device_ids: int = pynvml.nvmlDeviceGetCount()
         if device_ids > 1:
@@ -646,6 +981,14 @@ class NonNvmlCudaPlatform(CudaPlatformBase):
             " not found. Assuming no NVLink available."
         )
         return False
+
+    @classmethod
+    def get_device_numa_node(cls, device_id: int = 0) -> int | None:
+        return None
+
+    @classmethod
+    def get_all_device_numa_nodes(cls) -> list[int] | None:
+        return None
 
 
 # Autodetect either NVML-enabled or non-NVML platform

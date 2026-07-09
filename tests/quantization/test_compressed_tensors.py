@@ -5,27 +5,41 @@
 Run `pytest tests/quantization/test_compressed_tensors.py`.
 """
 
+from contextlib import contextmanager
+from unittest.mock import Mock
+
 import pytest
 import torch
-from compressed_tensors.quantization import QuantizationType
+from compressed_tensors.quantization import (
+    ActivationOrdering,
+    QuantizationArgs,
+    QuantizationStrategy,
+    QuantizationType,
+)
 
 from tests.models.utils import check_logprobs_close
+from vllm.model_executor.kernels.linear import (
+    Fp8BlockScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+    CompressedTensorsConfig,
     CompressedTensorsLinearMethod,
     CompressedTensorsW4A4Fp4,
+    CompressedTensorsW4A4Mxfp4,
     CompressedTensorsW4A8Fp8,
-    CompressedTensorsW4A16Fp4,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
+    CompressedTensorsW8A8Mxfp8,
     CompressedTensorsW8A16Fp8,
+    CompressedTensorsWNA8O8Int,
     CompressedTensorsWNA16,
 )
-from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
-from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
-    cutlass_fp4_supported,
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+    find_matched_target,
 )
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 
@@ -358,39 +372,52 @@ def test_compressed_tensors_kv_cache_fp8_per_attn_head(vllm_runner):
         assert output
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
-)
+@contextmanager
+def _nvfp4_marlin_error_context(model, capfd):
+    is_rocm_and_unsupported = (
+        model == "nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16"
+        and current_platform.is_rocm()
+    )
+
+    if is_rocm_and_unsupported:
+        expected_error = (
+            "ValueError: Forced NVFP4 kernel MarlinNvFp4LinearKernel is not "
+            "supported: Marlin FP4 not available"
+        )
+        with pytest.raises(RuntimeError, match="Engine core initialization failed"):
+            yield
+
+        captured = capfd.readouterr()
+        assert expected_error in captured.out + captured.err
+    else:
+        yield
+
+
 @pytest.mark.parametrize(
     "args",
     [
-        # TODO: Enable once model is available again
-        # ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16", CompressedTensorsW4A16Fp4),
-        ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4", CompressedTensorsW4A4Fp4),
+        ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16", True),
+        ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4", False),
     ],
 )
-def test_compressed_tensors_nvfp4(vllm_runner, args):
-    model, scheme = args
-    with vllm_runner(model, enforce_eager=True) as llm:
+def test_compressed_tensors_nvfp4(vllm_runner, args, capfd):
+    model, use_a16 = args
+    with (
+        _nvfp4_marlin_error_context(model, capfd),
+        vllm_runner(model, enforce_eager=True) as llm,
+    ):
 
         def check_model(model):
             layer = model.model.layers[0]
 
             qkv_proj = layer.self_attn.qkv_proj
             assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
-            if (
-                isinstance(qkv_proj.scheme, scheme)
-                or isinstance(qkv_proj.scheme, CompressedTensorsW4A16Fp4)
-                and not cutlass_fp4_supported()
-            ):
-                assert True
-            else:
-                raise AssertionError("FP4 Scheme Mismatch")
-
+            assert isinstance(qkv_proj.scheme, CompressedTensorsW4A4Fp4)
+            assert qkv_proj.scheme.use_a16 == use_a16
             assert qkv_proj.scheme.group_size == 16
 
         llm.apply_model(check_model)
-        output = llm.generate_greedy("Hello my name is", max_tokens=4)
+        output = llm.generate_greedy(["Hello my name is"], max_tokens=4)
         print(output)
         assert output
 
@@ -468,20 +495,19 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
             qkv_proj = layer.self_attn.qkv_proj
             assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
             assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Fp8)
-            assert isinstance(
-                qkv_proj.scheme.w8a8_block_fp8_linear, W8A8BlockFp8LinearOp
-            )
+            assert isinstance(qkv_proj.scheme.fp8_linear, Fp8BlockScaledMMLinearKernel)
 
             assert qkv_proj.weight.dtype is fp8_dtype
             assert qkv_proj.weight_scale.dtype is torch.float32
             assert len(qkv_proj.weight.shape) == 2
             assert len(qkv_proj.weight_scale.shape) == 2
 
-            input_quant_op = qkv_proj.scheme.w8a8_block_fp8_linear.input_quant_op
+            input_quant_op = qkv_proj.scheme.fp8_linear.quant_fp8
             assert isinstance(input_quant_op, QuantFP8)
             assert input_quant_op._forward_method in (
                 input_quant_op.forward_cuda,
                 input_quant_op.forward_hip,
+                input_quant_op.forward_xpu,
             )
 
         llm.apply_model(check_model)
@@ -515,20 +541,22 @@ def test_compressed_tensors_moe_ignore_with_model(vllm_runner):
     with vllm_runner(model_path, enforce_eager=True) as llm:
 
         def check_model(model):
-            from vllm.model_executor.layers.fused_moe import FusedMoE
+            from vllm.model_executor.layers.fused_moe import MoERunner
             from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
                 CompressedTensorsMoEMethod,
             )
 
             # Check layer 0 MoE (should be quantized)
             layer_quantized = model.model.layers[0].mlp.experts
-            assert isinstance(layer_quantized, FusedMoE)
-            assert isinstance(layer_quantized.quant_method, CompressedTensorsMoEMethod)
+            assert isinstance(layer_quantized, MoERunner)
+            assert isinstance(layer_quantized._quant_method, CompressedTensorsMoEMethod)
 
             # Check layer 10 MoE (should be unquantized + ignored)
             layer_unquantized = model.model.layers[3].mlp.experts
-            assert isinstance(layer_unquantized, FusedMoE)
-            assert isinstance(layer_unquantized.quant_method, UnquantizedFusedMoEMethod)
+            assert isinstance(layer_unquantized, MoERunner)
+            assert isinstance(
+                layer_unquantized._quant_method, UnquantizedFusedMoEMethod
+            )
 
         llm.apply_model(check_model)
 
@@ -557,4 +585,378 @@ def test_w4a16_moe_torch_compile(vllm_runner):
         },
     ) as llm:
         output = llm.generate_greedy("Hi", max_tokens=1)
+        assert output
+
+
+def _make_ct_config(*, target: str = "Linear") -> CompressedTensorsConfig:
+    """Build a minimal CompressedTensorsConfig with INT8 channel quant."""
+    weight_quant = QuantizationArgs(
+        num_bits=8,
+        type=QuantizationType.INT,
+        strategy=QuantizationStrategy.CHANNEL,
+        symmetric=True,
+        dynamic=False,
+    )
+    return CompressedTensorsConfig(
+        target_scheme_map={
+            target: {
+                "weights": weight_quant,
+                "input_activations": None,
+                "format": "pack-quantized",
+            }
+        },
+        ignore=[],
+        quant_format="pack-quantized",
+    )
+
+
+def test_get_quant_method_returns_linear_method_for_parallel_lm_head():
+    """ParallelLMHead whose name matches a target must get a quantised method."""
+    config = _make_ct_config(target="re:.*lm_head")
+    mock_lm_head = Mock(spec=ParallelLMHead)
+    mock_lm_head.__class__ = ParallelLMHead
+
+    method = config.get_quant_method(mock_lm_head, prefix="model.lm_head")
+
+    assert isinstance(method, CompressedTensorsLinearMethod), (
+        f"Expected CompressedTensorsLinearMethod, got {type(method).__name__}"
+    )
+
+
+def test_get_quant_method_returns_none_for_ignored_parallel_lm_head():
+    """ParallelLMHead on the ignore list should be left unquantized (None)."""
+    config = _make_ct_config(target="re:.*lm_head")
+    config.ignore = ["re:.*lm_head"]
+    mock_lm_head = Mock(spec=ParallelLMHead)
+    mock_lm_head.__class__ = ParallelLMHead
+
+    method = config.get_quant_method(mock_lm_head, prefix="model.lm_head")
+
+    assert method is None, (
+        f"Expected None for ignored ParallelLMHead, got {type(method).__name__}"
+    )
+
+
+def test_get_quant_method_returns_none_for_unmatched_parallel_lm_head():
+    """ParallelLMHead with target='Linear' (typical real model) must not crash.
+
+    Most compressed-tensors models only target 'Linear'. ParallelLMHead does
+    not match that target, so get_quant_method should return None (unquantized)
+    instead of raising ValueError.
+    """
+    config = _make_ct_config(target="Linear")
+    mock_lm_head = Mock(spec=ParallelLMHead)
+    mock_lm_head.__class__ = ParallelLMHead
+
+    method = config.get_quant_method(mock_lm_head, prefix="model.lm_head")
+
+    assert method is None, (
+        f"Expected None for unmatched ParallelLMHead, got {type(method).__name__}"
+    )
+
+
+def test_find_matched_target_returns_none_on_no_match():
+    result = find_matched_target(
+        layer_name="model.layers.0.self_attn.qkv_proj",
+        module=Mock(spec=torch.nn.Linear),
+        targets=["no_match_target"],
+    )
+    assert result is None
+
+
+def test_get_scheme_dict_returns_none_on_no_match():
+    config = _make_ct_config(target="matched_layer")
+    result = config.get_scheme_dict(
+        layer=Mock(spec=torch.nn.Linear),
+        layer_name="model.layers.0.unmatched_layer",
+    )
+    assert result is None
+
+
+# Test constants for activation quantization
+_STATIC_SYM_INT8_ACT = QuantizationArgs(
+    num_bits=8,
+    type=QuantizationType.INT,
+    strategy=QuantizationStrategy.TENSOR.value,
+    symmetric=True,
+    dynamic=False,
+)
+
+_STATIC_ASYM_INT8_ACT = QuantizationArgs(
+    num_bits=8,
+    type=QuantizationType.INT,
+    strategy=QuantizationStrategy.TENSOR.value,
+    symmetric=False,
+    dynamic=False,
+)
+
+_DYNAMIC_INT8_ACT = QuantizationArgs(
+    num_bits=8,
+    type=QuantizationType.INT,
+    strategy=QuantizationStrategy.TOKEN.value,
+    symmetric=True,
+    dynamic=True,
+)
+
+
+@pytest.mark.parametrize(
+    "weight_bits,weight_strategy,input_act,output_act,format,expected_scheme",
+    [
+        # W8A8 int-quantized -> W8A8Int8 (regression test for #46389)
+        pytest.param(
+            8,
+            QuantizationStrategy.CHANNEL.value,
+            _STATIC_SYM_INT8_ACT,
+            None,
+            "int-quantized",
+            CompressedTensorsW8A8Int8,
+            id="w8a8_channel_static_sym",
+        ),
+        pytest.param(
+            8,
+            QuantizationStrategy.CHANNEL.value,
+            _STATIC_ASYM_INT8_ACT,
+            None,
+            "int-quantized",
+            CompressedTensorsW8A8Int8,
+            id="w8a8_channel_static_asym",
+        ),
+        pytest.param(
+            8,
+            QuantizationStrategy.TENSOR.value,
+            _STATIC_SYM_INT8_ACT,
+            None,
+            "int-quantized",
+            CompressedTensorsW8A8Int8,
+            id="w8a8_tensor_static",
+        ),
+        pytest.param(
+            8,
+            QuantizationStrategy.CHANNEL.value,
+            _DYNAMIC_INT8_ACT,
+            None,
+            "int-quantized",
+            CompressedTensorsW8A8Int8,
+            id="w8a8_channel_dynamic",
+        ),
+        # W8A8O8 int-quantized -> WNA8O8Int (both input and output)
+        pytest.param(
+            8,
+            QuantizationStrategy.CHANNEL.value,
+            _STATIC_SYM_INT8_ACT,
+            _STATIC_SYM_INT8_ACT,
+            "int-quantized",
+            CompressedTensorsWNA8O8Int,
+            id="w8a8o8_channel",
+        ),
+        pytest.param(
+            4,
+            QuantizationStrategy.GROUP.value,
+            _STATIC_SYM_INT8_ACT,
+            _STATIC_SYM_INT8_ACT,
+            "int-quantized",
+            CompressedTensorsWNA8O8Int,
+            id="w4a8o8_group",
+        ),
+        # Weight-only pack-quantized -> WNA16
+        pytest.param(
+            8,
+            QuantizationStrategy.CHANNEL.value,
+            None,
+            None,
+            "pack-quantized",
+            CompressedTensorsWNA16,
+            id="w8_pack",
+        ),
+        pytest.param(
+            4,
+            QuantizationStrategy.GROUP.value,
+            None,
+            None,
+            "pack-quantized",
+            CompressedTensorsWNA16,
+            id="w4_pack",
+        ),
+        pytest.param(
+            2,
+            QuantizationStrategy.GROUP.value,
+            None,
+            None,
+            "pack-quantized",
+            CompressedTensorsWNA16,
+            id="w2_pack",
+        ),
+        pytest.param(
+            3,
+            QuantizationStrategy.GROUP.value,
+            None,
+            None,
+            "pack-quantized",
+            CompressedTensorsWNA16,
+            id="w3_pack",
+        ),
+        pytest.param(
+            5,
+            QuantizationStrategy.GROUP.value,
+            None,
+            None,
+            "pack-quantized",
+            CompressedTensorsWNA16,
+            id="w5_pack",
+        ),
+        pytest.param(
+            6,
+            QuantizationStrategy.GROUP.value,
+            None,
+            None,
+            "pack-quantized",
+            CompressedTensorsWNA16,
+            id="w6_pack",
+        ),
+        pytest.param(
+            7,
+            QuantizationStrategy.GROUP.value,
+            None,
+            None,
+            "pack-quantized",
+            CompressedTensorsWNA16,
+            id="w7_pack",
+        ),
+    ],
+)
+def test_scheme_selection(
+    weight_bits, weight_strategy, input_act, output_act, format, expected_scheme
+):
+    """Test that _get_scheme_from_parts selects the correct scheme.
+
+    This parametrized test verifies scheme selection for various combinations
+    of weight bits, quantization strategies, input/output activations, and
+    compression formats.
+
+    Key regression test: W8A8 int-quantized models with channel-wise weights
+    should use W8A8Int8 (true int8 gemm), not WNA8O8Int (fake-quant).
+    WNA8O8Int should only match when BOTH input and output activations are
+    present.
+    """
+    weight_quant = QuantizationArgs(
+        num_bits=weight_bits,
+        type=QuantizationType.INT,
+        strategy=weight_strategy,
+        symmetric=True,
+        dynamic=False,
+        group_size=128 if weight_strategy == QuantizationStrategy.GROUP.value else None,
+    )
+
+    config = CompressedTensorsConfig(
+        target_scheme_map={},
+        ignore=[],
+        quant_format=format,
+    )
+
+    scheme = config._get_scheme_from_parts(
+        weight_quant=weight_quant,
+        input_quant=input_act,
+        output_quant=output_act,
+        format=format,
+    )
+
+    assert isinstance(scheme, expected_scheme), (
+        f"Expected {expected_scheme.__name__} for "
+        f"W{weight_bits} {weight_strategy} + "
+        f"input_act={input_act} + output_act={output_act} + "
+        f"format={format}, got {type(scheme).__name__}"
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(75),
+    reason="MXFP8 requires Turing (sm_75+) or newer.",
+)
+def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
+    """Verify MXFP8 scheme, dtypes, and generation for a MoE model."""
+    model_path = "AliEdalati97/Qwen3-30B-A3B-MXFP8"
+    with vllm_runner(
+        model_path,
+        enforce_eager=True,
+        load_format="dummy",
+        hf_overrides={"num_hidden_layers": 4},
+    ) as llm:
+
+        def check_model(model):
+            from vllm.model_executor.layers.fused_moe import MoERunner
+            from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_mxfp8 import (  # noqa: E501
+                CompressedTensorsW8A8Mxfp8MoEMethod,
+            )
+
+            layer = model.model.layers[0]
+
+            qkv = layer.self_attn.qkv_proj
+            assert isinstance(qkv.quant_method, CompressedTensorsLinearMethod)
+            assert isinstance(qkv.scheme, CompressedTensorsW8A8Mxfp8)
+
+            experts = layer.mlp.experts
+            assert isinstance(experts, MoERunner)
+            assert isinstance(
+                experts._quant_method, CompressedTensorsW8A8Mxfp8MoEMethod
+            )
+
+        llm.apply_model(check_model)
+        output = llm.generate_greedy("Hello my name is", max_tokens=4)
+        assert output
+
+
+@pytest.mark.parametrize(
+    "actorder,group_size,part,full,expected",
+    [
+        # actorder="group" with real grouping: must load full-K w2 scales and,
+        # when sharded (part != full), report is_k_full=False.
+        (ActivationOrdering.GROUP, 32, 64, 128, (True, 128, False)),
+        # actorder="group" but unsharded (part == full): full scales, k_full.
+        (ActivationOrdering.GROUP, 32, 128, 128, (True, 128, True)),
+        # actorder="group" with channel-wise (group_size == -1): no full load.
+        (ActivationOrdering.GROUP, -1, 64, 128, (False, 64, False)),
+        # "static"/"weight" reorder at quant time -> shard normally + k_full.
+        # Regression: static actorder under TP must keep is_k_full=True so the
+        # Marlin kernel never gets the invalid (group_size=16, is_k_full=0).
+        ("static", 32, 64, 128, (False, 64, True)),
+        ("weight", 32, 64, 128, (False, 64, True)),
+        (None, 32, 64, 128, (False, 64, True)),
+    ],
+)
+def test_wna16_marlin_moe_w2_scale_sharding(actorder, group_size, part, full, expected):
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16_marlin import (  # noqa: E501
+        CompressedTensorsWNA16MarlinMoEMethod,
+    )
+
+    result = CompressedTensorsWNA16MarlinMoEMethod._w2_scale_sharding(
+        actorder, group_size, part, full
+    )
+    assert result == expected
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(80),
+    reason="MXFP4 requires ampere or newer",
+)
+def test_compressed_tensors_mxfp4(vllm_runner):
+    model_path = "nm-testing/TinyLlama-1.1B-Chat-v1.0-MXFP4"
+    with vllm_runner(model_path, enforce_eager=True) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+
+            qkv_proj = layer.self_attn.qkv_proj
+            o_proj = layer.self_attn.o_proj
+            gate_up_proj = layer.mlp.gate_up_proj
+            down_proj = layer.mlp.down_proj
+
+            for proj in (qkv_proj, o_proj, gate_up_proj, down_proj):
+                assert isinstance(proj.quant_method, CompressedTensorsLinearMethod)
+                assert isinstance(proj.scheme, CompressedTensorsW4A4Mxfp4)
+
+                # Verify group size
+                assert proj.scheme.group_size == 32
+
+        llm.apply_model(check_model)
+        output = llm.generate_greedy("Hello my name is", max_tokens=4)
         assert output

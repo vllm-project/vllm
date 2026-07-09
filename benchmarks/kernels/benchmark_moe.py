@@ -27,10 +27,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     _get_config_dtype_str,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import *
-from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
+from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe import *
 from vllm.transformers_utils.config import get_config
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -250,7 +250,7 @@ def benchmark_config(
                     num_experts=num_experts,
                     experts_per_token=topk,
                     hidden_dim=hidden_size,
-                    intermediate_size_per_partition=shard_intermediate_size,
+                    intermediate_size=shard_intermediate_size,
                     num_local_experts=num_experts,
                     num_logical_experts=num_experts,
                     activation=MoEActivation.SILU,
@@ -271,7 +271,6 @@ def benchmark_config(
                     moe_config=moe_config,
                     quant_config=quant_config,
                 ),
-                inplace=not disable_inplace(),
             )
 
         with override_config(config):
@@ -279,7 +278,6 @@ def benchmark_config(
                 x, input_gating, topk, renormalize=not use_deep_gemm
             )
 
-            inplace = not disable_inplace()
             if use_deep_gemm:
                 return deep_gemm_experts.apply(
                     x,
@@ -298,7 +296,6 @@ def benchmark_config(
                 w2,
                 topk_weights,
                 topk_ids,
-                inplace=inplace,
                 quant_config=quant_config,
             )
 
@@ -394,16 +391,19 @@ def get_configs_compute_bound(use_fp16, block_quant_shape) -> list[dict[str, int
         config = dict(zip(keys, config_values))
         configs.append(config)
 
-    # Remove configs that are not compatible with fp8 block quantization
-    # BLOCK_SIZE_K must be a multiple of block_k
-    # BLOCK_SIZE_N must be a multiple of block_n
+    # Drop configs incompatible with fp8 block quantization. A tile must align
+    # to the quant-block scale grid, i.e. tile and block must divide one
+    # another. The kernel indexes scales per element (offs_bn // group_n,
+    # k_start // group_k), so a tile narrower than the block (e.g. N=64 with
+    # block_n=128) is valid -- and often faster at small batch. An exact
+    # multiple was required before, which dropped those smaller tiles entirely.
     if block_quant_shape is not None and not use_fp16:
         block_n, block_k = block_quant_shape[0], block_quant_shape[1]
         for config in configs[:]:
-            if (
-                config["BLOCK_SIZE_K"] % block_k != 0
-                or config["BLOCK_SIZE_N"] % block_n != 0
-            ):
+            bn, bk = config["BLOCK_SIZE_N"], config["BLOCK_SIZE_K"]
+            n_aligned = bn % block_n == 0 or block_n % bn == 0
+            k_aligned = bk % block_k == 0 or block_k % bk == 0
+            if not (n_aligned and k_aligned):
                 configs.remove(config)
     return configs
 
@@ -627,9 +627,8 @@ class BenchmarkWorker:
                 need_device_guard = True
 
         with (
-            torch.accelerator.device_index(self.device_id)
-            if need_device_guard
-            else nullcontext()
+            # Ray restricts each worker to one GPU; use local index 0
+            torch.accelerator.device_index(0) if need_device_guard else nullcontext()
         ):
             for idx, config in enumerate(tqdm(search_space)):
                 try:
@@ -794,6 +793,12 @@ def get_model_params(config):
         text_config = config.get_text_config()
         E = text_config.num_experts
         topk = text_config.num_experts_per_tok
+        intermediate_size = text_config.moe_intermediate_size
+        hidden_size = text_config.hidden_size
+    elif architecture == "DiffusionGemmaForBlockDiffusion":
+        text_config = config.get_text_config()
+        E = text_config.num_experts
+        topk = text_config.top_k_experts
         intermediate_size = text_config.moe_intermediate_size
         hidden_size = text_config.hidden_size
     elif architecture == "HunYuanMoEV1ForCausalLM":

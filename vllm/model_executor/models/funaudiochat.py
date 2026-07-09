@@ -20,19 +20,19 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn as nn
-from transformers import PreTrainedTokenizerFast, WhisperFeatureExtractor
+from transformers import TokenizersBackend, WhisperFeatureExtractor
 from transformers.activations import get_activation
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.modeling_outputs import BaseModelOutput
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -556,15 +556,15 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
         return WhisperFeatureExtractor.from_pretrained(self.model_id)
 
     @cached_property
-    def speech_tokenizer(self) -> PreTrainedTokenizerFast:
-        return PreTrainedTokenizerFast.from_pretrained(
+    def speech_tokenizer(self) -> TokenizersBackend:
+        return TokenizersBackend.from_pretrained(
             self.model_id, subfolder="speech_tokenizer"
         )
 
     def get_feature_extractor(self) -> WhisperFeatureExtractor:
         return self.feature_extractor
 
-    def get_speech_tokenizer(self) -> PreTrainedTokenizerFast:
+    def get_speech_tokenizer(self) -> TokenizersBackend:
         return self.speech_tokenizer
 
     def get_data_parser(self):

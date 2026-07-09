@@ -9,6 +9,8 @@ import regex as re
 from openai import BadRequestError
 
 from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import get_tokenizer
 
 # any model with a chat template should work here
@@ -58,9 +60,12 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str) ->
     choice = completion.choices[0]
     assert len(choice.text) >= 5
     assert choice.finish_reason == "length"
-    assert completion.usage == openai.types.CompletionUsage(
-        completion_tokens=5, prompt_tokens=6, total_tokens=11
-    )
+    assert completion.usage is not None
+    assert completion.usage.completion_tokens == 5
+    assert completion.usage.prompt_tokens == 6
+    assert completion.usage.total_tokens == 11
+    assert completion.usage.prompt_tokens_details is not None
+    assert completion.usage.prompt_tokens_details.cached_tokens == 0
 
     # test using token IDs
     completion = await client.completions.create(
@@ -71,6 +76,43 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str) ->
     )
     assert len(completion.choices[0].text) >= 1
     assert completion.choices[0].prompt_logprobs is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
+async def test_completion_truncation_side_controls_prompt_truncation(
+    client: openai.AsyncOpenAI, model_name: str
+) -> None:
+    prompt_token_ids = list(range(8))
+
+    right_completion = await client.completions.create(
+        model=model_name,
+        prompt=prompt_token_ids,
+        max_tokens=1,
+        temperature=0.0,
+        extra_body={
+            "return_token_ids": True,
+            "truncate_prompt_tokens": 4,
+            "truncation_side": "right",
+        },
+    )
+    assert right_completion.choices[0].prompt_token_ids == prompt_token_ids[:4]
+
+    left_completion = await client.completions.create(
+        model=model_name,
+        prompt=prompt_token_ids,
+        max_tokens=1,
+        temperature=0.0,
+        extra_body={
+            "return_token_ids": True,
+            "truncate_prompt_tokens": 4,
+            "truncation_side": "left",
+        },
+    )
+    assert left_completion.choices[0].prompt_token_ids == prompt_token_ids[-4:]
 
 
 @pytest.mark.asyncio
@@ -690,3 +732,38 @@ async def test_invalid_grammar(client: openai.AsyncOpenAI, model_name: str):
                 "structured_outputs": {"grammar": invalid_simplified_sql_grammar}
             },
         )
+
+
+# Unit tests for bad_words in CompletionRequest.to_sampling_params()
+def test_completion_request_bad_words_to_sampling_params():
+    """bad_words should be forwarded to SamplingParams (parity with chat)."""
+    request = CompletionRequest(
+        model="test-model",
+        prompt="Hello",
+        bad_words=["foo", "bar"],
+        max_tokens=10,
+    )
+
+    sampling_params = request.to_sampling_params(
+        max_tokens=10,
+        default_sampling_params={},
+    )
+
+    assert isinstance(sampling_params, SamplingParams)
+    assert sampling_params.bad_words == ["foo", "bar"]
+
+
+def test_completion_request_bad_words_default_empty():
+    """bad_words defaults to an empty list, matching the chat endpoint."""
+    request = CompletionRequest(
+        model="test-model",
+        prompt="Hello",
+        max_tokens=10,
+    )
+
+    assert request.bad_words == []
+    sampling_params = request.to_sampling_params(
+        max_tokens=10,
+        default_sampling_params={},
+    )
+    assert sampling_params.bad_words == []

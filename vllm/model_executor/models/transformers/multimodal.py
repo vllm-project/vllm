@@ -20,18 +20,18 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 import torch
+from transformers import AutoModel
 
+from vllm.compilation.decorators import should_torch_compile_mm_encoder
 from vllm.config.utils import getattr_iter
+from vllm.inputs import MultiModalDataDict, MultiModalInput, mm_input
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsMultiModal
 from vllm.multimodal import MultiModalKwargsItems
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
-    MultiModalInputs,
     PlaceholderRange,
-    mm_inputs,
 )
 from vllm.multimodal.parse import (
     ImageProcessorItems,
@@ -48,20 +48,14 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
-    from transformers import BatchFeature
+    from transformers import BatchFeature, PreTrainedModel
 
     from vllm.config import VllmConfig
     from vllm.config.multimodal import BaseDummyOptions
 
-DYNAMIC_ARG_DIMS = {
-    "input_ids": 0,
-    # set `positions` to last dim to support Qwen-mrope
-    "positions": -1,
-    "intermediate_tensors": 0,
-    "inputs_embeds": 0,
-}
-
 logger = init_logger(__name__)
+
+_MODALITY_TO_TOKEN_TYPE_ID = {"image": 1, "video": 2, "audio": 3}
 
 
 class MultiModalProcessingInfo(BaseProcessingInfo):
@@ -160,7 +154,9 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         # Keep these as batched, as they always have batch size as first dim
         mm_fields["image_grid_thw"] = MultiModalFieldConfig.batched("image")
         mm_fields["video_grid_thw"] = MultiModalFieldConfig.batched("image")
-        mm_fields["num_image_patches"] = MultiModalFieldConfig.batched("image")
+        mm_fields["num_image_patches"] = MultiModalFieldConfig.batched(
+            "image", keep_on_cpu=True
+        )
         return mm_fields
 
     def _get_hf_mm_data(
@@ -179,7 +175,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> MultiModalInputs:
+    ) -> MultiModalInput:
         """
         Process multi-modal inputs to be used in vLLM.
 
@@ -212,12 +208,8 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             )
 
         # For gemma3 we check `token_type_ids` as the key
-        token_type_key = (
-            "mm_token_type_ids"
-            if "mm_token_type_ids" in processed_data
-            else "token_type_ids"
-        )
-        mm_token_type_ids = processed_data.get(token_type_key)
+        mm_token_type_ids = processed_data.pop("token_type_ids", None)
+        mm_token_type_ids = processed_data.pop("mm_token_type_ids", mm_token_type_ids)
 
         # We can infer vLLM style placeholder from token type ids, if we split
         # it for each input `mm_data`.
@@ -261,7 +253,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         with timing_ctx.record("get_mm_hashes"):
             mm_hashes = inputs.get_mm_hashes(self.info.model_id)
 
-        return mm_inputs(
+        return mm_input(
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
             mm_hashes=mm_hashes,
@@ -270,11 +262,69 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
 
 class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
-    supports_multimodal_raw_input_only = True
-
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         # Skip SupportsMRoPE.__init__ and call the next class in MRO
         super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
+
+    def _get_encoder_cls(
+        self, modality: str = "image", **kwargs: dict
+    ) -> type["PreTrainedModel"]:
+        """
+        Get the encoder class from the model.
+
+        Args:
+            kwargs: The kwargs to create the model.
+
+        Returns:
+            The encoder class.
+        """
+        with torch.device("meta"):
+            model: PreTrainedModel = AutoModel.from_config(**kwargs)
+        encoder_cls = type(model.get_encoder(modality=modality))
+        logger.debug("Identified encoder class as: %s", encoder_cls)
+        if type(model) is encoder_cls:
+            raise ValueError(
+                "Unable to infer vision encoder class from the model. "
+                "You must either: update the model so that "
+                "https://huggingface.co/docs/transformers/en/main_classes/model#transformers.PreTrainedModel.get_encoder"
+                " can detect the vision encoder correctly, or remove "
+                "'compile_mm_encoder'."
+            )
+        del model
+        return encoder_cls
+
+    def _decorate_for_torch_compile(self, **kwargs: dict):
+        """
+        Decorate the model's decoder and encoder classes to indicate to vLLM that they
+        support torch compile if `can_enable_torch_compile` and
+        `should_torch_compile_mm_encoder` are True respectively.
+
+        Args:
+            kwargs: The kwargs to create the model, which are needed to get the decoder
+                and encoder classes.
+        """
+        super()._decorate_for_torch_compile(**kwargs)
+        # Decorate the vision encoder model class to support torch compile if needed
+        if self.compilation_config.compile_mm_encoder:
+            self.check_version("5.0.0", "multimodal encoder compilation support")
+            logger.warning_once(
+                "Multimodal encoder compilation with the Transformers modeling backend "
+                "is an experimental feature. It relies on:\n"
+                "- The vision encoder being torch compilable.\n"
+                "- All vision encoder tensor inputs must be type hinted as either "
+                "`torch.Tensor` or `torch.FloatTensor`.\n"
+                "- The 0-th dimension of all tensor inputs to the vision encoder being "
+                "the dynamic dimension (i.e., sequence length or number of patches).\n"
+                "Please report any issues you encounter to help us improve it."
+            )
+            self._decorate_cls_for_torch_compile(
+                cls=self._get_encoder_cls(**kwargs),
+                # TODO: properly infer dynamic_arg_dims based on the encoder's forward
+                # method signature. Currently we assume dim 0 for all tensor inputs.
+                dynamic_arg_dims=None,
+                enable_if=should_torch_compile_mm_encoder,
+                is_encoder=True,
+            )
 
     def forward(
         self,
@@ -284,11 +334,12 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
-        # Gemma3 and PaliGemma needs `token_type_ids` to work correctly
-        # Other models will not have `token_type_ids` in kwargs
-        kwargs = {k: v for k, v in kwargs.items() if k == "token_type_ids"}
+        # Positions shape handling for MRoPE models
+        if self.model_config.uses_mrope:
+            # [3, seq_len] -> [3, 1, seq_len]
+            positions = positions[:, None]
         model_output = super().forward(
-            input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
+            input_ids, positions, intermediate_tensors, inputs_embeds
         )
         return model_output
 
@@ -327,8 +378,6 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             return None
 
         num_image_patches = kwargs.pop("num_image_patches")
-        kwargs.pop("token_type_ids", None)  # used only in `forward`
-        kwargs.pop("mm_token_type_ids", None)  # used only in `model.get_rope_index`
 
         if pixel_values is not None:
             # ROCm: Force math SDP backend for vision encoder to avoid accuracy issues
@@ -419,24 +468,18 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             {
                 "image_grid_thw",
                 "video_grid_thw",
-                "mm_token_type_ids",
                 "second_per_grid_ts",
                 "audio_feature_lengths",
                 "use_audio_in_video",
             },
         )
-        if any(
-            v
-            for k, v in kwargs.items()
-            if k not in {"image_grid_thw", "mm_token_type_ids"}
-        ):
+        if any(v for k, v in kwargs.items() if k not in {"image_grid_thw"}):
             raise NotImplementedError(
                 "Transformers modeling backend only supports images."
             )
 
         image_grid_thw = kwargs.get("image_grid_thw", [])
         video_grid_thw = kwargs.get("video_grid_thw", [])
-        mm_token_type_ids = kwargs.get("mm_token_type_ids")
 
         image_grid_thw = (torch.stack if image_grid_thw else torch.tensor)(
             image_grid_thw
@@ -445,8 +488,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             video_grid_thw
         )
 
-        # In v4 `get_rope_index` doesn't have wildcard `kwargs`, and
-        # can't accept arbitrary args, even if its value is `None`
+        # `get_rope_index` doesn't always accept arbitrary `kwargs`
         kwargs = {}
         if not hasattr(self, "_get_rope_index_accepts_mm_token_type_ids"):
             import inspect
@@ -458,11 +500,13 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
                 or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
             )
         if self._get_rope_index_accepts_mm_token_type_ids:
-            if mm_token_type_ids:
-                kwargs["mm_token_type_ids"] = torch.cat(mm_token_type_ids)
-            else:
-                shape = (1, len(input_tokens))
-                kwargs["mm_token_type_ids"] = torch.zeros(*shape, dtype=torch.int)
+            mm_token_type_ids = torch.zeros(len(input_tokens), dtype=torch.int)
+            for feature in mm_features:
+                position = feature.mm_position
+                offset, length = position.offset, position.length
+                mm_token_type_id = _MODALITY_TO_TOKEN_TYPE_ID[feature.modality]
+                mm_token_type_ids[offset : offset + length] = mm_token_type_id
+            kwargs["mm_token_type_ids"] = mm_token_type_ids.unsqueeze(0)
 
         mrope_positions, mrope_position_delta = self.model.get_rope_index(
             input_ids=torch.tensor(input_tokens).unsqueeze(0),

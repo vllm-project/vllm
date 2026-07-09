@@ -75,9 +75,8 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             # Update layer with new values
             replace_parameter(layer, "weight", weight.data)
             replace_parameter(layer, "weight_scale_inv", weight_scale_inv.data)
-        else:
-            weight = layer.weight.t()
-            replace_parameter(layer, "weight", weight.data)
+        # Non-block: callers must pass weight in (K, N) layout.
+
         layer.input_scale = None
         prepare_fp8_layer_for_marlin(
             layer, self.size_k_first, input_dtype=self.marlin_input_dtype

@@ -14,12 +14,10 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    BatchedTensorInputs,
-    MultiModalDataDict,
-)
+from vllm.multimodal.inputs import BatchedTensorInputs
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
     ImageProcessorItems,
@@ -179,27 +177,22 @@ class NVLM_D_Model(InternVLChatModel):
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None,
         *,
-        is_mono: bool,
         prefix: str,
     ):
-        if not is_mono:
-            vision_feature_layer = config.select_layer
-            if vision_feature_layer < 0:
-                num_hidden_layers = (
-                    config.vision_config.num_hidden_layers + vision_feature_layer + 1
-                )
-            else:
-                num_hidden_layers = vision_feature_layer + 1
-
-            # We added additional dummy heads to the original num of heads to
-            # make the number of heads divisible by 8.
-            return InternVisionModel(
-                config.vision_config,
-                quant_config=quant_config,
-                num_hidden_layers_override=num_hidden_layers,
-                num_dummy_heads=7,
-                prefix=prefix,
+        vision_feature_layer = config.select_layer
+        if vision_feature_layer < 0:
+            num_hidden_layers = (
+                config.vision_config.num_hidden_layers + vision_feature_layer + 1
             )
         else:
-            msg = "Monolith mode is not applicable to NVLM_D"
-            raise NotImplementedError(msg)
+            num_hidden_layers = vision_feature_layer + 1
+
+        # We added additional dummy heads to the original num of heads to
+        # make the number of heads divisible by 8.
+        return InternVisionModel(
+            config.vision_config,
+            quant_config=quant_config,
+            num_hidden_layers_override=num_hidden_layers,
+            num_dummy_heads=7,
+            prefix=prefix,
+        )

@@ -14,11 +14,11 @@ from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
 from vllm.renderers.hf import HfRenderer
-from vllm.tokenizers.registry import tokenizer_args_from_config
+from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "openai-community/gpt2"
@@ -54,6 +54,7 @@ class MockModelConfig:
     skip_tokenizer_init: bool = False
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
+    renderer_num_workers: int = 1
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
@@ -101,11 +102,9 @@ def register_mock_resolver():
 
 
 def _build_renderer(model_config: MockModelConfig):
-    _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
-
-    return HfRenderer.from_config(
+    return HfRenderer(
         MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
-        tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
+        cached_tokenizer_from_config(model_config),
     )
 
 
@@ -138,7 +137,6 @@ def mock_serving_setup():
 
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
-    mock_engine.io_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     models = OpenAIServingModels(
@@ -146,17 +144,15 @@ def mock_serving_setup():
         base_model_paths=BASE_MODEL_PATHS,
     )
 
-    serving_render = OpenAIServingRender(
+    online_renderer = OnlineRenderer(
         model_config=mock_engine.model_config,
         renderer=mock_engine.renderer,
-        io_processor=mock_engine.io_processor,
-        model_registry=models.registry,
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
     )
     serving_completion = OpenAIServingCompletion(
-        mock_engine, models, openai_serving_render=serving_render, request_logger=None
+        mock_engine, models, online_renderer=online_renderer, request_logger=None
     )
 
     return mock_engine, serving_completion

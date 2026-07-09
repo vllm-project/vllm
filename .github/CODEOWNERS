@@ -3,102 +3,123 @@
 
 # This lists cover the "core" components of vLLM that require careful review
 /vllm/compilation @zou3519 @youkaichao @ProExpertProg @BoyuanFeng
-/vllm/distributed/kv_transfer @NickLucche @ApostaC @orozery
+/vllm/distributed/kv_transfer @NickLucche @ApostaC @orozery @xuechendi @ivanium
 /vllm/lora @jeejeelee
 /vllm/model_executor/layers/attention @LucasWilkinson @MatthewBonanni
-/vllm/model_executor/layers/fused_moe @mgoin @pavanimajety
-/vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety
-/vllm/model_executor/layers/mamba @tdoublep
+/vllm/model_executor/layers/fused_moe @mgoin @pavanimajety @zyongye
+/vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety @zyongye
+/vllm/model_executor/layers/mamba @tdoublep @tomeras91
+/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py @tdoublep @ZJY0516 @vadiklyutiy
 /vllm/model_executor/model_loader @22quinn
-/vllm/model_executor/layers/batch_invariant.py @yewentao256 
+/vllm/model_executor/layers/batch_invariant.py @yewentao256
+/vllm/ir @ProExpertProg
+/vllm/kernels/ @ProExpertProg @tjtanaa
+/vllm/kernels/helion @ProExpertProg @zou3519
 /vllm/multimodal @DarkLight1337 @ywang96 @NickLucche @tjtanaa
 /vllm/vllm_flash_attn @LucasWilkinson @MatthewBonanni
-CMakeLists.txt @tlrmchlsmth @LucasWilkinson
+/CMakeLists.txt @tlrmchlsmth @LucasWilkinson @Harry-Chen
+/cmake @tlrmchlsmth @LucasWilkinson @Harry-Chen
 
 # Any change to the VllmConfig changes can have a large user-facing impact,
 # so spam a lot of people
-/vllm/config @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor @yewentao256 @ProExpertProg
-/vllm/config/cache.py @heheda12345
+/vllm/config @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @yewentao256 @ProExpertProg
+/vllm/config/cache.py @heheda12345 @ivanium
+
+# Config utils
+/vllm/config/utils.py @hmellor
+/vllm/engine/arg_utils.py @hmellor
+/vllm/utils/argparse_utils.py
 
 # Entrypoints
 /vllm/entrypoints/anthropic @mgoin @DarkLight1337
 /vllm/entrypoints/cli @hmellor @mgoin @DarkLight1337 @russellb
 /vllm/entrypoints/mcp @heheda12345
 /vllm/entrypoints/openai @aarnphm @chaunceyjiang @DarkLight1337 @russellb
-/vllm/entrypoints/openai/realtime @njhill
-/vllm/entrypoints/openai/speech_to_text @NickLucche
+/vllm/entrypoints/speech_to_text/realtime @njhill
+/vllm/entrypoints/speech_to_text @NickLucche
 /vllm/entrypoints/pooling @noooop
-/vllm/entrypoints/sagemaker @DarkLight1337
+/vllm/entrypoints/serve/sagemaker @DarkLight1337
 /vllm/entrypoints/serve @njhill
 /vllm/entrypoints/*.py @njhill
 /vllm/entrypoints/chat_utils.py @DarkLight1337
+/vllm/entrypoints/offline_utils.py @DarkLight1337
 /vllm/entrypoints/llm.py @DarkLight1337
+
+# Rust Frontend
+/rust/ @BugenZhao @njhill
+/build_rust.sh @BugenZhao @njhill
+/rust-toolchain.toml @BugenZhao @njhill
+/.buildkite/test_areas/rust* @BugenZhao @njhill
 
 # Input/Output Processing
 /vllm/sampling_params.py @njhill @NickLucche
 /vllm/pooling_params.py @noooop @DarkLight1337
 /vllm/tokenizers @DarkLight1337 @njhill
 /vllm/renderers @DarkLight1337 @njhill
-/vllm/reasoning @aarnphm @chaunceyjiang
-/vllm/tool_parsers @aarnphm @chaunceyjiang
+/vllm/reasoning @aarnphm @chaunceyjiang @sfeng33 @bbrowning
+/vllm/tool_parsers @aarnphm @chaunceyjiang @sfeng33 @bbrowning
+/vllm/parser @aarnphm @chaunceyjiang @sfeng33 @bbrowning
 
 # vLLM V1
 /vllm/v1/attention @LucasWilkinson @MatthewBonanni
 /vllm/v1/attention/backend.py @WoosukKwon @zhuohan123 @youkaichao @alexm-redhat @njhill
 /vllm/v1/attention/backends/mla @pavanimajety
-/vllm/v1/attention/backends/flashinfer.py @mgoin @pavanimajety
+/vllm/v1/attention/backends/flashinfer.py @mgoin @pavanimajety @vadiklyutiy
 /vllm/v1/attention/backends/triton_attn.py @tdoublep
-/vllm/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery
+/vllm/v1/attention/backends/gdn_attn.py @ZJY0516 @vadiklyutiy
+/vllm/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery @ivanium
 /vllm/v1/sample @22quinn @houseroad @njhill
 /vllm/v1/spec_decode @benchislett @luccafong @MatthewBonanni
 /vllm/v1/structured_output @mgoin @russellb @aarnphm @benchislett
-/vllm/v1/kv_cache_interface.py @heheda12345
+/vllm/v1/kv_cache_interface.py @heheda12345 @ivanium
 /vllm/v1/kv_offload @ApostaC @orozery
+/vllm/v1/simple_kv_offload @ivanium
 /vllm/v1/engine @njhill
 /vllm/v1/executor @njhill
 /vllm/v1/worker @njhill
-/vllm/v1/worker/kv_connector_model_runner_mixin.py @orozery @NickLucche
+/vllm/v1/worker/kv_connector_model_runner_mixin.py @orozery @NickLucche @ivanium
 
 # Model runner V2
-/vllm/v1/worker/gpu @WoosukKwon @njhill
+/vllm/v1/worker/gpu @WoosukKwon @njhill @yewentao256
 /vllm/v1/worker/gpu/kv_connector.py @orozery
 
+# CI & building
+/.buildkite @Harry-Chen @khluu
+/docker/Dockerfile @Harry-Chen @khluu
+/pyproject.toml @khluu
+/setup.py @khluu
+
 # Test ownership
-/.buildkite/lm-eval-harness @mgoin 
+/.buildkite/lm-eval-harness @mgoin
 /tests/distributed/test_multi_node_assignment.py @youkaichao
 /tests/distributed/test_pipeline_parallel.py @youkaichao
 /tests/distributed/test_same_node.py @youkaichao
-/tests/entrypoints @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche
-/tests/evals @mgoin
-/tests/kernels @mgoin @tlrmchlsmth @WoosukKwon @yewentao256
-/tests/models @DarkLight1337 @ywang96
+/tests/entrypoints @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche @AndreasKaratzas
+/tests/evals @mgoin @vadiklyutiy @AndreasKaratzas
+/tests/kernels @mgoin @tlrmchlsmth @WoosukKwon @yewentao256 @zyongye @AndreasKaratzas
+/tests/kernels/ir @ProExpertProg @tjtanaa
+/tests/models @DarkLight1337 @ywang96 @AndreasKaratzas
 /tests/multimodal @DarkLight1337 @ywang96 @NickLucche
-/tests/quantization @mgoin @robertgshaw2-redhat @yewentao256 @pavanimajety
+/tests/quantization @mgoin @robertgshaw2-redhat @yewentao256 @pavanimajety @zyongye @AndreasKaratzas
 /tests/test_inputs.py @DarkLight1337 @ywang96
 /tests/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb @aarnphm
 /tests/v1/structured_output @mgoin @russellb @aarnphm
-/tests/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery
+/tests/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery @ivanium
 /tests/weight_loading @mgoin @youkaichao @yewentao256
 /tests/lora @jeejeelee
-/tests/models/language/generation/test_hybrid.py @tdoublep
+/tests/models/language/generation/test_hybrid.py @tdoublep @tomeras91
 /tests/v1/kv_connector/nixl_integration @NickLucche
-/tests/v1/kv_connector @ApostaC @orozery
+/tests/v1/kv_connector @ApostaC @orozery @ivanium
 /tests/v1/kv_offload @ApostaC @orozery
-/tests/v1/determinism @yewentao256 
+/tests/v1/simple_kv_offload @ivanium
+/tests/v1/determinism @yewentao256
+/tests/reasoning @aarnphm @chaunceyjiang @sfeng33 @bbrowning
+/tests/tool_parsers @aarnphm @chaunceyjiang @sfeng33 @bbrowning
+/tests/tool_use @aarnphm @chaunceyjiang @sfeng33 @bbrowning
 
 # Transformers modeling backend
 /vllm/model_executor/models/transformers @hmellor
-/tests/models/test_transformers.py @hmellor
-
-# Observability
-/vllm/config/observability.py @markmc
-/vllm/v1/metrics @markmc
-/tests/v1/metrics @markmc
-/vllm/tracing.py @markmc
-/tests/v1/tracing/test_tracing.py @markmc
-/vllm/config/kv_events.py @markmc
-/vllm/distributed/kv_events.py @markmc
-/tests/distributed/test_events.py @markmc
+/tests/models/transformers @hmellor
 
 # Docs
 /docs/mkdocs @hmellor
@@ -113,23 +134,32 @@ mkdocs.yaml @hmellor
 /tools/pre_commit @hmellor
 
 # CPU
-/vllm/v1/worker/cpu* @bigPYJ1151
+/vllm/v1/worker/cpu* @bigPYJ1151 @xuechendi
 /csrc/cpu @bigPYJ1151
-/vllm/platforms/cpu.py @bigPYJ1151
+/vllm/platforms/cpu.py @bigPYJ1151 @xuechendi
 /cmake/cpu_extension.cmake @bigPYJ1151
-/docker/Dockerfile.cpu @bigPYJ1151
+/docker/Dockerfile.cpu @bigPYJ1151 @xuechendi
 
 # Intel GPU
-/vllm/v1/worker/xpu* @jikunshang
-/vllm/platforms/xpu.py @jikunshang
-/docker/Dockerfile.xpu @jikunshang
+/vllm/v1/worker/xpu* @jikunshang @xuechendi
+/vllm/platforms/xpu.py @jikunshang @xuechendi
+/docker/Dockerfile.xpu @jikunshang @xuechendi
+
+# Nemotron-specific files
+/vllm/model_executor/models/*nemotron* @tomeras91
+/vllm/transformers_utils/configs/*nemotron* @tomeras91
+/tests/**/*nemotron* @tomeras91
 
 # Qwen-specific files
-/vllm/attention/backends/dual_chunk_flash_attn.py @sighingnow
-/vllm/model_executor/models/qwen* @sighingnow
+/vllm/model_executor/models/qwen* @sighingnow @vadiklyutiy
+/vllm/transformers_utils/configs/qwen* @sighingnow @vadiklyutiy
 
 # MTP-specific files
 /vllm/model_executor/models/deepseek_mtp.py @luccafong
+
+# DeepseekV4-specific files
+/vllm/models/deepseek_v4 @zyongye
+/vllm/model_executor/layers/sparse_attn_indexer.py @zyongye
 
 # Mistral-specific files
 /vllm/model_executor/models/mistral*.py @patrickvonplaten
@@ -142,23 +172,24 @@ mkdocs.yaml @hmellor
 # Kernels
 /vllm/v1/attention/ops/chunked_prefill_paged_decode.py @tdoublep
 /vllm/v1/attention/ops/triton_unified_attention.py @tdoublep
+/vllm/model_executor/layers/fla @ZJY0516 @vadiklyutiy
 
 # ROCm related: specify owner with write access to notify AMD folks for careful code review
-/vllm/**/*rocm* @tjtanaa
-/docker/Dockerfile.rocm* @gshtras @tjtanaa
-/vllm/v1/attention/backends/rocm*.py @gshtras @tjtanaa
-/vllm/v1/attention/backends/mla/rocm*.py @gshtras @tjtanaa
-/vllm/v1/attention/ops/rocm*.py @gshtras @tjtanaa
-/vllm/model_executor/layers/fused_moe/rocm*.py @gshtras @tjtanaa
-/csrc/rocm @gshtras @tjtanaa
-/requirements/*rocm* @tjtanaa
-/tests/**/*rocm* @tjtanaa
+/vllm/**/*rocm* @tjtanaa @dllehr-amd
+/docker/Dockerfile.rocm* @tjtanaa @dllehr-amd @AndreasKaratzas
+/vllm/v1/attention/backends/rocm*.py @tjtanaa @dllehr-amd
+/vllm/v1/attention/backends/mla/rocm*.py @tjtanaa @dllehr-amd
+/vllm/v1/attention/ops/rocm*.py @tjtanaa @dllehr-amd
+/vllm/model_executor/layers/fused_moe/rocm*.py @tjtanaa @dllehr-amd
+/csrc/rocm @tjtanaa @dllehr-amd
+/requirements/*rocm* @tjtanaa @AndreasKaratzas
+/tests/**/*rocm* @tjtanaa @AndreasKaratzas
 /docs/**/*rocm* @tjtanaa
 /vllm/**/*quark* @tjtanaa
-/tests/**/*quark* @tjtanaa
+/tests/**/*quark* @tjtanaa @AndreasKaratzas
 /docs/**/*quark* @tjtanaa
-/vllm/**/*aiter* @tjtanaa
-/tests/**/*aiter* @tjtanaa
+/vllm/**/*aiter* @tjtanaa @AndreasKaratzas
+/tests/**/*aiter* @tjtanaa @AndreasKaratzas
 
 # TPU
 /vllm/v1/worker/tpu* @NickLucche

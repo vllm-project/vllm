@@ -18,7 +18,7 @@ from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,
 )
-from vllm.entrypoints.utils import create_error_response
+from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.exceptions import LoRAAdapterNotFoundError
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -42,6 +42,10 @@ class OpenAIModelRegistry:
     ) -> None:
         self.model_config = model_config
         self.base_model_paths = base_model_paths
+        self.lora_requests: dict[str, LoRARequest] = {}
+
+    def model_name(self, lora_request: LoRARequest | None = None) -> str:
+        return self.base_model_paths[0].name
 
     def is_base_model(self, model_name: str) -> bool:
         return any(model.name == model_name for model in self.base_model_paths)
@@ -71,6 +75,9 @@ class OpenAIModelRegistry:
                 for base_model in self.base_model_paths
             ]
         )
+
+    async def resolve_lora(self, lora_name: str):
+        raise RuntimeError("The OpenAIModelRegistry has no LoRA support.")
 
 
 class OpenAIServingModels:
@@ -112,7 +119,6 @@ class OpenAIServingModels:
 
         self.model_config = self.engine_client.model_config
         self.renderer = self.engine_client.renderer
-        self.io_processor = self.engine_client.io_processor
         self.input_processor = self.engine_client.input_processor
 
     async def init_static_loras(self):
@@ -122,7 +128,9 @@ class OpenAIServingModels:
             return
         for lora in self.static_lora_modules:
             load_request = LoadLoRAAdapterRequest(
-                lora_path=lora.path, lora_name=lora.name
+                lora_path=lora.path,
+                lora_name=lora.name,
+                is_3d_lora_weight=lora.is_3d_lora_weight,
             )
             load_result = await self.load_lora_adapter(
                 request=load_request, base_model_name=lora.base_model_name
@@ -178,6 +186,7 @@ class OpenAIServingModels:
                 lora_int_id=lora_int_id,
                 lora_path=lora_path,
                 load_inplace=request.load_inplace,
+                is_3d_lora_weight=request.is_3d_lora_weight,
             )
             if base_model_name is not None and self.is_base_model(base_model_name):
                 lora_request.base_model_name = base_model_name
@@ -192,10 +201,16 @@ class OpenAIServingModels:
                         lora_request.lora_name, lora_request.lora_path
                     )
                 ) in str(e):
-                    raise LoRAAdapterNotFoundError(
-                        lora_request.lora_name, lora_request.lora_path
-                    ) from e
-                raise
+                    return create_error_response(
+                        LoRAAdapterNotFoundError(
+                            lora_request.lora_name, lora_request.lora_path
+                        )
+                    )
+                return create_error_response(
+                    message=str(e),
+                    err_type="InternalServerError",
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
 
             self.lora_requests[lora_name] = lora_request
             logger.info(

@@ -20,7 +20,7 @@ from tests.v1.sample.utils import (
 )
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, validate_thinking_token_budget
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.sample.logits_processor import (
     BatchUpdate,
@@ -33,19 +33,31 @@ from vllm.v1.sample.logits_processor import (
     build_logitsprocs,
 )
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.thinking_budget_state import (
+    ThinkingBudgetStateHolder,
+    maybe_create_thinking_budget_state_holder,
+)
 
 PIN_MEMORY_AVAILABLE = is_pin_memory_available()
 MAX_NUM_REQS = 256
 VOCAB_SIZE = 1024
 NUM_OUTPUT_TOKENS = 20
-CUDA_DEVICES = [
-    f"{current_platform.device_type}:{i}"
+DEVICE_TYPE = current_platform.device_type
+DEVICES = [
+    f"{DEVICE_TYPE}:{i}"
     for i in range(1 if current_platform.device_count() == 1 else 2)
 ]
 MAX_NUM_PROMPT_TOKENS = 64
 MIN_TOKENS_LEN_THRESHOLD = 5
 REQS_PER_LOGITPROC = 50
 STR_NO_LOGITPROC = "none"
+# Thinking budget uses ``ThinkingBudgetStateHolder`` (not a logits processor).
+STR_THINKING_BUDGET = "thinking_budget"
+
+# Thinking token budget testing constants
+THINKING_TOKEN_BUDGET = 5
+THINK_START_TOKEN_ID = 999
+THINK_END_TOKEN_ID = 998
 
 # LogitsProcessor subclass or "none"
 LogitprocType: TypeAlias = type[LogitsProcessor] | str
@@ -67,9 +79,17 @@ class LogitsProcsRequestParams:
         self.workload_index = workload_index
         self.logitproc_type = logitproc_type
         # Number of output tokens is randomly 0 or twice the min-tokens
-        # threshold which will be used in testing. Output token values
-        # don't matter *for these tests* so use 0 as a dummy value
-        self.out_tokens = [0] * (MIN_TOKENS_LEN_THRESHOLD * random.randint(0, 2))
+        # threshold which will be used in testing.
+        # Generate diverse random tokens for all processors (more realistic)
+        num_tokens = MIN_TOKENS_LEN_THRESHOLD * random.randint(0, 2)
+        if num_tokens > 0:
+            # Use diverse random tokens
+            self.out_tokens = [random.randint(1, 950) for _ in range(num_tokens)]
+            # Think-start seed for ``STR_THINKING_BUDGET`` rows.
+            if logitproc_type == STR_THINKING_BUDGET:
+                self.out_tokens[0] = THINK_START_TOKEN_ID
+        else:
+            self.out_tokens = []
         self.prompt_tokens = []
         self.params = _sampling_params_from_logitproc(logitproc_type)
 
@@ -77,6 +97,14 @@ class LogitsProcsRequestParams:
         """For debugging"""
         summ = ", ".join(f"{k}={v}" for k, v in vars(self).items())
         return f"MyClass({summ})"
+
+
+class MockReasoningConfig:
+    """Minimal reasoning config for ``ThinkingBudgetStateHolder`` tests."""
+
+    reasoning_start_token_ids = [THINK_START_TOKEN_ID]
+    reasoning_end_token_ids = [THINK_END_TOKEN_ID]
+    enabled = True
 
 
 def _generate_fake_sampling_metadata(
@@ -97,11 +125,26 @@ def _generate_fake_sampling_metadata(
                 0, vocab_size, size=np.random.randint(1, MAX_NUM_PROMPT_TOKENS)
             ).tolist()
         )
+
+    vllm_config = VllmConfig()
+    vllm_config.reasoning_config = MockReasoningConfig()
+
     logitsprocs = build_logitsprocs(
-        vllm_config=VllmConfig(),
+        vllm_config=vllm_config,
         device=device,
         is_pin_memory=PIN_MEMORY_AVAILABLE,
         is_pooling_model=False,
+    )
+    num_spec = (
+        vllm_config.speculative_config.num_speculative_tokens
+        if vllm_config.speculative_config
+        else 0
+    )
+    thinking_holder = maybe_create_thinking_budget_state_holder(
+        vllm_config.reasoning_config,
+        vllm_config.scheduler_config.max_num_seqs,
+        num_spec,
+        device,
     )
     fake_sampling_metadata = SamplingMetadata(
         temperature=torch.full((batch_size,), 0.0),
@@ -122,6 +165,7 @@ def _generate_fake_sampling_metadata(
         allowed_token_ids_mask=None,
         bad_words_token_ids={},
         logitsprocs=logitsprocs,
+        thinking_budget_state_holder=thinking_holder,
     )
     return fake_sampling_metadata
 
@@ -153,7 +197,7 @@ def _sampling_params_from_logitproc(logitproc_type: LogitprocType) -> SamplingPa
 
 def _generate_mixed_logitsprocs_batch_params(
     reqs_per_logitproc: int,
-    logitsprocs_types: list[str],
+    logitsprocs_types: list[LogitprocType],
 ) -> list[LogitsProcsRequestParams]:
     """Define key params for a batch of requests with a different
     logitproc enabled per request.
@@ -403,6 +447,100 @@ def _min_tokens_validate(
                 )
 
 
+def _thinking_budget_params(kwargs: dict) -> None:
+    """Set SamplingParams kwargs for thinking token budget tests"""
+    kwargs["thinking_token_budget"] = THINKING_TOKEN_BUDGET
+
+
+def _thinking_budget_validate(
+    test_fakes: LogitsprocsTestFakes,
+    persistent_batch: list[LogitsProcsRequestParams],
+    logits_new: torch.Tensor,
+    batch_index: int,
+    request_params: LogitsProcsRequestParams,
+    step_idx: int,
+) -> None:
+    """Validate ``ThinkingBudgetStateHolder`` thinking-budget behavior.
+
+    State is keyed by **batch slot** (same index space as logits rows), matching
+    ``sync_batch`` / sampler integration (see PR #34668 discussion).
+    """
+    holder = test_fakes.sampling_metadata.thinking_budget_state_holder
+    assert holder is not None
+    state = holder._state.get(batch_index)
+    params = request_params.params
+
+    if hasattr(params, "thinking_token_budget") and params.thinking_token_budget:
+        if state is None:
+            _raise_error_invalid(
+                msg_suffix=(
+                    f"Expected holder state for batch slot {batch_index} "
+                    f"with thinking_token_budget={params.thinking_token_budget}"
+                ),
+                batch_index=batch_index,
+                request_params=request_params,
+                step_idx=step_idx,
+            )
+
+        expected_budget = params.thinking_token_budget
+        actual_budget = state["thinking_token_budget"]
+        if actual_budget != expected_budget:
+            _raise_error_invalid(
+                msg_suffix=(
+                    f"Budget mismatch: expected {expected_budget}, got {actual_budget}"
+                ),
+                batch_index=batch_index,
+                request_params=request_params,
+                step_idx=step_idx,
+            )
+
+        output_tokens = request_params.out_tokens
+        start_tokens = holder.think_start_token_ids
+        thinking_started = False
+        if len(start_tokens) > 0:
+            for i in range(len(output_tokens) - len(start_tokens) + 1):
+                if output_tokens[i : i + len(start_tokens)] == start_tokens:
+                    thinking_started = True
+                    break
+
+        if thinking_started:
+            think_count = state["think_count"]
+            budget = state["thinking_token_budget"]
+            if think_count >= budget and not state["in_end"]:
+                _raise_error_invalid(
+                    msg_suffix=(
+                        f"Budget exceeded ({think_count} >= {budget}) but "
+                        "in_end is false"
+                    ),
+                    batch_index=batch_index,
+                    request_params=request_params,
+                    step_idx=step_idx,
+                )
+
+            end_tokens = holder.think_end_token_ids
+            if (
+                think_count >= budget
+                and state["in_end"]
+                and len(end_tokens) > 0
+                and holder.has_tracked_requests()
+            ):
+                expected_end_token_id = end_tokens[
+                    min(state["end_count"], len(end_tokens) - 1)
+                ]
+                # Holder bumps forced vocab positions to 1e9 (does not -inf others).
+                forced_logit = float(logits_new[batch_index, expected_end_token_id])
+                if forced_logit < 1.0e8:
+                    _raise_error_invalid(
+                        msg_suffix=(
+                            f"Expected forced end token {expected_end_token_id} "
+                            f"with large logit, got {forced_logit}"
+                        ),
+                        batch_index=batch_index,
+                        request_params=request_params,
+                        step_idx=step_idx,
+                    )
+
+
 def _none_validate(
     test_fakes: LogitsprocsTestFakes,
     persistent_batch: list[LogitsProcsRequestParams],
@@ -449,20 +587,27 @@ logitsprocs_test_mapping = {
     MinTokensLogitsProcessor: LogitsprocTestHelpers(
         gen_request_fxn=_min_tokens_params, eval_fxn=_min_tokens_validate
     ),
+    STR_THINKING_BUDGET: LogitsprocTestHelpers(
+        gen_request_fxn=_thinking_budget_params, eval_fxn=_thinking_budget_validate
+    ),
 }
 
 
 def _get_test_cases() -> list[list[str]]:
     """Each test case is a set of logitsprocs"""
     logitsprocs_types = list(logitsprocs_test_mapping.keys())
+
+    # Isolate thinking-budget handling from other processors to avoid cross-talk.
+    thinking_id: LogitprocType = STR_THINKING_BUDGET
+    other_processors = [
+        p for p in logitsprocs_types if p != STR_NO_LOGITPROC and p != thinking_id
+    ]
+
     return (
         [[STR_NO_LOGITPROC]]
-        + [
-            [logitproc_type, STR_NO_LOGITPROC]
-            for logitproc_type in logitsprocs_types
-            if logitproc_type != STR_NO_LOGITPROC
-        ]
-        + [logitsprocs_types]
+        + [[logitproc_type, STR_NO_LOGITPROC] for logitproc_type in other_processors]
+        + [other_processors]
+        + [[thinking_id]]
     )
 
 
@@ -637,12 +782,23 @@ def _assert_valid(
         )
 
 
+def _slot_outputs_for_metadata(
+    persistent_batch: list[LogitsProcsRequestParams], pad_len: int
+) -> list[list[int]]:
+    """Per-batch-slot output token ids aligned with ``SamplingMetadata`` rows."""
+    rows: list[list[int]] = [[] for _ in range(pad_len)]
+    for i, req in enumerate(persistent_batch):
+        if i < pad_len:
+            rows[i] = list(req.out_tokens)
+    return rows
+
+
 @create_new_process_for_each_test()
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("reqs_per_logitproc", [REQS_PER_LOGITPROC])
 @pytest.mark.parametrize("logitsprocs_under_test", _get_test_cases())
 def test_logitsprocs(
-    device: str, reqs_per_logitproc: int, logitsprocs_under_test: list[str]
+    device: str, reqs_per_logitproc: int, logitsprocs_under_test: list[LogitprocType]
 ):
     random.seed(40)
     torch.set_default_device(device)
@@ -690,9 +846,10 @@ def test_logitsprocs(
         # Apply fake batch update to logitsprocs
         fake_update_logitsprocs_state(test_fakes, batch_update)
 
-        # Emulate application of logits processors in engine
+        # Emulate application of logits processors + thinking holder (sampler order).
         slice_idxs = [req.workload_index for req in persistent_batch]
-        logits_w_lp = fake_apply_logitsprocs(test_fakes, slice_idxs).cpu()
+        slot_rows = _slot_outputs_for_metadata(persistent_batch, workload_size)
+        logits_w_lp = fake_apply_logitsprocs(test_fakes, slice_idxs, slot_rows).cpu()
 
         _assert_valid(
             batch_size=batch_size,
@@ -704,3 +861,523 @@ def test_logitsprocs(
         )
 
         step_idx += 1
+
+
+class MockReasoningNoEndTokens:
+    """Reasoning config with no end token ids (disables enforcement in holder)."""
+
+    reasoning_start_token_ids = [THINK_START_TOKEN_ID]
+    reasoning_end_token_ids: list[int] = []
+
+
+def test_maybe_create_thinking_budget_holder_without_reasoning():
+    cfg = VllmConfig()
+    assert cfg.reasoning_config is None
+    assert (
+        maybe_create_thinking_budget_state_holder(
+            None,
+            cfg.scheduler_config.max_num_seqs,
+            0,
+            torch.device("cpu"),
+        )
+        is None
+    )
+
+
+def test_thinking_budget_holder_has_tracked_after_sync_add():
+    vc = VllmConfig()
+    vc.reasoning_config = MockReasoningConfig()
+    h = ThinkingBudgetStateHolder(
+        vc.reasoning_config,
+        vc.scheduler_config.max_num_seqs,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    assert not h.has_tracked_requests()
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[
+                (
+                    0,
+                    SamplingParams(thinking_token_budget=3),
+                    None,
+                    [THINK_START_TOKEN_ID],
+                )
+            ],
+            moved=(),
+        )
+    )
+    assert h.has_tracked_requests()
+    assert h._state[0]["thinking_token_budget"] == 3
+
+
+def test_thinking_budget_holder_sync_remove_clears_state():
+    vc = VllmConfig()
+    vc.reasoning_config = MockReasoningConfig()
+    h = ThinkingBudgetStateHolder(
+        vc.reasoning_config,
+        vc.scheduler_config.max_num_seqs,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[
+                (
+                    0,
+                    SamplingParams(thinking_token_budget=3),
+                    None,
+                    [],
+                )
+            ],
+            moved=(),
+        )
+    )
+    assert h.has_tracked_requests()
+    h.sync_batch(BatchUpdate(batch_size=0, removed=(0,), added=(), moved=()))
+    assert not h.has_tracked_requests()
+
+
+def test_thinking_budget_holder_sync_add_without_budget_drops_row():
+    vc = VllmConfig()
+    vc.reasoning_config = MockReasoningConfig()
+    h = ThinkingBudgetStateHolder(
+        vc.reasoning_config,
+        vc.scheduler_config.max_num_seqs,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[(0, SamplingParams(), None, [])],
+            moved=(),
+        )
+    )
+    assert not h.has_tracked_requests()
+
+
+def test_thinking_budget_holder_swap_exchanges_state():
+    vc = VllmConfig()
+    vc.reasoning_config = MockReasoningConfig()
+    h = ThinkingBudgetStateHolder(
+        vc.reasoning_config,
+        vc.scheduler_config.max_num_seqs,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=2,
+            removed=(),
+            added=[
+                (
+                    0,
+                    SamplingParams(thinking_token_budget=3),
+                    None,
+                    [],
+                ),
+                (
+                    1,
+                    SamplingParams(thinking_token_budget=7),
+                    None,
+                    [],
+                ),
+            ],
+            moved=(),
+        )
+    )
+    b0, b1 = h._state[0]["thinking_token_budget"], h._state[1]["thinking_token_budget"]
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=2,
+            removed=(),
+            added=(),
+            moved=[(0, 1, MoveDirectionality.SWAP)],
+        )
+    )
+    assert h._state[0]["thinking_token_budget"] == b1
+    assert h._state[1]["thinking_token_budget"] == b0
+
+
+def test_thinking_budget_holder_unidirectional_move():
+    vc = VllmConfig()
+    vc.reasoning_config = MockReasoningConfig()
+    h = ThinkingBudgetStateHolder(
+        vc.reasoning_config,
+        vc.scheduler_config.max_num_seqs,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=2,
+            removed=(),
+            added=[
+                (
+                    1,
+                    SamplingParams(thinking_token_budget=4),
+                    None,
+                    [],
+                ),
+            ],
+            moved=(),
+        )
+    )
+    assert 1 in h._state and 0 not in h._state
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=2,
+            removed=(),
+            added=(),
+            moved=[(1, 0, MoveDirectionality.UNIDIRECTIONAL)],
+        )
+    )
+    assert 0 in h._state and 1 not in h._state
+    assert h._state[0]["thinking_token_budget"] == 4
+
+
+def test_thinking_budget_holder_update_state_repeat_indices_last_row_wins():
+    vc = VllmConfig()
+    vc.reasoning_config = MockReasoningConfig()
+    h = ThinkingBudgetStateHolder(
+        vc.reasoning_config,
+        vc.scheduler_config.max_num_seqs,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[
+                (
+                    0,
+                    SamplingParams(thinking_token_budget=5),
+                    None,
+                    [THINK_START_TOKEN_ID],
+                )
+            ],
+            moved=(),
+        )
+    )
+    out_lists = [[THINK_START_TOKEN_ID], [THINK_START_TOKEN_ID, 10, 11, 12, 13, 14]]
+    h.update_state(
+        out_lists,
+        None,
+        torch.tensor([0, 0], dtype=torch.long),
+    )
+    assert h._state[0]["output_tok_ids"] == out_lists[1]
+
+
+def test_thinking_budget_holder_spec_mode_tensor_layout():
+    h = ThinkingBudgetStateHolder(
+        MockReasoningConfig(),
+        8,
+        2,
+        torch.device("cpu"),
+        False,
+    )
+    assert h.in_spec_mode
+    assert h._mask_capacity == 8 * (2 + 1)
+
+
+def test_thinking_budget_holder_empty_end_tokens_disables_row():
+    vc = VllmConfig()
+    vc.reasoning_config = MockReasoningNoEndTokens()
+    h = ThinkingBudgetStateHolder(
+        vc.reasoning_config,
+        vc.scheduler_config.max_num_seqs,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[
+                (
+                    0,
+                    SamplingParams(thinking_token_budget=5),
+                    None,
+                    [THINK_START_TOKEN_ID],
+                )
+            ],
+            moved=(),
+        )
+    )
+    h.update_state([[THINK_START_TOKEN_ID, 1]], None, None)
+    assert h._state[0]["thinking_token_budget"] == -1
+
+
+def test_thinking_budget_enforced_without_penalties():
+    """Regression test for gpu_input_batch.py bug.
+
+    When thinking_budget_tracks_reqs=True and no penalties/bad_words are set,
+    the old code computed needs_output_token_ids=False (inverted condition:
+    ``or not thinking_budget_tracks_reqs``), causing update_state to receive
+    an empty list and skip _update_think_state for every request.
+
+    Fix: changed ``or not thinking_budget_tracks_reqs`` to
+    ``or thinking_budget_tracks_reqs`` so that output_token_ids is populated
+    whenever the thinking budget state holder has tracked requests.
+
+    This test verifies that update_state correctly calls _update_think_state
+    (setting in_end=True) when given the real output_token_ids, and that
+    passing an empty list (the pre-fix behavior) prevents budget enforcement.
+    """
+    vc = VllmConfig()
+    vc.reasoning_config = MockReasoningConfig()
+    budget = 3  # allow 3 thinking tokens
+
+    h = ThinkingBudgetStateHolder(
+        vc.reasoning_config,
+        vc.scheduler_config.max_num_seqs,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    output_token_ids: list[int] = []
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[
+                (
+                    0,
+                    SamplingParams(thinking_token_budget=budget),
+                    None,
+                    output_token_ids,
+                )
+            ],
+            moved=(),
+        )
+    )
+    assert h.has_tracked_requests()
+
+    # Simulate the buggy behavior: update_state receives empty list.
+    # _update_think_state is skipped → in_end stays False → no budget enforcement.
+    h.update_state([], None, None)
+    assert not h._state[0].get("in_end", False), (
+        "With empty output_token_ids, in_end should stay False (budget not yet tracked)"
+    )
+
+    # Simulate the correct behavior: output_token_ids is the live list.
+    # Step 1: think-start token appears.
+    output_token_ids.append(THINK_START_TOKEN_ID)
+    h.update_state([output_token_ids], None, None)
+    assert not h._state[0].get("in_end", False), (
+        "Still within budget after 0 think tokens"
+    )
+
+    # Steps 2–4: 3 thinking tokens (hits the budget exactly).
+    for tok in [1, 2, 3]:
+        output_token_ids.append(tok)
+        h.update_state([output_token_ids], None, None)
+
+    # After exactly `budget` thinking tokens the holder should force end token.
+    assert h._state[0].get("in_end", False), (
+        "Budget exceeded: in_end should be True so that apply_to_logits "
+        "forces the end token"
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [
+        (None, None),
+        (-1, None),
+        (10, 10),
+        (0, 0),
+    ],
+)
+def test_validate_thinking_token_budget(raw_value, expected):
+    assert validate_thinking_token_budget(raw_value) == expected
+
+
+def test_sampling_params_minus_one_normalizes_to_none():
+    params = SamplingParams(thinking_token_budget=-1)
+    assert params.thinking_token_budget is None
+
+
+@pytest.mark.parametrize("invalid_budget", [-2, 0.6, 10.5, True])
+def test_validate_thinking_token_budget_rejects_invalid(invalid_budget):
+    from vllm.exceptions import VLLMValidationError
+
+    with pytest.raises(VLLMValidationError, match="thinking_token_budget"):
+        validate_thinking_token_budget(invalid_budget)
+
+
+@pytest.mark.parametrize("invalid_budget", [-2, 0.6, 10.5])
+def test_thinking_budget_invalid_budget_rejected(invalid_budget):
+    from vllm.exceptions import VLLMValidationError
+
+    with pytest.raises(VLLMValidationError, match="thinking_token_budget"):
+        SamplingParams(thinking_token_budget=invalid_budget)
+
+
+def test_thinking_budget_long_thinking_section_end_marker_found_at_correct_index():
+    """Test thinking budget enforced for a long thinking run,
+    then a natural end marker."""
+    h = ThinkingBudgetStateHolder(
+        MockReasoningConfig(), 8, 0, torch.device("cpu"), False
+    )
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[(0, SamplingParams(thinking_token_budget=10_000), None, [])],
+            moved=(),
+        )
+    )
+    start = MockReasoningConfig.reasoning_start_token_ids
+    end = MockReasoningConfig.reasoning_end_token_ids
+
+    out: list[int] = list(start)
+    h.update_state([out], None, None)
+    for tok in range(500):  # 500 filler thinking tokens, one decode step each
+        out.append(tok)
+        h.update_state([out], None, None)
+        assert h._state[0]["end_thinking"] == -1  # not present yet
+    expected_end_idx = len(out)  # marker appended next
+    out.extend(end)
+    h.update_state([out], None, None)
+
+    assert h._state[0]["start_thinking"] == 0
+    assert h._state[0]["end_thinking"] == expected_end_idx
+
+
+# --- Thinking budget re-entry tests (issue #43708) ---
+# Regression tests: after budget forces end-of-thinking token sequence,
+# the state machine must detect and enforce budget on subsequent blocks.
+
+
+class TestThinkingBudgetReentry:
+    THINK_START = 100
+    THINK_END_SINGLE = [200]
+    THINK_END_MULTI = [200, 201, 202]
+    BUDGET = 5
+    CONTENT_TOKEN = 50
+    THINK_TOKEN = 60
+
+    @staticmethod
+    def _make_holder(end_token_ids: list[int]) -> ThinkingBudgetStateHolder:
+        class FakeReasoningConfig:
+            reasoning_start_token_ids = [TestThinkingBudgetReentry.THINK_START]
+            reasoning_end_token_ids: list[int] = []
+            enabled = True
+
+        cfg = FakeReasoningConfig()
+        cfg.reasoning_end_token_ids = end_token_ids
+        return ThinkingBudgetStateHolder(
+            reasoning_config=cfg,
+            max_num_seqs=8,
+            num_spec_tokens=0,
+            device=torch.device("cpu"),
+            is_pin_memory=False,
+        )
+
+    @staticmethod
+    def _sync_batch(holder: ThinkingBudgetStateHolder, budget: int) -> None:
+        holder.sync_batch(
+            BatchUpdate(
+                batch_size=1,
+                removed=(),
+                added=[(0, SamplingParams(thinking_token_budget=budget), None, [])],
+                moved=(),
+            )
+        )
+
+    @staticmethod
+    def _step(holder: ThinkingBudgetStateHolder, output_tok_ids: list[int]) -> None:
+        holder.update_state(
+            output_token_ids=[output_tok_ids],
+            spec_token_ids=None,
+            repeat_indices=None,
+        )
+
+    def _exhaust_budget(self, holder: ThinkingBudgetStateHolder) -> list[int]:
+        output = [self.THINK_START]
+        self._step(holder, list(output))
+        for _ in range(self.BUDGET):
+            output.append(self.THINK_TOKEN)
+            self._step(holder, list(output))
+
+        assert holder._state[0]["in_end"]
+        return output
+
+    def _accept_end_tokens(
+        self,
+        holder: ThinkingBudgetStateHolder,
+        output: list[int],
+        end_token_ids: list[int],
+    ) -> None:
+        for tok in end_token_ids:
+            output.append(tok)
+            self._step(holder, list(output))
+
+    def test_single_token_end_reentry(self):
+        holder = self._make_holder(self.THINK_END_SINGLE)
+        self._sync_batch(holder, self.BUDGET)
+
+        output = self._exhaust_budget(holder)
+        self._accept_end_tokens(holder, output, self.THINK_END_SINGLE)
+
+        for _ in range(3):
+            output.append(self.CONTENT_TOKEN)
+            self._step(holder, list(output))
+
+        output.append(self.THINK_START)
+        self._step(holder, list(output))
+        for _ in range(self.BUDGET):
+            output.append(self.THINK_TOKEN)
+            self._step(holder, list(output))
+
+        assert holder._state[0]["in_end"], (
+            "Second thinking block must also be budget-enforced"
+        )
+
+    def test_multi_token_end_reentry(self):
+        holder = self._make_holder(self.THINK_END_MULTI)
+        self._sync_batch(holder, self.BUDGET)
+
+        output = self._exhaust_budget(holder)
+        self._accept_end_tokens(holder, output, self.THINK_END_MULTI)
+
+        assert not holder._state[0]["in_end"]
+
+        output.append(self.THINK_START)
+        self._step(holder, list(output))
+        for _ in range(self.BUDGET):
+            output.append(self.THINK_TOKEN)
+            self._step(holder, list(output))
+
+        assert holder._state[0]["in_end"], (
+            "Immediate re-entry after multi-token end must be enforced"
+        )
+
+    def test_single_block_not_broken(self):
+        holder = self._make_holder(self.THINK_END_SINGLE)
+        self._sync_batch(holder, self.BUDGET)
+
+        output = self._exhaust_budget(holder)
+        self._accept_end_tokens(holder, output, self.THINK_END_SINGLE)
+
+        for _ in range(20):
+            output.append(self.CONTENT_TOKEN)
+            self._step(holder, list(output))
+
+        assert not holder._state[0]["in_end"]
+        assert not holder._state[0]["in_think"]

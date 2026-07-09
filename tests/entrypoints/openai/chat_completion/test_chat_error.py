@@ -6,17 +6,22 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from vllm.config.multimodal import MultiModalConfig
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    BatchChatCompletionRequest,
+    ChatCompletionRequest,
+)
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+from vllm.entrypoints.scale_out.render.serving import ServingRender
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
-from vllm.tokenizers.registry import tokenizer_args_from_config
+from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "openai-community/gpt2"
@@ -55,6 +60,7 @@ class MockModelConfig:
     skip_tokenizer_init = False
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
+    renderer_num_workers: int = 1
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
@@ -72,11 +78,9 @@ class MockVllmConfig:
 
 
 def _build_renderer(model_config: MockModelConfig):
-    _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
-
-    return HfRenderer.from_config(
+    return HfRenderer(
         MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
-        tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
+        cached_tokenizer_from_config(model_config),
     )
 
 
@@ -85,33 +89,32 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
-    serving_render = OpenAIServingRender(
+    online_renderer = OnlineRenderer(
         model_config=engine.model_config,
         renderer=engine.renderer,
-        io_processor=engine.io_processor,
-        model_registry=models.registry,
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
     )
+
     serving_chat = OpenAIServingChat(
         engine,
         models,
         response_role="assistant",
-        openai_serving_render=serving_render,
+        online_renderer=online_renderer,
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
     )
 
     async def _fake_preprocess_chat(*args, **kwargs):
-        # return conversation, engine_prompts
+        # return conversation, engine_inputs
         return (
             [{"role": "user", "content": "Test"}],
             [{"prompt_token_ids": [1, 2, 3]}],
         )
 
-    serving_chat.openai_serving_render.preprocess_chat = AsyncMock(
+    serving_chat.online_renderer.preprocess_chat = AsyncMock(
         side_effect=_fake_preprocess_chat
     )
     return serving_chat
@@ -124,7 +127,6 @@ async def test_chat_error_non_stream():
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
-    mock_engine.io_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     serving_chat = _build_serving_chat(mock_engine)
@@ -168,13 +170,88 @@ async def test_chat_error_non_stream():
 
 
 @pytest.mark.asyncio
+async def test_openai_chat_keeps_mm_cache_for_engine_execution():
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Test prompt"}],
+    )
+
+    result = await serving_chat.render_chat_request(request)
+
+    assert isinstance(result, tuple)
+    assert (
+        serving_chat.online_renderer.preprocess_chat.call_args.kwargs["skip_mm_cache"]
+        is False
+    )
+
+
+def _build_serving_render(engine: AsyncLLM) -> ServingRender:
+    models = OpenAIServingModels(
+        engine_client=engine,
+        base_model_paths=BASE_MODEL_PATHS,
+    )
+    online_renderer = OnlineRenderer(
+        model_config=engine.model_config,
+        renderer=engine.renderer,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+
+    serving_render = ServingRender(models, online_renderer)
+
+    async def _fake_preprocess_chat(*args, **kwargs):
+        # return conversation, engine_inputs
+        return (
+            [{"role": "user", "content": "Test"}],
+            [{"prompt_token_ids": [1, 2, 3]}],
+        )
+
+    serving_render.online_renderer.preprocess_chat = AsyncMock(
+        side_effect=_fake_preprocess_chat
+    )
+    return serving_render
+
+
+@pytest.mark.asyncio
+async def test_renderer_only_chat_request_skips_mm_cache():
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_render = _build_serving_render(mock_engine)
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Test prompt"}],
+    )
+
+    result = await serving_render.render_chat_request(request)
+
+    assert result.token_ids == [1, 2, 3]
+    assert (
+        serving_render.online_renderer.preprocess_chat.call_args.kwargs["skip_mm_cache"]
+        is True
+    )
+
+
+@pytest.mark.asyncio
 async def test_chat_error_stream():
     """test finish_reason='error' returns 500 InternalServerError (streaming)"""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
-    mock_engine.io_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     serving_chat = _build_serving_chat(mock_engine)
@@ -395,4 +472,46 @@ def test_json_schema_response_format_missing_schema():
             model=MODEL_NAME,
             messages=[{"role": "user", "content": "hello"}],
             response_format={"type": "json_schema"},
+        )
+
+
+@pytest.mark.parametrize("format_value", [None, {}])
+def test_structural_tag_response_format_invalid(format_value):
+    """Malformed structural tags should be rejected during request validation."""
+    with pytest.raises(
+        ValidationError,
+        match="Invalid response_format structural_tag",
+    ):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "hello"}],
+            response_format={"type": "structural_tag", "format": format_value},
+        )
+
+
+@pytest.mark.parametrize("format_value", [None, {}])
+def test_batch_structural_tag_response_format_invalid(format_value):
+    """Batch chat should reject malformed structural tags at request parsing."""
+    with pytest.raises(
+        ValidationError,
+        match="Invalid response_format structural_tag",
+    ):
+        BatchChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[[{"role": "user", "content": "hello"}]],
+            response_format={"type": "structural_tag", "format": format_value},
+        )
+
+
+@pytest.mark.parametrize("structural_tag", ["not json", ""])
+def test_structured_outputs_structural_tag_invalid(structural_tag):
+    """Malformed direct structured_outputs structural tags should be rejected."""
+    with pytest.raises(
+        ValidationError,
+        match="Invalid structured_outputs structural_tag",
+    ):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "hello"}],
+            structured_outputs={"structural_tag": structural_tag},
         )

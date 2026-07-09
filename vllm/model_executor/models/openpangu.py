@@ -44,7 +44,10 @@ from vllm.model_executor.layers.attention import (
     Attention,
     StaticSinkAttention,
 )
-from vllm.model_executor.layers.fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -200,13 +203,12 @@ class OpenPanguMoE(nn.Module):
         else:
             self.shared_experts = None
 
-        self.experts = SharedFusedMoE(
+        self.experts = FusedMoE(
             shared_experts=self.shared_experts,
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             use_grouped_topk=True,
@@ -214,8 +216,8 @@ class OpenPanguMoE(nn.Module):
             topk_group=1,
             prefix=f"{prefix}.experts",
             scoring_func="sigmoid",
-            # we do scaling outside, set factor to 1.0 to avoid double mul
-            routed_scaling_factor=1.0,
+            routed_scaling_factor=self.routed_scaling_factor,
+            apply_routed_scale_to_output=True,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
@@ -234,33 +236,15 @@ class OpenPanguMoE(nn.Module):
 
         router_logits, _ = self.gate(hidden_states)
 
-        fused_moe_out = self.experts(
+        final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
-
-        shared_output, final_hidden_states = fused_moe_out
-        if self.shared_experts is None:
-            assert shared_output is None
-
-        if hidden_states.dtype != torch.float16:
-            final_hidden_states *= self.routed_scaling_factor
-        elif self.shared_experts is not None:
-            assert shared_output is not None
-            shared_output *= 1.0 / self.routed_scaling_factor
-
-        if self.shared_experts is not None:
-            assert shared_output is not None
-            final_hidden_states += shared_output
 
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
                 final_hidden_states, 0
             )
             final_hidden_states = final_hidden_states[:num_tokens]
-        elif self.tp_size > 1:
-            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
-                final_hidden_states
-            )
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
@@ -533,10 +517,6 @@ class OpenPanguEmbeddedAttention(nn.Module):
         quant_config: QuantizationConfig | None,
     ) -> None:
         is_neox_style = True
-        is_gguf = quant_config and quant_config.get_name() == "gguf"
-        if is_gguf and config.model_type == "PanguEmbedded":
-            is_neox_style = False
-
         rope_parameters = config.rope_parameters or {}
         if rope_parameters is not None and rope_parameters.get(
             "mrope_interleaved", False
@@ -731,20 +711,6 @@ class OpenPanguSinkAttention(nn.Module):
         # bitsandbytes loads the weights of the specific portion
         # no need to narrow
         is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
-
-        # Special case for GGUF
-        is_gguf_weight = getattr(param, "is_gguf_weight", False)
-        is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
-        if is_gguf_weight_type:
-            param.weight_type = loaded_weight.item()
-
-        # Materialize GGUF UninitializedParameter
-        if is_gguf_weight and isinstance(param, nn.UninitializedParameter):
-            final_shape = list(loaded_weight.shape)
-            if output_dim is not None:
-                assert final_shape[output_dim] % self.tp_size == 0
-                final_shape[output_dim] = final_shape[output_dim] // self.tp_size
-            param.materialize(final_shape, dtype=loaded_weight.dtype)
 
         param_data = param.data
         if output_dim is not None and not is_sharded_weight:
@@ -969,7 +935,7 @@ class OpenPanguDecoderLayer(nn.Module):
         residual: torch.Tensor | None,
     ) -> torch.Tensor:
         if residual is None:
-            residual = hidden_states.clone()
+            residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
@@ -1168,7 +1134,7 @@ class OpenPanguModel(nn.Module):
         ]
         has_experts = hasattr(self.config, "n_routed_experts")
         if has_experts:
-            expert_merge_mapping = SharedFusedMoE.make_expert_params_mapping(
+            expert_merge_mapping = fused_moe_make_expert_params_mapping(
                 self,
                 ckpt_gate_proj_name="gate_proj",
                 ckpt_down_proj_name="down_proj",
@@ -1323,7 +1289,6 @@ class OpenPanguMoEModel(OpenPanguModelBase, MixtureOfExperts):
         config = vllm_config.model_config.hf_config
 
         # Set MoE hyperparameters
-        self.expert_weights = []
         self.num_moe_layers = config.num_hidden_layers - config.first_k_dense_replace
         self.num_expert_groups = 1
 

@@ -14,9 +14,9 @@ from transformers import WhisperConfig as HFWhisperConfig
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.inputs.data import PromptType, TokensPrompt
+from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.inputs import PromptType, TokensPrompt
 from vllm.model_executor.model_loader import DefaultModelLoader
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     SupportsPP,
@@ -80,6 +80,14 @@ class KimiAudioWhisperEncoder(WhisperEncoder):
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
     }
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".self_attn.q_proj": (".self_attn.qkv_proj", "q"),
+            ".self_attn.k_proj": (".self_attn.qkv_proj", "k"),
+            ".self_attn.v_proj": (".self_attn.qkv_proj", "v"),
+        },
+    )
+
     def __init__(
         self, *, vllm_config: VllmConfig, prefix: str = "", init_in_fp32: bool = False
     ):
@@ -91,6 +99,7 @@ class KimiAudioWhisperEncoder(WhisperEncoder):
         whisper_config = HFWhisperConfig.from_pretrained(
             model_path,
             subfolder=KIMIA_WHISPER_SUBFOLDER,
+            revision=vllm_config.model_config.revision,
         )
 
         super().__init__(
@@ -100,37 +109,8 @@ class KimiAudioWhisperEncoder(WhisperEncoder):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 # -----------------------------------------------------------------------------
@@ -425,7 +405,7 @@ class KimiAudioForConditionalGeneration(
             DefaultModelLoader.Source(
                 model_or_path=vllm_config.model_config.model,
                 subfolder="whisper-large-v3",
-                revision=None,
+                revision=vllm_config.model_config.revision,
             )
         ]
 
@@ -626,16 +606,12 @@ class KimiAudioForConditionalGeneration(
         )
 
     @classmethod
-    def get_generation_prompt(
-        cls,
-        audio: np.ndarray,
-        model_config: ModelConfig,
-        stt_config: SpeechToTextConfig,
-        language: str | None,
-        task_type: Literal["transcribe", "translate"],
-        request_prompt: str,
-        to_language: str | None,
-    ) -> PromptType:
+    def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
+        audio = stt_params.audio
+        model_config = stt_params.model_config
+        task_type = stt_params.task_type
+        request_prompt = stt_params.request_prompt
+
         tokenizer = cached_get_tokenizer(
             model_config.tokenizer,
             tokenizer_cls=KimiAudioTokenizer,

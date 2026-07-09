@@ -16,6 +16,7 @@ from transformers import BatchFeature
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors import (
@@ -35,7 +36,6 @@ from vllm.model_executor.models.kimi_k25_vit import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     NestedTensors,
@@ -56,6 +56,10 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_k25 import KimiK25Config
 from vllm.transformers_utils.processor import cached_get_image_processor
 from vllm.transformers_utils.processors.kimi_k25 import KimiK25Processor
+from vllm.transformers_utils.processors.kimi_k25_vision_fused import (
+    KimiK25FusedVisionProcessor,
+)
+from vllm.utils.import_utils import is_numba_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .utils import (
@@ -108,12 +112,41 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
         self.hf_config = hf_config = self.get_hf_config()
 
         tokenizer = self.get_tokenizer()
+        processor_cls = KimiK25FusedVisionProcessor if is_numba_available() else None
+        logger.info_once(
+            "Using %s image preprocessing for Kimi-K2.5/K2.6 vision chunks.",
+            "fused CPU" if processor_cls is not None else "remote HF",
+        )
         image_processor = cached_get_image_processor(
             self.ctx.model_config.model,
+            revision=self.ctx.model_config.revision,
             trust_remote_code=self.ctx.model_config.trust_remote_code,
+            processor_cls_overrides=processor_cls,
         )
 
-        self.media_token_id = media_token_id = hf_config.media_placeholder_token_id
+        # Resolve token ID from the tokenizer because transformers v5
+        # may remap token IDs vs config.json.
+        config_token_id = hf_config.media_placeholder_token_id
+        resolved_token_id = tokenizer.convert_tokens_to_ids("<|media_pad|>")
+        is_valid_resolved = isinstance(resolved_token_id, int) and (
+            tokenizer.unk_token_id is None
+            or resolved_token_id != tokenizer.unk_token_id
+        )
+        if is_valid_resolved and resolved_token_id != config_token_id:
+            logger.warning_once(
+                "Kimi-K2.5 config.media_placeholder_token_id (%d) disagrees "
+                "with tokenizer mapping for <|media_pad|> (%d). "
+                "Using tokenizer value.",
+                config_token_id,
+                resolved_token_id,
+            )
+            media_token_id = resolved_token_id
+            # Patch config so downstream code also sees the correct ID.
+            hf_config.media_placeholder_token_id = resolved_token_id
+        else:
+            media_token_id = config_token_id
+
+        self.media_token_id = media_token_id
         self.media_token = tokenizer.decode(media_token_id)
 
         self.image_processor = image_processor
@@ -212,8 +245,19 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
             pixel_values=MultiModalFieldConfig.flat_from_sizes(
                 "vision_chunk", grid_sizes
             ),
-            grid_thws=MultiModalFieldConfig.batched("vision_chunk"),
+            grid_thws=MultiModalFieldConfig.batched("vision_chunk", keep_on_cpu=True),
         )
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        # Override to use the text path instead of token path because vision chunk
+        # is not considered
+        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
 
     def _get_prompt_updates(
         self,
@@ -221,8 +265,7 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        hf_config = self.info.get_hf_config()
-        media_token_id = hf_config.media_placeholder_token_id
+        media_token_id = self.info.media_token_id
 
         def get_replacement(item_idx: int):
             media = mm_items.get_items("vision_chunk", (VisionChunkProcessorItems,))
@@ -306,9 +349,12 @@ class KimiK25ForConditionalGeneration(
                 quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
-            self.vision_tower = self.vision_tower.to(
-                device=self.device, dtype=model_config.dtype
-            )
+            if self._maybe_ignore_quant_config(quant_config) is not None:
+                self.vision_tower = self.vision_tower.to(device=self.device)
+            else:
+                self.vision_tower = self.vision_tower.to(
+                    device=self.device, dtype=model_config.dtype
+                )
 
             self.mm_projector = KimiK25MultiModalProjector(
                 config=config.vision_config,
@@ -358,7 +404,7 @@ class KimiK25ForConditionalGeneration(
         target_dtype = next(self.vision_tower.parameters()).dtype
         pixel_values = pixel_values.to(target_dtype)
         assert isinstance(grid_thws, torch.Tensor), (
-            f"expect grid_thws to be a tensor, get {type(grid_thws)}"
+            f"expect grid_thws to be a tensor, got {type(grid_thws)}"
         )
         # In some cases (e.g. with merger), grid_thws has an extra middle dimension
         grid_thws = grid_thws.reshape(-1, grid_thws.shape[-1])

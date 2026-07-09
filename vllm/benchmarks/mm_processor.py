@@ -17,7 +17,6 @@ import argparse
 import json
 import time
 from collections import defaultdict
-from dataclasses import fields
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -29,6 +28,7 @@ from vllm.benchmarks.datasets import (
 )
 from vllm.benchmarks.throughput import get_requests
 from vllm.engine.arg_utils import EngineArgs
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.import_utils import PlaceholderModule
 
@@ -225,7 +225,7 @@ def benchmark_multimodal_processor(
         args.seed = 0
 
     engine_args = EngineArgs.from_cli_args(args)
-    llm = LLM(**{f.name: getattr(engine_args, f.name) for f in fields(engine_args)})
+    llm = LLM.from_engine_args(engine_args)
 
     tokenizer = llm.get_tokenizer()
     requests = get_requests(args, tokenizer)
@@ -370,7 +370,7 @@ def benchmark_multimodal_processor(
     return benchmark_result
 
 
-def add_cli_args(parser: argparse.ArgumentParser) -> None:
+def add_cli_args(parser: FlexibleArgumentParser) -> None:
     """Add CLI arguments for the multimodal processor benchmark."""
     from vllm.engine.arg_utils import EngineArgs
 
@@ -533,7 +533,7 @@ def main(args: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Benchmark mm processor latency")
+    parser = FlexibleArgumentParser(description="Benchmark mm processor latency")
     add_cli_args(parser)
     args = parser.parse_args()
     main(args)

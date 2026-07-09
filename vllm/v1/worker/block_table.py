@@ -121,6 +121,12 @@ class BlockTable:
         self.num_blocks_per_row[row_idx] = 0
         self.append_row(block_ids, row_idx)
 
+    def clear_row(self, row_idx: int) -> None:
+        num_blocks = self.num_blocks_per_row[row_idx]
+        if num_blocks > 0:
+            self.block_table.np[row_idx, :num_blocks] = 0
+        self.num_blocks_per_row[row_idx] = 0
+
     def move_row(self, src: int, tgt: int) -> None:
         num_blocks = self.num_blocks_per_row[src]
         block_table_np = self.block_table.np
@@ -251,6 +257,13 @@ class MultiGroupBlockTable:
                 f"must match block_sizes length ({len(block_sizes)})"
             )
 
+        # Align to a multiple of (128 / block_size) as required
+        # by some attention backends such as TRTLLM (#39324)
+        max_num_blocks = [
+            cdiv(n, 128 // bs) * (128 // bs) if bs <= 128 else n
+            for n, bs in zip(max_num_blocks, block_sizes)
+        ]
+
         self.block_tables = [
             BlockTable(
                 block_size,
@@ -274,6 +287,10 @@ class MultiGroupBlockTable:
     def add_row(self, block_ids: tuple[list[int], ...], row_idx: int) -> None:
         for i, block_table in enumerate(self.block_tables):
             block_table.add_row(block_ids[i], row_idx)
+
+    def clear_row(self, row_idx: int) -> None:
+        for block_table in self.block_tables:
+            block_table.clear_row(row_idx)
 
     def move_row(self, src: int, tgt: int) -> None:
         for block_table in self.block_tables:
@@ -305,7 +322,7 @@ class MultiGroupBlockTable:
         return self.block_tables[idx]
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_tokens", "max_num_tokens"])
 def _compute_slot_mapping_kernel(
     num_tokens,
     max_num_tokens,

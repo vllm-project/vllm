@@ -16,13 +16,15 @@
 # limitations under the License.
 """Wrapper around `transformers` models"""
 
-from vllm.compilation.decorators import support_torch_compile
+from typing import TYPE_CHECKING
+
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
 from vllm.model_executor.models.transformers.base import Base
 from vllm.model_executor.models.transformers.causal import CausalMixin
 from vllm.model_executor.models.transformers.legacy import LegacyMixin
 from vllm.model_executor.models.transformers.moe import MoEMixin
 from vllm.model_executor.models.transformers.multimodal import (
-    DYNAMIC_ARG_DIMS,
     MultiModalDummyInputsBuilder,
     MultiModalMixin,
     MultiModalProcessingInfo,
@@ -32,16 +34,43 @@ from vllm.model_executor.models.transformers.pooling import (
     EmbeddingMixin,
     SequenceClassificationMixin,
 )
-from vllm.model_executor.models.transformers.utils import can_enable_torch_compile
 from vllm.multimodal import MULTIMODAL_REGISTRY
+
+if TYPE_CHECKING:
+    import torch
+
+    from vllm.model_executor.layers.attention import Attention
+
+
+def vllm_attention_forward(
+    # Transformers args
+    module: "torch.nn.Module",
+    query: "torch.Tensor",
+    key: "torch.Tensor",
+    value: "torch.Tensor",
+    attention_mask: "torch.Tensor",
+    # Transformers kwargs
+    scaling: float | None = None,
+    # vLLM kwargs
+    attention_instances: dict[int, "Attention"] | None = None,
+    **kwargs,
+):
+    self_attn = attention_instances[module.layer_idx]
+    if scaling is not None:
+        self_attn.impl.scale = float(scaling)
+    hidden = query.shape[-2]
+    query, key, value = (x.transpose(1, 2) for x in (query, key, value))
+    query, key, value = (x.reshape(hidden, -1) for x in (query, key, value))
+    return self_attn.forward(query, key, value), None
+
+
+ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_attention_forward
 
 
 # Text only models
-@support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersForCausalLM(CausalMixin, Base): ...
 
 
-@support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersMoEForCausalLM(MoEMixin, CausalMixin, Base): ...
 
 
@@ -51,9 +80,6 @@ class TransformersMoEForCausalLM(MoEMixin, CausalMixin, Base): ...
     info=MultiModalProcessingInfo,
     dummy_inputs=MultiModalDummyInputsBuilder,
 )
-@support_torch_compile(
-    dynamic_arg_dims=DYNAMIC_ARG_DIMS, enable_if=can_enable_torch_compile
-)
 class TransformersMultiModalForCausalLM(MultiModalMixin, CausalMixin, Base): ...
 
 
@@ -62,20 +88,15 @@ class TransformersMultiModalForCausalLM(MultiModalMixin, CausalMixin, Base): ...
     info=MultiModalProcessingInfo,
     dummy_inputs=MultiModalDummyInputsBuilder,
 )
-@support_torch_compile(
-    dynamic_arg_dims=DYNAMIC_ARG_DIMS, enable_if=can_enable_torch_compile
-)
 class TransformersMultiModalMoEForCausalLM(
     MoEMixin, MultiModalMixin, CausalMixin, Base
 ): ...
 
 
 # Embedding models
-@support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersEmbeddingModel(EmbeddingMixin, LegacyMixin, Base): ...
 
 
-@support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersMoEEmbeddingModel(EmbeddingMixin, MoEMixin, Base): ...
 
 
@@ -84,20 +105,15 @@ class TransformersMoEEmbeddingModel(EmbeddingMixin, MoEMixin, Base): ...
     info=MultiModalProcessingInfo,
     dummy_inputs=MultiModalDummyInputsBuilder,
 )
-@support_torch_compile(
-    dynamic_arg_dims=DYNAMIC_ARG_DIMS, enable_if=can_enable_torch_compile
-)
 class TransformersMultiModalEmbeddingModel(EmbeddingMixin, MultiModalMixin, Base): ...
 
 
 # Sequence classification models
-@support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersForSequenceClassification(
     SequenceClassificationMixin, LegacyMixin, Base
 ): ...
 
 
-@support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersMoEForSequenceClassification(
     SequenceClassificationMixin, MoEMixin, Base
 ): ...
@@ -107,9 +123,6 @@ class TransformersMoEForSequenceClassification(
     MultiModalProcessor,
     info=MultiModalProcessingInfo,
     dummy_inputs=MultiModalDummyInputsBuilder,
-)
-@support_torch_compile(
-    dynamic_arg_dims=DYNAMIC_ARG_DIMS, enable_if=can_enable_torch_compile
 )
 class TransformersMultiModalForSequenceClassification(
     SequenceClassificationMixin, MultiModalMixin, Base

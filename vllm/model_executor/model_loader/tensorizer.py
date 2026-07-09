@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import regex as re
 import torch
-from huggingface_hub import snapshot_download
 from torch import nn
 from torch.utils._python_dispatch import TorchDispatchMode
 from transformers import PretrainedConfig
@@ -26,6 +25,7 @@ from vllm.config import ModelConfig, ParallelConfig, VllmConfig, set_current_vll
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import hf_api
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.import_utils import PlaceholderModule
 
@@ -211,7 +211,7 @@ class TensorizerConfig(MutableMapping):
         encryption_keyfile: File path to a binary file containing a  
             binary key to use for decryption. `None` (the default) means 
             no decryption. See the example script in 
-            examples/others/tensorize_vllm_model.py. 
+            examples/features/tensorize_vllm_model.py. 
         s3_access_key_id: The access key for the S3 bucket. Can also be set via
             the S3_ACCESS_KEY_ID environment variable.
         s3_secret_access_key: The secret access key for the S3 bucket. Can also
@@ -579,7 +579,7 @@ def tensorizer_weights_iterator(
         "loading on vLLM, as tensorizer is forced to load to CPU. "
         "Consider deserializing a vLLM model instead for faster "
         "load times. See the "
-        "examples/others/tensorize_vllm_model.py example script "
+        "examples/features/tensorize_vllm_model.py example script "
         "for serializing vLLM models."
     )
 
@@ -629,7 +629,7 @@ def serialize_extra_artifacts(
         )
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        snapshot_download(
+        hf_api().snapshot_download(
             served_model_name,
             local_dir=tmpdir,
             ignore_patterns=[
@@ -674,7 +674,8 @@ def serialize_vllm_model(
             key = f.read()
         encryption_params = EncryptionParams(key=key)
 
-    output_file = tensorizer_args.tensorizer_uri
+    if (output_file := tensorizer_args.tensorizer_uri) is None:
+        raise ValueError("tensorizer_uri must be specified for serialization.")
     if tensorizer_config._is_sharded:
         from vllm.distributed import get_tensor_model_parallel_rank
 
@@ -686,7 +687,7 @@ def serialize_vllm_model(
         serializer = TensorSerializer(
             stream,
             encryption=encryption_params,
-            **tensorizer_config.serialization_kwargs,
+            **(tensorizer_config.serialization_kwargs or {}),
         )
         serializer.write_module(model)
         serializer.close()

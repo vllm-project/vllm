@@ -31,17 +31,16 @@ from transformers.models.qwen2_audio import Qwen2AudioEncoder
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
-    ModalityData,
     ModalityDataItems,
     MultiModalDataItems,
     MultiModalDataParser,
@@ -203,7 +202,7 @@ class AudioFlamingo3ProcessingInfo(BaseProcessingInfo):
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"audio": None}
+        return {"audio": 1}
 
 
 class AudioFlamingo3DummyInputsBuilder(
@@ -380,32 +379,37 @@ class AudioFlamingo3MultiModalProcessor(
         mm_kwargs: Mapping[str, Any],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        audios = mm_data.pop("audios", [])
-        if audios:
-            mm_data["audio"] = audios
+        processor_mm_data = dict(mm_data)
+        audios = processor_mm_data.pop("audios", None)
+        if audios is not None:
+            processor_mm_data["audio"] = audios
 
-        if not mm_data.get("audio", []):
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+        outputs = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=processor_mm_data,
+            mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
+        )
+
+        if "input_features_mask" in outputs:
+            outputs["feature_attention_mask"] = outputs.pop("input_features_mask")
+
+        audio_data = processor_mm_data.get("audio")
+        if audio_data is None:
+            return outputs
+
+        audio_list = audio_data if isinstance(audio_data, list) else [audio_data]
+        if len(audio_list) == 0:
+            return outputs
 
         processor = self.info.get_hf_processor(**mm_kwargs)
         feature_extractor = processor.feature_extractor
-        mm_kwargs = dict(
-            **mm_kwargs,
-            sampling_rate=feature_extractor.sampling_rate,
-        )
-
-        audio_list = mm_data.get("audio")
-        if not isinstance(audio_list, list):
-            audio_list = [audio_list]
-
-        chunk_counts = []
         sampling_rate = feature_extractor.sampling_rate
         chunk_length = feature_extractor.chunk_length
         window_size = int(sampling_rate * chunk_length)
         max_windows = int(processor.max_audio_len // chunk_length)
 
+        chunk_counts = []
         for audio in audio_list:
             # audio is numpy array or list
             n_samples = len(audio) if isinstance(audio, list) else audio.shape[0]
@@ -415,18 +419,7 @@ class AudioFlamingo3MultiModalProcessor(
                 n_win = max_windows
             chunk_counts.append(n_win)
 
-        outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
-
-        if "input_features_mask" in outputs:
-            outputs["feature_attention_mask"] = outputs.pop("input_features_mask")
-
         outputs["chunk_counts"] = torch.tensor(chunk_counts, dtype=torch.long)
-
         return outputs
 
     def _get_mm_fields_config(
@@ -612,6 +605,10 @@ class AudioFlamingo3ForConditionalGeneration(
         input_features: torch.Tensor,
         feature_attention_mask: torch.Tensor,
     ) -> torch.Tensor:
+        input_features = input_features.to(
+            dtype=self.audio_tower.conv1.weight.dtype,
+            device=self.audio_tower.conv1.weight.device,
+        )
         audio_attention_mask = _build_audio_encoder_attention_mask(
             feature_attention_mask,
             dtype=self.audio_tower.conv1.weight.dtype,

@@ -808,17 +808,26 @@ async def test_invocations(server: RemoteOpenAIServer, client: openai.AsyncOpenA
         "logprobs": False,
     }
 
-    chat_completion = await client.chat.completions.create(**request_args)
+    # Use raw HTTP for both endpoints so we compare server responses
+    # directly, without the openai SDK injecting extra fields
+    # (e.g. `moderation` added in newer SDK versions).
+    chat_response = requests.post(
+        server.url_for("v1/chat/completions"), json=request_args
+    )
+    chat_response.raise_for_status()
 
     invocation_response = requests.post(
         server.url_for("invocations"), json=request_args
     )
     invocation_response.raise_for_status()
 
-    chat_output = chat_completion.model_dump()
+    chat_output = chat_response.json()
     invocation_output = invocation_response.json()
 
-    assert chat_output.keys() == invocation_output.keys()
+    extra_keys = invocation_output.keys() - chat_output.keys()
+    missing_keys = chat_output.keys() - invocation_output.keys()
+    assert missing_keys == set()
+    assert extra_keys <= {"moderation"}
     assert chat_output["choices"] == invocation_output["choices"]
 
 
@@ -845,9 +854,10 @@ async def test_chat_completion_n_parameter_non_streaming(
     chat_completion = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_completion_tokens=20,
-        temperature=0.7,
+        max_completion_tokens=50,
+        temperature=1.0,
         n=3,
+        seed=42,
         stream=False,
     )
 
@@ -859,7 +869,6 @@ async def test_chat_completion_n_parameter_non_streaming(
         assert choice.message.content is not None
         assert len(choice.message.content) > 0
 
-    # Verify all responses are different (highly likely with temperature > 0)
     contents = [choice.message.content for choice in chat_completion.choices]
     assert len(set(contents)) > 1, "Expected different responses with n=3"
 
@@ -1002,6 +1011,31 @@ def test_chat_completion_request_n_parameter_default():
     assert sampling_params.n == 1, f"Expected n=1 (default), got n={sampling_params.n}"
 
 
+def test_chat_completion_request_accepts_model_specific_reasoning_effort():
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Hello"}],
+        reasoning_effort="max",
+    )
+
+    chat_params = request.build_chat_params(
+        default_template=None,
+        default_template_content_format="auto",
+    )
+
+    assert request.reasoning_effort == "max"
+    assert chat_params.chat_template_kwargs["reasoning_effort"] == "max"
+
+
+def test_chat_completion_request_rejects_unknown_reasoning_effort():
+    with pytest.raises(ValueError, match="Input should be"):
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Hello"}],
+            reasoning_effort="extra_high",
+        )
+
+
 def test_chat_completion_request_n_parameter_various_values():
     """Test n parameter with various values."""
     for n_value in [1, 2, 5, 10]:
@@ -1019,4 +1053,115 @@ def test_chat_completion_request_n_parameter_various_values():
 
         assert sampling_params.n == n_value, (
             f"Expected n={n_value}, got n={sampling_params.n}"
+        )
+
+
+def test_chat_completion_request_n_parameter_exceeds_default_limit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Test that n values exceeding the default limit are rejected."""
+    import vllm.envs as envs
+
+    monkeypatch.delenv("VLLM_MAX_N_SEQUENCES", raising=False)
+    if hasattr(envs.__getattr__, "cache_clear"):
+        envs.__getattr__.cache_clear()
+
+    max_n = envs.VLLM_MAX_N_SEQUENCES
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test"}],
+        n=max_n + 1,
+        max_tokens=10,
+    )
+
+    with pytest.raises(ValueError, match="n must be at most"):
+        request.to_sampling_params(
+            max_tokens=10,
+            default_sampling_params={},
+        )
+
+
+def test_chat_completion_request_n_parameter_at_limit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Test that n at exactly the limit is accepted."""
+    import vllm.envs as envs
+
+    monkeypatch.delenv("VLLM_MAX_N_SEQUENCES", raising=False)
+    if hasattr(envs.__getattr__, "cache_clear"):
+        envs.__getattr__.cache_clear()
+
+    max_n = envs.VLLM_MAX_N_SEQUENCES
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test"}],
+        n=max_n,
+        max_tokens=10,
+    )
+
+    sampling_params = request.to_sampling_params(
+        max_tokens=10,
+        default_sampling_params={},
+    )
+    assert sampling_params.n == max_n
+
+
+def test_chat_completion_request_n_parameter_custom_limit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Test that VLLM_MAX_N_SEQUENCES env var overrides the default limit."""
+    import vllm.envs as envs
+
+    monkeypatch.setenv("VLLM_MAX_N_SEQUENCES", "128")
+    if hasattr(envs.__getattr__, "cache_clear"):
+        envs.__getattr__.cache_clear()
+
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test"}],
+        n=128,
+        max_tokens=10,
+    )
+
+    sampling_params = request.to_sampling_params(
+        max_tokens=10,
+        default_sampling_params={},
+    )
+    assert sampling_params.n == 128
+
+    request_over = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test"}],
+        n=129,
+        max_tokens=10,
+    )
+
+    with pytest.raises(ValueError, match="n must be at most 128"):
+        request_over.to_sampling_params(
+            max_tokens=10,
+            default_sampling_params={},
+        )
+
+
+def test_chat_completion_request_n_parameter_massive_value(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Test that astronomically large n values are rejected (CVE fix)."""
+    import vllm.envs as envs
+
+    monkeypatch.delenv("VLLM_MAX_N_SEQUENCES", raising=False)
+    if hasattr(envs.__getattr__, "cache_clear"):
+        envs.__getattr__.cache_clear()
+
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test"}],
+        n=100_000_000,
+        max_tokens=1,
+    )
+
+    with pytest.raises(ValueError, match="n must be at most"):
+        request.to_sampling_params(
+            max_tokens=1,
+            default_sampling_params={},
         )

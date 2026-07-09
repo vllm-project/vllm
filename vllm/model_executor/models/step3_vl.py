@@ -13,6 +13,7 @@ from transformers import BatchFeature
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
@@ -24,7 +25,6 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -46,7 +46,12 @@ from vllm.transformers_utils.processors.step3_vl import (
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
+    SupportsMultiModal,
+    SupportsPP,
+)
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -487,7 +492,9 @@ class Step3VisionTransformer(nn.Module):
     info=Step3VLProcessingInfo,
     dummy_inputs=Step3VLDummyInputsBuilder,
 )
-class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+class Step3VLForConditionalGeneration(
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsEncoderCudaGraph
+):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.": "language_model.model.",
@@ -510,6 +517,7 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
+        self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
@@ -570,6 +578,42 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
     def dtype(self):
         return next(self.parameters()).dtype
 
+    @staticmethod
+    def _compute_spatial_tokens(size, patch_size, stride):
+        # Compute the number of spatial tokens after two rounds of
+        # downsampling with given patch size and stride.
+        grid = size // patch_size
+        vit_tokens = grid * grid
+        spatial = int(math.sqrt(vit_tokens))
+        h1 = (spatial - 2) // stride + 1
+        h2 = (h1 - 1) // 2 + 1
+        return h2 * h2
+
+    @property
+    def img_output_tokens(self) -> int:
+        return self._compute_spatial_tokens(
+            self.config.vision_config.image_size,
+            self.config.vision_config.patch_size,
+            self.config.understand_projector_stride,
+        )
+
+    @property
+    def patch_output_tokens(self) -> int:
+        return self._compute_spatial_tokens(
+            504,
+            self.config.vision_config.patch_size,
+            self.config.understand_projector_stride,
+        )
+
+    def _batched_encoder_forward(
+        self,
+        pixel_values: torch.Tensor,
+    ) -> torch.Tensor:
+        image_features = self._process_image_features(
+            self._get_vision_model_output(pixel_values)
+        )
+        return image_features.reshape(-1, image_features.shape[-1])
+
     def _parse_and_validate_image_input(
         self, **kwargs: object
     ) -> Step3VLImageInputs | None:
@@ -592,7 +636,7 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         if image_embeds is not None:
             return Step3VLImageEmbeddingInputs(
                 type="image_embeds",
-                image_embeds=image_embeds.to(self.dtype),
+                data=image_embeds.to(self.dtype),
             )
 
         raise AssertionError("This line should be unreachable.")
@@ -615,15 +659,19 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         self, image_input: Step3VLImageInputs
     ) -> tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
-            image_features = image_input["image_embeds"]
-        else:
-            image_features = self._get_vision_model_output(image_input["pixel_values"])
-            patch_image_features = (
-                self._get_vision_model_output(image_input["patch_pixel_values"])
-                if len(image_input["patch_pixel_values"]) > 0
-                else None
-            )
-            num_patches = image_input["num_patches"]
+            image_features = image_input["data"]
+            return [
+                image_features[i].view(-1, image_features.shape[-1])
+                for i in range(image_features.shape[0])
+            ]
+
+        image_features = self._get_vision_model_output(image_input["pixel_values"])
+        patch_image_features = (
+            self._get_vision_model_output(image_input["patch_pixel_values"])
+            if len(image_input["patch_pixel_values"]) > 0
+            else None
+        )
+        num_patches = image_input["num_patches"]
 
         image_features = self._process_image_features(image_features)
         patch_image_features = (
@@ -671,6 +719,226 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
         )
+
+    # -- SupportsEncoderCudaGraph protocol methods --
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphConfig,
+        )
+
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=[
+                "pixel_values",
+                "patch_pixel_values",
+            ],
+            out_hidden_size=self.config.hidden_size,
+            enable_dual_path_graph=True,
+            global_token_per_image=self.img_output_tokens,
+            local_token_per_patch=self.patch_output_tokens,
+        )
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config: "VllmConfig",
+    ) -> tuple[int, int]:
+        min_budget = self.img_output_tokens
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            self.model_config.max_model_len,
+        )
+        return min_budget, max_budget
+
+    def get_encoder_cudagraph_item_specs(
+        self,
+        mm_kwargs: dict[str, Any],
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
+
+        num_patches = mm_kwargs.get("num_patches")
+
+        img_grid = (
+            self.config.vision_config.image_size // self.config.vision_config.patch_size
+        )
+        patch_grid = 504 // self.config.vision_config.patch_size
+        total_image_pixel = img_grid * img_grid
+        total_patch_pixel = patch_grid * patch_grid
+
+        return [
+            EncoderItemSpec(
+                input_size=(total_image_pixel + num_patch * total_patch_pixel),
+                output_tokens=(
+                    self.img_output_tokens + num_patch * self.patch_output_tokens
+                ),
+                global_output_tokens=self.img_output_tokens,
+                local_output_tokens=num_patch * self.patch_output_tokens,
+            )
+            for num_patch in num_patches
+        ]
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        pixel_values = mm_kwargs["pixel_values"]
+        patch_pixel_values = mm_kwargs["patch_pixel_values"]
+        num_patches = mm_kwargs["num_patches"]
+
+        # calcute the accumulated patch counts
+        cum_patches = [0]
+        for p in num_patches:
+            cum_patches.append(cum_patches[-1] + p)
+
+        if len(indices) == 0:
+            return {
+                "pixel_values": pixel_values[:0],
+                "patch_pixel_values": patch_pixel_values[:0],
+                "num_patches": num_patches[:0],
+            }
+
+        selected_pv = pixel_values[indices]
+        selected_np = num_patches[indices]
+        selected_ppv = torch.cat(
+            [patch_pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
+        )
+
+        return {
+            "pixel_values": selected_pv,
+            "patch_pixel_values": selected_ppv,
+            "num_patches": selected_np,
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphCaptureInputs,
+        )
+
+        assert path in ("global", "local")
+        if path == "global":
+            max_num_images = token_budget // self.img_output_tokens
+            max_batch_size = min(max_batch_size, max_num_images)
+            dummy_pixel_values = torch.randn(
+                max_batch_size,
+                3,
+                self.config.vision_config.image_size,
+                self.config.vision_config.image_size,
+                device=device,
+                dtype=dtype,
+            )
+            values = {"pixel_values": dummy_pixel_values}
+        else:
+            max_num_patches = token_budget // self.patch_output_tokens
+            dummy_patch_pixel_values = torch.randn(
+                max_num_patches,
+                3,
+                504,
+                504,
+                device=device,
+                dtype=dtype,
+            )
+            values = {"patch_pixel_values": dummy_patch_pixel_values}
+
+        return EncoderCudaGraphCaptureInputs(
+            values=values,
+        )
+
+    def encoder_cudagraph_forward(
+        self,
+        values: dict[str, torch.Tensor],
+        path: str = "default",
+    ) -> torch.Tensor:
+        assert path in ("global", "local")
+        if path == "global":
+            return self._batched_encoder_forward(values["pixel_values"])
+        else:
+            return self._batched_encoder_forward(values["patch_pixel_values"])
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        path: str = "default",
+    ) -> torch.Tensor:
+        assert path in ("global", "local")
+        if path == "global":
+            return self._batched_encoder_forward(mm_kwargs["pixel_values"])
+        else:
+            return self._batched_encoder_forward(mm_kwargs["patch_pixel_values"])
+
+    def postprocess_encoder_output(
+        self,
+        output: torch.Tensor,
+        indices: list[int],
+        per_item_out_tokens: list[int],
+        dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
+        clone: bool = False,
+        batch_mm_kwargs: dict[str, Any] | None = None,
+        local_output: torch.Tensor | None = None,
+    ):
+        """CPU-side per-item merge after dual-path graph replay.
+
+        ``output`` contains global-image features and ``local_output``
+        contains local-patch features (or ``None`` when there are no patches).
+        """
+        num_patches = batch_mm_kwargs["num_patches"]
+        hidden = output.shape[-1]
+        bsz = len(indices)
+
+        actual_np = [int(np) for np in num_patches]
+        total_patches = sum(actual_np)
+        img_tokens = bsz * self.img_output_tokens
+        patch_tokens = total_patches * self.patch_output_tokens
+
+        global_part = output[:img_tokens].reshape(bsz, self.img_output_tokens, hidden)
+        if total_patches > 0:
+            patch_part = local_output[:patch_tokens].reshape(
+                -1, self.patch_output_tokens, hidden
+            )
+        else:
+            patch_part = None
+
+        merged: dict[int, torch.Tensor] = {}
+        cur_patch = 0
+        for i, idx in enumerate(indices):
+            np = actual_np[i]
+            parts: list[torch.Tensor] = []
+            if patch_part is not None and np > 0:
+                parts.append(patch_part[cur_patch : cur_patch + np].reshape(-1, hidden))
+                cur_patch += np
+            parts.append(global_part[i].reshape(-1, hidden))
+            merged[idx] = torch.cat(parts, dim=0) if len(parts) > 1 else parts[0]
+
+        out = [merged[i] for i in indices]
+        for i, idx in enumerate(indices):
+            dest[idx] = out[i]
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphReplayBuffers,
+        )
+
+        assert path in ("global", "local")
+        if path == "global":
+            values = {"pixel_values": mm_kwargs["pixel_values"]}
+        else:
+            values = {"patch_pixel_values": mm_kwargs["patch_pixel_values"]}
+
+        return EncoderCudaGraphReplayBuffers(values=values)
 
     def forward(
         self,

@@ -6,7 +6,6 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.triton_utils import triton
 from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 
@@ -18,6 +17,20 @@ logger = init_logger(__name__)
 # tile size constraints. When violated, AITER raises:
 # "device_gemm ... does not support this GEMM problem".
 CK_MXFP4_MOE_DIM_ALIGNMENT = 256
+
+
+def should_use_cdna4_mx_scale_swizzle() -> bool:
+    """Whether to use the CDNA4 swizzled scale layout for mxfp4 on gfx950.
+
+    CDNA4 swizzle requires BLOCK_K%256==0; at TP>=4 the A8W4 dispatch
+    picks BK<256 tiles for the smaller per-rank shapes, so swizzle must
+    be off. Used by both the weight-load swizzle in `_swizzle_mxfp4` and
+    the kernel-argument gate in `aiter_mxfp4_w4a8_moe`; they must agree.
+    """
+    from vllm.distributed import get_tensor_model_parallel_world_size
+    from vllm.platforms.rocm import on_gfx950
+
+    return on_gfx950() and get_tensor_model_parallel_world_size() <= 2
 
 
 def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
@@ -45,13 +58,18 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
         value_layout = StridedLayout
         scale_layout = StridedLayout
     elif current_platform.is_rocm():
-        from vllm.platforms.rocm import on_gfx950
-
         value_layout = StridedLayout
-        if on_gfx950():
-            from triton_kernels.tensor_details.layout import GFX950MXScaleLayout
+        if should_use_cdna4_mx_scale_swizzle():
+            try:
+                # triton < 3.6
+                from triton_kernels.tensor_details.layout import GFX950MXScaleLayout
 
-            scale_layout = GFX950MXScaleLayout
+                scale_layout = GFX950MXScaleLayout
+            except ImportError:
+                # triton >= 3.6
+                from triton_kernels.tensor_details.layout import CDNA4MXScaleLayout
+
+                scale_layout = CDNA4MXScaleLayout
         else:
             scale_layout = StridedLayout
     else:
@@ -69,6 +87,12 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
                 "split_k": 1,
             }
             opt_flags.update_opt_flags_constraints(constraints)
+            # Patches #47303: pad K (num scale groups) to 0 mod 4
+            # TODO: Remove once we upgrade to Triton 3.8.0+ kernels
+            if scale.numel() > 0:
+                K = scale.shape[-1]
+                pad_k = -K % 4
+                scale = torch.nn.functional.pad(scale, (0, pad_k))
         elif current_platform.is_device_capability_family(100):
             constraints = {
                 "is_persistent": True,
@@ -83,14 +107,6 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
     )
     scale = convert_layout(wrap_torch_tensor(scale), scale_layout, **scale_layout_opts)
     return quant_tensor, InFlexData(), scale
-
-
-def get_padding_alignment():
-    return (
-        256
-        if triton.runtime.driver.active.get_current_target().arch in ("gfx950",)
-        else 128
-    )
 
 
 def _dequant_mxfp4(
@@ -164,3 +180,7 @@ try:
     quant_dequant_mxfp4 = torch.ops.vllm.quant_dequant_mxfp4
 except AttributeError as error:
     raise error
+
+
+def xpu_mxfp4_quantize(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops.vllm.xpu_mxfp4_quantize(x)

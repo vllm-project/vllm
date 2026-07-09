@@ -10,10 +10,13 @@ import pybase64
 from PIL import Image
 
 from vllm import envs
+from vllm.logger import init_logger
 
 from ..video import VIDEO_LOADER_REGISTRY
 from .base import MediaIO
 from .image import ImageMediaIO
+
+logger = init_logger(__name__)
 
 
 class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
@@ -28,6 +31,24 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
         default_kwargs: dict[str, Any] | None,
         runtime_kwargs: dict[str, Any] | None,
     ) -> dict[str, Any]:
+        if runtime_kwargs:
+            # Block request-level selection of GPU video backends that
+            # were not configured (and VRAM-reserved) at startup.
+            for key in ("video_backend", "backend"):
+                requested = runtime_kwargs.get(key)
+                if requested and VIDEO_LOADER_REGISTRY.backend_requires_gpu(requested):
+                    static_val = (default_kwargs or {}).get(key)
+                    if static_val != requested:
+                        logger.warning_once(
+                            "Stripping request-level %s=%r: GPU video "
+                            "backend not configured at startup.",
+                            key,
+                            requested,
+                        )
+                        runtime_kwargs = {
+                            k: v for k, v in runtime_kwargs.items() if k != key
+                        }
+
         merged = super().merge_kwargs(default_kwargs, runtime_kwargs)
         # fps and num_frames interact with each other, so if either is
         # overridden at request time, wipe the other from defaults to
@@ -80,19 +101,60 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
                 "image/jpeg",
             )
 
+            if self.num_frames > 0:
+                frame_parts = data.split(",", self.num_frames)[: self.num_frames]
+            elif self.num_frames == 0:
+                raise ValueError("num_frames must be greater than 0 or -1")
+            else:
+                frame_parts = data.split(",")
+
             frames = np.stack(
-                [np.asarray(load_frame(frame_data)) for frame_data in data.split(",")]
+                [np.asarray(load_frame(frame_data)) for frame_data in frame_parts]
             )
             total = int(frames.shape[0])
             fps = float(self.kwargs.get("fps", 1))
-            duration = total / fps if fps > 0 else 0.0
+
+            # validate and extract frames_indices
+            frames_indices = self.kwargs.get("frames_indices")
+            if frames_indices is not None:
+                if not (
+                    isinstance(frames_indices, list)
+                    and all(isinstance(i, int) for i in frames_indices)
+                ):
+                    raise ValueError("frames_indices must be a list of integers")
+                if len(frames_indices) != total:
+                    raise ValueError(
+                        f"frames_indices length ({len(frames_indices)}) must "
+                        f"match number of frames sent ({total})"
+                    )
+            else:
+                frames_indices = list(range(total))
+
+            # validate and extract total_num_frames
+            total_num_frames = self.kwargs.get("total_num_frames", total)
+            if not isinstance(total_num_frames, int) or total_num_frames < 1:
+                raise ValueError("total_num_frames must be a positive integer")
+            if total_num_frames < total:
+                raise ValueError(
+                    f"total_num_frames ({total_num_frames}) must be >= "
+                    f"number of frames sent ({total})"
+                )
+
+            # validate and extract duration
+            duration = self.kwargs.get("duration")
+            if duration is not None:
+                if not isinstance(duration, (int, float)) or duration < 0:
+                    raise ValueError("duration must be a non-negative number")
+            else:
+                duration = total_num_frames / fps if fps > 0 else 0.0
+
             metadata = {
-                "total_num_frames": total,
+                "total_num_frames": total_num_frames,
                 "fps": fps,
                 "duration": duration,
                 "video_backend": "jpeg_sequence",
-                "frames_indices": list(range(total)),
-                "do_sample_frames": False,
+                "frames_indices": frames_indices,
+                "do_sample_frames": self.kwargs.get("do_sample_frames", False),
             }
             return frames, metadata
 
