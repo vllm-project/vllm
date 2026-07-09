@@ -69,7 +69,10 @@ def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
         use_chat_completions=eval_config.get("use_chat_completions", False),
         host=host,
         port=port,
+        temperature=eval_config.get("temperature", 0.0),
+        seed=eval_config.get("seed", 42),
         request_timeout_seconds=request_timeout_seconds,
+        gen_prefix=eval_config.get("gen_prefix", ""),
     )
 
     return results

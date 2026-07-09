@@ -5,7 +5,7 @@ from collections.abc import Generator
 from typing import Any
 
 import pytest
-from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers import AutoTokenizer, PythonBackend, TokenizersBackend
 
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers.mistral import MistralTokenizer
@@ -153,13 +153,13 @@ def test_decode_streaming(
     spaces_between_special_tokens,
     fast,
 ):
-    if fast and not isinstance(tokenizer, PreTrainedTokenizerFast):
+    if fast and not isinstance(tokenizer, TokenizersBackend):
         pytest.skip()
 
     if skip_special_tokens and not spaces_between_special_tokens:
         pytest.skip()
 
-    if not fast and isinstance(tokenizer, PreTrainedTokenizerFast):
+    if not fast and isinstance(tokenizer, TokenizersBackend):
         # Fix up inconsistency in fast/slow tokenizer behaviour.
         tokenizer.add_special_tokens(
             {
@@ -173,7 +173,7 @@ def test_decode_streaming(
 
     extra_decode_args = (
         {}
-        if not isinstance(tokenizer, PreTrainedTokenizer)
+        if not isinstance(tokenizer, PythonBackend)
         else {"spaces_between_special_tokens": spaces_between_special_tokens}
     )
 
@@ -225,7 +225,7 @@ def test_decode_streaming(
 @pytest.mark.parametrize("tokenizer_name", TOKENIZERS)
 @pytest.mark.parametrize("fast", (True, False))
 def test_oov_decode(tokenizer, fast):
-    if fast and not isinstance(tokenizer, PreTrainedTokenizerFast):
+    if fast and not isinstance(tokenizer, TokenizersBackend):
         pytest.skip()
 
     decoded_text, out_ids = _run_incremental_decode(
