@@ -548,9 +548,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "SolarForCausalLM": _HfExamplesInfo(
         "upstage/solar-pro-preview-instruct", trust_remote_code=True
     ),
-    "TeleChatForCausalLM": _HfExamplesInfo(
-        "chuhac/TeleChat2-35B", trust_remote_code=True
-    ),
     "TeleChat2ForCausalLM": _HfExamplesInfo(
         "Tele-AI/TeleChat2-3B", trust_remote_code=True
     ),
@@ -1126,6 +1123,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "8b-thinking": "OpenMOSS-Team/MOSS-Audio-8B-Thinking",
         },
         trust_remote_code=True,
+    ),
+    "MossTranscribeDiarizeForConditionalGeneration": _HfExamplesInfo(
+        "OpenMOSS-Team/MOSS-Transcribe-Diarize",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "HfMoondream": _HfExamplesInfo(
         "moondream/moondream3-preview",
