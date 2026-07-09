@@ -407,6 +407,20 @@ class FreeKVCacheBlockQueue:
             curr_block = curr_block.next_free_block
         return ret
 
+    def iter_blocks_after(
+        self,
+        cursor: KVCacheBlock | None,
+    ) -> Iterator[KVCacheBlock]:
+        """Iterate free blocks in eviction order after the cursor."""
+        if cursor is None:
+            curr_block = self.fake_free_list_head.next_free_block
+        else:
+            curr_block = cursor.next_free_block
+
+        while curr_block is not None and curr_block is not self.fake_free_list_tail:
+            yield curr_block
+            curr_block = curr_block.next_free_block
+
 
 def need_extra_keys(request: Request) -> bool:
     """Check whether the blocks allocated to this request need extra hash keys.
