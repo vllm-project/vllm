@@ -92,6 +92,39 @@ def namespace_tool_request() -> ResponsesRequest:
 
 
 class TestGlm47ExtractToolCalls:
+    def test_required_skips_structured_outputs_chatcompletion(
+        self, glm47_tool_parser, sample_tools
+    ):
+        request = ChatCompletionRequest(
+            messages=[],
+            model="glm-test",
+            tools=sample_tools,
+            tool_choice="required",
+        )
+
+        adjusted = glm47_tool_parser.adjust_request(request)
+
+        assert adjusted.structured_outputs is None
+        assert adjusted.skip_special_tokens is False
+
+    def test_named_skips_structured_outputs_chatcompletion(
+        self, glm47_tool_parser, sample_tools
+    ):
+        request = ChatCompletionRequest(
+            messages=[],
+            model="glm-test",
+            tools=sample_tools,
+            tool_choice={
+                "type": "function",
+                "function": {"name": "get_weather"},
+            },
+        )
+
+        adjusted = glm47_tool_parser.adjust_request(request)
+
+        assert adjusted.structured_outputs is None
+        assert adjusted.skip_special_tokens is False
+
     def test_namespace_tool_call_round_trip_to_responses_output(
         self, glm47_tokenizer, namespace_tool_request
     ):
