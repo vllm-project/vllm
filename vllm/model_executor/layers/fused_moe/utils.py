@@ -585,8 +585,37 @@ def enable_swap_ab(BLOCK_SIZE_M: int, BLOCK_SIZE_N: int) -> bool:
     )
 
 
+def moe_use_td_hw_supported() -> bool:
+    """Whether the current device can run the TD (gather) path of
+    ``fused_moe_kernel`` (ignores the ``VLLM_TRITON_USE_TD`` override).
+
+    The A-load uses ``tensor_descriptor.gather``, which lowers to the PTX
+    ``tile::gather4`` instruction. That instruction is part of the
+    ``tcgen05``/Tensor Memory (TMEM) family introduced with Blackwell and has
+    no Hopper (sm90) equivalent -- ptxas rejects it there ("Feature
+    '.tile::gather4 ...' requires .target sm_100 or higher"). Unlike
+    ``scatter4``, ``gather4`` is supported across the whole sm100+ range
+    including consumer Blackwell (sm120/sm121): see triton-lang/triton#8498,
+    which enables ``gather4`` on sm120/sm121 while leaving ``scatter4``
+    unsupported there. So this gates on a blanket ``has_device_capability(100)``
+    rather than the sm100 *family* check used for the scatter store path.
+    """
+    if current_platform.is_xpu():
+        return True
+    if current_platform.is_cuda():
+        return current_platform.has_device_capability(100)
+    return False
+
+
 def resolve_moe_use_td() -> bool:
-    """Tri-state resolver for ``VLLM_TRITON_USE_TD`` (auto-on for XPU)."""
+    """Tri-state resolver for ``VLLM_TRITON_USE_TD``.
+
+    Unset auto-selects the TD path on XPU only, mirroring the attention
+    dispatcher in ``triton_attn.py``. ``1``/``0`` force it on/off regardless
+    of hardware; forcing ``1`` where it cannot compile (see
+    ``moe_use_td_hw_supported``) fails at ptxas. Blackwell CUDA (sm100+) can
+    compile it but is opt-in only, pending validation.
+    """
     override = envs.VLLM_TRITON_USE_TD
     if override is None:
         return current_platform.is_xpu()

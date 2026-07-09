@@ -36,6 +36,9 @@ from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     batched_fused_marlin_moe,
     fused_marlin_moe,
 )
+from vllm.model_executor.layers.fused_moe.utils import (
+    moe_use_td_hw_supported,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_permute_bias,
 )
@@ -306,6 +309,12 @@ def test_fused_moe(
 ):
     if use_td and not hasattr(tl, "make_tensor_descriptor"):
         pytest.skip("Triton < 3.6 lacks tl.make_tensor_descriptor")
+    if use_td and not moe_use_td_hw_supported():
+        pytest.skip(
+            "tensor_descriptor.gather requires XPU or NVIDIA Blackwell "
+            "(sm100+); lowers to tile::gather4 (tcgen05/TMEM), which ptxas "
+            "rejects on Hopper (sm90) and earlier"
+        )
     monkeypatch.setenv("VLLM_TRITON_USE_TD", "1" if use_td else "0")
     set_random_seed(7)
 

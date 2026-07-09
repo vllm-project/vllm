@@ -33,6 +33,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.triton_utils.allocation import set_triton_allocator
 from vllm.utils.platform_utils import get_device_name_as_file_name
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -439,6 +440,8 @@ def fused_moe_kernel(
 
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
+    # TD gather and the SWAP_AB accumulator layout are mutually exclusive.
+    tl.static_assert(not (USE_TD and SWAP_AB))
     if USE_TD:
         # ``tt.descriptor_gather`` requires block_shape[0] == 1 and i32 idx.
         m_td = num_valid_tokens // top_k
@@ -787,12 +790,16 @@ def invoke_fused_moe_triton_kernel(
     else:
         SWAP_AB = False
 
-    warn_if_moe_use_td_ineffective(
-        "TRITON",
-        is_quantized=(
-            use_fp8_w8a8 or use_int8_w8a8 or use_int8_w8a16 or use_int4_w4a16
-        ),
-    )
+    is_quantized = use_fp8_w8a8 or use_int8_w8a8 or use_int8_w8a16 or use_int4_w4a16
+    warn_if_moe_use_td_ineffective("TRITON", is_quantized=is_quantized)
+
+    # TD path is unvalidated under quantization; fall back to the pointer path.
+    use_td = resolve_moe_use_td() and not is_quantized
+    if use_td:
+        # The TD path builds a tensor descriptor inside the kernel, which
+        # requires a PyTorch-backed scratch allocator to be registered
+        # (Triton raises "no allocator was set" otherwise on CUDA).
+        set_triton_allocator(A.device)
 
     if use_fp8_w8a8 or use_int8_w8a8:
         assert B_scale is not None
@@ -876,7 +883,7 @@ def invoke_fused_moe_triton_kernel(
         HAS_BIAS=HAS_BIAS,
         BLOCK_SIZE_K=BLOCK_SIZE_K,
         SWAP_AB=SWAP_AB,
-        USE_TD=resolve_moe_use_td(),
+        USE_TD=use_td,
         **config,
     )
 
