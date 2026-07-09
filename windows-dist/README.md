@@ -54,51 +54,24 @@ setup.bat
 
 ## How to Run
 
-### Option A: API Server (with Chat UI)
+After install, activate your venv and set `HIP_PATH`, then:
 
 ```powershell
-# Set ROCm path (or let sitecustomize.py do it)
+# Set your ROCm path
 $env:HIP_PATH = "C:\Program Files\AMD\ROCm\7.13"
 
-# Start the server
-python -m vllm.entrypoints.openai.api_server `
-    --model F:\VLLM-Models\Qwen2.5-3B-Instruct `
-    --port 8001 `
-    --enforce-eager `
-    --dtype float16
+# Start the API server (chat UI at http://localhost:8001)
+python -m vllm.entrypoints.openai.api_server --model F:\VLLM-Models\Qwen2.5-3B-Instruct --enforce-eager --dtype float16 --port 8001
 ```
 
-Then open **http://localhost:8001/** for the dark-theme chat UI, or use the OpenAI API at `http://localhost:8001/v1`.
+Open **http://localhost:8001/** for the chat UI, or use the OpenAI-compatible API at `http://localhost:8001/v1`.
 
-### Option B: Python Script
-
-```python
-from vllm import LLM, SamplingParams
-
-llm = LLM(
-    model="F:/VLLM-Models/Qwen2.5-3B-Instruct",
-    dtype="float16",
-    enforce_eager=True,
-    max_model_len=4096,
-)
-
-sp = SamplingParams(temperature=0, max_tokens=64)
-output = llm.generate(["What is the capital of France?"], sp)
-print(output[0].outputs[0].text)
-```
-
-### Option C: Benchmark
+You need a model downloaded first. Get Qwen2.5-3B-Instruct (~5.8 GB, works great on 16 GB VRAM):
 
 ```powershell
-python scripts/benchmark_model.py --model F:\VLLM-Models\Qwen2.5-3B-Instruct --num-prompts 10 --max-tokens 64
+pip install huggingface_hub
+python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='Qwen/Qwen2.5-3B-Instruct', local_dir=r'F:\VLLM-Models\Qwen2.5-3B-Instruct')"
 ```
-
-### Expected Performance (RX 9070 XT, 16 GB VRAM)
-
-| Model | Tokens/s | VRAM |
-|-------|----------|------|
-| OPT-125M | ~90 | <1 GB |
-| Qwen2.5-3B-Instruct | ~24 | 5.8 GB |
 
 ## How It Works
 
