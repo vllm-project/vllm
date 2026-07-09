@@ -254,3 +254,11 @@ vllm/grpc/vllm_engine_pb2.pyi
 
 # Ignore generated cpu headers 
 csrc/cpu/cpu_attn_dispatch_generated.h
+
+.venv312/
+*.pyd
+.webui_secret_key
+server_stdout.txt
+server_stderr.txt
+_triton_debug.txt
+_triton_import_debug.txt
