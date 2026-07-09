@@ -434,6 +434,8 @@ def _get_backend_priorities(
             ]
 
     backends = []
+    # TRITON_ATTN first (doesn't require _C.pyd), then ROCM_ATTN
+    backends.append(AttentionBackendEnum.TRITON_ATTN)
     # ROCM_ATTN uses (2, num_blocks, ...) KV cache layout which is
     # incompatible with KV connectors that require blocks-first layout.
     if not use_kv_connector:
@@ -442,7 +444,6 @@ def _get_backend_priorities(
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
     if is_aiter_found_and_supported():
         backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
-    backends.append(AttentionBackendEnum.TRITON_ATTN)
     backends.append(AttentionBackendEnum.TURBOQUANT)
 
     return backends
