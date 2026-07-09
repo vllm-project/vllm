@@ -285,6 +285,93 @@ def test_mxfp8_native_moe(T, H, inter, E, top_k):
 
 
 # --------------------------------------------------------------------------- #
+# Native MXFP8 grouped GEMM (dot_scaled) vs pure-PyTorch grouped matmul
+# --------------------------------------------------------------------------- #
+def _ref_grouped_gemm(a_deq, w_deq, topk_ids, a_div, num_valid, mul_weight=None):
+    """Pure-PyTorch reference for ``_grouped_gemm_mxfp8``.
+
+    For each routed (expanded) token ``tid in [0, num_valid)`` the kernel writes
+    ``out[tid] = a[tid // a_div] @ w[expert(tid)].T`` (fp32 accumulate), optionally
+    scaled by ``mul_weight[tid]``. The expert for ``tid`` is ``topk_ids.flatten()
+    [tid]`` (row-major expansion: ``tid = token*top_k + slot``). This is computed
+    here with plain ``torch.matmul`` on the dequantized operands — independent of
+    the Triton ``dot_scaled`` path and of the (separate) aiter backend.
+    """
+    eids = topk_ids.reshape(-1)
+    n = w_deq.shape[1]
+    out = torch.empty(num_valid, n, dtype=torch.float32, device=a_deq.device)
+    for tid in range(num_valid):
+        e = int(eids[tid].item())
+        out[tid] = a_deq[tid // a_div].float() @ w_deq[e].float().T
+        if mul_weight is not None:
+            out[tid] *= float(mul_weight[tid].item())
+    return out
+
+
+@requires_gfx950
+@pytest.mark.parametrize("T,N,K,E,top_k", [(8, 256, 128, 8, 2), (5, 512, 256, 16, 4)])
+@pytest.mark.parametrize("weighted", [False, True])
+@torch.inference_mode()
+def test_mxfp8_grouped_gemm_native(T, N, K, E, top_k, weighted):
+    """Directly exercise ``_grouped_gemm_mxfp8`` against a non-Triton reference.
+
+    Covers both call modes used by ``fused_moe_mxfp8_native``:
+      * ``weighted=False`` -> g1: ``a_div=top_k`` (a-row shared across the top_k
+        expansions of a token), no per-token weight.
+      * ``weighted=True``  -> g2: ``a_div=1`` (one a-row per expansion), output
+        scaled by ``topk_weights``.
+    """
+    from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
+        _grouped_gemm_mxfp8,
+    )
+    from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
+        moe_align_block_size,
+    )
+
+    torch.manual_seed(0)
+    block_m = 64
+    a_div = 1 if weighted else top_k
+    m_routed = T * top_k
+    # a-rows: g1 reads one row per token (a_div=top_k); g2 one per expansion.
+    a_rows = m_routed if weighted else T
+    a_bf16 = torch.randn(a_rows, K, device=DEVICE, dtype=torch.bfloat16) * 0.5
+    w_bf16 = torch.randn(E, N, K, device=DEVICE, dtype=torch.bfloat16) * 0.1
+    a_fp8, a_scale = _mxfp8_e4m3_quantize_torch(a_bf16, is_sf_swizzled_layout=False)
+    w_fp8, w_scale = _mxfp8_e4m3_quantize_torch(w_bf16, is_sf_swizzled_layout=False)
+
+    logits = torch.randn(T, E, device=DEVICE, dtype=torch.float32)
+    topk_weights, topk_ids = logits.softmax(dim=-1).topk(top_k, dim=-1)
+    topk_weights = topk_weights.to(torch.float32)
+    topk_ids = topk_ids.to(torch.int32)
+    mul = topk_weights.reshape(-1) if weighted else None
+
+    sorted_ids, expert_ids, num_post = moe_align_block_size(
+        topk_ids, block_m, E, None, ignore_invalid_experts=False
+    )
+    got = _grouped_gemm_mxfp8(
+        a_fp8,
+        a_scale,
+        w_fp8,
+        w_scale,
+        sorted_ids,
+        expert_ids,
+        num_post,
+        m_routed,
+        top_k,
+        block_m,
+        torch.bfloat16,
+        a_div=a_div,
+        mul_weight_by=mul,
+    )
+    # Reference: dequant the SAME bits the kernel reads, plain torch matmul.
+    a_deq = dequant_mxfp8_to_bf16(a_fp8, a_scale)
+    w_deq = dequant_mxfp8_to_bf16(w_fp8, w_scale)
+    ref = _ref_grouped_gemm(a_deq, w_deq, topk_ids, a_div, m_routed, mul)
+    assert got.shape == (m_routed, N)
+    assert _relerr(got, ref) < 5e-2
+
+
+# --------------------------------------------------------------------------- #
 # MXFP8 linear emulation: BF16-at-load (default) vs per-step dequant + switch
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("shape", [(512, 2048), (1, 6144)])
@@ -335,3 +422,97 @@ def test_mxfp8_linear_emulation_bf16_at_load(
     out = kernel.apply_weights(layer, x)
     assert out.dtype == act_dtype  # dtype-match preserved (no tl.dot/F.linear crash)
     assert _relerr(out.float(), out_ref.float()) < 2e-2
+
+
+# ── EP expert_mask handling for the FlyDSL (AITER_MXFP8) MoE ────────────────
+# Regression for the EP + aiter-master-switch interaction: under expert
+# parallelism ``RoutedExperts.expert_map`` hands the experts either the 0/1
+# ``expert_mask`` (aiter master ON, ``rocm_aiter_fmoe_enabled``) or vLLM's -1
+# index map (master OFF). ``AiterMxfp8Experts.apply`` must forward the right 0/1
+# mask to aiter in BOTH cases. The old code always rebuilt the mask via
+# ``(expert_map >= 0)``; on the already-0/1 mask that collapses to all-ones (no
+# experts masked out) and EP output becomes garbage (no accuracy).
+def _capture_expert_mask(expert_map, *, rocm_aiter_fmoe_enabled, global_num_experts):
+    """Drive the real ``AiterMxfp8Experts.apply`` mask branch and capture the
+    ``expert_mask`` it forwards to ``rocm_aiter_ops.fused_moe``."""
+    from types import SimpleNamespace
+    from unittest import mock
+
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (
+        AiterMxfp8Experts,
+    )
+
+    experts = object.__new__(AiterMxfp8Experts)  # bypass heavy __init__
+    experts.moe_config = SimpleNamespace(
+        rocm_aiter_fmoe_enabled=rocm_aiter_fmoe_enabled
+    )
+    experts.quant_config = SimpleNamespace(gemm1_clamp_limit=None)
+    experts.w1_scale_val = None
+    experts.w2_scale_val = None
+
+    captured = {}
+
+    def _fake_fused_moe(hidden_states, w1, w2, tw, ti, *, expert_mask, **kw):
+        captured["expert_mask"] = expert_mask
+        return torch.zeros_like(hidden_states)
+
+    w1 = torch.zeros(1, device=DEVICE)
+    w2 = torch.zeros(1, device=DEVICE)
+    out = torch.zeros(4, 8, device=DEVICE, dtype=torch.bfloat16)
+    hidden = torch.zeros(4, 8, device=DEVICE, dtype=torch.bfloat16)
+    tw = torch.ones(4, 2, device=DEVICE)
+    ti = torch.zeros(4, 2, dtype=torch.int32, device=DEVICE)
+
+    with mock.patch.object(rocm_aiter_ops, "fused_moe", side_effect=_fake_fused_moe):
+        experts.apply(
+            output=out,
+            hidden_states=hidden,
+            w1=w1,
+            w2=w2,
+            topk_weights=tw,
+            topk_ids=ti,
+            activation=None,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            a1q_scale=None,
+            a2_scale=None,
+            workspace13=None,
+            workspace2=None,
+            expert_tokens_meta=None,
+            apply_router_weight_on_input=False,
+        )
+    return captured["expert_mask"]
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+def test_aiter_mxfp8_ep_expert_mask_both_master_modes():
+    """Both aiter-master forms must yield the SAME correct 0/1 aiter mask;
+    guards the EP+master regression (mask must not collapse to all-ones)."""
+    from vllm.model_executor.layers.fused_moe.expert_map_manager import (
+        determine_expert_map,
+    )
+
+    E, ep_size, ep_rank = 8, 2, 0  # rank owns global experts 0..3
+    # master OFF: vLLM's -1 index map
+    _, idx_map, _ = determine_expert_map(ep_size, ep_rank, E, return_expert_mask=False)
+    # master ON: 0/1 mask (+ trailing sentinel) that RoutedExperts forwards
+    _, _, ep_mask = determine_expert_map(ep_size, ep_rank, E, return_expert_mask=True)
+
+    idx_map = idx_map.to(DEVICE)
+    ep_mask = ep_mask.to(DEVICE)
+
+    # Expected aiter expert_mask: 0/1 over global ids + trailing sentinel slot.
+    expected = torch.tensor([1, 1, 1, 1, 0, 0, 0, 0, 0], dtype=torch.int32)
+
+    got_off = _capture_expert_mask(
+        idx_map, rocm_aiter_fmoe_enabled=False, global_num_experts=E
+    )
+    got_on = _capture_expert_mask(
+        ep_mask, rocm_aiter_fmoe_enabled=True, global_num_experts=E
+    )
+
+    assert torch.equal(got_off.cpu().to(torch.int32), expected)
+    # master ON forwards the prebuilt mask unchanged (NOT collapsed to all-ones)
+    assert torch.equal(got_on.cpu().to(torch.int32), ep_mask.cpu().to(torch.int32))
+    assert got_on.sum().item() == 4  # exactly the 4 local experts, not all 9

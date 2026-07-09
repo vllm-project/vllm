@@ -19,6 +19,7 @@
 #   MODEL_NAMES              - model to test (default: Qwen/Qwen3-0.6B)
 #   KV_CACHE_MEMORY_BYTES    - GPU KV cache size in bytes (default: 268435456 = 256 MiB)
 #   BLOCK_SIZE               - KV cache block size (default: 128)
+#   ATTENTION_BACKEND        - optional attention backend for vllm serve
 #   VLLM_SERVE_EXTRA_ARGS    - comma-separated extra args for vllm serve
 set -xe
 
@@ -34,9 +35,11 @@ fi
 KV_CACHE_MEMORY_BYTES=${KV_CACHE_MEMORY_BYTES:-268435456}  # 256 MiB
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-2048}
 BLOCK_SIZE=${BLOCK_SIZE:-128}
+ATTENTION_BACKEND=${ATTENTION_BACKEND:-}
 VLLM_SERVE_EXTRA_ARGS=${VLLM_SERVE_EXTRA_ARGS:-}
 
-GIT_ROOT=$(git rev-parse --show-toplevel)
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+GIT_ROOT="${GIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)}"
 
 # ── KV transfer config ──────────────────────────────────────────────────
 
@@ -110,6 +113,9 @@ run_tests_for_model() {
       BASE_CMD="${BASE_CMD} $arg"
     done
   fi
+  if [[ -n "$ATTENTION_BACKEND" ]]; then
+    BASE_CMD="${BASE_CMD} --attention-backend $ATTENTION_BACKEND"
+  fi
   eval "$BASE_CMD &"
 
   # ── Start decode instance ──
@@ -132,6 +138,9 @@ run_tests_for_model() {
     for arg in "${extra_args[@]}"; do
       BASE_CMD="${BASE_CMD} $arg"
     done
+  fi
+  if [[ -n "$ATTENTION_BACKEND" ]]; then
+    BASE_CMD="${BASE_CMD} --attention-backend $ATTENTION_BACKEND"
   fi
   eval "$BASE_CMD &"
 

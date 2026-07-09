@@ -10,10 +10,13 @@ import pybase64
 from PIL import Image
 
 from vllm import envs
+from vllm.logger import init_logger
 
 from ..video import VIDEO_LOADER_REGISTRY
 from .base import MediaIO
 from .image import ImageMediaIO
+
+logger = init_logger(__name__)
 
 
 class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
@@ -28,6 +31,24 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
         default_kwargs: dict[str, Any] | None,
         runtime_kwargs: dict[str, Any] | None,
     ) -> dict[str, Any]:
+        if runtime_kwargs:
+            # Block request-level selection of GPU video backends that
+            # were not configured (and VRAM-reserved) at startup.
+            for key in ("video_backend", "backend"):
+                requested = runtime_kwargs.get(key)
+                if requested and VIDEO_LOADER_REGISTRY.backend_requires_gpu(requested):
+                    static_val = (default_kwargs or {}).get(key)
+                    if static_val != requested:
+                        logger.warning_once(
+                            "Stripping request-level %s=%r: GPU video "
+                            "backend not configured at startup.",
+                            key,
+                            requested,
+                        )
+                        runtime_kwargs = {
+                            k: v for k, v in runtime_kwargs.items() if k != key
+                        }
+
         merged = super().merge_kwargs(default_kwargs, runtime_kwargs)
         # fps and num_frames interact with each other, so if either is
         # overridden at request time, wipe the other from defaults to

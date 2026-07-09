@@ -2191,6 +2191,28 @@ async fn non_stream_chat_returns_json_response() {
     assert_eq!(json["usage"]["prompt_tokens"], 22);
     assert_eq!(json["usage"]["completion_tokens"], 3);
     assert_eq!(json["usage"]["total_tokens"], 25);
+
+    // Unset optional fields are serialized as explicit `null` on
+    // non-streaming responses...
+    let response_object = json.as_object().expect("response object");
+    let choice = json["choices"][0].as_object().expect("choice object");
+    let message = choice["message"].as_object().expect("message object");
+    for (object, key) in [
+        (response_object, "system_fingerprint"),
+        (response_object, "prompt_token_ids"),
+        (response_object, "kv_transfer_params"),
+        (choice, "logprobs"),
+        (choice, "stop_reason"),
+        (choice, "token_ids"),
+        (message, "reasoning"),
+    ] {
+        assert!(
+            object.contains_key(key) && object[key].is_null(),
+            "expected explicit null `{key}`: {json}"
+        );
+    }
+    // ...except `tool_calls`, which Python pops from the payload when empty.
+    assert!(!message.contains_key("tool_calls"), "{json}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2956,6 +2978,25 @@ async fn non_stream_completions_return_json_response() {
     assert_eq!(json["choices"][0]["text"], "hi");
     assert_eq!(json["choices"][0]["finish_reason"], "stop");
     assert_eq!(json["usage"]["completion_tokens"], 3);
+
+    // Unset optional fields are serialized as explicit `null` on
+    // non-streaming responses.
+    let response_object = json.as_object().expect("response object");
+    let choice = json["choices"][0].as_object().expect("choice object");
+    for (object, key) in [
+        (response_object, "system_fingerprint"),
+        (response_object, "kv_transfer_params"),
+        (choice, "logprobs"),
+        (choice, "stop_reason"),
+        (choice, "prompt_logprobs"),
+        (choice, "token_ids"),
+        (choice, "prompt_token_ids"),
+    ] {
+        assert!(
+            object.contains_key(key) && object[key].is_null(),
+            "expected explicit null `{key}`: {json}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4371,10 +4412,10 @@ async fn include_reasoning_false_suppresses_reasoning_in_non_stream_chat() {
     let json: serde_json::Value = serde_json::from_str(&text).expect("decode json");
 
     assert_eq!(json["choices"][0]["message"]["content"], "answer");
+    // Suppressed fields are serialized as explicit `null` on non-streaming
+    // responses.
     assert!(
-        json["choices"][0]["message"]
-            .as_object()
-            .is_some_and(|message| !message.contains_key("reasoning")),
+        json["choices"][0]["message"]["reasoning"].is_null(),
         "{text}"
     );
 }
@@ -4476,14 +4517,14 @@ async fn include_reasoning_false_suppresses_non_stream_output_metadata() {
     let choice = json["choices"][0].as_object().expect("choice object");
 
     assert_eq!(json["choices"][0]["message"]["content"], "answer");
+    // Suppressed fields are serialized as explicit `null` on non-streaming
+    // responses.
     assert!(
-        json["choices"][0]["message"]
-            .as_object()
-            .is_some_and(|message| !message.contains_key("reasoning")),
+        json["choices"][0]["message"]["reasoning"].is_null(),
         "{text}"
     );
-    assert!(!choice.contains_key("logprobs"), "{text}");
-    assert!(!choice.contains_key("token_ids"), "{text}");
+    assert!(choice["logprobs"].is_null(), "{text}");
+    assert!(choice["token_ids"].is_null(), "{text}");
     assert!(json["prompt_token_ids"].is_array(), "{text}");
 }
 
@@ -4755,7 +4796,10 @@ async fn reset_prefix_cache_route_sends_expected_utility_call() {
     let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    assert!(body.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("json body"),
+        json!({"success": true})
+    );
     engine_task.await.expect("mock engine task");
 }
 

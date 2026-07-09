@@ -81,7 +81,7 @@ def assert_encoder_kv_cache_spec(engine: LLM) -> None:
     assert spec.sliding_window == cdiv(750, 4) + 1 == 189
     assert (
         spec.max_admission_blocks_per_request(
-            max_num_batched_tokens=1,
+            max_in_flight_tokens=1,
             max_model_len=vllm_config.model_config.max_model_len,
         )
         == 13

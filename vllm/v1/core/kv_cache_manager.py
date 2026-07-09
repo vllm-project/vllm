@@ -8,10 +8,14 @@ from typing import Literal, overload
 
 from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.logger import init_logger
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    CrossAttentionSpec,
+    EncoderOnlyAttentionSpec,
     KVCacheConfig,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
@@ -114,7 +118,7 @@ class KVCacheManager:
         max_model_len: int,
         scheduler_block_size: int,
         hash_block_size: int,
-        max_num_batched_tokens: int | None = None,
+        max_in_flight_tokens: int | None = None,
         enable_caching: bool = True,
         use_eagle: bool = False,
         log_stats: bool = False,
@@ -128,8 +132,8 @@ class KVCacheManager:
         # When unset, fall back to `max_model_len` so the recycling-aware cap
         # collapses to the prior (uncapped) admission behavior. The scheduler
         # always supplies the real value at runtime.
-        if max_num_batched_tokens is None:
-            max_num_batched_tokens = max_model_len
+        if max_in_flight_tokens is None:
+            max_in_flight_tokens = max_model_len
 
         self.enable_caching = enable_caching
         self.use_eagle = use_eagle
@@ -143,7 +147,7 @@ class KVCacheManager:
         self.coordinator = get_kv_cache_coordinator(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
-            max_num_batched_tokens=max_num_batched_tokens,
+            max_in_flight_tokens=max_in_flight_tokens,
             use_eagle=self.use_eagle,
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
@@ -397,9 +401,12 @@ class KVCacheManager:
         # insufficient free blocks.
         # Should call this function before allocating new blocks to reduce
         # the number of evicted blocks.
+        # Free on the processed-token basis: in-flight steps' attention windows
+        # still read blocks below the optimistic boundary, and rejected spec
+        # tokens can roll it back.
         self.coordinator.remove_skipped_blocks(
             request.request_id,
-            total_computed_tokens,
+            max(0, total_computed_tokens - request.num_in_flight_tokens),
             num_prompt_tokens=request.num_prompt_tokens,
         )
 
@@ -472,7 +479,7 @@ class KVCacheManager:
     def remove_skipped_blocks(
         self,
         request_id: str,
-        total_computed_tokens: int,
+        processed_computed_tokens: int,
         num_prompt_tokens: int | None = None,
     ) -> None:
         """Remove the blocks that are no longer needed from `blocks` and replace
@@ -480,12 +487,12 @@ class KVCacheManager:
 
         Args:
             request_id: The request ID.
-            total_computed_tokens: The total number of computed tokens, including
-                local computed tokens and external computed tokens.
+            processed_computed_tokens: Computed-token prefix length covering
+                fully processed and committed tokens only (safe to free).
             num_prompt_tokens: Optional prompt length for R-SWA gap eviction.
         """
         self.coordinator.remove_skipped_blocks(
-            request_id, total_computed_tokens, num_prompt_tokens
+            request_id, processed_computed_tokens, num_prompt_tokens
         )
 
     def pop_blocks_for_free(self, request: Request) -> list[KVCacheBlock]:
@@ -592,6 +599,26 @@ class KVCacheManager:
     def get_block_ids(self, request_id: str) -> tuple[list[int], ...]:
         """Get the block ids of a request."""
         return self.get_blocks(request_id).get_block_ids()
+
+    def get_block_ids_for_computed_tokens(
+        self,
+        request_id: str,
+        num_computed_tokens: int,
+    ) -> tuple[list[int], ...]:
+        """Get block ids covering the request's computed tokens."""
+        block_ids = self.get_block_ids(request_id)
+        clipped_block_ids: list[list[int]] = []
+        for group, ids in zip(self.kv_cache_config.kv_cache_groups, block_ids):
+            spec = group.kv_cache_spec
+            if not isinstance(spec, AttentionSpec) or isinstance(
+                spec, (CrossAttentionSpec, EncoderOnlyAttentionSpec)
+            ):
+                clipped_block_ids.append(ids)
+                continue
+
+            num_valid_blocks = cdiv(num_computed_tokens, spec.block_size)
+            clipped_block_ids.append(ids[:num_valid_blocks])
+        return tuple(clipped_block_ids)
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """Cache the blocks for the request, if enabled.

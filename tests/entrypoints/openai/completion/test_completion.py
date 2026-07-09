@@ -9,6 +9,8 @@ import regex as re
 from openai import BadRequestError
 
 from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import get_tokenizer
 
 # any model with a chat template should work here
@@ -730,3 +732,38 @@ async def test_invalid_grammar(client: openai.AsyncOpenAI, model_name: str):
                 "structured_outputs": {"grammar": invalid_simplified_sql_grammar}
             },
         )
+
+
+# Unit tests for bad_words in CompletionRequest.to_sampling_params()
+def test_completion_request_bad_words_to_sampling_params():
+    """bad_words should be forwarded to SamplingParams (parity with chat)."""
+    request = CompletionRequest(
+        model="test-model",
+        prompt="Hello",
+        bad_words=["foo", "bar"],
+        max_tokens=10,
+    )
+
+    sampling_params = request.to_sampling_params(
+        max_tokens=10,
+        default_sampling_params={},
+    )
+
+    assert isinstance(sampling_params, SamplingParams)
+    assert sampling_params.bad_words == ["foo", "bar"]
+
+
+def test_completion_request_bad_words_default_empty():
+    """bad_words defaults to an empty list, matching the chat endpoint."""
+    request = CompletionRequest(
+        model="test-model",
+        prompt="Hello",
+        max_tokens=10,
+    )
+
+    assert request.bad_words == []
+    sampling_params = request.to_sampling_params(
+        max_tokens=10,
+        default_sampling_params={},
+    )
+    assert sampling_params.bad_words == []

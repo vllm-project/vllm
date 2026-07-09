@@ -89,14 +89,22 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
-        # mtp_block's MoE output is left un-reduced (skip_final_all_reduce); the
+        # mtp_block's MoE output is left un-reduced (reduce_results=False); the
         # main model fuses that all-reduce into the next norm, but here the
         # recycle hidden is consumed directly, so reduce it now.
         hidden_states = tensor_model_parallel_all_reduce(hidden_states)
-        # Return the pre-final-norm recycle hidden (re-fed as the next spec
-        # step's previous_hidden_states); shared_head norm is applied in
-        # compute_logits. Matches the V2-runner / deepseek_v4 MTP contract.
-        return residual + hidden_states
+        # Recycle the POST-final-norm hidden into the next draft step. The
+        # residual-add is fused into the final RMSNorm so it is computed
+        # exactly once, and the result is returned for both tuple positions:
+        # the draft-logits hidden (compute_logits applies the LM head only) and
+        # the recycled previous_hidden_states. Recycling the pre-final-norm
+        # hidden mismatches the draft model's hnorm and lowers MTP acceptance;
+        # post-norm recycle matches deepseek_mtp.py (PR #45895). The tuple form
+        # is understood by both the V2 speculator (isinstance-tuple check) and
+        # the legacy proposer (model_returns_tuple is True for the
+        # DeepSeekMTPModel architecture).
+        hidden_states, _ = self.shared_head.norm(hidden_states, residual)
+        return hidden_states, hidden_states
 
 
 class DeepseekV32MultiTokenPredictor(nn.Module):
@@ -168,9 +176,10 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
     ) -> torch.Tensor:
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
-        return self.logits_processor(
-            mtp_layer.shared_head.head, mtp_layer.shared_head(hidden_states)
-        )
+        # hidden_states is already post-final-norm (produced in the layer
+        # forward and recycled as-is); apply the LM head only, without a
+        # second RMSNorm.
+        return self.logits_processor(mtp_layer.shared_head.head, hidden_states)
 
 
 class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):

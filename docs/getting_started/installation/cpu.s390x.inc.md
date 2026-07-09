@@ -48,10 +48,10 @@ Execute the following commands to build and install vLLM from source.
 
 ```bash
     uv pip install -v \
-        --extra-index-url https://download.pytorch.org/whl/cpu \
-        --torch-backend auto \
         -r requirements/build/cpu.txt \
         -r requirements/cpu.txt \
+        --torch-backend cpu \
+        --index-strategy unsafe-best-match && \
     VLLM_TARGET_DEVICE=cpu python setup.py bdist_wheel && \
         uv pip install dist/*.whl
 ```

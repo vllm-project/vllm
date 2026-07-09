@@ -9,8 +9,10 @@ PREFILL_GPU_ID=${PREFILL_GPU_ID:-0}
 DECODE_GPU_ID=${DECODE_GPU_ID:-1}
 MODEL=${MODEL:-"ibm-granite/granite-4.0-h-tiny"}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.8}
+VLLM_SERVE_EXTRA_ARGS=${VLLM_SERVE_EXTRA_ARGS:-}
+ATTENTION_BACKEND=${ATTENTION_BACKEND:-FLASHINFER}
 
-echo "Running Mamba prefix cache test (GPUs: P=$PREFILL_GPU_ID, D=$DECODE_GPU_ID, model=$MODEL)"
+echo "Running Mamba prefix cache test (GPUs: P=$PREFILL_GPU_ID, D=$DECODE_GPU_ID, model=$MODEL, backend=$ATTENTION_BACKEND)"
 
 KV_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
 
@@ -36,6 +38,14 @@ cleanup_instances() {
 
 cleanup_instances
 
+EXTRA_ARGS=()
+if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
+  IFS=',' read -r -a EXTRA_ARGS <<< "$VLLM_SERVE_EXTRA_ARGS"
+fi
+if [[ -n "$ATTENTION_BACKEND" ]]; then
+  EXTRA_ARGS+=(--attention-backend "$ATTENTION_BACKEND")
+fi
+
 # Start prefill instance
 PREFILL_PORT=8001
 CUDA_VISIBLE_DEVICES=$PREFILL_GPU_ID \
@@ -51,8 +61,8 @@ vllm serve $MODEL \
   --trust-remote-code \
   --enable-prefix-caching \
   --mamba-cache-mode all \
-  --attention-backend FLASHINFER \
-  --kv-transfer-config "$KV_CONFIG" &
+  --kv-transfer-config "$KV_CONFIG" \
+  "${EXTRA_ARGS[@]}" &
 
 # Start decode instance
 DECODE_PORT=8002
@@ -69,8 +79,8 @@ vllm serve $MODEL \
   --trust-remote-code \
   --enable-prefix-caching \
   --mamba-cache-mode all \
-  --attention-backend FLASHINFER \
-  --kv-transfer-config "$KV_CONFIG" &
+  --kv-transfer-config "$KV_CONFIG" \
+  "${EXTRA_ARGS[@]}" &
 
 echo "Waiting for prefill instance on port $PREFILL_PORT..."
 wait_for_server "$PREFILL_PORT"

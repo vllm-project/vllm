@@ -355,9 +355,11 @@ _fi_sparse_workspace: torch.Tensor | None = None
 def _get_workspace_buffer(device: torch.device) -> torch.Tensor:
     global _fi_sparse_workspace
     if _fi_sparse_workspace is None:
+        # FlashInfer's CuteDSL MLA-decode tactic requires an int8 workspace;
+        # the trtllm-gen path views it as uint8, so int8 is safe for all backends.
         _fi_sparse_workspace = torch.zeros(
             envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,
-            dtype=torch.uint8,
+            dtype=torch.int8,
             device=device,
         )
     return _fi_sparse_workspace

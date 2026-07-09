@@ -764,7 +764,7 @@ def _convert_sublayer_to_humming(
     Returns:
         Tuple of (converted_weight_schema, converted_input_schema)
     """
-    from humming.schema import HummingWeightSchema
+    from vllm.utils.humming import HummingWeightSchema
 
     if isinstance(weight_schema, HummingWeightSchema):
         # Already in Humming format
@@ -814,7 +814,7 @@ def _prepare_and_transform_sublayer(
 
     This calls Humming's prepare_layer_meta and transform_humming_layer.
     """
-    from humming.layer import HummingMethod
+    from vllm.utils.humming import HummingMethod
 
     HummingMethod.prepare_layer_meta(
         layer=layer,
@@ -866,7 +866,7 @@ def _process_single_sublayer(
     Returns:
         Tuple of (final_weight_schema, final_input_schema)
     """
-    from humming.schema import HummingWeightSchema
+    from vllm.utils.humming import HummingWeightSchema
 
     # Step 1: Convert from checkpoint format to humming format if needed
     current_weight_schema, current_input_schema = _convert_sublayer_to_humming(
@@ -958,12 +958,10 @@ def convert_to_humming_moe_kernel_format(
                 "Must provide either weight_schema/input_schema or quant_config"
             )
 
-        from humming.layer import HummingInputSchema
-        from humming.schema import BaseWeightSchema
-
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
             humming_is_layer_skipped,
         )
+        from vllm.utils.humming import BaseWeightSchema, HummingInputSchema
 
         if weight_schema is None:
             weight_schema = BaseWeightSchema.from_config(quant_config)

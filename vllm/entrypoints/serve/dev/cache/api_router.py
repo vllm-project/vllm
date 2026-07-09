@@ -3,7 +3,7 @@
 
 
 from fastapi import APIRouter, FastAPI, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
@@ -29,18 +29,19 @@ async def reset_prefix_cache(
     Optionally, if the query parameter `reset_external=true`
     also resets the external (connector-managed) prefix cache.
 
-    Note that we currently do not check if the prefix cache
-    is successfully reset in the API server.
+    Returns `{"success": bool}`. The reset fails (`success=false`) while
+    blocks are still held, e.g. by running requests or in-flight async KV
+    offload transfers; callers may retry.
 
     Example:
        POST /reset_prefix_cache?reset_external=true
     """
     logger.info("Resetting prefix cache...")
 
-    await engine_client(raw_request).reset_prefix_cache(
+    success = await engine_client(raw_request).reset_prefix_cache(
         reset_running_requests, reset_external
     )
-    return Response(status_code=200)
+    return JSONResponse(content={"success": bool(success)})
 
 
 @router.post("/reset_mm_cache")

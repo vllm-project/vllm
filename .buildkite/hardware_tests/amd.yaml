@@ -1,5 +1,28 @@
 group: Hardware - AMD Build
+
+# ROCm image flow:
+# 1. Refresh the long-lived ROCm base image only when Dockerfile.rocm_base changes.
+# 2. Build ci_base from either the stable base or the freshly refreshed base.
+# 3. Build the per-commit ROCm CI image and smoke-test it before GPU jobs run.
 steps:
+  - label: "AMD: :docker: refresh ROCm base"
+    key: refresh-rocm-base-amd
+    depends_on: []
+    device: amd_cpu
+    no_plugin: true
+    commands:
+      - bash .buildkite/scripts/rocm/refresh-base-image.sh
+    env:
+      DOCKER_BUILDKIT: "1"
+      BUILDKIT_PROGRESS: "tty"
+      TERM: "xterm-256color"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+
   # Ensure ci_base is up-to-date before building the test image.
   # Compares a content hash of ci_base-affecting files against the remote
   # image label. If hashes match the build is skipped (< 30 s); if they
@@ -7,13 +30,16 @@ steps:
   - label: "AMD: :docker: ensure ci_base"
     key: ensure-ci-base-amd
     soft_fail: false
-    depends_on: []
+    depends_on:
+      - refresh-rocm-base-amd
     device: amd_cpu
     no_plugin: true
     commands:
-      - bash .buildkite/scripts/ci-bake-rocm.sh ci-base-rocm-ci-with-deps
+      - bash .buildkite/scripts/rocm/build-ci-base.sh
     env:
       DOCKER_BUILDKIT: "1"
+      BUILDKIT_PROGRESS: "tty"
+      TERM: "xterm-256color"
       VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
       PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
       REMOTE_VLLM: "1"
@@ -33,35 +59,12 @@ steps:
     device: amd_cpu
     no_plugin: true
     commands:
-      - |
-        if [[ "${ROCM_CI_ARTIFACT_ONLY:-0}" == "1" ]]; then
-          echo "ROCM_CI_ARTIFACT_ONLY=1; building ROCm wheel artifact only"
-          IMAGE_TAG="" bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-artifacts
-        else
-          bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-wheel
-        fi
-      - |
-        docker run --rm --network=none --entrypoint /bin/bash "rocm/vllm-ci:${BUILDKITE_COMMIT}" -ec '
-          if [ ! -d /vllm-workspace ]; then echo Missing directory: /vllm-workspace >&2; exit 1; fi
-          if [ ! -d /vllm-workspace/tests ]; then echo Missing directory: /vllm-workspace/tests >&2; exit 1; fi
-          if [ ! -d /vllm-workspace/src/vllm ]; then echo Missing directory: /vllm-workspace/src/vllm >&2; exit 1; fi
-          if [ ! -x /vllm-workspace/src/vllm/vllm-rs ]; then echo Missing executable: /vllm-workspace/src/vllm/vllm-rs >&2; exit 1; fi
-          command -v python3
-          command -v uv
-          command -v pytest
-          if ! command -v amd-smi >/dev/null 2>&1 && ! command -v rocminfo >/dev/null 2>&1; then
-            echo No ROCm CLI found in image >&2
-            exit 1
-          fi
-          python3 - <<PY
-        import torch, vllm
-        print(torch.__version__)
-        print(vllm.__version__)
-        PY
-          echo AMD image smoke OK
-        '
+      - bash .buildkite/scripts/rocm/build-test-image.sh
+      - bash .buildkite/scripts/rocm/smoke-test-image.sh
     env:
       DOCKER_BUILDKIT: "1"
+      BUILDKIT_PROGRESS: "tty"
+      TERM: "xterm-256color"
       VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
       PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
       IMAGE_TAG: "rocm/vllm-ci:$BUILDKITE_COMMIT"

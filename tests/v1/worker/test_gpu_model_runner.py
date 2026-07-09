@@ -18,6 +18,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.reasoning import ReasoningConfig
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
@@ -253,6 +254,31 @@ def test_select_common_block_size_uses_largest_shared_int():
 
     selected_size = select_common_block_size(256, [backend_a, backend_b])
     assert selected_size == 64
+
+
+def test_reasoning_config_without_custom_logitsprocs_does_not_need_output_token_ids(
+    dist_init,
+):
+    vllm_config = get_vllm_config()
+    assert vllm_config.model_config.logits_processors is None
+    reasoning_config = ReasoningConfig(
+        reasoning_start_str="<think>", reasoning_end_str="</think>"
+    )
+    reasoning_config._reasoning_start_token_ids = [1]
+    reasoning_config._reasoning_end_token_ids = [2]
+    vllm_config.reasoning_config = reasoning_config
+
+    with set_current_vllm_config(vllm_config):
+        model_config = vllm_config.model_config
+        num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
+        head_size = model_config.get_head_size()
+        vllm_config.compilation_config.static_forward_context["layer.0"] = Attention(
+            num_heads, head_size, 0.1
+        )
+        runner = GPUModelRunner(vllm_config, torch.device("cpu"))
+
+    assert runner.input_batch.thinking_budget_state_holder is not None
+    assert runner.input_batch.logitsprocs_need_output_token_ids is False
 
 
 @pytest.mark.skip_global_cleanup

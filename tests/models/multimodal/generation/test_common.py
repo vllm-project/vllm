@@ -388,20 +388,6 @@ VLM_TEST_SETTINGS = {
         stop_str=["<｜end▁of▁sentence｜>", "<｜begin▁of▁sentence｜>"],
         image_size_factors=[(1.0,), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
     ),
-    "fuyu": VLMTestInfo(
-        models=["adept/fuyu-8b"],
-        test_type=VLMTestType.IMAGE,
-        prompt_formatter=lambda img_prompt: f"{img_prompt}\n",
-        img_idx_to_prompt=lambda idx: "",
-        max_model_len=2048,
-        max_num_seqs=2,
-        auto_cls=AutoModelForImageTextToText,
-        use_tokenizer_eos=True,
-        vllm_output_post_proc=model_utils.fuyu_vllm_to_hf_output,
-        num_logprobs=10,
-        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
-        marks=[large_gpu_mark(min_gb=32)],
-    ),
     "gemma3": VLMTestInfo(
         models=["google/gemma-3-4b-it"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
@@ -906,7 +892,6 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         use_tokenizer_eos=True,
         auto_cls=AutoModelForImageTextToText,
-        hf_model_kwargs=model_utils.qianfan_ocr_hf_model_kwargs("baidu/Qianfan-OCR"),
     ),
     "qwen2_vl": VLMTestInfo(
         models=["Qwen/Qwen2-VL-2B-Instruct"],

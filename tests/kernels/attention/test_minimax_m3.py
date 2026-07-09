@@ -150,7 +150,7 @@ def _reference_index_topk(
         num_blocks = (seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
         pages = block_table[req_id, :num_blocks]
         k = index_kv_cache[pages].reshape(num_blocks * BLOCK_SIZE, -1)
-        score = torch.einsum("qhd,kd->hqk", q.float(), k.float()) * sm_scale
+        score = sm_scale * torch.einsum("qhd,kd->hqk", q.float(), k.float())
 
         q_pos = prefix_len + torch.arange(q_len, device=idx_q.device)
         k_pos = torch.arange(k.shape[0], device=idx_q.device)
@@ -621,11 +621,12 @@ def test_decode_index_topk_fp8(num_idx_heads: int):
         init_blocks=init_blocks,
         local_blocks=local_blocks,
         num_kv_heads=num_idx_heads,
-        sm_scale=head_dim**-0.5,
         decode_query_len=decode_query_len,
+        max_decode_query_len=decode_query_len,
     )
     # Reference from the DEQUANTIZED fp8 values (the kernel computes the fp8 QK
-    # in fp32, so it must match an fp32 matmul of the same e4m3 values).
+    # in fp32 with no scaling, so it must match an unscaled fp32 matmul of the
+    # same e4m3 values).
     expected = _reference_index_topk(
         idx_q.float(),
         index_kv_cache.float(),
@@ -636,7 +637,6 @@ def test_decode_index_topk_fp8(num_idx_heads: int):
         topk,
         init_blocks,
         local_blocks,
-        head_dim**-0.5,
     )
     _assert_topk_indices_equal_unordered(actual, expected)
 

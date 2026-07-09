@@ -195,7 +195,7 @@ class Moondream3Processor(ProcessorMixin):
         The moondream3 model uses a custom tokenizer from 'moondream/starmie-v1'
         instead of having tokenizer files in the model repo.
         """
-        from transformers import AutoTokenizer, PreTrainedTokenizerFast
+        from transformers import AutoTokenizer, TokenizersBackend
         from transformers.utils import cached_file
 
         tokenizer = kwargs.pop("tokenizer", None)
@@ -237,7 +237,7 @@ class Moondream3Processor(ProcessorMixin):
                     "tokenizer.json",
                     **cached_file_kwargs,
                 )
-                return PreTrainedTokenizerFast(
+                return TokenizersBackend(
                     tokenizer_file=tokenizer_file,
                     clean_up_tokenization_spaces=False,
                 )

@@ -533,6 +533,7 @@ class MistralToolParser(ToolParser):
 
             if prefix == "item" and event == "start_map":
                 self.streaming_state = StreamingState.WAITING_FOR_TOOL_KEY
+                self.starting_new_tool = True
             if prefix == "item" and event == "map_key" and value == "name":
                 self.streaming_state = StreamingState.PARSING_NAME
             if prefix == "item.name" and event == "string":
@@ -640,18 +641,10 @@ class MistralToolParser(ToolParser):
 
             # Given the parsed text and the possible streaming state change,
             # let's add to the tool delta
-            if (
-                (streaming_state_before_parse != self.streaming_state)
-                and streaming_state_before_parse
-                in [StreamingState.WAITING_FOR_TOOL_START, StreamingState.TOOL_COMPLETE]
-                and self.streaming_state
-                not in [
-                    StreamingState.ALL_TOOLS_COMPLETE,
-                    StreamingState.TOOL_COMPLETE,
-                    StreamingState.WAITING_FOR_TOOL_START,
-                ]
-            ):
-                # starting a new tool call
+            # start_map is the authoritative new-tool signal and survives
+            # batched deltas, unlike comparing pre/post streaming states
+            if self.starting_new_tool:
+                self.starting_new_tool = False
                 if current_tool_call_modified:
                     if self.current_tool_mistral_id is not None:
                         current_tool_call.id = self.current_tool_mistral_id

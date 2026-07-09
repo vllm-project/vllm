@@ -157,8 +157,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         except Exception as e:
             raise RuntimeError(
                 f"Object store tier connectivity probe failed — check bucket, "
-                f"endpoint_override, access_key, secret_key, and scheme. "
-                f"Error: {e}"
+                f"endpoint_override, and scheme. If using explicit credentials "
+                f"verify access_key and secret_key; otherwise ensure the AWS "
+                f"SDK default credential chain is configured (IAM role, env "
+                f"vars, credential file). Error: {e}"
             ) from e
 
     def _exists(self, obj_key: str) -> bool:

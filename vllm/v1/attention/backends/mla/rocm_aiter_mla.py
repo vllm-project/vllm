@@ -196,6 +196,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         kv_cache_dtype_str = getattr(vllm_config.cache_config, "cache_dtype", "auto")
         if kv_cache_dtype_str in ("fp8", "fp8_e4m3", "fp8_e5m2"):
             kv_cache_dtype_str = "fp8"
+            q_dtype = dtypes.fp8
         else:
             kv_cache_dtype_str = "bf16"
         kv_dtype = dtypes.d_dtypes.get(kv_cache_dtype_str, dtypes.bf16)

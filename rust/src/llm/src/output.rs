@@ -248,12 +248,7 @@ impl Stream for GenerateOutputStream {
         };
 
         let received_at = current_unix_timestamp_secs();
-        self.request_metrics.observe_output(
-            raw.engine_index,
-            raw.timestamp,
-            received_at,
-            &raw.output,
-        );
+        self.request_metrics.observe_output(raw.timestamp, received_at, &raw.output);
 
         let raw = raw.output;
 

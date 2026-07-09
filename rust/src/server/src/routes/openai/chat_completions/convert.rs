@@ -830,7 +830,7 @@ mod tests {
         let message = ChatCompletionMessage {
             role: AssistantRole,
             content: Some("answer".to_string()),
-            tool_calls: None,
+            tool_calls: Vec::new(),
             reasoning: Some("inner".to_string()),
         };
         let message_json = serde_json::to_value(message).expect("message serializes");

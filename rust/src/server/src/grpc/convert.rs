@@ -94,6 +94,7 @@ pub fn to_text_request(
         data_parallel_rank: None,
         reasoning_parser_kwargs: None,
         lora_request: None,
+        arrival_time: None,
     })
 }
 

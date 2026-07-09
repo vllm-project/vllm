@@ -63,6 +63,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,
+    process_fp8_weight_channel_strategy,
     process_fp8_weight_tensor_strategy_moe,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -604,8 +605,11 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight = Parameter(layer.weight.t(), requires_grad=False)
-        layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
+        weight, weight_scale, _ = process_fp8_weight_channel_strategy(
+            layer.weight, layer.weight_scale.data
+        )
+        layer.weight = Parameter(weight.t(), requires_grad=False)
+        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
         self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
@@ -905,6 +909,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             fp8_backend=self.fp8_backend,
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
+            layer=layer,
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
@@ -951,6 +956,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
+            layer=layer,
         )
 
     def apply_monolithic(
@@ -1602,7 +1608,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
+            backend=self.nvfp4_backend,
             routing_tables=layer._expert_routing_tables(),
+            layer=layer,
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
@@ -1616,6 +1624,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             a13_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
+            layer=layer,
         )
 
     @property
@@ -2162,6 +2171,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             fp8_backend=self.mxfp8_backend,
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
+            layer=layer,
         )
 
         # No native MXFP8 MoE kernel on this device (e.g. gfx942): the emulation
@@ -2207,6 +2217,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             gemm1_alpha=getattr(layer, "swiglu_alpha", None),
             gemm1_beta=getattr(layer, "swiglu_beta", None),
+            layer=layer,
         )
 
     def apply_monolithic(
@@ -2450,16 +2461,29 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 if key.startswith(parent_dot):
                     return info["quant_algo"].upper()
 
-        # 4. Parent-prefix fallback for fused projections (qkv_proj, gate_up_proj).
-        for candidate in self._quantized_layer_prefix_candidates(prefix):
-            parent_dot = candidate.rsplit(".", 1)[0] + "."
-            algos = {
-                info["quant_algo"].upper()
-                for key, info in self.quantized_layers.items()
-                if key.startswith(parent_dot) and "." not in key[len(parent_dot) :]
-            }
-            if len(algos) == 1:
-                return algos.pop()
+        # 4. Parent-prefix fallback for fused projections whose config lists
+        # shard names instead of vLLM's packed module name.
+        fused_projection_shards = {
+            "qkv_proj": ("q_proj", "k_proj", "v_proj"),
+            "gate_up_proj": ("gate_proj", "up_proj"),
+        }
+        shard_names = fused_projection_shards.get(proj_name)
+        if shard_names is not None:
+            for candidate in self._quantized_layer_prefix_candidates(prefix):
+                parent_dot = candidate.rsplit(".", 1)[0] + "."
+                shard_algos: set[str] = set()
+                for shard_name in shard_names:
+                    shard_prefix = f"{parent_dot}{shard_name}"
+                    if shard_prefix in self.quantized_layers:
+                        algo = self.quantized_layers[shard_prefix]["quant_algo"].upper()
+                        shard_algos.add(algo)
+                if len(shard_algos) == 1:
+                    return shard_algos.pop()
+                if len(shard_algos) > 1:
+                    raise ValueError(
+                        f"Mixed quant_algo within fused layer {prefix}: "
+                        f"{shard_algos}. All shards must use the same quantization."
+                    )
 
         return None
 

@@ -29,7 +29,9 @@ pub struct GenerateRequest {
 impl Normalizable for GenerateRequest {}
 
 /// Mirrors the Python vLLM `GenerateResponseChoice` class.
-#[serde_with::skip_serializing_none]
+///
+/// Do not skip serializing `None` fields here: non-streaming response types
+/// should serialize `None` as explicit `null`.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateResponseChoice {
     pub index: u32,
@@ -58,7 +60,6 @@ pub(super) struct GenerateStreamResponse {
 }
 
 /// Mirrors the Python vLLM `GenerateResponse` class.
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateResponse {
     pub request_id: String,
@@ -68,7 +69,6 @@ pub(super) struct GenerateResponse {
 }
 
 /// Mirrors the Python vLLM `Logprob` class used in prompt-logprobs payloads.
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateLogprob {
     pub logprob: f32,

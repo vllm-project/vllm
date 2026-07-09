@@ -233,7 +233,10 @@ class LlamaModel(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if input_embeds is None:
             input_embeds = self.embed_input_ids(input_ids)
-        assert hidden_states.shape[-1] == input_embeds.shape[-1]
+        torch._assert(
+            hidden_states.shape[-1] == input_embeds.shape[-1],
+            "hidden_states and input_embeds must have the same last dimension",
+        )
 
         residual = None
         for layer in self.layers:

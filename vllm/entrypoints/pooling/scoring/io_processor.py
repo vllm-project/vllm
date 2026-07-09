@@ -36,6 +36,39 @@ from .utils import (
 ScoringServeContext: TypeAlias = PoolingServeContext[ScoringRequest]
 
 
+def _apply_post_tokenization_to_token_type_ids(
+    tokenizer: Any,
+    tok_params: TokenizeParams,
+    token_type_ids: list[int],
+) -> list[int]:
+    pad_length = tok_params.pad_prompt_tokens
+    if pad_length is not None and pad_length < 0:
+        pad_length = tok_params.max_input_tokens
+
+    if pad_length is not None and pad_length > len(token_type_ids):
+        pad_token_type_id = token_type_ids[-1] if token_type_ids else 0
+        token_type_ids = token_type_ids + [pad_token_type_id] * (
+            pad_length - len(token_type_ids)
+        )
+
+    max_length = tok_params.truncate_prompt_tokens
+    if max_length is not None and max_length < 0:
+        max_length = tok_params.max_input_tokens
+
+    if max_length is None or max_length >= len(token_type_ids):
+        return token_type_ids
+    if max_length == 0:
+        return token_type_ids[:0]
+
+    side = tok_params.truncation_side or (
+        tokenizer.truncation_side if tokenizer is not None else None
+    )
+    if side == "left":
+        return token_type_ids[-max_length:]
+
+    return token_type_ids[:max_length]
+
+
 class ScoringIOProcessor(PoolingIOProcessor):
     name: str
     pooling_task: PoolingTask
@@ -469,9 +502,16 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 else None,
             )
 
-            if token_type_ids := engine_prompt.pop("token_type_ids", None):
+            token_type_ids = engine_prompt.pop("token_type_ids", None)
+            tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
+
+            if token_type_ids is not None:
                 params = pooling_params.clone()
-                compressed = compress_token_type_ids(token_type_ids)
+                compressed = compress_token_type_ids(
+                    _apply_post_tokenization_to_token_type_ids(
+                        self.tokenizer, tok_params, token_type_ids
+                    )
+                )
                 params.extra_kwargs = {
                     **(params.extra_kwargs or {}),
                     "compressed_token_type_ids": compressed,
@@ -480,7 +520,6 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             else:
                 pooling_params_list.append(pooling_params)
 
-            tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
             if engine_prompt_extras:
                 target_prompt = extract_target_prompt(self.model_config, engine_prompt)
                 target_prompt.update(engine_prompt_extras)

@@ -25,7 +25,6 @@ FROM ubuntu:22.04 AS base-common
 WORKDIR /workspace
 
 ARG PYTHON_VERSION=3.12
-ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
 
 ARG max_jobs=32
 ENV MAX_JOBS=${max_jobs}
@@ -53,8 +52,6 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 ENV UV_HTTP_TIMEOUT=500
 
 # Install Python dependencies
-ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
-ENV UV_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE="copy"
 
@@ -64,7 +61,7 @@ COPY requirements/cpu.txt requirements/cpu.txt
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --upgrade pip && \
-    uv pip install -r requirements/cpu.txt
+    uv pip install -r requirements/cpu.txt --torch-backend cpu
 
 ARG TARGETARCH
 ENV TARGETARCH=${TARGETARCH}
@@ -149,7 +146,7 @@ RUN if [ "$TARGETARCH" = "arm64" ] && [ "$VLLM_CPU_X86" != "0" ]; then \
 COPY requirements/build/cpu.txt requirements/build/cpu.txt
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r requirements/build/cpu.txt
+    uv pip install -r requirements/build/cpu.txt --torch-backend cpu
 
 COPY . .
 
@@ -205,7 +202,7 @@ RUN case "$(uname -m)" in \
     esac
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r requirements/test/cpu.txt
+    uv pip install -r requirements/test/cpu.txt --torch-backend cpu
 
 ######################### DEV IMAGE #########################
 FROM vllm-build AS vllm-dev
@@ -231,7 +228,7 @@ COPY --from=vllm-test-deps /vllm-workspace/requirements/test/cpu.txt requirement
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/lint.txt && \
-    uv pip install -r requirements/test/cpu.txt && \
+    uv pip install -r requirements/test/cpu.txt --torch-backend cpu && \
     pre-commit install --hook-type pre-commit --hook-type commit-msg
 
 ENTRYPOINT ["bash"]

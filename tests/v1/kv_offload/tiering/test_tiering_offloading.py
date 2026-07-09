@@ -23,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.v1.kv_offload.base import (
     LookupResult,
     OffloadingCounterMetadata,
+    OffloadingEvent,
     OffloadKey,
     OffloadPolicy,
     ReqContext,
@@ -241,6 +242,24 @@ class TestTieringOffloadingManager:
     def _start_request(self, req_context: ReqContext = _CTX):
         if req_context.req_id not in self.manager._req_state:
             self.manager.on_new_request(req_context)
+
+    def test_take_events_aggregates_tier_owned_events(self, manager_setup):
+        primary_event = OffloadingEvent(to_keys([1]), "CPU", removed=False)
+        secondary_event1 = OffloadingEvent(to_keys([2]), "tier-1", removed=False)
+        secondary_event2 = OffloadingEvent(to_keys([3]), "tier-2", removed=True)
+
+        self.primary_tier.take_events = MagicMock(return_value=[primary_event])
+        self.secondary_tier1.take_events = MagicMock(return_value=[secondary_event1])
+        self.secondary_tier2.take_events = MagicMock(return_value=[secondary_event2])
+
+        assert list(self.manager.take_events()) == [
+            primary_event,
+            secondary_event1,
+            secondary_event2,
+        ]
+        self.primary_tier.take_events.assert_called_once_with()
+        self.secondary_tier1.take_events.assert_called_once_with()
+        self.secondary_tier2.take_events.assert_called_once_with()
 
     def test_basic_store_to_primary(self, manager_setup):
         """Test basic store operation to primary tier."""

@@ -192,10 +192,6 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         if isinstance(attn_out, tuple):
             attn_out, lse = attn_out[0], attn_out[1]
 
-        # Unpad output back to v_head_dim if we padded V
-        if self.requires_v_padding:
-            attn_out = attn_out[..., : v.shape[-1]]
-
         # Remain consistent with old `flash_attn_varlen_func` where there
         # is only one output tensor if `return_softmax_lse` is False.
         if return_softmax_lse:

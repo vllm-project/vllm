@@ -16,6 +16,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
+from vllm.utils.torch_utils import np_to_pinned_tensor
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -467,6 +468,7 @@ class CommonAttentionMetadata:
     _num_computed_tokens_cpu: torch.Tensor | None = None
 
     _num_computed_tokens_cache: torch.Tensor | None = None
+    _token_to_req_indices_cache: torch.Tensor | None = None
 
     def batch_size(self) -> int:
         return self.seq_lens.shape[0]
@@ -514,6 +516,31 @@ class CommonAttentionMetadata:
             query_lens = self.query_start_loc[1:] - self.query_start_loc[:-1]
             self._num_computed_tokens_cache = self.seq_lens - query_lens
         return self._num_computed_tokens_cache
+
+    def token_to_req_indices(self, buffer: torch.Tensor) -> torch.Tensor:
+        """Build or reuse the per-token request index mapping."""
+        num_tokens = self.num_actual_tokens
+        if self._token_to_req_indices_cache is not None:
+            assert self._token_to_req_indices_cache.device == buffer.device
+            assert self._token_to_req_indices_cache.dtype == torch.int32
+            assert self._token_to_req_indices_cache.shape[0] >= num_tokens
+            return self._token_to_req_indices_cache[:num_tokens]
+
+        starts = np.asarray(self.query_start_loc_cpu, dtype=np.int32)
+        query_lens = np.diff(starts)
+        token_to_req_indices = np.repeat(
+            np.arange(query_lens.shape[0], dtype=np.int32), query_lens
+        )
+        num_mapped_tokens = token_to_req_indices.shape[0]
+        assert buffer.shape[0] >= max(num_mapped_tokens, num_tokens)
+        # copy from CPU to GPU
+        buffer[:num_mapped_tokens].copy_(
+            np_to_pinned_tensor(token_to_req_indices), non_blocking=True
+        )
+        if num_mapped_tokens < num_tokens:
+            buffer[num_mapped_tokens:num_tokens].zero_()
+        self._token_to_req_indices_cache = buffer[: max(num_mapped_tokens, num_tokens)]
+        return self._token_to_req_indices_cache[:num_tokens]
 
     # TODO(lucas): remove once we have FULL-CG spec-decode support
     def unpadded(

@@ -439,7 +439,7 @@ Additionally, to enable structured output, you'll need to create a new `Reasoner
         end_token: str = "</think>"
 
         @classmethod
-        def from_tokenizer(cls, tokenizer: PreTrainedTokenizer) -> Reasoner:
+        def from_tokenizer(cls, tokenizer: PythonBackend) -> Reasoner:
             return cls(
                 start_token_id=tokenizer.encode("<think>", add_special_tokens=False)[0],
                 end_token_id=tokenizer.encode("</think>", add_special_tokens=False)[0],

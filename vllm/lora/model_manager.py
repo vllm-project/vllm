@@ -117,6 +117,7 @@ class LoRAModelManager:
         self.packed_modules: dict[str, list[str]] = {}
         self.modules: dict[str, BaseLayerWithLoRA] = {}
         self._last_mapping: LoRAMapping | None = None
+        self._last_slot_layout: tuple[int | None, ...] | None = None
         is_moe = is_moe_model(self.model)
         self._is_moe = is_moe
 
@@ -1147,9 +1148,14 @@ class LoRAModelManager:
         return True
 
     def set_adapter_mapping(self, mapping: LoRAMapping) -> None:
-        if self._last_mapping != mapping:
+        # The punica metadata derives from the slot layout as well as the
+        # mapping: an out-of-band add_lora() can LRU-evict and reassign slots
+        # while the running batch, and thus the mapping, is unchanged.
+        slot_layout = tuple(self.lora_index_to_id)
+        if self._last_mapping != mapping or self._last_slot_layout != slot_layout:
             self._set_adapter_mapping(mapping)
             self._last_mapping = mapping
+            self._last_slot_layout = slot_layout
 
     def remove_adapter(self, adapter_id: int) -> bool:
         self.deactivate_adapter(adapter_id)
