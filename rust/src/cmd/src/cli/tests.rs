@@ -48,6 +48,8 @@ fn serve_args_forward_python_flags_with_separator() {
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
+                        disable_uvicorn_access_log: false,
+                        disable_access_log_for_endpoints: None,
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
@@ -405,6 +407,47 @@ fn serve_passes_enable_prompt_tokens_details_into_config() {
 }
 
 #[test]
+fn serve_passes_access_log_exclusions_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--disable-uvicorn-access-log",
+        "--disable-access-log-for-endpoints",
+        " /health , ,/metrics ",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert!(args.runtime.disable_uvicorn_access_log);
+    assert_eq!(
+        args.runtime.disable_access_log_for_endpoints.as_deref(),
+        Some(" /health , ,/metrics ")
+    );
+
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert!(!config.access_log.enabled);
+    // Whitespace trimmed and empty entries dropped, leaving exactly two paths.
+    assert_eq!(config.access_log.excluded_endpoints.len(), 2);
+    assert!(config.access_log.is_excluded("/health"));
+    assert!(config.access_log.is_excluded("/metrics"));
+    assert!(!config.access_log.is_excluded("/v1/completions"));
+}
+
+#[test]
+fn serve_defaults_access_log_enabled_with_no_exclusions() {
+    let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"]).unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert!(config.access_log.enabled);
+    assert!(config.access_log.excluded_endpoints.is_empty());
+}
+
+#[test]
 fn serve_passes_tls_into_config() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -744,6 +787,8 @@ fn frontend_args_accept_json() {
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
+                        disable_uvicorn_access_log: false,
+                        disable_access_log_for_endpoints: None,
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
@@ -1266,6 +1311,8 @@ fn serve_args_accept_handshake_aliases() {
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
+                        disable_uvicorn_access_log: false,
+                        disable_access_log_for_endpoints: None,
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
@@ -1411,6 +1458,10 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 enable_prompt_tokens_details: false,
                 enable_request_id_headers: false,
             },
+            access_log: AccessLogConfig {
+                enabled: true,
+                excluded_endpoints: {},
+            },
             cors: CorsConfig {
                 allow_origins: [
                     "*",
@@ -1494,6 +1545,10 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
                 enable_request_id_headers: false,
+            },
+            access_log: AccessLogConfig {
+                enabled: true,
+                excluded_endpoints: {},
             },
             cors: CorsConfig {
                 allow_origins: [
@@ -1596,6 +1651,10 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
                 enable_request_id_headers: false,
+            },
+            access_log: AccessLogConfig {
+                enabled: true,
+                excluded_endpoints: {},
             },
             cors: CorsConfig {
                 allow_origins: [
