@@ -103,6 +103,34 @@ def _merge_dcp_topk_global(
         stable_topk_from_gathered_candidates_cutedsl,
     )
 
+    # Prefer the symmetric-memory fused merge: each rank packs its candidates
+    # into a peer-mapped buffer and a fused selector reads all ranks in place,
+    # replacing the NCCL all-gather launch entirely (device-side flags keep it
+    # FULL-cudagraph capturable). Falls back to the all-gather path when
+    # symmetric memory is unavailable or the configuration is unsupported.
+    from vllm.model_executor.kernels.attention.dsa.dcp_topk_symm_mem import (
+        get_dcp_topk_symm_mem_workspace,
+    )
+
+    # First call happens during the memory-profiling run, which uses the
+    # maximum batched-token count, so its row count bounds later calls.
+    workspace = get_dcp_topk_symm_mem_workspace(
+        topk_indices.shape[0],
+        topk_indices.shape[1],
+        dcp_world_size,
+    )
+    if workspace is not None:
+        workspace.merge(
+            logits,
+            topk_indices,
+            topk_tokens,
+            dcp_rank,
+            dcp_world_size,
+            cp_interleave,
+            row_starts,
+        )
+        return
+
     packed = torch.empty(
         (*topk_indices.shape, 2),
         dtype=torch.float32,
