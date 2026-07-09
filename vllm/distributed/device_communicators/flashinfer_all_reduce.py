@@ -285,7 +285,7 @@ class FlashInferAllReduce:
                 self.world_size,
             )
             return
-        self.max_workspace_size = max_workspace_size * MiB
+        self.max_workspace_size = int(max_workspace_size * MiB)
         self.max_num_tokens = 0
         self.disabled = False
 
@@ -293,7 +293,9 @@ class FlashInferAllReduce:
         """Ensure the all reduce workspace is initialized."""
         if self.max_num_tokens == 0:
             element_size = torch.tensor([], dtype=dtype, device="cpu").element_size()
-            self.max_num_tokens = self.max_workspace_size // (hidden_dim * element_size)
+            self.max_num_tokens = int(
+                self.max_workspace_size // (hidden_dim * element_size)
+            )
         workspace = get_fi_ar_workspace(
             world_size=self.world_size,
             rank=self.rank,
@@ -323,7 +325,9 @@ class FlashInferAllReduce:
         num_tokens, hidden_dim = input_tensor.shape
         if not self.max_num_tokens:
             element_size = torch.tensor([], dtype=input_tensor.dtype).element_size()
-            self.max_num_tokens = self.max_workspace_size // (hidden_dim * element_size)
+            self.max_num_tokens = int(
+                self.max_workspace_size // (hidden_dim * element_size)
+            )
 
         if num_tokens > self.max_num_tokens:
             return False

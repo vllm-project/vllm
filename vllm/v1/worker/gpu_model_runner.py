@@ -4,6 +4,7 @@
 import functools
 import gc
 import itertools
+import os
 import threading
 import time
 from collections import defaultdict
@@ -4070,6 +4071,24 @@ class GPUModelRunner(
         if self.routed_experts_initialized:
             self.routed_experts_capturer.clear_buffer()
 
+        trace_enabled = os.environ.get("AG2_VLLM_LONG_PREFILL_TRACE") == "1"
+        trace_sync = os.environ.get("AG2_VLLM_LONG_PREFILL_TRACE_SYNC") == "1"
+        trace_min_tokens = int(
+            os.environ.get("AG2_VLLM_LONG_PREFILL_TRACE_MIN_TOKENS", "8192")
+        )
+        trace_parts: list[tuple[str, float]] = []
+        trace_last = time.perf_counter()
+
+        def mark_trace(name: str) -> None:
+            nonlocal trace_last
+            if not trace_enabled:
+                return
+            if trace_sync and torch.cuda.is_available():
+                torch.cuda.synchronize()
+            now = time.perf_counter()
+            trace_parts.append((name, now - trace_last))
+            trace_last = now
+
         # If ngram_gpu is used, we need to copy the scheduler_output to avoid
         # the modification has influence on the scheduler_output in engine core process.
         # The replace is much faster than deepcopy.
@@ -4093,12 +4112,14 @@ class GPUModelRunner(
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        mark_trace("start")
         with (
             record_function_or_nullcontext("gpu_model_runner: preprocess"),
             self.synchronize_input_prep(),
         ):
             # Update persistent batch states.
             deferred_state_corrections_fn = self._update_states(scheduler_output)
+            mark_trace("update_states")
 
             if has_ec_transfer() and not get_ec_transfer().is_consumer:
                 with self.maybe_get_ec_connector_output(
@@ -4144,6 +4165,7 @@ class GPUModelRunner(
                 scheduler_output,
                 num_scheduled_tokens_np,
             )
+            mark_trace("prepare_inputs")
 
             cascade_attn_prefix_lens = None
             # Disable cascade attention when using microbatching (DBO)
@@ -4169,6 +4191,7 @@ class GPUModelRunner(
                 use_cascade_attn=cascade_attn_prefix_lens is not None,
                 num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
             )
+            mark_trace("determine_batch")
 
             logger.debug(
                 "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
@@ -4229,6 +4252,7 @@ class GPUModelRunner(
                     self.model.get_mamba_state_copy_func(),
                     mamba_bufs.preprocess,
                 )
+                mark_trace("preprocess_mamba")
                 # preprocess_mamba resets num_accepted_tokens_cpu to 1
                 # for requests whose state was copied to a new block.
                 # Re-sync to GPU so the mamba kernel reads from the
@@ -4266,6 +4290,7 @@ class GPUModelRunner(
                 num_tokens_unpadded=num_tokens_unpadded,
                 ubatch_slices=ubatch_slices_padded,
             )
+            mark_trace("slot_mappings")
 
             attn_metadata, spec_decode_common_attn_metadata = (
                 self._build_attention_metadata(
@@ -4282,6 +4307,7 @@ class GPUModelRunner(
                     slot_mappings=slot_mappings_by_group,
                 )
             )
+            mark_trace("attention_metadata")
 
             (
                 input_ids,
@@ -4293,6 +4319,7 @@ class GPUModelRunner(
             ) = self._preprocess(
                 scheduler_output, num_tokens_padded, intermediate_tensors
             )
+            mark_trace("preprocess")
 
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
@@ -4321,6 +4348,7 @@ class GPUModelRunner(
                 num_tokens_unpadded,
                 ubatch_slices_padded,
             )
+        mark_trace("before_forward")
         with (
             set_forward_context(
                 attn_metadata,
@@ -4346,6 +4374,7 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+        mark_trace("model_forward")
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -4404,6 +4433,7 @@ class GPUModelRunner(
                 )
                 assert broadcasted is not None
                 logits = broadcasted["logits"]
+        mark_trace("postprocess_logits")
 
         self.execute_model_state = ExecuteModelState(
             scheduler_output,
@@ -4423,6 +4453,24 @@ class GPUModelRunner(
         # previous model forward without breaking async scheduling.
         if deferred_state_corrections_fn:
             deferred_state_corrections_fn()
+            mark_trace("deferred_state_corrections")
+
+        if trace_enabled and num_scheduled_tokens >= trace_min_tokens:
+            computed = self.input_batch.num_computed_tokens_cpu[:num_reqs].tolist()
+            logger.warning(
+                "AG2_RUNNER_TRACE total_tokens=%d unpadded=%d padded=%d reqs=%d "
+                "max_sched=%d mode=%s batch=%s ubatch=%s computed=%s parts=%s",
+                num_scheduled_tokens,
+                num_tokens_unpadded,
+                num_tokens_padded,
+                num_reqs,
+                max_num_scheduled_tokens,
+                cudagraph_mode,
+                batch_desc,
+                should_ubatch,
+                computed,
+                ",".join(f"{name}:{dt:.6f}" for name, dt in trace_parts),
+            )
 
         return None
 

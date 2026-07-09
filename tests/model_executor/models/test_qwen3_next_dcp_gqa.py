@@ -6,7 +6,7 @@ from vllm.model_executor.models.qwen3_next import (
 )
 
 
-def test_dcp_replicates_overlapping_gqa_full_attention_heads():
+def test_dcp_keeps_overlapping_gqa_full_attention_heads_sharded():
     should_replicate, use_overlapping_gqa = _should_replicate_full_attention_heads(
         total_num_heads=24,
         total_num_kv_heads=4,
@@ -16,7 +16,7 @@ def test_dcp_replicates_overlapping_gqa_full_attention_heads():
     )
 
     assert use_overlapping_gqa
-    assert should_replicate
+    assert not should_replicate
 
 
 def test_overlapping_gqa_without_dcp_keeps_tp_partition():

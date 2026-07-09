@@ -19,6 +19,7 @@ instead of embedding feature-specific logic directly.
 
 import functools
 import gc
+import os
 import time
 from copy import deepcopy
 from typing import Any, NamedTuple
@@ -1119,14 +1120,40 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        trace_enabled = (
+            os.environ.get("AG2_VLLM_LONG_PREFILL_TRACE") == "1" and not dummy_run
+        )
+        trace_sync = os.environ.get("AG2_VLLM_LONG_PREFILL_TRACE_SYNC") == "1"
+        trace_min_tokens = int(
+            os.environ.get("AG2_VLLM_LONG_PREFILL_TRACE_MIN_TOKENS", "8192")
+        )
+        trace_parts: list[tuple[str, float]] = []
+        trace_last = time.perf_counter()
+
+        def mark_trace(name: str) -> None:
+            nonlocal trace_last
+            if not trace_enabled:
+                return
+            if trace_sync and torch.cuda.is_available():
+                torch.cuda.synchronize()
+            now = time.perf_counter()
+            trace_parts.append((name, now - trace_last))
+            trace_last = now
+
         if not dummy_run:
             # Update the request states.
             self.update_pp_decode_requests()
+            mark_trace("update_pp_decode_requests")
             self.finish_requests(scheduler_output)
+            mark_trace("finish_requests")
             self.free_states(scheduler_output)
+            mark_trace("free_states")
             self.add_requests(scheduler_output)
+            mark_trace("add_requests")
             self.update_requests(scheduler_output)
+            mark_trace("update_requests")
             self.block_tables.apply_staged_writes()
+            mark_trace("apply_staged_writes")
             if scheduler_output.total_num_scheduled_tokens == 0:
                 # No need to run the model.
                 empty_output = self.kv_connector.no_forward(scheduler_output)
@@ -1162,6 +1189,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             need_eager=is_profile or skip_compiled,
             num_active_loras=num_active_loras,
         )
+        mark_trace("dispatch_cg_and_sync_dp")
 
         if batch_desc.num_tokens == 0:
             # All DP ranks have zero tokens to run.
@@ -1172,7 +1200,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
             input_batch = self.prepare_inputs(scheduler_output, batch_desc)
+            mark_trace("prepare_inputs")
             block_tables, slot_mappings = self.prepare_attn(input_batch)
+            mark_trace("prepare_attn")
             # Mamba "align" pre-copy: migrate recurrent state across block
             # boundaries before the forward. Runs only on real batches, and
             # before model_state.prepare_attn gathers num_accepted_tokens so the
@@ -1183,6 +1213,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.kv_cache_config,
                 self.req_states.num_computed_tokens.gpu,
             )
+            mark_trace("preprocess_state")
 
             if self.lora_config:
                 # Activate LoRA adapters.
@@ -1192,6 +1223,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     input_batch.num_scheduled_tokens,
                 )
                 self._set_active_loras(*lora_inputs)
+                mark_trace("set_active_loras")
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
             input_batch = InputBatch.make_dummy(
@@ -1225,6 +1257,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.attn_groups,
                 self.kv_cache_config,
             )
+            mark_trace("model_state_prepare_attn")
 
         input_ids = input_batch.input_ids
         inputs_embeds = None
@@ -1262,6 +1295,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # values above.
             **self.model_state.prepare_inputs(input_batch, self.req_states),
         }
+        mark_trace("model_state_prepare_inputs")
         if not self.is_first_pp_rank:
             # Update for non-first PP ranks.
             model_inputs["input_ids"] = None
@@ -1282,6 +1316,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Update the EPLB meta.
         self.eplb.prepare_forward(self.model_config, input_batch.num_tokens)
+        mark_trace("eplb_prepare_forward")
 
         # Run model.
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
@@ -1290,7 +1325,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # because they are already copied to the CUDA graph input buffers.
             assert self.cudagraph_manager is not None
             self.kv_connector.pre_forward(scheduler_output)
+            mark_trace("kv_pre_forward")
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
+            mark_trace("model_forward")
         else:
             # For piecewise and eager mode, just call model().
             batch_descriptor = BatchDescriptor(
@@ -1311,6 +1348,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 is_padding=input_batch.is_padding,
             ):
                 self.kv_connector.pre_forward(scheduler_output)
+                mark_trace("kv_pre_forward")
                 if batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:
                     # Run the PIECEWISE graph (compiled PW cudagraph or breakable
                     # cudagraph, chosen inside run_pw_graph). cg_mode is only
@@ -1322,6 +1360,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 else:
                     # Eager (NONE): call the raw model directly.
                     model_output = self.model(**model_inputs)
+                mark_trace("model_forward")
 
         if self.is_last_pp_rank:
             if self.use_aux_hidden_state_outputs:
@@ -1351,6 +1390,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not self.is_last_pp_rank:
             # Non-last PP rank: return IntermediateTensors for sending.
             return output_intermediate_tensors
+        if trace_enabled and scheduler_output.total_num_scheduled_tokens >= trace_min_tokens:
+            logger.warning(
+                "AG2_RUNNER_TRACE_V2 total_tokens=%d padded=%d reqs=%d "
+                "max_sched=%d mode=%s batch=%s parts=%s",
+                scheduler_output.total_num_scheduled_tokens,
+                input_batch.num_tokens_after_padding,
+                input_batch.num_reqs,
+                max(scheduler_output.num_scheduled_tokens.values()),
+                batch_desc.cg_mode,
+                batch_desc,
+                ",".join(f"{name}:{dt:.6f}" for name, dt in trace_parts),
+            )
         return None
 
     @torch.inference_mode()

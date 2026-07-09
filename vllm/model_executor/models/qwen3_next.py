@@ -3,6 +3,7 @@
 """Inference-only Qwen3Next model."""
 
 import os
+import time
 from collections.abc import Iterable
 from itertools import islice
 
@@ -132,13 +133,8 @@ def _should_replicate_full_attention_heads(
         and total_num_kv_heads % tp_size != 0
         and tp_size % total_num_kv_heads != 0
     )
-    replicate_for_dcp_overlapping_gqa = (
-        use_overlapping_gqa
-        and dcp_size > 1
-        and enable_dcp_replicated_full_attention
-    )
     return (
-        total_num_heads % tp_size != 0 or replicate_for_dcp_overlapping_gqa,
+        total_num_heads % tp_size != 0,
         use_overlapping_gqa,
     )
 
@@ -322,6 +318,12 @@ class Qwen3NextAttention(nn.Module):
             should_replicate_full_attention
             and _experimental_replicate_uneven_full_attention()
         )
+        self.dcp_full_kv_attention_heads = (
+            use_overlapping_gqa
+            and dcp_size > 1
+            and envs.VLLM_EXPERIMENTAL_DCP_REPLICATED_FULL_ATTENTION
+            and not self.replicate_uneven_full_attention
+        )
         if self.replicate_uneven_full_attention:
             reason = (
                 "num_attention_heads is not divisible"
@@ -346,9 +348,22 @@ class Qwen3NextAttention(nn.Module):
             self.num_heads = self.total_num_heads // tp_size
         self.attn_head_partition = None
         use_overlapping_gqa = (
-            use_overlapping_gqa and not self.replicate_uneven_full_attention
+            use_overlapping_gqa
+            and not self.replicate_uneven_full_attention
+            and not self.dcp_full_kv_attention_heads
         )
-        if use_overlapping_gqa:
+        if self.dcp_full_kv_attention_heads:
+            # DCP sequence merging requires every DCP rank to expose the same
+            # KV-head layout for its sequence shard. Keep Q/O tensor-parallel
+            # sharded, but load all KV heads on each sequence shard.
+            self.attn_head_partition = make_attention_head_partition(
+                total_num_heads=self.total_num_heads,
+                total_num_kv_heads=self.total_num_kv_heads,
+                tp_size=tp_size,
+                tp_rank=tp_rank,
+            )
+            self.num_kv_heads = self.total_num_kv_heads
+        elif use_overlapping_gqa:
             self.attn_head_partition = make_attention_head_partition(
                 total_num_heads=self.total_num_heads,
                 total_num_kv_heads=self.total_num_kv_heads,
@@ -378,10 +393,14 @@ class Qwen3NextAttention(nn.Module):
         self.attn_output_gate = getattr(config, "attn_output_gate", True)
 
         qkv_proj_cls = (
-            QKVParallelLinearOverlappingGQA if use_overlapping_gqa else QKVParallelLinear
+            QKVParallelLinearOverlappingGQA
+            if use_overlapping_gqa or self.dcp_full_kv_attention_heads
+            else QKVParallelLinear
         )
         qkv_kwargs = {}
-        if self.attn_head_partition is not None:
+        if self.dcp_full_kv_attention_heads:
+            qkv_kwargs["kv_head_indices"] = tuple(range(self.total_num_kv_heads))
+        elif self.attn_head_partition is not None:
             qkv_kwargs["kv_head_indices"] = self.attn_head_partition.kv_head_indices
         self.qkv_proj = qkv_proj_cls(
             config.hidden_size,
@@ -439,6 +458,12 @@ class Qwen3NextAttention(nn.Module):
         self.attn.dcp_replicated_full_attention_heads = (
             self.replicate_uneven_full_attention
         )
+        self.attn.dcp_full_kv_attention_heads = self.dcp_full_kv_attention_heads
+        if self.dcp_full_kv_attention_heads:
+            assert self.attn_head_partition is not None
+            self.attn.dcp_local_kv_head_indices = (
+                self.attn_head_partition.kv_head_indices
+            )
 
         vllm_config = get_current_vllm_config_or_none()
         if vllm_config is not None:
@@ -697,11 +722,28 @@ class Qwen3NextDecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         positions: torch.Tensor = None,
     ):
+        trace_enabled = (
+            os.environ.get("AG2_VLLM_LAYER_PHASE_TRACE") == "1"
+            and _diagnostic_decoder_layer_full_boundary()
+        )
+        trace_sync = os.environ.get("AG2_VLLM_LAYER_PHASE_TRACE_SYNC") == "1"
+        trace_min_tokens = int(
+            os.environ.get("AG2_VLLM_LAYER_PHASE_TRACE_MIN_TOKENS", "8192")
+        )
+        token_count = int(hidden_states.shape[0])
+
+        def mark() -> float:
+            if trace_enabled and trace_sync and token_count >= trace_min_tokens:
+                torch.cuda.synchronize()
+            return time.perf_counter()
+
+        t0 = mark() if trace_enabled and token_count >= trace_min_tokens else 0.0
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        t1 = mark() if trace_enabled and token_count >= trace_min_tokens else 0.0
 
         self_attention_output = torch.empty_like(hidden_states)
         if self.layer_type == "linear_attention":
@@ -718,6 +760,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         else:
             raise ValueError("Invalid layer_type")
         hidden_states = self_attention_output
+        t2 = mark() if trace_enabled and token_count >= trace_min_tokens else 0.0
 
         if self.layer_scale:
             if len(hidden_states.shape) == 2:
@@ -731,7 +774,9 @@ class Qwen3NextDecoderLayer(nn.Module):
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        t3 = mark() if trace_enabled and token_count >= trace_min_tokens else 0.0
         hidden_states = self.mlp(hidden_states)
+        t4 = mark() if trace_enabled and token_count >= trace_min_tokens else 0.0
 
         if self.layer_scale:
             if len(hidden_states.shape) == 2:
@@ -747,6 +792,20 @@ class Qwen3NextDecoderLayer(nn.Module):
                     self.ffn_layer_scale.to(hidden_states.dtype) + 1
                 )
 
+        if trace_enabled and token_count >= trace_min_tokens:
+            logger.warning(
+                "AG2_LAYER_PHASE_TRACE layer=%s type=%s tokens=%d "
+                "input_norm=%.6f attention=%.6f post_norm=%.6f mlp=%.6f "
+                "total=%.6f",
+                self.prefix,
+                self.layer_type,
+                token_count,
+                t1 - t0,
+                t2 - t1,
+                t3 - t2,
+                t4 - t3,
+                t4 - t0,
+            )
         return hidden_states, residual
 
 
@@ -762,13 +821,38 @@ def qwen3_next_decoder_layer_full_forward(
     layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
+    trace_enabled = (
+        os.environ.get("AG2_VLLM_LAYER_TRACE") == "1"
+        and not torch.cuda.is_current_stream_capturing()
+    )
+    trace_sync = os.environ.get("AG2_VLLM_LONG_PREFILL_TRACE_SYNC") == "1"
+    trace_min_tokens = int(os.environ.get("AG2_VLLM_LAYER_TRACE_MIN_TOKENS", "8192"))
+    token_count = int(hidden_states.shape[0])
+    if trace_enabled and token_count >= trace_min_tokens and trace_sync:
+        torch.cuda.synchronize()
+    trace_t0 = time.perf_counter() if trace_enabled else 0.0
     next_hidden, next_residual = self._forward_impl(
         hidden_states=hidden_states,
         residual=residual,
         positions=positions,
     )
+    if trace_enabled and token_count >= trace_min_tokens and trace_sync:
+        torch.cuda.synchronize()
+    trace_t1 = time.perf_counter() if trace_enabled else 0.0
     hidden_out.copy_(next_hidden)
     residual_out.copy_(next_residual)
+    if trace_enabled and token_count >= trace_min_tokens:
+        if trace_sync:
+            torch.cuda.synchronize()
+        trace_t2 = time.perf_counter()
+        logger.warning(
+            "AG2_LAYER_TRACE layer=%s type=%s tokens=%d forward=%.6f copy=%.6f",
+            layer_name,
+            self.layer_type,
+            token_count,
+            trace_t1 - trace_t0,
+            trace_t2 - trace_t1,
+        )
 
 
 def qwen3_next_decoder_layer_full_forward_fake(

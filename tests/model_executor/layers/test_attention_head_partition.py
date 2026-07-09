@@ -132,3 +132,37 @@ def test_qwopus_tp3_slot_expansion_matches_full_gqa_attention():
 
     tp_out = torch.cat(local_outputs, dim=1)
     torch.testing.assert_close(tp_out, full_out)
+
+
+def test_qwopus_tp3_dcp_full_kv_layout_matches_full_gqa_attention():
+    torch.manual_seed(0)
+    num_tokens = 5
+    num_heads = 24
+    num_kv_heads = 4
+    head_dim = 16
+    scale = head_dim**-0.5
+
+    q = torch.randn(num_tokens, num_heads, head_dim)
+    k = torch.randn(num_tokens, num_kv_heads, head_dim)
+    v = torch.randn(num_tokens, num_kv_heads, head_dim)
+
+    q_per_kv = num_heads // num_kv_heads
+    full_k = k.repeat_interleave(q_per_kv, dim=1)
+    full_v = v.repeat_interleave(q_per_kv, dim=1)
+    full_scores = torch.einsum("qhd,khd->hqk", q, full_k) * scale
+    full_probs = torch.softmax(full_scores, dim=-1)
+    full_out = torch.einsum("hqk,khd->qhd", full_probs, full_v)
+
+    local_outputs = []
+    for rank in range(3):
+        q_start = rank * (num_heads // 3)
+        q_end = q_start + (num_heads // 3)
+        local_q = q[:, q_start:q_end, :]
+        local_full_k = k.repeat_interleave(q_per_kv, dim=1)[:, q_start:q_end, :]
+        local_full_v = v.repeat_interleave(q_per_kv, dim=1)[:, q_start:q_end, :]
+        local_scores = torch.einsum("qhd,khd->hqk", local_q, local_full_k) * scale
+        local_probs = torch.softmax(local_scores, dim=-1)
+        local_outputs.append(torch.einsum("hqk,khd->qhd", local_probs, local_full_v))
+
+    tp_out = torch.cat(local_outputs, dim=1)
+    torch.testing.assert_close(tp_out, full_out)

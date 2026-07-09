@@ -197,6 +197,7 @@ class PassConfig:
 
     @staticmethod
     def default_fi_allreduce_fusion_max_size_mb() -> dict[int, float]:
+        import vllm.envs as envs
         from vllm.compilation.passes.fusion.allreduce_rms_fusion import (
             FI_ALLREDUCE_FUSION_MAX_SIZE_MB,
         )
@@ -207,7 +208,16 @@ class PassConfig:
         capability = current_platform.get_device_capability()
         if capability is None:
             return {}
-        return FI_ALLREDUCE_FUSION_MAX_SIZE_MB.get(capability.to_int(), {})
+        thresholds = dict(FI_ALLREDUCE_FUSION_MAX_SIZE_MB.get(capability.to_int(), {}))
+        thresholds.update(
+            {
+                int(world_size): float(max_size_mb)
+                for world_size, max_size_mb in (
+                    envs.VLLM_FLASHINFER_ALLREDUCE_FUSION_THRESHOLDS_MB
+                ).items()
+            }
+        )
+        return thresholds
 
     def compute_hash(self) -> str:
         """

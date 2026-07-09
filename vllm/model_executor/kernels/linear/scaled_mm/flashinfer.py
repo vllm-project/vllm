@@ -19,6 +19,7 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_fp8_blockscale_gemm,
     flashinfer_scaled_fp8_mm,
+    flashinfer_scaled_fp8_mm_out,
     has_flashinfer,
     is_flashinfer_fp8_blockscale_gemm_supported,
     should_use_flashinfer_for_blockscale_fp8_gemm,
@@ -80,9 +81,53 @@ class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        return flashinfer_scaled_fp8_mm(
-            A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
+        output = torch.empty(
+            (A.shape[0], B.shape[1]), dtype=out_dtype, device=A.device
         )
+        torch.ops.vllm.flashinfer_scaled_fp8_mm_out(
+            A,
+            B,
+            As,
+            Bs,
+            output,
+        )
+        if bias is not None:
+            output = output + bias
+        return output.view(*output_shape)
+
+
+def _flashinfer_scaled_fp8_mm_out_impl(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    output: torch.Tensor,
+) -> None:
+    flashinfer_scaled_fp8_mm_out(A, B, As, Bs, output, out_dtype=output.dtype)
+
+
+def _flashinfer_scaled_fp8_mm_out_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    output: torch.Tensor,
+) -> None:
+    dep = (
+        A.flatten()[:1].sum()
+        + B.flatten()[:1].sum()
+        + As.flatten()[:1].sum()
+        + Bs.flatten()[:1].sum()
+    ) * 0
+    output.copy_(torch.zeros_like(output) + dep.to(output.dtype))
+
+
+direct_register_custom_op(
+    "flashinfer_scaled_fp8_mm_out",
+    _flashinfer_scaled_fp8_mm_out_impl,
+    mutates_args=["output"],
+    fake_impl=_flashinfer_scaled_fp8_mm_out_fake,
+)
 
 
 class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):

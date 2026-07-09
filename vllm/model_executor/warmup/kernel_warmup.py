@@ -6,6 +6,7 @@ This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -189,6 +190,18 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     is_leader = world.rank_in_group == 0
 
     cache_path = resolve_flashinfer_autotune_file(runner)
+    per_rank_autotune = os.environ.get(
+        "VLLM_FLASHINFER_AUTOTUNE_PER_RANK", ""
+    ).lower() in ("1", "true", "yes", "on")
+    if per_rank_autotune:
+        cache_path = cache_path.with_name(
+            f"{cache_path.stem}.rank{world.rank_in_group}{cache_path.suffix}"
+        )
+        logger.info(
+            "Using per-rank FlashInfer autotune cache file on rank %d: %s",
+            world.rank_in_group,
+            cache_path,
+        )
     if is_leader:
         logger.info("Using FlashInfer autotune cache file: %s", cache_path)
 
@@ -203,11 +216,34 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     )
 
     with torch.inference_mode():
-        if is_leader:
+        if per_rank_autotune:
+            with fi_utils.autotune(tune_mode=True, cache=str(cache_path)):
+                runner._dummy_run(**dummy_run_kwargs)
+        elif is_leader:
             with fi_utils.autotune(tune_mode=True, cache=str(cache_path)):
                 runner._dummy_run(**dummy_run_kwargs)
         else:
             runner._dummy_run(**dummy_run_kwargs)
+
+    if per_rank_autotune:
+        world.barrier()
+        if cache_path.exists():
+            from flashinfer.autotuner import AutoTuner
+
+            AutoTuner.get().load_configs(str(cache_path))
+            logger.info(
+                "Per-rank FlashInfer autotune cache loaded on rank %d from %s.",
+                world.rank_in_group,
+                cache_path,
+            )
+        else:
+            logger.warning(
+                "No per-rank FlashInfer autotune cache entries found on rank %d. "
+                "Falling back to default tactics.",
+                world.rank_in_group,
+            )
+        world.barrier()
+        return
 
     # Broadcast autotune cache from rank 0 to all other ranks so every
     # rank loads the same set of chosen tactics.

@@ -254,6 +254,24 @@ class CudaCommunicator(DeviceCommunicatorBase):
         )
 
     def all_reduce(self, input_):
+        if envs.VLLM_EXPERIMENTAL_TP3_INT8_HIDDEN_REDUCE:
+            from vllm.distributed.device_communicators.lowbit_all_reduce import (
+                should_use_tp3_lowbit_hidden_reduce,
+                tp3_lowbit_hidden_all_reduce,
+            )
+
+            if should_use_tp3_lowbit_hidden_reduce(
+                input_,
+                self.world_size,
+                envs.VLLM_EXPERIMENTAL_TP3_INT8_HIDDEN_REDUCE_MIN_TOKENS,
+                envs.VLLM_EXPERIMENTAL_TP3_LOWBIT_HIDDEN_REDUCE_MODE,
+            ):
+                return tp3_lowbit_hidden_all_reduce(
+                    input_,
+                    self.device_group,
+                    envs.VLLM_EXPERIMENTAL_TP3_LOWBIT_HIDDEN_REDUCE_MODE,
+                )
+
         # since currently we perform copy input -> symm_input -> out-of-place AR
         # return symm_output, we don't need to check if input is symmetric
         if self.pynccl_comm is not None and should_nccl_symm_mem_allreduce(

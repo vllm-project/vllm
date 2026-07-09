@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from functools import partial
 import os
+import time
 from typing import ClassVar
 
 import numpy as np
@@ -95,13 +96,13 @@ trtllm_workspace_buffer = None
 def _use_replicated_full_attention_heads(layer: torch.nn.Module) -> bool:
     if not envs.VLLM_EXPERIMENTAL_DCP_REPLICATED_FULL_ATTENTION:
         return False
-    if hasattr(layer, "dcp_replicated_full_attention_heads"):
-        assert getattr(layer, "dcp_replicated_full_attention_heads"), (
-            "DCP replicated full-attention planning is enabled globally, but "
-            f"{layer.__class__.__name__}.dcp_replicated_full_attention_heads is "
-            "False. FlashInfer DCP plan/run head layouts would diverge."
-        )
-    return True
+    return bool(getattr(layer, "dcp_replicated_full_attention_heads", False))
+
+
+def _use_dcp_full_kv_attention_heads(layer: torch.nn.Module) -> bool:
+    if not envs.VLLM_EXPERIMENTAL_DCP_REPLICATED_FULL_ATTENTION:
+        return False
+    return bool(getattr(layer, "dcp_full_kv_attention_heads", False))
 
 
 def _dcp_debug_sync(label: str, *tensors: torch.Tensor) -> None:
@@ -332,9 +333,10 @@ class BatchDCPPrefillWrapper:
         kv_cache_dtype: torch.dtype,
         prefill_fixed_split_size: int,
         disable_split_kv: bool,
+        replicated_full_heads: bool,
+        dcp_full_kv_heads: bool,
     ):
         """Plan the prefill operation with given parameters."""
-        replicated_full_heads = envs.VLLM_EXPERIMENTAL_DCP_REPLICATED_FULL_ATTENTION
         self._context.plan(
             qo_indptr=qo_indptr_cpu,
             paged_kv_indptr=paged_kv_indptr_cpu,
@@ -378,6 +380,17 @@ class BatchDCPPrefillWrapper:
         value: torch.Tensor,
         out: torch.Tensor,
     ):
+        trace_enabled = os.environ.get("AG2_VLLM_DCP_ATTN_TRACE") == "1"
+        trace_sync = os.environ.get("AG2_VLLM_DCP_ATTN_TRACE_SYNC") == "1"
+        trace_min_tokens = int(os.environ.get("AG2_VLLM_DCP_ATTN_TRACE_MIN_TOKENS", "8192"))
+        token_count = int(prefill_query.shape[0])
+
+        def mark() -> float:
+            if trace_enabled and trace_sync and token_count >= trace_min_tokens:
+                torch.cuda.synchronize()
+            return time.perf_counter()
+
+        t0 = mark() if trace_enabled and token_count >= trace_min_tokens else 0.0
         _dcp_debug_sync("prefill.start", prefill_query, key, value, out)
         replicated_full_heads = _use_replicated_full_attention_heads(layer)
         prefill_query_across_dcp = (
@@ -385,6 +398,7 @@ class BatchDCPPrefillWrapper:
             if replicated_full_heads
             else get_dcp_group().all_gather(prefill_query.contiguous(), dim=1)
         )
+        t1 = mark() if trace_enabled and token_count >= trace_min_tokens else 0.0
         _dcp_debug_sync("prefill.after_all_gather", prefill_query_across_dcp)
         output_context_tmp, lse_context_tmp = self._context.run(
             prefill_query_across_dcp,
@@ -393,6 +407,7 @@ class BatchDCPPrefillWrapper:
             v_scale=layer._v_scale_float,
             return_lse=True,
         )
+        t2 = mark() if trace_enabled and token_count >= trace_min_tokens else 0.0
         _dcp_debug_sync(
             "prefill.after_context", output_context_tmp, lse_context_tmp
         )
@@ -413,13 +428,38 @@ class BatchDCPPrefillWrapper:
             )
         _dcp_debug_sync("prefill.after_combine", output_context, lse_context)
         lse_context = lse_context.transpose(0, 1).contiguous()
+        t3 = mark() if trace_enabled and token_count >= trace_min_tokens else 0.0
 
+        dcp_full_kv_heads = _use_dcp_full_kv_attention_heads(layer)
+        new_tokens_query = prefill_query
+        if dcp_full_kv_heads:
+            # Context attention must expose all KV heads on every DCP sequence
+            # shard so the LSE merge can reduce all gathered Q heads. The
+            # causal attention over the newly scheduled chunk is not
+            # sequence-sharded, so it should only compute this rank's local Q
+            # heads. Rebuild the local overlapping-GQA KV slot layout from the
+            # full-KV projection to preserve Qwen's global Q->KV mapping.
+            local_kv_head_indices = getattr(layer, "dcp_local_kv_head_indices", None)
+            if local_kv_head_indices is None:
+                raise ValueError(
+                    "DCP full-KV attention requires local KV head indices "
+                    "for the new-token attention path."
+                )
+            local_kv_head_indices_tensor = torch.tensor(
+                local_kv_head_indices, device=key.device, dtype=torch.long
+            )
+            key = torch.index_select(key, dim=1, index=local_kv_head_indices_tensor)
+            value = torch.index_select(
+                value, dim=1, index=local_kv_head_indices_tensor
+            )
+        t4 = mark() if trace_enabled and token_count >= trace_min_tokens else 0.0
         output_query, lse_query = self._new_tokens.run(
-            prefill_query,
+            new_tokens_query,
             key,
             value,
             return_lse=True,
         )
+        t5 = mark() if trace_enabled and token_count >= trace_min_tokens else 0.0
         _dcp_debug_sync("prefill.after_new_tokens", output_query, lse_query)
         lse_query = lse_query.transpose(0, 1).contiguous()
 
@@ -430,6 +470,28 @@ class BatchDCPPrefillWrapper:
             output_query,
             lse_query,
         )
+        t6 = mark() if trace_enabled and token_count >= trace_min_tokens else 0.0
+        if trace_enabled and token_count >= trace_min_tokens:
+            logger.warning(
+                "AG2_DCP_ATTN_TRACE layer=%s tokens=%d local_heads=%d "
+                "gathered_heads=%d kv_heads=%d replicated=%s full_kv=%s "
+                "q_gather=%.6f context=%.6f combine=%.6f kv_select=%.6f "
+                "new_tokens=%.6f merge=%.6f total=%.6f",
+                getattr(layer, "prefix", "<unknown>"),
+                token_count,
+                prefill_query.shape[1],
+                prefill_query_across_dcp.shape[1],
+                key.shape[1],
+                replicated_full_heads,
+                dcp_full_kv_heads,
+                t1 - t0,
+                t2 - t1,
+                t3 - t2,
+                t4 - t3,
+                t5 - t4,
+                t6 - t5,
+                t6 - t0,
+            )
         _dcp_debug_sync("prefill.after_merge", out)
         return out
 
@@ -871,6 +933,56 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.window_left = self.global_hyperparameters.window_left
         self.logits_soft_cap = self.global_hyperparameters.logits_soft_cap
         self.has_sinks = self.global_hyperparameters.has_sinks
+        dcp_replicated_flags = [
+            bool(
+                getattr(
+                    self.compilation_config.static_forward_context.get(layer_name),
+                    "dcp_replicated_full_attention_heads",
+                    False,
+                )
+            )
+            for layer_name in layer_names
+        ]
+        self.dcp_replicated_full_attention_heads = (
+            envs.VLLM_EXPERIMENTAL_DCP_REPLICATED_FULL_ATTENTION
+            and any(dcp_replicated_flags)
+        )
+        dcp_full_kv_flags = [
+            bool(
+                getattr(
+                    self.compilation_config.static_forward_context.get(layer_name),
+                    "dcp_full_kv_attention_heads",
+                    False,
+                )
+            )
+            for layer_name in layer_names
+        ]
+        self.dcp_full_kv_attention_heads = (
+            envs.VLLM_EXPERIMENTAL_DCP_REPLICATED_FULL_ATTENTION
+            and any(dcp_full_kv_flags)
+        )
+        if self.dcp_replicated_full_attention_heads and not all(
+            dcp_replicated_flags
+        ):
+            raise ValueError(
+                "FlashInfer DCP metadata group mixes replicated and "
+                "non-replicated full-attention layers, which would make "
+                "plan/run head layouts diverge."
+            )
+        if self.dcp_full_kv_attention_heads and not all(dcp_full_kv_flags):
+            raise ValueError(
+                "FlashInfer DCP metadata group mixes full-KV and regular "
+                "full-attention layers, which would make plan/run head "
+                "layouts diverge."
+            )
+        if (
+            self.dcp_replicated_full_attention_heads
+            and self.dcp_full_kv_attention_heads
+        ):
+            raise ValueError(
+                "FlashInfer DCP metadata group cannot be both replicated-head "
+                "and full-KV sharded-Q."
+            )
         if self.has_sinks and not FlashInferBackend.supports_sink():
             raise NotImplementedError(
                 "FlashInfer backend currently does not support attention "
@@ -1471,6 +1583,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         kv_cache_dtype=self.kv_cache_dtype,
                         prefill_fixed_split_size=self.prefill_fixed_split_size,
                         disable_split_kv=self.disable_split_kv,
+                        replicated_full_heads=(
+                            self.dcp_replicated_full_attention_heads
+                        ),
+                        dcp_full_kv_heads=self.dcp_full_kv_attention_heads,
                     )
                 else:
                     assert isinstance(

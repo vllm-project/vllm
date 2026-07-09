@@ -166,13 +166,14 @@ def _resolve_gdn_prefill_backend(
     * ``platform == cuda``;
     * one of the following:
       - Hopper (SM90) — no further constraints;
-      - Blackwell (SM10.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``,
-        and an intact ``nvidia-cutlass-dsl-libs-cu13`` install on disk
+      - Datacenter Blackwell (SM10.x) with ``head_k_dim == 128``,
+        ``cuda_runtime >= 13``, and an intact
+        ``nvidia-cutlass-dsl-libs-cu13`` install on disk
         (see :func:`_is_libs_cu13_install_intact`).
 
     In-tree CuteDSL GDN prefill kernel is chosen when:
     * "cutedsl" is requested; (opt-in only)
-    * Blackwell (SM10.x) with ``head_k_dim == 128``;
+    * Datacenter Blackwell (SM10.x) with ``head_k_dim == 128``;
     """
     additional_config = vllm_config.additional_config
     backend_cfg = (
@@ -209,7 +210,8 @@ def _resolve_gdn_prefill_backend(
                 "nvidia-cutlass-dsl packaging -- see "
                 "https://github.com/NVIDIA/cutlass/issues/3170 and "
                 "https://github.com/NVIDIA/cutlass/issues/3259). Falling back "
-                "to Triton/FLA. Repair with: pip install --force-reinstall "
+                "to Triton/FLA. Repair with: uv pip install --system "
+                "--force-reinstall "
                 "--no-deps nvidia-cutlass-dsl-libs-cu13"
             )
 
@@ -1987,7 +1989,19 @@ def gdn_attention_core_fake(
     core_attn_out: torch.Tensor,
     layer_name: LayerNameType,
 ) -> None:
-    """Fake implementation for torch.compile."""
+    """Fake implementation for torch.compile.
+
+    The real op mutates core_attn_out from qkv/b/a.  Keep that data dependency
+    visible to functionalization; otherwise Inductor may treat the mutated
+    output as independent of the projections that feed it.
+    """
+    del layer_name
+    dep = (
+        qkv_or_qkvz.flatten()[:1].sum()
+        + b_or_ba.flatten()[:1].sum()
+        + a_or_z_out.flatten()[:1].sum()
+    ) * 0
+    core_attn_out.copy_(torch.zeros_like(core_attn_out) + dep.to(core_attn_out.dtype))
     return
 
 
@@ -1999,6 +2013,10 @@ def gdn_attention_core_aiter_fake(
     layer_name: LayerNameType,
 ) -> None:
     """Fake implementation for torch.compile."""
+    del layer_name
+    dep = (qkvz.flatten()[:1].sum() + ba.flatten()[:1].sum()) * 0
+    z_out.copy_(torch.zeros_like(z_out) + dep.to(z_out.dtype))
+    core_attn_out.copy_(torch.zeros_like(core_attn_out) + dep.to(core_attn_out.dtype))
     return
 
 
@@ -2008,6 +2026,8 @@ def qwen_gdn_full_forward_fake(
     layer_name: LayerNameType,
 ) -> None:
     """Fake implementation for torch.compile."""
+    del layer_name
+    output.copy_(hidden_states.to(output.dtype))
     return
 
 

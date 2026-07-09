@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 import math
+import os
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -104,6 +105,7 @@ class Scheduler(SchedulerInterface):
         )
         # Track requests scheduled in prior step (MRV1-only).
         self.prev_step_scheduled_req_ids: set[str] = set()
+        self._ag2_trace_step = 0
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
@@ -289,6 +291,22 @@ class Scheduler(SchedulerInterface):
         # prefill batch fully drained the waiting queue. Prefill throttling
         # is disabled in this case.
         self.prefill_capacity_bound = False
+        self._ag2_prefill_admission_delay_s = max(
+            0.0,
+            float(os.environ.get("AG2_VLLM_PREFILL_ADMISSION_DELAY_MS", "0"))
+            / 1000.0,
+        )
+        admission_max_delay_ms = os.environ.get(
+            "AG2_VLLM_PREFILL_ADMISSION_MAX_DELAY_MS"
+        )
+        if not admission_max_delay_ms:
+            admission_max_delay_ms = str(
+                int(self._ag2_prefill_admission_delay_s * 4000)
+            )
+        self._ag2_prefill_admission_max_delay_s = max(
+            self._ag2_prefill_admission_delay_s,
+            float(admission_max_delay_ms) / 1000.0,
+        )
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -401,6 +419,136 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = num_new_tokens // block_size * block_size
         return num_new_tokens
 
+    def _is_prefill_request(self, request: Request) -> bool:
+        return request.num_computed_tokens < request.num_tokens
+
+    def _is_long_prefill_request(self, request: Request) -> bool:
+        threshold = self.scheduler_config.long_prefill_token_threshold
+        return threshold > 0 and request.num_tokens > threshold
+
+    def _partial_prefill_targets(self) -> tuple[int, int]:
+        """Estimate how many prefill requests this step should co-schedule.
+
+        V0 treated long_prefill_token_threshold as long-request classification
+        for concurrent partial prefill admission. In this V1 scheduler the same
+        value was also used as a hard chunk cap, which under-filled token budget
+        for np < max_num_partial_prefills. Keep the admission intent, but derive
+        chunk cap from the number of active/admissible prefills.
+        """
+        max_partial = self.scheduler_config.max_num_partial_prefills
+        max_long = self.scheduler_config.max_long_partial_prefills
+        if max_partial <= 1:
+            return 1, 1
+
+        prefills = 0
+        long_prefills = 0
+        for request in self.running:
+            if not self._is_prefill_request(request):
+                continue
+            prefills += 1
+            if self._is_long_prefill_request(request):
+                long_prefills += 1
+            if prefills >= max_partial:
+                return max_partial, long_prefills
+
+        remaining_slots = min(
+            max_partial - prefills,
+            max(0, self.max_num_running_reqs - len(self.running)),
+        )
+        for queue in (self.waiting, self.skipped_waiting):
+            if remaining_slots <= 0:
+                break
+            for request in queue:
+                if remaining_slots <= 0:
+                    break
+                if not self._is_prefill_request(request):
+                    continue
+                if self._is_long_prefill_request(request):
+                    if long_prefills >= max_long:
+                        continue
+                    long_prefills += 1
+                prefills += 1
+                remaining_slots -= 1
+                if prefills >= max_partial:
+                    break
+
+        return max(prefills, 1), long_prefills
+
+    def _partial_prefill_chunk_cap(self, prefill_targets: int) -> int:
+        if self.scheduler_config.max_num_partial_prefills <= 1:
+            return self.scheduler_config.long_prefill_token_threshold
+        return max(1, self.max_num_scheduled_tokens // max(prefill_targets, 1))
+
+    def _should_delay_waiting_prefill_admission(self) -> bool:
+        """Briefly wait for peer long-prefills before launching singleton work."""
+        if (
+            self._ag2_prefill_admission_delay_s <= 0
+            or self.scheduler_config.max_num_partial_prefills <= 1
+            or self.running
+            or self.num_waiting_for_streaming_input > 0
+        ):
+            return False
+
+        target_prefills = min(
+            self.scheduler_config.max_num_partial_prefills,
+            self.max_num_running_reqs,
+        )
+        if self.scheduler_config.long_prefill_token_threshold > 0:
+            target_prefills = min(
+                target_prefills,
+                self.scheduler_config.max_long_partial_prefills,
+            )
+        if target_prefills <= 1:
+            return False
+
+        waiting_prefills = 0
+        oldest_arrival_time: float | None = None
+        newest_arrival_time: float | None = None
+        for queue in (self.waiting, self.skipped_waiting):
+            for request in queue:
+                if not self._is_prefill_request(request):
+                    continue
+                waiting_prefills += 1
+                oldest_arrival_time = (
+                    request.arrival_time
+                    if oldest_arrival_time is None
+                    else min(oldest_arrival_time, request.arrival_time)
+                )
+                newest_arrival_time = (
+                    request.arrival_time
+                    if newest_arrival_time is None
+                    else max(newest_arrival_time, request.arrival_time)
+                )
+                if waiting_prefills >= target_prefills:
+                    return False
+
+        if (
+            waiting_prefills == 0
+            or oldest_arrival_time is None
+            or newest_arrival_time is None
+        ):
+            return False
+
+        now = time.time()
+        oldest_age = now - oldest_arrival_time
+        if oldest_age >= self._ag2_prefill_admission_max_delay_s:
+            return False
+        if waiting_prefills < target_prefills:
+            return True
+        return (now - newest_arrival_time) < self._ag2_prefill_admission_delay_s
+
+    def _cap_prefill_chunk(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        prefill_chunk_cap: int,
+    ) -> int:
+        if not self._is_prefill_request(request):
+            return num_new_tokens
+        if prefill_chunk_cap > 0 and prefill_chunk_cap < num_new_tokens:
+            return prefill_chunk_cap
+        return num_new_tokens
+
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -425,6 +573,8 @@ class Scheduler(SchedulerInterface):
         if self._pause_state == PauseState.PAUSED_ALL:
             # Do not schedule any requests when paused.
             token_budget = 0
+        prefill_targets, long_prefill_targets = self._partial_prefill_targets()
+        prefill_chunk_cap = self._partial_prefill_chunk_cap(prefill_targets)
 
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
@@ -483,8 +633,9 @@ class Scheduler(SchedulerInterface):
                 + request.num_output_placeholders
                 - request.num_computed_tokens
             )
-            if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
-                num_new_tokens = self.scheduler_config.long_prefill_token_threshold
+            num_new_tokens = self._cap_prefill_chunk(
+                request, num_new_tokens, prefill_chunk_cap
+            )
             num_new_tokens = min(num_new_tokens, token_budget)
 
             # Make sure the input position does not exceed the max model len.
@@ -645,7 +796,13 @@ class Scheduler(SchedulerInterface):
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
 
-            while (self.waiting or self.skipped_waiting) and token_budget > 0:
+            delay_waiting_prefills = self._should_delay_waiting_prefill_admission()
+
+            while (
+                not delay_waiting_prefills
+                and (self.waiting or self.skipped_waiting)
+                and token_budget > 0
+            ):
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
                 # in `running` but still hold a model-runner request slot.
                 num_running = len(self.running) + self.num_waiting_for_streaming_input
@@ -833,9 +990,9 @@ class Scheduler(SchedulerInterface):
                             break
                         pad_spec_decode = True
 
-                    threshold = self.scheduler_config.long_prefill_token_threshold
-                    if 0 < threshold < num_new_tokens:
-                        num_new_tokens = threshold
+                    num_new_tokens = self._cap_prefill_chunk(
+                        request, num_new_tokens, prefill_chunk_cap
+                    )
 
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
@@ -1138,8 +1295,37 @@ class Scheduler(SchedulerInterface):
         if self.defer_block_free and total_num_scheduled_tokens > 0:
             self.sched_step_seq += 1
 
+        trace_enabled = os.environ.get("AG2_VLLM_LONG_PREFILL_TRACE") == "1"
+        trace_min_tokens = int(
+            os.environ.get("AG2_VLLM_LONG_PREFILL_TRACE_MIN_TOKENS", "8192")
+        )
+        trace_details: list[str] = []
+        if trace_enabled and total_num_scheduled_tokens >= trace_min_tokens:
+            for req_id, scheduled_tokens in num_scheduled_tokens.items():
+                request = self.requests[req_id]
+                start = request.num_computed_tokens
+                is_prefill = request.num_computed_tokens < request.num_tokens
+                trace_details.append(
+                    f"{req_id}:start={start}:sched={scheduled_tokens}:"
+                    f"end={start + scheduled_tokens}:total={request.num_tokens}:"
+                    f"prefill={is_prefill}"
+                )
+
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
+        if trace_enabled and total_num_scheduled_tokens >= trace_min_tokens:
+            self._ag2_trace_step += 1
+            logger.warning(
+                "AG2_SCHED_TRACE step=%d total_tokens=%d reqs=%d "
+                "running=%d waiting=%d token_budget_left=%d details=%s",
+                self._ag2_trace_step,
+                total_num_scheduled_tokens,
+                len(num_scheduled_tokens),
+                len(self.running),
+                len(self.waiting),
+                token_budget,
+                ";".join(trace_details),
+            )
         return scheduler_output
 
     def _build_kv_connector_meta(
