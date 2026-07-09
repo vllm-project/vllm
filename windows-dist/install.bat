@@ -44,14 +44,46 @@ if /i "!DO_VENV!"=="Y" (
 )
 echo.
 
+:: ===== DETECT ROCm VERSION =====
+set "HIP_PATH="
+if EXIST "C:\Program Files\AMD\ROCm\7.13\bin\hipcc.exe" set "HIP_PATH=C:\Program Files\AMD\ROCm\7.13" & set "ROCVER=7.13"
+if EXIST "C:\Program Files\AMD\ROCm\7.12\bin\hipcc.exe" set "HIP_PATH=C:\Program Files\AMD\ROCm\7.12" & set "ROCVER=7.12"
+if EXIST "C:\Program Files\AMD\ROCm\7.11\bin\hipcc.exe" set "HIP_PATH=C:\Program Files\AMD\ROCm\7.11" & set "ROCVER=7.11"
+if "!HIP_PATH!"=="" (
+    for /f "delims=" %%D in ('dir /b "C:\Program Files\AMD\ROCm\*" 2^>nul') do (
+        if EXIST "C:\Program Files\AMD\ROCm\%%D\bin\hipcc.exe" set "HIP_PATH=C:\Program Files\AMD\ROCm\%%D" & set "ROCVER=%%D"
+    )
+)
+if "!HIP_PATH!"=="" (
+    if NOT "!ROCM_HOME!"=="" set "HIP_PATH=!ROCM_HOME!"
+    if NOT "!HIP_PATH!"=="" if EXIST "!HIP_PATH!\bin\hipcc.exe" for %%I in ("!HIP_PATH!") do set "ROCVER=%%~nxI"
+)
+if "!HIP_PATH!"=="" (
+    echo [WARN] ROCm not detected. Will attempt to install anyway.
+    set "ROCVER=7.13"
+) else (
+    echo [OK] ROCm !ROCVER! at !HIP_PATH!
+)
+
+:: Choose matching torch version based on ROCm version
+if "!ROCVER!"=="7.13" set "TORCH_VER=2.11.0+rocm7.13.0" & set "TV_VER=0.22.0+rocm7.13.0"
+if "!ROCVER!"=="7.12" set "TORCH_VER=2.10.0+rocm7.12.0" & set "TV_VER=0.21.0+rocm7.12.0"
+if "!ROCVER!"=="7.11" set "TORCH_VER=2.9.1+rocm7.11.0" & set "TV_VER=0.20.1+rocm7.11.0"
+if "!ROCVER!"=="7.10" set "TORCH_VER=2.9.1+rocm7.10.0" & set "TV_VER=0.20.1+rocm7.10.0"
+if "!TORCH_VER!"=="" set "TORCH_VER=2.11.0+rocm7.13.0" & set "TV_VER=0.22.0+rocm7.13.0"
+
+echo Detected: ROCm !ROCVER! -> torch !TORCH_VER!
+echo.
+
 :: ===== PYTORCH WITH ROCM =====
-set /p "DO_TORCH=Install PyTorch with ROCm? (Y/N) [Y]: "
+set /p "DO_TORCH=Install PyTorch !TORCH_VER! with ROCm? (Y/N) [Y]: "
 if "!DO_TORCH!"=="" set "DO_TORCH=Y"
 if /i "!DO_TORCH!"=="Y" (
-    pip install torch==2.11.0+rocm7.13.0 torchvision==0.22.0+rocm7.13.0 --find-links https://repo.amd.com/rocm/whl/gfx120X-all/ --timeout 120
+    echo Installing from https://repo.amd.com/rocm/whl/gfx120X-all/ ...
+    pip install torch==!TORCH_VER! torchvision==!TV_VER! --find-links https://repo.amd.com/rocm/whl/gfx120X-all/ --timeout 120
     if ERRORLEVEL 1 (
-        echo AMD repo failed. Trying PyTorch official ROCm repo...
-        pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.13 --timeout 120
+        echo AMD repo failed. Trying PyTorch official repo...
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm!ROCVER! --timeout 120
         if ERRORLEVEL 1 (
             echo PyTorch install failed.
             pause
