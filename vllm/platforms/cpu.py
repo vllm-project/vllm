@@ -126,8 +126,12 @@ class CpuPlatform(Platform):
             )
 
         # AMX GDN requires float32 state
-        if torch.cpu._is_amx_tile_supported():
+        if (
+            torch.cpu._is_amx_tile_supported()
+            and cache_config.mamba_ssm_cache_dtype != "float32"
+        ):
             cache_config.mamba_ssm_cache_dtype = "float32"
+            logger.warning("Reset SSM cache type to float32 for AMX mamba attention.")
 
         # Lagecy setting
         env_key = "VLLM_CPU_KVCACHE_SPACE"
