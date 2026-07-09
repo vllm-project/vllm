@@ -1,14 +1,13 @@
 use std::collections::BTreeMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
-use vllm_engine_core_client::protocol::{
-    EngineCoreRequest, EngineCoreSamplingParams, ReasoningParserKwargs,
-};
+use vllm_engine_core_client::protocol::request::{EngineCoreRequest, ReasoningParserKwargs};
+use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 
 use crate::error::{Error, Result};
+use crate::request_metrics::current_unix_timestamp_secs;
 
 /// Tokenized decoder-only generate request accepted by [`crate::Llm`].
 ///
@@ -31,8 +30,9 @@ pub struct GenerateRequest {
     pub mm_features: Option<MmFeatures>,
     /// Unix timestamp, in seconds, when this request arrived at the frontend.
     ///
-    /// When omitted, the Rust frontend fills it immediately before sending the
-    /// request to engine-core, matching Python's default arrival-time behavior.
+    /// Stamped at the frontend entry, before render and tokenization, to match
+    /// Python's renderer-entry arrival_time. When omitted, it is filled as a
+    /// fallback before the request is sent to engine-core.
     pub arrival_time: Option<f64>,
     /// Optional salt used to partition prefix-cache entries for this request.
     pub cache_salt: Option<String>,
@@ -123,18 +123,12 @@ impl PreparedGenerateRequest {
     }
 }
 
-fn current_unix_timestamp_secs() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock is before unix epoch")
-        .as_secs_f64()
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
-    use vllm_engine_core_client::protocol::{EngineCoreSamplingParams, ReasoningParserKwargs};
+    use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
+    use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 
     use super::GenerateRequest;
     use crate::error::Error;

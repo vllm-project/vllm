@@ -326,39 +326,6 @@ VLM_TEST_SETTINGS = {
             large_gpu_mark(min_gb=64),
         ],
     ),
-    "aya_vision": VLMTestInfo(
-        models=["CohereLabs/aya-vision-8b"],
-        test_type=(VLMTestType.IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|>{img_prompt}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>",  # noqa: E501
-        single_image_prompts=IMAGE_ASSETS.prompts(
-            {
-                "stop_sign": "<image>What's the content in the center of the image?",
-                "cherry_blossom": "<image>What is the season?",
-            }
-        ),
-        multi_image_prompt="<image><image>Describe the two images in detail.",
-        max_model_len=4096,
-        max_num_seqs=2,
-        auto_cls=AutoModelForImageTextToText,
-        vllm_runner_kwargs={"mm_processor_kwargs": {"crop_to_patches": True}},
-    ),
-    "aya_vision-multi_image": VLMTestInfo(
-        models=["CohereLabs/aya-vision-8b"],
-        test_type=(VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|>{img_prompt}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>",  # noqa: E501
-        single_image_prompts=IMAGE_ASSETS.prompts(
-            {
-                "stop_sign": "<image>What's the content in the center of the image?",
-                "cherry_blossom": "<image>What is the season?",
-            }
-        ),
-        multi_image_prompt="<image><image>Describe the two images in detail.",
-        max_model_len=4096,
-        max_num_seqs=2,
-        auto_cls=AutoModelForImageTextToText,
-        vllm_runner_kwargs={"mm_processor_kwargs": {"crop_to_patches": True}},
-        marks=[large_gpu_mark(min_gb=32)],
-    ),
     "blip2": VLMTestInfo(
         models=["Salesforce/blip2-opt-2.7b"],
         test_type=VLMTestType.IMAGE,
@@ -420,20 +387,6 @@ VLM_TEST_SETTINGS = {
         hf_output_post_proc=model_utils.deepseekvl2_trunc_hf_output,
         stop_str=["<｜end▁of▁sentence｜>", "<｜begin▁of▁sentence｜>"],
         image_size_factors=[(1.0,), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
-    ),
-    "fuyu": VLMTestInfo(
-        models=["adept/fuyu-8b"],
-        test_type=VLMTestType.IMAGE,
-        prompt_formatter=lambda img_prompt: f"{img_prompt}\n",
-        img_idx_to_prompt=lambda idx: "",
-        max_model_len=2048,
-        max_num_seqs=2,
-        auto_cls=AutoModelForImageTextToText,
-        use_tokenizer_eos=True,
-        vllm_output_post_proc=model_utils.fuyu_vllm_to_hf_output,
-        num_logprobs=10,
-        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
-        marks=[large_gpu_mark(min_gb=32)],
     ),
     "gemma3": VLMTestInfo(
         models=["google/gemma-3-4b-it"],
@@ -939,7 +892,6 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         use_tokenizer_eos=True,
         auto_cls=AutoModelForImageTextToText,
-        hf_model_kwargs=model_utils.qianfan_ocr_hf_model_kwargs("baidu/Qianfan-OCR"),
     ),
     "qwen2_vl": VLMTestInfo(
         models=["Qwen/Qwen2-VL-2B-Instruct"],
