@@ -47,6 +47,19 @@ from vllm.utils.mistral import mt as _mt
 logger = init_logger(__name__)
 
 
+def _reused_prompt_token_ids(request: Any) -> list[int] | None:
+    """Pop prompt token ids forwarded for decode-side reuse, if any.
+
+    Disaggregated serving carries the prefill stage's ids in
+    ``kv_transfer_params`` so the decode stage can skip re-tokenizing. Removing
+    the key keeps the id list out of the engine's sampling metadata.
+    """
+    kv = getattr(request, "kv_transfer_params", None)
+    if not isinstance(kv, dict):
+        return None
+    return kv.pop("prompt_token_ids", None) or None
+
+
 class OnlineRenderer:
     def __init__(
         self,
@@ -103,10 +116,11 @@ class OnlineRenderer:
         Called directly by render_chat_request and delegated to by
         OpenAIServingChat.render_chat_request after its engine-aware checks.
 
-        Pre-tokenized input (``prompt_token_ids``, token-in) is handled deeper,
-        in ``preprocess_chat`` / ``_make_request_with_harmony``, so it skips only
-        templating and tokenization while tool-choice validation and
-        ``adjust_request`` still run and the output is detokenized (text-out).
+        Decode-side token reuse (ids forwarded in ``kv_transfer_params``) is
+        handled deeper, in ``preprocess_chat`` / ``_make_request_with_harmony``,
+        so it skips only templating and tokenization while tool-choice
+        validation and ``adjust_request`` still run and the output is
+        detokenized (text-out).
         """
         tokenizer = self.renderer.tokenizer
 
@@ -191,12 +205,11 @@ class OnlineRenderer:
         should_include_tools: bool = True,
     ):
         """Build Harmony (GPT-OSS) messages and engine prompt from a chat request."""
-        if request.prompt_token_ids:
-            # Pre-tokenized input (token-in): feed the ids straight to the
+        reuse_ids = _reused_prompt_token_ids(request)
+        if reuse_ids:
+            # Decode-side token reuse: feed the forwarded ids straight to the
             # engine. Harmony has no adjust_request hook to preserve.
-            engine_input = tokens_input(
-                request.prompt_token_ids, cache_salt=request.cache_salt
-            )
+            engine_input = tokens_input(reuse_ids, cache_salt=request.cache_salt)
             return [], [engine_input]
 
         messages: list[OpenAIMessage] = []
@@ -381,15 +394,15 @@ class OnlineRenderer:
             default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
         )
 
-        prompt_token_ids = getattr(request, "prompt_token_ids", None)
-        if prompt_token_ids:
-            # Pre-tokenized input (token-in): feed the ids straight to the
-            # engine, skipping templating and tokenization. ``messages`` are
-            # ignored (the protocol layer rejects template/multimodal options),
-            # so conversation is empty. The adjust_request tail below still runs.
+        reuse_ids = _reused_prompt_token_ids(request)
+        if reuse_ids:
+            # Decode-side token reuse: feed the forwarded ids straight to the
+            # engine, skipping templating and tokenization. ``messages`` are not
+            # tokenized, so conversation is empty. The adjust_request tail below
+            # still runs.
             conversation: list[ConversationMessage] = []
             engine_input = tokens_input(
-                prompt_token_ids, cache_salt=getattr(request, "cache_salt", None)
+                reuse_ids, cache_salt=getattr(request, "cache_salt", None)
             )
         else:
             (conversation,), (engine_input,) = await renderer.render_chat_async(

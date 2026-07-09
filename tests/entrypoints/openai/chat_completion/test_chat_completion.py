@@ -160,19 +160,22 @@ async def test_empty_grammar(client: openai.AsyncOpenAI, model_name: str) -> Non
         )
 
 
-# Pre-tokenized input (token-in, text-out) on the chat completions API.
+# Decode-side token reuse for disaggregated serving. The router forwards the
+# prefill stage's prompt token ids in kv_transfer_params so the decode stage
+# skips re-tokenizing.
 
 TOKEN_IN_MESSAGES = [{"role": "user", "content": "Hello, how are you today?"}]
+DECODE_MESSAGES = [{"role": "user", "content": "unrelated decode-side text"}]
 
 
 @pytest.mark.asyncio
-async def test_prompt_token_ids_round_trip(client: openai.AsyncOpenAI):
-    """Chat accepts the templated prompt's own token ids and returns text.
+async def test_kv_transfer_prompt_token_ids_round_trip(client: openai.AsyncOpenAI):
+    """Ids forwarded in kv_transfer_params are used verbatim, skipping tokenize.
 
-    The engine receives exactly the ids the messages path produced, and the
-    output is still detokenized (token-in, text-out). Generated text is not
-    compared against the messages path because vLLM greedy decoding is not
-    bitwise-reproducible across requests.
+    The decode request carries different messages, so a response whose
+    prompt_token_ids match the forwarded ids proves the ids were used rather
+    than the request's own messages. Generated text is not compared across
+    requests because vLLM greedy decoding is not bitwise-reproducible.
     """
     baseline = await client.chat.completions.create(
         model=MODEL_NAME,
@@ -181,30 +184,29 @@ async def test_prompt_token_ids_round_trip(client: openai.AsyncOpenAI):
         temperature=0,
         extra_body={"return_token_ids": True},
     )
-    prompt_token_ids = baseline.prompt_token_ids
-    assert prompt_token_ids
+    reused_ids = baseline.prompt_token_ids
+    assert reused_ids
 
-    token_in = await client.chat.completions.create(
+    decode = await client.chat.completions.create(
         model=MODEL_NAME,
-        messages=[],
+        messages=DECODE_MESSAGES,
         max_completion_tokens=16,
         temperature=0,
-        extra_body={"prompt_token_ids": prompt_token_ids, "return_token_ids": True},
+        extra_body={
+            "kv_transfer_params": {"prompt_token_ids": reused_ids},
+            "return_token_ids": True,
+        },
     )
 
-    # token-in feeds the engine exactly the ids from the messages path.
-    assert token_in.prompt_token_ids == prompt_token_ids
-    # text-out: pre-tokenized input still yields a detokenized message.
-    assert token_in.choices[0].message.content
+    # The engine saw the forwarded ids, not the decode request's own messages.
+    assert decode.prompt_token_ids == reused_ids
+    # text-out: reuse still yields a detokenized message.
+    assert decode.choices[0].message.content
 
 
 @pytest.mark.asyncio
-async def test_prompt_token_ids_streaming(client: openai.AsyncOpenAI):
-    """Token-in streams chat-formatted text-out.
-
-    The scale-out derender endpoint is non-streaming, so streaming output from
-    pre-tokenized input is only available on the chat completions endpoint.
-    """
+async def test_kv_transfer_prompt_token_ids_streaming(client: openai.AsyncOpenAI):
+    """Decode-side token reuse streams chat-formatted text-out."""
     baseline = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=TOKEN_IN_MESSAGES,
@@ -212,16 +214,19 @@ async def test_prompt_token_ids_streaming(client: openai.AsyncOpenAI):
         temperature=0,
         extra_body={"return_token_ids": True},
     )
-    prompt_token_ids = baseline.prompt_token_ids
-    assert prompt_token_ids
+    reused_ids = baseline.prompt_token_ids
+    assert reused_ids
 
     stream = await client.chat.completions.create(
         model=MODEL_NAME,
-        messages=[],
+        messages=DECODE_MESSAGES,
         max_completion_tokens=16,
         temperature=0,
         stream=True,
-        extra_body={"prompt_token_ids": prompt_token_ids, "return_token_ids": True},
+        extra_body={
+            "kv_transfer_params": {"prompt_token_ids": reused_ids},
+            "return_token_ids": True,
+        },
     )
 
     content = ""
@@ -230,7 +235,7 @@ async def test_prompt_token_ids_streaming(client: openai.AsyncOpenAI):
     async for chunk in stream:
         if first_chunk:
             # prompt_token_ids arrives once, on the first chunk.
-            assert chunk.prompt_token_ids == prompt_token_ids
+            assert chunk.prompt_token_ids == reused_ids
             first_chunk = False
         if not chunk.choices:
             continue
@@ -242,40 +247,3 @@ async def test_prompt_token_ids_streaming(client: openai.AsyncOpenAI):
     # streamed text-out, reconstructed from deltas, with generated token ids.
     assert content
     assert delta_token_ids
-
-
-@pytest.mark.asyncio
-async def test_prompt_token_ids_requires_a_prompt(client: openai.AsyncOpenAI):
-    """Neither messages nor prompt_token_ids provided is a 400."""
-    with pytest.raises(openai.BadRequestError):
-        await client.chat.completions.create(
-            model=MODEL_NAME, messages=[], max_completion_tokens=4
-        )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "messages, extra_options",
-    [
-        # Pre-tokenized input is exclusive with messages.
-        (TOKEN_IN_MESSAGES, {}),
-        # A chat-template option cannot apply to pre-tokenized input.
-        ([], {"add_generation_prompt": True}),
-        # Truncation would desync the max_tokens budget from the real prompt.
-        ([], {"truncate_prompt_tokens": 8}),
-    ],
-    ids=["messages-present", "template-option", "truncate-option"],
-)
-async def test_prompt_token_ids_rejects_incompatible_input(
-    client: openai.AsyncOpenAI, messages, extra_options
-):
-    """Anything that conflicts with pre-tokenized input is rejected."""
-    # Rejection happens during request validation, so the ids need only be
-    # non-empty; no need to render real ones.
-    with pytest.raises(openai.BadRequestError):
-        await client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            max_completion_tokens=4,
-            extra_body={"prompt_token_ids": [1, 2, 3], **extra_options},
-        )
