@@ -351,28 +351,40 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
             mm_kwargs=mm_kwargs,
             tok_kwargs=tok_kwargs,
         )
-        hf_processor = self.info.get_hf_processor()
+        hf_config = self.info.get_hf_config()
+        vte_vocab_size = hf_config.visual_vocab_size
 
         if "videos" in mm_data:
-            visual_indicators = [
-                hf_processor.construct_visual_indicators((1, 1, 1), True)
-                for grid in processed_outputs["video_grids"]
-            ]
-            indicator_tokens = [
-                self.visual_indicators_to_visual_tokens(indicator)
-                for indicator in visual_indicators
-            ]
+            video_start = vte_vocab_size - len(INDICATOR_IDS)
+            visual_atom = vte_vocab_size - len(INDICATOR_IDS) + 1
+            video_end = vte_vocab_size - len(INDICATOR_IDS) + 3
+            indicator_tokens = []
+            for grid in processed_outputs["video_grids"]:
+                g = grid.flatten().tolist()
+                if len(g) >= 3:
+                    patches = g[0] * g[1] * g[2]
+                else:
+                    patches = 1
+                if patches > 1:
+                    indicator_tokens.append([video_start, video_end])
+                else:
+                    indicator_tokens.append([video_start, visual_atom, video_end])
             processed_outputs["video_indicator_tokens"] = torch.tensor(indicator_tokens)
         if "images" in mm_data:
-            visual_indicators = [
-                hf_processor.construct_visual_indicators((1, 1, 1), False)
-                for grid in processed_outputs["grids"]
-            ]
-            indicator_tokens = [
-                self.visual_indicators_to_visual_tokens(indicator)
-                for indicator in visual_indicators
-            ]
-
+            image_start = vte_vocab_size - len(INDICATOR_IDS)
+            visual_atom = vte_vocab_size - len(INDICATOR_IDS) + 1
+            image_end = vte_vocab_size - len(INDICATOR_IDS) + 2
+            indicator_tokens = []
+            for grid in processed_outputs["grids"]:
+                g = grid.flatten().tolist()
+                if len(g) >= 3:
+                    patches = g[0] * g[1] * g[2]
+                else:
+                    patches = 1
+                if patches > 1:
+                    indicator_tokens.append([image_start, image_end])
+                else:
+                    indicator_tokens.append([image_start, visual_atom, image_end])
             processed_outputs["indicator_tokens"] = torch.tensor(indicator_tokens)
         return processed_outputs
 
@@ -550,6 +562,24 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         patches_per_image = visual_input["patches_per_item"]
         indicator_tokens = visual_input["indicator_tokens"]
         grid_thws = visual_input["grids"]
+
+        if indicator_tokens.numel() == 0:
+            vte_vocab_size = self.config.visual_vocab_size
+            is_video = visual_input["type"] == "video_patches"
+            start_idx = vte_vocab_size - len(INDICATOR_IDS)
+            atom_idx = vte_vocab_size - len(INDICATOR_IDS) + 1
+            end_idx = vte_vocab_size - len(INDICATOR_IDS) + (3 if is_video else 2)
+            tokens_list = []
+            for patches in patches_per_image:
+                if patches > 1:
+                    tokens_list.append([start_idx, end_idx])
+                else:
+                    tokens_list.append([start_idx, atom_idx, end_idx])
+            indicator_tokens = torch.tensor(
+                tokens_list,
+                dtype=indicator_tokens.dtype,
+                device=indicator_tokens.device,
+            )
 
         indicator_per_image = list(
             map(lambda x: 2 if x > 1 else x + 2, patches_per_image)
