@@ -13,6 +13,8 @@ Differences from DFlash:
     token), so we sample at all N positions and ``sample_pos = query_pos + 1``
     (standard next-token), whereas DFlash's masks sit AT the predicted position.
     This is the ``sample_from_anchor`` path in the shared prepare-inputs kernel.
+    Speculators-format checkpoints instead use the DFlash ``1 + N`` fill-in
+    layout (anchor is the bonus token).
   * Sequential Markov sampling: instead of DFlash's single parallel sample, we
     sample left-to-right, adding a prefix-dependent Markov bias derived from the
     previously sampled token at each step.
@@ -38,8 +40,15 @@ class DSparkSpeculator(DFlashSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
-        # Anchor-first: N query tokens per request (anchor + N-1 noise), not 1+N.
-        self.num_query_per_req = self.num_speculative_steps
+        # Anchor-as-first (N slots) unless the checkpoint uses the 1+N fill-in
+        # block, where the anchor is a separate bonus token.
+        self.sample_from_anchor = not getattr(
+            self.draft_model_config.hf_config, "dspark_bonus_anchor", False
+        )
+        if self.sample_from_anchor:
+            self.num_query_per_req = self.num_speculative_steps
+        else:
+            self.num_query_per_req = 1 + self.num_speculative_steps
 
         # DSpark consumes mean-pooled target aux hidden states at the target
         # layers, combined to hidden_size via main_proj. Store that combined
@@ -52,9 +61,6 @@ class DSparkSpeculator(DFlashSpeculator):
 
         self.dflash_causal = False
 
-        # The anchor query position is itself a prediction (see module docstring).
-        self.sample_from_anchor = True
-
         self._step_cols = torch.arange(
             self.num_speculative_steps, dtype=torch.int32, device=device
         )
@@ -64,12 +70,33 @@ class DSparkSpeculator(DFlashSpeculator):
             * self.num_query_per_req
         )
 
+        # Reduced-vocab probabilistic drafting only; set in load_draft_model.
+        self._d2t_scatter_index: torch.Tensor | None = None
+        self._draft_scatter_buf: torch.Tensor | None = None
+
     def load_draft_model(
         self,
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
-        return load_dspark_model(target_model, self.vllm_config)
+        model = load_dspark_model(target_model, self.vllm_config)
+        # Reduced draft vocab: probabilistic rejection sampling indexes draft
+        # logits by target id, so precompute the draft->target column map and a
+        # scratch buffer to scatter logits into target vocab before sampling.
+        if self.draft_logits is not None and model.draft_id_to_target_id is not None:
+            d2t = model.draft_id_to_target_id
+            self._d2t_scatter_index = (
+                torch.arange(d2t.shape[0], device=d2t.device) + d2t
+            )
+            # -inf once; the per-step scatter overwrites the draft->target
+            # columns. Kept separate from draft_logits to avoid aliasing.
+            self._draft_scatter_buf = torch.full(
+                (self.max_num_reqs, self.vocab_size),
+                float("-inf"),
+                dtype=self.draft_logits.dtype,
+                device=self.device,
+            )
+        return model
 
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
         # Sequential Markov sampling over the backbone's output hidden states.
@@ -77,7 +104,8 @@ class DSparkSpeculator(DFlashSpeculator):
         num_sample = num_reqs * n_spec
         # Per-(req, position) head hidden, ordered (req, step).
         sample_hidden = head_hidden[self.sample_indices[:num_sample]]
-        base_logits = self.model.compute_logits(sample_hidden)
+        # Draft-vocab logits; sampled ids are remapped to target vocab below.
+        base_logits = self.model.compute_draft_logits(sample_hidden)
         vocab_size = base_logits.shape[-1]
         base_logits = base_logits.view(num_reqs, n_spec, vocab_size)
 
@@ -94,9 +122,16 @@ class DSparkSpeculator(DFlashSpeculator):
             bias = self.model.markov_bias(markov_embed)
             logits_i = base_logits[:, i] + bias
             if self.draft_logits is not None:
+                # Probabilistic: sample in target vocab (a reduced draft vocab is
+                # scattered into its target columns; full vocab is already there).
+                if self._d2t_scatter_index is not None:
+                    assert self._draft_scatter_buf is not None
+                    buf = self._draft_scatter_buf[:num_reqs]
+                    buf.index_copy_(1, self._d2t_scatter_index, logits_i.to(buf.dtype))
+                    logits_i = buf
                 # sample_pos is the predicted token's position Q; the target
                 # verifies it with the predecessor's Gumbel key (Q-1). Pass Q-1.
-                draft_i = gumbel_sample(
+                draft_sampled_i = gumbel_sample(
                     logits_i,
                     idx_map[:, i],
                     self.temperature,
@@ -108,9 +143,11 @@ class DSparkSpeculator(DFlashSpeculator):
                     use_fp64=self.use_fp64_gumbel,
                 )
             else:
-                draft_i = logits_i.argmax(dim=-1)
-            self.draft_tokens[:num_reqs, i] = draft_i
-            prev = draft_i
+                draft_sampled_i = self.model.map_draft_to_target(
+                    logits_i.argmax(dim=-1)
+                )
+            self.draft_tokens[:num_reqs, i] = draft_sampled_i
+            prev = draft_sampled_i
 
     def _generate_draft(
         self,
