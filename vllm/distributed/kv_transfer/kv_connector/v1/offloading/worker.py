@@ -54,7 +54,10 @@ class OffloadingConnectorWorker:
         kv_cache_config = self.spec.kv_cache_config
         num_blocks = kv_cache_config.num_blocks
         model_config = self.spec.vllm_config.model_config
+        parallel_config = self.spec.vllm_config.parallel_config
         total_num_kv_heads = model_config.get_total_num_kv_heads()
+        tp_size = parallel_config.tensor_parallel_size
+        dcp_size = parallel_config.decode_context_parallel_size
 
         # Packed layouts (e.g. DSv4) set block_stride > 0; their tensors use
         # stride(0) as the manager-block stride (equals total_num_bytes_per_block).
@@ -72,8 +75,8 @@ class OffloadingConnectorWorker:
         unpadded_page_size_bytes: dict[str, int] = {}
         # layer_name -> size of page in bytes
         page_size_bytes: dict[str, int] = {}
-        # layer_name -> canonical (n_heads, h_stride, bs_stride)
-        head_layout: dict[str, tuple[int, int, int]] = {}
+        # layer_name -> canonical (n_heads, h_stride, bs_stride, replicated)
+        head_layout: dict[str, tuple[int, int, int, bool]] = {}
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             group_layer_names = kv_cache_group.layer_names
             group_kv_cache_spec = kv_cache_group.kv_cache_spec
@@ -113,16 +116,34 @@ class OffloadingConnectorWorker:
                     unpadded_page_size_bytes[layer_name] = (
                         layer_kv_cache_spec.real_page_size_bytes
                     )
-                    if not isinstance(layer_kv_cache_spec, MLAAttentionSpec):
-                        h_stride = unpadded_page_size_bytes[layer_name] // (
+                    if isinstance(layer_kv_cache_spec, MLAAttentionSpec):
+                        # Replicated latent: any one rank's page is complete
+                        # (unless DCP shards tokens across ranks).
+                        if dcp_size == 1:
+                            head_layout[layer_name] = (0, 0, 0, True)
+                    else:
+                        page = unpadded_page_size_bytes[layer_name]
+                        num_head_cells = (
                             layer_kv_cache_spec.block_size
                             * layer_kv_cache_spec.num_kv_heads
                         )
-                        head_layout[layer_name] = (
-                            total_num_kv_heads,
-                            h_stride,
-                            total_num_kv_heads * h_stride,
-                        )
+                        h_stride = page // num_head_cells
+                        # Head-sliceable only if TP ranks hold distinct heads
+                        # in rank order and the page is pure head cells;
+                        # otherwise fail closed to the opaque default.
+                        if (
+                            dcp_size == 1
+                            and layer_kv_cache_spec.num_kv_heads * tp_size
+                            == total_num_kv_heads
+                            and not layer_kv_cache_spec.kv_quant_mode.is_per_token_head
+                            and h_stride * num_head_cells == page
+                        ):
+                            head_layout[layer_name] = (
+                                total_num_kv_heads,
+                                h_stride,
+                                total_num_kv_heads * h_stride,
+                                False,
+                            )
 
                 elif isinstance(layer_kv_cache_spec, MambaSpec):
                     state_tensors = kv_caches[layer_name]
@@ -168,20 +189,9 @@ class OffloadingConnectorWorker:
                 (block_stride, 1),
                 storage_offset=0,
             )
-            n_heads, h_stride, bs_stride = head_layout.get(
-                packed_kv_cache_tensor.shared_by[0], (0, 0, 0)
-            )
             self._init_worker(
                 CanonicalKVCaches(
-                    [
-                        CanonicalKVCacheTensor(
-                            packed_tensor,
-                            block_stride,
-                            n_heads,
-                            h_stride,
-                            bs_stride,
-                        )
-                    ],
+                    [CanonicalKVCacheTensor(packed_tensor, block_stride)],
                     [
                         [CanonicalKVCacheRef(0, block_stride)]
                         for _ in kv_cache_config.kv_cache_groups
@@ -216,24 +226,27 @@ class OffloadingConnectorWorker:
 
             # pick the first layer to represent the group
             first_layer_name = tensor_layer_names[0]
-            n_heads, h_stride, bs_stride = head_layout.get(first_layer_name, (0, 0, 0))
             for tensor in tensors_per_block[first_layer_name]:
                 block_tensors.append(
                     CanonicalKVCacheTensor(
                         tensor=tensor,
                         page_size_bytes=page_size_bytes[first_layer_name],
-                        n_heads=n_heads,
-                        h_stride=h_stride,
-                        bs_stride=bs_stride,
                     )
                 )
 
                 curr_tensor_idx = len(block_tensors) - 1
                 for layer_name in tensor_layer_names:
+                    n_heads, h_stride, bs_stride, replicated = head_layout.get(
+                        layer_name, (0, 0, 0, False)
+                    )
                     block_data_refs[layer_name].append(
                         CanonicalKVCacheRef(
                             tensor_idx=curr_tensor_idx,
                             page_size_bytes=(unpadded_page_size_bytes[layer_name]),
+                            n_heads=n_heads,
+                            h_stride=h_stride,
+                            bs_stride=bs_stride,
+                            replicated=replicated,
                         )
                     )
 

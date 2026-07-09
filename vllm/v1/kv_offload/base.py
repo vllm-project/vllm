@@ -404,11 +404,6 @@ class CanonicalKVCacheTensor:
     tensor: torch.Tensor
     # The (possibly padded) page size per block in bytes
     page_size_bytes: int
-    n_heads: int = 0
-    # Bytes per head per token (the head-slice unit)
-    h_stride: int = 0
-    # Bytes per token (== n_heads * h_stride)
-    bs_stride: int = 0
 
 
 @dataclass
@@ -422,6 +417,15 @@ class CanonicalKVCacheRef:
     tensor_idx: int
     # The un-padded page size per block in bytes
     page_size_bytes: int
+    # Global KV head count (across all TP ranks); 0 = no head decomposition
+    n_heads: int = 0
+    # Bytes per head per token (the head-slice unit)
+    h_stride: int = 0
+    # Bytes per token (== n_heads * h_stride)
+    bs_stride: int = 0
+    # When n_heads == 0: True = page is identical on every TP rank (MLA
+    # latent), False = rank-specific shards (Mamba states, packed blocks)
+    replicated: bool = False
 
 
 @dataclass
