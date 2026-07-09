@@ -37,7 +37,10 @@ _TUNED_DOTPROD_MAX_M: dict[tuple[int, int], int] = {
     (7168, 256): 6,
 }
 _TUNED_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int]]] = {
-    (7168, 384): {M: (4, 4) for M in range(5, 16)},
+    (7168, 384): {
+        5: (4, 4),
+        **{M: (5, 4) for M in range(6, 17)},
+    },
 }
 
 

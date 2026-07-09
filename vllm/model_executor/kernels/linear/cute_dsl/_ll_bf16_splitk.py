@@ -201,7 +201,7 @@ class LLBf16SplitK:
                 self.split_k,
             ],  # [1, 1, 8] -- the 8 CTAs along Z form one cluster
             stream=stream,
-            use_pdl=False,
+            use_pdl=True,
         )
 
     @cute.kernel
@@ -324,7 +324,7 @@ class LLBf16SplitK:
                 tBsB[None, None, None, producer_state.index],
                 pred=tBpB,
             )  # cp.async copy of B tile from GMEM -> SMEM
-            #cute.arch.griddepcontrol_wait()  # PDL-wait
+            cute.arch.griddepcontrol_wait()  # PDL-wait
             cute.copy(
                 tiled_copy_A,
                 tAgA[None, None, None, k_start],
@@ -488,8 +488,8 @@ class LLBf16SplitK:
             cute.arch.cluster_arrive()
             cute.arch.cluster_wait()
 
-            # if mma_tidx == 0:
-            #     cute.arch.griddepcontrol_launch_dependents()
+            if mma_tidx == 0:
+                cute.arch.griddepcontrol_launch_dependents()
             cute.arch.sync_threads()
 
             # Local reduction + global output

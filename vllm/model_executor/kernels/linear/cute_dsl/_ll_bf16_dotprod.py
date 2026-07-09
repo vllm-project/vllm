@@ -119,7 +119,7 @@ def make_host_bf16(k_val: int, bs: int = 128):
         acc = cute.make_rmem_tensor((M,), cutlass.Float32)
         acc.fill(0.0)
 
-        #cute.arch.griddepcontrol_wait()  # PDL wait
+        cute.arch.griddepcontrol_wait()  # PDL wait
 
         # 128-bit vectorized main loop
         if K_MAIN_ELEMS > 0:
@@ -190,7 +190,7 @@ def make_host_bf16(k_val: int, bs: int = 128):
                 gC[m, n_idx] = partials.reduce(
                     cute.ReductionOp.ADD, init_val=0.0, reduction_profile=0
                 )
-        #cute.arch.griddepcontrol_launch_dependents()  # PDL signal
+        cute.arch.griddepcontrol_launch_dependents()  # PDL signal
 
     @cute.jit
     def host_bf16_lf(
@@ -207,7 +207,7 @@ def make_host_bf16(k_val: int, bs: int = 128):
             block=[bs, 1, 1],
             smem=M * 4 * (bs // 32),
             stream=stream,
-            use_pdl=False,
+            use_pdl=True,
             min_blocks_per_mp=1,
         )
 
