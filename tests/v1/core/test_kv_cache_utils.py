@@ -3281,6 +3281,10 @@ def _spec_decode_grouping_config(method="dspark", model_type=None):
         speculative_config=SimpleNamespace(
             method=method,
             use_eagle=lambda: True,
+            # Mirrors SpeculativeConfig.has_ephemeral_draft_context(): the
+            # annotation path reads it to decide whether a flagged group is
+            # also veto-exempt.
+            has_ephemeral_draft_context=lambda: method in ("dspark",),
         ),
     )
 
