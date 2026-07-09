@@ -172,7 +172,7 @@ class LLBf16Gemm:
             output,
             compile_key.M,
             compile_key.K,
-            1,  # Placeholder for the runtime Int32 launch-grid argument.
+            1,  # runtime N placeholder for fake-tensor compile
             _stream(),
             options="--enable-tvm-ffi --ptxas-options -maxrregcount=64",
         )

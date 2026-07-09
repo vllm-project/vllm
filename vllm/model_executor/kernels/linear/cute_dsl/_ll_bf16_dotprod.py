@@ -18,12 +18,7 @@ def _vector_dotprod(
     num_tiles: cutlass.Constexpr,  # tiles this thread processes
     align_bytes: cutlass.Constexpr,  # 16 for 128-bit loads, 8 for 64-bit tail
 ):
-    """FMA dot-product over all K-tiles.
-
-    B is loaded once per tile and converted to fp32, then reused across all M
-    tokens to avoid redundant type conversion.
-    Alignment hints are re-applied after logical_divide to restore vectorized loads.
-    """
+    """Accumulate the thread-local K-slice into FP32 registers."""
     for tile in range(num_tiles):
         bt = tB[None, tile]
         bt_a = cute.make_tensor(bt.iterator.align(align_bytes), bt.layout)
@@ -58,9 +53,8 @@ def _make_k_slice(
     k_offset: cutlass.Constexpr,
     k_extent: cutlass.Constexpr,
 ):
-    """Extract a K-dimension slice [*leading_dims, k_offset:k_offset+k_extent]."""
-    # CuTe layouts require positive dimensions even when a compile-time branch
-    # is eliminated. Empty K regions use a one-element layout and zero tiles.
+    """Return a positive-extent K slice for CuTe tiling."""
+    # Empty compile-time branches still need a valid CuTe extent.
     k_layout_extent: cutlass.Constexpr = max(k_extent, 1)
     if k_offset == 0:
         return cute.local_tile(gX, (cute.size(gX, mode=[0]), k_layout_extent), (0, 0))
@@ -71,10 +65,8 @@ def _make_k_slice(
     )
 
 
-# Returns a compiled host function specialized for a specific K.
-# K-derived constants are computed from the CuTe layout so loop bounds remain
-# compile-time constants.
-# TODO (roberto): add 256-bit instructions support.
+# Specialize on K so vectorized loop bounds are constexpr.
+# TODO(roberto): try 256-bit copies.
 def make_host_bf16(k_val: int, bs: int = 128):
     _MAIN_VEC_WIDTH = 8  # bf16 elements per 128-bit vectorized load
     _TAIL_VEC_WIDTH = 4  # bf16 elements per 64-bit vectorized load
@@ -115,7 +107,7 @@ def make_host_bf16(k_val: int, bs: int = 128):
         MAIN_TILES: cutlass.Constexpr = K_MAIN_ELEMS // (MAIN_VEC_WIDTH * BS)
         TAIL_TILES: cutlass.Constexpr = K_TAIL_ELEMS // (TAIL_VEC_WIDTH * BS)
 
-        # One FP32 accumulator per token, in registers
+        # One FP32 accumulator per token.
         acc = cute.make_rmem_tensor((M,), cutlass.Float32)
         acc.fill(0.0)
 
@@ -141,9 +133,7 @@ def make_host_bf16(k_val: int, bs: int = 128):
             )
             _vector_dotprod(acc, tA_t, tB_t, M, TAIL_TILES, 8)
 
-        # Scalar remainder after vectorized loops. Full BS-wide rounds are
-        # expressed as width-1 CuTe partitions; only the final ragged tile needs
-        # a runtime guard for threads beyond KS_PART.
+        # Full scalar rounds use CuTe width-1 tiles; KS_PART is the ragged tail.
         if KS_FULL > 0:
             gA_scalar = _make_k_slice(gA, K_DONE_ALL, K_SCALAR_FULL)
             gB_scalar = _make_k_slice(gB, K_DONE_ALL, K_SCALAR_FULL)
@@ -154,9 +144,7 @@ def make_host_bf16(k_val: int, bs: int = 128):
             )
             _vector_dotprod(acc, tA_s, tB_s, M, KS_FULL, 2)
 
-        # Compile-time guard: no partial remainder eliminates this block.
-        # Runtime guard: only the first KS_PART threads participate.
-        # Remaining threads do not execute any out-of-bounds loads.
+        # Only threads below KS_PART load the ragged tail.
         if KS_PART > 0:
             gA_part = _make_k_slice(gA, K_PART_OFFSET, KS_PART)
             gB_part = _make_k_slice(gB, K_PART_OFFSET, KS_PART)
@@ -167,7 +155,7 @@ def make_host_bf16(k_val: int, bs: int = 128):
 
         # Intra-warp shuffle reduction
         WS: cutlass.Constexpr = 32
-        NW: cutlass.Constexpr = BS // WS # = 8 warps
+        NW: cutlass.Constexpr = BS // WS  # warps per CTA
         for m in cutlass.range_constexpr(M):
             acc[m] = cute.arch.warp_reduction_sum(acc[m])
 
@@ -203,7 +191,7 @@ def make_host_bf16(k_val: int, bs: int = 128):
         stream: CUstream,
     ):
         dotprod_bf16_lf(gA, gB, gC, M, K_dim).launch(
-            grid=[N_dim, 1, 1], # one CTA per expert
+            grid=[N_dim, 1, 1],  # one CTA per expert
             block=[bs, 1, 1],
             smem=M * 4 * (bs // 32),
             stream=stream,
