@@ -47,7 +47,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install Python and other dependencies
 RUN apt-get update -y \
-    && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev liblzma-dev pkg-config g++ \
+    && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev liblzma-dev libnuma-dev libdrm-dev pkg-config g++ \
     && for i in 1 2 3; do \
     add-apt-repository -y ppa:deadsnakes/ppa && break || \
     { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
@@ -137,6 +137,31 @@ RUN if [ -f "${SITE_PACKAGES}/rocm_sdk/__init__.py" ]; then \
     "${SITE_PACKAGES}/rocm_sdk/__init__.py"; \
     fi
 
+# The ROCm SDK wheel ships a broken CMake export for hsakmt
+# This patch includes the right paths for the numa build target
+RUN <<'EOF'
+set -eu
+TARGETS="/opt/rocm/lib/cmake/hsakmt/hsakmtTargets.cmake"
+[ -f "$TARGETS" ] || exit 0            # nothing to patch
+grep -q NUMA_LIBRARY "$TARGETS" && exit 0   # already patched
+
+# 1. Point libdrm's -L at the copy bundled in the wheel, not the builder path.
+sed -i 's|-L/__w/[^;"]*|-L${_IMPORT_PREFIX}/lib/rocm_sysdeps/lib|g' "$TARGETS"
+
+# 2. Drop the nonexistent RHEL libc path (libc is linked implicitly anyway).
+sed -i 's|/usr/lib64/libc.so;||g' "$TARGETS"
+
+# 3. Define the numa::numa target the export references but forgot to create.
+cat >> "$TARGETS" <<'CMAKE'
+
+if(NOT TARGET numa::numa)
+  find_library(NUMA_LIBRARY NAMES numa REQUIRED)
+  add_library(numa::numa UNKNOWN IMPORTED)
+  set_target_properties(numa::numa PROPERTIES IMPORTED_LOCATION "${NUMA_LIBRARY}")
+endif()
+CMAKE
+EOF
+
 # Setup sccache for HIP compilation via HIP_CLANG_PATH
 # This creates wrapper scripts in a separate directory and points HIP to use them
 # This avoids modifying the original ROCm binaries which can break detection
@@ -178,16 +203,12 @@ ARG MORI_BRANCH
 ARG MORI_REPO
 ARG MORI_GPU_ARCHS
 RUN mkdir -p /app/install; \
-    if echo "${PYTORCH_ROCM_ARCH}" | grep -q "gfx1250"; then \
-    echo "gfx1250 in PYTORCH_ROCM_ARCH; skipping MORI build"; \
-    else \
     git clone ${MORI_REPO} \
     && cd mori \
     && git checkout ${MORI_BRANCH} \
     && git submodule update --init --recursive \
     && python3 setup.py bdist_wheel --dist-dir=dist && ls /app/mori/dist/*.whl \
-    && cp /app/mori/dist/*.whl /app/install; \
-    fi
+    && cp /app/mori/dist/*.whl /app/install;
 
 
 ###
