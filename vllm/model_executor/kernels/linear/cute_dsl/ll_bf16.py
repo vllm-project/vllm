@@ -31,9 +31,13 @@ def is_available() -> bool:
 
 
 _DEFAULT_DOTPROD_BS = 128
-_DEFAULT_SPLITK_CONFIG = (8, 2)
+_DEFAULT_DOTPROD_MAX_M = 4
+_DEFAULT_SPLITK_CONFIG = (6, 4)
+_TUNED_DOTPROD_MAX_M: dict[tuple[int, int], int] = {
+    (7168, 256): 6,
+}
 _TUNED_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int]]] = {
-    (7168, 384): {M: (4, 3) for M in range(5, 16)},
+    (7168, 384): {M: (4, 4) for M in range(5, 16)},
 }
 
 
@@ -75,7 +79,10 @@ class LLBf16Gemm:
         self._splitk_cache: dict[tuple[int, int], object] = {}
 
     def dispatch(self, *, M: int, K: int, N: int) -> CompileKey:
-        if M <= 4 or K < 2048:
+        dotprod_max_m = _TUNED_DOTPROD_MAX_M.get(
+            (K, N), _DEFAULT_DOTPROD_MAX_M
+        )
+        if dotprod_max_m >= M or K < 2048:
             return self.CompileKey(
                 backend="dotprod", M=M, K=K, bs=_DEFAULT_DOTPROD_BS
             )
