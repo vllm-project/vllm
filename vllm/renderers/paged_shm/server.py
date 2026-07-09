@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import json
-import multiprocessing as mp
+from collections.abc import Callable
+from multiprocessing.synchronize import Event
 
 import zmq
 
@@ -100,7 +101,7 @@ class PagedShmServer:
         self.storage.close()
 
 
-def zmq_server(size: int, block_size: int, conn, stop_event: mp.Event):
+def zmq_server(size: int, block_size: int, conn, stop_event: Event):
     context = zmq.Context()
     socket = None
     server = None
@@ -191,6 +192,7 @@ def zmq_server(size: int, block_size: int, conn, stop_event: mp.Event):
                 _send_response(socket, response_frames)
                 continue
 
+            handler: Callable
             handler, requires_payload = handler_info
             try:
                 if requires_payload:

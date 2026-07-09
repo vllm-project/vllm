@@ -94,7 +94,7 @@ class _WriteContext:
         self.blocks = alloc[0]["blocks"]
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+    def __exit__(self, exc_type, exc_val, exc_tb):
         if exc_type is None:
             self._client.close_write(self._uuid)
         else:
@@ -115,7 +115,6 @@ class _WriteContext:
                     self._uuid,
                     e,
                 )
-        return False
 
 
 class _ReadContext:
@@ -136,9 +135,8 @@ class _ReadContext:
         self.blocks = items["blocks"]
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+    def __exit__(self, exc_type, exc_val, exc_tb):
         self._client.close_read(self._uuid)
-        return False
 
 
 # ---------------------------------------------------------------------------

@@ -132,7 +132,7 @@ class PagedShmManager:
             self._lru_cache.put(uuid, item)
 
     def open_read(self, uuid):
-        item: AllocatedItem = self._all_items.get(uuid, None)
+        item: AllocatedItem | None = self._all_items.get(uuid, None)
         if item is None:
             raise ValueError(f"UUID {uuid} not found")
         if item.ref_count < 0:

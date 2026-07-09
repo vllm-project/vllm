@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import AsyncGenerator
+from uuid import UUID, uuid4
 
 from fastapi import HTTPException, UploadFile
 from starlette.responses import StreamingResponse
@@ -32,14 +33,14 @@ class ServingObjectStorage:
         if uuid is not None:
             try:
                 # Validate UUID format
-                uuid.UUID(uuid)
+                UUID(uuid)
             except ValueError:
                 raise HTTPException(
                     status_code=400, detail="Invalid UUID format"
                 ) from None
             uid = uuid
         else:
-            uid = str(uuid.uuid4())
+            uid = str(uuid4())
 
         try:
             await self.client.write(uid, content)
