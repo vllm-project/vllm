@@ -9,13 +9,25 @@ def main():
     print("=" * 50)
     print()
 
-    # 1. Check Python 3.12
-    if sys.version_info[:2] != (3, 12):
-        print(f"[!!] Python 3.12 required. You have Python {sys.version_info.major}.{sys.version_info.minor}")
-        print("     Download from: https://www.python.org/downloads/release/python-3129/")
-        input("Press Enter to exit...")
-        sys.exit(1)
-    print(f"[OK] Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
+    # 1. Find Python 3.12
+    python312 = find_python312()
+    if not python312:
+        print("[!!] Python 3.12 not found.")
+        dl = input("Download Python 3.12? (Y/N) [Y]: ").strip().upper() or "Y"
+        if dl == "Y":
+            url = "https://www.python.org/ftp/python/3.12.9/python-3.12.9-amd64.exe"
+            installer = Path(os.environ.get("TEMP", ".")) / "python-3.12.9-amd64.exe"
+            print(f"Downloading from {url}...")
+            import urllib.request
+            urllib.request.urlretrieve(url, str(installer))
+            print("Running installer...")
+            subprocess.run([str(installer), "/quiet", "InstallAllUsers=0", "PrependPath=1", "Include_test=0"], check=True)
+            python312 = find_python312()
+        if not python312:
+            print("[!!] Python 3.12 required. Install it manually from python.org")
+            input("Press Enter to exit...")
+            sys.exit(1)
+    print(f"[OK] Python 3.12: {python312}")
 
     # 2. Install folder
     default = "E:\\VLLM"
@@ -24,16 +36,18 @@ def main():
     install_dir.mkdir(parents=True, exist_ok=True)
     print(f"[OK] {install_dir}")
 
-    # 3. Create venv
+    # 3. Create venv with Python 3.12
     venv_dir = install_dir / ".venv"
     if input("\nCreate Python venv? (Y/N) [Y]: ").strip().upper() or "Y":
-        subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
+        subprocess.run([python312, "-m", "venv", str(venv_dir)], check=True)
         python = str(venv_dir / "Scripts" / "python.exe")
         pip = str(venv_dir / "Scripts" / "pip.exe")
-        print(f"[OK] Venv: {venv_dir}")
+        # Verify venv is 3.12
+        r = subprocess.run([python, "--version"], capture_output=True, text=True)
+        print(f"[OK] Venv: {venv_dir} ({r.stdout.strip()})")
     else:
-        python = sys.executable
-        pip = shutil.which("pip") or "pip"
+        python = python312
+        pip = str(Path(python312).parent / "pip.exe") if os.name == "nt" else "pip"
 
     # 4. Detect ROCm
     print("\n[..] Detecting ROCm...")
@@ -141,6 +155,34 @@ def main():
     print(f"  Run:  {src_dir / 'vllm.exe'}")
     print()
     input("Press Enter to exit...")
+
+def find_python312():
+    # 1. Try py launcher
+    try:
+        r = subprocess.run(["py", "-3.12", "--version"], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            # Find where py's 3.12 is
+            r2 = subprocess.run(["py", "-3.12", "-c", "import sys; print(sys.executable)"], capture_output=True, text=True, timeout=5)
+            if r2.returncode == 0:
+                return r2.stdout.strip()
+    except: pass
+    # 2. Check PATH
+    try:
+        r = subprocess.run(["python3.12", "--version"], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            r2 = subprocess.run(["python3.12", "-c", "import sys; print(sys.executable)"], capture_output=True, text=True, timeout=5)
+            if r2.returncode == 0:
+                return r2.stdout.strip()
+    except: pass
+    # 3. Check common install paths
+    for p in [
+        r"C:\Python312\python.exe",
+        r"C:\Program Files\Python312\python.exe",
+        os.path.expanduser(r"~\AppData\Local\Programs\Python\Python312\python.exe"),
+    ]:
+        if Path(p).exists():
+            return p
+    return None
 
 def detect_rocm():
     for var in ["ROCM_HOME", "ROCM_PATH", "HIP_PATH"]:
