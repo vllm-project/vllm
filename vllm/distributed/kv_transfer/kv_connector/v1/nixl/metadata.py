@@ -147,6 +147,7 @@ class HeartbeatInfo:
     host: str
     port: int
     tp_size: int
+    pp_size: int = 1
 
 
 @dataclass
@@ -167,6 +168,8 @@ class ReqMeta:
     remote: RemoteMeta | None = None
     # Remote block size, discovered during NIXL handshake (push mode).
     remote_block_size: int | None = None
+    # Remote producer pipeline-parallel size (push mode, D side).
+    pp_size: int = 1
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -196,6 +199,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             # P workers don't need to receive tp_size from proxy here.
             tp_size=kv_transfer_params.get("tp_size", 1),
             remote_block_size=kv_transfer_params.get("remote_block_size"),
+            pp_size=kv_transfer_params.get("pp_size", 1),
         )
 
     def add_new_req_to_save(

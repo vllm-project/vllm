@@ -67,7 +67,7 @@ class KVCacheCoordinator(ABC):
         self,
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
-        max_num_batched_tokens: int,
+        max_in_flight_tokens: int,
         use_eagle: bool,
         enable_caching: bool,
         enable_kv_cache_events: bool,
@@ -107,7 +107,7 @@ class KVCacheCoordinator(ABC):
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
                 kv_cache_spec=kv_cache_group.kv_cache_spec,
-                max_num_batched_tokens=max_num_batched_tokens,
+                max_in_flight_tokens=max_in_flight_tokens,
                 max_model_len=max_model_len,
                 block_pool=self.block_pool,
                 enable_caching=enable_caching,
@@ -115,6 +115,7 @@ class KVCacheCoordinator(ABC):
                 dcp_world_size=dcp_world_size,
                 pcp_world_size=pcp_world_size,
                 scheduler_block_size=self.scheduler_block_size,
+                needs_kv_cache_zeroing=self.kv_cache_config.needs_kv_cache_zeroing,
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
@@ -331,7 +332,7 @@ class KVCacheCoordinator(ABC):
     def remove_skipped_blocks(
         self,
         request_id: str,
-        total_computed_tokens: int,
+        processed_computed_tokens: int,
         num_prompt_tokens: int | None = None,
     ) -> None:
         """
@@ -340,15 +341,15 @@ class KVCacheCoordinator(ABC):
 
         Args:
             request_id: The request ID.
-            total_computed_tokens: The total number of computed tokens, including
-                local computed tokens and external computed tokens.
+            processed_computed_tokens: Computed-token prefix length covering
+                fully processed and committed tokens only (safe to free).
             num_prompt_tokens: Optional prompt length. R-SWA managers use this to
                 free gap blocks between the prefill tail and decode window; other
                 manager types ignore it.
         """
         for manager in self.single_type_managers:
             manager.remove_skipped_blocks(
-                request_id, total_computed_tokens, num_prompt_tokens
+                request_id, processed_computed_tokens, num_prompt_tokens
             )
 
     def get_blocks(self, request_id: str) -> tuple[list[KVCacheBlock], ...]:
@@ -386,7 +387,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         self,
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
-        max_num_batched_tokens: int,
+        max_in_flight_tokens: int,
         use_eagle: bool,
         enable_kv_cache_events: bool,
         dcp_world_size: int,
@@ -398,7 +399,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         super().__init__(
             kv_cache_config,
             max_model_len,
-            max_num_batched_tokens,
+            max_in_flight_tokens,
             use_eagle,
             False,
             enable_kv_cache_events,
@@ -435,7 +436,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         self,
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
-        max_num_batched_tokens: int,
+        max_in_flight_tokens: int,
         use_eagle: bool,
         enable_caching: bool,
         enable_kv_cache_events: bool,
@@ -448,7 +449,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         super().__init__(
             kv_cache_config,
             max_model_len,
-            max_num_batched_tokens,
+            max_in_flight_tokens,
             use_eagle,
             enable_caching,
             enable_kv_cache_events,
@@ -521,7 +522,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self,
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
-        max_num_batched_tokens: int,
+        max_in_flight_tokens: int,
         use_eagle: bool,
         enable_caching: bool,
         enable_kv_cache_events: bool,
@@ -534,7 +535,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         super().__init__(
             kv_cache_config,
             max_model_len,
-            max_num_batched_tokens,
+            max_in_flight_tokens,
             use_eagle,
             enable_caching,
             enable_kv_cache_events,
@@ -782,7 +783,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 def get_kv_cache_coordinator(
     kv_cache_config: KVCacheConfig,
     max_model_len: int,
-    max_num_batched_tokens: int,
+    max_in_flight_tokens: int,
     use_eagle: bool,
     enable_caching: bool,
     enable_kv_cache_events: bool,
@@ -796,7 +797,7 @@ def get_kv_cache_coordinator(
         return KVCacheCoordinatorNoPrefixCache(
             kv_cache_config,
             max_model_len,
-            max_num_batched_tokens,
+            max_in_flight_tokens,
             use_eagle,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
@@ -809,7 +810,7 @@ def get_kv_cache_coordinator(
         return UnitaryKVCacheCoordinator(
             kv_cache_config,
             max_model_len,
-            max_num_batched_tokens,
+            max_in_flight_tokens,
             use_eagle,
             enable_caching,
             enable_kv_cache_events,
@@ -822,7 +823,7 @@ def get_kv_cache_coordinator(
     return HybridKVCacheCoordinator(
         kv_cache_config,
         max_model_len,
-        max_num_batched_tokens,
+        max_in_flight_tokens,
         use_eagle,
         enable_caching,
         enable_kv_cache_events,
