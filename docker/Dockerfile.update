@@ -1,0 +1,44 @@
+# vLLM 快速更新镜像: 在最新 base 镜像 (docker/Dockerfile.base 构建) 之上,
+# 只更新 vLLM 的 Python 源码, 完全跳过 CUDA 编译。
+#
+# 原理: base 里 vLLM 是编辑模式安装 (pip install -e .), site-packages 里的
+# __editable__.vllm-*.pth 直接指向 /vllm-workspace/vllm 源码树, entry point
+# (/usr/local/bin/vllm) 和 dist-info 也都装好了。日常发版只覆盖 .py 文件,
+# Python 下次 import 就拿到新代码, 无需 rerun `pip install -e .`。
+#
+# 不 rerun 的好处: 不触发 setup.py -> build_ext -> cmake/ninja, 避免 ninja
+# 按 mtime 判定源文件比 base 里的 .o/.so 都新 -> 认为整棵产物都过期 ->
+# 数小时的全量重编 (曾经 [175/397] @ 2h 超时).
+#
+# 前提约束 (变了必须重建 base, 不能走 update):
+#   - csrc/**  或  CMakeLists.txt / build.txt
+#   - pyproject.toml 的 entry points / dependencies / dynamic metadata
+#   - setup.py 或 requirements/cuda.txt / common.txt (影响装机版本对齐)
+# 如果只是 vllm/**/*.py 修改, 走 update 即可。
+#
+# Usage:
+#   docker build -f docker/Dockerfile.update \
+#     --build-arg BASE_IMAGE=registry-cn-beijing.siflow.cn/skyinfer/vllm:base-latest \
+#     --build-arg VLLM_BUILD_VERSION=0.1.0 \
+#     -t registry-cn-beijing.siflow.cn/skyinfer/vllm:release-develop-<sha9>-<date> .
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV UV_HTTP_TIMEOUT=500
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
+ENV UV_BREAK_SYSTEM_PACKAGES=1
+
+# 构建上下文可能没有完整 .git, 显式指定版本号 (PEP 440); base 已装好 dist-info,
+# 这里不再重装 vllm, 版本号只用于可能的运行时/日志读取
+ARG VLLM_BUILD_VERSION=0.0.0.dev0
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VLLM_BUILD_VERSION}
+
+WORKDIR /vllm-workspace/vllm
+
+# 覆盖 Python 源码; .dockerignore 排除 build/ 和 vllm/*.so, 所以 base 里的
+# 编译产物完好保留
+COPY . .
+
+ENTRYPOINT ["vllm", "serve"]

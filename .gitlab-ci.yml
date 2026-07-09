@@ -1,12 +1,212 @@
+# GitLab CI for vLLM (fork)
+#
+# 流水线 (按 tag 前缀路由):
+#   普通提交(任意分支 push / MR): 只跑 lint -> unit-test(CPU)
+#   打 release* tag: lint -> unit-test -> image-build(kaniko, 推 release-<分支>-<sha>-<日期>)
+#                    -> image-test(在刚构建的镜像里跑测试) -> release(晋升 :<tag> + :latest)
+#   打 base* tag:     完整编译重建 base 镜像 (kaniko, 数小时)
+#   打 unittest* tag: 重建单测依赖镜像 (requirements 变化时)
+#
+# Runner: 全部 job 使用 iquest-inference-runner (kubernetes executor)。
+#   Pod 里没有 docker daemon, 因此:
+#   - 镜像构建用 kaniko (自动从 registry 拉 FROM 镜像、构建、推送)
+#   - image-test 直接以刚构建的镜像作为 job 运行镜像 (tag 经 dotenv 传递)
+#   - release 用 crane 远程打 tag (只改 manifest, 不搬数据)
+#   注意: base 镜像的 CUDA 编译在 Pod 里进行, 如果 runner 的 Pod 资源限额
+#   (CPU/内存) 太小会很慢甚至 OOM, 必要时请管理员调大或降低 MAX_JOBS
+#
+# MR 合并门禁: 需在 Settings -> General -> Merge requests 勾选 "Pipelines must succeed"
+#
+# Required CI/CD variables (Settings -> CI/CD -> Variables):
+#   REGISTRY_HOST         registry 地址, 如 registry-cn-beijing.siflow.cn (末尾不带 /)
+#   REGISTRY_IMAGE        命名空间/镜像名, 如 skyinfer/vllm (不带 tag)
+#   REGISTRY_USER         registry 用户名, 如 xxx@skyinfer (Masked)
+#   REGISTRY_PASSWORD     registry 密码 (Masked)
+#   (凭据未配置时构建类 job 自动跳过; 若变量勾了 Protected, 需同时把
+#    unittest-*/base-*/release-* 加入 Protected tags, 否则 tag 流水线拿不到)
+#
+#   仅 base-image-build 需要 (内部 pretrain/transformers 从私有仓库 clone):
+#   TRANSFORMER_REPO_URL  仓库地址, 如 https://gitlab-cn-beijing.siflow.cn/pretrain/transformers.git
+#   TRANSFORMER_BRANCH    分支名, 如 feat_baseline
+#   TRANSFORMER_COMMIT    可选; 空则停在分支 HEAD (变量留空即可, 不要不建)
+#   GITLAB_TOKEN          带 read_repository 的 PAT/deploy token (Masked, 建议 Protected)
+#
+# Optional variables:
+#   FEISHU_WEBHOOK_URL  飞书机器人 webhook (未配置则跳过通知; 勿硬编码进仓库)
+#   BUILD_BASE_IMAGE    base 镜像构建的起点镜像 (需自带 torch+CUDA+nvcc)
+#   BASE_IMAGE_TAG      日常构建基于的 base 镜像 tag (默认 base-latest)
+#   CUDA_ARCH_LIST      base 构建的目标 GPU 架构
+#   SOURCE_BRANCH       镜像 tag 中的分支段 (tag 流水线拿不到分支名, 默认 develop)
+
 stages:
   - lint
+  - unittest
+  - build
+  - image-e2e-test
+  - release
 
-# ---------------- lint ----------------
-# 复用仓库自带的 pre-commit 配置（ruff / typos / clang-format / mypy 等），
-# 只对本次变更的文件做增量检查（--from-ref/--to-ref）:
-#   - MR 流水线: 对比 MR 的 diff base
-#   - 分支 push: 对比 push 前的 commit; 新分支/force-push 等拿不到时
-#     退化为只检查最近一个 commit, 再不行才全量
+# 避免 push + MR 触发重复流水线: 有开着的 MR 时只跑 MR 流水线
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+variables:
+  # REGISTRY_HOST / REGISTRY_IMAGE 不在此定义, 由 GitLab 项目设置的
+  # CI/CD Variables 提供 (Settings -> CI/CD -> Variables):
+  #   REGISTRY_HOST  = registry-cn-beijing.siflow.cn (末尾不带 /)
+  #   REGISTRY_IMAGE = skyinfer/vllm (命名空间/镜像名, 不带 tag)
+  # 三类镜像共用该仓库, 用 tag 前缀区分:
+  #   base-<分支>-<sha9>-<日期>      完整编译的 base 镜像
+  #   release-<分支>-<sha9>-<日期>   发版镜像
+  #   unittest-<分支>-<sha9>-<日期>  单测依赖镜像
+  # 滑动 tag: base-latest / unittest-latest / latest(=最新通过测试的 release)
+  TEST_DEPS_IMAGE: ${REGISTRY_HOST}/${REGISTRY_IMAGE}:unittest-latest
+  BASE_IMAGE_TAG: base-latest
+  # 构建工具镜像 (gcr/quay 的国内镜像源, kaniko 版本沿用前端项目已验证的)
+  KANIKO_IMAGE: gcr.m.daocloud.io/kaniko-project/executor:v1.23.2-debug
+  CRANE_IMAGE: gcr.m.daocloud.io/go-containerregistry/crane:debug
+  # base 镜像构建的起点: pytorch 官方 devel 镜像 (自带 Python/torch/nvcc);
+  # torch 版本须与 requirements/cuda.txt 钉版一致 (Dockerfile.base 里有断言)
+  BUILD_BASE_IMAGE: pytorch/pytorch:2.10.0-cuda12.8-cudnn9-devel
+  MAX_JOBS: "16"
+  NVCC_THREADS: "8"
+  # 目标 GPU 架构: 8.9=Ada, 9.0=Hopper, 10.0/12.0=Blackwell
+  CUDA_ARCH_LIST: "8.9 9.0 10.0 12.0"
+  # tag 流水线里拿不到分支名(CI_COMMIT_BRANCH 为空), 镜像 tag 中的分支段用
+  # 此变量代替; 从非 develop 分支打 tag 时, 触发流水线时覆盖它
+  SOURCE_BRANCH: develop
+  # CPU 可跑的单元测试子集 (iquest parser + 轻量顶层测试)
+  # TODO: tests/reasoning/test_iquest_reasoning_parser.py tests/tool_parsers/test_iquest_coder_tool_parser.py
+  UNIT_TEST_PATHS: >-
+    tests/test_logger.py
+  # 国内访问 HuggingFace 的镜像 (parser 测试需要下载 Qwen tokenizer)
+  HF_ENDPOINT: https://hf-mirror.com
+
+# 镜像 tag 规则: <类型>-<分支>-<commit前9位>-<日期>, 如 base-develop-5da4717f4-20260706
+# 类型由各 job 的 IMAGE_TYPE 变量给出; 日期取流水线创建时间,
+# 保证同一条流水线各 job 算出的 tag 一致
+.export-image-tag: &export-image-tag
+  - export SHORT_SHA=$(echo $CI_COMMIT_SHA | cut -c1-9)
+  - export BUILD_DATE=$(echo $CI_PIPELINE_CREATED_AT | cut -c1-10 | tr -d '-')
+  - export REF_NAME=${CI_COMMIT_BRANCH:-${SOURCE_BRANCH}}
+  - export IMAGE_TAG=${IMAGE_TYPE:-release}-${REF_NAME}-${SHORT_SHA}-${BUILD_DATE}
+  - echo "IMAGE_TAG = ${IMAGE_TAG}"
+  - echo "REGISTRY_USER = ${REGISTRY_USER}"
+  - echo "REGISTRY_PASSWORD = ${REGISTRY_PASSWORD}"
+
+# 写 kaniko 的 registry 认证文件
+.kaniko-auth: &kaniko-auth
+  - mkdir -p /kaniko/.docker
+  - |
+    cat > /kaniko/.docker/config.json <<EOF
+    {"auths":{"${REGISTRY_HOST}":{"username":"${REGISTRY_USER}","password":"${REGISTRY_PASSWORD}"}}}
+    EOF
+
+# ─── 飞书通知模板 ────────────────────────────────────────────────────────────
+# 构建类 job extends 本模板: before_script 发开始通知, after_script 按
+# CI_JOB_STATUS (success/failed/canceled) 发结束通知并附耗时。
+# 需要 job 里定义 IMAGE_TYPE 变量。
+# 注意: 起始时间等文件必须写 CI_PROJECT_DIR (挂载卷, kaniko 擦根文件系统时幸存)
+.feishu-notify:
+  before_script:
+    - *export-image-tag
+    - |
+      date +%s > "${CI_PROJECT_DIR}/.ci_start_epoch"
+      date -u +"%Y-%m-%d %H:%M:%S UTC" > "${CI_PROJECT_DIR}/.ci_start_time"
+      if [ -n "${FEISHU_WEBHOOK_URL}" ]; then
+        SAFE_COMMIT_TITLE=$(printf '%s' "${CI_COMMIT_TITLE}" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        cat > "${CI_PROJECT_DIR}/.feishu_payload.json" <<EOF
+      {
+        "msg_type": "post",
+        "content": { "post": { "zh_cn": {
+          "title": "🚀 vLLM 开始构建 (${CI_JOB_NAME})",
+          "content": [[
+            {"tag": "text", "text": "仓库: ${CI_PROJECT_PATH}\n"},
+            {"tag": "text", "text": "分支/Tag: ${CI_COMMIT_REF_NAME}\n"},
+            {"tag": "text", "text": "Commit: ${CI_COMMIT_SHORT_SHA} - ${SAFE_COMMIT_TITLE}\n"},
+            {"tag": "text", "text": "作者: ${CI_COMMIT_AUTHOR}\n"},
+            {"tag": "text", "text": "触发人: ${GITLAB_USER_NAME} (${GITLAB_USER_LOGIN})\n"},
+            {"tag": "text", "text": "流水线 ID: ${CI_PIPELINE_ID}  Job ID: ${CI_JOB_ID}\n"},
+            {"tag": "text", "text": "目标镜像: ${REGISTRY_HOST}/${REGISTRY_IMAGE}:${IMAGE_TAG}\n"},
+            {"tag": "a", "text": "🔗 查看任务进度", "href": "${CI_JOB_URL}"},
+            {"tag": "text", "text": "  |  "},
+            {"tag": "a", "text": "查看流水线", "href": "${CI_PIPELINE_URL}"},
+            {"tag": "text", "text": "  |  "},
+            {"tag": "a", "text": "查看 Commit", "href": "${CI_PROJECT_URL}/-/commit/${CI_COMMIT_SHA}"}
+          ]]
+        }}}
+      }
+      EOF
+        echo "发送构建开始通知至飞书..."
+        wget --post-file="${CI_PROJECT_DIR}/.feishu_payload.json" \
+          --header="Content-Type: application/json" \
+          "${FEISHU_WEBHOOK_URL}" -O- || echo "⚠️ 开始通知发送失败, 继续构建"
+      else
+        echo "未配置 FEISHU_WEBHOOK_URL, 跳过构建开始通知"
+      fi
+  after_script:
+    - *export-image-tag
+    - |
+      if [ -z "${FEISHU_WEBHOOK_URL}" ]; then
+        echo "未配置 FEISHU_WEBHOOK_URL, 跳过结束通知"
+        exit 0
+      fi
+      # 计算耗时 (after_script 是独立 shell, 从文件读起始时间)
+      if [ -f "${CI_PROJECT_DIR}/.ci_start_epoch" ]; then
+        START_EPOCH=$(cat "${CI_PROJECT_DIR}/.ci_start_epoch")
+        DURATION_SEC=$(( $(date +%s) - START_EPOCH ))
+        DURATION_FMT="$((DURATION_SEC / 60))m $((DURATION_SEC % 60))s"
+        START_TIME=$(cat "${CI_PROJECT_DIR}/.ci_start_time" 2>/dev/null || echo unknown)
+      else
+        DURATION_FMT="unknown"; START_TIME="unknown"
+      fi
+      END_TIME=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+      case "${CI_JOB_STATUS}" in
+        success)  TITLE="✅ vLLM 镜像构建成功 (${CI_JOB_NAME})"; TIP="拉取: docker pull ${REGISTRY_HOST}/${REGISTRY_IMAGE}:${IMAGE_TAG}" ;;
+        canceled) TITLE="⚠️ vLLM 构建已取消 (${CI_JOB_NAME})"; TIP="job 被手动取消" ;;
+        *)        TITLE="❌ vLLM 镜像构建失败 (${CI_JOB_NAME})"; TIP="⚠️ 请查看 Job 日志定位失败原因" ;;
+      esac
+      SAFE_COMMIT_TITLE=$(printf '%s' "${CI_COMMIT_TITLE}" | sed 's/\\/\\\\/g; s/"/\\"/g')
+      cat > "${CI_PROJECT_DIR}/.feishu_payload.json" <<EOF
+      {
+        "msg_type": "post",
+        "content": { "post": { "zh_cn": {
+          "title": "${TITLE}",
+          "content": [[
+            {"tag": "text", "text": "仓库: ${CI_PROJECT_PATH}\n"},
+            {"tag": "text", "text": "分支/Tag: ${CI_COMMIT_REF_NAME}\n"},
+            {"tag": "text", "text": "Commit: ${CI_COMMIT_SHORT_SHA} - ${SAFE_COMMIT_TITLE}\n"},
+            {"tag": "text", "text": "作者: ${CI_COMMIT_AUTHOR}\n"},
+            {"tag": "text", "text": "触发人: ${GITLAB_USER_NAME} (${GITLAB_USER_LOGIN})\n"},
+            {"tag": "text", "text": "Runner: ${CI_RUNNER_DESCRIPTION:-unknown}\n"},
+            {"tag": "text", "text": "流水线 ID: ${CI_PIPELINE_ID}  Job ID: ${CI_JOB_ID}\n"},
+            {"tag": "text", "text": "────────────────\n"},
+            {"tag": "text", "text": "⏱ 开始: ${START_TIME}\n"},
+            {"tag": "text", "text": "⏱ 结束: ${END_TIME}\n"},
+            {"tag": "text", "text": "⏱ 耗时: ${DURATION_FMT}\n"},
+            {"tag": "text", "text": "────────────────\n"},
+            {"tag": "text", "text": "镜像: ${REGISTRY_HOST}/${REGISTRY_IMAGE}:${IMAGE_TAG}\n"},
+            {"tag": "text", "text": "${TIP}\n"},
+            {"tag": "a", "text": "🔗 查看 Job", "href": "${CI_JOB_URL}"},
+            {"tag": "text", "text": "  |  "},
+            {"tag": "a", "text": "查看流水线", "href": "${CI_PIPELINE_URL}"},
+            {"tag": "text", "text": "  |  "},
+            {"tag": "a", "text": "查看 Commit", "href": "${CI_PROJECT_URL}/-/commit/${CI_COMMIT_SHA}"}
+          ]]
+        }}}
+      }
+      EOF
+      echo "发送构建结束通知至飞书 (status=${CI_JOB_STATUS}, duration=${DURATION_FMT})..."
+      wget --post-file="${CI_PROJECT_DIR}/.feishu_payload.json" \
+        --header="Content-Type: application/json" \
+        "${FEISHU_WEBHOOK_URL}" -O- || echo "⚠️ 结束通知发送失败"
+
+# ─── lint (每次提交) ─────────────────────────────────────────────────────────
+# 复用仓库自带的 pre-commit 配置, 只对本次变更的文件做增量检查
 lint:
   stage: lint
   tags:
@@ -18,8 +218,16 @@ lint:
     GIT_DEPTH: "50"
     PRE_COMMIT_HOME: ${CI_PROJECT_DIR}/.cache/pre-commit
     PIP_CACHE_DIR: ${CI_PROJECT_DIR}/.cache/pip
+  # cache key 用 hook 配置 + lint deps 的内容 hash: 配置不变永远命中,
+  # 变了自动失效重建。要在 runner 端配好 shared cache storage (S3/OSS) 才生效,
+  # 否则日志会打印 "No URL provided, ... local version of cache", 每个 Pod
+  # 起一次都是空 cache
   cache:
-    key: pre-commit-${CI_PROJECT_NAME}
+    key:
+      files:
+        - .pre-commit-config.yaml
+        - requirements/lint.txt
+      prefix: pre-commit-${CI_PROJECT_NAME}
     paths:
       - .cache/pre-commit
       - .cache/pip
@@ -42,7 +250,209 @@ lint:
         echo "No base ref available, falling back to linting all files"
         pre-commit run --all-files --hook-stage manual --show-diff-on-failure
       fi
+
+# ─── unit test (CPU, 每次提交) ───────────────────────────────────────────────
+# 测试依赖已烘在 unittest 镜像里 (docker/Dockerfile.test-deps),
+# clone 源码后直接跑 pytest
+unit-test:
+  stage: unittest
+  tags:
+    - iquest-inference-runner
+  image: ${TEST_DEPS_IMAGE}
+  timeout: 1h
+  variables:
+    GIT_STRATEGY: clone
+    GIT_DEPTH: "50"
+  script:
+    # 不安装 vllm: python -m pytest 会把仓库根目录加进 sys.path,
+    # import vllm 直接解析到源码目录, 对纯 Python 单测足够。
+    # 注意: 若将来测试涉及 grpc 生成代码 / entry points / 包元数据,
+    # 需要恢复 "VLLM_TARGET_DEVICE=empty pip install -e . --no-build-isolation --no-deps"
+    - python -m pytest -v ${UNIT_TEST_PATHS}
+
+# ─── base image (低频, base* tag / 手动) ────────────────────────────────────
+# kaniko 完整编译 CUDA kernel, 数小时。csrc/CMake/torch 等变化时必须重建
+base-image-build:
+  stage: build
+  extends: .feishu-notify
+  tags:
+    - iquest-inference-runner
+  image:
+    name: ${KANIKO_IMAGE}
+    entrypoint: [""]
+  timeout: 8h
+  needs: []          # 基建镜像不依赖 lint/unit-test, 直接开跑
+  variables:
+    GIT_STRATEGY: clone
+    GIT_SUBMODULE_STRATEGY: recursive
+    IMAGE_TYPE: base
+  script:
+    - *kaniko-auth
+    - |
+      KANIKO_EXIT=0
+      /kaniko/executor \
+        --context "${CI_PROJECT_DIR}" \
+        --dockerfile "${CI_PROJECT_DIR}/docker/Dockerfile.base" \
+        --build-arg "BUILD_BASE_IMAGE=${BUILD_BASE_IMAGE}" \
+        --build-arg "max_jobs=${MAX_JOBS}" \
+        --build-arg "nvcc_threads=${NVCC_THREADS}" \
+        --build-arg "torch_cuda_arch_list=${CUDA_ARCH_LIST}" \
+        --build-arg "VLLM_BUILD_VERSION=0.0.0.dev0+${SHORT_SHA}" \
+        --build-arg "TRANSFORMER_REPO_URL=${TRANSFORMER_REPO_URL}" \
+        --build-arg "TRANSFORMER_BRANCH=${TRANSFORMER_BRANCH}" \
+        --build-arg "TRANSFORMER_COMMIT=${TRANSFORMER_COMMIT}" \
+        --build-arg "GITLAB_TOKEN=${GITLAB_TOKEN}" \
+        --destination "${REGISTRY_HOST}/${REGISTRY_IMAGE}:${IMAGE_TAG}" \
+        --destination "${REGISTRY_HOST}/${REGISTRY_IMAGE}:base-latest" \
+        --ignore-path=/workspace || KANIKO_EXIT=$?
+      # --ignore-path=/workspace: k8s runner 的 CI_PROJECT_DIR 就是 /workspace,
+      # 防止 kaniko 把挂载卷里的内容也塞进镜像 (兼防污染 after_script 的 CWD)。
+      # 副作用: 镜像内的 /workspace 也会被剔除, 所以 Dockerfile 的 WORKDIR
+      # 必须避开 /workspace (base/update 都用 /vllm-workspace)。
+      mkdir -p /workspace 2>/dev/null || /busybox/mkdir -p /workspace 2>/dev/null || true
+      exit $KANIKO_EXIT
   rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: '$REGISTRY_USER == null || $REGISTRY_PASSWORD == null'
+      when: never
+    - if: $CI_COMMIT_TAG =~ /^base/
     - if: $CI_COMMIT_BRANCH == "develop"
-    - if: $CI_COMMIT_TAG
+      when: manual
+      allow_failure: true
+
+# ─── unittest 依赖镜像 (低频, unittest* tag) ─────────────────────────────────
+# 重建单测依赖镜像 (unit-test job 的运行环境, 预装全部测试依赖)。
+# 仅 requirements/*.txt 变化时需要: 打 unittest* tag 触发
+unittest-image-build:
+  stage: build
+  extends: .feishu-notify
+  tags:
+    - iquest-inference-runner
+  image:
+    name: ${KANIKO_IMAGE}
+    entrypoint: [""]
+  timeout: 3h
+  # TODO(bootstrap): unittest-latest 镜像首次构建成功、unit-test 转绿后,
+  # 删除下面这行 needs, 恢复"lint 和 unit-test 全部通过后才构建"的严格顺序
+  # (自举期间 unit-test 因镜像不存在必红, 不加 needs:[] 本 job 会被 skip)
+  needs: []
+  variables:
+    GIT_STRATEGY: clone
+    IMAGE_TYPE: unittest
+  script:
+    - *kaniko-auth
+    - |
+      KANIKO_EXIT=0
+      /kaniko/executor \
+        --context "${CI_PROJECT_DIR}" \
+        --dockerfile "${CI_PROJECT_DIR}/docker/Dockerfile.test-deps" \
+        --destination "${REGISTRY_HOST}/${REGISTRY_IMAGE}:${IMAGE_TAG}" \
+        --destination "${REGISTRY_HOST}/${REGISTRY_IMAGE}:unittest-latest" \
+        --ignore-path=/workspace || KANIKO_EXIT=$?
+      mkdir -p /workspace 2>/dev/null || /busybox/mkdir -p /workspace 2>/dev/null || true
+      exit $KANIKO_EXIT
+  rules:
+    - if: '$REGISTRY_USER == null || $REGISTRY_PASSWORD == null'
+      when: never
+    - if: $CI_COMMIT_TAG =~ /^unittest/
+
+# ─── image build (日常, 快速, release* tag) ──────────────────────────────────
+# kaniko 基于 base 镜像重新打包 Python 代码 (复用已编译 kernel), 分钟级,
+# 构建后立即推 release-<分支>-<sha>-<日期> tag (可追溯, 未经镜像内测试);
+# 同时通过 dotenv 把镜像名传给 image-test / release
+image-build:
+  stage: build
+  extends: .feishu-notify
+  tags:
+    - iquest-inference-runner
+  image:
+    name: ${KANIKO_IMAGE}
+    entrypoint: [""]
+  timeout: 2h
+  variables:
+    GIT_STRATEGY: clone
+    IMAGE_TYPE: release
+  script:
+    # 版本号 (PEP 440): 从 tag 里提取, 如 release-v0.1.0 / release-0.1.0 -> 0.1.0;
+    # 提取不出数字开头的版本时退回 dev 版本号 + commit
+    - |
+      VER="${CI_COMMIT_TAG#release}"; VER="${VER#-}"; VER="${VER#v}"
+      case "$VER" in
+        [0-9]*) export VLLM_BUILD_VERSION="$VER" ;;
+        *)      export VLLM_BUILD_VERSION="0.0.0.dev0+${SHORT_SHA}" ;;
+      esac
+      echo "VLLM_BUILD_VERSION = ${VLLM_BUILD_VERSION}"
+    # 把镜像名传给下游 job (image-test 用它做运行镜像, release 用它晋升)
+    - echo "RELEASE_IMAGE=${REGISTRY_HOST}/${REGISTRY_IMAGE}:${IMAGE_TAG}" > build.env
+    - *kaniko-auth
+    - |
+      KANIKO_EXIT=0
+      /kaniko/executor \
+        --context "${CI_PROJECT_DIR}" \
+        --dockerfile "${CI_PROJECT_DIR}/docker/Dockerfile.update" \
+        --build-arg "BASE_IMAGE=${REGISTRY_HOST}/${REGISTRY_IMAGE}:${BASE_IMAGE_TAG}" \
+        --build-arg "VLLM_BUILD_VERSION=${VLLM_BUILD_VERSION}" \
+        --destination "${REGISTRY_HOST}/${REGISTRY_IMAGE}:${IMAGE_TAG}" \
+        --ignore-path=/workspace || KANIKO_EXIT=$?
+      mkdir -p /workspace 2>/dev/null || /busybox/mkdir -p /workspace 2>/dev/null || true
+      exit $KANIKO_EXIT
+  artifacts:
+    reports:
+      dotenv: build.env
+  rules:
+    - if: '$REGISTRY_USER == null || $REGISTRY_PASSWORD == null'
+      when: never
+    - if: $CI_COMMIT_TAG =~ /^release/
+
+# ─── image test (镜像内测试) ─────────────────────────────────────────────────
+# 直接以刚构建的 release 镜像作为 job 运行镜像 (RELEASE_IMAGE 来自 dotenv),
+# 验证 artifact 本身:
+#   1. import 冒烟: 镜像里编辑安装的 vllm 能正常加载
+#   2. 把 tests/ 拷到中立目录跑, 避免 clone 的源码 shadow 镜像里的 vllm
+image-test:
+  stage: image-e2e-test
+  tags:
+    - iquest-inference-runner
+  image:
+    name: ${RELEASE_IMAGE}
+    entrypoint: [""]
+  timeout: 2h
+  variables:
+    GIT_STRATEGY: clone
+  script:
+    - mkdir -p /itest && cp -r tests /itest/tests && cd /itest
+    - python3 -c "import vllm; print('vllm version =', vllm.__version__)"
+    - pip install -q pytest pytest-asyncio tblib pillow
+    - python3 -m pytest -v ${UNIT_TEST_PATHS}
+  rules:
+    - if: '$REGISTRY_USER == null || $REGISTRY_PASSWORD == null'
+      when: never
+    - if: $CI_COMMIT_TAG =~ /^release/
+  needs:
+    - job: image-build
+      artifacts: true
+
+# ─── release (镜像内测试通过后发布) ──────────────────────────────────────────
+# 用 crane 远程给已推送的 release 镜像追加正式 tag (:<git tag> 和 :latest),
+# 只改 registry 里的 manifest, 不搬镜像数据
+release:
+  stage: release
+  tags:
+    - iquest-inference-runner
+  image:
+    name: ${CRANE_IMAGE}
+    entrypoint: [""]
+  variables:
+    GIT_STRATEGY: none
+    IMAGE_TYPE: release
+  script:
+    - *export-image-tag
+    - crane auth login ${REGISTRY_HOST} -u ${REGISTRY_USER} -p ${REGISTRY_PASSWORD}
+    - crane tag ${REGISTRY_HOST}/${REGISTRY_IMAGE}:${IMAGE_TAG} ${CI_COMMIT_TAG}
+    - crane tag ${REGISTRY_HOST}/${REGISTRY_IMAGE}:${IMAGE_TAG} latest
+    - 'echo "已发布: ${REGISTRY_HOST}/${REGISTRY_IMAGE}:${CI_COMMIT_TAG} 和 :latest"'
+  rules:
+    - if: '$REGISTRY_USER == null || $REGISTRY_PASSWORD == null'
+      when: never
+    - if: $CI_COMMIT_TAG =~ /^release/
+  needs:
+    - image-test

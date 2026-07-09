@@ -1,0 +1,121 @@
+# vLLM base 镜像: 从 PyTorch 官方 devel 镜像开始 (自带 Python + torch + CUDA
+# toolkit/nvcc), 以编辑模式 (pip install -e .) 完整编译安装 vLLM。
+#
+# 版本对齐: torch 版本以仓库 requirements/cuda.txt (torch==2.10.0) 为准,
+# 基础镜像的 torch 必须一致 (下方有构建期断言, 不一致会直接失败)。
+# 注: PyTorch 官方镜像没有 cuda12.9 变体, 用 cuda12.8 (与 test.txt 的
+# +cu129 有一档小版本差, CUDA 12.x 内兼容, 单测在 CPU 上跑无影响)。
+#
+# 编辑模式的意义: vLLM 以源码目录形式安装在 /vllm-workspace/vllm, 编译出的 CUDA
+# kernel (*.so) 和 cmake 构建缓存都留在源码树里。日常发版时 Dockerfile.update
+# 只需用新代码覆盖源码树并增量重装, 无需重新编译 (纯 Python 改动时)。
+#
+# 触发: 打 base* tag, 或在流水线里手动触发 (见 .gitlab-ci.yml)
+#
+# Usage:
+#   docker build -f docker/Dockerfile.base \
+#     -t registry-cn-beijing.siflow.cn/skyinfer/vllm:base-develop-<sha9>-<date> .
+
+# devel 变体: 自带完整 CUDA toolkit(nvcc), 编译 kernel 必需; runtime 变体不行
+ARG BUILD_BASE_IMAGE=pytorch/pytorch:2.10.0-cuda12.8-cudnn9-devel
+FROM ${BUILD_BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# apt 换国内源 (官方源在集群内极慢); ubuntu/debian 两种源文件格式都处理
+RUN for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; do \
+      [ -f "$f" ] && sed -i 's|archive.ubuntu.com|mirrors.aliyun.com|g; s|security.ubuntu.com|mirrors.aliyun.com|g; s|deb.debian.org|mirrors.aliyun.com|g' "$f"; \
+    done; true
+
+# 系统依赖: git/curl(构建), ccache(增量编译), libibverbs(RDMA),
+# ffmpeg/libgl 等(多模态模型运行时)
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        git \
+        curl \
+        ccache \
+        libibverbs-dev \
+        ffmpeg \
+        libsm6 \
+        libxext6 \
+        libgl1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# 构建期断言: 基础镜像的 torch 必须和仓库 requirements 钉版一致,
+# 否则直接失败, 避免默默构建出 torch 版本漂移的镜像
+ARG EXPECTED_TORCH_VERSION=2.10.0
+RUN python -c "import torch; v = torch.__version__; \
+    assert v.startswith('${EXPECTED_TORCH_VERSION}'), f'torch {v} != ${EXPECTED_TORCH_VERSION}'; \
+    print(f'torch {v}, cuda {torch.version.cuda}')"
+
+# Ubuntu 24.04 (pytorch/pytorch:2.10 底层) 的系统 python3.12 带 PEP 668
+# EXTERNALLY-MANAGED 标记, 直装会被拒; 镜像里 python 就是唯一 python 环境,
+# 直接 --break-system-packages 装到系统 site-packages 即可
+RUN pip install --break-system-packages --no-cache-dir uv
+ENV UV_HTTP_TIMEOUT=500
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
+# uv 也认 PEP 668 EXTERNALLY-MANAGED, 后续 uv pip install --system 会被拒;
+# 镜像里 python 就是唯一环境, 让 uv 无视这个标记
+ENV UV_BREAK_SYSTEM_PACKAGES=1
+
+# 编译并发度 (按构建机 CPU/内存调整)
+ARG max_jobs=16
+ENV MAX_JOBS=${max_jobs}
+ARG nvcc_threads=8
+ENV NVCC_THREADS=${nvcc_threads}
+
+# 目标 GPU 架构 (与 .gitlab-ci.yml 的 CUDA_ARCH_LIST 保持一致):
+# 8.9=Ada(L40S/4090), 9.0=Hopper(H100/H800), 10.0=Blackwell(B200), 12.0=Blackwell(RTX50/PRO6000)
+ARG torch_cuda_arch_list="8.9 9.0 10.0 12.0"
+ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
+
+# 构建上下文可能没有完整 .git, 显式指定版本号 (PEP 440)
+ARG VLLM_BUILD_VERSION=0.0.0.dev0
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VLLM_BUILD_VERSION}
+
+# 注意: 不要用 /workspace 作为 WORKDIR — GitLab k8s runner 的 CI_PROJECT_DIR
+# 也是 /workspace, CI 里 kaniko 用 --ignore-path=/workspace 保护 runner 挂载卷,
+# 这会连带把镜像内 /workspace 下的编辑模式安装源码也从最终 layer 剔除,
+# 运行时 import vllm 会 ModuleNotFoundError
+WORKDIR /vllm-workspace
+COPY . vllm/
+
+# vLLM 官方 "use an existing PyTorch installation" 流程:
+# use_existing_torch.py 去掉 requirements 里的 torch 钉版 → 复用镜像自带 torch;
+# 编辑模式安装, 编译产物 (*.so) 落在 /workspace/vllm/vllm/ 源码树内。
+# --system: 装进镜像自带的系统 python (Ubuntu 24.04 /usr/bin/python3, PEP 668)
+RUN cd vllm && \
+    python use_existing_torch.py && \
+    uv pip install --system -r requirements/build.txt && \
+    uv pip install --system --no-build-isolation -e . -v
+
+# 内部 pretrain/transformers 分支 (编辑模式安装, 源码留在 /vllm-workspace/transformers).
+# 四个值都从 CI/CD Variables 通过 --build-arg 注入 (见 .gitlab-ci.yml base-image-build),
+# 不在 Dockerfile 里硬编码:
+#   TRANSFORMER_REPO_URL  仓库地址 (公开信息, 但为集中管理也走 CI 变量)
+#   TRANSFORMER_BRANCH    分支名
+#   TRANSFORMER_COMMIT    可选; 空则停在分支 HEAD
+#   GITLAB_TOKEN          带 read_repository 权限的 PAT (在 GitLab 里设 Masked + Protected)
+ARG TRANSFORMER_REPO_URL=
+ARG TRANSFORMER_BRANCH=
+ARG TRANSFORMER_COMMIT=
+ARG GITLAB_TOKEN=
+
+# 引入 --no-deps 确保绝不触碰 vLLM 已对齐的底层依赖环境
+RUN set -eu; \
+    : "${TRANSFORMER_REPO_URL:?TRANSFORMER_REPO_URL is required (set in GitLab CI/CD Variables)}"; \
+    : "${TRANSFORMER_BRANCH:?TRANSFORMER_BRANCH is required (set in GitLab CI/CD Variables)}"; \
+    if [ -n "$GITLAB_TOKEN" ]; then \
+        tf_clone_url="https://oauth2:${GITLAB_TOKEN}@${TRANSFORMER_REPO_URL#https://}"; \
+    else \
+        tf_clone_url="$TRANSFORMER_REPO_URL"; \
+    fi; \
+    git clone "$tf_clone_url" transformers; \
+    unset tf_clone_url GITLAB_TOKEN; \
+    cd transformers; \
+    git checkout "$TRANSFORMER_BRANCH"; \
+    if [ -n "$TRANSFORMER_COMMIT" ]; then git checkout "$TRANSFORMER_COMMIT"; fi; \
+    uv pip install --system --no-build-isolation --no-deps -e .
+
+WORKDIR /vllm-workspace/vllm
+ENTRYPOINT ["vllm", "serve"]
