@@ -737,7 +737,7 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "MantisForConditionalGeneration": "0.24.0",
     "MusicFlamingoForConditionalGeneration": "0.24.0",
     "AyaVisionForConditionalGeneration": "0.24.0",
-    "TeleChatForCausalLM": "0.26.0",
+    "TeleChatForCausalLM": "0.25.0",
 }
 
 _OOT_SUPPORTED_MODELS = {
