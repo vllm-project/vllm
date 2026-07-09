@@ -39,6 +39,7 @@ def _make_platform_config(
             user_specified_block_size=True,
             block_size=128,
             kv_cache_memory_bytes=0,
+            mamba_ssm_cache_dtype="auto",
         ),
         scheduler_config=SimpleNamespace(async_scheduling=True),
         parallel_config=ParallelConfig(
