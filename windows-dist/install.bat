@@ -13,8 +13,17 @@ echo.
 
 :: ===== WHERE TO INSTALL =====
 set "DEF_DIR=E:\VLLM"
-set /p "INSTALL_DIR=Where to install? [%DEF_DIR%]: "
+:ask_path
+set /p "INSTALL_DIR=Install folder [%DEF_DIR%]: "
 if "!INSTALL_DIR!"=="" set "INSTALL_DIR=%DEF_DIR%"
+:: Validate it's a proper path (has a colon for drive letter or starts with a backslash)
+echo !INSTALL_DIR! | findstr /r "^[A-Za-z]:\\" >nul
+if ERRORLEVEL 1 (
+    if "!INSTALL_DIR!"=="%DEF_DIR%" goto :path_ok
+    echo   Please enter a full path like E:\VLLM or C:\vllm
+    goto :ask_path
+)
+:path_ok
 echo.
 
 :: Check if directory exists
@@ -126,17 +135,14 @@ if "!HIP_PATH!"=="" (
     echo [OK] ROCm found: !HIP_PATH!
 )
 
-:: ===== CREATE sitecustomize.py =====
+:: ===== FIX sitecustomize.py (remove stale one with errors) =====
 for /f "delims=" %%P in ('python -c "import sys; [print(p) for p in sys.path if p.endswith('site-packages')]" 2^>nul') do set "SITE_PKG=%%P"
 if not "!SITE_PKG!"=="" (
-    if not EXIST "!SITE_PKG!\sitecustomize.py" (
-        echo import os > "!SITE_PKG!\sitecustomize.py"
-        echo os.environ.setdefault('HIP_PATH', '!HIP_PATH!') >> "!SITE_PKG!\sitecustomize.py"
-        echo os.environ.setdefault('VLLM_NO_USAGE_STATS', 'true') >> "!SITE_PKG!\sitecustomize.py"
-        echo [OK] sitecustomize.py created
-    ) else (
-        echo [OK] sitecustomize.py already exists
-    )
+    if EXIST "!SITE_PKG!\sitecustomize.py" del "!SITE_PKG!\sitecustomize.py"
+    echo import os > "!SITE_PKG!\sitecustomize.py"
+    echo os.environ.setdefault('HIP_PATH', '!HIP_PATH!') >> "!SITE_PKG!\sitecustomize.py"
+    echo os.environ.setdefault('VLLM_NO_USAGE_STATS', 'true') >> "!SITE_PKG!\sitecustomize.py"
+    echo [OK] sitecustomize.py written
 )
 echo.
 
