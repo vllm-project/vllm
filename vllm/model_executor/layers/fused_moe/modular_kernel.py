@@ -1118,8 +1118,6 @@ class FusedMoEKernelModularImpl:
 
         moe_config = self.fused_experts.moe_config
         max_num_tokens = moe_config.max_num_tokens
-        if max_num_tokens <= 0 or N <= 0 or K <= 0:
-            return
 
         try:
             self._allocate_buffers(
