@@ -28,6 +28,9 @@ hybrid_ssm_configs=(
   # GDN (Qwen3.5)
   "VLLM_SSM_CONV_STATE_LAYOUT=DS GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=Qwen/Qwen3.5-0.8B"
   "VLLM_SSM_CONV_STATE_LAYOUT=DS PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=Qwen/Qwen3.5-0.8B"
+  "VLLM_SSM_CONV_STATE_LAYOUT=DS ENFORCE_EAGER=0 GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=Qwen/Qwen3.5-0.8B VLLM_SERVE_EXTRA_ARGS=--spec-method,mtp,--spec-tokens,1"
+  # Mamba1 (Jamba)
+  "VLLM_SSM_CONV_STATE_LAYOUT=DS GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=ai21labs/AI21-Jamba2-3B VLLM_SERVE_EXTRA_ARGS=--max-model-len,8192"
 )
 sw_attn_configs=(
   # NOTE: gemma3 does not work with FlashInfer
@@ -37,7 +40,6 @@ sw_attn_configs=(
   # Gemma4: SW + cross-layer KV sharing
   "GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=google/gemma-4-E2B-it VLLM_SERVE_EXTRA_ARGS=--max-model-len,8192"
 )
-
 # Select config array based on DP_EP env var
 if [[ -n "${DP_EP:-}" ]]; then
   configs=("${dp_ep_configs[@]}")

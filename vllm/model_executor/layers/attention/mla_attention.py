@@ -818,14 +818,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         attn_out,
                         lse,
                         get_dcp_group(),
-                        is_lse_base_on_e=True,
+                        is_lse_base_on_e=self.impl.lse_base_on_e,
                     )
                 else:
                     attn_out = cp_lse_ag_out_rs(
                         attn_out,
                         lse,
                         get_dcp_group(),
-                        is_lse_base_on_e=True,
+                        is_lse_base_on_e=self.impl.lse_base_on_e,
                     )
 
             # v_up projection
@@ -1532,9 +1532,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.dcp_virtual_block_size = self.dcp_local_block_size * self.dcp_world_size
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
 
-        # Don't try to access the runner on AMD
-        if self.aot_schedule:
-            self.page_size = self.kv_cache_spec.block_size
+        self.page_size = self.kv_cache_spec.block_size
 
         self.chunked_prefill_workspace_size = (
             self.determine_chunked_prefill_workspace_size(vllm_config)
@@ -1565,9 +1563,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 device=device,
             )
 
+        # Metadata builders are created per ubatch when DBO is enabled. MLA
+        # prefill backends keep the prepared metadata on the backend object, so
+        # each builder needs its own backend instance to avoid cross-ubatch races.
         self._prefill_backend = self.compilation_config.static_forward_context[
             layer_names[0]
-        ].prefill_backend
+        ].prefill_backend.clone()
 
         supports_spec_decode = self.query_len_support != QueryLenSupport.SINGLE_ONLY
         self._init_reorder_batch_threshold(
@@ -1684,12 +1685,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     self.chunked_prefill_workspace_size // num_prefills_with_context_cpu
                 )
 
-                if self.aot_schedule:
-                    # align max_context_chunk to page_size by rounding down,
-                    # currently the `gather_and_maybe_dequant_cache` kernel
-                    # cannot handle `context_chunk_starts` that are not aligned
-                    # to page_size
-                    max_context_chunk = round_down(max_context_chunk, self.page_size)
+                # align max_context_chunk to page_size by rounding down,
+                # currently the `gather_and_maybe_dequant_cache` kernel
+                # cannot handle `context_chunk_starts` that are not aligned
+                # to page_size
+                max_context_chunk = round_down(max_context_chunk, self.page_size)
 
                 assert max_context_chunk > 0
                 num_chunks = cdiv(max_context_len_cpu, max_context_chunk)
@@ -2409,6 +2409,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                     q, kv_c_and_k_pe_cache, attn_metadata, k_scale
                 )
 
+            context_output = context_output[..., : self.v_head_dim]
+            suffix_output = suffix_output[..., : self.v_head_dim]
+
             output = output.view(-1, self.num_heads, self.v_head_dim)
             merge_attn_states(
                 output=output,
@@ -2421,6 +2424,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         elif output_scale is None:
             # With output_scale set, backend already wrote into `output` in place.
             assert isinstance(output_prefill, torch.Tensor)
+            output_prefill = output_prefill[..., : self.v_head_dim]
             output_prefill = output_prefill.flatten(start_dim=-2)
             output.copy_(output_prefill)
 

@@ -93,11 +93,6 @@ class CpuPlatform(Platform):
         return meminfo.total_memory
 
     @classmethod
-    def mem_get_info(cls) -> tuple[int, int]:
-        meminfo = get_memory_node_info()
-        return meminfo.available_memory, meminfo.total_memory
-
-    @classmethod
     def set_device(cls, device: torch.device) -> None:
         """
         Set the device for the current platform.
@@ -130,6 +125,14 @@ class CpuPlatform(Platform):
                 "otherwise the performance is not optimized."
             )
 
+        # AMX GDN requires float32 state
+        if (
+            torch.cpu._is_amx_tile_supported()
+            and cache_config.mamba_ssm_cache_dtype != "float32"
+        ):
+            cache_config.mamba_ssm_cache_dtype = "float32"
+            logger.warning("Reset SSM cache type to float32 for AMX mamba attention.")
+
         # Lagecy setting
         env_key = "VLLM_CPU_KVCACHE_SPACE"
         if env_key in os.environ and os.environ[env_key] != "":
@@ -156,20 +159,6 @@ class CpuPlatform(Platform):
         if parallel_config.enable_dbo:
             logger.warning_once("Dual-Batch Overlap is not supported on CPU, disabled.")
             parallel_config.enable_dbo = False
-
-        if torch.cpu._is_amx_tile_supported() and (
-            model_config is not None
-            and model_config.get_num_layers_by_block_type(
-                parallel_config, "linear_attention"
-            )
-            > 0
-        ):
-            cache_config.enable_prefix_caching = False
-            scheduler_config.enable_chunked_prefill = False
-            logger.warning_once(
-                "Disabled unsupported prefix caching and chunked prefill "
-                "for linear attention on AMX CPU platforms."
-            )
 
         # Note: workaround for v1 gpu_model_runner
         from vllm.config import CompilationMode
@@ -212,6 +201,18 @@ class CpuPlatform(Platform):
             and "-gelu" not in compilation_config.custom_ops
         ):
             compilation_config.custom_ops.append("+gelu")
+        if (
+            cls.get_cpu_architecture() == CpuArchEnum.ARM
+            and "+gelu_tanh" not in compilation_config.custom_ops
+            and "-gelu_tanh" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+gelu_tanh")
+        if (
+            cls.get_cpu_architecture() == CpuArchEnum.ARM
+            and "+gelu_and_mul" not in compilation_config.custom_ops
+            and "-gelu_and_mul" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+gelu_and_mul")
 
         vllm_config.profiler_config.torch_profiler_dump_cuda_time_total = False
 
