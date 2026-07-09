@@ -108,3 +108,11 @@ If you use vLLM for your research, please cite our [paper](https://arxiv.org/abs
 ## Media Kit
 
 - If you wish to use vLLM's logo, please refer to [our media kit repo](https://github.com/vllm-project/media-kit)
+
+## Windows + ROCm Port
+
+This branch contains a community port of vLLM to native Windows with AMD ROCm (RDNA3/RDNA4) GPUs.
+
+**Special thanks to:**
+
+- **[ThePie88](https://github.com/ThePie88)** ([vLLM-ROCm-Windows](https://github.com/ThePie88/vLLM-ROCm-Windows)) — Native HIP kernel build harness, Windows ROCm platform plugin, and custom Triton kernels for Windows
