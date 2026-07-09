@@ -246,6 +246,38 @@ class VllmGui : Form
             return;
         }
 
+        // --- Pre-flight checks ---
+        string pydPath = Path.Combine(repoRoot, "vllm", "_C.pyd");
+        if (!File.Exists(pydPath))
+        {
+            Log("WARNING: _C.pyd not found at " + pydPath);
+            Log("Run setup.bat first or copy _C.pyd into the vllm folder.");
+        }
+        else
+        {
+            Log("_C.pyd: OK (" + (new FileInfo(pydPath).Length / 1048576) + " MB)");
+        }
+
+        // Check Python
+        try
+        {
+            System.Diagnostics.Process p = new System.Diagnostics.Process();
+            p.StartInfo.FileName = "python";
+            p.StartInfo.Arguments = "--version";
+            p.StartInfo.RedirectStandardOutput = true;
+            p.StartInfo.CreateNoWindow = true;
+            p.Start();
+            string ver = p.StandardOutput.ReadToEnd().Trim();
+            p.WaitForExit(3000);
+            Log("Python: " + ver);
+        }
+        catch (Exception ex)
+        {
+            Log("ERROR: Python not found! " + ex.Message);
+            SetStatus("Error");
+            return;
+        }
+
         List<string> args = new List<string>();
         args.Add("-m"); args.Add("vllm.entrypoints.openai.api_server");
         args.Add("--model"); args.Add("\"" + txtModel.Text + "\"");
@@ -307,10 +339,26 @@ class VllmGui : Form
             serverProcess.EnableRaisingEvents = true;
             serverProcess.Exited += (s, e) => {
                 serverRunning = false;
-                try { this.BeginInvoke(new Action(() => { btnStart.Text = "Start Server"; btnStart.ForeColor = Color.Green; SetStatus("Stopped"); })); } catch {}
+                try {
+                    int code = serverProcess.ExitCode;
+                    this.BeginInvoke(new Action(() => {
+                        Log("Server exited with code: " + code + (code != 0 ? " (ERROR)" : ""));
+                        btnStart.Text = "Start Server";
+                        btnStart.ForeColor = Color.Green;
+                        SetStatus("Stopped");
+                    }));
+                } catch {}
             };
 
-            serverProcess.Start();
+            try { serverProcess.Start(); }
+            catch (Exception ex) {
+                Log("ERROR starting process: " + ex.Message);
+                Log("Command: python " + argStr);
+                SetStatus("Error");
+                btnStart.Text = "Start Server";
+                btnStart.ForeColor = Color.Green;
+                return;
+            }
             serverRunning = true;
             outputThread = new Thread(ReadOutput);
             outputThread.IsBackground = true;
