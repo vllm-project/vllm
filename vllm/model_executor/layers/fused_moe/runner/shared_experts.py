@@ -71,6 +71,17 @@ class SharedExperts(torch.nn.Module):
             if self._stream is not None:
                 logger.debug_once("Enabled separate cuda stream for MoE shared_experts")
 
+        # Cross-stream sync via CUDA events (record()/wait()), NOT
+        # record_stream()/wait_stream(). Events are legal inside cudagraph
+        # capture; record_stream (caching-allocator async free) and wait_stream
+        # are not, and cause hangs on ROCm under capture. One (fork, join) pair
+        # per DBO ubatch id. `_fork_event[i]` marks the main-stream point the
+        # aux stream must wait for before running; `_join_event[i]` marks aux
+        # completion the main stream waits for before using the shared output.
+        if self._stream is not None:
+            self._fork_event = [torch.cuda.Event(), torch.cuda.Event()]
+            self._join_event = [torch.cuda.Event(), torch.cuda.Event()]
+
     # TODO(bnell): Hack for elastic_ep. Get rid of this
     def _set_moe_config(self, new_moe_config: FusedMoEConfig):
         self.moe_config = new_moe_config
@@ -117,16 +128,14 @@ class SharedExperts(torch.nn.Module):
         if experts_order == SharedExpertsOrder.MULTI_STREAM_OVERLAPPED:
             assert self._stream is not None
 
-            # Record that the clone will be used by shared_experts_stream
-            # to avoid gc issue from deallocation of hidden_states_clone
-            # For more details: https://docs.pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html # noqa: E501
-            # NOTE: We don't need shared_output.record_stream(current_stream())
-            # because we synch the streams before using shared_output.
-            shared_experts_input.record_stream(self._stream)
-
-            # Mark sync start point for the aux stream since we will
-            # run in parallel with router/gate.
-            self._stream.wait_stream(current_stream())
+            # Fork point: record on the main stream now, so the aux stream can
+            # wait for `shared_experts_input` to be ready before it runs. Uses
+            # an event (capture-safe) rather than stream.wait_stream(). No
+            # record_stream() is needed: the join event ordering in
+            # join_overlapped keeps `shared_experts_input` alive until the aux
+            # stream is done, and the main stream is event-ordered after the aux
+            # output before consuming it.
+            self._fork_event[self._output_idx].record(current_stream())
 
     def _run_in_aux_stream(
         self,
@@ -134,10 +143,14 @@ class SharedExperts(torch.nn.Module):
     ) -> torch.Tensor:
         # TODO: assert that maybe_sync_shared_experts_stream has been called.
 
-        # Run shared experts in parallel on a separate stream.
+        # Run shared experts in parallel on a separate stream, ordered via
+        # events (capture-safe) instead of wait_stream.
+        idx = self._output_idx
         with torch.cuda.stream(self._stream):
+            self._fork_event[idx].wait(self._stream)
             output = self._layer(shared_experts_input)
-        current_stream().wait_stream(self._stream)
+            self._join_event[idx].record(self._stream)
+        self._join_event[idx].wait(current_stream())
 
         return output
 
@@ -149,10 +162,11 @@ class SharedExperts(torch.nn.Module):
         or False if the multi-stream order does not apply (caller should fall
         back to sequential execution).
 
-        Used by the monolithic routed path to submit shared-expert work to the
-        aux stream *before* the host-blocking routed kernel, so it overlaps the
-        routed all-gather + fused MoE. :meth:`maybe_sync_shared_experts_stream`
-        must have run earlier to record the aux->main dependency.
+        Submits shared-expert work to the aux stream *before* the routed
+        kernel/collective so it overlaps the DP all-gather + fused MoE.
+        :meth:`maybe_sync_shared_experts_stream` must have recorded the fork
+        event earlier. Ordering is via CUDA events (capture-safe), so this works
+        under cudagraph capture; wait_stream/record_stream would not.
         """
         if (
             self._determine_shared_experts_order(shared_experts_input)
@@ -160,15 +174,22 @@ class SharedExperts(torch.nn.Module):
         ):
             return False
         assert self._stream is not None
-        assert self._output[self._output_idx] is None
+        idx = self._output_idx
+        assert self._output[idx] is None
         with torch.cuda.stream(self._stream):
-            self._output[self._output_idx] = self._layer(shared_experts_input)
+            self._fork_event[idx].wait(self._stream)
+            self._output[idx] = self._layer(shared_experts_input)
+            self._join_event[idx].record(self._stream)
         return True
 
     def join_overlapped(self) -> None:
-        """Join the aux stream back after a :meth:`launch_overlapped` call."""
+        """Join the aux stream back after a :meth:`launch_overlapped` call.
+
+        Makes the main stream wait (via event) for the aux-stream shared-expert
+        work to finish before its output is consumed.
+        """
         assert self._stream is not None
-        current_stream().wait_stream(self._stream)
+        self._join_event[self._output_idx].wait(current_stream())
 
     @property
     def _output_idx(self) -> int:
