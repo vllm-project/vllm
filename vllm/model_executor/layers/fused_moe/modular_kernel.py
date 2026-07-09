@@ -39,7 +39,10 @@ from vllm.v1.worker.ubatching import (
     dbo_register_recv_hook,
     dbo_yield,
 )
-from vllm.v1.worker.workspace import current_workspace_manager
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
 
 logger = init_logger(__name__)
 
@@ -1102,6 +1105,40 @@ class FusedMoEKernelModularImpl:
 
         return workspace13, workspace2, fused_out
 
+    def reserve_workspace(self, N: int, K: int) -> None:
+        """Pre-grow the shared MoE workspace to its worst-case size."""
+        # DP-EP experts size their own persistent buffers, so skip them here.
+        if self.is_dp_ep:
+            return
+        if not is_workspace_manager_initialized():
+            return
+        workspace_manager = current_workspace_manager()
+        if workspace_manager.is_locked():
+            return
+
+        moe_config = self.fused_experts.moe_config
+        max_num_tokens = moe_config.max_num_tokens
+        if max_num_tokens <= 0 or N <= 0 or K <= 0:
+            return
+
+        try:
+            self._allocate_buffers(
+                moe_config.in_dtype,
+                torch.device(moe_config.device),
+                max_num_tokens,
+                max_num_tokens,
+                N,
+                K,
+                moe_config.experts_per_token,
+                moe_config.num_experts,
+                moe_config.num_local_experts,
+                None,
+                moe_config.activation,
+            )
+        except Exception as e:
+            # If we cannot pre-size the workspace, fall back to lazy growth
+            logger.debug_once("Skipping MoE workspace reservation: %s", e)
+
     def _maybe_apply_shared_experts(
         self,
         shared_experts: SharedExperts | None,
@@ -1586,6 +1623,10 @@ class FusedMoEKernel:
 
     def supports_lora(self) -> bool:
         return self.fused_experts.supports_lora()
+
+    def reserve_workspace(self, N: int, K: int) -> None:
+        if isinstance(self.impl, FusedMoEKernelModularImpl):
+            self.impl.reserve_workspace(N, K)
 
     def _post_init_setup(self):
         """
