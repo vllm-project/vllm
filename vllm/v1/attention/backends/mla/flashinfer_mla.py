@@ -42,7 +42,9 @@ def _get_workspace_buffer(return_lse: bool) -> torch.Tensor:
         else FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE
     )
     if _fi_workspace is None or _fi_workspace.numel() < buffer_size:
-        _fi_workspace = torch.zeros(buffer_size, dtype=torch.uint8, device="cuda")
+        # FlashInfer's CuteDSL MLA-decode tactic requires an int8 workspace;
+        # the trtllm-gen path views it as uint8, so int8 is safe for all backends.
+        _fi_workspace = torch.zeros(buffer_size, dtype=torch.int8, device="cuda")
     return _fi_workspace
 
 
