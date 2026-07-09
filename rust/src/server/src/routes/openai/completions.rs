@@ -5,7 +5,7 @@ mod convert;
 mod types;
 mod validate;
 
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::convert::Infallible;
 use std::result::Result;
 use std::sync::Arc;
@@ -336,16 +336,14 @@ fn build_beam_logprobs(
 
     for pos in 0..n {
         let entries = &beam_logprobs[pos];
-        let Some(first) = entries.first() else {
-            continue;
-        };
         let token_id = generated_tokens[pos];
+        let selected_logprob = entries.iter().find(|e| e.token_id == token_id).map(|e| e.logprob);
         let token = tokenizer.decode(&[token_id], false).unwrap_or_default();
         offset += text_len(&token);
         tokens.push(token);
-        token_logprobs.push(Some(first.logprob));
+        token_logprobs.push(selected_logprob);
         text_offset.push(offset);
-        let mut top: HashMap<String, f32> = HashMap::with_capacity(entries.len());
+        let mut top: IndexMap<String, f32> = IndexMap::with_capacity(entries.len());
         for entry in entries {
             let decoded = tokenizer.decode(&[entry.token_id], false).unwrap_or_default();
             top.insert(
@@ -409,6 +407,8 @@ async fn collect_beam_search_completion(
         None,
     );
 
+    let prompt_token_ids = return_token_ids.then(|| beam_result.prompt_token_ids.clone());
+
     let choices: Vec<CompletionChoice> = beam_result
         .beams
         .iter()
@@ -439,7 +439,7 @@ async fn collect_beam_search_completion(
                 stop_reason,
                 prompt_logprobs: None,
                 token_ids: return_token_ids.then_some(generated_tokens),
-                prompt_token_ids: return_token_ids.then(|| beam_result.prompt_token_ids.clone()),
+                prompt_token_ids: prompt_token_ids.clone(),
                 routed_experts: None,
                 weight_versions: None,
             }
