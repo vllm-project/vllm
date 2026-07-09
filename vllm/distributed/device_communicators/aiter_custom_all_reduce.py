@@ -56,6 +56,40 @@ class AiterCustomAllreduce:
     def custom_all_reduce(self, inp: torch.Tensor) -> torch.Tensor | None:
         return self._impl.custom_all_reduce(inp)
 
+    def should_custom_ag(self, inp: torch.Tensor) -> bool:
+        return self._impl.should_custom_ag(inp)
+
+    def should_custom_rs(self, inp: torch.Tensor, dim: int) -> bool:
+        return self._impl.should_custom_rs(inp, dim)
+
+    def custom_all_gather(self, inp: torch.Tensor, dim: int = 0) -> torch.Tensor | None:
+        return self._impl.custom_all_gather(inp, dim=dim)
+
+    def custom_reduce_scatter(
+        self, inp: torch.Tensor, out: torch.Tensor, dim: int = 0
+    ) -> torch.Tensor | None:
+        return self._impl.custom_reduce_scatter(inp, out, dim=dim)
+
+    @staticmethod
+    def build_supports_ag_rs() -> bool:
+        """True if the running AITER build exposes the custom all-gather /
+        reduce-scatter kernels (``custom_all_gather`` / ``custom_reduce_scatter``
+        plus their ``should_*`` predicates). Older builds only expose all-reduce.
+        """
+        from aiter.dist.device_communicators.custom_all_reduce import (
+            CustomAllreduce as _AiterCustomAllreduce,
+        )
+
+        return all(
+            hasattr(_AiterCustomAllreduce, name)
+            for name in (
+                "custom_all_gather",
+                "custom_reduce_scatter",
+                "should_custom_ag",
+                "should_custom_rs",
+            )
+        )
+
     def capture(self):
         return self._impl.capture()
 

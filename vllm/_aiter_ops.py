@@ -1541,6 +1541,7 @@ class rocm_aiter_ops:
     # Check if the env variable is set
     _AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
     _CUSTOM_ALL_REDUCE_ENABLED = envs.VLLM_ROCM_USE_AITER_CUSTOM_AR
+    _MOE_AG_RS_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE_AG_RS
     _LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
     _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
     _MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
@@ -1573,6 +1574,7 @@ class rocm_aiter_ops:
         """
         cls._AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
         cls._CUSTOM_ALL_REDUCE_ENABLED = envs.VLLM_ROCM_USE_AITER_CUSTOM_AR
+        cls._MOE_AG_RS_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE_AG_RS
         cls._LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
         cls._FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
         cls._MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
@@ -1739,6 +1741,11 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
+    def is_moe_ag_rs_enabled(cls) -> bool:
+        return cls._AITER_ENABLED and cls._MOE_AG_RS_ENABLED
+
+    @classmethod
+    @if_aiter_supported
     def is_shuffle_kv_cache_enabled(cls) -> bool:
         return cls._SHUFFLE_KV_CACHE_ENABLED
 
@@ -1804,6 +1811,24 @@ class rocm_aiter_ops:
         aiter_ar_comm = getattr(device_comm, "aiter_ar_comm", None)
         return (
             aiter_ar_comm if isinstance(aiter_ar_comm, AiterCustomAllreduce) else None
+        )
+
+    @classmethod
+    def get_aiter_dp_ag_rs(cls):
+        """Return the DP device communicator's AITER all-gather/reduce-scatter
+        communicator if it has one, return None otherwise.
+        """
+        from vllm.distributed.device_communicators.aiter_custom_all_reduce import (
+            AiterCustomAllreduce,
+        )
+        from vllm.distributed.parallel_state import get_dp_group
+
+        device_comm = get_dp_group().device_communicator
+        aiter_ag_rs_comm = getattr(device_comm, "aiter_ag_rs_comm", None)
+        return (
+            aiter_ag_rs_comm
+            if isinstance(aiter_ag_rs_comm, AiterCustomAllreduce)
+            else None
         )
 
     @classmethod

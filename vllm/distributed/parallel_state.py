@@ -606,6 +606,7 @@ class GroupCoordinator:
         # so we don't abstract it into the base class
         maybe_ca_context = nullcontext()
         maybe_aiter_context = nullcontext()
+        maybe_aiter_ag_rs_context = nullcontext()
         from vllm.distributed.device_communicators.cuda_communicator import (
             CudaCommunicator,
         )
@@ -629,13 +630,24 @@ class GroupCoordinator:
                 if aiter_ar is not None:
                     maybe_aiter_context = aiter_ar.capture()  # type: ignore
 
+                # DP-group AG/RS comm: capture so the custom all-gather /
+                # reduce-scatter kernels are recorded into the decode graph.
+                aiter_ag_rs = rocm_aiter_ops.get_aiter_dp_ag_rs()
+                if aiter_ag_rs is not None:
+                    maybe_aiter_ag_rs_context = aiter_ag_rs.capture()  # type: ignore
+
         # ensure all initialization operations complete before attempting to
         # capture the graph on another stream
         curr_stream = torch.cuda.current_stream()
         if curr_stream != stream:
             stream.wait_stream(curr_stream)
 
-        with torch.cuda.stream(stream), maybe_ca_context, maybe_aiter_context:
+        with (
+            torch.cuda.stream(stream),
+            maybe_ca_context,
+            maybe_aiter_context,
+            maybe_aiter_ag_rs_context,
+        ):
             yield graph_capture_context
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
