@@ -40,9 +40,11 @@ logger = init_logger(__name__)
 ShardId: TypeAlias = str | int | tuple[int, ...]
 
 
-def get_padded_num_video_frames(num_frames: int, temporal_patch_size: int) -> int:
+def get_padded_num_video_frames(
+    num_frames: int | float, temporal_patch_size: int
+) -> int:
     """Pad video frames to a multiple of the temporal patch size."""
-    return round_up(num_frames, temporal_patch_size)
+    return int(round_up(num_frames, temporal_patch_size))
 
 
 @dataclass

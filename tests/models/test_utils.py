@@ -24,12 +24,15 @@ DEVICE_TYPE = current_platform.device_type
         (18, 4, 20),
         (19, 4, 20),
         (20, 4, 20),
+        (16.5, 4, 20),
     ],
 )
 def test_get_padded_num_video_frames(
-    num_frames: int, temporal_patch_size: int, expected: int
+    num_frames: int | float, temporal_patch_size: int, expected: int
 ):
-    assert get_padded_num_video_frames(num_frames, temporal_patch_size) == expected
+    padded_frames = get_padded_num_video_frames(num_frames, temporal_patch_size)
+    assert padded_frames == expected
+    assert isinstance(padded_frames, int)
 
 
 class ModuleWithBatchNorm(torch.nn.Module):
