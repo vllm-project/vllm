@@ -1,17 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from unittest.mock import patch
+
 import numpy as np
 import pytest
 import torch
-from unittest.mock import patch
 
 from vllm.renderers.paged_shm.storage import PagedShmStorage
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _create_storage(size=1024, block_size=256, pin=False):
     return PagedShmStorage(size=size, block_size=block_size, pin=pin)
@@ -28,6 +29,7 @@ def _cleanup(storage):
 # ---------------------------------------------------------------------------
 # Basic initialisation
 # ---------------------------------------------------------------------------
+
 
 class TestInit:
     def test_create_new_shm(self):
@@ -59,6 +61,7 @@ class TestInit:
 # Size / block calculations
 # ---------------------------------------------------------------------------
 
+
 class TestSizing:
     def test_exact_multiple(self):
         store = _create_storage(size=1024, block_size=256)
@@ -78,6 +81,7 @@ class TestSizing:
 # Write lifecycle (CPU data)
 # ---------------------------------------------------------------------------
 
+
 class TestWrite:
     def test_write_bytes(self):
         store = _create_storage(block_size=64)
@@ -85,8 +89,7 @@ class TestWrite:
         store.write(data, blocks=[0])
         # Verify the first 50 bytes of block 0
         np.testing.assert_array_equal(
-            store._shm_np[0][:50],
-            np.frombuffer(data, dtype=np.uint8)
+            store._shm_np[0][:50], np.frombuffer(data, dtype=np.uint8)
         )
         _cleanup(store)
 
@@ -115,6 +118,7 @@ class TestWrite:
 # ---------------------------------------------------------------------------
 # Read lifecycle
 # ---------------------------------------------------------------------------
+
 
 class TestRead:
     def test_read_to_numpy(self):
@@ -148,6 +152,7 @@ class TestRead:
 # ---------------------------------------------------------------------------
 # Iterator helpers
 # ---------------------------------------------------------------------------
+
 
 class TestIterators:
     def test_iterator_numpy(self):
@@ -191,6 +196,7 @@ class TestIterators:
 # ---------------------------------------------------------------------------
 # GPU direct transfers (pinned memory)
 # ---------------------------------------------------------------------------
+
 
 class TestDeviceTransfers:
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -243,13 +249,16 @@ class TestDeviceTransfers:
             mock_op.assert_called_once()
             # The sizes argument should reflect 256 + 256
             sizes_tensor = mock_op.call_args[0][2]
-            assert torch.equal(sizes_tensor, torch.tensor([256, 256], dtype=torch.int64))
+            assert torch.equal(
+                sizes_tensor, torch.tensor([256, 256], dtype=torch.int64)
+            )
         _cleanup(store)
 
 
 # ---------------------------------------------------------------------------
 # Cleanup & resource management
 # ---------------------------------------------------------------------------
+
 
 class TestCleanup:
     def test_explicit_unlink_removes_name(self):
@@ -281,6 +290,7 @@ class TestCleanup:
 # ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------
+
 
 class TestEdgeCases:
     def test_write_zero_bytes(self):

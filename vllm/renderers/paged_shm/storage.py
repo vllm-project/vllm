@@ -245,7 +245,7 @@ class PagedShmStorage:
         if hasattr(self, "_shm_tensor"):
             del self._shm_tensor
 
-        if hasattr(self, "_shm_tensor"):
+        if hasattr(self, "_shm_np"):
             del self._shm_np
 
     def unlink(self):

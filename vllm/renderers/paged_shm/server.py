@@ -2,18 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-import zmq
-
-from .manager import PagedShmManager, Item
-from .storage import PagedShmStorage
-from vllm.utils.network_utils import get_open_zmq_ipc_path
 import multiprocessing as mp
 
+import zmq
+
 from vllm.logger import init_logger
+from vllm.utils.network_utils import get_open_zmq_ipc_path
+
+from .manager import Item, PagedShmManager
+from .storage import PagedShmStorage
 
 POLL_INTERVAL = 1000
 
 logger = init_logger(__name__)
+
 
 class PagedShmServer:
     """Server‑side wrapper that exposes PagedShmManager over ZMQ."""
@@ -57,11 +59,7 @@ class PagedShmServer:
     def open_read(self, uuid: str) -> str:
         """Acquire a read reference to an item, returning its block list and size."""
         item = self.manager.open_read(uuid)
-        return json.dumps({
-            "status": "ok",
-            "blocks": item.blocks,
-            "size": item.size
-        })
+        return json.dumps({"status": "ok", "blocks": item.blocks, "size": item.size})
 
     def close_read(self, uuid: str) -> str:
         """Release a read reference."""
@@ -122,15 +120,15 @@ def zmq_server(size: int, block_size: int, conn, stop_event: mp.Event):
 
         # Command dispatcher: {command_bytes: (handler, requires_payload)}
         handlers = {
-            b"open_write":          (server.open_write,          True),
-            b"close_write":         (server.close_write,         True),
-            b"open_read":           (server.open_read,           True),
-            b"close_read":          (server.close_read,          True),
-            b"pin":                 (server.pin,                 True),
-            b"unpin":               (server.unpin,               True),
-            b"delete":              (server.delete,              True),
-            b"get_manager_state":   (server.get_manager_state,   False),
-            b"get_storage_info":    (server.get_storage_info,    False),
+            b"open_write": (server.open_write, True),
+            b"close_write": (server.close_write, True),
+            b"open_read": (server.open_read, True),
+            b"close_read": (server.close_read, True),
+            b"pin": (server.pin, True),
+            b"unpin": (server.unpin, True),
+            b"delete": (server.delete, True),
+            b"get_manager_state": (server.get_manager_state, False),
+            b"get_storage_info": (server.get_storage_info, False),
         }
 
         poller = zmq.Poller()
@@ -159,12 +157,16 @@ def zmq_server(size: int, block_size: int, conn, stop_event: mp.Event):
                 continue
 
             if len(frames) < 3:
-                logger.warning("Received malformed message with %d frames, ignoring", len(frames))
+                logger.warning(
+                    "Received malformed message with %d frames, ignoring", len(frames)
+                )
                 continue
 
             identity, delimiter, command, *payloads = frames
             if delimiter != b"":
-                logger.warning("Invalid delimiter in message from %s, ignoring", identity)
+                logger.warning(
+                    "Invalid delimiter in message from %s, ignoring", identity
+                )
                 continue
 
             def _send_response(socket: zmq.Socket, frames: list):
@@ -178,8 +180,12 @@ def zmq_server(size: int, block_size: int, conn, stop_event: mp.Event):
             # Dispatch command
             handler_info = handlers.get(command)
             if handler_info is None:
-                response_frames = [identity, b"", b"ERROR",
-                                   f"Unknown command: {command.decode('utf-8', errors='replace')}".encode("utf-8")]
+                response_frames = [
+                    identity,
+                    b"",
+                    b"ERROR",
+                    f"Unknown command: {command.decode('utf-8', errors='replace')}".encode(),
+                ]
                 _send_response(socket, response_frames)
                 continue
 
@@ -193,11 +199,16 @@ def zmq_server(size: int, block_size: int, conn, stop_event: mp.Event):
                 response_frames = [identity, b"", b"OK", result.encode("utf-8")]
             except Exception as e:
                 import traceback
+
                 traceback.print_exc()
                 # Include exception type and message for client debugging
-                error_msg = f"{type(e).__name__}: {e}".encode("utf-8")
+                error_msg = f"{type(e).__name__}: {e}".encode()
                 response_frames = [identity, b"", b"ERROR", error_msg]
-                logger.warning("Command %s failed: %s", command.decode('utf-8', errors='replace'), e)
+                logger.warning(
+                    "Command %s failed: %s",
+                    command.decode("utf-8", errors="replace"),
+                    e,
+                )
 
             _send_response(socket, response_frames)
 

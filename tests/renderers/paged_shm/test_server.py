@@ -1,24 +1,21 @@
-"""
-Integration tests for PagedShmClient and PagedShmServer.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-Covers basic write/read lifecycle, atomicity of write operations, pin/unpin,
-delete, info queries, and protocol robustness.
-"""
-
+import math
 import multiprocessing as mp
 
 import numpy as np
 import pytest
 import torch
 
-from vllm.renderers.paged_shm.server import zmq_server
 from vllm.renderers.paged_shm.client import PagedShmClient
+from vllm.renderers.paged_shm.server import zmq_server
 from vllm.utils import random_uuid
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(scope="function")
 def server_address():
@@ -56,9 +53,6 @@ def server_address():
 def client(server_address):
     """
     Create a fresh PagedShmClient connected to the test server.
-
-    Memory pinning is disabled by default; GPU tests create their own
-    client with ``pin=True``.
     """
     c = PagedShmClient(address=server_address, pin=False)
     yield c
@@ -66,17 +60,24 @@ def client(server_address):
 
 
 # ---------------------------------------------------------------------------
-# Helper
+# Helpers
 # ---------------------------------------------------------------------------
+
 
 def _unique_uuid() -> str:
     """Return a short unique identifier for test items."""
     return f"test-{random_uuid()}"
 
 
+def _blocks_needed(size: int, block_size: int = 4096) -> int:
+    """Return the number of blocks required to store `size` bytes."""
+    return math.ceil(size / block_size)
+
+
 # ---------------------------------------------------------------------------
 # Basic write / read
 # ---------------------------------------------------------------------------
+
 
 class TestWriteRead:
     """Verify round‑trip correctness for various data types."""
@@ -84,179 +85,460 @@ class TestWriteRead:
     def test_write_read_bytes(self, client):
         uuid = _unique_uuid()
         data = b"Hello, shared memory!"
+        state_before = client.get_manager_state()
+
         client.write(uuid, data)
+
+        state_after_write = client.get_manager_state()
+        needed = _blocks_needed(len(data))
+        assert (
+            state_after_write["cached_items_count"]
+            == state_before["cached_items_count"] + 1
+        )
+        assert (
+            state_after_write["cached_blocks_count"]
+            == state_before["cached_blocks_count"] + needed
+        )
+        assert (
+            state_after_write["free_blocks_count"]
+            == state_before["free_blocks_count"] - needed
+        )
+
         result = client.read(uuid)
+        assert isinstance(result, np.ndarray)
         assert result.tobytes() == data
+
+        # Cleanup
+        client.delete(uuid)
+        state_final = client.get_manager_state()
+        assert state_final["cached_items_count"] == state_before["cached_items_count"]
+        assert state_final["free_blocks_count"] == state_before["free_blocks_count"]
 
     def test_write_read_numpy(self, client):
         uuid = _unique_uuid()
-        data = np.random.bytes(1024)
-        client.write(uuid, data)
+        original = np.arange(100, dtype=np.float32)
+        state_before = client.get_manager_state()
+
+        client.write(uuid, original)
+
+        state_after_write = client.get_manager_state()
+        needed = _blocks_needed(original.nbytes)
+        assert (
+            state_after_write["cached_items_count"]
+            == state_before["cached_items_count"] + 1
+        )
+        assert (
+            state_after_write["free_blocks_count"]
+            == state_before["free_blocks_count"] - needed
+        )
+
         result = client.read(uuid)
-        assert (result == np.frombuffer(data, dtype=np.uint8)).all()
+        # result is uint8 numpy array
+        assert isinstance(result, np.ndarray)
+        np.testing.assert_array_equal(result.view(np.float32), original)
+
+        client.delete(uuid)
+        state_final = client.get_manager_state()
+        assert state_final["cached_items_count"] == state_before["cached_items_count"]
 
     def test_write_read_torch_cpu(self, client):
         uuid = _unique_uuid()
-        data = torch.arange(256, dtype=torch.uint8)
-        client.write(uuid, data)
-        result = client.read(uuid, device="cpu")
-        assert torch.equal(result, data)
+        original = torch.arange(50, dtype=torch.int32)
+        state_before = client.get_manager_state()
 
+        client.write(uuid, original)
 
-    @pytest.mark.skipif(True, reason="No GPU available")
-    def test_write_read_torch_gpu(self, client, server_address):
-        """GPU direct transfer requires a client with pinned memory."""
-        gpu_client = PagedShmClient(server_address, pin=True)
+        state_after_write = client.get_manager_state()
+        needed = _blocks_needed(original.numel() * original.element_size())
+        assert (
+            state_after_write["cached_items_count"]
+            == state_before["cached_items_count"] + 1
+        )
+        assert (
+            state_after_write["free_blocks_count"]
+            == state_before["free_blocks_count"] - needed
+        )
+
+        result_np = client.read(uuid)
+        # client.read returns numpy uint8 array
+        assert isinstance(result_np, np.ndarray)
+        result = torch.from_numpy(result_np)
+        torch.testing.assert_close(result.view(torch.int32)[: len(original)], original)
+
+        client.delete(uuid)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_write_read_torch_gpu(self, server_address):
+        # GPU tests require pin=True and PIN_MEMORY support
+        client = PagedShmClient(address=server_address, pin=True)
         try:
             uuid = _unique_uuid()
-            data = torch.arange(4096, dtype=torch.uint8, device="cuda")
-            gpu_client.write(uuid, data)
-            result = gpu_client.read(uuid, device="cuda")
-            assert torch.equal(result.cpu(), data.cpu())
+            original = torch.randint(0, 255, (500,), dtype=torch.uint8, device="cuda")
+            state_before = client.get_manager_state()
+
+            client.write(uuid, original)
+
+            state_after_write = client.get_manager_state()
+            needed = _blocks_needed(original.numel())
+            assert (
+                state_after_write["cached_items_count"]
+                == state_before["cached_items_count"] + 1
+            )
+            assert (
+                state_after_write["free_blocks_count"]
+                == state_before["free_blocks_count"] - needed
+            )
+
+            result = client.read(uuid, device="cuda")
+            assert isinstance(result, torch.Tensor)
+            torch.testing.assert_close(result, original)
+
+            client.delete(uuid)
         finally:
-            gpu_client.close()
-
-    def test_read_nonexistent_item(self, client):
-        with pytest.raises(RuntimeError, match="Server error"):
-            client.read("nonexistent")
+            client.close()
 
 
 # ---------------------------------------------------------------------------
-# Write atomicity – blocks are cleaned up on failure
+# Large data (spanning multiple blocks)
 # ---------------------------------------------------------------------------
 
-class TestWriteAtomicity:
-    """
-    If a write fails after server‑side allocation, the client must
-    automatically call ``delete`` to prevent block leaks.
-    """
 
-    def test_write_data_transfer_error_cleans_up(self, client, monkeypatch):
+class TestMultiBlock:
+    """Test data that spans several shared memory blocks (block size = 4096)."""
+
+    @pytest.mark.parametrize("size", [8000, 16384, 20000])
+    def test_bytes_multi_block(self, client, size):
         uuid = _unique_uuid()
-        data = b"test"
+        data = bytes(np.random.bytes(size))
+        state_before = client.get_manager_state()
 
-        # Simulate a failure during the local data transfer
-        def failing_write(*args, **kwargs):
-            raise RuntimeError("Simulated transfer error")
-        monkeypatch.setattr(client._storage, "write", failing_write)
+        client.write(uuid, data)
 
-        with pytest.raises(RuntimeError, match="Simulated transfer error"):
-            client.write(uuid, data)
+        state_after_write = client.get_manager_state()
+        needed = _blocks_needed(size)
+        assert (
+            state_after_write["cached_blocks_count"]
+            == state_before["cached_blocks_count"] + needed
+        )
+        assert (
+            state_after_write["free_blocks_count"]
+            == state_before["free_blocks_count"] - needed
+        )
 
-        # The item should have been cleaned up – reading must fail
-        with pytest.raises(RuntimeError, match="Server error"):
-            client.read(uuid)
+        result = client.read(uuid)
+        assert result.tobytes() == data
 
-
-# ---------------------------------------------------------------------------
-# Pin / Unpin
-# ---------------------------------------------------------------------------
-
-class TestPinUnpin:
-    """Pin and unpin operations are passed through to the server."""
-
-    def test_pin_unpin_cycle(self, client):
-        uuid = _unique_uuid()
-        client.write(uuid, b"data")
-        # Both calls should succeed without errors
-        client.pin(uuid)
-        client.unpin(uuid)
-
-    def test_pin_nonexistent(self, client):
-        with pytest.raises(RuntimeError, match="Server error"):
-            client.pin("nonexistent")
-
-
-# ---------------------------------------------------------------------------
-# Delete
-# ---------------------------------------------------------------------------
-
-class TestDelete:
-    """Delete removes an item completely."""
-
-    def test_delete_existing(self, client):
-        uuid = _unique_uuid()
-        client.write(uuid, b"data")
         client.delete(uuid)
-        # Subsequent read must fail
+        state_final = client.get_manager_state()
+        assert state_final["free_blocks_count"] == state_before["free_blocks_count"]
+
+    @pytest.mark.parametrize("size", [8000, 16384, 20000])
+    def test_numpy_multi_block(self, client, size):
+        uuid = _unique_uuid()
+        original = np.random.randint(0, 256, size, dtype=np.uint8)
+        state_before = client.get_manager_state()
+
+        client.write(uuid, original)
+
+        state_after_write = client.get_manager_state()
+        needed = _blocks_needed(original.nbytes)
+        assert (
+            state_after_write["cached_blocks_count"]
+            == state_before["cached_blocks_count"] + needed
+        )
+        assert (
+            state_after_write["free_blocks_count"]
+            == state_before["free_blocks_count"] - needed
+        )
+
+        result = client.read(uuid)
+        np.testing.assert_array_equal(result, original)
+
+        client.delete(uuid)
+
+    @pytest.mark.parametrize("size", [8000, 16384, 20000])
+    def test_torch_multi_block(self, client, size):
+        uuid = _unique_uuid()
+        original = torch.randint(0, 256, (size,), dtype=torch.uint8)
+        state_before = client.get_manager_state()
+
+        client.write(uuid, original)
+
+        state_after_write = client.get_manager_state()
+        needed = _blocks_needed(size)
+        assert (
+            state_after_write["cached_blocks_count"]
+            == state_before["cached_blocks_count"] + needed
+        )
+        assert (
+            state_after_write["free_blocks_count"]
+            == state_before["free_blocks_count"] - needed
+        )
+
+        result_np = client.read(uuid)
+        result = torch.from_numpy(result_np)
+        torch.testing.assert_close(result, original)
+
+        client.delete(uuid)
+
+
+# ---------------------------------------------------------------------------
+# Context manager usage
+# ---------------------------------------------------------------------------
+
+
+class TestContextManagers:
+    """Exercise the write/read context managers directly."""
+
+    def test_write_context_commit(self, client):
+        uuid = _unique_uuid()
+        data = b"context write test"
+        size = len(data)
+        state_before = client.get_manager_state()
+
+        with client.write_context(uuid, size) as ctx:
+            # Direct block manipulation through storage
+            client._storage.write(data, ctx.blocks)
+
+        state_after_commit = client.get_manager_state()
+        needed = _blocks_needed(size)
+        assert (
+            state_after_commit["cached_items_count"]
+            == state_before["cached_items_count"] + 1
+        )
+        assert (
+            state_after_commit["free_blocks_count"]
+            == state_before["free_blocks_count"] - needed
+        )
+
+        result = client.read(uuid)
+        assert result.tobytes() == data
+
+        client.delete(uuid)
+
+    def test_write_context_rollback(self, client):
+        uuid = _unique_uuid()
+        data = b"should not be visible"
+        size = len(data)
+        state_before = client.get_manager_state()
+
+        class TestException(Exception):
+            pass
+
+        with pytest.raises(TestException):
+            with client.write_context(uuid, size) as ctx:
+                client._storage.write(data, ctx.blocks)
+                raise TestException("trigger rollback")
+
+        # State should be identical to before, blocks freed
+        state_after_rollback = client.get_manager_state()
+        assert (
+            state_after_rollback["free_blocks_count"]
+            == state_before["free_blocks_count"]
+        )
+        assert (
+            state_after_rollback["cached_items_count"]
+            == state_before["cached_items_count"]
+        )
+
+        # After rollback the item should not exist
         with pytest.raises(RuntimeError, match="Server error"):
             client.read(uuid)
 
-    def test_delete_nonexistent(self, client):
+    def test_read_context(self, client):
+        uuid = _unique_uuid()
+        data = b"read context test"
+        client.write(uuid, data)
+
+        state_before_read = client.get_manager_state()
+        reading_before = state_before_read["reading_items_count"]
+
+        with client.read_context(uuid) as ctx:
+            # During read lock, reading count should increase
+            state_during = client.get_manager_state()
+            assert state_during["reading_items_count"] == reading_before + 1
+            assert ctx.size == len(data)
+            result = client._storage.read_to_numpy(ctx.size, ctx.blocks)
+            assert result.tobytes() == data
+
+        # After leaving context, reading count returns
+        state_after = client.get_manager_state()
+        assert state_after["reading_items_count"] == reading_before
+
+        client.delete(uuid)
+
+    def test_iterator_numpy_context(self, client):
+        uuid = _unique_uuid()
+        original = np.random.randint(0, 256, 10000, dtype=np.uint8)
+        client.write(uuid, original)
+
+        with client.get_iterator_numpy(uuid, len(original)) as it:
+            blocks = []
+            for arr, valid_len in it:
+                blocks.append(arr[:valid_len])
+        assembled = np.concatenate(blocks)
+        np.testing.assert_array_equal(assembled, original)
+
+        client.delete(uuid)
+
+    def test_iterator_tensor_context(self, client):
+        uuid = _unique_uuid()
+        original = torch.randint(0, 256, (10000,), dtype=torch.uint8)
+        client.write(uuid, original)
+
+        with client.get_iterator_tensor(uuid, len(original)) as it:
+            blocks = []
+            for tensor, valid_len in it:
+                blocks.append(tensor[:valid_len])
+        assembled = torch.cat(blocks)
+        torch.testing.assert_close(assembled, original)
+
+        client.delete(uuid)
+
+
+# ---------------------------------------------------------------------------
+# Error and edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestErrors:
+    """Validate appropriate error handling."""
+
+    def test_read_nonexistent_uuid(self, client):
         with pytest.raises(RuntimeError, match="Server error"):
-            client.delete("nonexistent")
+            client.read("nonexistent-uuid")
+
+    def test_write_exceeding_block_count(self, client):
+        # 1 MB pool, 4096-byte blocks → 256 blocks. Data > 256*4096 should fail.
+        uuid = _unique_uuid()
+        too_large = bytes(1024 * 1024 + 1)
+        state_before = client.get_manager_state()
+        with pytest.raises(RuntimeError, match="Server error"):
+            client.write(uuid, too_large)
+        state_after = client.get_manager_state()
+        assert state_after["free_blocks_count"] == state_before["free_blocks_count"]
+        # No item should remain
+        assert uuid not in client.get_manager_state().get("cached_items", [])
+
+    def test_read_request_exceeding_data_size(self, client):
+        uuid = _unique_uuid()
+        data = b"short"
+        client.write(uuid, data)
+
+        with pytest.raises(ValueError, match="exceeds available data size"):
+            with client.get_iterator_tensor(uuid, 100):
+                pass
+
+        client.delete(uuid)
+
+    def test_delete_and_read(self, client):
+        uuid = _unique_uuid()
+        client.write(uuid, b"temp data")
+        state_before_delete = client.get_manager_state()
+        client.delete(uuid)
+        state_after_delete = client.get_manager_state()
+        assert (
+            state_after_delete["cached_items_count"]
+            == state_before_delete["cached_items_count"] - 1
+        )
+        with pytest.raises(RuntimeError, match="Server error"):
+            client.read(uuid)
+
+    def test_pin_unpin(self, client):
+        uuid = _unique_uuid()
+        client.write(uuid, b"pinned item")
+        state_before_pin = client.get_manager_state()
+        client.pin(uuid)
+        state_after_pin = client.get_manager_state()
+        assert (
+            state_after_pin["pinned_items_count"]
+            == state_before_pin["pinned_items_count"] + 1
+        )
+
+        client.unpin(uuid)
+        state_after_unpin = client.get_manager_state()
+        assert (
+            state_after_unpin["pinned_items_count"]
+            == state_before_pin["pinned_items_count"]
+        )
+
+        result = client.read(uuid)
+        assert result.tobytes() == b"pinned item"
+
+        client.delete(uuid)
 
 
 # ---------------------------------------------------------------------------
-# Info & state queries
+# Server metadata and state
 # ---------------------------------------------------------------------------
 
-class TestInfoQueries:
-    """Verify that metadata and state queries return expected structures."""
 
-    def test_get_storage_info(self, client):
+class TestMetadata:
+    """Check that server reports correct storage information."""
+
+    def test_storage_info(self, client):
         info = client.get_storage_info()
         assert "name" in info
-        assert "size" in info
-        assert "block_size" in info
         assert info["size"] == 1024 * 1024
         assert info["block_size"] == 4096
+        assert info["n_block"] == 256
 
-    def test_get_manager_state(self, client):
+    def test_manager_state_initial(self, client):
         state = client.get_manager_state()
-        assert "total_blocks" in state
-        assert "free_blocks" in state
+        assert state["free_blocks_count"] == 256
+        assert state["cached_items_count"] == 0
+        assert state["pinned_items_count"] == 0
+        assert state["total_items_count"] == 0
+        assert state["writing_items_count"] == 0
+        assert state["reading_items_count"] == 0
+        assert state["idle_items_count"] == 0
 
-    def test_get_shm_name(self, client):
-        name = client.get_shm_name()
-        assert name.startswith("psm_")
-
-
-# ---------------------------------------------------------------------------
-# Edge cases & protocol robustness
-# ---------------------------------------------------------------------------
-
-class TestProtocolRobustness:
-    """Check that the client handles malformed or unexpected server responses."""
-
-    def test_unknown_command_raises(self, client):
-        with pytest.raises(RuntimeError, match="Unknown command"):
-            client._request(b"nonexistent_cmd")
-
-    def test_malformed_uuid_payload(self, client):
-        """
-        The server expects raw UUID strings for single‑argument commands.
-        Previously the client incorrectly JSON‑encoded them; this test
-        confirms the fix is in place.
-        """
+    def test_manager_state_after_write(self, client):
         uuid = _unique_uuid()
-        client.write(uuid, b"x")
-        # open_read must accept the raw UUID and return block information
-        item = client.open_read(uuid)
-        assert "blocks" in item
-        assert "size" in item
-        client.close_read(uuid)
+        state_before = client.get_manager_state()
+        client.write(uuid, b"state check")
+        state_after = client.get_manager_state()
+        needed = _blocks_needed(len(b"state check"))
+        assert (
+            state_after["cached_items_count"] == state_before["cached_items_count"] + 1
+        )
+        assert (
+            state_after["cached_blocks_count"]
+            == state_before["cached_blocks_count"] + needed
+        )
+        assert (
+            state_after["free_blocks_count"]
+            == state_before["free_blocks_count"] - needed
+        )
+        client.delete(uuid)
+
+
+# ---------------------------------------------------------------------------
+# Concurrent access (basic smoke test)
+# ---------------------------------------------------------------------------
+
+
+class TestConcurrency:
+    """Limited concurrency test using threads (ZMQ sockets are thread‑safe)."""
 
     def test_concurrent_readers(self, client):
-        """Multiple concurrent read references are allowed."""
+        import threading
+
         uuid = _unique_uuid()
-        client.write(uuid, b"shared")
-        client.open_read(uuid)
-        client.open_read(uuid)
-        client.close_read(uuid)
-        client.close_read(uuid)
+        data = b"concurrent read data"
+        client.write(uuid, data)
 
-    def test_write_and_delete_many(self, client):
-        """Stress test: write, read, and delete several items, then check free blocks."""
-        uuids = [_unique_uuid() for _ in range(10)]
-        for u in uuids:
-            client.write(u, np.zeros(1024, dtype=np.uint8))
-        for u in uuids:
-            result = client.read(u)
-            assert result.nbytes == 1024
-        for u in uuids:
-            client.delete(u)
+        results = []
 
-        # All blocks should be reclaimed
-        state = client.get_manager_state()
-        assert state["free_blocks"] == state["total_blocks"]
+        def reader():
+            results.append(client.read(uuid).tobytes())
+
+        threads = [threading.Thread(target=reader) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert all(r == data for r in results)
+
+        client.delete(uuid)
