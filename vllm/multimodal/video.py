@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
+import os
+import tempfile
+import threading
 from abc import abstractmethod
+from contextlib import contextmanager, suppress
 from io import BytesIO
 from typing import Any, ClassVar, Literal, NamedTuple, cast
 
@@ -9,8 +13,10 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
+from vllm import envs
 from vllm.logger import init_logger
-from vllm.utils.import_utils import PlaceholderModule
+from vllm.utils.import_utils import PlaceholderModule, check_torchcodec_available
+from vllm.utils.mem_constants import MiB_bytes
 from vllm.utils.registry import ExtensionManager
 
 try:
@@ -25,6 +31,13 @@ try:
 except ImportError:
     av = PlaceholderModule("av")  # type: ignore[assignment]
 
+try:
+    from torchcodec.decoders import VideoDecoder
+except (ImportError, RuntimeError):
+    VideoDecoder = PlaceholderModule("torchcodec").placeholder_attr(  # type: ignore[assignment]
+        "decoders.VideoDecoder"
+    )
+
 
 logger = init_logger(__name__)
 
@@ -33,6 +46,7 @@ class VideoLoaderRegistry(ExtensionManager):
     def __init__(self) -> None:
         super().__init__()
         self.processor2backend: dict[str, str] = {}
+        self._requires_gpu: dict[str, bool] = {}
 
     @staticmethod
     def _normalize_registered_video_processors(
@@ -56,11 +70,13 @@ class VideoLoaderRegistry(ExtensionManager):
         name: str,
         *,
         video_processor: str | tuple[str, ...] | None = None,
+        requires_gpu: bool = False,
     ):
         processors = self._normalize_registered_video_processors(video_processor)
 
         def wrap(cls_to_register):
             self.name2class[name] = cls_to_register
+            self._requires_gpu[name] = requires_gpu
             for processor_name in processors:
                 self.processor2backend[processor_name] = name
             return cls_to_register
@@ -76,11 +92,26 @@ class VideoLoaderRegistry(ExtensionManager):
 
         return self.processor2backend.get(video_processor)
 
+    def backend_requires_gpu(self, name: str) -> bool:
+        return self._requires_gpu.get(name, False)
+
 
 def get_video_loader_backend_for_processor(
     video_processor: str | None,
 ) -> str | None:
     return VIDEO_LOADER_REGISTRY.get_backend_for_video_processor(video_processor)
+
+
+def _check_frame_pixel_limit(width: int, height: int) -> None:
+    """Reject video frames exceeding VLLM_MAX_IMAGE_PIXELS before decoding."""
+    max_pixels = envs.VLLM_MAX_IMAGE_PIXELS
+    if max_pixels > 0 and width * height > max_pixels:
+        raise ValueError(
+            f"Video frame dimensions {width}x{height} "
+            f"({width * height} pixels) exceed the maximum of "
+            f"{max_pixels} pixels. Set VLLM_MAX_IMAGE_PIXELS to "
+            f"increase this limit."
+        )
 
 
 def resize_video(frames: npt.NDArray, size: tuple[int, int]) -> npt.NDArray:
@@ -130,6 +161,14 @@ class VideoSourceMetadata(NamedTuple):
     duration: float
 
 
+class PyNvVideoCodecSourceMetadata(NamedTuple):
+    """Metadata needed before GPU video decode."""
+
+    source: VideoSourceMetadata
+    width: int
+    height: int
+
+
 class VideoLoader:
     @classmethod
     def compute_frames_index_to_sample(
@@ -169,6 +208,57 @@ class VideoLoader:
 
 
 VIDEO_LOADER_REGISTRY = VideoLoaderRegistry()
+
+PYNVVIDEOCODEC_VIDEO_BACKEND: Literal["pynvvideocodec"] = "pynvvideocodec"
+# Fixed upper bound reserved for persistent PyNvVideoCodec decoder surfaces.
+PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES = 128 * MiB_bytes
+PYNVVIDEOCODEC_DECODER_CACHE_SIZE = 2
+PYNVVIDEOCODEC_MAX_RETAINED_DECODERS = 1
+# Per-API-server CUDA context and driver allocation, measured with
+# PyNvVideoCodec 2.0.4 on H100.
+PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES = int(1.8 * 1024 * MiB_bytes)
+
+
+class PyNvVideoCodecDecoderSlot:
+    """A retained PyNv decoder slot and its CUDA stream.
+
+    The decoder is reused across requests: ``reconfigure_decoder`` repoints the
+    existing decoder at each new source instead of paying a fresh
+    ``SimpleDecoder`` construction per request. Construction (CUVID parser +
+    decoder + surface-pool allocation) is the dominant per-request cost, so
+    reconfiguring is far cheaper. A single decoder serves both metadata
+    (``len``/``get_stream_metadata``) and frame decode -- no separate
+    metadata decoder.
+    """
+
+    def __init__(self, stream) -> None:
+        self.stream = stream
+        self.decoder = None
+        self.source_path: str | None = None
+
+    def _construct(self, file_path: str, nvc, device_index: int) -> None:
+        self.decoder = nvc.SimpleDecoder(
+            file_path,
+            output_color_type=nvc.OutputColorType.RGB,
+            use_device_memory=True,
+            need_scanned_stream_metadata=True,
+            gpu_id=device_index,
+            cuda_stream=self.stream.cuda_stream,
+            decoder_cache_size=PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
+        )
+        self.source_path = file_path
+
+    def get_decoder(self, file_path: str, nvc, device_index: int):
+        if self.decoder is None:
+            self._construct(file_path, nvc, device_index)
+        elif self.source_path != file_path:
+            try:
+                self.decoder.reconfigure_decoder(file_path)
+                self.source_path = file_path
+            except Exception:
+                # reconfigure unsupported/unsafe for this source -> rebuild.
+                self._construct(file_path, nvc, device_index)
+        return self.decoder
 
 
 class OpenCVVideoBackendMixin:
@@ -485,15 +575,272 @@ class PyAVVideoBackendMixin:
         return np.stack(frames_list), valid_indices
 
 
+class TorchCodecVideoBackendMixin:
+    """TorchCodec (FFmpeg-backed, PyTorch-native) codec utilities.
+
+    Builds a :class:`~torchcodec.decoders.VideoDecoder` over the in-memory
+    bytes and extracts the sampled indices with a single batched
+    ``get_frames_at`` call, while releasing the GIL during decode.
+    """
+
+    @staticmethod
+    def make_torchcodec_decoder(
+        data: bytes,
+        *,
+        num_ffmpeg_threads: int = 0,
+        seek_mode: Literal["exact", "approximate"] = "exact",
+    ) -> "VideoDecoder":
+        # NHWC matches the (num_frames, H, W, 3) uint8 RGB layout the rest
+        # of the pipeline expects, avoiding a transpose.
+        return VideoDecoder(
+            data,
+            dimension_order="NHWC",
+            num_ffmpeg_threads=num_ffmpeg_threads,
+            seek_mode=seek_mode,
+        )
+
+    @staticmethod
+    def get_torchcodec_metadata(decoder: "VideoDecoder") -> VideoSourceMetadata:
+        md = decoder.metadata
+        total_frames = md.num_frames or 0
+        fps = float(md.average_fps) if md.average_fps else 0.0
+        duration = float(md.duration_seconds) if md.duration_seconds else 0.0
+        if total_frames == 0 and duration > 0 and fps > 0:
+            total_frames = int(duration * fps)
+        return VideoSourceMetadata(total_frames, fps, duration)
+
+    @staticmethod
+    def decode_torchcodec_frames(
+        decoder: "VideoDecoder",
+        frame_indices: list[int],
+    ) -> tuple[npt.NDArray, list[int]]:
+        """Decode the requested indices in one batched, index-exact call."""
+        if not frame_indices:
+            return np.empty((0,), dtype=np.uint8), []
+        # Note: torchcodec releases the GIL for the entire call
+        batch = decoder.get_frames_at(frame_indices)
+        return batch.data.numpy(), list(frame_indices)
+
+
+class PyNvVideoCodecVideoBackendMixin:
+    """PyNvVideoCodec utilities for GPU-backed frame decode."""
+
+    _decoder_slots: ClassVar[list[PyNvVideoCodecDecoderSlot]] = []
+    _active_decoder_slots: ClassVar[int] = 0
+    _decoder_slot_cond: ClassVar[threading.Condition] = threading.Condition()
+    _DEVICE_INDEX: ClassVar[int] = 0
+
+    @classmethod
+    @abstractmethod
+    def compute_frames_index_to_sample(
+        cls,
+        source: VideoSourceMetadata,
+        target: VideoTargetMetadata,
+        **kwargs,
+    ) -> list[int]:
+        raise NotImplementedError
+
+    @classmethod
+    @abstractmethod
+    def _prepare_source(cls, source: VideoSourceMetadata) -> VideoSourceMetadata:
+        raise NotImplementedError
+
+    @classmethod
+    def _create_decoder_slot(cls) -> PyNvVideoCodecDecoderSlot:
+        import torch
+
+        return PyNvVideoCodecDecoderSlot(torch.cuda.Stream(device=cls._DEVICE_INDEX))
+
+    @staticmethod
+    @contextmanager
+    def _torch_stream_context(stream):
+        import torch
+
+        torch.accelerator.set_device_index(stream.device.index)
+        previous_stream = torch.accelerator.current_stream()
+        torch.accelerator.set_stream(stream)
+        try:
+            yield
+        finally:
+            torch.accelerator.set_stream(previous_stream)
+
+    @classmethod
+    @contextmanager
+    def _borrow_decoder_slot(cls):
+        create_slot = False
+        with cls._decoder_slot_cond:
+            while True:
+                if cls._decoder_slots:
+                    slot = cls._decoder_slots.pop()
+                    break
+                if cls._active_decoder_slots < PYNVVIDEOCODEC_MAX_RETAINED_DECODERS:
+                    cls._active_decoder_slots += 1
+                    create_slot = True
+                    break
+                cls._decoder_slot_cond.wait()
+
+        if create_slot:
+            try:
+                slot = cls._create_decoder_slot()
+            except Exception:
+                with cls._decoder_slot_cond:
+                    cls._active_decoder_slots -= 1
+                    cls._decoder_slot_cond.notify()
+                raise
+
+        try:
+            yield slot
+        finally:
+            with cls._decoder_slot_cond:
+                cls._decoder_slots.append(slot)
+                cls._decoder_slot_cond.notify()
+
+    @staticmethod
+    def _metadata_value(metadata, *names: str, default=None):
+        for name in names:
+            value = getattr(metadata, name, None)
+            if value is not None:
+                return value
+        return default
+
+    @classmethod
+    def _read_source_metadata(
+        cls,
+        file_path: str,
+        nvc,
+    ) -> PyNvVideoCodecSourceMetadata:
+        with cls._borrow_decoder_slot() as decoder_slot:
+            with cls._torch_stream_context(decoder_slot.stream):
+                decoder = decoder_slot.get_decoder(
+                    file_path, nvc, device_index=cls._DEVICE_INDEX
+                )
+                metadata = decoder.get_stream_metadata()
+                total_frames_num = len(decoder)
+            width = int(cls._metadata_value(metadata, "width", default=0))
+            height = int(cls._metadata_value(metadata, "height", default=0))
+            original_fps = float(
+                cls._metadata_value(
+                    metadata,
+                    "average_fps",
+                    "avg_frame_rate",
+                    "frame_rate",
+                    "frameRate",
+                    default=0.0,
+                )
+            )
+            duration = float(
+                cls._metadata_value(metadata, "duration", default=0.0)
+                or (total_frames_num / original_fps if original_fps > 0 else 0.0)
+            )
+            if total_frames_num <= 0:
+                raise ValueError("Could not determine video frame count")
+            if width <= 0 or height <= 0:
+                raise ValueError("Could not determine video dimensions")
+            return PyNvVideoCodecSourceMetadata(
+                source=VideoSourceMetadata(total_frames_num, original_fps, duration),
+                width=width,
+                height=height,
+            )
+
+    @classmethod
+    def _decode_to_pinned_host(
+        cls,
+        file_path: str,
+        frame_idx: list[int],
+        nvc,
+    ) -> npt.NDArray:
+        import torch
+
+        if not frame_idx:
+            return np.empty((0,), dtype=np.uint8)
+
+        with cls._borrow_decoder_slot() as decoder_slot:
+            stream = decoder_slot.stream
+            with cls._torch_stream_context(stream):
+                decoder = decoder_slot.get_decoder(
+                    file_path, nvc, device_index=cls._DEVICE_INDEX
+                )
+                decoded_frames = decoder.get_batch_frames_by_index(frame_idx)
+                if len(decoded_frames) < len(frame_idx):
+                    logger.warning(
+                        "pynvvideocodec video loading: expected %d frames but got %d.",
+                        len(frame_idx),
+                        len(decoded_frames),
+                    )
+                torch_frames = [torch.from_dlpack(frame) for frame in decoded_frames]
+                if not torch_frames:
+                    return np.empty((0,), dtype=np.uint8)
+                device_frames = torch.stack(torch_frames)
+                if device_frames.ndim != 4:
+                    raise ValueError(
+                        "PyNvVideoCodec returned frames with unexpected shape "
+                        f"{tuple(device_frames.shape)}"
+                    )
+                device_frames = device_frames.permute(0, 3, 1, 2).contiguous()
+                host_frames = torch.empty(
+                    device_frames.shape,
+                    dtype=device_frames.dtype,
+                    device="cpu",
+                    pin_memory=True,
+                )
+                host_frames.copy_(device_frames, non_blocking=True)
+                stream.synchronize()
+                host_array = host_frames.numpy()
+                del decoded_frames, torch_frames, device_frames
+                return host_array
+
+    @classmethod
+    def decode_frames_pynvvideocodec(
+        cls,
+        data: bytes,
+        target: VideoTargetMetadata,
+        **kwargs,
+    ) -> tuple[npt.NDArray, VideoSourceMetadata, list[int], list[int]]:
+        import PyNvVideoCodec as nvc
+
+        from vllm.multimodal.gpu_ipc_memory import get_mm_gpu_ipc_pool
+
+        temp_fd, temp_path = tempfile.mkstemp(suffix=".mp4")
+        try:
+            with os.fdopen(temp_fd, "wb") as temp_file:
+                temp_file.write(data)
+
+            gpu_source = cls._read_source_metadata(temp_path, nvc)
+            _check_frame_pixel_limit(gpu_source.width, gpu_source.height)
+            source = cls._prepare_source(gpu_source.source)
+            frame_idx = cls.compute_frames_index_to_sample(
+                source=source, target=target, **kwargs
+            )
+            raw_frame_bytes = len(frame_idx) * gpu_source.height * gpu_source.width * 3
+            pool = get_mm_gpu_ipc_pool()
+            if pool is None or raw_frame_bytes == 0:
+                frames = cls._decode_to_pinned_host(temp_path, frame_idx, nvc)
+            else:
+                with pool.acquire(raw_frame_bytes):
+                    frames = cls._decode_to_pinned_host(temp_path, frame_idx, nvc)
+        finally:
+            with suppress(FileNotFoundError):
+                os.unlink(temp_path)
+
+        valid_frame_indices = frame_idx[: int(frames.shape[0])]
+        return frames, source, frame_idx, valid_frame_indices
+
+
 @VIDEO_LOADER_REGISTRY.register("opencv")
-class VideoBackend(VideoLoader, OpenCVVideoBackendMixin, PyAVVideoBackendMixin):
+class VideoBackend(
+    VideoLoader,
+    OpenCVVideoBackendMixin,
+    PyAVVideoBackendMixin,
+    TorchCodecVideoBackendMixin,
+    PyNvVideoCodecVideoBackendMixin,
+):
     """Uniform-sampling video backend.
 
     Samples ``num_frames`` uniformly across the video (or one frame every
     ``1/fps`` seconds, whichever produces fewer frames). The decoding codec
-    is selected via the ``backend`` kwarg (``"opencv"`` or ``"pyav"``),
-    which can be passed through ``--media-io-kwargs``. Defaults to
-    ``"pyav"`` for concurrent decoding.
+    is selected via the ``backend`` kwarg (``"opencv"``, ``"pyav"``,
+    ``"torchcodec"`` or ``"pynvvideocodec"``), which can be passed through
+    ``--media-io-kwargs``. Defaults to ``"opencv"``.
     """
 
     _sampling_suffix: ClassVar[str] = ""
@@ -538,7 +885,9 @@ class VideoBackend(VideoLoader, OpenCVVideoBackendMixin, PyAVVideoBackendMixin):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav"] = "opencv",
+        backend: Literal["opencv", "pyav", "torchcodec", "pynvvideocodec"] = "opencv",
+        num_ffmpeg_threads: int = 0,
+        seek_mode: Literal["exact", "approximate"] = "exact",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """Load sampled frames from raw video bytes.
@@ -551,7 +900,20 @@ class VideoBackend(VideoLoader, OpenCVVideoBackendMixin, PyAVVideoBackendMixin):
                 dynamic subclass; ignored here.
             frame_recovery: Enable forward-scan recovery for failed frames.
                 Only honored by the OpenCV codec.
-            backend: Decoding codec — ``"opencv"`` or ``"pyav"`` .
+            backend: Decoding codec — ``"opencv"``, ``"pyav"``,
+                ``"torchcodec"`` or ``"pynvvideocodec"``.
+            num_ffmpeg_threads: Number of FFmpeg decoding threads, only used by
+                TorchCodec: ``0`` (default) relies on the FFmpeg default value
+                which is ``min(cpu_count + 1, 16)``.
+                OpenCV will always use ``min(cpu_count, 16)`` while pyav will
+                always use ``min(cpu_count, (height + 15) / 16)``.
+            seek_mode: Seek mode for the TorchCodec decoder, only used by
+                TorchCodec: ``"exact"`` (default) guarantees frame-accurate
+                sampling by scanning the file on creation, while
+                ``"approximate"`` skips that scan for faster decoder creation
+                at the cost of relying on the file's metadata. See
+                https://meta-pytorch.org/torchcodec/stable/generated_examples/decoding/approximate_mode.html
+                for details.
 
         Returns:
             Tuple of ``(frames_array, metadata_dict)``.
@@ -562,6 +924,10 @@ class VideoBackend(VideoLoader, OpenCVVideoBackendMixin, PyAVVideoBackendMixin):
 
         if backend == "opencv":
             cap = cls.open_video_capture(data)
+            _check_frame_pixel_limit(
+                int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            )
             source = cls._prepare_source(cls.get_video_metadata(cap))
             frame_idx = cls.compute_frames_index_to_sample(
                 source=source, target=target, **kwargs
@@ -577,6 +943,8 @@ class VideoBackend(VideoLoader, OpenCVVideoBackendMixin, PyAVVideoBackendMixin):
                 "frame_recovery is only available for `opencv` backend"
             )
             with av.open(BytesIO(data)) as container:
+                stream = container.streams.video[0]
+                _check_frame_pixel_limit(stream.width, stream.height)
                 source = cls._prepare_source(cls.get_metadata(container))
                 frame_idx = cls.compute_frames_index_to_sample(
                     source=source, target=target, **kwargs
@@ -584,10 +952,41 @@ class VideoBackend(VideoLoader, OpenCVVideoBackendMixin, PyAVVideoBackendMixin):
                 frames, valid = cls.decode_frames(
                     container, frame_idx, source.original_fps, source.duration
                 )
+        elif backend == "torchcodec":
+            assert not frame_recovery, (
+                "frame_recovery is only available for `opencv` backend"
+            )
+            check_torchcodec_available()
+            decoder = cls.make_torchcodec_decoder(
+                data,
+                num_ffmpeg_threads=num_ffmpeg_threads,
+                seek_mode=seek_mode,
+            )
+            _check_frame_pixel_limit(
+                decoder.metadata.width or 0,
+                decoder.metadata.height or 0,
+            )
+            source = cls._prepare_source(cls.get_torchcodec_metadata(decoder))
+            frame_idx = cls.compute_frames_index_to_sample(
+                source=source, target=target, **kwargs
+            )
+            frames, valid = cls.decode_torchcodec_frames(decoder, frame_idx)
+        elif backend == PYNVVIDEOCODEC_VIDEO_BACKEND:
+            if frame_recovery:
+                raise ValueError(
+                    "frame_recovery is not supported for "
+                    f"`{PYNVVIDEOCODEC_VIDEO_BACKEND}` backend"
+                )
+            frames, source, frame_idx, valid = cls.decode_frames_pynvvideocodec(
+                data,
+                target,
+                **kwargs,
+            )
         else:
             raise ValueError(
                 f"Unknown video codec backend {backend!r}; "
-                "valid options: 'opencv', 'pyav'."
+                "valid options: 'opencv', 'pyav', 'torchcodec', "
+                "'pynvvideocodec'."
             )
 
         if len(valid) < len(frame_idx):
@@ -602,6 +1001,40 @@ class VideoBackend(VideoLoader, OpenCVVideoBackendMixin, PyAVVideoBackendMixin):
             source=source,
             video_backend=f"{backend}{cls._sampling_suffix}",
             valid_frame_indices=valid,
+        )
+
+
+@VIDEO_LOADER_REGISTRY.register(PYNVVIDEOCODEC_VIDEO_BACKEND, requires_gpu=True)
+class PyNvVideoCodecVideoBackend(VideoBackend):
+    """Hardware-accelerated video backend using PyNvVideoCodec.
+
+    The backend first opens the stream only to read metadata and compute the
+    sampled frame indices. It then acquires the raw decoded RGB byte count from
+    the process-local multimodal GPU memory pool before decoding the selected
+    frames into VRAM. Decoded frames are copied into pinned host memory before
+    the lease is released, so downstream preprocessing continues to receive a
+    CPU ``np.ndarray`` in NHWC RGB format.
+    """
+
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = -1,
+        max_duration: int = 300,
+        frame_recovery: bool = False,
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        kwargs.pop("backend", None)
+        return super().load_bytes(
+            data,
+            num_frames=num_frames,
+            fps=fps,
+            max_duration=max_duration,
+            frame_recovery=frame_recovery,
+            backend=PYNVVIDEOCODEC_VIDEO_BACKEND,
+            **kwargs,
         )
 
 
@@ -640,7 +1073,7 @@ class Qwen3VLVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav"] = "opencv",
+        backend: Literal["opencv", "pyav", "torchcodec", "pynvvideocodec"] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         return super().load_bytes(
@@ -719,7 +1152,7 @@ class Qwen2VLVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav"] = "opencv",
+        backend: Literal["opencv", "pyav", "torchcodec", "pynvvideocodec"] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         return super().load_bytes(
@@ -811,7 +1244,7 @@ class DynamicVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav"] = "opencv",
+        backend: Literal["opencv", "pyav", "torchcodec", "pynvvideocodec"] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         return super().load_bytes(
@@ -936,7 +1369,7 @@ class GLM46VVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav"] = "opencv",
+        backend: Literal["opencv", "pyav", "torchcodec", "pynvvideocodec"] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         return super().load_bytes(
@@ -1034,7 +1467,7 @@ class GLMGAVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav"] = "opencv",
+        backend: Literal["opencv", "pyav", "torchcodec", "pynvvideocodec"] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         frames, metadata = super().load_bytes(
@@ -1291,6 +1724,10 @@ class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         cap = cls.open_video_capture(data)
+        _check_frame_pixel_limit(
+            int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+        )
 
         source = OpenCVVideoBackendMixin.get_video_metadata(cap)
         target = VideoTargetMetadata(
@@ -1353,7 +1790,7 @@ class NemotronVLVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav"] = "opencv",
+        backend: Literal["opencv", "pyav", "torchcodec", "pynvvideocodec"] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         frames, metadata = super().load_bytes(
@@ -1440,6 +1877,10 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
             Tuple of (frames_array, metadata_dict)
         """
         cap = cls.open_video_capture(data)
+        _check_frame_pixel_limit(
+            int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+        )
 
         source = OpenCVVideoBackendMixin.get_video_metadata(cap)
 
