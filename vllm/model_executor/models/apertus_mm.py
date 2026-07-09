@@ -101,7 +101,7 @@ class ApertusDummyInputsBuilder(BaseDummyInputsBuilder[ApertusProcessingInfo]):
             "image": self._get_dummy_images(
                     width=max_side,
                     height=max_side,
-                    num_images=mm_options.get("image", 0),
+                    num_images=mm_counts.get("image", 0),
                     overrides=image_overrides,
                     ),
             "audio": self._get_dummy_audios(
