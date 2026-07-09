@@ -247,6 +247,20 @@ class SamplingParams(
     """Represents the minimum probability for a token to be considered,
     relative to the probability of the most likely token. Must be in [0, 1].
     Set to 0 to disable this."""
+    min_k: bool = False
+    """Enables Min-k sampling, a temperature-invariant truncation strategy that
+    works in logit space. It sorts the logits, measures a position-weighted
+    relative decay between adjacent sorted logits, and truncates at the
+    steepest drop (the "semantic cliff") separating high-confidence tokens from
+    the long tail. Because the decision is based on relative logit geometry
+    rather than probabilities, the kept set does not change with temperature.
+    Set to True to enable. See https://arxiv.org/abs/2604.11012 for details."""
+    min_k_tau: float = 3.0
+    """Fallback strength for Min-k sampling. Only used when min_k is True. When
+    the sorted logits are nearly flat and no clear cliff exists, Min-k falls
+    back to a candidate set of size floor(min_k_tau / logit_range) to avoid
+    collapsing to a single token. Must be greater than or equal to 0. The
+    default of 3.0 follows the paper and rarely activates in practice."""
     seed: int | None = None
     """Random seed to use for the generation."""
     stop: str | list[str] | None = None
@@ -362,6 +376,8 @@ class SamplingParams(
         top_p: float | None = 1.0,
         top_k: int = 0,
         min_p: float = 0.0,
+        min_k: bool = False,
+        min_k_tau: float = 3.0,
         seed: int | None = None,
         stop: str | list[str] | None = None,
         stop_token_ids: list[int] | None = None,
@@ -422,6 +438,8 @@ class SamplingParams(
             top_p=1.0 if top_p is None else top_p,
             top_k=top_k,
             min_p=min_p,
+            min_k=min_k,
+            min_k_tau=min_k_tau,
             seed=seed,
             stop=stop,
             stop_token_ids=stop_token_ids,
@@ -492,6 +510,7 @@ class SamplingParams(
             self.top_p = 1.0
             self.top_k = 0
             self.min_p = 0.0
+            self.min_k = False
             self._verify_greedy_sampling()
 
         # eos_token_id is added to this by the engine
@@ -568,6 +587,14 @@ class SamplingParams(
             )
         if not 0.0 <= self.min_p <= 1.0:
             raise ValueError(f"min_p must be in [0, 1], got {self.min_p}.")
+        if not isinstance(self.min_k, bool):
+            raise TypeError(
+                f"min_k must be a boolean, got {type(self.min_k).__name__}."
+            )
+        if self.min_k and self.min_k_tau < 0.0:
+            raise ValueError(
+                f"min_k_tau must be greater than or equal to 0, got {self.min_k_tau}."
+            )
         if self.max_tokens is not None and self.max_tokens < 1:
             raise VLLMValidationError(
                 f"max_tokens must be at least 1, got {self.max_tokens}.",
@@ -873,9 +900,9 @@ class SamplingParams(
             return
 
         # Some sampling parameters are not yet compatible with spec decoding.
-        if self.min_p > _SAMPLING_EPS or self.logit_bias:
+        if self.min_p > _SAMPLING_EPS or self.min_k or self.logit_bias:
             raise ValueError(
-                "The min_p and logit_bias sampling parameters "
+                "The min_p, min_k and logit_bias sampling parameters "
                 "are not yet supported with speculative decoding."
             )
 
@@ -889,6 +916,7 @@ class SamplingParams(
         if (
             self.temperature != 1.0
             or self.min_p > _SAMPLING_EPS
+            or self.min_k
             or self.seed is not None
             or self.min_tokens > 0
             or self.logit_bias
@@ -896,7 +924,7 @@ class SamplingParams(
             or self.allowed_token_ids
         ):
             raise ValueError(
-                "The temperature, min_p, seed, min_tokens, logit_bias, "
+                "The temperature, min_p, min_k, seed, min_tokens, logit_bias, "
                 "bad_words, and allowed_token_ids sampling parameters "
                 "are not yet supported with diffusion models."
             )
@@ -1072,6 +1100,8 @@ class SamplingParams(
             f"top_p={self.top_p}, "
             f"top_k={self.top_k}, "
             f"min_p={self.min_p}, "
+            f"min_k={self.min_k}, "
+            f"min_k_tau={self.min_k_tau}, "
             f"seed={self.seed}, "
             f"stop={self.stop}, "
             f"stop_token_ids={self.stop_token_ids}, "
@@ -1098,6 +1128,7 @@ class SamplingParams(
             top_p=0.9,
             top_k=50,
             min_p=0.1,
+            min_k=True,
             frequency_penalty=0.5,
             presence_penalty=0.5,
             repetition_penalty=1.2,

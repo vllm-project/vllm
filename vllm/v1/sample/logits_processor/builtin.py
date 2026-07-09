@@ -116,6 +116,154 @@ class MinPLogitsProcessor(LogitsProcessor):
         return logits
 
 
+class MinKLogitsProcessor(LogitsProcessor):
+    """Min-k sampling (https://arxiv.org/abs/2604.11012).
+
+    Min-k is a temperature-invariant truncation strategy that operates on the
+    shape of the sorted logits. For each request it sorts the logits in
+    descending order, normalizes the adjacent drops by the logit range, weights
+    each drop by 1 / rank to emphasize the head of the distribution, and
+    truncates at the position of the steepest weighted drop (the "semantic
+    cliff") that separates confident tokens from the long tail. A fallback
+    keeps floor(tau / logit_range) tokens when the distribution is nearly flat
+    and no cliff exists, which guards against collapsing to a single token.
+
+    vLLM applies temperature before logits processors run, so the logits seen
+    here are already divided by the temperature. Temperature scaling preserves
+    both the ordering of tokens and the normalized relative decay, so the
+    cliff position is identical to the one computed on the raw logits, and the
+    final sampling distribution over the kept set matches the paper exactly.
+    The fallback uses the range of the temperature-scaled logits, so its size
+    can shift with temperature, but it only activates on near-flat
+    distributions where it merely prevents a degenerate single-token set.
+
+    A per-request tau of -1 means Min-k is disabled for that request. Disabled
+    rows are computed alongside the rest and then masked out, keeping the batch
+    vectorized.
+    """
+
+    # Sentinel stored per request when Min-k is disabled (valid tau is >= 0).
+    _DISABLED = -1.0
+
+    def __init__(
+        self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool
+    ):
+        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        # Number of requests with Min-k enabled (tau != _DISABLED).
+        self.min_k_count: int = 0
+
+        self.tau_cpu_tensor = torch.full(
+            (max_num_reqs,),
+            self._DISABLED,
+            dtype=torch.float32,
+            device="cpu",
+            pin_memory=is_pin_memory,
+        )
+        self.tau_cpu = self.tau_cpu_tensor.numpy()
+
+        self.use_double_tensor = torch.device(device).type != "cpu"
+
+        if self.use_double_tensor:
+            self.tau_device: torch.Tensor = torch.empty(
+                (max_num_reqs,), dtype=torch.float32, device=device
+            )
+        else:
+            self.tau_device = self.tau_cpu_tensor
+        # Current slice of the device tensor
+        self.tau: torch.Tensor = self.tau_device[:0]
+
+    @classmethod
+    def _req_tau(cls, params: SamplingParams) -> float:
+        """Effective tau for a request: the requested tau if Min-k is enabled,
+        otherwise the disabled sentinel."""
+        return params.min_k_tau if params.min_k else cls._DISABLED
+
+    def is_argmax_invariant(self) -> bool:
+        """Min-k always keeps the top-ranked token, so it cannot change the
+        outcome of greedy sampling."""
+        return True
+
+    def update_state(self, batch_update: BatchUpdate | None):
+        if not batch_update:
+            return
+
+        needs_update = False
+        disabled = self._DISABLED
+        # Process added requests.
+        for index, params, _, _ in batch_update.added:
+            tau = self._req_tau(params)
+            tau_before = self.tau_cpu[index]
+            if tau_before != tau:
+                needs_update = True
+                self.tau_cpu[index] = tau
+                enabled = tau != disabled
+                enabled_before = tau_before != disabled
+                if enabled and not enabled_before:
+                    self.min_k_count += 1
+                elif not enabled and enabled_before:
+                    self.min_k_count -= 1
+
+        if self.min_k_count:
+            # Process removed requests.
+            if batch_update.removed:
+                needs_update = True
+                for index in batch_update.removed:
+                    if self.tau_cpu[index] != disabled:
+                        self.tau_cpu[index] = disabled
+                        self.min_k_count -= 1
+
+            # Process moved requests, unidirectional (a->b) and swap (a<->b).
+            for adx, bdx, direct in batch_update.moved:
+                tau_a, tau_b = self.tau_cpu[adx], self.tau_cpu[bdx]
+                if tau_a != tau_b:
+                    needs_update = True
+                    self.tau_cpu[bdx] = tau_a
+                    if direct == MoveDirectionality.SWAP:
+                        self.tau_cpu[adx] = tau_b
+                if direct == MoveDirectionality.UNIDIRECTIONAL:
+                    if tau_a != disabled:
+                        self.tau_cpu[adx] = disabled
+                    if tau_b != disabled:
+                        self.min_k_count -= 1
+
+        # Update tensors if needed.
+        size = batch_update.batch_size
+        if self.min_k_count and (needs_update or self.tau.shape[0] != size):
+            self.tau = self.tau_device[:size]
+            if self.use_double_tensor:
+                self.tau.copy_(self.tau_cpu_tensor[:size], non_blocking=True)
+            self.tau.unsqueeze_(1)
+
+    def apply(self, logits: torch.Tensor) -> torch.Tensor:
+        if not self.min_k_count:
+            return logits
+
+        vocab_size = logits.shape[-1]
+        # Sort logits in descending order to inspect the head-to-tail shape.
+        sorted_logits, _ = torch.sort(logits, dim=-1, descending=True)
+        # Logit range, used to normalize drops so the decay is scale (and thus
+        # temperature) invariant. A small epsilon guards a uniform row.
+        logit_range = sorted_logits[:, :1] - sorted_logits[:, -1:] + 1e-8
+        # Position-weighted relative decay between adjacent sorted logits.
+        drops = sorted_logits[:, :-1] - sorted_logits[:, 1:]
+        positions = torch.arange(
+            1, vocab_size, device=logits.device, dtype=logits.dtype
+        )
+        weighted_decay = drops / logit_range / positions
+        # The steepest weighted drop marks the cliff; keep that many tokens.
+        k_cliff = weighted_decay.argmax(dim=-1) + 1
+        # Fallback for near-flat rows; disabled rows carry tau -1, clamped to 0.
+        tau = self.tau.squeeze(1)
+        k_fallback = torch.floor(tau.clamp(min=0.0) / logit_range.squeeze(1)).long()
+        k = torch.maximum(k_cliff, k_fallback).clamp_(1, vocab_size)
+        # Threshold is the k-th largest logit per row; truncate everything
+        # below it, but only for requests that enabled Min-k.
+        kth_value = sorted_logits.gather(1, (k - 1).unsqueeze(1))
+        invalid_token_mask = (logits < kth_value) & (self.tau != self._DISABLED)
+        logits.masked_fill_(invalid_token_mask, -float("inf"))
+        return logits
+
+
 class LogitBiasLogitsProcessor(LogitsProcessor):
     def __init__(self, _, device: torch.device, is_pin_memory: bool):
         self.device = device

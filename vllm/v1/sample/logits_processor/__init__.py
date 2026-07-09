@@ -16,6 +16,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.torch_utils import guard_cuda_initialization
 from vllm.v1.sample.logits_processor.builtin import (
     LogitBiasLogitsProcessor,
+    MinKLogitsProcessor,
     MinPLogitsProcessor,
     MinTokensLogitsProcessor,
     process_dict_updates,
@@ -50,6 +51,7 @@ BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
     MinTokensLogitsProcessor,
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
+    MinKLogitsProcessor,
 ]
 
 
@@ -344,6 +346,7 @@ class AdapterLogitsProcessor(LogitsProcessor):
 __all__ = [
     "LogitsProcessor",
     "LogitBiasLogitsProcessor",
+    "MinKLogitsProcessor",
     "MinPLogitsProcessor",
     "MinTokensLogitsProcessor",
     "BatchUpdate",
