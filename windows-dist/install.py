@@ -1,62 +1,104 @@
 #!/usr/bin/env python3
 """vLLM for AMD ROCm - Interactive Installer"""
-import os, sys, subprocess, shutil, glob
+import os, sys, subprocess, shutil, glob, webbrowser
 from pathlib import Path
 
 def main():
-    print("=" * 45)
-    print("  vLLM for AMD ROCm - Interactive Installer")
-    print("=" * 45)
+    print("=" * 50)
+    print("  vLLM for AMD ROCm - Installer")
+    print("=" * 50)
     print()
 
-    # Where to install
+    # 1. Check Python 3.12
+    if sys.version_info[:2] != (3, 12):
+        print(f"[!!] Python 3.12 required. You have Python {sys.version_info.major}.{sys.version_info.minor}")
+        print("     Download from: https://www.python.org/downloads/release/python-3129/")
+        input("Press Enter to exit...")
+        sys.exit(1)
+    print(f"[OK] Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
+
+    # 2. Install folder
     default = "E:\\VLLM"
-    install_dir = input(f"Install folder [{default}]: ").strip() or default
+    install_dir = input(f"\nInstall folder [{default}]: ").strip() or default
     install_dir = Path(install_dir)
     install_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Installed to: {install_dir}")
-    print()
+    print(f"[OK] {install_dir}")
 
-    # Python venv
-    if input("Create Python venv? (Y/N) [Y]: ").strip().upper() or "Y":
-        venv_dir = install_dir / ".venv"
-        if not (venv_dir / "Scripts" / "python.exe").exists():
-            subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
+    # 3. Create venv
+    venv_dir = install_dir / ".venv"
+    if input("\nCreate Python venv? (Y/N) [Y]: ").strip().upper() or "Y":
+        subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
         python = str(venv_dir / "Scripts" / "python.exe")
         pip = str(venv_dir / "Scripts" / "pip.exe")
-        print(f"Venv: {venv_dir}")
+        print(f"[OK] Venv: {venv_dir}")
     else:
         python = sys.executable
-        pip = os.path.join(os.path.dirname(python), "pip.exe") if os.name == "nt" else "pip"
-    print()
+        pip = shutil.which("pip") or "pip"
 
-    # Detect ROCm
+    # 4. Detect ROCm
+    print("\n[..] Detecting ROCm...")
     hip_path = detect_rocm()
     if hip_path:
         rocm_ver = get_rocm_version(hip_path)
-        print(f"[OK] ROCm at {hip_path} (version {rocm_ver})")
+        print(f"[OK] ROCm {rocm_ver} at {hip_path}")
     else:
         print("[!!] ROCm not found.")
-        user_path = input("ROCm path (or press Enter to skip): ").strip()
-        if not user_path:
-            print("[!!] ROCm is required. Install from https://rocm.docs.amd.com")
-            sys.exit(1)
-        if not (Path(user_path) / "bin" / "hipcc.exe").exists():
-            print(f"[!!] hipcc.exe not found at {user_path}")
+        user_path = input("Enter ROCm path: ").strip()
+        if not user_path or not (Path(user_path) / "bin" / "hipcc.exe").exists():
+            print("[!!] ROCm required. Install from https://rocm.docs.amd.com")
+            input("Press Enter to exit...")
             sys.exit(1)
         hip_path = user_path
         rocm_ver = get_rocm_version(hip_path) or "7.13"
-        print(f"[OK] ROCm at {hip_path} (version {rocm_ver})")
+        print(f"[OK] ROCm {rocm_ver}")
 
-    # Clean ALL stale sitecustomize.py files (from previous broken installers)
+    # 5. Generate requirements.txt with AMD wheel URLs
+    amd_url = "https://repo.amd.com/rocm/whl/gfx120X-all"
+    py_tag = f"cp312"
+    torch_ver, tv_ver = get_torch_versions(rocm_ver)
+
+    req_lines = [
+        f"--find-links {amd_url}/",
+        f"{amd_url}/torch/torch-{torch_ver}-{py_tag}-{py_tag}-win_amd64.whl",
+        f"{amd_url}/torchvision/torchvision-{tv_ver}-{py_tag}-{py_tag}-win_amd64.whl",
+    ]
+    req_file = install_dir / "requirements.txt"
+    req_file.write_text("\n".join(req_lines) + "\n")
+
+    # 6. Check if GPU shows up
+    print("\n[..] Checking for AMD GPU...")
+    try:
+        r = subprocess.run([str(Path(hip_path) / "bin" / "rocm-smi.exe"), "--showproductname"],
+                          capture_output=True, text=True, timeout=10)
+        if "RX" in r.stdout or "AMD" in r.stdout:
+            for line in r.stdout.splitlines():
+                if line.strip():
+                    print(f"  GPU: {line.strip()}")
+    except: pass
+
+    # 7. Print instructions
+    print()
+    print("=" * 50)
+    print("  READY TO INSTALL PYTORCH")
+    print("=" * 50)
+    print()
+    print("Run these commands in your terminal (as administrator):")
+    print()
+    print(f"  1. {pip} install -r \"{req_file}\"")
+    print()
+    print("This will download and install PyTorch with ROCm support")
+    print("from the AMD repository. It may take a few minutes.")
+    print()
+    input("Type DONE after the install finishes, or ENTER to skip: ")
+
+    # 8. Clean stale sitecustomize.py
     for p in sys.path:
         f = Path(p) / "sitecustomize.py"
         if f.exists():
-            try:
-                f.unlink()
-                print(f"  Removed stale: {f}")
+            try: f.unlink()
             except: pass
-    # Write fresh sitecustomize.py
+
+    # 9. Write fresh sitecustomize.py
     site_pkg = get_site_packages(python)
     if site_pkg:
         site_file = Path(site_pkg) / "sitecustomize.py"
@@ -66,85 +108,46 @@ def main():
             "os.environ.setdefault('VLLM_NO_USAGE_STATS', 'true')\n"
         )
         print("[OK] sitecustomize.py created")
-    print()
 
-    # Install PyTorch with ROCm
-    if input(f"Install PyTorch with ROCm? (Y/N) [Y]: ").strip().upper() or "Y":
-        torch_ver, tv_ver = get_torch_versions(rocm_ver)
-        py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
-        base_url = "https://repo.amd.com/rocm/whl/gfx120X-all/torch"
-        torch_url = f"{base_url}/torch-{torch_ver}-{py_tag}-{py_tag}-win_amd64.whl"
-        print(f"Downloading torch {torch_ver} from AMD repo...")
-        cmd = [pip, "install", torch_url, "--timeout", "120"]
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode != 0:
-            # Fallback: find-links with the torch directory
-            print("Direct download failed, trying find-links...")
-            cmd = [pip, "install", f"torch=={torch_ver}", f"torchvision=={tv_ver}",
-                   "--find-links", base_url, "--timeout", "120"]
-            r = subprocess.run(cmd, capture_output=True, text=True)
-            if r.returncode != 0:
-                # Last resort: official PyTorch ROCm repo
-                print("AMD repo failed, trying PyTorch official repo...")
-                cmd = [pip, "install", "torch", "torchvision",
-                       f"--index-url=https://download.pytorch.org/whl/rocm{rocm_ver}",
-                       "--timeout", "120"]
-                r = subprocess.run(cmd, capture_output=True, text=True)
-                if r.returncode != 0:
-                    print(f"PyTorch install failed:\n{r.stderr}")
-                    sys.exit(1)
-        print("PyTorch + ROCm installed.")
-    print()
-
-    # Clone vLLM
+    # 10. Clone vLLM
     src_dir = install_dir / "vllm-windows"
-    if not (install_dir / "vllm-windows" / "vllm" / "__init__.py").exists():
-        if not src_dir.exists():
-            print("Cloning vLLM Windows port...")
-            subprocess.run(["git", "clone", "https://github.com/Maxritz/vllm-windows.git", str(src_dir)], check=True)
+    if not src_dir.exists():
+        print("\n[..] Cloning vLLM...")
+        subprocess.run(["git", "clone", "https://github.com/Maxritz/vllm-windows.git", str(src_dir)], check=True)
         subprocess.run(["git", "checkout", "WINDOWS-PORT"], cwd=src_dir, capture_output=True)
-    print(f"vLLM source: {src_dir}")
-    print()
+    print(f"[OK] vLLM source at {src_dir}")
 
-    # Install vLLM package
-    print("Installing vLLM package...")
+    # 11. Install vLLM package
+    print("\n[..] Installing vLLM package...")
     subprocess.run([pip, "install", "-e", "."], cwd=src_dir, capture_output=True)
-    print("vLLM package installed.")
 
-    # Copy _C.pyd
+    # 12. Copy binaries
     pyd_src = Path(__file__).parent / "_C.pyd"
     if pyd_src.exists():
         shutil.copy2(pyd_src, src_dir / "vllm" / "_C.pyd")
-        print(f"_C.pyd installed ({pyd_src.stat().st_size // 1048576} MB)")
+        print(f"[OK] _C.pyd ({pyd_src.stat().st_size // 1048576} MB)")
 
-    # Copy vllm.exe
     exe_src = Path(__file__).parent / "vllm.exe"
     if exe_src.exists():
         shutil.copy2(exe_src, src_dir)
-        print("vllm.exe copied")
+        print("[OK] vllm.exe copied")
 
     print()
-    print("=" * 45)
+    print("=" * 50)
     print("  INSTALLATION COMPLETE")
-    print("=" * 45)
+    print("=" * 50)
     print()
-    print(f"vLLM is ready in: {src_dir}")
-    print(f"Run: {src_dir / 'vllm.exe'}")
+    print(f"  vLLM: {src_dir}")
+    print(f"  Run:  {src_dir / 'vllm.exe'}")
     print()
+    input("Press Enter to exit...")
 
 def detect_rocm():
-    # Check env vars
     for var in ["ROCM_HOME", "ROCM_PATH", "HIP_PATH"]:
         val = os.environ.get(var)
         if val and (Path(val) / "bin" / "hipcc.exe").exists():
             return val
-    # Check common paths
-    for pattern in [
-        "C:/Program Files/AMD/ROCm/*",
-        "C:/ROCm/*",
-        "D:/ROCM-*",
-        "E:/ROCM-*",
-    ]:
+    for pattern in ["C:/Program Files/AMD/ROCm/*", "C:/ROCm/*", "D:/ROCM-*", "E:/ROCM-*"]:
         for p in glob.glob(pattern):
             if (Path(p) / "bin" / "hipcc.exe").exists():
                 return str(Path(p))
@@ -164,13 +167,13 @@ def get_rocm_version(hip_path):
     return "7.13"
 
 def get_torch_versions(rocm_ver):
-    versions = {
+    v = {
         "7.13": ("2.11.0+rocm7.13.0", "0.22.0+rocm7.13.0"),
         "7.12": ("2.10.0+rocm7.12.0", "0.21.0+rocm7.12.0"),
         "7.11": ("2.9.1+rocm7.11.0", "0.20.1+rocm7.11.0"),
         "7.10": ("2.9.1+rocm7.10.0", "0.20.1+rocm7.10.0"),
     }
-    return versions.get(rocm_ver, ("2.11.0+rocm7.13.0", "0.22.0+rocm7.13.0"))
+    return v.get(rocm_ver, ("2.11.0+rocm7.13.0", "0.22.0+rocm7.13.0"))
 
 def get_site_packages(python):
     try:
