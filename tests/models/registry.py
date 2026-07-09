@@ -466,7 +466,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "bharatgenai/Param2-17B-A2.4B-Thinking",
         trust_remote_code=True,
     ),
-    "PersimmonForCausalLM": _HfExamplesInfo("adept/persimmon-8b-chat"),
     "PhiForCausalLM": _HfExamplesInfo("microsoft/phi-2"),
     "Phi3ForCausalLM": _HfExamplesInfo("microsoft/Phi-3-mini-4k-instruct"),
     "PhiMoEForCausalLM": _HfExamplesInfo(
@@ -547,9 +546,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Step3TextForCausalLM": _HfExamplesInfo("stepfun-ai/step3", trust_remote_code=True),
     "SolarForCausalLM": _HfExamplesInfo(
         "upstage/solar-pro-preview-instruct", trust_remote_code=True
-    ),
-    "TeleChatForCausalLM": _HfExamplesInfo(
-        "chuhac/TeleChat2-35B", trust_remote_code=True
     ),
     "TeleChat2ForCausalLM": _HfExamplesInfo(
         "Tele-AI/TeleChat2-3B", trust_remote_code=True
@@ -869,7 +865,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "FunAudioChatForConditionalGeneration": _HfExamplesInfo(
         "funaudiochat", is_available_online=False
     ),
-    "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
     "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it"),
     "DiffusionGemmaForBlockDiffusion": _HfExamplesInfo(
         "google/diffusiongemma-26B-A4B-it",
@@ -936,7 +931,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "HunYuanVLForConditionalGeneration": _HfExamplesInfo(
         "tencent/HunyuanOCR",
         hf_overrides={"num_experts": 0},
-        is_available_online=False,
+        min_transformers_version="5.13",
     ),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo(
         "HuggingFaceM4/Idefics3-8B-Llama3",
@@ -1126,6 +1121,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "8b-thinking": "OpenMOSS-Team/MOSS-Audio-8B-Thinking",
         },
         trust_remote_code=True,
+    ),
+    "MossTranscribeDiarizeForConditionalGeneration": _HfExamplesInfo(
+        "OpenMOSS-Team/MOSS-Transcribe-Diarize",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "HfMoondream": _HfExamplesInfo(
         "moondream/moondream3-preview",
