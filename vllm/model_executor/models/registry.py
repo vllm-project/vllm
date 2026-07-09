@@ -168,9 +168,7 @@ _TEXT_GENERATION_MODELS = {
     "NemotronForCausalLM": ("nemotron", "NemotronForCausalLM"),
     "NemotronHForCausalLM": ("nemotron_h", "NemotronHForCausalLM"),
     "NemotronHPuzzleForCausalLM": ("nemotron_h", "NemotronHForCausalLM"),
-    "OlmoForCausalLM": ("olmo", "OlmoForCausalLM"),
-    "Olmo2ForCausalLM": ("olmo2", "Olmo2ForCausalLM"),
-    "Olmo3ForCausalLM": ("olmo2", "Olmo2ForCausalLM"),
+    "Olmo3ForCausalLM": ("olmo3", "Olmo3ForCausalLM"),
     "OlmoHybridForCausalLM": ("olmo_hybrid", "OlmoHybridForCausalLM"),
     "OlmoeForCausalLM": ("olmoe", "OlmoeForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
@@ -641,6 +639,8 @@ _SPECULATIVE_DECODING_MODELS = {
 _TRANSFORMERS_SUPPORTED_MODELS = {
     # Text generation models
     "GPTBigCodeForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "OlmoForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "Olmo2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "SmolLM3ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Starcoder2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     # Multimodal models
