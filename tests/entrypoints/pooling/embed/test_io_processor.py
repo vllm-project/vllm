@@ -3,6 +3,7 @@
 """Unit tests for EmbedIOProcessor."""
 
 import pytest
+import torch
 from pydantic import TypeAdapter, ValidationError
 
 from vllm import PoolingParams
@@ -19,6 +20,7 @@ from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingRequest,
 )
 from vllm.entrypoints.pooling.typing import PoolingServeContext
+from vllm.outputs import PoolingOutput, PoolingRequestOutput
 
 
 class TestEmbeddingRequestParsing:
@@ -398,6 +400,96 @@ class TestValidateInputType:
             handler._validate_input_type("z")
 
 
+class TestChunkedEmbeddingProcessing:
+    """Unit tests for chunked embedding aggregation."""
+
+    class _FakeModelConfig:
+        max_model_len = 3
+
+    @classmethod
+    def _make_handler(cls):
+        handler = object.__new__(EmbedIOProcessor)
+        handler.model_config = cls._FakeModelConfig()
+        return handler
+
+    @staticmethod
+    def _make_context() -> PoolingServeContext[EmbeddingCompletionRequest]:
+        request = TypeAdapter(EmbeddingRequest).validate_python(
+            {
+                "model": "test",
+                "input": [[0, 1, 2, 3, 4], [10, 11]],
+            }
+        )
+        assert isinstance(request, EmbeddingCompletionRequest)
+        return PoolingServeContext(
+            request=request,
+            pooling_params=PoolingParams(),
+            model_name="test",
+            request_id="embd-client-prompt-999-chunk-888",
+            engine_inputs=[
+                {"prompt_token_ids": [0, 1, 2, 3, 4]},
+                {"prompt_token_ids": [10, 11]},
+            ],
+        )
+
+    @staticmethod
+    def _make_output(
+        request_id: str,
+        prompt_token_ids: list[int],
+        embedding: list[float],
+    ) -> PoolingRequestOutput:
+        return PoolingRequestOutput(
+            request_id=request_id,
+            outputs=PoolingOutput(data=torch.tensor(embedding)),
+            prompt_token_ids=prompt_token_ids,
+            num_cached_tokens=0,
+            finished=True,
+        )
+
+    def test_aggregation_uses_metadata_not_request_id_parsing(self):
+        handler = self._make_handler()
+        ctx = self._make_context()
+
+        handler._pre_process_chunked(ctx)
+
+        assert ctx.prompt_request_ids == [
+            "embd-client-prompt-999-chunk-888-prompt-0-chunk-0",
+            "embd-client-prompt-999-chunk-888-prompt-0-chunk-1",
+            "embd-client-prompt-999-chunk-888-prompt-1-chunk-0",
+        ]
+        assert ctx.chunked_embedding_metadata is not None
+        assert [
+            (item.prompt_index, item.chunk_index)
+            for item in ctx.chunked_embedding_metadata
+        ] == [(0, 0), (0, 1), (1, 0)]
+
+        ctx.final_res_batch = [
+            self._make_output(ctx.prompt_request_ids[0], [0, 1, 2], [1.0, 1.0]),
+            self._make_output(ctx.prompt_request_ids[1], [3, 4], [4.0, 7.0]),
+            self._make_output(ctx.prompt_request_ids[2], [10, 11], [9.0, 9.0]),
+        ]
+
+        handler._post_process_chunked(ctx)
+
+        assert len(ctx.final_res_batch) == 2
+        assert ctx.final_res_batch[0].request_id == (
+            "embd-client-prompt-999-chunk-888-prompt-0"
+        )
+        assert ctx.final_res_batch[0].prompt_token_ids == [0, 1, 2, 3, 4]
+        assert torch.allclose(
+            ctx.final_res_batch[0].outputs.data,
+            torch.tensor([2.2, 3.4]),
+        )
+        assert ctx.final_res_batch[1].request_id == (
+            "embd-client-prompt-999-chunk-888-prompt-1"
+        )
+        assert ctx.final_res_batch[1].prompt_token_ids == [10, 11]
+        assert torch.allclose(
+            ctx.final_res_batch[1].outputs.data,
+            torch.tensor([9.0, 9.0]),
+        )
+
+
 class TestPreProcessCohereOnline:
     """Unit tests for EmbedIOProcessor._pre_process_cohere_online."""
 
@@ -428,8 +520,8 @@ class TestPreProcessCohereOnline:
         handler._get_task_instruction_prefix = lambda _input_type: None
         handler._has_chat_template = lambda: False
         handler._preprocess_cmpl_online = preprocess_cmpl_online
-        handler._batch_render_chat = lambda *_args, **_kwargs: (
-            pytest.fail("text-only request should not require chat rendering")
+        handler._batch_render_chat = lambda *_args, **_kwargs: pytest.fail(
+            "text-only request should not require chat rendering"
         )
 
         handler._pre_process_cohere_online(ctx)
@@ -448,8 +540,8 @@ class TestPreProcessCohereOnline:
 
         handler._get_task_instruction_prefix = lambda _input_type: "query: "
         handler._has_chat_template = lambda: False
-        handler._batch_render_chat = lambda *_args, **_kwargs: (
-            pytest.fail("chat rendering should be skipped without a template")
+        handler._batch_render_chat = lambda *_args, **_kwargs: pytest.fail(
+            "chat rendering should be skipped without a template"
         )
         handler._preprocess_cmpl_online = preprocess_cmpl
 
@@ -485,8 +577,8 @@ class TestPreProcessCohereOnline:
         handler._get_task_instruction_prefix = lambda _input_type: "query: "
         handler._has_chat_template = lambda: True
         handler._batch_render_chat = batch_render_chat
-        handler._preprocess_cmpl_online = lambda *_args, **_kwargs: (
-            pytest.fail("completion path should be skipped when a template exists")
+        handler._preprocess_cmpl_online = lambda *_args, **_kwargs: pytest.fail(
+            "completion path should be skipped when a template exists"
         )
 
         handler._pre_process_cohere_online(ctx)

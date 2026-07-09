@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
@@ -220,17 +221,22 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 )
             recv_topk_idx = recv_topk_idx.unsqueeze(1)
         else:
-            # do_expand=False (decode/cudagraph mode): recv_topk_idx has
-            # LOCAL expert IDs (-1 for non-local and padding rows).
-            # Convert valid local IDs to global. Rows with -1 are
-            # skipped by expert kernels (TrtLLM tile-level skipping,
-            # DeepGemm is_computation_valid), so no need to zero
-            # hidden states, scales, or weights for padding rows.
-            valid_mask = recv_topk_idx >= 0
-            recv_topk_idx = torch.where(
-                valid_mask,
-                recv_topk_idx + self.rank_expert_offset,
+            # do_expand=False (decode/cudagraph mode): the dispatch only writes
+            # rows [0, num_recv_tokens); the rest of the worst-case-allocated
+            # buffer is left UNINITIALIZED. For valid rows, recv_topk_idx holds
+            # LOCAL expert IDs (-1 for non-local slots). Convert valid local IDs
+            # to global and force everything else to -1:
+            #   * non-local / out-of-range expert slots, and
+            #   * every row >= num_recv_tokens (uninitialized padding): its
+            #     stale contents can alias valid expert IDs and would otherwise
+            #     be treated as real routed tokens by experts that build routing
+            #     over *all* rows (e.g. triton MoE backend's make_routing_data),
+            #     polluting the per-expert token lists and corrupting real tokens.
+            recv_topk_idx = _globalize_recv_topk_idx(
                 recv_topk_idx,
+                psum_recv_per_rank,
+                self.rank_expert_offset,
+                self.num_experts,
             )
 
         # Reshape recv_topk_weights to match recv_topk_idx shape [N, 1]
@@ -416,3 +422,51 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             weight_and_reduce_impl,
             False,
         )
+
+
+@triton.jit
+def _globalize_recv_topk_idx_kernel(
+    topk_idx_ptr,  # [N*topk] local expert IDs (-1 = non-local), modified in place
+    psum_ptr,  # [P] per-scaleup-rank recv prefix sum; num_recv = psum[P-1]
+    P,
+    rank_expert_offset,
+    num_experts,
+    n_elements,  # N * topk
+    topk: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < n_elements
+    # num_recv_tokens read on-device (no host sync) -> cudagraph-safe.
+    num_recv = tl.load(psum_ptr + P - 1)
+    val = tl.load(topk_idx_ptr + offs, mask=mask, other=-1)
+    g = val + rank_expert_offset
+    row = offs // topk
+    # Keep a slot iff: it is a local expert (val >= 0), its global id is in
+    # range, and its row is a real received token (< num_recv). Otherwise -1.
+    valid = (val >= 0) & (g < num_experts) & (row < num_recv)
+    tl.store(topk_idx_ptr + offs, tl.where(valid, g, -1), mask=mask)
+
+
+def _globalize_recv_topk_idx(
+    recv_topk_idx: torch.Tensor,  # [N, topk] local expert IDs, -1 = non-local
+    psum_recv_per_rank: torch.Tensor,
+    rank_expert_offset: int,
+    num_experts: int,
+) -> torch.Tensor:
+    N, topk = recv_topk_idx.shape
+    n = N * topk
+    BLOCK = 1024
+    grid = (triton.cdiv(n, BLOCK),)
+    _globalize_recv_topk_idx_kernel[grid](
+        recv_topk_idx,
+        psum_recv_per_rank,
+        psum_recv_per_rank.shape[0],
+        rank_expert_offset,
+        num_experts,
+        n,
+        topk=topk,
+        BLOCK=BLOCK,
+    )
+    return recv_topk_idx

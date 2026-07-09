@@ -6,6 +6,7 @@ from typing import Any
 
 import torch
 
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -77,24 +78,20 @@ def determine_expert_counts(
 ) -> tuple[int, int, int]:
     global_num_experts = num_experts + num_redundant_experts
     logical_num_experts = num_experts
-    # ROCm aiter shared experts fusion
-    # AITER only supports gated activations (silu/gelu), so disable it
-    # for non-gated MoE (is_act_and_mul=False)
-    # rocm_aiter_fmoe_enabled = rocm_aiter_ops.is_fused_moe_enabled() and is_act_and_mul
-    aiter_fmoe_shared_expert_enabled = (
-        rocm_aiter_ops.is_fusion_moe_shared_experts_enabled() and is_act_and_mul
-    )
+    # Shared-expert fusion: append the shared expert(s) as routed-expert slots
+    # so they run in the same grouped GEMM. Gated by
+    # VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: either the native aiter fused-MoE
+    # path (env + master switch, via is_fusion_moe_shared_experts_enabled) or the
+    # backend-neutral router-append path (env alone, independent of the master
+    # switch; e.g. the MM3 triton/flydsl mxfp8 MoE). Gated activations only.
+    fuse_shared_enabled = (
+        rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        or envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
+    ) and is_act_and_mul
 
     num_fused_shared_experts = (
-        n_shared_experts
-        if n_shared_experts is not None and aiter_fmoe_shared_expert_enabled
-        else 0
+        n_shared_experts if n_shared_experts is not None and fuse_shared_enabled else 0
     )
-    if not aiter_fmoe_shared_expert_enabled and num_fused_shared_experts != 0:
-        raise ValueError(
-            "n_shared_experts is only supported on ROCm aiter when "
-            "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled"
-        )
 
     return global_num_experts, logical_num_experts, num_fused_shared_experts
 
@@ -105,6 +102,7 @@ def FusedMoE(
     top_k: int,
     hidden_size: int,
     intermediate_size: int,
+    intermediate_pad: int | None = None,
     params_dtype: torch.dtype | None = None,
     renormalize: bool = True,
     use_grouped_topk: bool = False,
@@ -129,7 +127,8 @@ def FusedMoE(
     num_redundant_experts: int = 0,
     has_bias: bool = False,
     is_sequence_parallel: bool = False,
-    expert_mapping: list[tuple[str, str, int, str]] | None = None,
+    reduce_results: bool = True,
+    ckpt_names: tuple[str, str, str] = ("gate_proj", "down_proj", "up_proj"),
     n_shared_experts: int | None = None,
     router_logits_dtype: torch.dtype | None = None,
     gate: torch.nn.Module | None = None,
@@ -186,8 +185,13 @@ def FusedMoE(
         num_redundant_experts: Number of redundant experts for EPLB
         has_bias: Whether expert layers have bias terms
         is_sequence_parallel: Whether sequence parallelism is enabled
-        expert_mapping: Expert parameter mapping for weight loading
-        n_shared_experts: Number of shared experts (ROCm aiter only)
+        reduce_results: Whether to all-reduce the final output. Setting this
+            to False (to fuse the all-reduce downstream) is only honored on
+            the late-AR path.
+        ckpt_names: Checkpoint parameter name tuple (gate_proj, down_proj,
+            up_proj) used for weight loading
+        n_shared_experts: Number of shared experts to fuse into the routed
+            grouped GEMM (ROCm; requires aiter FSE or the router-append path)
         router_logits_dtype: Data type for router logits buffers
         gate: Pre-configured gate module
         shared_experts: Pre-configured shared experts module
@@ -219,6 +223,14 @@ def FusedMoE(
         pcp_size=pcp_size,
         is_sequence_parallel=is_sequence_parallel,
         parallel_config=vllm_config.parallel_config,
+    )
+
+    # Resolve the deferred all-reduce request against the parallel config.
+    skip_final_all_reduce = (
+        not reduce_results
+        and not moe_parallel_config.use_all2all_kernels
+        and not moe_parallel_config.is_sequence_parallel
+        and zero_expert_type is None
     )
 
     global_num_experts, logical_num_experts, num_fused_shared_experts = (
@@ -288,6 +300,19 @@ def FusedMoE(
             else 1.0,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=num_fused_shared_experts,
+            # Fused shared-expert slot weight. With apply_routed_scale_to_output
+            # the runner scales the combined output by routed_scaling_factor, so
+            # the shared slot weight must be 1/routed_scaling_factor for its net
+            # contribution to be 1.0 (matching the un-scaled separate-MLP add).
+            shared_expert_weight=(
+                (1.0 / routed_scaling_factor)
+                if (
+                    apply_routed_scale_to_output
+                    and num_fused_shared_experts > 0
+                    and routed_scaling_factor
+                )
+                else 1.0
+            ),
             zero_expert_type=zero_expert_type,
             num_logical_experts=logical_num_experts,
             hash_indices_table=hash_indices_table,
@@ -311,6 +336,7 @@ def FusedMoE(
         experts_per_token=top_k,
         hidden_dim=hidden_size,
         intermediate_size=intermediate_size,
+        intermediate_pad=intermediate_pad,
         num_local_experts=expert_map_manager.local_num_experts,
         num_logical_experts=logical_num_experts,
         moe_parallel_config=moe_parallel_config,
@@ -327,6 +353,7 @@ def FusedMoE(
         swiglu_alpha=swiglu_alpha,
         swiglu_beta=swiglu_beta,
         max_capture_size=vllm_config.compilation_config.max_cudagraph_capture_size,
+        skip_final_all_reduce=skip_final_all_reduce,
     )
 
     logger.debug("FusedMoEConfig = %s", moe_config)
@@ -343,7 +370,9 @@ def FusedMoE(
         moe_config,
         quant_config,
         expert_map_manager=expert_map_manager,
-        expert_mapping=expert_mapping,
+        ckpt_gate_proj_name=ckpt_names[0],
+        ckpt_down_proj_name=ckpt_names[1],
+        ckpt_up_proj_name=ckpt_names[2],
         # Extra params that are needed by quant_methods, pass along for now
         # Prefer getting these from other sources, e.g. moe_config or
         # router object

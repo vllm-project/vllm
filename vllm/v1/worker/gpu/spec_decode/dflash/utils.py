@@ -5,7 +5,10 @@ import torch.nn as nn
 from vllm.config import ModelConfig, VllmConfig, replace
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.model_loader import get_model
-from vllm.v1.worker.gpu.spec_decode.eagle.utils import _should_share
+from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
+    _should_share,
+    get_target_lm_head,
+)
 
 
 def get_dflash_causal(draft_model_config: ModelConfig) -> bool:
@@ -26,7 +29,9 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     draft_vllm_config = replace(
         vllm_config,
         attention_config=replace(
-            vllm_config.attention_config, use_non_causal=not causal
+            vllm_config.attention_config,
+            use_non_causal=not causal,
+            backend=speculative_config.attention_backend,
         ),
     )
     with set_model_tag("dflash_head"):
@@ -55,16 +60,13 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
                 del draft_inner.embed_tokens
             draft_inner.embed_tokens = target_embed
 
-    # Share lm_head with the target unless the draft remaps vocab via
-    # draft_id_to_target_id (in which case its own lm_head is required).
-    target_lm_head = getattr(target_model, "lm_head", None)
+    target_lm_head = get_target_lm_head(target_model, target_language_model)
     draft_lm_head = getattr(dflash_model, "lm_head", None)
-    if (
-        target_lm_head is not None
-        and draft_lm_head is not None
-        and getattr(dflash_model, "draft_id_to_target_id", None) is None
+    if target_lm_head is not None and _should_share(
+        dflash_model, "has_own_lm_head", draft_lm_head, target_lm_head
     ):
-        del dflash_model.lm_head
+        if draft_lm_head is not None:
+            del dflash_model.lm_head
         dflash_model.lm_head = target_lm_head
 
     return dflash_model

@@ -41,7 +41,8 @@ class KVQuantMode(IntEnum):
     FP8_PER_TENSOR = 1  # per-tensor scales (current fp8 path)
     INT8_PER_TOKEN_HEAD = 2  # per-token-head dynamic scales for int8
     FP8_PER_TOKEN_HEAD = 3  # per-token-head dynamic scales for fp8
-    NVFP4 = 4  # packed fp4 data + fp8 block scales
+    INT4_PER_TOKEN_HEAD = 4  # packed 2×int4/byte, RHT + asymmetric zp
+    NVFP4 = 5  # packed fp4 data + fp8 block scales
 
     @property
     def is_per_token_head(self) -> bool:
@@ -49,6 +50,7 @@ class KVQuantMode(IntEnum):
         return self in (
             KVQuantMode.INT8_PER_TOKEN_HEAD,
             KVQuantMode.FP8_PER_TOKEN_HEAD,
+            KVQuantMode.INT4_PER_TOKEN_HEAD,
         )
 
     @property
@@ -59,6 +61,8 @@ class KVQuantMode(IntEnum):
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
+    if kv_cache_dtype == "int4_per_token_head":
+        return KVQuantMode.INT4_PER_TOKEN_HEAD
     if kv_cache_dtype == "int8_per_token_head":
         return KVQuantMode.INT8_PER_TOKEN_HEAD
     if kv_cache_dtype == "fp8_per_token_head":
@@ -184,19 +188,16 @@ class AttentionSpec(KVCacheSpec):
     def real_page_size_bytes(self) -> int:
         if self.kv_quant_mode.is_nvfp4:
             # Packed layout: fp4 data + fp8 block scales per head.
-            full_dim = nvfp4_kv_cache_full_dim(self.head_size)
-            return (
-                2
-                * self.block_size
-                * self.num_kv_heads
-                * full_dim
-                * get_dtype_size(self.dtype)
-            )
+            head_dim = nvfp4_kv_cache_full_dim(self.head_size)
+        elif self.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            head_dim = self.head_size // 2
+        else:
+            head_dim = self.head_size
         return (
             2
             * self.block_size
             * self.num_kv_heads
-            * self.head_size
+            * head_dim
             * get_dtype_size(self.dtype)
         )
 
@@ -314,17 +315,12 @@ class FullAttentionSpec(AttentionSpec):
             last_dim = nvfp4_kv_cache_full_dim(
                 self.head_size
             ) + nvfp4_kv_cache_full_dim(self.head_size_v)
-            return (
-                self.block_size
-                * self.num_kv_heads
-                * last_dim
-                * get_dtype_size(self.dtype)
-            )
+        elif self.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            last_dim = self.head_size // 2 + self.head_size_v // 2
+        else:
+            last_dim = self.head_size + self.head_size_v
         return (
-            self.block_size
-            * self.num_kv_heads
-            * (self.head_size + self.head_size_v)
-            * get_dtype_size(self.dtype)
+            self.block_size * self.num_kv_heads * last_dim * get_dtype_size(self.dtype)
         )
 
 
@@ -390,10 +386,14 @@ class MLAAttentionSpec(FullAttentionSpec):
             # V3.2 main MLA: 656-byte custom layout (kv_lora_rank=512 +
             # qk_rope_head_dim=64, head_size=576). See flashmla_sparse.py.
             return self.block_size * 656
+        if self.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            head_dim = self.head_size // 2
+        else:
+            head_dim = self.head_size
         return (
             self.storage_block_size
             * self.num_kv_heads
-            * self.head_size
+            * head_dim
             * get_dtype_size(self.dtype)
         )
 
@@ -438,29 +438,72 @@ class HiddenStateCacheSpec(MLAAttentionSpec):
 
 
 @dataclass(frozen=True, kw_only=True)
+class RSWASpec(FullAttentionSpec):
+    """KV cache spec for Reference Sliding Window Attention (R-SWA).
+
+    Prefill (image + text prompt) tokens are always globally visible.
+    Only the last ``rswa_window`` generated tokens are kept in the KV cache;
+    gap blocks (between the prefill tail and the current decode window) are
+    evicted during each decode step to bound memory at
+    O(prefix_blocks + window_blocks).
+    """
+
+    rswa_window: int
+
+    @classmethod
+    def merge(cls, specs: list[RSWASpec]) -> RSWASpec:
+        assert all(isinstance(spec, RSWASpec) for spec in specs), (
+            "All attention layers in the same KV cache group must be RSWASpec."
+        )
+        rswa_windows = {spec.rswa_window for spec in specs}
+        assert len(rswa_windows) == 1, (
+            f"All R-SWA layers must share the same rswa_window, got {rswa_windows}"
+        )
+        # Delegate common field merging to the parent, then reattach rswa_window.
+        base = FullAttentionSpec.merge(specs)  # type: ignore[arg-type]
+        return cls(
+            block_size=base.block_size,
+            num_kv_heads=base.num_kv_heads,
+            head_size=base.head_size,
+            head_size_v=base.head_size_v,
+            dtype=base.dtype,
+            kv_quant_mode=base.kv_quant_mode,
+            page_size_padded=base.page_size_padded,
+            indexes_kv_by_block_stride=base.indexes_kv_by_block_stride,
+            sliding_window=base.sliding_window,
+            attention_chunk_size=base.attention_chunk_size,
+            non_causal=base.non_causal,
+            rswa_window=rswa_windows.pop(),
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
 class ChunkedLocalAttentionSpec(AttentionSpec):
     attention_chunk_size: int
 
     def max_admission_blocks_per_request(
-        self, max_num_batched_tokens: int, max_model_len: int
+        self, max_in_flight_tokens: int, max_model_len: int
     ) -> int:
         """Per-request admission cap, in blocks.
 
         Single source of truth for both startup pool sizing
         (`max_memory_usage_bytes`) and the runtime admission gate, so requests
         admitted by startup can also be admitted at runtime.
+
+        `max_in_flight_tokens` is the max tokens scheduled but not yet settled
+        (one batch per concurrent step); see `VllmConfig.max_in_flight_tokens`.
         """
-        # During chunked prefill, we hold KV for at most one chunk window.
+        # During chunked prefill, we hold KV for at most one chunk window plus
+        # the in-flight tokens, since frees happen on the processed-token basis.
         num_tokens = min(
-            self.attention_chunk_size + max_num_batched_tokens, max_model_len
+            self.attention_chunk_size + max_in_flight_tokens, max_model_len
         )
         return cdiv(num_tokens, self.block_size)
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        max_model_len = vllm_config.model_config.max_model_len
-        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         max_blocks = self.max_admission_blocks_per_request(
-            max_num_batched_tokens=max_num_batched_tokens, max_model_len=max_model_len
+            max_in_flight_tokens=vllm_config.max_in_flight_tokens,
+            max_model_len=vllm_config.model_config.max_model_len,
         )
         return max_blocks * self.page_size_bytes
 
@@ -504,7 +547,7 @@ class SlidingWindowSpec(AttentionSpec):
         )
 
     def max_admission_blocks_per_request(
-        self, max_num_batched_tokens: int, max_model_len: int
+        self, max_in_flight_tokens: int, max_model_len: int
     ) -> int:
         """Per-request admission cap, in blocks.
 
@@ -513,13 +556,14 @@ class SlidingWindowSpec(AttentionSpec):
         real-held blocks plateau at this bound because
         `SlidingWindowManager.remove_skipped_blocks` runs from `allocate_slots`
         before each chunk's `get_num_blocks_to_allocate`.
+
+        `max_in_flight_tokens` is the max tokens scheduled but not yet settled
+        (one batch per concurrent step); see `VllmConfig.max_in_flight_tokens`.
         """
         # During chunked prefill, we hold KV for the last `sliding_window-1`
-        # computed tokens plus the newly scheduled tokens, and never more
-        # than `max_model_len`.
-        num_tokens = min(
-            self.sliding_window - 1 + max_num_batched_tokens, max_model_len
-        )
+        # computed tokens plus the in-flight tokens (frees happen on the
+        # processed-token basis); never more than `max_model_len`.
+        num_tokens = min(self.sliding_window - 1 + max_in_flight_tokens, max_model_len)
         # +1 because the sliding window may not start from the beginning of
         # the block. E.g. block size 4 and num_token 4 needs two blocks
         # [XXCD][EF] to store the 6-token window [CDEF].
@@ -529,10 +573,9 @@ class SlidingWindowSpec(AttentionSpec):
         assert vllm_config.parallel_config.decode_context_parallel_size == 1, (
             "DCP not support sliding window."
         )
-        max_model_len = vllm_config.model_config.max_model_len
-        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         max_blocks = self.max_admission_blocks_per_request(
-            max_num_batched_tokens=max_num_batched_tokens, max_model_len=max_model_len
+            max_in_flight_tokens=vllm_config.max_in_flight_tokens,
+            max_model_len=vllm_config.model_config.max_model_len,
         )
         return max_blocks * self.page_size_bytes
 

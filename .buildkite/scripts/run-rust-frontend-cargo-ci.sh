@@ -8,7 +8,12 @@ if [[ "$MODE" != "style-clippy" && "$MODE" != "test" ]]; then
   exit 2
 fi
 
-ROOT_DIR="$(git rev-parse --show-toplevel)"
+if ROOT_DIR="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+  :
+else
+  SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+  ROOT_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
+fi
 cd "$ROOT_DIR"
 
 export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
@@ -90,6 +95,16 @@ install_cargo_sort() {
   cargo binstall --no-confirm cargo-sort
 }
 
+install_cargo_deny() {
+  if command -v cargo-deny >/dev/null 2>&1; then
+    return
+  fi
+
+  log_section "Installing cargo-deny"
+  install_cargo_binstall
+  cargo binstall --no-confirm cargo-deny
+}
+
 install_cargo_nextest() {
   if command -v cargo-nextest >/dev/null 2>&1; then
     return
@@ -142,12 +157,20 @@ PY
 
 run_style_clippy() {
   install_cargo_sort
+  install_cargo_deny
 
   log_section "Checking Rust formatting"
   cargo fmt --manifest-path rust/Cargo.toml --all -- --check
 
   log_section "Checking Cargo.toml ordering"
   cargo sort --workspace --check rust
+
+  log_section "Checking Rust dependency bans"
+  cargo deny \
+    --manifest-path rust/Cargo.toml \
+    check \
+    --config rust/deny.toml \
+    bans
 
   log_section "Running clippy"
   cargo clippy \
