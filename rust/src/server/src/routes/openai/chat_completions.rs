@@ -275,10 +275,9 @@ fn build_beam_chat_logprobs(
     let mut content = Vec::with_capacity(n);
     for pos in 0..n {
         let entries = &beam_logprobs[pos];
-        let Some(first) = entries.first() else {
-            continue;
-        };
-        let token = tokenizer.decode(&[generated_tokens[pos]], false).unwrap_or_default();
+        let token_id = generated_tokens[pos];
+        let selected_logprob = entries.iter().find(|e| e.token_id == token_id).map(|e| e.logprob);
+        let token = tokenizer.decode(&[token_id], false).unwrap_or_default();
         let token_bytes = token.as_bytes().to_vec();
         let top_logprobs: Vec<TopLogProb> = entries
             .iter()
@@ -297,11 +296,11 @@ fn build_beam_chat_logprobs(
             .collect();
         content.push(ChatLogProbsContent {
             token: if token.is_empty() {
-                format!("token_id:{}", generated_tokens[pos])
+                format!("token_id:{}", token_id)
             } else {
                 token
             },
-            logprob: first.logprob,
+            logprob: selected_logprob.unwrap_or(0.0),
             bytes: Some(token_bytes),
             top_logprobs,
         });

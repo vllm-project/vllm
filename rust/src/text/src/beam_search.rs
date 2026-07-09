@@ -45,6 +45,7 @@ pub(crate) struct BeamSearchConfig {
     pub length_penalty: f32,
     pub ignore_eos: bool,
     pub eos_token_id: Option<u32>,
+    pub extra_eos_token_ids: BTreeSet<u32>,
     pub lora_request: Option<LoraRequest>,
     pub cache_salt: Option<String>,
     pub priority: i32,
@@ -104,9 +105,12 @@ pub(crate) async fn run_beam_search(
     }];
     let mut completed: Vec<BeamSearchBeam> = vec![];
 
-    let stop_token_ids = config.stop_token_ids.clone();
+    let mut stop_token_ids = config.stop_token_ids.clone();
+    if !config.ignore_eos {
+        stop_token_ids.extend(config.extra_eos_token_ids.iter().copied());
+    }
     let all_stop_token_ids: BTreeSet<u32> = {
-        let mut ids: BTreeSet<u32> = config.stop_token_ids.iter().copied().collect();
+        let mut ids: BTreeSet<u32> = stop_token_ids.iter().copied().collect();
         if let Some(eos) = config.eos_token_id {
             ids.insert(eos);
         }
@@ -164,9 +168,10 @@ pub(crate) async fn run_beam_search(
                         }
                         let candidate_logprob = current_beam.cum_logprob + entry.logprob;
                         let is_eos = config.eos_token_id.is_some_and(|eos| entry.token_id == eos);
+                        let is_extra_eos = config.extra_eos_token_ids.contains(&entry.token_id);
                         let is_stop = config.stop_token_ids.contains(&entry.token_id);
 
-                        if (is_eos || is_stop) && !config.ignore_eos {
+                        if (is_eos && !config.ignore_eos) || is_extra_eos || is_stop {
                             let mut logprobs = current_beam.logprobs.clone();
                             logprobs.push(position.entries.clone());
                             completed.push(BeamSearchBeam {

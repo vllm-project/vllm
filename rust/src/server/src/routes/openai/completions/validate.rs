@@ -70,6 +70,13 @@ pub(super) fn validate_request_compat(
         );
     }
 
+    if request.use_beam_search && request.structured_outputs.is_some() {
+        bail_invalid_request!(
+            param = "structured_outputs",
+            "Structured outputs are not currently supported with beam search."
+        );
+    }
+
     // ---- Reject parameters that are accepted for deserialization but not yet
     // implemented ----
 
