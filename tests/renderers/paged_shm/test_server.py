@@ -2,14 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-import multiprocessing as mp
 
 import numpy as np
 import pytest
 import torch
 
 from vllm.renderers.paged_shm.client import PagedShmClient
-from vllm.renderers.paged_shm.server import zmq_server
+from vllm.renderers.paged_shm.server import PagedShmServerProc
 from vllm.utils import random_uuid
 
 # ---------------------------------------------------------------------------
@@ -17,30 +16,11 @@ from vllm.utils import random_uuid
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="module")
 def server_address():
-    """
-    Spawn a real PagedShmServer in a subprocess and return its IPC address.
-    """
-    ctx = mp.get_context("spawn")
-    parent_conn, child_conn = ctx.Pipe()
-    stop_event = ctx.Event()
-
-    proc = ctx.Process(
-        target=zmq_server,
-        args=(1024 * 1024, 4096, child_conn, stop_event),
-    )
-    proc.start()
-    address = parent_conn.recv()
-    parent_conn.close()
-
-    yield address
-
-    stop_event.set()
-    proc.join(timeout=5)
-    if proc.is_alive():
-        proc.terminate()
-        proc.join()
+    server = PagedShmServerProc(size=1024 * 1024, block_size=4096)
+    yield server.address
+    server.close()
 
 
 @pytest.fixture(scope="function")

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import json
+import multiprocessing as mp
 from collections.abc import Callable
 from multiprocessing.synchronize import Event
 
@@ -101,7 +102,7 @@ class PagedShmServer:
         self.storage.close()
 
 
-def zmq_server(size: int, block_size: int, conn, stop_event: Event):
+def _zmq_server(size: int, block_size: int, conn, stop_event: Event):
     context = zmq.Context()
     socket = None
     server = None
@@ -226,3 +227,29 @@ def zmq_server(size: int, block_size: int, conn, stop_event: Event):
             with contextlib.suppress(Exception):
                 server.close()
         logger.info("PagedShmServer stopped.")
+
+
+class PagedShmServerProc:
+    def __init__(self, size: int, block_size: int):
+        ctx = mp.get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe()
+        stop_event = ctx.Event()
+
+        proc = ctx.Process(
+            target=_zmq_server,
+            args=(size, block_size, child_conn, stop_event),
+        )
+        proc.start()
+        address = parent_conn.recv()
+        parent_conn.close()
+
+        self.proc = proc
+        self.address = address
+        self.stop_event = stop_event
+
+    def close(self):
+        self.stop_event.set()
+        self.proc.join(timeout=5)
+        if self.proc.is_alive():
+            self.proc.terminate()
+            self.proc.join()
