@@ -46,9 +46,11 @@ ENV PATH="/root/.cargo/bin:/opt/venv/bin:${PATH}"
 
 RUN python3 -m venv /opt/venv && pip install -U pip wheel
 
-# torch-Trio als eigener Layer (0.9 GB Download, cached gut).
+# torch + torchvision als eigener Layer (0.9 GB Download, cached gut).
 # Offizielle cu129-Wheels sind für {75,80,86,90,100,120} gebaut.
-RUN pip install torch==${TORCH_VERSION} torchvision torchaudio \
+# Kein torchaudio: der cu129-Index endet bei 2.11 (ABI-Mismatch zu 2.13),
+# gebraucht wird es nur für Audio-Modelle.
+RUN pip install "torch==${TORCH_VERSION}" "torchvision==0.28.0" \
         --index-url https://download.pytorch.org/whl/cu129
 
 # ---- vLLM-Fork bauen (der teure Schritt) ----
@@ -85,14 +87,23 @@ RUN apt-get update -q && apt-get install -y -q --no-install-recommends \
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 
-# torch-Trio (eigener Layer, identisch zum Builder)
+# torch + torchvision (eigener Layer, identisch zum Builder)
 RUN pip install -U pip && \
-    pip install torch==${TORCH_VERSION} torchvision torchaudio \
+    pip install "torch==${TORCH_VERSION}" "torchvision==0.28.0" \
         --index-url https://download.pytorch.org/whl/cu129
 
 # vLLM-Wheel + Abhängigkeiten (eigener Layer)
 COPY --from=builder /wheels/vllm-*.whl /tmp/wheels/
 RUN pip install /tmp/wheels/vllm-*.whl --no-cache-dir
+
+# Reparatur: Abhängigkeitsauflösung von PyPI kann torch/torchvision durch
+# cu13-Defaults ersetzen — cu129-Builds erzwungen wiederherstellen.
+RUN pip install --force-reinstall --no-deps --no-cache-dir \
+        "torch==${TORCH_VERSION}+cu129" "torchvision==0.28.0+cu129" \
+        --index-url https://download.pytorch.org/whl/cu129 && \
+    python3 -c "import torch, torchvision; \
+assert torch.version.cuda.startswith('12.9'), torch.version.cuda; \
+print('torch', torch.__version__, '| torchvision', torchvision.__version__, '| CUDA', torch.version.cuda)"
 
 # GGUF-Plugin + gguf-py
 COPY --from=builder /wheels/vllm_gguf_plugin-*.whl /tmp/wheels/
