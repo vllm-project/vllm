@@ -850,6 +850,13 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
 
         request_latency_buckets = [
+            0.01,
+            0.025,
+            0.05,
+            0.075,
+            0.1,
+            0.15,
+            0.2,
             0.3,
             0.5,
             0.8,
