@@ -23,6 +23,11 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
 
 
+def _reinterpret_u64_as_i64(value: int) -> int:
+    """Preserve a uint64 pointer bit pattern in a torch.int64 tensor."""
+    return value if value < (1 << 63) else value - (1 << 64)
+
+
 @triton.jit
 def _copy_mamba_state_block(
     state_idx,
@@ -625,7 +630,9 @@ class MambaSpecDecodeGPUContext:
 
                 for state_type_idx, state in enumerate(kv_caches):
                     # Base address
-                    self.state_base_addrs[idx] = state.data_ptr()
+                    self.state_base_addrs[idx] = _reinterpret_u64_as_i64(
+                        state.data_ptr()
+                    )
 
                     # Block stride (bytes between consecutive blocks)
                     # state shape: [num_blocks, ...], stride(0) = elements per block
@@ -691,7 +698,7 @@ class MambaSpecDecodeGPUContext:
         )
         self.block_table_stride_req = int(next(iter(strides)))
         for i, bt in enumerate(block_tables):
-            self.block_table_ptrs[i] = bt.data_ptr()
+            self.block_table_ptrs[i] = _reinterpret_u64_as_i64(bt.data_ptr())
 
         self.is_initialized = True
 
