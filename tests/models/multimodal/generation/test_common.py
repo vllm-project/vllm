@@ -906,7 +906,6 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         use_tokenizer_eos=True,
         auto_cls=AutoModelForImageTextToText,
-        hf_model_kwargs=model_utils.qianfan_ocr_hf_model_kwargs("baidu/Qianfan-OCR"),
     ),
     "qwen2_vl": VLMTestInfo(
         models=["Qwen/Qwen2-VL-2B-Instruct"],
