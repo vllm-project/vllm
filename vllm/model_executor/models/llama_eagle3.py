@@ -60,7 +60,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
             self.self_attn.total_num_kv_heads,
             bias=qkv_bias,
             quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "qkv_proj"),
+            prefix=maybe_prefix(prefix, "self_attn.qkv_proj"),
         )
 
         self.hidden_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
