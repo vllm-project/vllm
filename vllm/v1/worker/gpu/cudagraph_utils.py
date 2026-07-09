@@ -59,6 +59,8 @@ class BatchExecutionDescriptor:
     num_reqs: int | None  # None means no request padding is needed (PIECEWISE graphs)
     uniform_token_count: int | None = None
     num_active_loras: int = 0
+    # Explicit max query length for nonuniform FULL graphs.
+    max_query_len: int | None = None
 
 
 class CreateForwardFn(Protocol):
@@ -79,9 +81,11 @@ def _is_compatible(
     num_tokens: int,
     uniform_token_count: int | None,
     num_active_loras: int,
+    max_query_len: int | None = None,
 ) -> bool:
-    # desc.uniform_token_count=None (PIECEWISE) can handle any uniform_token_count
-    # desc.num_reqs=None means no request padding needed (PIECEWISE)
+    # A descriptor with uniform_token_count=None accepts any runtime uniformity.
+    # PIECEWISE and nonuniform FULL descriptors both use this wildcard.
+    # num_reqs=None means no request padding is needed (currently limited to PIECEWISE).
     return (
         (
             desc.uniform_token_count is None
@@ -90,6 +94,7 @@ def _is_compatible(
         and (desc.num_reqs is None or desc.num_reqs >= num_reqs)
         and desc.num_tokens >= num_tokens
         and desc.num_active_loras == num_active_loras
+        and (desc.max_query_len is None or desc.max_query_len == max_query_len)
     )
 
 
@@ -99,7 +104,7 @@ def get_uniform_token_count(
     max_query_len: int,
 ) -> int | None:
     """
-    Return the uniform token count if batch is uniform, else None.
+    Return the uniform token count if the runtime batch is uniform, else None.
     A batch is uniform if all requests have the same number of tokens.
     """
     if (max_query_len == num_tokens // num_reqs) and (
@@ -202,6 +207,10 @@ class CudaGraphManager:
         # draft tokens. The scheduler might use a smaller number so we need
         # to capture graphs for all possible values during decode.
         speculative_config = self.vllm_config.speculative_config
+        adaptive_verification = (
+            speculative_config is not None
+            and getattr(speculative_config, "adaptive_verification", False) is True
+        )
         if (
             speculative_config
             and speculative_config.uses_dynamic_speculative_decoding()
@@ -219,7 +228,9 @@ class CudaGraphManager:
             )
             # Each entry is (range_start, range_end, num_speculative_tokens).
             decode_query_lens = [
-                x[2] + num_new_sampled_tokens_per_step for x in num_spec_per_batch_size
+                min(x[2], self.vllm_config.num_speculative_tokens)
+                + num_new_sampled_tokens_per_step
+                for x in num_spec_per_batch_size
             ]
         else:
             decode_query_lens = [self.decode_query_len]
@@ -227,8 +238,8 @@ class CudaGraphManager:
         for num_tokens, num_active_loras in product(
             capture_sizes, self.lora_capture_cases
         ):
-            # Capture uniform decode specfifc graphs if required
-            #  (i.e. separate decode routine)
+            # Capture decode-specific graphs when decode and mixed batches use
+            # separate routines.
             if separate_decode_routine and decode_mode:
                 for decode_query_len in decode_query_lens:
                     rounded_num_tokens = round_up(num_tokens, decode_query_len)
@@ -245,8 +256,13 @@ class CudaGraphManager:
                         cg_mode=decode_mode,
                         num_tokens=rounded_num_tokens,
                         num_reqs=rounded_num_reqs,
-                        uniform_token_count=decode_query_len,
+                        uniform_token_count=(
+                            None if adaptive_verification else decode_query_len
+                        ),
                         num_active_loras=num_active_loras,
+                        max_query_len=(
+                            self.decode_query_len if adaptive_verification else None
+                        ),
                     )
 
                     # avoid duplicate graphs
@@ -374,6 +390,7 @@ class CudaGraphManager:
         num_tokens: int,
         uniform_token_count: int | None,
         num_active_loras: int,
+        max_query_len: int | None = None,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
 
@@ -387,6 +404,7 @@ class CudaGraphManager:
                     num_tokens,
                     uniform_token_count,
                     effective_loras,
+                    max_query_len,
                 ):
                     return desc
         return BatchExecutionDescriptor(
@@ -508,6 +526,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 attn_groups,
                 kv_cache_config,
                 skip_attn=(desc.cg_mode == CUDAGraphMode.PIECEWISE),
+                max_query_len=desc.max_query_len,
             )
 
             # Capture with dummy rows marked as padding.
@@ -600,8 +619,14 @@ def prepare_inputs_to_capture(
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
     skip_attn: bool = False,
+    max_query_len: int | None = None,
 ) -> AttentionState:
-    input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
+    input_batch = InputBatch.make_dummy(
+        num_reqs,
+        num_tokens,
+        input_buffers,
+        max_query_len=max_query_len,
+    )
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
     slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = build_slot_mappings_by_layer(

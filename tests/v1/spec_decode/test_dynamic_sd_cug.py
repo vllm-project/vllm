@@ -26,6 +26,7 @@ def _create_vllm_config_for_dsd(
     *,
     cudagraph_mode: str = "FULL_AND_PIECEWISE",
     use_dynamic_sd: bool = True,
+    adaptive_verification: bool = False,
     num_spec_per_batch_size: list[tuple[int, int, int]] | None = None,
 ) -> MagicMock:
     """Create a minimal config that exercises DSD cudagraph dispatch.
@@ -63,6 +64,7 @@ def _create_vllm_config_for_dsd(
 
     speculative_config = MagicMock()
     speculative_config.uses_dynamic_speculative_decoding.return_value = use_dynamic_sd
+    speculative_config.adaptive_verification = adaptive_verification
     if use_dynamic_sd:
         # DSD reads the per-batch-size schedule; a schedule entry with K
         # speculative tokens maps to decode query length K + 1. By default
@@ -150,7 +152,7 @@ def test_dynamic_sd_full_cudagraph_covers_all_uniform_decode_shapes(monkeypatch)
 
 
 def test_dynamic_sd_non_uniform_batch_falls_back_to_piecewise(monkeypatch):
-    """DSD should use PIECEWISE when the batch is not a uniform decode batch.
+    """Non-varlen DSD should use PIECEWISE for a nonuniform decode batch.
 
     FULL DSD graphs are captured separately for each decode query length k.
     When runtime tokens are not uniform, uniform_token_count is None and those
@@ -194,6 +196,72 @@ def test_dynamic_sd_non_uniform_batch_falls_back_to_piecewise(monkeypatch):
     assert desc.num_reqs is None
     assert desc.num_tokens == 3
     assert desc.num_active_loras == 0
+
+
+def test_adaptive_verification_non_uniform_batch_uses_full_cudagraph(monkeypatch):
+    """Adaptive verification should select its bounded FULL descriptor.
+
+    Both the adaptive-verification FULL descriptor and the mixed-batch
+    PIECEWISE wildcard use uniform_token_count=None. max_query_len identifies
+    the adaptive-verification descriptor, while cg_mode determines that replay
+    remains a FULL CUDA graph.
+    """
+
+    max_num_seqs = 8
+    max_spec_tokens = 7
+    max_decode_query_len = max_spec_tokens + 1
+    scheduled_num_spec_tokens = 3
+    scheduled_query_len = scheduled_num_spec_tokens + 1
+
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+
+    vllm_config = _create_vllm_config_for_dsd(
+        max_num_seqs=max_num_seqs,
+        max_spec_tokens=max_spec_tokens,
+        adaptive_verification=True,
+        num_spec_per_batch_size=[(1, max_num_seqs, scheduled_num_spec_tokens)],
+    )
+    manager = gpu_cudagraph_utils.CudaGraphManager(
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        decode_query_len=max_decode_query_len,
+    )
+    manager._graphs_captured = True
+
+    num_reqs = 4
+    num_tokens = num_reqs * scheduled_query_len
+    candidates = manager._candidates[(num_tokens, 0)]
+    assert any(desc.cg_mode == CUDAGraphMode.FULL for desc in candidates)
+    assert any(desc.cg_mode == CUDAGraphMode.PIECEWISE for desc in candidates)
+
+    desc = manager.dispatch(
+        num_reqs=num_reqs,
+        num_tokens=num_tokens,
+        uniform_token_count=None,
+        num_active_loras=0,
+        max_query_len=max_decode_query_len,
+    )
+
+    assert desc.cg_mode == CUDAGraphMode.FULL
+    assert desc.uniform_token_count is None
+    assert desc.max_query_len == max_decode_query_len
+    assert desc.num_tokens == num_tokens
+    assert desc.num_reqs == num_reqs
+
+    # Without the adaptive-verification max-query discriminator, the same
+    # nonuniform shape follows the ordinary mixed-batch PIECEWISE path.
+    fallback_desc = manager.dispatch(
+        num_reqs=num_reqs,
+        num_tokens=num_tokens,
+        uniform_token_count=None,
+        num_active_loras=0,
+    )
+    assert fallback_desc.cg_mode == CUDAGraphMode.PIECEWISE
 
 
 def test_basic_sd_does_not_capture_shorter_full_decode_shapes(monkeypatch):

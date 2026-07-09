@@ -99,12 +99,18 @@ class InputBatch:
     # [num_reqs] per-request prompt length, only populated for R-SWA.
     prompt_lens: torch.Tensor | None
 
+    # Device-side actual draft counts after variable-length allocation.
+    num_draft_tokens_per_req_gpu: torch.Tensor | None = None
+    # Host-known upper bound passed to attention kernels. Zero means infer it.
+    max_query_len: int = 0
+
     @classmethod
     def make_dummy(
         cls,
         num_reqs: int,
         num_tokens: int,
         input_buffers: InputBuffers,
+        max_query_len: int | None = None,
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
@@ -161,6 +167,12 @@ class InputBatch:
             num_tokens_after_padding=num_tokens,
             num_draft_tokens=0,
             num_draft_tokens_per_req=None,
+            num_draft_tokens_per_req_gpu=None,
+            max_query_len=(
+                int(num_scheduled_tokens.max())
+                if max_query_len is None
+                else max_query_len
+            ),
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,

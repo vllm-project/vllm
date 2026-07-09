@@ -94,6 +94,7 @@ def dispatch_cg_and_sync_dp(
     dp_rank: int,
     need_eager: bool = False,
     num_active_loras: int = 0,
+    max_query_len: int | None = None,
 ) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
     if need_eager:
         batch_desc = BatchExecutionDescriptor(
@@ -112,6 +113,7 @@ def dispatch_cg_and_sync_dp(
             num_tokens,
             uniform_token_count,
             num_active_loras=num_active_loras,
+            max_query_len=max_query_len,
         )
 
     if dp_size == 1:

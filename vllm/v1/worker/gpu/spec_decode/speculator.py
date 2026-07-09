@@ -30,6 +30,14 @@ logger = init_logger(__name__)
 
 
 class BaseSpeculator(ABC):
+    def allocate_draft_token_budget(
+        self,
+        req_state_indices: torch.Tensor,
+        draft_token_budget: int,
+    ) -> torch.Tensor:
+        """Allocate a batch-wide draft-token budget across request prefixes."""
+        raise NotImplementedError
+
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         pass

@@ -1598,21 +1598,29 @@ class Scheduler(SchedulerInterface):
                 and (generated_token_ids or self.num_sampled_tokens_per_step == 0)
                 and request.async_tokens_to_discard == 0
             ):
-                num_draft_tokens = len(scheduled_spec_token_ids)
+                planned_num_draft_tokens = len(scheduled_spec_token_ids)
+                num_draft_tokens = planned_num_draft_tokens
+                if model_runner_output.num_draft_tokens is not None:
+                    # Support dynamic speculation where the model runner might verify
+                    # fewer than the "planned" number of spec tokens. In this case,
+                    # the scheduler needs to roll back according to its "planned" number
+                    # of spec tokens, and we use the actual number of draft tokens
+                    # **only for statistics**
+                    num_draft_tokens = model_runner_output.num_draft_tokens[req_index]
                 num_sampled = self.num_sampled_tokens_per_step
                 num_accepted = max(len(generated_token_ids) - num_sampled, 0)
-                num_rejected = num_draft_tokens - num_accepted
+                num_rejected_from_plan = planned_num_draft_tokens - num_accepted
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
                 # tokens and rejections. If some tokens are rejected,
                 # num_computed_tokens is decreased by the number of rejected
                 # tokens.
                 if request.num_computed_tokens > 0:
-                    request.num_computed_tokens -= num_rejected
+                    request.num_computed_tokens -= num_rejected_from_plan
                 # If async scheduling, num_output_placeholders also includes
                 # the scheduled spec tokens count and so is similarly adjusted.
                 if request.num_output_placeholders > 0:
-                    request.num_output_placeholders -= num_rejected
+                    request.num_output_placeholders -= num_rejected_from_plan
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
                     num_draft_tokens=num_draft_tokens,

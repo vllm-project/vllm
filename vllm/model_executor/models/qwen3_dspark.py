@@ -10,8 +10,10 @@ The parallel backbone is a standard Qwen3 decoder stack reused from the
 DFlash Qwen3 draft (see qwen3_dflash.py). DSpark adds:
   * ``markov_head``: low-rank V x r / r x V transition bias added to the base
     logits, sampled left-to-right by the speculator (the sequential stage).
+  * ``confidence_head``: per-position acceptance-probability estimate.
 
-DSparkMarkovHead is shared with the DSV4-style DSpark model.
+DSparkMarkovHead and DSparkConfidenceHead are shared with the DSV4-style
+DSpark model.
 """
 
 from collections.abc import Iterable
@@ -21,6 +23,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -67,8 +70,36 @@ class DSparkMarkovHead(nn.Module):
         return logits_processor(self.markov_w2, markov_embed)
 
 
+class DSparkConfidenceHead(nn.Module):
+    """Per-position acceptance-probability head."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        prefix: str,
+        *,
+        bias: bool = False,
+        params_dtype: torch.dtype,
+        with_markov: bool = True,
+    ) -> None:
+        super().__init__()
+        self.with_markov = with_markov
+        self.proj = ReplicatedLinear(
+            input_dim,
+            1,
+            bias=bias,
+            return_bias=False,
+            params_dtype=params_dtype,
+            prefix=maybe_prefix(prefix, "proj"),
+        )
+
+    def forward(self, hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
+        x = torch.cat([hidden, markov_embed], dim=-1) if self.with_markov else hidden
+        return self.proj(x).float().squeeze(-1)
+
+
 class Qwen3DSparkModel(DFlashQwen3Model):
-    """DFlash Qwen3 backbone + DSpark Markov head."""
+    """DFlash Qwen3 backbone + DSpark Markov and confidence heads."""
 
     def __init__(
         self,
@@ -90,6 +121,17 @@ class Qwen3DSparkModel(DFlashQwen3Model):
             config.markov_rank,
             prefix=maybe_prefix(prefix, "markov_head"),
         )
+        self.confidence_head: DSparkConfidenceHead | None = None
+        assert vllm_config.speculative_config is not None
+        if vllm_config.speculative_config.adaptive_verification:
+            with_markov = getattr(config, "confidence_head_with_markov", True)
+            self.confidence_head = DSparkConfidenceHead(
+                config.hidden_size + (config.markov_rank if with_markov else 0),
+                prefix=maybe_prefix(prefix, "confidence_head"),
+                bias=True,
+                params_dtype=vllm_config.model_config.dtype,
+                with_markov=with_markov,
+            )
 
 
 class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
@@ -146,12 +188,22 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
     def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
         return self.model.markov_head.bias(markov_embed, self.logits_processor)
 
+    def compute_confidence(
+        self, head_hidden: torch.Tensor, markov_embed: torch.Tensor
+    ) -> torch.Tensor | None:
+        if self.model.confidence_head is None:
+            return None
+        return self.model.confidence_head(head_hidden, markov_embed)
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         model_weights = {}
         includes_embed_tokens = False
         includes_lm_head = False
         includes_draft_id_mapping = False
+        includes_confidence_head = False
         for name, loaded_weight in weights:
+            if "confidence_head" in name and self.model.confidence_head is None:
+                continue
             # t2d is training-only; the draft remaps via d2t at sampling time.
             if "t2d" in name:
                 continue
@@ -164,22 +216,30 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
                 includes_embed_tokens = True
             if "lm_head" in name:
                 includes_lm_head = True
+            if "confidence_head" in name:
+                includes_confidence_head = True
             model_weights[name] = loaded_weight
             # Sets has_own_embed_tokens / has_own_lm_head so load_dspark_model
             # knows whether to keep these or alias the target's.
             process_eagle_weight(self, name)
 
         # mask_embedding is an unused placeholder param; DSpark masks via the vocab row.
-        # confidence_head is not wired into inference yet; skip its weights.
         # embed_tokens / lm_head are optional; when omitted they are shared from
         # the target by load_dspark_model, so skip the unloaded params here.
-        skip_substrs = ["mask_embedding", "confidence_head"]
+        skip_substrs = ["mask_embedding"]
         if not includes_embed_tokens:
             skip_substrs.append("embed_tokens")
         if not includes_lm_head:
             skip_substrs.append("lm_head")
         if not includes_draft_id_mapping:
             skip_substrs.append("draft_id_to_target_id")
+        if self.model.confidence_head is None:
+            skip_substrs.append("confidence_head")
+        elif not includes_confidence_head:
+            raise ValueError(
+                "adaptive_verification requires confidence-head weights, but none "
+                "were found in the Qwen3 DSpark checkpoint."
+            )
         loader = AutoWeightsLoader(self, skip_substrs=skip_substrs)
         loader.load_weights(model_weights.items())
         self.model._build_fused_kv_buffers()

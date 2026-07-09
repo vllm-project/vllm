@@ -20,10 +20,17 @@ class DraftTokensHandler:
         self.num_draft_tokens: int = 0
 
     def set_draft_tokens(
-        self, input_batch: InputBatch, draft_tokens: torch.Tensor
+        self,
+        input_batch: InputBatch,
+        draft_tokens: torch.Tensor,
+        num_draft_tokens: int | None = None,
     ) -> None:
         self.req_ids = input_batch.req_ids
-        self.num_draft_tokens = draft_tokens.shape[1]
+        self.num_draft_tokens = (
+            draft_tokens.shape[1]
+            if num_draft_tokens is None
+            else min(num_draft_tokens, draft_tokens.shape[1])
+        )
         if not input_batch.has_structured_output_reqs:
             # No draft token validation needs to be performed by
             # the scheduler for this batch.
@@ -35,6 +42,7 @@ class DraftTokensHandler:
         current_stream = torch.cuda.current_stream(self.device)
         self.copy_stream.wait_stream(current_stream)
         with torch.cuda.stream(self.copy_stream):
+            draft_tokens = draft_tokens[:, : self.num_draft_tokens]
             self.draft_tokens_np = async_copy_to_np(draft_tokens)
             # draft_tokens is a temporary allocation on the main stream and read here on
             # copy_stream; without record_stream, the caching allocator may reuse its

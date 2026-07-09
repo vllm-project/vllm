@@ -34,6 +34,44 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
 
+def allocate_draft_token_budget_from_confidence(
+    confidence_logits: torch.Tensor,
+    draft_token_budget: int,
+) -> torch.Tensor:
+    """Allocate exactly ``draft_token_budget`` prefix tokens on device.
+
+    Confidence logits are converted to cumulative prefix-survival probabilities.
+    Selecting the globally best scores therefore maximizes the sum of admitted
+    prefix-survival probabilities. Stable tie-breaking preserves prefix order.
+    """
+    num_reqs, num_speculative_steps = confidence_logits.shape
+    max_budget = num_reqs * num_speculative_steps
+    if not 0 <= draft_token_budget <= max_budget:
+        raise ValueError(
+            f"draft_token_budget must be in [0, {max_budget}], got "
+            f"{draft_token_budget}."
+        )
+    if draft_token_budget == 0:
+        return torch.zeros(num_reqs, dtype=torch.int32, device=confidence_logits.device)
+    if draft_token_budget == max_budget:
+        return torch.full(
+            (num_reqs,),
+            num_speculative_steps,
+            dtype=torch.int32,
+            device=confidence_logits.device,
+        )
+
+    survival_probs = confidence_logits.float().sigmoid().cumprod(dim=1)
+    ranked_indices = torch.argsort(
+        survival_probs.flatten(), descending=True, stable=True
+    )
+    selected = torch.zeros(
+        max_budget, dtype=torch.bool, device=confidence_logits.device
+    )
+    selected[ranked_indices[:draft_token_budget]] = True
+    return selected.view(num_reqs, num_speculative_steps).sum(dim=1, dtype=torch.int32)
+
+
 class DSparkSpeculator(DFlashSpeculator):
     _speculator_name = "DSpark"
 
@@ -74,12 +112,28 @@ class DSparkSpeculator(DFlashSpeculator):
         self._d2t_scatter_index: torch.Tensor | None = None
         self._draft_scatter_buf: torch.Tensor | None = None
 
+        self.adaptive_verification = self.speculative_config.adaptive_verification
+        self.draft_token_confidence_logits = torch.empty(
+            self.max_num_reqs,
+            self.num_speculative_steps,
+            dtype=torch.float32,
+            device=device,
+        )
+
     def load_draft_model(
         self,
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
         model = load_dspark_model(target_model, self.vllm_config)
+        if (
+            self.adaptive_verification
+            and getattr(model.model, "confidence_head", None) is None
+        ):
+            raise ValueError(
+                "adaptive_verification requires a DSpark checkpoint with "
+                "confidence-head weights."
+            )
         # Reduced draft vocab: probabilistic rejection sampling indexes draft
         # logits by target id, so precompute the draft->target column map and a
         # scratch buffer to scatter logits into target vocab before sampling.
@@ -98,14 +152,32 @@ class DSparkSpeculator(DFlashSpeculator):
             )
         return model
 
+    def allocate_draft_token_budget(
+        self,
+        req_state_indices: torch.Tensor,
+        draft_token_budget: int,
+    ) -> torch.Tensor:
+        if not self.adaptive_verification:
+            return super().allocate_draft_token_budget(
+                req_state_indices, draft_token_budget
+            )
+        confidence_logits = self.draft_token_confidence_logits[req_state_indices]
+        return allocate_draft_token_budget_from_confidence(
+            confidence_logits, draft_token_budget
+        )
+
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
         # Sequential Markov sampling over the backbone's output hidden states.
         n_spec = self.num_speculative_steps
         num_sample = num_reqs * n_spec
         # Per-(req, position) head hidden, ordered (req, step).
-        sample_hidden = head_hidden[self.sample_indices[:num_sample]]
+        sample_hidden = head_hidden[self.sample_indices[:num_sample]].view(
+            num_reqs, n_spec, -1
+        )
         # Draft-vocab logits; sampled ids are remapped to target vocab below.
-        base_logits = self.model.compute_draft_logits(sample_hidden)
+        base_logits = self.model.compute_draft_logits(
+            sample_hidden.reshape(num_sample, -1)
+        )
         vocab_size = base_logits.shape[-1]
         base_logits = base_logits.view(num_reqs, n_spec, vocab_size)
 
@@ -119,6 +191,12 @@ class DSparkSpeculator(DFlashSpeculator):
         for i in range(n_spec):
             # Sequential stage: Markov bias from the previously sampled token.
             markov_embed = self.model.markov_embed(prev)
+            if self.adaptive_verification:
+                confidence_i = self.model.compute_confidence(
+                    sample_hidden[:, i], markov_embed
+                )
+                assert confidence_i is not None
+                self.draft_token_confidence_logits[idx_map[:, i], i] = confidence_i
             bias = self.model.markov_bias(markov_embed)
             logits_i = base_logits[:, i] + bias
             if self.draft_logits is not None:
