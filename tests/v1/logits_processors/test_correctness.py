@@ -30,6 +30,7 @@ from vllm.v1.sample.logits_processor import (
     MinPLogitsProcessor,
     MinTokensLogitsProcessor,
     MoveDirectionality,
+    PLessLogitsProcessor,
     build_logitsprocs,
 )
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -341,6 +342,58 @@ def _min_p_validate(
                     )
 
 
+def _p_less_params(kwargs: dict) -> None:
+    """p-less logitproc config"""
+    kwargs["p_less"] = True
+
+
+def _p_less_validate(
+    test_fakes: LogitsprocsTestFakes,
+    persistent_batch: list[LogitsProcsRequestParams],
+    logits_new: torch.Tensor,
+    batch_index: int,
+    request_params: LogitsProcsRequestParams,
+    step_idx: int,
+) -> None:
+    """Validate p-less logitproc applied correctly.
+
+    The test fixture gives every row one dominant token (index 0) and a long
+    tail of near-uniform low-probability tokens, so the squared-sum threshold
+    lands just below the dominant token. p-less should therefore keep token 0
+    and mask the tail, and leave every token untouched when disabled.
+    """
+    for token_id in range(VOCAB_SIZE):
+        logits_for_token = logits_new[batch_index][token_id]
+        if token_id == 0:
+            # Dominant token is always at least the threshold, so never masked.
+            if logits_for_token == -float("inf"):
+                _raise_error_invalid(
+                    msg_suffix="Invalid: dominant token 0 masked (-inf)",
+                    batch_index=batch_index,
+                    request_params=request_params,
+                    step_idx=step_idx,
+                )
+        else:
+            if request_params.params.p_less:
+                # Tail tokens fall below the threshold and should be masked.
+                if logits_for_token != -float("inf"):
+                    _raise_error_invalid(
+                        msg_suffix=f"Invalid: tail token {token_id} not masked",
+                        batch_index=batch_index,
+                        request_params=request_params,
+                        step_idx=step_idx,
+                    )
+            else:
+                # No masking when p-less is disabled.
+                if logits_for_token == -float("inf"):
+                    _raise_error_invalid(
+                        msg_suffix=f"Invalid: token {token_id} masked when p_less off",
+                        batch_index=batch_index,
+                        request_params=request_params,
+                        step_idx=step_idx,
+                    )
+
+
 def _min_tokens_params(kwargs: dict) -> None:
     """Min-tokens logitproc config"""
     kwargs["min_tokens"] = MIN_TOKENS_LEN_THRESHOLD
@@ -583,6 +636,9 @@ logitsprocs_test_mapping = {
     ),
     MinPLogitsProcessor: LogitsprocTestHelpers(
         gen_request_fxn=_min_p_params, eval_fxn=_min_p_validate
+    ),
+    PLessLogitsProcessor: LogitsprocTestHelpers(
+        gen_request_fxn=_p_less_params, eval_fxn=_p_less_validate
     ),
     MinTokensLogitsProcessor: LogitsprocTestHelpers(
         gen_request_fxn=_min_tokens_params, eval_fxn=_min_tokens_validate

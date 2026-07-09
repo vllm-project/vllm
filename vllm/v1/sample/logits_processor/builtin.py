@@ -116,6 +116,135 @@ class MinPLogitsProcessor(LogitsProcessor):
         return logits
 
 
+class PLessLogitsProcessor(LogitsProcessor):
+    """p-less sampling (https://arxiv.org/abs/2509.23234).
+
+    p-less is a hyperparameter-free truncation strategy. At every step it
+    computes a threshold over the temperature-scaled token distribution and
+    keeps only tokens whose probability is at least that threshold. With the
+    default order of 2 the threshold is ``L = sum_v p(v) ** 2``, the
+    probability that a random draw from the distribution matches an independent
+    draw from the same distribution (the exponential of the negative Renyi
+    entropy of order 2). Because ``L`` is bounded above by the modal
+    probability, the most likely token is always retained, which keeps the
+    method argmax invariant and guarantees a non-empty candidate set. The
+    threshold rises for peaked distributions and falls for flat ones, so
+    nothing needs to be tuned per task or temperature the way min_p does.
+
+    The order generalizes the threshold to the family of Renyi entropies
+    (Appendix B.5 of the paper): for an order ``k`` the threshold is
+    ``(sum_v p(v) ** k) ** (1 / (k - 1))``. Order 2 recovers the squared-sum
+    threshold and is the validated default; larger orders behave more like
+    greedy decoding while orders closer to 1 admit more of the tail. Any order
+    greater than 1 keeps the modal token and so stays argmax invariant.
+
+    A per-request order of ``0`` means p-less is disabled for that request. The
+    columns of the order tensor are broadcast over the vocabulary, so disabled
+    rows are computed alongside the rest and then masked out, which keeps the
+    batch fully vectorized.
+    """
+
+    def __init__(
+        self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool
+    ):
+        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        # Number of requests with p-less enabled (order != 0).
+        self.p_less_count: int = 0
+
+        self.order_cpu_tensor = torch.zeros(
+            (max_num_reqs,), dtype=torch.float32, device="cpu", pin_memory=is_pin_memory
+        )
+        self.order_cpu = self.order_cpu_tensor.numpy()
+
+        self.use_double_tensor = torch.device(device).type != "cpu"
+
+        if self.use_double_tensor:
+            # Pre-allocated device tensor
+            self.order_device: torch.Tensor = torch.empty(
+                (max_num_reqs,), dtype=torch.float32, device=device
+            )
+        else:
+            self.order_device = self.order_cpu_tensor
+        # Current slice of the device tensor
+        self.order: torch.Tensor = self.order_device[:0]
+
+    @staticmethod
+    def _req_order(params: SamplingParams) -> float:
+        """Effective order for a request: the requested order if p-less is
+        enabled, otherwise 0 to indicate disabled."""
+        return params.p_less_order if params.p_less else 0.0
+
+    def is_argmax_invariant(self) -> bool:
+        """p-less never removes the modal token, so it cannot change the
+        outcome of greedy sampling."""
+        return True
+
+    def update_state(self, batch_update: BatchUpdate | None):
+        if not batch_update:
+            return
+
+        needs_update = False
+        # Process added requests.
+        for index, params, _, _ in batch_update.added:
+            order = self._req_order(params)
+            order_before = self.order_cpu[index]
+            if order_before != order:
+                needs_update = True
+                self.order_cpu[index] = order
+                if order and not order_before:
+                    self.p_less_count += 1
+                elif not order and order_before:
+                    self.p_less_count -= 1
+
+        if self.p_less_count:
+            # Process removed requests.
+            if batch_update.removed:
+                needs_update = True
+                for index in batch_update.removed:
+                    if self.order_cpu[index]:
+                        self.order_cpu[index] = 0.0
+                        self.p_less_count -= 1
+
+            # Process moved requests, unidirectional (a->b) and swap (a<->b).
+            for adx, bdx, direct in batch_update.moved:
+                order_a, order_b = self.order_cpu[adx], self.order_cpu[bdx]
+                if order_a != order_b:
+                    needs_update = True
+                    self.order_cpu[bdx] = order_a
+                    if direct == MoveDirectionality.SWAP:
+                        self.order_cpu[adx] = order_b
+                if direct == MoveDirectionality.UNIDIRECTIONAL:
+                    if order_a:
+                        self.order_cpu[adx] = 0.0
+                    if order_b:
+                        self.p_less_count -= 1
+
+        # Update tensors if needed.
+        size = batch_update.batch_size
+        if self.p_less_count and (needs_update or self.order.shape[0] != size):
+            self.order = self.order_device[:size]
+            if self.use_double_tensor:
+                self.order.copy_(self.order_cpu_tensor[:size], non_blocking=True)
+            self.order.unsqueeze_(1)
+
+    def apply(self, logits: torch.Tensor) -> torch.Tensor:
+        if not self.p_less_count:
+            return logits
+
+        # Convert logits to a probability distribution.
+        probs = torch.nn.functional.softmax(logits, dim=-1)
+        # Generalized p-less threshold (sum_v p(v) ** k) ** (1 / (k - 1)), one
+        # value per sequence. Disabled rows carry order 0; their threshold is
+        # meaningless but gets masked out below, so no branch is needed.
+        moment = probs.pow(self.order).sum(dim=-1, keepdim=True)
+        threshold = moment.pow(1.0 / (self.order - 1.0))
+        # Tokens below the threshold are truncated, but only for requests that
+        # enabled p-less (order != 0).
+        invalid_token_mask = (probs < threshold) & (self.order != 0.0)
+        logits.masked_fill_(invalid_token_mask, -float("inf"))
+        return logits
+
+
 class LogitBiasLogitsProcessor(LogitsProcessor):
     def __init__(self, _, device: torch.device, is_pin_memory: bool):
         self.device = device

@@ -8,6 +8,7 @@ from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.sample.gumbel import apply_temperature
 from vllm.v1.worker.gpu.sample.min_p import apply_min_p
+from vllm.v1.worker.gpu.sample.p_less import apply_p_less
 
 NO_LOGPROBS = -1
 _NP_INT64_MIN = np.iinfo(np.int64).min
@@ -23,6 +24,8 @@ class SamplingStates:
         self.top_k = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
         self.top_p = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.min_p = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
+        # p-less order per request; 0 means p-less is disabled.
+        self.p_less_order = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.seeds = UvaBackedTensor(max_num_reqs, dtype=torch.int64)
         # Tracks whether `seed` was set explicitly by the user, so callers
         # can fall back from RNG paths that don't honor per-request seeds.
@@ -46,6 +49,9 @@ class SamplingStates:
             top_k = self.vocab_size
         self.top_k.np[req_idx] = top_k
         self.min_p.np[req_idx] = sampling_params.min_p
+        self.p_less_order.np[req_idx] = (
+            sampling_params.p_less_order if sampling_params.p_less else 0.0
+        )
 
         seed = sampling_params.seed
         self.seeds_set[req_idx] = seed is not None
@@ -65,6 +71,7 @@ class SamplingStates:
         self.top_p.copy_to_uva()
         self.top_k.copy_to_uva()
         self.min_p.copy_to_uva()
+        self.p_less_order.copy_to_uva()
         self.seeds.copy_to_uva()
 
     def apply_temperature(
@@ -90,6 +97,17 @@ class SamplingStates:
             # No request uses min_p. Skip the kernel launch.
             return
         apply_min_p(logits, expanded_idx_mapping, self.min_p.gpu)
+
+    def apply_p_less(
+        self,
+        logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+    ) -> None:
+        if np.all(self.p_less_order.np[idx_mapping_np] == 0.0):
+            # No request uses p-less. Skip the kernel launch.
+            return
+        apply_p_less(logits, expanded_idx_mapping, self.p_less_order.gpu)
 
     def get_top_k_top_p(
         self, expanded_idx_mapping: torch.Tensor, idx_mapping_np: np.ndarray

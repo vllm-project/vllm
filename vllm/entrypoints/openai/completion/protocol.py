@@ -76,6 +76,8 @@ class CompletionRequest(OpenAIBaseModel):
     use_beam_search: bool = False
     top_k: int | None = None
     min_p: float | None = None
+    p_less: bool = False
+    p_less_order: float = 2.0
     repetition_penalty: float | None = None
     length_penalty: float = 1.0
     stop_token_ids: list[int] | None = []
@@ -355,6 +357,8 @@ class CompletionRequest(OpenAIBaseModel):
             top_p=top_p,
             top_k=top_k,
             min_p=min_p,
+            p_less=self.p_less,
+            p_less_order=self.p_less_order,
             seed=self.seed,
             stop=self.stop,
             stop_token_ids=stop_token_ids,
