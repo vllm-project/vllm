@@ -157,12 +157,16 @@ class TestDetokenizeDelta:
     def test_empty_delta_passthrough(self, derenderer, tokenizer):
         """An empty delta (usage only chunk) emits empty string and preserves state."""
         token_ids = tokenizer.encode("Hello")[:4]
-        state = DerenderStreamState(prior_token_ids=token_ids)
+        _, state = derenderer._detokenize_delta(
+            tokenizer, token_ids, DerenderStreamState(), skip_special_tokens=True
+        )
         text, new_state = derenderer._detokenize_delta(
             tokenizer, [], state, skip_special_tokens=True
         )
         assert text == ""
-        assert new_state.prior_token_ids == token_ids
+        assert new_state.prev_tokens == state.prev_tokens
+        assert new_state.prefix_offset == state.prefix_offset
+        assert new_state.read_offset == state.read_offset
 
     def test_multibyte_char_split_across_chunks(self, derenderer, tokenizer):
         """A CJK/emoji char straddling chunk boundaries == one shot.
@@ -177,14 +181,36 @@ class TestDetokenizeDelta:
             tokenizer, token_ids
         )
 
-    def test_state_accumulates_token_ids(self, derenderer, tokenizer):
-        """prior_token_ids grows correctly across multiple calls."""
+    def test_state_carries_across_calls(self, derenderer, tokenizer):
+        """Decode state threads across calls. Text still matches one shot."""
         t1 = tokenizer.encode("Hello")[:2]
         t2 = tokenizer.encode(" world")[:2]
         state = DerenderStreamState()
-        _, state = derenderer._detokenize_delta(tokenizer, t1, state)
-        _, state = derenderer._detokenize_delta(tokenizer, t2, state)
-        assert state.prior_token_ids == t1 + t2
+        text1, state = derenderer._detokenize_delta(tokenizer, t1, state)
+        text2, state = derenderer._detokenize_delta(tokenizer, t2, state)
+        assert text1 + text2 == self._one_shot(tokenizer, t1 + t2)
+        # Offsets are rebased to the carried tail each chunk
+        assert state.prefix_offset == 0
+
+    def test_state_window_stays_bounded(self, derenderer, tokenizer):
+        """prev_tokens must not grow with the number of chunks (bounded transport).
+
+        Guards that the carried decode window is a small constant
+        tail, so cumulative ``stream_state`` transport is O(n) and not O(n^2).
+        """
+        token_ids = tokenizer.encode(
+            "a reasonably long ascii stream of tokens used to exercise the "
+            "window bound across many single token chunks so the carried "
+            "state cannot grow linearly with the generation length"
+        )
+        assert len(token_ids) > 32
+        state = DerenderStreamState()
+        max_window = 0
+        for tok in token_ids:
+            _, state = derenderer._detokenize_delta(tokenizer, [tok], state)
+            max_window = max(max_window, len(state.prev_tokens))
+        # Bounded by a small constant independent of len(token_ids)
+        assert max_window <= 32
 
     def test_n_independent_streams_same_result(self, derenderer, tokenizer):
         """N parallel streams with the same token sequence give the same text."""
@@ -261,12 +287,39 @@ class TestDerenderCompletionStream:
     async def test_none_state_initialises_correctly(self, derenderer, tokenizer):
         """Passing state=None (first call) initialises an empty DerenderStreamState."""
         token_ids = tokenizer.encode("hello")[:4]
-        _, state = await derenderer.derender_completion_stream(
+        chunk, state = await derenderer.derender_completion_stream(
             model=MODEL_NAME,
             generate_chunk=_make_stream_chunk(token_ids),
             state=None,
         )
-        assert state.prior_token_ids == token_ids
+        assert isinstance(state, DerenderStreamState)
+        assert chunk.choices[0].text == tokenizer.decode(
+            token_ids, skip_special_tokens=True
+        )
+
+    @pytest.mark.asyncio
+    async def test_skip_special_tokens_threaded(self, derenderer, tokenizer):
+        """completion_request.skip_special_tokens is honored (not hardcoded True)."""
+        from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+
+        eos = tokenizer.eos_token_id
+        if eos is None:
+            pytest.skip("tokenizer has no eos token to exercise special stripping")
+        token_ids = tokenizer.encode("hi")[:2] + [eos]
+
+        async def _text(skip: bool) -> str:
+            req = CompletionRequest(
+                model=MODEL_NAME, prompt="x", skip_special_tokens=skip
+            )
+            chunk, _ = await derenderer.derender_completion_stream(
+                model=MODEL_NAME,
+                generate_chunk=_make_stream_chunk(token_ids),
+                completion_request=req,
+            )
+            return chunk.choices[0].text
+
+        # skip=False must retain the special token; skip=True must strip it.
+        assert await _text(False) != await _text(True)
 
     @pytest.mark.asyncio
     async def test_finish_reason_forwarded(self, derenderer, tokenizer):
@@ -328,8 +381,14 @@ class TestDerenderChatStream:
         assert streamed == one_shot
 
     @pytest.mark.asyncio
-    async def test_parser_raises_not_implemented(self, tokenizer):
-        """Stream chat with a parser active raises NotImplementedError (TODO)."""
+    @pytest.mark.parametrize("with_chat_request", [True, False])
+    async def test_parser_raises_not_implemented(self, tokenizer, with_chat_request):
+        """Stream chat with a parser active must fail closed (NotImplementedError).
+
+        Checks that a parser configured model must 501 even when ``chat_request`` is
+        omitted, otherwise reasoning/tool markup would leak into ``delta.content`
+          via the plain detok fallback.
+        """
         from unittest.mock import MagicMock
 
         from vllm.renderers.online_derenderer import OnlineDerenderer
@@ -353,7 +412,7 @@ class TestDerenderChatStream:
         )
         dr.parser = MagicMock()  # simulate a parser being active
 
-        chat_request = MagicMock()
+        chat_request = MagicMock() if with_chat_request else None
         token_ids = tokenizer.encode("hello")[:3]
 
         with pytest.raises(NotImplementedError):

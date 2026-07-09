@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
 from pydantic import (
     BaseModel,
@@ -14,8 +14,12 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,
     ChatCompletionRequest,
+    ChatCompletionStreamResponse,
 )
-from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.entrypoints.openai.completion.protocol import (
+    CompletionRequest,
+    CompletionStreamResponse,
+)
 from vllm.entrypoints.openai.engine.protocol import StreamOptions, UsageInfo
 from vllm.logprobs import Logprob
 from vllm.renderers import TokenizeParams
@@ -336,28 +340,41 @@ class DerenderStreamState(BaseModel):
     streaming derender endpoint. All fields are plain JSON serializable data.
     No opaque tokenizer or parser internals are stored here.
 
-    The detokenization reset strategy is as follows: For each request, we
-    rebuild the decoding state from scratch using a small window of recent
-    tokens (``prior_token_ids``). We do this by feeding those tokens one at a
-    time into ``detokenize_incrementally``, starting from an empty state. This
-    recreates the current decoding context, including any partially processed
-    multi-byte characters (tracked by read_offset). After rebuilding the state,
-    we process each new incoming token normally with ``detokenize_incrementally``.
+    The detokenization strategy carries the incremental decode offsets
+    directly rather than re-sending the whole token history each chunk.
+    ``detokenize_incrementally`` only ever reads the trailing token window
+    ``prev_tokens[prefix_offset:]``, so we carry just that tail plus the two
+    offsets. Each chunk resumes exactly where the last one stopped, including
+    any partially processed multi-byte character (tracked by ``read_offset``),
+    then trims and rebases the window so it never grows with generation length.
 
-    The detokenization reset strategy performance is as follows:
-    - Each request does a fixed amount of work (based on the window size)
-    - Overall cost grows linearly with the number of chunks (O(n))
-    - This is about the same cost as continuously detokenizing without resetting
+    Performance:
+    - Compute per chunk is O(delta). One ``detokenize_incrementally`` call per
+      new token, independent of how many tokens preceded it.
+    - Transport per chunk is O(window). The carried tail is bounded by the
+      incremental detokenization offset, so cumulative bytes over the wire are
+      O(n) rather than the O(n^2) a full history round trip would incur.
     """
 
-    prior_token_ids: list[int] = Field(default_factory=list)
-    """Accumulated output token IDs emitted so far (grows with each chunk)."""
+    prev_tokens: list[str] = Field(default_factory=list)
+    """Trailing decode window. Token strings from ``prefix_offset`` onward.
+
+    Bounded, trimmed and rebased each chunk to the tail
+    ``detokenize_incrementally`` still reads, so it does not grow with the
+    number of chunks.
+    """
+
+    prefix_offset: int = 0
+    """Prefix offset into ``prev_tokens`` for incremental detokenization."""
+
+    read_offset: int = 0
+    """Read offset into ``prev_tokens`` for incremental detokenization."""
 
     role_sent: bool = False
     """True once the initial ``role: "assistant"`` delta has been emitted.
 
-    Prevents re-emitting the role on subsequent chunks even when
-    ``prior_token_ids`` is transiently empty (e.g. usage only final chunk).
+    Prevents re-emitting the role on subsequent chunks even when the detok
+    window is transiently empty (e.g. usage only final chunk).
     """
 
     # TODO: Properties used in follow on PR for tool call parsing
@@ -425,3 +442,34 @@ class DerenderCompletionStreamRequest(BaseModel):
 
     completion_request: CompletionRequest | None = None
     """The original (post adjust_request) CompletionRequest from /render."""
+
+
+class DerenderChatStreamResponse(BaseModel):
+    """Response for one streaming chat derender chunk.
+
+    Pairs the derendered SSE chunk with the updated client carried state to
+    pass to the next call.
+    """
+
+    chunk: ChatCompletionStreamResponse
+    stream_state: DerenderStreamState
+
+
+class DerenderCompletionStreamResponse(BaseModel):
+    """Response for one streaming completions derender chunk.
+
+    Parallel to ``DerenderChatStreamResponse`` for the completions endpoint.
+    """
+
+    chunk: CompletionStreamResponse
+    stream_state: DerenderStreamState
+
+
+# Determines the type by checking the ``stream`` field's literal value. A body without
+# ``stream`` validates as the non-streaming member
+# (``stream`` defaults to ``False`` there), so FastAPI can validate and dispatch both
+# shapes on a single path.
+DerenderChatRequestUnion: TypeAlias = DerenderChatRequest | DerenderChatStreamRequest
+DerenderCompletionRequestUnion: TypeAlias = (
+    DerenderCompletionRequest | DerenderCompletionStreamRequest
+)
