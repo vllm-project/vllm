@@ -380,11 +380,12 @@ def test_inc_resolve_scheme_selects_wna16() -> None:
     assert isinstance(scheme, INCWna16Scheme)
 
 
-def test_inc_config_accepts_mxfp_family_llm_compressor_defaults_sym() -> None:
+def test_inc_config_accepts_mxfp_family_llm_compressor() -> None:
     config = INCConfig.from_config({
         "quant_method": "auto-round",
         "bits": 4,
         "group_size": 32,
+        "sym": True,
         "packing_format": "auto_round:llm_compressor",
         "data_type": "mx_fp4e2m1",
     })
