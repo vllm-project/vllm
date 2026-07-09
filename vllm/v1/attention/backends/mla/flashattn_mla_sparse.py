@@ -152,10 +152,7 @@ class FlashAttnMLASparseMetadataBuilder(
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
-        self._init_reorder_batch_threshold(
-            1024,
-            supports_spec_as_decode=True,
-        )
+        self._init_reorder_batch_threshold(1024, supports_spec_as_decode=True)
 
 
 class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
