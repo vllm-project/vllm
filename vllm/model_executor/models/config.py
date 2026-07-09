@@ -216,12 +216,30 @@ class Gemma4Config(VerifyAndUpdateConfig):
         if head_dim is None or global_head_dim is None or head_dim == global_head_dim:
             return
 
-        from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
+        from vllm.v1.attention.backends.fa_utils import (
+            get_flash_attn_version,
+            is_fa_version_supported,
+        )
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         max_head_dim = max(head_dim, global_head_dim)
 
-        if is_fa_version_supported(4) and max_head_dim <= 512:
+        # FA4 is only usable if it actually resolves to version 4 for this head
+        # dim. On SM100 (Blackwell) get_flash_attn_version() silently downgrades
+        # FA4 -> FA2 for head_size > 128 (TMEM limit), so a bare
+        # is_fa_version_supported(4) check is not enough: it would set
+        # flash_attn_version=4 but leave the backend unset, and generic backend
+        # selection then picks FlashInfer for the head_dim=512 global-attention
+        # layers -- which crashes (no trtllm-gen head_dim=512 decode cubin; the
+        # fa2 prefill fallback rejects 512). Gate on the *resolved* FA version so
+        # we force TRITON_ATTN whenever FA4 is not actually available for 512.
+        can_use_fa4 = (
+            is_fa_version_supported(4)
+            and max_head_dim <= 512
+            and get_flash_attn_version(head_size=max_head_dim) == 4
+        )
+
+        if can_use_fa4:
             if (
                 vllm_config.attention_config.flash_attn_version is None
                 and vllm_config.attention_config.backend
@@ -239,8 +257,9 @@ class Gemma4Config(VerifyAndUpdateConfig):
             vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
             logger.info(
                 "Gemma4 model has heterogeneous head dimensions "
-                "(head_dim=%d, global_head_dim=%d). FA4 not available, "
-                "forcing TRITON_ATTN backend.",
+                "(head_dim=%d, global_head_dim=%d). FA4 does not support "
+                "the required head dimensions on this device; forcing "
+                "TRITON_ATTN backend.",
                 head_dim,
                 global_head_dim,
             )
