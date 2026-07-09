@@ -1180,22 +1180,6 @@ class NixlBaseConnectorWorker:
             regions_per_layer = self.num_regions // num_local_layers
             self._remote_region_offset = regions_per_layer * start_layer
 
-        if self.transfer_topo.virtually_split_kv_in_blocks:
-            # NOTE (NickLucche) When FlashInfer is used, memory is registered
-            # with joint KV for each block. This minimizes the overhead in
-            # registerMem allowing faster descs queries. In order to be able to
-            # split on kv_heads dim as required by heterogeneous TP, one must
-            # be able to index K/V separately. Hence we double the number
-            # of 'virtual' regions here and halve `block_len` below.
-            # Similarly for Mamba layers, we register SSM+Conv as a single region and
-            # then duplicate it logically to be able to index SSM/Conv separately.
-            # Exception: key-only REPLICATE regions (MLA) have no V half, so
-            # they contribute a single desc stream and are not doubled.
-            self.num_regions = sum(
-                1 if self._is_region_replicated(i) else 2
-                for i in range(len(self._region_is_mla))
-            )
-
         # Total local FA descriptors (boundary between FA and mamba descs).
         self.num_descs = self.num_regions * self.num_blocks
 
