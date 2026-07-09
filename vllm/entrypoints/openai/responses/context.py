@@ -18,7 +18,7 @@ from openai.types.responses.response_output_item import McpCall
 from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_output_text import ResponseOutputText
 from openai.types.responses.tool import Mcp
-from openai_harmony import Author, HarmonyError, Message, Role, TextContent
+from openai_harmony import Author, Message, Role, TextContent
 
 from vllm import envs
 from vllm.entrypoints.chat_utils import (
@@ -349,6 +349,7 @@ class ParsableContext(ConversationContext):
                     reasoning=reasoning,
                     content=content,
                     tool_calls=tool_calls,
+                    tools=self.request.tools,
                 )
             )
         elif completion.text:
@@ -616,7 +617,7 @@ class HarmonyContext(ConversationContext):
         self.num_tool_output_tokens = 0
 
         self.last_append_segments: list[Segment] = []
-        self.last_append_flush_status: bool | HarmonyError = False
+        self.last_append_flush_status: bool = False
 
         # Turn tracking - replaces multiple individual tracking variables
         self.current_turn_metrics = TurnMetrics()
@@ -643,10 +644,10 @@ class HarmonyContext(ConversationContext):
 
         if output.finished:
             self.finish_reason = output.outputs[0].finish_reason
-            flushed = self.response_parser.flush()
-            if flushed is not None:
-                segments.append(flushed)
-            self.last_append_flush_status = flushed is not None
+            flushed_segments = self.response_parser.flush()
+            if flushed_segments:
+                segments.extend(flushed_segments)
+            self.last_append_flush_status = len(flushed_segments) > 0
             self.all_turn_metrics.append(self.current_turn_metrics.copy())
             self.current_turn_metrics.reset()
 

@@ -18,6 +18,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.reasoning import ReasoningConfig
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
@@ -253,6 +254,31 @@ def test_select_common_block_size_uses_largest_shared_int():
 
     selected_size = select_common_block_size(256, [backend_a, backend_b])
     assert selected_size == 64
+
+
+def test_reasoning_config_without_custom_logitsprocs_does_not_need_output_token_ids(
+    dist_init,
+):
+    vllm_config = get_vllm_config()
+    assert vllm_config.model_config.logits_processors is None
+    reasoning_config = ReasoningConfig(
+        reasoning_start_str="<think>", reasoning_end_str="</think>"
+    )
+    reasoning_config._reasoning_start_token_ids = [1]
+    reasoning_config._reasoning_end_token_ids = [2]
+    vllm_config.reasoning_config = reasoning_config
+
+    with set_current_vllm_config(vllm_config):
+        model_config = vllm_config.model_config
+        num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
+        head_size = model_config.get_head_size()
+        vllm_config.compilation_config.static_forward_context["layer.0"] = Attention(
+            num_heads, head_size, 0.1
+        )
+        runner = GPUModelRunner(vllm_config, torch.device("cpu"))
+
+    assert runner.input_batch.thinking_budget_state_holder is not None
+    assert runner.input_batch.logitsprocs_need_output_token_ids is False
 
 
 @pytest.mark.skip_global_cleanup
@@ -860,6 +886,28 @@ def test_sample_passes_reordered_draft_probs_to_rejection_sampler():
         dim=0,
     )
     assert torch.equal(passed_draft_probs, expected_draft_probs)
+
+
+def test_invalid_draft_suffixes_remain_rejected_in_metadata():
+    runner = object.__new__(GPUModelRunner)
+    runner.device = torch.device("cpu")
+    runner.arange_np = np.arange(64, dtype=np.int64)
+    runner._arange_scratch = np.empty(64, dtype=np.int64)
+    # Placeholder (-1) drafts are kept in input_ids (clamped to 0 only at the
+    # embedding boundary). For num_draft_tokens=[2, 1, 2] the draft positions
+    # are [1, 2, 4, 6, 7], so the gather carries the -1s straight into the
+    # rejection-sampling metadata.
+    runner.input_ids = SimpleNamespace(
+        gpu=torch.tensor([99, 10, -1, 99, 12, 99, 13, -1], dtype=torch.int32),
+    )
+
+    metadata = GPUModelRunner._calc_spec_decode_metadata(
+        runner,
+        np.array([2, 1, 2], dtype=np.int32),
+        np.array([3, 5, 8], dtype=np.int32),
+    )
+
+    assert metadata.draft_token_ids.tolist() == [10, -1, 12, 13, -1]
 
 
 def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order(default_vllm_config):
