@@ -78,13 +78,6 @@ def _wrap_media_fetch_error(
             )
         return exc
 
-    if isinstance(exc, aiohttp.InvalidURL):
-        return VLLMUnprocessableEntityError(
-            "Failed to fetch media from URL: Invalid URL",
-            parameter="image_url",
-            value=url,
-        )
-
     if isinstance(exc, requests.exceptions.HTTPError):
         if exc.response is not None:
             status_code = exc.response.status_code
@@ -100,7 +93,7 @@ def _wrap_media_fetch_error(
 
     if isinstance(exc, requests.exceptions.InvalidURL):
         return VLLMUnprocessableEntityError(
-            "Failed to fetch media from URL: Invalid URL",
+            "Failed to fetch media from URL: Invalid URL format",
             parameter="image_url",
             value=url,
         )

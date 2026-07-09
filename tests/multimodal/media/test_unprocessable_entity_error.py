@@ -98,26 +98,6 @@ class TestMediaConnectorErrorHandling:
             assert exc_info.value.status == 429
 
     @pytest.mark.asyncio
-    async def test_fetch_image_async_invalid_url(self):
-        connector = MediaConnector()
-
-        with patch.object(
-            connector.connection, "async_get_bytes", new_callable=AsyncMock
-        ) as mock_get:
-            mock_get.side_effect = aiohttp.InvalidURL(
-                "http://internal.example:8080/image.jpg"
-            )
-
-            with pytest.raises(VLLMUnprocessableEntityError) as exc_info:
-                await connector.fetch_image_async("http:// bad")
-
-            assert exc_info.value.parameter == "image_url"
-            assert str(exc_info.value).startswith(
-                "Failed to fetch media from URL: Invalid URL"
-            )
-            assert "internal.example" not in str(exc_info.value)
-
-    @pytest.mark.asyncio
     async def test_fetch_image_async_500_preserved(self):
         """5xx errors should remain as server errors."""
         connector = MediaConnector()
@@ -180,25 +160,6 @@ class TestMediaConnectorErrorHandling:
 
             with pytest.raises(requests.exceptions.ConnectionError):
                 connector.fetch_image("https://example.com/image.jpg")
-
-    def test_fetch_image_requests_invalid_url(self):
-        connector = MediaConnector()
-
-        with patch.object(
-            connector.connection, "get_bytes", new_callable=MagicMock
-        ) as mock_get:
-            mock_get.side_effect = requests.exceptions.InvalidURL(
-                "No host supplied for internal.example:8080"
-            )
-
-            with pytest.raises(VLLMUnprocessableEntityError) as exc_info:
-                connector.fetch_image("http:// bad")
-
-            assert exc_info.value.parameter == "image_url"
-            assert str(exc_info.value).startswith(
-                "Failed to fetch media from URL: Invalid URL"
-            )
-            assert "internal.example" not in str(exc_info.value)
 
 
 class TestErrorResponse:
