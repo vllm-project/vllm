@@ -139,7 +139,10 @@ class Request:
 
         # Used in async scheduling.
         self.num_output_placeholders = 0
-        self.async_tokens_to_discard = 0
+        # Tokens of this request's in-flight output from steps scheduled before
+        # a preemption rollback: still delivered when it returns, but must not
+        # mutate the reset counters.
+        self.num_stale_output_tokens = 0
 
         # Tokens of steps whose output is not yet processed (async scheduling
         # and PP run ahead of the GPU); `num_computed_tokens` counts them

@@ -1158,14 +1158,13 @@ class Scheduler(SchedulerInterface):
         request.num_computed_tokens = 0
         if request.spec_token_ids:
             request.spec_token_ids = []
-        # Async scheduling: this request's in-flight output frame is now stale
-        # (rolled back above) and must be discarded when it returns, or it
-        # drains num_output_placeholders below zero. async_tokens_to_discard
-        # counts frames, not placeholder tokens; a decode request has at most
-        # one in-flight frame (eligible-step gating), so discard one -- not
-        # num_output_placeholders (= 1 + spec_width, which would over-discard).
-        if request.num_output_placeholders > 0:
-            request.async_tokens_to_discard += 1
+        # Async scheduling: this request has output from steps scheduled before
+        # the rollback still in flight. That output still delivers its tokens
+        # when it returns (dropping them would perturb spec-decode acceptance),
+        # but must not mutate the request's reset counters. num_in_flight_tokens
+        # is its total token count -- any number of steps may be in flight (async
+        # depth, PP, spec); each drains its own share in update_from_output.
+        request.num_stale_output_tokens += request.num_in_flight_tokens
         request.num_output_placeholders = 0
         request.num_preemptions += 1
         if self.log_stats:
@@ -1592,6 +1591,13 @@ class Scheduler(SchedulerInterface):
                 # In this case, we use is_finished() to check.
                 continue
 
+            # Stale in-flight output (see _preempt_request) still delivers its
+            # token but must not touch the request's reset counters; drain the
+            # count as it returns.
+            output_is_stale = request.num_stale_output_tokens > 0
+            if output_is_stale:
+                request.num_stale_output_tokens -= num_tokens_scheduled
+
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
@@ -1600,28 +1606,22 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
-            # Skip a stale frame still pending discard (async_tokens_to_discard
-            # > 0): its pre-reset rejection count would underflow the counters.
-            if (
-                scheduled_spec_token_ids
-                and (generated_token_ids or self.num_sampled_tokens_per_step == 0)
-                and request.async_tokens_to_discard == 0
+            if scheduled_spec_token_ids and (
+                generated_token_ids or self.num_sampled_tokens_per_step == 0
             ):
                 num_draft_tokens = len(scheduled_spec_token_ids)
                 num_sampled = self.num_sampled_tokens_per_step
                 num_accepted = max(len(generated_token_ids) - num_sampled, 0)
                 num_rejected = num_draft_tokens - num_accepted
-                # num_computed_tokens represents the number of tokens
-                # processed in the current step, considering scheduled
-                # tokens and rejections. If some tokens are rejected,
-                # num_computed_tokens is decreased by the number of rejected
-                # tokens.
-                if request.num_computed_tokens > 0:
-                    request.num_computed_tokens -= num_rejected
-                # If async scheduling, num_output_placeholders also includes
-                # the scheduled spec tokens count and so is similarly adjusted.
-                if request.num_output_placeholders > 0:
-                    request.num_output_placeholders -= num_rejected
+                # Rejected tokens roll back num_computed_tokens (and, under async
+                # scheduling, num_output_placeholders, which also covers the spec
+                # tokens). Skip for stale output: its rejection count predates
+                # the rollback and would corrupt/underflow the reset counters.
+                if not output_is_stale:
+                    if request.num_computed_tokens > 0:
+                        request.num_computed_tokens -= num_rejected
+                    if request.num_output_placeholders > 0:
+                        request.num_output_placeholders -= num_rejected
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
                     num_draft_tokens=num_draft_tokens,
@@ -1645,7 +1645,7 @@ class Scheduler(SchedulerInterface):
             # Check for stop and update request status.
             if new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
-                    request, new_token_ids
+                    request, new_token_ids, is_stale=output_is_stale
                 )
             elif request.pooling_params and pooler_output is not None:
                 # Pooling stops as soon as there is output.
@@ -1912,8 +1912,10 @@ class Scheduler(SchedulerInterface):
         return False
 
     def _update_request_with_output(
-        self, request: Request, new_token_ids: list[int]
+        self, request: Request, new_token_ids: list[int], is_stale: bool = False
     ) -> tuple[list[int], bool]:
+        # is_stale only matters for the async override (the sync scheduler has
+        # no in-flight output to preempt).
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
         # to return empty token ids for the request.
@@ -2230,7 +2232,7 @@ class Scheduler(SchedulerInterface):
             # running queue in FIFO order.
             while self.running:
                 request = self.running.pop()
-                # _preempt_request discards any in-flight async output frame.
+                # _preempt_request marks any in-flight async output stale.
                 self._preempt_request(request, timestamp)
 
             # Clear scheduled request ids cache. Since we are forcing preemption

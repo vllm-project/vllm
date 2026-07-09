@@ -326,7 +326,13 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     assert not scheduler.running
 
 
-def test_no_placeholder_underflow_on_discarded_spec_frame():
+def test_no_placeholder_underflow_on_stale_spec_output():
+    """A request's stale in-flight spec output (from a step scheduled before a
+    preemption rolled it back, now resumed) must NOT apply its pre-reset
+    rejection count to the resumed request's freshly re-added placeholder count
+    -- that underflows ``num_output_placeholders`` below zero. Its token is
+    still delivered.
+    """
     num_spec = 5
     scheduler = create_scheduler(
         async_scheduling=True,
@@ -336,12 +342,14 @@ def test_no_placeholder_underflow_on_discarded_spec_frame():
     req = create_requests(num_requests=1, max_tokens=20)[0]
     req.num_computed_tokens = req.num_tokens
     scheduler.requests[req.request_id] = req
-    scheduler.running.append(req)
-    req.status = RequestStatus.RUNNING
+    req.status = RequestStatus.PREEMPTED
 
+    # A small placeholder count as if the request has just resumed, plus one
+    # stale in-flight output outstanding (1 sampled + num_spec draft tokens).
     req.num_output_placeholders = 1
-    req.async_tokens_to_discard = num_spec
+    req.num_stale_output_tokens = num_spec + 1
     computed_before = req.num_computed_tokens
+    outputs_before = len(req.output_token_ids)
 
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
@@ -365,21 +373,25 @@ def test_no_placeholder_underflow_on_discarded_spec_frame():
 
     scheduler.update_from_output(scheduler_output, model_runner_output)
 
+    # Stale output's counter mutations are skipped (no underflow/corruption)...
     assert req.num_output_placeholders == 1
     assert req.num_computed_tokens == computed_before
-    assert req.async_tokens_to_discard == num_spec - 1
-    assert req.status == RequestStatus.RUNNING
+    assert req.num_stale_output_tokens == 0
+    # ...but its token is still delivered (lossless).
+    assert len(req.output_token_ids) == outputs_before + 1
 
 
-def test_preempt_converts_inflight_async_frame_to_discard():
-    """A KV-pressure preemption of a request that has an in-flight async output
-    frame must convert its outstanding ``num_output_placeholders`` into
-    ``async_tokens_to_discard`` so the stale frame is discarded when it returns,
-    rather than drained against the reset placeholder count (which underflows:
-    the assert in ``AsyncScheduler._update_request_with_output``).
+def test_preempt_marks_all_inflight_async_output_stale():
+    """A KV-pressure preemption must account for *every* piece of the request's
+    in-flight output, not just one. ``_preempt_request`` records the request's
+    outstanding ``num_in_flight_tokens`` as stale; each stale return then
+    delivers its token (lossless) but is drained by its own scheduled token
+    count, so the reset ``num_output_placeholders`` never underflows and the
+    resumed request's counters are never corrupted by a stale rejection count.
 
-    Regression: only ``reset_prefix_cache`` preemption used to do this; the
-    common KV-pressure preemption path (``_preempt_request``) did not.
+    Regression: the first attempt discarded a single return, assuming at most
+    one is in flight -- but async depth / PP / spec can leave several, and the
+    leftover stale returns underflowed the placeholder count.
     """
     num_spec = 4
     scheduler = create_scheduler(
@@ -392,43 +404,50 @@ def test_preempt_converts_inflight_async_frame_to_discard():
     scheduler.requests[req.request_id] = req
     scheduler.running.append(req)
     req.status = RequestStatus.RUNNING
-    # One in-flight async decode frame is outstanding: _update_after_schedule
-    # reserves num_sampled_tokens_per_step (1) + num_spec draft placeholders.
-    req.num_output_placeholders = scheduler.num_sampled_tokens_per_step + num_spec
-    assert req.async_tokens_to_discard == 0
+    # The request has two in-flight spec-decode outputs (async depth / PP): each
+    # reserves num_sampled_tokens_per_step (1) + num_spec draft tokens.
+    scheduled_tokens = scheduler.num_sampled_tokens_per_step + num_spec
+    req.num_output_placeholders = 2 * scheduled_tokens
+    req.num_in_flight_tokens = 2 * scheduled_tokens
 
+    scheduler.running.remove(req)
     scheduler._preempt_request(req, timestamp=0.0)
 
     assert req.status == RequestStatus.PREEMPTED
-    # Exactly ONE frame is queued for discard. async_tokens_to_discard counts
-    # frames (drained one per returned output frame), not placeholder tokens;
-    # discarding num_output_placeholders (1 + num_spec) instead would
-    # over-discard the request's next real frames after it resumes.
-    assert req.async_tokens_to_discard == 1
+    # The whole in-flight token count is marked stale -- not one output.
+    assert req.num_stale_output_tokens == 2 * scheduled_tokens
     assert req.num_output_placeholders == 0
+    outputs_before = len(req.output_token_ids)
 
-    # The stale in-flight frame now returns. It must be discarded (dropped),
-    # not drained -- and must not underflow num_output_placeholders.
-    scheduler_output = SchedulerOutput(
-        scheduled_new_reqs=[],
-        scheduled_cached_reqs=CachedRequestData.make_empty(),
-        num_scheduled_tokens={req.request_id: num_spec + 1},
-        total_num_scheduled_tokens=num_spec + 1,
-        scheduled_encoder_inputs={},
-        scheduled_spec_decode_tokens={req.request_id: [10] * num_spec},
-        num_common_prefix_blocks=[],
-        finished_req_ids=set(),
-        free_encoder_mm_hashes=[],
-    )
-    model_runner_output = ModelRunnerOutput(
-        req_ids=[req.request_id],
-        req_id_to_index={req.request_id: 0},
-        sampled_token_ids=[[999]],
-        logprobs=None,
-        prompt_logprobs_dict={},
-        pooler_output=[],
-    )
-    scheduler.update_from_output(scheduler_output, model_runner_output)
+    def _return_stale_output():
+        scheduler_output = SchedulerOutput(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=CachedRequestData.make_empty(),
+            num_scheduled_tokens={req.request_id: scheduled_tokens},
+            total_num_scheduled_tokens=scheduled_tokens,
+            scheduled_encoder_inputs={},
+            scheduled_spec_decode_tokens={req.request_id: [10] * num_spec},
+            num_common_prefix_blocks=[],
+            finished_req_ids=set(),
+            free_encoder_mm_hashes=[],
+        )
+        model_runner_output = ModelRunnerOutput(
+            req_ids=[req.request_id],
+            req_id_to_index={req.request_id: 0},
+            sampled_token_ids=[[999]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+        scheduler.update_from_output(scheduler_output, model_runner_output)
 
+    # Both stale outputs return: each delivers its token, drains the stale
+    # count, and leaves the reset placeholder count untouched (no underflow).
+    _return_stale_output()
+    assert req.num_stale_output_tokens == scheduled_tokens
+    _return_stale_output()
+    assert req.num_stale_output_tokens == 0
     assert req.num_output_placeholders == 0
-    assert req.async_tokens_to_discard == 0
+    assert req.status == RequestStatus.PREEMPTED
+    # Each stale output delivered its sampled token (lossless).
+    assert len(req.output_token_ids) == outputs_before + 2
