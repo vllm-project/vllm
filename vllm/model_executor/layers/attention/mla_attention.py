@@ -714,8 +714,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         num_mqa_tokens = attn_metadata.num_decode_tokens
         num_mha_tokens = q.size(0) - num_mqa_tokens
 
-        # Sparse MLA can use dense MHA while the sequence is short enough that
-        # the sparse top-k would cover the full sequence anyway.
         if self.impl.is_sparse and num_mha_tokens > 0:
             prefill_max_seq_len = attn_metadata.prefill_max_seq_len  # type: ignore[attr-defined]
             use_mha = (
@@ -2006,12 +2004,11 @@ def reorg_kvcache(
 
 
 class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
-    """Shared MLA base carrying dense-MHA prefill (new tokens + chunked context)
-    for both dense and sparse impls; delegates attention to the selected
-    MLAPrefillBackend. Subclasses extend ``__init__`` with their own extras and
-    implement ``forward_mqa`` (decode); metadata must expose ``.prefill``
-    (MLACommonPrefillMetadata) and ``.num_prefills``. Subclasses must also set
-    ``_use_flashinfer_concat_mla_k``."""
+    """
+    Shared MLA base providing dense-MHA prefill (via the selected
+    MLAPrefillBackend) for both dense and sparse impls; subclasses add decode
+    (``forward_mqa``).
+    """
 
     _use_flashinfer_concat_mla_k: bool
 

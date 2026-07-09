@@ -916,13 +916,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
 
 
 class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
-    """MLA attention interface (dense and sparse).
-
-    Concrete impls implement ``forward_mqa`` (decode); ``forward_mha`` (dense
-    prefill) is provided by ``MLACommonBaseImpl``. ``is_sparse`` (on
-    ``AttentionImplBase``) marks impls that use the sparse top-k MQA path so the
-    layer can route accordingly.
-    """
+    """MLA attention implementation with forward_mqa and forward_mha methods."""
 
     @abstractmethod
     def __init__(
@@ -961,7 +955,7 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
     ) -> None:
-        """MHA-style (dense) prefill forward pass."""
+        """MHA-style prefill forward pass."""
         raise NotImplementedError
 
     @abstractmethod

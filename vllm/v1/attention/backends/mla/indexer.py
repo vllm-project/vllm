@@ -287,15 +287,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         )
 
         next_n = self.num_speculative_tokens + 1
-        # The indexer's decode logits kernel only handles next_n query rows, so
-        # its decode/prefill split stays at next_n regardless of how the
-        # attention backends route. It opts out of the shared reorder-threshold
-        # vote (None is skipped by calculate_reorder_batch_threshold) so it never
-        # drags the single physical reorder below the attention backends' larger
-        # routing thresholds. It only needs the true decodes contiguous at the
-        # front, which the reorder's region ordering guarantees for any reorder
-        # threshold >= next_n (every attention backend votes >= next_n), so its
-        # split at next_n stays exact.
         self.decode_threshold = next_n
         self.reorder_batch_threshold = None
         # NOTE: SM100 datacenter GPUs support any next_n natively via the

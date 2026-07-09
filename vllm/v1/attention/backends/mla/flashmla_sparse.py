@@ -251,8 +251,6 @@ class FlashMLASparseMetadataBuilder(
         cache_config = vllm_config.cache_config
         parallel_config = vllm_config.parallel_config
 
-        # Route sparse MLA through MQA for short query chunks; larger chunks use
-        # dense MHA prefill. The cutoff depends on the local TP q-head count.
         num_q_heads = self.model_config.get_num_attention_heads(parallel_config)
         threshold = {16: 64, 32: 128, 64: 256, 128: 1024}.get(num_q_heads, 1024)
         self._init_reorder_batch_threshold(

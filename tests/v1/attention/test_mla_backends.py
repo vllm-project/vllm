@@ -1077,9 +1077,6 @@ def test_backend_correctness(
     dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
     kv_lora_rank = 512
     qk_rope_head_dim = 64
-    # qk_nope_head_dim / v_head_dim are parametrized (DeepSeek 128/128 vs
-    # GLM-style symmetric 192/256). kv_lora_rank + qk_rope_head_dim (the latent
-    # KV cache head_size) is unaffected, so the model config stays consistent.
     total_head_size = kv_lora_rank + qk_rope_head_dim
     assert kv_lora_rank + qk_rope_head_dim == head_size, (
         f"MLA dimensions don't match: {total_head_size} != {head_size}"
