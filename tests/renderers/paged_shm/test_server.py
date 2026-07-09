@@ -314,7 +314,7 @@ class TestContextManagers:
         class TestException(Exception):
             pass
 
-        with pytest.raises(TestException):
+        with pytest.raises(TestException):  # noqa: SIM117
             with client.write_context(uuid, size) as ctx:
                 client._storage.write(data, ctx.blocks)
                 raise TestException("trigger rollback")

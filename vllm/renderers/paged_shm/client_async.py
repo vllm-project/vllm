@@ -11,6 +11,7 @@ managers for write/read locks and iterators that hold the read lock.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -357,11 +358,8 @@ class AsyncPagedShmClient(_AsyncBaseClient):
             response = await sock.recv_multipart()
             return await self._parse_response(response)
         except Exception:
-            # Discard faulty socket
-            try:
+            with contextlib.suppress(Exception):
                 sock.close()
-            except Exception:
-                pass
             raise
         else:
             self._pool.put_nowait(sock)

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, HTTPException, Request, UploadFile
 
 from .serving import ServingObjectStorage
 
@@ -20,7 +20,7 @@ def get_object_storage(request: Request) -> ServingObjectStorage:
 @router.put("/object_storage")
 async def upload_auto(
     raw_request: Request,
-    file: UploadFile = File(...),
+    file: UploadFile,
 ):
     storage = get_object_storage(raw_request)
     return await storage.upload(file=file)
@@ -30,7 +30,7 @@ async def upload_auto(
 async def upload_with_uuid(
     uuid: str,
     raw_request: Request,
-    file: UploadFile = File(...),
+    file: UploadFile,
 ):
     storage = get_object_storage(raw_request)
     return await storage.upload(file=file, uuid=uuid)

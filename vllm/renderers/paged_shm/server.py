@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import contextlib
 import json
 import multiprocessing as mp
 
@@ -170,7 +170,8 @@ def zmq_server(size: int, block_size: int, conn, stop_event: mp.Event):
                 continue
 
             def _send_response(socket: zmq.Socket, frames: list):
-                """Send a multipart response, ignoring errors if the client disconnected."""
+                """Send a multipart response, ignoring errors if the client
+                disconnected."""
                 try:
                     socket.send_multipart(frames)
                 except zmq.ZMQError as e:
@@ -184,7 +185,8 @@ def zmq_server(size: int, block_size: int, conn, stop_event: mp.Event):
                     identity,
                     b"",
                     b"ERROR",
-                    f"Unknown command: {command.decode('utf-8', errors='replace')}".encode(),
+                    f"Unknown command: "
+                    f"{command.decode('utf-8', errors='replace')}".encode(),
                 ]
                 _send_response(socket, response_frames)
                 continue
@@ -198,9 +200,6 @@ def zmq_server(size: int, block_size: int, conn, stop_event: mp.Event):
                     result = handler()
                 response_frames = [identity, b"", b"OK", result.encode("utf-8")]
             except Exception as e:
-                import traceback
-
-                traceback.print_exc()
                 # Include exception type and message for client debugging
                 error_msg = f"{type(e).__name__}: {e}".encode()
                 response_frames = [identity, b"", b"ERROR", error_msg]
@@ -217,18 +216,12 @@ def zmq_server(size: int, block_size: int, conn, stop_event: mp.Event):
     finally:
         # Clean up resources in reverse order
         if socket is not None:
-            try:
+            with contextlib.suppress(Exception):
                 socket.close()
-            except Exception:
-                pass
         if context is not None:
-            try:
+            with contextlib.suppress(Exception):
                 context.term()
-            except Exception:
-                pass
         if server is not None:
-            try:
+            with contextlib.suppress(Exception):
                 server.close()
-            except Exception:
-                pass
         logger.info("PagedShmServer stopped.")

@@ -44,7 +44,9 @@ class PagedShmStorage:
                     self._shm = shared_memory.SharedMemory(name=name)
                     assert self._shm.size >= self.size
                 except FileNotFoundError:
-                    raise FileNotFoundError(f"Shared memory '{name}' not found")
+                    raise FileNotFoundError(
+                        f"Shared memory '{name}' not found"
+                    ) from None
         assert self._shm.buf is not None, "Buffer was not created"
 
         self.name = self._shm.name
@@ -62,7 +64,8 @@ class PagedShmStorage:
             self.is_pinned = True
 
     def get_iterator_numpy(self, size: int, blocks: list[int]):
-        """Return a callable that yields (block_array, valid_length) tuples as numpy arrays."""
+        """Return a callable that yields (block_array, valid_length) tuples as numpy
+        arrays."""
 
         def iterator():
             full_blocks = size // self.block_size
@@ -79,7 +82,8 @@ class PagedShmStorage:
         return iterator
 
     def get_iterator_tensor(self, size: int, blocks: list[int]):
-        """Return a callable that yields (block_tensor, valid_length) tuples as torch tensors."""
+        """Return a callable that yields (block_tensor, valid_length) tuples as torch
+        tensors."""
 
         def iterator():
             full_blocks = size // self.block_size
@@ -96,7 +100,8 @@ class PagedShmStorage:
         return iterator
 
     def write(self, data: bytes | np.ndarray | torch.Tensor, blocks: list[int]) -> None:
-        """Write data into the given blocks. Supports CPU bytes/numpy/tensor and GPU tensor."""
+        """Write data into the given blocks. Supports CPU bytes/numpy/tensor and
+        GPU tensor."""
         if isinstance(data, torch.Tensor):
             if data.device.type != "cpu":
                 self.write_from_device(data, blocks)
@@ -176,7 +181,8 @@ class PagedShmStorage:
     def read_to_tensor(
         self, size: int, blocks: list[int], device: DeviceLikeType = "cpu"
     ) -> torch.Tensor:
-        """Read data into a torch tensor. If device != 'cpu', a GPU direct transfer is used."""
+        """Read data into a torch tensor. If device != 'cpu', a GPU direct transfer
+        is used."""
         if device != "cpu":
             return self.read_to_device(size, blocks, device)
 

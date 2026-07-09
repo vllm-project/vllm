@@ -35,7 +35,8 @@ async def client(server):
 
 @pytest.mark.asyncio
 class TestUpload:
-    """Tests for the upload endpoints (PUT /object_storage and /object_storage/{uuid})."""
+    """Tests for the upload endpoints
+    (PUT /object_storage and /object_storage/{uuid})."""
 
     async def test_upload_auto(self, client: httpx.AsyncClient):
         """Upload a file without specifying a UUID; server generates one."""

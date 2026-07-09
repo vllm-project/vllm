@@ -227,7 +227,8 @@ class TestDelete:
         assert manager._total_available_blocks == 4
 
     def test_delete_not_in_lru_does_not_raise(self, manager, item_nocache):
-        """Regression test: deleting an item not in the LRU cache must not raise KeyError."""
+        """Regression test:
+        deleting an item not in the LRU cache must not raise KeyError."""
         manager.open_write([item_nocache])
         manager.close_write("nocache")
         # 'nocache' is not in the LRU; delete should succeed silently

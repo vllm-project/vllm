@@ -3,7 +3,7 @@
 
 from collections.abc import AsyncGenerator
 
-from fastapi import File, HTTPException, UploadFile
+from fastapi import HTTPException, UploadFile
 from starlette.responses import StreamingResponse
 
 from vllm.renderers.paged_shm.client_async import AsyncPagedShmClient
@@ -19,7 +19,7 @@ class ServingObjectStorage:
     def __init__(self, shm_server_address: str):
         self.client = AsyncPagedShmClient(shm_server_address, pin=False)
 
-    async def upload(self, file: UploadFile = File(...), uuid: str | None = None):
+    async def upload(self, file: UploadFile, uuid: str | None = None):
         """
         Upload a file to shared memory.
 
@@ -34,7 +34,9 @@ class ServingObjectStorage:
                 # Validate UUID format
                 uuid.UUID(uuid)
             except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid UUID format")
+                raise HTTPException(
+                    status_code=400, detail="Invalid UUID format"
+                ) from None
             uid = uuid
         else:
             uid = str(uuid.uuid4())
@@ -44,7 +46,7 @@ class ServingObjectStorage:
         except RuntimeError as e:
             raise HTTPException(
                 status_code=500, detail=f"Failed to write to shared memory: {e}"
-            )
+            ) from None
 
         return {"uuid": uid}
 
@@ -59,8 +61,10 @@ class ServingObjectStorage:
             except RuntimeError as e:
                 # Map server-side "not found" errors to 404
                 if "not found" in str(e).lower():
-                    raise HTTPException(status_code=404, detail="Object not found")
-                raise HTTPException(status_code=500, detail=str(e))
+                    raise HTTPException(
+                        status_code=404, detail="Object not found"
+                    ) from None
+                raise HTTPException(status_code=500, detail=str(e)) from None
 
         return StreamingResponse(
             stream_data(),
@@ -74,8 +78,10 @@ class ServingObjectStorage:
             await self.client.delete(uuid)
         except RuntimeError as e:
             if "not found" in str(e).lower():
-                raise HTTPException(status_code=404, detail="Object not found")
-            raise HTTPException(status_code=500, detail=str(e))
+                raise HTTPException(
+                    status_code=404, detail="Object not found"
+                ) from None
+            raise HTTPException(status_code=500, detail=str(e)) from None
 
     async def info(self, uuid: str):
         """Return metadata (currently only size) for the given UUID."""
@@ -87,8 +93,10 @@ class ServingObjectStorage:
             return {"uuid": uuid, "size": size}
         except RuntimeError as e:
             if "not found" in str(e).lower():
-                raise HTTPException(status_code=404, detail="Object not found")
-            raise HTTPException(status_code=500, detail=str(e))
+                raise HTTPException(
+                    status_code=404, detail="Object not found"
+                ) from None
+            raise HTTPException(status_code=500, detail=str(e)) from None
 
     async def close(self):
         """Release resources; call during application shutdown."""

@@ -10,6 +10,7 @@ to a shared memory segment and offers high-level read/write operations
 with automatic block allocation and lock management via context managers.
 """
 
+import contextlib
 import json
 import logging
 import queue
@@ -382,10 +383,8 @@ class PagedShmClient(_BaseClient):
             response = sock.recv_multipart()
             return self._parse_response(response)
         except Exception:
-            try:
+            with contextlib.suppress(Exception):
                 sock.close()
-            except Exception:
-                pass
             raise
         else:
             self._pool.put(sock)
