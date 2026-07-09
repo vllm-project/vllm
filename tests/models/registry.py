@@ -202,9 +202,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "AfmoeForCausalLM": _HfExamplesInfo("arcee-ai/Trinity-Nano-Preview"),
     "ApertusForCausalLM": _HfExamplesInfo("swiss-ai/Apertus-8B-Instruct-2509"),
     "ArceeForCausalLM": _HfExamplesInfo("arcee-ai/AFM-4.5B-Base"),
-    "ArcticForCausalLM": _HfExamplesInfo(
-        "Snowflake/snowflake-arctic-instruct", trust_remote_code=True
-    ),
+    "ArcticForCausalLM": _HfExamplesInfo("Snowflake/snowflake-arctic-instruct"),
     "AXK1ForCausalLM": _HfExamplesInfo("skt/A.X-K1", trust_remote_code=True),
     "BailingMoeForCausalLM": _HfExamplesInfo(
         "inclusionAI/Ling-lite-1.5", trust_remote_code=True
@@ -296,7 +294,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GlmMoeDsaForCausalLM": _HfExamplesInfo(
         "zai-org/GLM-5", min_transformers_version="5.0.1", is_available_online=False
     ),
-    "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2", {"alias": "gpt2"}),
+    "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2"),
     "GPTBigCodeForCausalLM": _HfExamplesInfo(
         "bigcode/starcoder",
         extras={
@@ -549,9 +547,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "SolarForCausalLM": _HfExamplesInfo(
         "upstage/solar-pro-preview-instruct", trust_remote_code=True
     ),
-    "TeleChatForCausalLM": _HfExamplesInfo(
-        "chuhac/TeleChat2-35B", trust_remote_code=True
-    ),
     "TeleChat2ForCausalLM": _HfExamplesInfo(
         "Tele-AI/TeleChat2-3B", trust_remote_code=True
     ),
@@ -779,14 +774,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "vllm": "Needs https://github.com/huggingface/transformers/pull/43538"
         },
     ),
-    "MusicFlamingoForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/music-flamingo-2601-hf",
-        min_transformers_version="5.5.0",
-        transformers_version_reason={
-            "vllm": "Needs https://github.com/huggingface/transformers/pull/43538"
-        },
-    ),
-    "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereLabs/aya-vision-8b"),
     "BagelForConditionalGeneration": _HfExamplesInfo("ByteDance-Seed/BAGEL-7B-MoT"),
     "BeeForConditionalGeneration": _HfExamplesInfo(
         "Open-Bee/Bee-8B-RL",
@@ -944,6 +931,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "HunYuanVLForConditionalGeneration": _HfExamplesInfo(
         "tencent/HunyuanOCR",
         hf_overrides={"num_experts": 0},
+        min_transformers_version="5.13",
     ),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo(
         "HuggingFaceM4/Idefics3-8B-Llama3",
@@ -1054,6 +1042,17 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "LlavaNextVideoForConditionalGeneration": _HfExamplesInfo(
         "llava-hf/LLaVA-NeXT-Video-7B-hf"
     ),
+    "LlavaOnevision2ForConditionalGeneration": _HfExamplesInfo(
+        "lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct",
+        trust_remote_code=True,
+        # Keep the init/schema harness eager (these tests never run forward).
+        # NOTE: a separate H200-only hang exists in the core FA3 attention
+        # construction (after `FlashAttentionImpl.__init__` logs the FA3
+        # version, while building the Qwen3 backbone). enforce_eager does NOT
+        # gate that path, so this flag is hygiene, not the fix -- tracked with
+        # the maintainer.
+        enforce_eager=True,
+    ),
     "LlavaOnevisionForConditionalGeneration": _HfExamplesInfo(
         "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
     ),
@@ -1122,6 +1121,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "8b-thinking": "OpenMOSS-Team/MOSS-Audio-8B-Thinking",
         },
         trust_remote_code=True,
+    ),
+    "MossTranscribeDiarizeForConditionalGeneration": _HfExamplesInfo(
+        "OpenMOSS-Team/MOSS-Transcribe-Diarize",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "HfMoondream": _HfExamplesInfo(
         "moondream/moondream3-preview",
@@ -1405,6 +1409,13 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
         max_num_seqs=32,
     ),
+    "DFlashLagunaForCausalLM": _HfExamplesInfo(
+        "poolside/Laguna-XS-2.1",
+        speculative_model="poolside/Laguna-XS-2.1-DFlash",
+        use_original_num_layers=True,
+        max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
+        max_num_seqs=32,
+    ),
     "DFlashQwen3NextDraftModel": _HfExamplesInfo(
         "Qwen/Qwen3-Coder-Next",
         speculative_model="z-lab/Qwen3-Coder-Next-DFlash",
@@ -1412,6 +1423,19 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         max_model_len=8192,  # Reduce for CI
         max_num_seqs=32,
         min_transformers_version="4.56.3",  # Required for Qwen3Next
+    ),
+    # [DSpark]
+    "DSparkDraftModel": _HfExamplesInfo(
+        "deepseek-ai/DeepSeek-V4-Pro-DSpark",
+        speculative_model="deepseek-ai/DeepSeek-V4-Pro-DSpark",  # draft in mtp.*
+        is_available_online=False,
+        use_original_num_layers=True,  # DSpark has >1 draft block
+    ),
+    "Qwen3DSparkModel": _HfExamplesInfo(
+        "Qwen/Qwen3-8B",
+        speculative_model="deepseek-ai/dspark_qwen3_8b_block7",
+        is_available_online=False,
+        use_original_num_layers=True,  # DSpark backbone requires all layers
     ),
     # [Eagle]
     "EagleCohereForCausalLM": _HfExamplesInfo(
@@ -1466,8 +1490,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "EagleMistralLarge3ForCausalLM": _HfExamplesInfo(
         "mistralai/Mistral-Large-3-675B-Instruct-2512",
         speculative_model="mistralai/Mistral-Large-3-675B-Instruct-2512-Eagle",
-        # TODO: revert once figuring out OOM in CI
-        is_available_online=False,
     ),
     "LlamaForCausalLMEagle3": _HfExamplesInfo(
         "Qwen/Qwen3-8B",
@@ -1532,6 +1554,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         use_original_num_layers=True,
     ),
     # [MTP]
+    "BailingMoeV25MTPModel": _HfExamplesInfo(
+        "inclusionAI/Ring-2.5-1T",
+        speculative_model="inclusionAI/Ring-2.5-1T",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "DeepSeekMTPModel": _HfExamplesInfo(
         "luccafong/deepseek_mtp_main_random",
         speculative_model="luccafong/deepseek_mtp_draft_random",

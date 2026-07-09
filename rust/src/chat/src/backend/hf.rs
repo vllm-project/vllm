@@ -303,7 +303,7 @@ mod tests {
             .unwrap()
             .join("preprocessor_config.json");
         write_json(&preprocessor_config_path, r#"{"size":[672,672]}"#);
-        files.preprocessor_config_path = Some(preprocessor_config_path);
+        files.preprocessor_config_path = Some(preprocessor_config_path.clone());
 
         let backend = HfChatBackend::from_resolved_model_files(
             files.clone(),
@@ -320,6 +320,9 @@ mod tests {
         .unwrap();
 
         assert!(backend.multimodal_model_info().is_none());
+
+        let invalid_preprocessor_config = r#"{"size":[672,672]"#;
+        write_json(&preprocessor_config_path, invalid_preprocessor_config);
 
         let error = HfChatBackend::from_resolved_model_files(
             files,
