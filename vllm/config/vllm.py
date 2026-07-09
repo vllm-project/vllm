@@ -528,7 +528,7 @@ class VllmConfig:
 
     @property
     def use_v2_model_runner(self) -> bool:
-        if self.cache_config is not None and self.cache_config.simulate_forward:
+        if self.cache_config.simulate_forward:
             return True
 
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
