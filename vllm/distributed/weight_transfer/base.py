@@ -3,11 +3,14 @@
 """Base class for weight transfer engines."""
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator
-from dataclasses import KW_ONLY, dataclass, field
-from typing import Any, Generic, Literal, TypeVar
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
@@ -28,44 +31,7 @@ class WeightTransferInitInfo(ABC):  # noqa: B024
 class WeightTransferUpdateInfo(ABC):  # noqa: B024
     """Base class for backend-specific weight update info."""
 
-    _: KW_ONLY
-    update_kind: Literal["dense", "sparse_flat"] = "dense"
-    """Weight update format."""
-    num_updates_list: list[int] | None = None
-    """Number of sparse entries to receive for each parameter in ``names``."""
-
-    def __post_init__(self) -> None:
-        if self.update_kind not in ("dense", "sparse_flat"):
-            raise ValueError(f"Unsupported update_kind: {self.update_kind}")
-        if self.update_kind == "dense":
-            if self.num_updates_list is not None:
-                raise ValueError(
-                    "Sparse metadata is only supported for `update_kind='sparse_flat'`"
-                )
-            return
-
-        if self.num_updates_list is None:
-            raise ValueError("`num_updates_list` is required for sparse updates")
-        if len(self.num_updates_list) == 0:
-            raise ValueError("`num_updates_list` cannot be empty for sparse updates")
-        if any(num_updates < 0 for num_updates in self.num_updates_list):
-            raise ValueError("Sparse `num_updates_list` entries must be non-negative")
-
-        names = getattr(self, "names", None)
-        if names is not None and len(self.num_updates_list) != len(names):
-            raise ValueError(
-                f"`num_updates_list` should be of the same size as `names`: "
-                f"got {len(self.num_updates_list)} and {len(names)}"
-            )
-
-
-@dataclass
-class SparseWeightPatch:
-    """A sparse in-place patch for one existing parameter."""
-
-    name: str
-    indices: torch.Tensor
-    values: torch.Tensor
+    pass
 
 
 # API-level request classes (accept dicts for backend-agnostic serialization)
@@ -89,8 +55,14 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
     from a trainer to inference workers.
 
     This abstraction separates weight transfer transport logic from the worker
-    implementation, allowing different backends (NCCL, CUDA IPC[TODO], RDMA[TODO]) to be
+    implementation, allowing different backends (NCCL, CUDA IPC, RDMA[TODO]) to be
     plugged in.
+
+    Each engine owns its full weight-update lifecycle: `start_weight_update`,
+    `update_weights`, and `finish_weight_update`. Layerwise reloading (used by
+    checkpoint-format engines) is opted into per engine by running it inside
+    `start_weight_update`/`finish_weight_update`. Engines that apply weights in
+    place (e.g. sparse patches) leave those methods as no-ops.
 
     Subclasses should define:
         init_info_cls: Type of backend-specific initialization info
@@ -104,7 +76,8 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
     def __init__(
         self,
         config: WeightTransferConfig,
-        parallel_config: ParallelConfig,
+        vllm_config: "VllmConfig",
+        device: torch.device,
         model: torch.nn.Module,
     ) -> None:
         """
@@ -112,11 +85,15 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
 
         Args:
             config: The configuration for the weight transfer engine
-            parallel_config: The configuration for the parallel setup
+            vllm_config: The full vLLM config (provides parallel/model config)
+            device: The device this worker's model lives on
             model: The local model instance which will receive the weights
         """
         self.config = config
-        self.parallel_config = parallel_config
+        self.vllm_config = vllm_config
+        self.parallel_config: ParallelConfig = vllm_config.parallel_config
+        self.model_config = vllm_config.model_config
+        self.device = device
         self.model = model
 
     def parse_init_info(self, init_dict: dict[str, Any]) -> TInitInfo:
@@ -171,31 +148,49 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         raise NotImplementedError
 
     @abstractmethod
-    def receive_weights(
-        self,
-        update_info: TUpdateInfo,
-        load_weights: Callable[[list[tuple[str, torch.Tensor]]], None],
-    ) -> None:
+    def start_weight_update(self) -> None:
         """
-        Receive weights from the trainer and load them incrementally.
+        Prepare the engine for a new weight update.
+
+        Engines that receive weights in checkpoint format initialize layerwise reloading
+        here, else this is typically a no-op.
+        See: https://docs.vllm.ai/en/latest/training/layerwise/ for more details.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def finish_weight_update(self) -> None:
+        """
+        Finalize the current weight update.
+
+        Checkpoint-format engines finalize layerwise reloading here; engines
+        that apply weights in place leave this as a no-op.
+        """
+        raise NotImplementedError
+
+    def update_weights(self, update_info: dict[str, Any]) -> None:
+        """
+        Receive one weight update chunk and load it into the model.
+
+        Args:
+            update_info: Dictionary containing backend-specific update info
+        """
+        typed_update_info = self.parse_update_info(update_info)
+        self.receive_weights(typed_update_info)
+        # NCCL broadcast / IPC paths may be asynchronous. Synchronize here so the
+        # next step uses the new weights.
+        torch.accelerator.synchronize()
+
+    @abstractmethod
+    def receive_weights(self, update_info: TUpdateInfo) -> None:
+        """
+        Receive weights from the trainer and load them into the model.
 
         Args:
             update_info: Backend-specific update info containing parameter metadata
                         and any backend-specific data
-            load_weights: Callable that loads weights into the model. Called
-                         incrementally for each weight to avoid OOM.
         """
         raise NotImplementedError
-
-    def receive_sparse_weights(
-        self,
-        update_info: TUpdateInfo,
-        apply_patches: Callable[[list[SparseWeightPatch]], None],
-    ) -> None:
-        """Receive sparse weight patches from the trainer."""
-        raise NotImplementedError(
-            f"{self.__class__.__name__} does not support sparse weight updates"
-        )
 
     @abstractmethod
     def shutdown(self) -> None:
@@ -208,7 +203,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
     @staticmethod
     @abstractmethod
     def trainer_send_weights(
-        iterator: Iterator[tuple[str, torch.Tensor]],
+        iterator: Iterator[Any],
         trainer_args: dict[str, Any] | Any,
     ) -> None:
         """
@@ -218,8 +213,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         to send weights to all inference workers.
 
         Args:
-            iterator: Iterator of model parameters. Returns (name, tensor) tuples.
-                     The tensors should be on the appropriate device for the backend.
+            iterator: Iterator of backend-specific items to send.
             trainer_args: Dictionary containing backend-specific arguments needed
                          to send weights. The structure depends on the backend:
                          - NCCL: Contains 'group', 'src', 'packed', etc.
@@ -231,11 +225,3 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
             >>> engine.trainer_send_weights(param_iter, trainer_args)
         """
         raise NotImplementedError
-
-    @staticmethod
-    def trainer_send_sparse_weights(
-        _iterator: Iterator[SparseWeightPatch],
-        _trainer_args: dict[str, Any] | Any,
-    ) -> None:
-        """Send sparse weight patches from trainer to inference workers."""
-        raise NotImplementedError("Sparse weight updates are not supported")

@@ -135,6 +135,37 @@ def _sparse_attention_layer_ids(config: PretrainedConfig) -> set[int]:
     return {i for i, f in enumerate(freq) if f != 0}
 
 
+def _sparse_attention_layer_ordinals(config: PretrainedConfig) -> dict[int, int]:
+    """Map each sparse-attention layer id to its ordinal among sparse layers."""
+    return {
+        lid: ordinal
+        for ordinal, lid in enumerate(sorted(_sparse_attention_layer_ids(config)))
+    }
+
+
+def _should_skip_index_topk(config: PretrainedConfig, layer_id: int) -> bool:
+    """ATOM ``index_topk_freq`` (cross-layer index sharing).
+
+    Only 1 of every ``index_topk_freq`` sparse-attention layers recomputes the
+    lightning-indexer top-k block selection; the rest reuse the selection the
+    preceding compute layer wrote into the shared ``topk_indices_buffer`` this
+    same forward pass. This cuts the indexer score + top-k cost ~``freq``x with
+    negligible accuracy impact (adjacent sparse layers pick nearly the same
+    blocks; ATOM validated GSM8K with freq=4). Gated by ``use_index_cache``;
+    enable via ``--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}'``.
+    """
+    if not getattr(config, "use_index_cache", False):
+        return False
+    freq = int(getattr(config, "index_topk_freq", 1) or 1)
+    if freq <= 1:
+        return False
+    ordinal = _sparse_attention_layer_ordinals(config).get(layer_id)
+    if ordinal is None:
+        return False
+    offset = int(getattr(config, "index_skip_topk_offset", 0) or 0)
+    return max(ordinal - offset, 0) % freq != 0
+
+
 def _is_moe_layer(config: PretrainedConfig, layer_id: int) -> bool:
     """Whether this layer's MLP is a sparse MoE block (vs a dense MLP)."""
     moe_layer_freq = getattr(config, "moe_layer_freq", None)
@@ -541,6 +572,12 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
 
+        # Cross-layer index sharing (ATOM index_topk_freq): when True this sparse
+        # layer reuses the previous compute layer's top-k block selection from the
+        # shared topk_indices_buffer instead of recomputing it. Static per layer
+        # -> cudagraph-capture-safe.
+        self.skip_index_topk = _should_skip_index_topk(config, layer_id)
+
         # Sparse "index" branch dims. index_q has the same head count as the KV
         # heads (sparse_num_index_heads == num_key_value_heads), so it shards
         # identically -- including replication when tp_size > num_key_value_heads.
@@ -728,7 +765,10 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # Single eager break around both: their split-K kernels read per-request
         # metadata and can't be captured into a cudagraph. The indexer writes its
         # top-k into the shared ``topk_indices_buffer``; the attend reads it back.
-        self.indexer(index_query)
+        # When skip_index_topk is set (ATOM index_topk_freq), reuse the selection
+        # the preceding compute layer wrote into the shared buffer this forward.
+        if not self.skip_index_topk:
+            self.indexer(index_query)
         return self.impl.forward(self, query, self.kv_cache, output)
 
 

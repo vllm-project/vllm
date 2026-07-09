@@ -252,6 +252,8 @@ class FlashAttentionMetadata:
 
     causal: bool | torch.Tensor = True
 
+    sliding_window: tuple[int, int] | None = None
+
     # PrefixLM bidirectional ranges for multimodal tokens.
     # Shape: (num_seqs, max_ranges, 2) int32, [start, end] per range.
     mm_prefix_range_tensor: torch.Tensor | None = None
@@ -282,6 +284,20 @@ def _get_sliding_window_configs(
             continue
         sliding_window_configs.add(layer.impl.sliding_window)
     return sliding_window_configs
+
+
+def _maybe_symmetrize_window(
+    window: tuple[int, int] | None,
+    causal: bool | torch.Tensor,
+) -> tuple[int, int] | None:
+    """Make a causal sliding window ``(w, 0)`` symmetric ``(w, w)`` when attention
+    is non-causal, so bidirectional queries attend in both directions. Leaves
+    full-attention ``(-1, -1)`` and already-symmetric windows untouched.
+    """
+    non_causal = isinstance(causal, torch.Tensor) or causal is False
+    if window is not None and window[0] >= 0 and window[1] == 0 and non_causal:
+        return (window[0], window[0])
+    return window
 
 
 class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetadata]):
@@ -487,7 +503,9 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                     cu_seqlens_q=cu_query_lens,
                     page_size=self.block_size,
                     causal=causal,
-                    window_size=self.aot_sliding_window,
+                    window_size=_maybe_symmetrize_window(
+                        self.aot_sliding_window, causal
+                    ),
                     num_splits=max_num_splits,
                 )
             return None
@@ -579,6 +597,13 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         if isinstance(causal, torch.Tensor) and causal.dtype != torch.int32:
             causal = causal.to(torch.int32)
 
+        # Symmetrize the spec's sliding_window for non-causal attention
+        group_sliding_window = getattr(self.kv_cache_spec, "sliding_window", None)
+        base_window = (
+            (-1, -1) if group_sliding_window is None else (group_sliding_window - 1, 0)
+        )
+        effective_sliding_window = _maybe_symmetrize_window(base_window, causal)
+
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
@@ -598,6 +623,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
             causal=causal,
+            sliding_window=effective_sliding_window,
         )
 
         # Compute mm_prefix range tensor if the batch contains
@@ -844,27 +870,17 @@ class FlashAttentionImpl(AttentionImpl):
                 )
                 return output
             else:
+                window = (
+                    attn_metadata.sliding_window
+                    if attn_metadata.sliding_window is not None
+                    else self.sliding_window
+                )
                 sliding_window_size: list[int] | None = (
-                    list(self.sliding_window)
-                    if self.sliding_window is not None
-                    else None
+                    list(window) if window is not None else None
                 )
 
                 causal = attn_metadata.causal
                 is_dynamic_causal = isinstance(causal, torch.Tensor)
-
-                # For non-causal (bidirectional) attention, make the
-                # sliding window symmetric so queries attend in both
-                # directions.
-                if (
-                    sliding_window_size is not None
-                    and sliding_window_size[1] == 0
-                    and (is_dynamic_causal or causal is False)
-                ):
-                    sliding_window_size = [
-                        sliding_window_size[0],
-                        sliding_window_size[0],
-                    ]
 
                 mm_prefix_ranges = attn_metadata.mm_prefix_range_tensor
                 mm_mask_mod = None
@@ -876,7 +892,29 @@ class FlashAttentionImpl(AttentionImpl):
                     and self.vllm_flash_attn_version == 4
                 ):
                     max_ranges = mm_prefix_ranges.shape[1]
-                    mm_mask_mod = _make_mm_prefix_mask_mod(max_ranges)
+                    # Sliding window value in Triton convention
+                    # (1 + window_size[0]).  Global-attention layers
+                    # store (-1, -1) → sw stays None / 0.
+                    sw_val = (
+                        1 + sliding_window_size[0]
+                        if sliding_window_size is not None
+                        and sliding_window_size[0] >= 0
+                        else None
+                    )
+                    # Gemma4: also clamp the bidirectional block to the
+                    # sliding window when the layer opts in
+                    # (mm_prefix_clamp_sliding_window flag from PR #47217).
+                    mm_clamp_sw = 0
+                    if (
+                        getattr(layer, "mm_prefix_clamp_sliding_window", False)
+                        and sw_val is not None
+                    ):
+                        mm_clamp_sw = sw_val
+                    mm_mask_mod = _make_mm_prefix_mask_mod(
+                        max_ranges,
+                        sliding_window=mm_clamp_sw,
+                        sliding_window_left=sw_val,
+                    )
                     mm_aux = [mm_prefix_ranges]
 
                 # R-SWA: use CuTE-DSL mask_mod on FA4 for exact token-level
@@ -906,7 +944,10 @@ class FlashAttentionImpl(AttentionImpl):
                             f"FA{self.vllm_flash_attn_version}"
                         )
                     dynamic_causal = causal
-                    causal = False
+                    has_window = (
+                        sliding_window_size is not None and sliding_window_size[1] >= 0
+                    )
+                    causal = not has_window
 
                 flash_attn_varlen_func(
                     q=query[:num_actual_tokens],
@@ -1170,13 +1211,26 @@ class FlashAttentionImpl(AttentionImpl):
         return output
 
 
-def _make_mm_prefix_mask_mod(max_ranges: int):
-    """Build a CuTE-DSL mask_mod implementing (causal OR mm_prefix).
+def _make_mm_prefix_mask_mod(
+    max_ranges: int,
+    sliding_window: int = 0,
+    sliding_window_left: int | None = None,
+):
+    """Build a CuTE-DSL mask_mod implementing
+    ``(causal AND sliding_window) OR mm_prefix``.
 
-    Returns a @cute.jit callable that evaluates:
-      keep = (kv_idx <= q_idx) OR
-             (q_idx in [r_start,r_end] AND kv_idx in [r_start,r_end])
-    for each mm_prefix range stored in aux_tensors[0].
+    The FA4 kernel passes *local* ``q_idx`` (0-based within the current
+    prefill chunk) while ``kv_idx`` is absolute (0-based over the full
+    KV cache).  We recover the absolute Q position via
+    ``q_abs = q_idx + seqlen_k - seqlen_q`` (the context-length offset)
+    so that causal, sliding-window, and mm_prefix range comparisons all
+    use consistent absolute positions.  This matches the Triton
+    reference path (``compute_kv_seq_mask``).
+
+    ``sliding_window_left`` enforces the sliding window on the causal
+    term (None = full causal, no window).  ``sliding_window`` clamps the
+    bidirectional block to the window (0 = unclamped; >0 = Gemma4 local
+    layers via ``mm_prefix_clamp_sliding_window``).
     """
     import cutlass
     import cutlass.cute as cute
@@ -1186,26 +1240,59 @@ def _make_mm_prefix_mask_mod(max_ranges: int):
         scalar_to_ssa,
     )
 
-    @cute.jit
-    def mm_prefix_mask_mod(
-        batch_idx: cute.TensorSSA,
-        head_idx: cute.TensorSSA,
-        q_idx: cute.TensorSSA,
-        kv_idx: cute.TensorSSA,
-        seqlen_info,
-        aux_tensors,
-    ):
-        keep = kv_idx <= q_idx
-        ranges = aux_tensors[0]
-        b = batch_idx[0]
-        for i in cutlass.range_constexpr(max_ranges):  # type: ignore[attr-defined]
-            r_start = scalar_to_ssa(ranges[b, i, 0], Int32)
-            r_end = scalar_to_ssa(ranges[b, i, 1], Int32)
-            valid = r_start < r_end
-            q_in = (q_idx >= r_start) & (q_idx <= r_end) & valid
-            k_in = (kv_idx >= r_start) & (kv_idx <= r_end) & valid
-            keep = keep | (q_in & k_in)
-        return keep
+    if sliding_window_left is not None:
+
+        @cute.jit
+        def mm_prefix_mask_mod(
+            batch_idx: cute.TensorSSA,
+            head_idx: cute.TensorSSA,
+            q_idx: cute.TensorSSA,
+            kv_idx: cute.TensorSSA,
+            seqlen_info,
+            aux_tensors,
+        ):
+            ctx_off = scalar_to_ssa(seqlen_info.seqlen_k - seqlen_info.seqlen_q, Int32)
+            q_abs = q_idx + ctx_off
+            sw = scalar_to_ssa(Int32(sliding_window_left), Int32)
+            keep = (kv_idx <= q_abs) & ((q_abs - kv_idx) < sw)
+            ranges = aux_tensors[0]
+            b = batch_idx[0]
+            for i in cutlass.range_constexpr(max_ranges):  # type: ignore[attr-defined]
+                r_start = scalar_to_ssa(ranges[b, i, 0], Int32)
+                r_end = scalar_to_ssa(ranges[b, i, 1], Int32)
+                valid = r_start < r_end
+                q_in = (q_abs >= r_start) & (q_abs <= r_end) & valid
+                k_in = (kv_idx >= r_start) & (kv_idx <= r_end) & valid
+                mm = q_in & k_in
+                if sliding_window > 0:
+                    mm = mm & ((q_abs - kv_idx) < sw)
+                keep = keep | mm
+            return keep
+
+    else:
+
+        @cute.jit
+        def mm_prefix_mask_mod(
+            batch_idx: cute.TensorSSA,
+            head_idx: cute.TensorSSA,
+            q_idx: cute.TensorSSA,
+            kv_idx: cute.TensorSSA,
+            seqlen_info,
+            aux_tensors,
+        ):
+            ctx_off = scalar_to_ssa(seqlen_info.seqlen_k - seqlen_info.seqlen_q, Int32)
+            q_abs = q_idx + ctx_off
+            keep = kv_idx <= q_abs
+            ranges = aux_tensors[0]
+            b = batch_idx[0]
+            for i in cutlass.range_constexpr(max_ranges):  # type: ignore[attr-defined]
+                r_start = scalar_to_ssa(ranges[b, i, 0], Int32)
+                r_end = scalar_to_ssa(ranges[b, i, 1], Int32)
+                valid = r_start < r_end
+                q_in = (q_abs >= r_start) & (q_abs <= r_end) & valid
+                k_in = (kv_idx >= r_start) & (kv_idx <= r_end) & valid
+                keep = keep | (q_in & k_in)
+            return keep
 
     mm_prefix_mask_mod.use_fast_sampling = True
     return mm_prefix_mask_mod
