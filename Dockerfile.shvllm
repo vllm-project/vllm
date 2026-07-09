@@ -46,11 +46,10 @@ ENV PATH="/root/.cargo/bin:/opt/venv/bin:${PATH}"
 
 RUN python3 -m venv /opt/venv && pip install -U pip wheel
 
-# torch + torchvision als eigener Layer (0.9 GB Download, cached gut).
+# torch-Trio als eigener Layer (0.9 GB Download, cached gut).
 # Offizielle cu129-Wheels sind für {75,80,86,90,100,120} gebaut.
-# Kein torchaudio: der cu129-Index endet bei 2.11 (ABI-Mismatch zu 2.13),
-# gebraucht wird es nur für Audio-Modelle.
-RUN pip install "torch==${TORCH_VERSION}" "torchvision==0.28.0" \
+# (Builder-Stage: torchaudio hier unkritisch, Zeile bleibt cache-stabil.)
+RUN pip install torch==${TORCH_VERSION} torchvision torchaudio \
         --index-url https://download.pytorch.org/whl/cu129
 
 # ---- vLLM-Fork bauen (der teure Schritt) ----
