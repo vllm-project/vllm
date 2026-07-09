@@ -67,14 +67,15 @@ def main():
         print(f"[OK] ROCm {rocm_ver}")
 
     # 5. Generate requirements.txt with AMD wheel URLs
-    amd_url = "https://repo.amd.com/rocm/whl/gfx120X-all"
-    py_tag = f"cp312"
-    torch_ver, tv_ver = get_torch_versions(rocm_ver)
+    # AMD ROCm Windows wheels repo (NOT repo.amd.com - that one blocks downloads)
+    base_url = "https://repo.radeon.com/rocm/windows/.rocm-rel-7.2_a"
+    py_tag = "cp312"
 
     req_lines = [
-        f"--find-links {amd_url}/",
-        f"{amd_url}/torch/torch-{torch_ver}-{py_tag}-{py_tag}-win_amd64.whl",
-        f"{amd_url}/torchvision/torchvision-{tv_ver}-{py_tag}-{py_tag}-win_amd64.whl",
+        f"{base_url}/torch-2.9.1+rocmsdk20260116-{py_tag}-{py_tag}-win_amd64.whl",
+        f"{base_url}/torchvision-0.24.1+rocmsdk20260116-{py_tag}-{py_tag}-win_amd64.whl",
+        f"{base_url}/rocm_sdk_core-7.2.0.dev0-py3-none-win_amd64.whl",
+        f"{base_url}/rocm_sdk_devel-7.2.0.dev0-py3-none-win_amd64.whl",
     ]
     req_file = install_dir / "requirements.txt"
     req_file.write_text("\n".join(req_lines) + "\n")
