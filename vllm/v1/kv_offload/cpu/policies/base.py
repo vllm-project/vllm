@@ -4,7 +4,7 @@ import ctypes
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 
-from vllm.v1.kv_offload.base import OffloadKey
+from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 
 
 class BlockStatus(ctypes.Structure):
@@ -57,8 +57,14 @@ class CachePolicy(ABC):
         """Remove a block (used to clean up after a failed store)."""
 
     @abstractmethod
-    def touch(self, keys: Iterable[OffloadKey]) -> None:
-        """Mark blocks as recently used."""
+    def touch(self, keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
+        """
+        Mark blocks as recently used.
+
+        Args:
+            keys: Blocks to mark as recently used.
+            req_context: Per-request context for the request touching these blocks.
+        """
 
     @abstractmethod
     def evict(
