@@ -3,11 +3,13 @@
 
 import pytest
 
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.v1.structured_output import backend_xgrammar
 from vllm.v1.structured_output.backend_xgrammar import (
     has_xgrammar_unsupported_json_features,
 )
 
-pytestmark = pytest.mark.cpu_test
+pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 
 @pytest.fixture
@@ -104,3 +106,41 @@ def test_supported_json_features(supported_schema):
     assert not has_xgrammar_unsupported_json_features(supported_schema), (
         "Schema should be supported"
     )
+
+
+def test_xgrammar_json_schema_validation_is_cached(monkeypatch):
+    calls = 0
+
+    class FakeGrammar:
+        @staticmethod
+        def from_json_schema(schema):
+            nonlocal calls
+            calls += 1
+
+    class FakeXgrammar:
+        Grammar = FakeGrammar
+
+    cache = backend_xgrammar._validate_xgrammar_json_schema
+    cache.cache_clear()
+    monkeypatch.setattr(backend_xgrammar, "xgr", FakeXgrammar)
+
+    try:
+        schema = {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+        }
+
+        backend_xgrammar.validate_xgrammar_grammar(
+            SamplingParams(
+                structured_outputs=StructuredOutputsParams(json=schema)
+            )
+        )
+        backend_xgrammar.validate_xgrammar_grammar(
+            SamplingParams(
+                structured_outputs=StructuredOutputsParams(json=schema)
+            )
+        )
+
+        assert calls == 1
+    finally:
+        cache.cache_clear()

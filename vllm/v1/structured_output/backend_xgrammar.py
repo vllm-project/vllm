@@ -3,6 +3,7 @@
 
 import json
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -269,6 +270,26 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
     return check_object(schema)
 
 
+@lru_cache(maxsize=128)
+def _validate_xgrammar_json_schema(schema_json: str) -> None:
+    try:
+        schema = json.loads(schema_json)
+    except json.JSONDecodeError as e:
+        raise ValueError("Invalid JSON grammar specification.") from e
+
+    if has_xgrammar_unsupported_json_features(schema):
+        raise ValueError(
+            "The provided JSON schema contains features not supported by xgrammar."
+        )
+
+    try:
+        xgr.Grammar.from_json_schema(schema)
+    except Exception as err:
+        raise ValueError(
+            f"Failed to transform json schema into a grammar: {err}"
+        ) from err
+
+
 def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
     """Validate that the request is supported by structured output.
 
@@ -304,24 +325,11 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
 
     if so_params.json:
         if isinstance(so_params.json, str):
-            try:
-                schema = json.loads(so_params.json)
-            except json.JSONDecodeError as e:
-                raise ValueError("Invalid JSON grammar specification.") from e
+            schema_json = so_params.json
         else:
-            schema = so_params.json
+            schema_json = json.dumps(so_params.json)
 
-        if has_xgrammar_unsupported_json_features(schema):
-            raise ValueError(
-                "The provided JSON schema contains features not supported by xgrammar."
-            )
-
-        try:
-            xgr.Grammar.from_json_schema(schema)
-        except Exception as err:
-            raise ValueError(
-                f"Failed to transform json schema into a grammar: {err}"
-            ) from err
+        _validate_xgrammar_json_schema(schema_json)
         return
 
     if so_params.grammar:
