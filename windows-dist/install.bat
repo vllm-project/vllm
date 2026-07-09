@@ -133,15 +133,24 @@ echo.
 set /p "DO_TORCH=Install PyTorch !TORCH_VER! with ROCm? (Y/N) [Y]: "
 if "!DO_TORCH!"=="" set "DO_TORCH=Y"
 if /i "!DO_TORCH!"=="Y" (
-    echo Installing from PyTorch official ROCm repo...
-    pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm!ROCVER! --timeout 120
+    :: Build Python tag for direct wheel URL (e.g. cp312-cp312-win_amd64)
+    for /f "tokens=2 delims= " %%V in ('python --version 2^>nul') do set "PY_FULL=%%V"
+    for /f "tokens=1,2 delims=." %%a in ("!PY_FULL!") do set "PY_TAG=cp%%a%%b"
+    set "WHEEL_TAG=!PY_TAG!-!PY_TAG!-win_amd64"
+
+    echo Installing from AMD repo...
+    pip install torch==!TORCH_VER! torchvision==!TV_VER! --extra-index-url https://repo.amd.com/rocm/whl/gfx120X-all/ --timeout 120
     if ERRORLEVEL 1 (
-        echo Official repo failed. Trying AMD repo...
-        pip install torch==!TORCH_VER! torchvision==!TV_VER! --find-links https://repo.amd.com/rocm/whl/gfx120X-all/torch/ --timeout 120
+        echo AMD index failed. Trying direct wheel download...
+        pip install https://repo.amd.com/rocm/whl/gfx120X-all/torch/torch-!TORCH_VER!-!WHEEL_TAG!.whl --timeout 120
         if ERRORLEVEL 1 (
-            echo PyTorch install failed.
-            pause
-            exit /b 1
+            echo Direct download failed. Trying PyTorch official ROCm repo...
+            pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm!ROCVER! --timeout 120
+            if ERRORLEVEL 1 (
+                echo PyTorch install failed.
+                pause
+                exit /b 1
+            )
         )
     )
     echo PyTorch + ROCm installed.
