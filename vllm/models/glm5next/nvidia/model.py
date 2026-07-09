@@ -293,7 +293,10 @@ class Glm5NextModel(nn.Module):
             )
         else:
         """
-        self.is_v32 = hasattr(config, "index_topk")
+        # `index_topk` is declared on Glm5NextTextConfig with a default of None,
+        # so hasattr() is True even for full-MLA configs (no kpool indexer).
+        # Gate on the value being set instead.
+        self.is_v32 = getattr(config, "index_topk", None) is not None
         if self.is_v32:
             topk_tokens = config.index_topk
             # kpool widens the topk buffer: selecting topk_tokens//kpool pools and
@@ -320,6 +323,9 @@ class Glm5NextModel(nn.Module):
                 dtype=torch.int32,
                 device=self.device,
             )
+        else:
+            # Full-MLA config (no kpool sparse indexer): no topk buffer.
+            topk_indices_buffer = None
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(

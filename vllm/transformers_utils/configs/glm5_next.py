@@ -284,11 +284,28 @@ class Glm5NextConfig(PretrainedConfig):
         # Mirror attention implementation recursively onto sub-configs.
         self._attn_implementation = kwargs.pop("attn_implementation", None)
 
+    # Config-metadata fields that belong to the top-level (multimodal) config
+    # and must NOT be mirrored onto text_config: ``architectures`` /
+    # ``torch_dtype`` differ between the top-level config and the text
+    # sub-config, and mirroring them makes the top-level ``architectures``
+    # silently read back as None (PretrainedConfig initializes both to None),
+    # which then fails model-class resolution ("No model architectures are
+    # specified").
+    _UNMIRRORED_KEYS = [
+        "_name_or_path",
+        "model_type",
+        "dtype",
+        "torch_dtype",
+        "architectures",
+        "_attn_implementation_internal",
+    ]
+
     def __setattr__(self, key, value):
+        unmirrored = type(self)._UNMIRRORED_KEYS
         if (
             (text_config := super().__getattribute__("__dict__").get("text_config"))
             is not None
-            and key not in ["dtype", "_attn_implementation_internal"]
+            and key not in unmirrored
             and key in text_config.__dict__
         ):
             setattr(text_config, key, value)
@@ -296,12 +313,8 @@ class Glm5NextConfig(PretrainedConfig):
             super().__setattr__(key, value)
 
     def __getattribute__(self, key):
-        if "text_config" in super().__getattribute__("__dict__") and key not in [
-            "_name_or_path",
-            "model_type",
-            "dtype",
-            "_attn_implementation_internal",
-        ]:
+        unmirrored = type(self)._UNMIRRORED_KEYS
+        if "text_config" in super().__getattribute__("__dict__") and key not in unmirrored:
             text_config = super().__getattribute__("text_config")
             if key in text_config.__dict__:
                 return getattr(text_config, key)
