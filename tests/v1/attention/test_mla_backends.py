@@ -882,6 +882,59 @@ def test_flashmla_dcp_decode_metadata_uses_gathered_query_heads(
         assert fp8_call is None
 
 
+def test_flashinfer_mla_dcp_spec_decode_keeps_reorder_threshold():
+    builder_cls, _ = try_get_attention_backend(AttentionBackendEnum.FLASHINFER_MLA)
+
+    from vllm.config import SpeculativeConfig
+
+    class _DummyPrefillBackend:
+        def clone(self):
+            return self
+
+    vllm_config = create_vllm_config(
+        model_name="deepseek-ai/DeepSeek-R1",
+        tensor_parallel_size=1,
+        max_model_len=1024,
+        max_num_batched_tokens=512,
+        hf_config_override={
+            "num_attention_heads": 128,
+            "num_key_value_heads": 128,
+            "hidden_size": 7168,
+            "qk_nope_head_dim": 128,
+            "qk_rope_head_dim": 64,
+            "v_head_dim": 128,
+            "kv_lora_rank": 512,
+        },
+    )
+    vllm_config.parallel_config.decode_context_parallel_size = 4
+    vllm_config.speculative_config = SpeculativeConfig(
+        method="ngram", num_speculative_tokens=3
+    )
+    vllm_config.compilation_config.static_forward_context["layer.0"] = SimpleNamespace(
+        prefill_backend=_DummyPrefillBackend()
+    )
+
+    kv_cache_spec = MLAAttentionSpec(
+        block_size=32,
+        num_kv_heads=vllm_config.model_config.get_num_kv_heads(
+            vllm_config.parallel_config
+        ),
+        head_size=vllm_config.model_config.get_head_size(),
+        dtype=vllm_config.model_config.dtype,
+        sliding_window=vllm_config.model_config.get_sliding_window(),
+        cache_dtype_str="fp8",
+    )
+
+    builder = builder_cls(
+        kv_cache_spec,
+        ["layer.0"],
+        vllm_config,
+        torch.device("cpu"),
+    )
+
+    assert builder.reorder_batch_threshold == 4
+
+
 def run_attention_backend(
     backend: AttentionBackendEnum,
     kv_cache_spec: MLAAttentionSpec,

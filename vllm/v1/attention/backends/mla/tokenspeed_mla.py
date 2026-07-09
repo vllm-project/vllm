@@ -23,10 +23,7 @@ from vllm.v1.attention.backend import (
     AttentionType,
     MultipleOf,
 )
-from vllm.v1.attention.backends.utils import (
-    KVCacheLayoutType,
-    get_dcp_local_seq_lens,
-)
+from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -263,9 +260,7 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
         causal_seqs = attn_metadata.decode.dcp_tot_seq_lens
 
         # tokenspeed_mla_decode expects query shape
-        # (num_decodes, q_len_per_request, num_heads, head_dim). Under DCP,
-        # multi-token speculative decode must be split into one-token rows:
-        # local(G-k) is not local(G)-k in interleaved DCP layout.
+        # (num_decodes, q_len_per_request, num_heads, head_dim).
         if num_decode_tokens % num_decodes != 0:
             logger.warning_once(
                 """TokenspeedMLAImpl got a query of uneven length.
@@ -274,33 +269,7 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
             )
             q = q.unsqueeze(1)
         else:
-            tokens_per_req = num_decode_tokens // num_decodes
-            if self.dcp_world_size > 1 and tokens_per_req > 1:
-                assert causal_seqs is not None
-                offsets = torch.arange(
-                    1 - tokens_per_req,
-                    1,
-                    device=causal_seqs.device,
-                    dtype=causal_seqs.dtype,
-                )
-                causal_seqs = (
-                    causal_seqs[:num_decodes].unsqueeze(1) + offsets
-                ).flatten()
-                seq_lens = get_dcp_local_seq_lens(
-                    causal_seqs,
-                    self.dcp_world_size,
-                    self.dcp_rank,
-                    self.cp_kv_cache_interleave_size,
-                )
-                block_tables = (
-                    block_tables[:num_decodes]
-                    .unsqueeze(1)
-                    .expand(-1, tokens_per_req, -1)
-                    .reshape(num_decode_tokens, -1)
-                )
-                q = q.view(num_decode_tokens, 1, q.shape[-2], q.shape[-1])
-            else:
-                q = q.view(num_decodes, -1, q.shape[-2], q.shape[-1])
+            q = q.view(num_decodes, -1, q.shape[-2], q.shape[-1])
 
         if self.softmax_scale is None:
             # FP8 KV cache is mandatory for this backend, so q_scale/k_scale
