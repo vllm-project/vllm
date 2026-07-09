@@ -108,6 +108,13 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         # Scheduler-side mmap (rank=None); kept for cleanup
         self._scheduler_mmap: SharedOffloadRegion | None = None
 
+        # engine_id is unique per DP replica (suffixed with _dp{rank} in both
+        # the Ray and multiprocessing paths), so it names a per-replica offload
+        # region. Non-None is guaranteed by OffloadingSpec.__init__.
+        assert vllm_config.kv_transfer_config is not None
+        assert vllm_config.kv_transfer_config.engine_id is not None
+        self._engine_id: str = vllm_config.kv_transfer_config.engine_id
+
     @override
     def get_manager(self) -> OffloadingManager:
         """
@@ -124,7 +131,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             # Create scheduler-side SharedOffloadRegion (rank=None) so the
             # primary tier can eagerly create a memoryview over _base.
             scheduler_mmap = SharedOffloadRegion(
-                instance_id=self.vllm_config.instance_id,
+                engine_id=self._engine_id,
                 num_blocks=self.num_blocks,
                 rank=None,
                 kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
@@ -189,7 +196,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         rank = torch.accelerator.current_device_index()
         worker_mmap = SharedOffloadRegion(
-            instance_id=self.vllm_config.instance_id,
+            engine_id=self._engine_id,
             num_blocks=self.num_blocks,
             rank=rank,
             kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
