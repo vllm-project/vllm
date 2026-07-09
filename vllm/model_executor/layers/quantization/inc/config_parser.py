@@ -103,7 +103,10 @@ class INCConfigParser:
                 cfg = self._config.extra_config[name]
                 return (
                     cfg.get("bits", self._config.weight_bits if quantized else 16),
-                    cfg.get("group_size", self._config.group_size if quantized else -1),
+                    cfg.get(
+                        "group_size",
+                        self._config.group_size if quantized else -1,
+                    ),
                     cfg.get("sym", self._config.sym if quantized else True),
                 )
 

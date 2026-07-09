@@ -34,10 +34,6 @@ class INCConfig(QuantizationConfig):
     Repo: https://github.com/intel/neural-compressor
     """
 
-    AUTO_ROUND_QUANT_METHODS = {"auto-round", "auto_round"}
-
-    DEFAULT_INT_PACKING_FORMAT = "auto_round:auto_gptq"
-
     MXFP8_BITS = 8
     MXFP8_GROUP_SIZE = 32
     MXFP8_DATA_TYPE = "mx_fp"
@@ -47,7 +43,7 @@ class INCConfig(QuantizationConfig):
     SUPPORTED_BITS = {2, 3, 4, 8}
     SUPPORTED_DTYPES = {"int", "mx_fp"}
     SUPPORTED_FORMATS = {
-        DEFAULT_INT_PACKING_FORMAT,
+        "auto_round:auto_gptq",
         "auto_round:auto_awq",
         MXFP8_PACKING_FORMAT,
     }
@@ -65,7 +61,7 @@ class INCConfig(QuantizationConfig):
         weight_bits: int,
         group_size: int,
         sym: bool = True,
-        packing_format: str = DEFAULT_INT_PACKING_FORMAT,
+        packing_format: str = "auto_round:auto_gptq",
         block_name_to_quantize: str | list[str] | None = None,
         extra_config: dict[str, Any] | None = None,
         data_type: str = "int",
@@ -190,7 +186,7 @@ class INCConfig(QuantizationConfig):
         quant_config = cls(
             weight_bits=cls.get_from_keys(config, ["bits"]),
             group_size=cls.get_from_keys(config, ["group_size"]),
-            sym=cls.get_from_keys_or(config, ["sym"], True),
+            sym=cls.get_from_keys(config, ["sym"]),
             packing_format=cls.get_from_keys_or(
                 config, ["packing_format"], "auto_round:auto_gptq"
             ),
