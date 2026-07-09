@@ -1,8 +1,9 @@
 # AMD CI step definitions for test-template-amd.j2 (ci-infra).
 # Disaggregated P/D SLURM tests only. See .buildkite/amd-disagg/README.md.
 #
-# ci-infra main does not support no_plugin yet; disagg steps inline IMAGE=… and
-# run-amd-test.sh detects run-slurm-disagg-test.sh and runs on the login host.
+# ci-infra main does not support no_plugin yet; disagg steps inline env on the
+# command line and run-amd-test.sh detects run-slurm-disagg-test.sh and runs on
+# the login host. IMAGE is omitted so run-slurm-disagg-test.sh uses its default.
 
 steps:
 
@@ -18,7 +19,7 @@ steps:
   - vllm/platforms/rocm.py
   - .buildkite/amd-disagg/
   commands:
-  - IMAGE=rocm/vllm-ci:$BUILDKITE_COMMIT NODES=2 GPUS_PER_NODE=8 WIDE_EP_MODE=0 RUN_AFTER_HEALTH=accuracy WAIT=1 SLURM_TIME_LIMIT=08:30:00 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
+  - NODES=2 GPUS_PER_NODE=8 WIDE_EP_MODE=0 RUN_AFTER_HEALTH=accuracy WAIT=1 SLURM_TIME_LIMIT=08:30:00 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
 
 - label: "ROCm Disagg P/D 1P1D TP8 (MoRIIO + vllm-router) — SLURM"
   timeout_in_minutes: 480
@@ -30,16 +31,16 @@ steps:
   - vllm/platforms/rocm.py
   - .buildkite/amd-disagg/
   commands:
-  - IMAGE=rocm/vllm-ci:$BUILDKITE_COMMIT NODES=2 GPUS_PER_NODE=8 WIDE_EP_MODE=0 RUN_AFTER_HEALTH=accuracy ROUTER_TYPE=vllm-router WAIT=1 SLURM_TIME_LIMIT=08:30:00 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
+  - NODES=2 GPUS_PER_NODE=8 WIDE_EP_MODE=0 RUN_AFTER_HEALTH=accuracy ROUTER_TYPE=vllm-router WAIT=1 SLURM_TIME_LIMIT=08:30:00 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
 
-- label: "ROCm Disagg P/D 1P1D EP8/DP8 WideEP (MoRIIO + toy proxy) — SLURM"
-  timeout_in_minutes: 480
-  optional: true
-  agent_pool: mi250_8
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  source_file_dependencies:
-  - vllm/distributed/kv_transfer/
-  - vllm/platforms/rocm.py
-  - .buildkite/amd-disagg/
-  commands:
-  - IMAGE=rocm/vllm-ci:$BUILDKITE_COMMIT NODES=2 GPUS_PER_NODE=8 WIDE_EP_MODE=1 RUN_AFTER_HEALTH=accuracy WAIT=1 SLURM_TIME_LIMIT=08:30:00 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
+# - label: "ROCm Disagg P/D 1P1D EP8/DP8 WideEP (MoRIIO + toy proxy) — SLURM"
+#   timeout_in_minutes: 480
+#   optional: true
+#   agent_pool: mi250_8
+#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+#   source_file_dependencies:
+#   - vllm/distributed/kv_transfer/
+#   - vllm/platforms/rocm.py
+#   - .buildkite/amd-disagg/
+#   commands:
+#   - NODES=2 GPUS_PER_NODE=8 WIDE_EP_MODE=1 RUN_AFTER_HEALTH=accuracy WAIT=1 SLURM_TIME_LIMIT=08:30:00 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh

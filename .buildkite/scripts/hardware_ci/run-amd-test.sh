@@ -380,8 +380,8 @@ echo "Final commands: $commands"
 
 # SLURM disagg P/D: run on the login-node agent (sbatch), not inside Docker.
 # ci-infra test-template-amd.j2 wraps commands with rocm-smi and
-# `cd /vllm-workspace/tests` (a container-only path). Extract the disagg
-# command (from IMAGE= onward) and run it from the Buildkite checkout.
+# `cd /vllm-workspace/tests` (a container-only path). Strip the wrapper and run
+# the disagg command from the Buildkite checkout (from IMAGE= or NODES= onward).
 if [[ "$commands" == *run-slurm-disagg-test.sh* ]]; then
   echo "--- SLURM disagg P/D (host execution, no container)"
   checkout="${BUILDKITE_BUILD_CHECKOUT_PATH:-.}"
@@ -389,11 +389,13 @@ if [[ "$commands" == *run-slurm-disagg-test.sh* ]]; then
     echo "Error: BUILDKITE checkout not found: ${checkout}" >&2
     exit 1
   fi
-  if [[ "$commands" != *IMAGE=* ]]; then
-    echo "Error: disagg command missing IMAGE= in VLLM_TEST_COMMANDS" >&2
-    exit 1
+  if [[ "$commands" == *IMAGE=* ]]; then
+    disagg_cmd="IMAGE=${commands#*IMAGE=}"
+  elif [[ "$commands" == *NODES=* ]]; then
+    disagg_cmd="NODES=${commands#*NODES=}"
+  else
+    disagg_cmd="bash .buildkite/amd-disagg/run-slurm-disagg-test.sh"
   fi
-  disagg_cmd="IMAGE=${commands#*IMAGE=}"
   echo "Checkout: ${checkout}"
   echo "Disagg command: ${disagg_cmd}"
   bash -c "cd '${checkout}' && ${disagg_cmd}"
