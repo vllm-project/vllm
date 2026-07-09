@@ -48,10 +48,10 @@ echo.
 set /p "DO_TORCH=Install PyTorch with ROCm? (Y/N) [Y]: "
 if "!DO_TORCH!"=="" set "DO_TORCH=Y"
 if /i "!DO_TORCH!"=="Y" (
-    pip install torch --index-url https://repo.amd.com/rocm/whl/gfx120X-all/ --timeout 120
+    pip install torch --index-url https://download.pytorch.org/whl/rocm7.13 --timeout 120
     if ERRORLEVEL 1 (
-        echo PyTorch install failed. Try manually:
-        echo   pip install torch --index-url https://download.pytorch.org/whl/rocm7.13
+        echo PyTorch install failed.
+        echo Try: pip install torch --index-url https://repo.amd.com/rocm/whl/gfx120X-all/
         pause
         exit /b 1
     )
