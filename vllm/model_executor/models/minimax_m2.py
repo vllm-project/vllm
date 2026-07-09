@@ -34,10 +34,12 @@ from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
+    get_attention_tp_group,
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.distributed.layer_parallel_config import get_layer_parallel_config
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
@@ -156,22 +158,24 @@ class MiniMaxM2Attention(nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        layer_parallel_config = get_layer_parallel_config(self, prefix)
+        attn_tp_size = layer_parallel_config.tp_size or tp_size
+        attn_tp_rank = layer_parallel_config.tp_rank
+        if attn_tp_rank is None:
+            attn_tp_rank = tp_rank
         self.total_num_heads = num_heads
-        assert self.total_num_heads % tp_size == 0
-        self.num_heads = self.total_num_heads // tp_size
+        assert self.total_num_heads % attn_tp_size == 0
         self.total_num_kv_heads = num_kv_heads
-        if self.total_num_kv_heads >= tp_size:
+        if self.total_num_kv_heads >= attn_tp_size:
             # Number of KV heads is greater than TP size, so we partition
             # the KV heads across multiple tensor parallel GPUs.
-            assert self.total_num_kv_heads % tp_size == 0
+            assert self.total_num_kv_heads % attn_tp_size == 0
         else:
             # Number of KV heads is less than TP size, so we replicate
             # the KV heads across multiple tensor parallel GPUs.
-            assert tp_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+            assert attn_tp_size % self.total_num_kv_heads == 0
         self.head_dim = head_dim or (hidden_size // self.total_num_heads)
-        self.q_size = self.num_heads * self.head_dim
-        self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.max_position_embeddings = max_position_embeddings
 
@@ -184,6 +188,10 @@ class MiniMaxM2Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
+        self.num_heads = self.qkv_proj.num_heads_per_rank
+        self.num_kv_heads = self.qkv_proj.num_kv_heads_per_rank
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
 
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
@@ -214,23 +222,32 @@ class MiniMaxM2Attention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
+        attn_tp_group = get_attention_tp_group()
         self.q_norm = MiniMaxText01RMSNormTP(
-            self.head_dim * self.total_num_heads, eps=rms_norm_eps
+            self.head_dim * self.total_num_heads,
+            eps=rms_norm_eps,
+            weight_shard_world_size=attn_tp_size,
+            weight_shard_rank=attn_tp_rank,
+            reduce_group=attn_tp_group,
         )
-        if self.total_num_kv_heads >= tp_size:
+        if self.total_num_kv_heads >= attn_tp_size:
             self.k_norm = MiniMaxText01RMSNormTP(
-                self.head_dim * self.total_num_kv_heads, eps=rms_norm_eps
+                self.head_dim * self.total_num_kv_heads,
+                eps=rms_norm_eps,
+                weight_shard_world_size=attn_tp_size,
+                weight_shard_rank=attn_tp_rank,
+                reduce_group=attn_tp_group,
             )
         else:
             # KV heads are replicated across TP ranks; shard k_norm weight by
             # total_num_kv_heads rather than tp_size to avoid incorrect sharding.
-            num_kv_head_replicas = tp_size // self.total_num_kv_heads
+            num_kv_head_replicas = attn_tp_size // self.total_num_kv_heads
             self.k_norm = MiniMaxText01RMSNormTP(
                 self.head_dim * self.total_num_kv_heads,
                 eps=rms_norm_eps,
                 weight_shard_world_size=self.total_num_kv_heads,
-                weight_shard_rank=get_tensor_model_parallel_rank()
-                // num_kv_head_replicas,
+                weight_shard_rank=attn_tp_rank // num_kv_head_replicas,
+                reduce_group=attn_tp_group,
             )
 
     def forward(
