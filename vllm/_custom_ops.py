@@ -57,7 +57,13 @@ def create_fp4_scale_tensor(
         rounded_m = round_up(m, 128)
         scale_n = n // block_size
         rounded_n = round_up(scale_n, 4)
-        return torch.empty(
+        # Must be zero-initialized: the swizzled scale buffer is padded to
+        # (round_up(m, 128), round_up(scale_n, 4) // 4) but the NVFP4 quant
+        # kernel does not write every padded element that the downstream
+        # NVFP4 GEMM reads. torch.empty leaves those padded scale factors
+        # uninitialized, which corrupts dequantization and causes a severe
+        # Blackwell NVFP4 decode throughput/output-length regression.
+        return torch.zeros(
             (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
         )
     else:
@@ -111,100 +117,6 @@ if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "scaled_fp4_quant"):
 
 
 # page attention ops
-def paged_attention_v1(
-    out: torch.Tensor,
-    query: torch.Tensor,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
-    num_kv_heads: int,
-    scale: float,
-    block_tables: torch.Tensor,
-    seq_lens: torch.Tensor,
-    block_size: int,
-    max_seq_len: int,
-    alibi_slopes: torch.Tensor | None,
-    kv_cache_dtype: str,
-    k_scale: torch.Tensor,
-    v_scale: torch.Tensor,
-    tp_rank: int = 0,
-    blocksparse_local_blocks: int = 0,
-    blocksparse_vert_stride: int = 0,
-    blocksparse_block_size: int = 64,
-    blocksparse_head_sliding_step: int = 0,
-) -> None:
-    torch.ops._C.paged_attention_v1(
-        out,
-        query,
-        key_cache,
-        value_cache,
-        num_kv_heads,
-        scale,
-        block_tables,
-        seq_lens,
-        block_size,
-        max_seq_len,
-        alibi_slopes,
-        kv_cache_dtype,
-        k_scale,
-        v_scale,
-        tp_rank,
-        blocksparse_local_blocks,
-        blocksparse_vert_stride,
-        blocksparse_block_size,
-        blocksparse_head_sliding_step,
-    )
-
-
-def paged_attention_v2(
-    out: torch.Tensor,
-    exp_sum: torch.Tensor,
-    max_logits: torch.Tensor,
-    tmp_out: torch.Tensor,
-    query: torch.Tensor,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
-    num_kv_heads: int,
-    scale: float,
-    block_tables: torch.Tensor,
-    seq_lens: torch.Tensor,
-    block_size: int,
-    max_seq_len: int,
-    alibi_slopes: torch.Tensor | None,
-    kv_cache_dtype: str,
-    k_scale: torch.Tensor,
-    v_scale: torch.Tensor,
-    tp_rank: int = 0,
-    blocksparse_local_blocks: int = 0,
-    blocksparse_vert_stride: int = 0,
-    blocksparse_block_size: int = 64,
-    blocksparse_head_sliding_step: int = 0,
-) -> None:
-    torch.ops._C.paged_attention_v2(
-        out,
-        exp_sum,
-        max_logits,
-        tmp_out,
-        query,
-        key_cache,
-        value_cache,
-        num_kv_heads,
-        scale,
-        block_tables,
-        seq_lens,
-        block_size,
-        max_seq_len,
-        alibi_slopes,
-        kv_cache_dtype,
-        k_scale,
-        v_scale,
-        tp_rank,
-        blocksparse_local_blocks,
-        blocksparse_vert_stride,
-        blocksparse_block_size,
-        blocksparse_head_sliding_step,
-    )
-
-
 def paged_attention_rocm(
     out: torch.Tensor,
     exp_sum: torch.Tensor,
@@ -2332,7 +2244,20 @@ def topk_sigmoid(
     gating_output: torch.Tensor,
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
+    routed_scaling_factor: float = 1.0,
 ) -> None:
+    if current_platform.is_xpu():
+        # xpu doesn't support routed_scaling_factor currently, will revert
+        # in next vllm-xpu-kernels bumpup
+        torch.ops._moe_C.topk_sigmoid(
+            topk_weights,
+            topk_ids,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            e_score_correction_bias,
+        )
+        return
     torch.ops._moe_C.topk_sigmoid(
         topk_weights,
         topk_ids,
@@ -2340,6 +2265,7 @@ def topk_sigmoid(
         gating_output,
         renormalize,
         e_score_correction_bias,
+        routed_scaling_factor,
     )
 
 
@@ -3060,6 +2986,24 @@ if hasattr(torch.ops._C, "fused_experts_cpu"):
         is_vnni: bool,
     ) -> torch.Tensor:
         return torch.empty_like(hidden_states)
+
+
+if hasattr(torch.ops._C, "dynamic_4bit_int_moe"):
+
+    @register_fake("_C::dynamic_4bit_int_moe")
+    def dynamic_4bit_int_moe_fake(
+        x: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        w13_packed: torch.Tensor,
+        w2_packed: torch.Tensor,
+        hidden_size: int,
+        intermediate_size: int,
+        group_size: int,
+        apply_router_weight_on_input: bool,
+        activation_kind: int,
+    ) -> torch.Tensor:
+        return x.new_empty((x.size(0), hidden_size))
 
 
 def fused_experts_cpu(
@@ -3817,20 +3761,6 @@ if hasattr(torch.ops._C, "hadacore_transform"):
     @register_fake("_C::hadacore_transform")
     def _hadacore_transform_fake(x: torch.Tensor, inplace: bool) -> torch.Tensor:
         return torch.empty_like(x) if not inplace else x
-
-
-if hasattr(torch.ops._C, "minimax_allreduce_rms"):
-
-    @register_fake("_C::minimax_allreduce_rms")
-    def _minimax_allreduce_rms_fake(
-        input: torch.Tensor,
-        norm_weight: torch.Tensor,
-        workspace: torch.Tensor,
-        rank: int,
-        nranks: int,
-        eps: float,
-    ) -> torch.Tensor:
-        return torch.empty_like(input)
 
 
 if hasattr(torch.ops._C, "minimax_allreduce_rms_qk"):

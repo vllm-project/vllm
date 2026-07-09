@@ -286,7 +286,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "dynamic_4bit_int_moe("
       "Tensor x, Tensor topk_ids, Tensor topk_weights,"
-      "Tensor w13_packed, Tensor w2_packed, int H, int I, int I2,"
+      "Tensor w13_packed, Tensor w2_packed,"
+      "int hidden_size, int intermediate_size,"
       "int group_size, bool apply_router_weight_on_input, int activation_kind"
       ") -> Tensor");
 
@@ -305,6 +306,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Activation function used in GeGLU with `tanh` approximation.
   ops.def("gelu_tanh_and_mul(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_tanh_and_mul", torch::kCPU, &gelu_tanh_and_mul);
+
+  // GELU tanh implementation.
+  ops.def("gelu_tanh(Tensor! out, Tensor input) -> ()");
+  ops.impl("gelu_tanh", torch::kCPU, &gelu_tanh);
 
   // GELU implementation used in GPT-2.
   ops.def("gelu_new(Tensor! out, Tensor input) -> ()");
