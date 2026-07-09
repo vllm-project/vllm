@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ast
 import json
 
 import pytest
 
 from vllm.tool_parsers.utils import (
+    UnexpectedAstError,
     coerce_to_schema_type,
+    escape_ctrl_chars_in_strings,
     extract_types_from_schema,
+    make_valid_python,
 )
 
 
@@ -279,3 +283,66 @@ class TestExtractTypesFromSchema:
         }
         result = set(extract_types_from_schema(schema))
         assert result == {"integer", "null", "string"}
+
+
+class TestMakeValidPythonStringLiterals:
+    def test_bracket_inside_string_is_literal(self):
+        # A bracket inside a string argument must not be counted as a
+        # structural bracket. Regression: `]` inside the string popped the
+        # bracket stack and the whole call raised as mismatched.
+        text = "[exec(command='grep -F \"]\" log.txt')]"
+        assert make_valid_python(text) == (text, "")
+
+    def test_open_bracket_inside_string_is_literal(self):
+        # An unclosed `[` inside a string must not leave a phantom open
+        # bracket on the stack.
+        text = "[exec(command='grep [abc log.txt')]"
+        assert make_valid_python(text) == (text, "")
+
+    def test_partial_string_with_bracket_completes(self):
+        # Streaming prefix ending mid-string after a literal bracket closes
+        # with quote + paren + bracket.
+        result = make_valid_python('[exec(command=\'grep -F "]" lo')
+        assert result is not None
+        completed, added = result
+        assert added == "')]"
+        assert completed == "[exec(command='grep -F \"]\" lo')]"
+
+    def test_real_mismatched_bracket_still_raises(self):
+        with pytest.raises(UnexpectedAstError):
+            make_valid_python("[exec(command=data])")
+
+    def test_multiline_string_argument_recovers(self):
+        # A raw newline inside a string argument is invalid Python; the
+        # escaped-retry path must recover the call instead of returning None,
+        # and the escaped value must evaluate back to the original.
+        text = "[exec(command='line1\nline2')]"
+        result = make_valid_python(text)
+        assert result is not None
+        completed, added = result
+        assert added == ""
+        module = ast.parse(completed)
+        call = module.body[0].value.elts[0]
+        assert call.keywords[0].value.value == "line1\nline2"
+
+
+class TestEscapeCtrlCharsInStrings:
+    def test_newline_inside_string_escaped(self):
+        assert escape_ctrl_chars_in_strings("f(cmd='a\nb')") == "f(cmd='a\\nb')"
+
+    def test_ctrl_chars_outside_strings_untouched(self):
+        assert escape_ctrl_chars_in_strings("f(a=1,\nb=2)") == "f(a=1,\nb=2)"
+
+    def test_existing_escapes_pass_through(self):
+        text = "f(cmd='a\\nb')"
+        assert escape_ctrl_chars_in_strings(text) == text
+
+    def test_escaped_quote_does_not_close_string(self):
+        assert escape_ctrl_chars_in_strings("f(cmd='a\\'\nb')") == "f(cmd='a\\'\\nb')"
+
+    def test_value_preserved_through_ast(self):
+        # The escaped text parses and evaluates back to the original value.
+        raw = "cat > f.py << EOF\nimport csv\nEOF\techo done"
+        escaped = escape_ctrl_chars_in_strings(f"f(cmd='{raw}')")
+        call = ast.parse(escaped).body[0].value
+        assert call.keywords[0].value.value == raw

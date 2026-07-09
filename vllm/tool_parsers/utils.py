@@ -524,6 +524,48 @@ def handle_single_tool(call: ast.Call) -> ToolCall:
     )
 
 
+def escape_ctrl_chars_in_strings(text: str) -> str:
+    """Escape literal control chars inside string literals of pythonic text.
+
+    Models emitting pythonic tool calls frequently place raw newlines inside a
+    string argument (e.g. ``exec(command='line1\\nline2')`` written with a real
+    line break). That is invalid Python — ``ast.parse`` fails with "unterminated
+    string literal" — so the call would be dropped even though the intent is
+    unambiguous. Escaping ``\\n``/``\\r``/``\\t`` only *inside* string literals
+    makes the text parseable while preserving the argument value exactly
+    (the escape sequences evaluate back to the original control chars).
+
+    Text outside string literals is returned unchanged.
+    """
+    out: list[str] = []
+    quote: str | None = None
+    index, length = 0, len(text)
+    while index < length:
+        char = text[index]
+        if quote is None:
+            if char in {"'", '"'}:
+                quote = char
+            out.append(char)
+        elif char == "\\" and index + 1 < length:
+            out.append(char)
+            out.append(text[index + 1])
+            index += 2
+            continue
+        elif char == quote:
+            quote = None
+            out.append(char)
+        elif char == "\n":
+            out.append("\\n")
+        elif char == "\r":
+            out.append("\\r")
+        elif char == "\t":
+            out.append("\\t")
+        else:
+            out.append(char)
+        index += 1
+    return "".join(out)
+
+
 def make_valid_python(text: str) -> tuple[str, str] | None:
     """Attempt to close all open brackets/quotes to make partial Python valid.
 
@@ -541,6 +583,16 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     """
     bracket_stack: list[str] = []
     for index, char in enumerate(text):
+        # Inside a string literal only an unescaped matching quote is
+        # significant; brackets are literal text. Without this guard a bracket
+        # in a string argument (e.g. `cmd='grep -F "]"'`) corrupts the bracket
+        # stack and the whole tool call is rejected as mismatched.
+        if bracket_stack and bracket_stack[-1] in {"'", '"'}:
+            if char == bracket_stack[-1] and not (
+                index > 0 and text[index - 1] == "\\"
+            ):
+                bracket_stack.pop()
+            continue
         if char in {"[", "(", "{"}:
             bracket_stack.append(char)
         elif char == "]":
@@ -553,15 +605,7 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
             if not bracket_stack or bracket_stack.pop() != "{":
                 raise UnexpectedAstError("Mismatched curly braces")
         elif char in {"'", '"'}:
-            if bracket_stack and bracket_stack[-1] == char:
-                if index > 0 and text[index - 1] == "\\":
-                    pass
-                else:
-                    bracket_stack.pop()
-            elif bracket_stack and bracket_stack[-1] in {"'", '"'}:
-                pass
-            else:
-                bracket_stack.append(char)
+            bracket_stack.append(char)
 
     text = text.rstrip()
     if text.endswith("=") or text.endswith(":"):
@@ -603,11 +647,17 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     #      Python but a *set* literal, which downstream tool-call AST
     #      handling rejects.
     # Validate the candidate parses, has a body, and contains no Set
-    # nodes (pythonic tool calls always use dicts for `{...}`).
+    # nodes (pythonic tool calls always use dicts for `{...}`). A raw
+    # newline inside a string argument is recovered by escaping control
+    # chars in string literals before giving up.
     try:
         module = ast.parse(candidate)
     except SyntaxError:
-        return None
+        candidate = escape_ctrl_chars_in_strings(candidate)
+        try:
+            module = ast.parse(candidate)
+        except SyntaxError:
+            return None
     if not module.body:
         return None
     for node in ast.walk(module):
