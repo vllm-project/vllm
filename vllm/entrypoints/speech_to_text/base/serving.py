@@ -163,7 +163,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
     def _decode_and_chunk_speech(
         self,
         audio_data: bytes,
-    ) -> tuple[list[np.ndarray], float]:
+    ) -> tuple[list[np.ndarray], list[float], float]:
         # Decode audio bytes.  For container formats (MP4, M4A, WebM) that
         # soundfile cannot detect from a BytesIO stream, _load_audio_bytes
         # transparently falls back to ffmpeg via an in-memory fd.
@@ -189,10 +189,11 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         if not do_split_audio:
             chunks = [y]
+            chunk_offsets = [0.0]
         else:
             assert self.asr_config.max_audio_clip_s is not None
             assert self.asr_config.min_energy_split_window_size is not None
-            chunks = split_audio(
+            chunks, chunk_offsets = split_audio(
                 audio_data=y,
                 sample_rate=int(sr),
                 max_clip_duration_s=self.asr_config.max_audio_clip_s,
@@ -200,7 +201,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 min_energy_window_size=self.asr_config.min_energy_split_window_size,
             )
 
-        return chunks, duration
+        return chunks, chunk_offsets, duration
 
     async def _detect_language(
         self,
@@ -258,7 +259,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         request: SpeechToTextRequest,
         audio_data: bytes,
         request_id: str,
-    ) -> tuple[list[EngineInput], float]:
+    ) -> tuple[list[EngineInput], list[float], float]:
         # Validate request
         request.language = self.model_cls.validate_language(request.language)
         request.to_language = (
@@ -275,7 +276,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             )
 
         # Run cpu intensive preprocess step in a separate thread pool executor.
-        chunks, duration = await self._decode_and_chunk_speech_async(audio_data)
+        chunks, chunk_offsets, duration = await self._decode_and_chunk_speech_async(
+            audio_data
+        )
 
         if request.language is None and getattr(
             self.model_cls, "supports_explicit_language_detection", False
@@ -306,7 +309,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         engine_inputs = await self.renderer.render_cmpl_async(parsed_prompts)
 
-        return engine_inputs, duration
+        return engine_inputs, chunk_offsets, duration
 
     def _preprocess_verbose_prompt(self, prompt: EncoderDecoderDictPrompt):
         dec_prompt = prompt["decoder_prompt"]
@@ -467,7 +470,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         lora_request = self._maybe_get_adapters(request)
 
-        engine_inputs, duration_s = await self._preprocess_speech_to_text(
+        engine_inputs, chunk_offsets, duration_s = await self._preprocess_speech_to_text(
             request=request,
             audio_data=audio_data,
             request_id=request_id,
@@ -589,9 +592,11 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 )
             result_generator = merge_async_iterators(*list_result_generator)
             async for idx, op in result_generator:
-                start_time = (
-                    float(idx * chunk_size_in_s) if chunk_size_in_s is not None else 0.0
-                )
+                # Use the real start offset of each chunk within the original
+                # audio. Chunks are split at low-energy points (up to
+                # ``overlap_chunk_second`` earlier than the nominal boundary),
+                # so ``idx * chunk_size_in_s`` drifts from the true offset.
+                start_time = chunk_offsets[idx]
                 if request.response_format == "verbose_json":
                     assert op.outputs[0].logprobs
                     segments: list[SpeechToTextSegment] = self._get_verbose_segments(

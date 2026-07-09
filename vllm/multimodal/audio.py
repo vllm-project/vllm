@@ -328,12 +328,18 @@ def split_audio(
     max_clip_duration_s: float,
     overlap_duration_s: float,
     min_energy_window_size: int,
-) -> list[np.ndarray]:
+) -> tuple[list[np.ndarray], list[float]]:
     """Split audio into chunks with intelligent split points.
 
     Splits long audio into smaller chunks at low-energy regions to minimize
     cutting through speech. Uses overlapping windows to find quiet moments
     for splitting.
+
+    The split points are chosen dynamically (at the quietest point within a
+    search window), so a chunk's actual start in the original audio is not
+    always ``index * max_clip_duration_s``. Callers that report
+    chunk-relative timestamps (e.g. segment timestamps) must use the returned
+    per-chunk offsets rather than assuming evenly spaced chunks.
 
     Args:
         audio_data: Audio array to split. Can be 1D (mono) or multi-dimensional.
@@ -345,12 +351,14 @@ def split_audio(
         min_energy_window_size: Window size in samples for finding low-energy regions.
 
     Returns:
-        List of audio chunks. Each chunk is a numpy array with the same shape
-        as the input except for the last (time) dimension.
+        A tuple of ``(chunks, offsets)``. ``chunks`` is a list of audio chunks,
+        each a numpy array with the same shape as the input except for the last
+        (time) dimension. ``offsets`` is a list of the same length giving the
+        start time (in seconds) of each chunk within the original audio.
 
     Example:
         >>> audio = np.random.randn(1040000)  # 65 seconds at 16kHz
-        >>> chunks = split_audio(
+        >>> chunks, offsets = split_audio(
         ...     audio_data=audio,
         ...     sample_rate=16000,
         ...     max_clip_duration_s=30.0,
@@ -359,16 +367,20 @@ def split_audio(
         ... )
         >>> len(chunks)
         3
+        >>> offsets[0]
+        0.0
     """
     chunk_size = int(sample_rate * max_clip_duration_s)
     overlap_size = int(sample_rate * overlap_duration_s)
     chunks = []
+    offsets: list[float] = []
     i = 0
 
     while i < audio_data.shape[-1]:
         if i + chunk_size >= audio_data.shape[-1]:
             # Handle last chunk - take everything remaining
             chunks.append(audio_data[..., i:])
+            offsets.append(i / sample_rate)
             break
 
         # Find the best split point in the overlap region
@@ -385,9 +397,10 @@ def split_audio(
 
         # Extract chunk up to the split point
         chunks.append(audio_data[..., i:split_point])
+        offsets.append(i / sample_rate)
         i = split_point
 
-    return chunks
+    return chunks, offsets
 
 
 def find_split_point(
