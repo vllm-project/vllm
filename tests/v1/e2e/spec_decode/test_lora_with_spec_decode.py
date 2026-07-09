@@ -8,6 +8,7 @@ This script contains:
 import pytest
 import torch
 
+import vllm.envs as envs
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.request import LoRARequest
@@ -59,7 +60,9 @@ def test_batch_inference_correctness(
     model_setup: (method, model_name, spec_model_name, lora_path, tp_size)
     """
     with monkeypatch.context() as m:
-        # Disable randomness
+        m.setenv("VLLM_BATCH_INVARIANT", "1")
+        m.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+
         m.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         set_random_seed(SEED)
         torch.backends.cudnn.benchmark = False
