@@ -134,9 +134,16 @@ class PLessLogitsProcessor(LogitsProcessor):
     The order generalizes the threshold to the family of Renyi entropies
     (Appendix B.5 of the paper): for an order ``k`` the threshold is
     ``(sum_v p(v) ** k) ** (1 / (k - 1))``. Order 2 recovers the squared-sum
-    threshold and is the validated default; larger orders behave more like
-    greedy decoding while orders closer to 1 admit more of the tail. Any order
+    threshold and is the validated default. The threshold rises with the order,
+    so increasing the order keeps fewer tokens and pushes the output toward
+    greedy decoding, while lowering the order toward 1 lowers the threshold and
+    admits more of the tail for more diverse and creative output. Any order
     greater than 1 keeps the modal token and so stays argmax invariant.
+
+    The threshold is evaluated in a scale-stable form ``max_p ** (k / (k - 1))
+    * (sum_v (p(v) / max_p) ** k) ** (1 / (k - 1))`` so that large orders do not
+    underflow ``p(v) ** k`` to zero, which matches the log-space form used by
+    the V2 Triton kernel across the whole range of orders.
 
     A per-request order of ``0`` means p-less is disabled for that request. The
     columns of the order tensor are broadcast over the vocabulary, so disabled
@@ -234,10 +241,14 @@ class PLessLogitsProcessor(LogitsProcessor):
         # Convert logits to a probability distribution.
         probs = torch.nn.functional.softmax(logits, dim=-1)
         # Generalized p-less threshold (sum_v p(v) ** k) ** (1 / (k - 1)), one
-        # value per sequence. Disabled rows carry order 0; their threshold is
-        # meaningless but gets masked out below, so no branch is needed.
-        moment = probs.pow(self.order).sum(dim=-1, keepdim=True)
-        threshold = moment.pow(1.0 / (self.order - 1.0))
+        # value per sequence, factored through the modal probability so that
+        # (p / max_p) ** k stays in [0, 1] and does not underflow for large
+        # orders. Disabled rows carry order 0; their threshold is meaningless
+        # but gets masked out below, so no branch is needed.
+        max_p = probs.amax(dim=-1, keepdim=True)
+        inv = 1.0 / (self.order - 1.0)
+        ratio_moment = probs.div(max_p).pow(self.order).sum(dim=-1, keepdim=True)
+        threshold = max_p.pow(self.order * inv) * ratio_moment.pow(inv)
         # Tokens below the threshold are truncated, but only for requests that
         # enabled p-less (order != 0).
         invalid_token_mask = (probs < threshold) & (self.order != 0.0)

@@ -259,8 +259,10 @@ class SamplingParams(
     entropies. Only used when p_less is True. The threshold is
     (sum_v p(v) ** k) ** (1 / (k - 1)) for order k, so the default of 2
     reproduces the squared-sum threshold from the paper. Must be greater than
-    1. Larger values truncate more aggressively toward greedy decoding, while
-    values closer to 1 admit more of the distribution tail."""
+    1. The threshold rises with the order, so increasing this value raises the
+    truncation threshold and keeps fewer tokens (closer to greedy decoding),
+    while lowering it toward 1 lowers the threshold and admits more of the
+    distribution tail for more diverse, creative output."""
     seed: int | None = None
     """Random seed to use for the generation."""
     stop: str | list[str] | None = None

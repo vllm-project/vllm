@@ -1,0 +1,32 @@
+## Purpose
+
+This pull request adds p-less sampling to vLLM as a builtin, hyperparameter-free truncation strategy. p-less was published as a conference paper at ICLR 2026 (Tan, Wu, and Howard, "p-less Sampling: A Robust Hyperparameter-Free Approach for LLM Decoding", https://arxiv.org/abs/2509.23234). At every decoding step it truncates the temperature-scaled distribution using a threshold computed from the whole distribution rather than from a single tunable cutoff. With the default order of two, the threshold is the sum of the squared token probabilities, which is the probability that an independent draw from the model matches the sampled token, and equivalently the exponential of the negative Renyi entropy of order two. Tokens whose probability is at least this threshold are kept and the rest are removed before sampling.
+
+The motivation is that the current min_p, which I helped introduce as one of its authors, is only partially distribution aware. min_p sets its cutoff from a single statistic, the modal probability, multiplied by a fractional hyperparameter that the user has to pick. Because that cutoff ignores the shape of the rest of the distribution, its best value drifts with the task and especially with temperature, so a setting that works well at temperature one degrades badly as temperature rises. p-less instead reads the entire probability vector every step, so the truncation tightens on peaked distributions and relaxes on flat ones with nothing to tune, and it stays well behaved as temperature grows. The paper reports that p-less holds accuracy across temperatures from 0.5 to 2.0 on math and reasoning benchmarks and wins creative writing comparisons in regimes where min_p, top_p, and the entropy based methods fall off. Because the modal token is provably at or above the threshold, p-less is argmax invariant and always leaves a non-empty candidate set, and it needs no default fallback for the empty-set edge case.
+
+This continues the direction started by the top-n-sigma logits processor in #45034, another fully distribution aware sampler, and it promotes the fully distribution aware option to a first-class sampling parameter alongside min_p rather than an example plugin. My hope is that p-less can serve as a drop-in default for users who currently reach for min_p and then struggle to retune it whenever they change temperature or task.
+
+The change adds a `p_less` boolean to `SamplingParams` and to the OpenAI completion and chat protocols. Because p-less generalizes to the family of Renyi entropies (Appendix B.5 of the paper), it also exposes an optional `p_less_order` float that defaults to two and reproduces the squared-sum threshold from the paper. For an order k the threshold is the sum of p to the power k, raised to the power one over k minus one, and it rises with k. Increasing `p_less_order` therefore raises the truncation threshold and keeps fewer tokens, moving the output toward greedy decoding, while lowering the order toward one reduces the threshold and admits more of the tail for more diverse and creative output. This is the direction reported in Appendix B.5, where the order-k threshold approaches the modal probability as k grows and the uniform value as k approaches zero. I confirmed it numerically on a peaked distribution over a 2000 token vocabulary, where order 1.1 kept 51 tokens, order 2 kept 9, and order 10 kept 2. Any order above one keeps the modal token, so the method remains argmax invariant. The threshold is computed in a scale-stable form factored through the modal probability so that large orders do not underflow, which keeps the default sampler in agreement with the V2 Triton kernel across the whole range of orders. p-less runs after temperature scaling as an argmax-invariant logits processor in the default sampler, and it has a matching Triton kernel in the V2 GPU sampler so the two sampling paths stay at parity with min_p. As with min_p, p-less is not yet wired into speculative decoding or diffusion models, and those combinations are rejected during validation.
+
+## Test Plan
+
+The new file `tests/v1/sample/test_p_less.py` pins the numeric behavior on CPU so it needs no accelerator. It builds the processor over a mixed batch, drives it through a batch update, and checks the masked logits against the closed-form threshold for order two and order three, that a disabled request is left untouched, that the modal token always survives while a near-uniform tail is removed, and that orders at or below one are rejected at validation time. The p-less case was also added to the shared logits-processor correctness harness in `tests/v1/logits_processors/test_correctness.py` so it is exercised alongside min_p, logit bias, and min tokens across the batching, moving, and swapping paths.
+
+Run the focused tests with `pytest tests/v1/sample/test_p_less.py` and the shared harness with `pytest tests/v1/logits_processors/test_correctness.py`.
+
+## Test Result
+
+I validated the core math with a standalone script that replicates the processor computation. It confirms that the masked output matches the closed-form order-k threshold for orders two and three, that disabled rows are left untouched with no NaN produced by the order-zero path, and that the modal token is always retained. The same script confirms that the probability-space threshold used by the default sampler and the log-space threshold used by the Triton kernel produce identical keep-or-mask decisions for orders 1.6, two, and three, which shows the two code paths agree. All changed files pass `ruff format` and `ruff check`.
+
+This is opened as a draft because I have not yet been able to run the full pytest suites or the V2 Triton path on a GPU. I would welcome a maintainer running the suites above on hardware to confirm the accelerator path before this is marked ready for review.
+
+---
+
+<details>
+<summary> Essential Elements of an Effective PR Description Checklist </summary>
+
+- [x] The purpose of the PR, such as "Fix some issue (link existing issues this PR will resolve)".
+- [x] The test plan, such as providing test command.
+- [x] The test results, such as pasting the results comparison before and after, or e2e results
+- [x] (Optional) The necessary documentation update. The new sampling parameters render into the OpenAI server docs through the existing protocol snippet markers and the SamplingParams field docstrings.
+</details>
