@@ -407,6 +407,20 @@ class FreeKVCacheBlockQueue:
             curr_block = curr_block.next_free_block
         return ret
 
+    def iter_blocks_after(
+        self,
+        cursor: KVCacheBlock | None,
+    ) -> Iterator[KVCacheBlock]:
+        """Iterate free blocks in eviction order after the cursor."""
+        if cursor is None:
+            curr_block = self.fake_free_list_head.next_free_block
+        else:
+            curr_block = cursor.next_free_block
+
+        while curr_block is not None and curr_block is not self.fake_free_list_tail:
+            yield curr_block
+            curr_block = curr_block.next_free_block
+
 
 def need_extra_keys(request: Request) -> bool:
     """Check whether the blocks allocated to this request need extra hash keys.
@@ -1051,11 +1065,12 @@ def unify_kv_cache_spec_page_size(
 ) -> dict[str, KVCacheSpec]:
     """
     Unify the page size of the given KVCacheSpec. If the page size of all layers
-    are the same, return the original KVCacheSpec. If not same, first try to
-    unify page size by increasing the block size of layers with smaller page
-    size. If a smaller attention page does not evenly divide the maximum page
-    size, keep its logical block size and pad its physical page instead --- but
-    only for attention layers whose backend opts in via
+    are the same, return the original KVCacheSpec. If not same, unify the page
+    size by increasing the block size of layers with smaller page size. Two
+    cases cannot be unified by block size alone and pad their physical page to
+    the maximum instead: Mamba layers, whose page size comes from state shapes
+    and is independent of block size; and attention layers whose page does not
+    evenly divide the maximum and whose backend opts in via
     ``AttentionSpec.indexes_kv_by_block_stride`` (the padded page is read through
     a strided view, which not every backend handles). Raise NotImplementedError
     if failed to unify the page size.
@@ -1076,6 +1091,16 @@ def unify_kv_cache_spec_page_size(
     for layer_name, layer_spec in kv_cache_spec.items():
         if layer_spec.page_size_bytes == max_page_size:
             new_kv_cache_spec[layer_name] = layer_spec
+        elif isinstance(layer_spec, MambaSpec):
+            # MambaSpec's page size is determined by its state shapes and does
+            # not scale with block_size, so pad the page instead. This is the
+            # same padding mechanism the platform uses to align Mamba pages
+            # with the main model's attention page size; it is needed here
+            # when another layer (e.g. from a draft model) has a larger page
+            # than the already-aligned Mamba page.
+            new_spec: KVCacheSpec = replace(layer_spec, page_size_padded=max_page_size)
+            assert new_spec.page_size_bytes == max_page_size
+            new_kv_cache_spec[layer_name] = new_spec
         else:
             layer_page_size = layer_spec.page_size_bytes
             if max_page_size % layer_page_size == 0:
@@ -1310,9 +1335,6 @@ def _get_kv_cache_config_packed(
             byte_offset += ps
 
     return num_blocks, kv_cache_tensors
-
-
-_get_kv_cache_config_deepseek_v4 = _get_kv_cache_config_packed
 
 
 def get_kv_cache_config_from_groups(
