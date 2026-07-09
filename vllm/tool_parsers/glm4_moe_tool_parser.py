@@ -319,6 +319,10 @@ class Glm4MoeModelToolParser(ToolParser):
         name = inner_text[:cut].strip()
         return name if name else None
 
+    def _extract_complete_zero_arg_tool_name(self, inner_text: str) -> str | None:
+        """Extract a completed zero-argument tool name, if supported."""
+        return None
+
     def _build_args_json_so_far(
         self,
         tool_name: str,
@@ -450,6 +454,8 @@ class Glm4MoeModelToolParser(ToolParser):
 
             # Extract tool name
             tool_name = self._extract_tool_name_from_region(inner_text)
+            if not tool_name and is_complete:
+                tool_name = self._extract_complete_zero_arg_tool_name(inner_text)
             if not tool_name:
                 break
 

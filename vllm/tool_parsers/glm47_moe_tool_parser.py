@@ -38,3 +38,9 @@ class Glm47MoeModelToolParser(Glm4MoeModelToolParser):
             r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>",
             re.DOTALL,
         )
+
+    def _extract_complete_zero_arg_tool_name(self, inner_text: str) -> str | None:
+        name = inner_text.strip()
+        if not name or "<" in name or ">" in name:
+            return None
+        return name

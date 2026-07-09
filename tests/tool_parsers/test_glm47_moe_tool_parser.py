@@ -149,6 +149,51 @@ class TestGlm47Streaming:
             )
         assert len(glm47_tool_parser.prev_tool_call_arr) >= 1
 
+    def test_completed_zero_arg_call_returns_delta_tool_calls(
+        self, glm47_tool_parser, mock_request
+    ):
+        _reset(glm47_tool_parser)
+        text = "<tool_call>get_current_date</tool_call>"
+
+        delta = glm47_tool_parser.extract_tool_calls_streaming(
+            previous_text="",
+            current_text=text,
+            delta_text=text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=mock_request,
+        )
+
+        assert delta is not None
+        assert delta.content is None
+        assert delta.tool_calls is not None
+        assert delta.tool_calls[0].index == 0
+        assert delta.tool_calls[0].function is not None
+        assert delta.tool_calls[0].function.name == "get_current_date"
+        assert delta.tool_calls[0].function.arguments == ""
+        assert delta.tool_calls[1].index == 0
+        assert delta.tool_calls[1].function is not None
+        assert delta.tool_calls[1].function.arguments == "{}"
+
+    def test_incomplete_zero_arg_call_does_not_return_tool_name(
+        self, glm47_tool_parser, mock_request
+    ):
+        _reset(glm47_tool_parser)
+        text = "<tool_call>get_current_date"
+
+        delta = glm47_tool_parser.extract_tool_calls_streaming(
+            previous_text="",
+            current_text=text,
+            delta_text=text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=mock_request,
+        )
+
+        assert delta is None
+
     def test_with_args(self, glm47_tool_parser, mock_request):
         _reset(glm47_tool_parser)
         chunks = [
