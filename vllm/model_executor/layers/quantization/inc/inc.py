@@ -34,18 +34,12 @@ class INCConfig(QuantizationConfig):
     Repo: https://github.com/intel/neural-compressor
     """
 
-    MXFP8_BITS = 8
-    MXFP8_GROUP_SIZE = 32
-    MXFP8_DATA_TYPE = "mx_fp"
-    MXFP8_PACKING_FORMAT = "auto_round:llm_compressor"
-    MXFP8_SUPPORTED_ACT_DTYPES = {"mx_fp", "mx_fp_rceil"}
-
     SUPPORTED_BITS = {2, 3, 4, 8}
     SUPPORTED_DTYPES = {"int", "mx_fp"}
     SUPPORTED_FORMATS = {
         "auto_round:auto_gptq",
         "auto_round:auto_awq",
-        MXFP8_PACKING_FORMAT,
+        "auto_round:llm_compressor",
     }
     SUPPORTED_BACKENDS = {
         "auto",
@@ -55,6 +49,11 @@ class INCConfig(QuantizationConfig):
         "awq:marlin",
         "marlin",
     }
+    MXFP8_BITS = 8
+    MXFP8_GROUP_SIZE = 32
+    MXFP8_DATA_TYPE = "mx_fp"
+    MXFP8_PACKING_FORMAT = "auto_round:llm_compressor"
+    MXFP8_SUPPORTED_ACT_DTYPES = {"mx_fp", "mx_fp_rceil"}
 
     def __init__(
         self,
@@ -68,7 +67,6 @@ class INCConfig(QuantizationConfig):
         backend: str = "auto",
     ) -> None:
         super().__init__()
-
         if weight_bits not in self.SUPPORTED_BITS:
             raise ValueError(
                 f"Unsupported weight_bits: {weight_bits}, "
