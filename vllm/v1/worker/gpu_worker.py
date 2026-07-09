@@ -75,6 +75,10 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.worker.startup_plan import (
+    maybe_apply_startup_plan,
+    maybe_save_startup_plan,
+)
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -439,6 +443,8 @@ class Worker(WorkerBase):
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
+        maybe_apply_startup_plan(self)
+
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
@@ -723,6 +729,11 @@ class Worker(WorkerBase):
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
         warmup_sizes: list[int] = []
+        cg_capture_sizes: list[int] = []
+
+        if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            cg_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
+            cg_capture_sizes = [] if cg_sizes is None else cg_sizes
 
         if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
             # warm up sizes that are not in cudagraph capture sizes,
@@ -730,11 +741,8 @@ class Worker(WorkerBase):
             # e.g. for the max-num-batched token size in chunked prefill.
             compile_sizes = self.vllm_config.compilation_config.compile_sizes
             warmup_sizes = compile_sizes.copy() if compile_sizes is not None else []  # type: ignore[assignment]
-            cg_capture_sizes: list[int] = []
 
             if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-                cg_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
-                cg_capture_sizes = [] if cg_sizes is None else cg_sizes
                 warmup_sizes = [x for x in warmup_sizes if x not in cg_capture_sizes]
 
             compile_ranges = self.vllm_config.compilation_config.get_compile_ranges()
@@ -746,6 +754,23 @@ class Worker(WorkerBase):
             for compile_range in compile_ranges:
                 if not any(x in compile_range for x in all_sizes):
                     warmup_sizes.append(compile_range.end)
+
+        # TODO(LucasWilkinson, akaratza): Remove when MRV1 is deprecated
+        if (
+            current_platform.is_rocm()
+            and not self.use_v2_model_runner
+            and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            and get_pp_group().is_last_rank
+        ):
+            max_num_reqs = min(
+                self.scheduler_config.max_num_seqs,
+                self.scheduler_config.max_num_batched_tokens,
+            )
+            if (
+                max_num_reqs not in cg_capture_sizes
+                and max_num_reqs not in warmup_sizes
+            ):
+                warmup_sizes.append(max_num_reqs)
 
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):
@@ -833,6 +858,8 @@ class Worker(WorkerBase):
             )
 
             logger.info(msg)
+
+            maybe_save_startup_plan(self, kv_cache_memory_bytes_to_requested_limit)
 
         if self.use_v2_model_runner:
             # V2: Run full execute_model + sample_tokens to JIT compile triton kernels.
