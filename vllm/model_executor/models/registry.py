@@ -731,8 +731,8 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "TarsierForConditionalGeneration": "0.24.0",
     "Tarsier2ForConditionalGeneration": "0.23.0",  # last version with Transformers v4
     "MantisForConditionalGeneration": "0.24.0",
-    "PersimmonForCausalLM": "0.24.0",
-    "FuyuForCausalLM": "0.24.0",
+    "PersimmonForCausalLM": "0.25.0",
+    "FuyuForCausalLM": "0.25.0",
 }
 
 _OOT_SUPPORTED_MODELS = {
