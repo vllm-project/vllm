@@ -31,17 +31,26 @@ Drop it in and skip the 80s build + Visual Studio + ROCm toolchain.
 ```powershell
 # 1. Install prerequisites
 winget install Python.Python.3.12 Git.Git
+
+# 2. Create and activate virtual environment
+python -m venv .venv
+.venv\Scripts\activate
+
+# 3. Install PyTorch with ROCm (inside the venv)
 pip install torch --index-url https://repo.amd.com/rocm/whl/gfx120X-all/
 
-# 2. Get vLLM Windows port
+# 4. Get vLLM Windows port
 git clone https://github.com/Maxritz/vllm-windows.git
 cd vllm-windows
 git checkout WINDOWS-PORT
 
-# 3. Extract this zip into the repo, then run the installer
+# 5. Install vLLM Python source in the venv
+pip install -e .
+
+# 6. Extract this zip into the repo, then run the installer
 setup.bat
 
-# 4. Run a model
+# 7. Run a model
 $env:HIP_PATH = "C:\Program Files\AMD\ROCm\7.13"
 python -m vllm.entrypoints.openai.api_server --model F:\VLLM-Models\Qwen2.5-3B-Instruct --enforce-eager
 ```
