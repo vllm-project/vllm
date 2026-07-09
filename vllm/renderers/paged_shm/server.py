@@ -120,7 +120,7 @@ def zmq_server(size: int, block_size: int, conn, stop_event: Event):
         conn.close()
 
         # Command dispatcher: {command_bytes: (handler, requires_payload)}
-        handlers = {
+        handlers: dict[bytes, tuple[Callable, bool]] = {
             b"open_write": (server.open_write, True),
             b"close_write": (server.close_write, True),
             b"open_read": (server.open_read, True),
@@ -192,7 +192,6 @@ def zmq_server(size: int, block_size: int, conn, stop_event: Event):
                 _send_response(socket, response_frames)
                 continue
 
-            handler: Callable
             handler, requires_payload = handler_info
             try:
                 if requires_payload:
