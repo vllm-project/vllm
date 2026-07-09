@@ -14,8 +14,16 @@ set "DEF_DIR=E:\VLLM"
 set /p "INSTALL_DIR=Install folder [%DEF_DIR%]: "
 if "!INSTALL_DIR!"=="" set "INSTALL_DIR=%DEF_DIR%"
 :: Validate full path like E:\...
-echo !INSTALL_DIR! | findstr /r "^[A-Za-z]:\\" >nul
-if ERRORLEVEL 1 goto :ask_path
+echo !INSTALL_DIR! | findstr /r "^[A-Za-z]:" >nul 2>nul
+if not ERRORLEVEL 1 if EXIST "!INSTALL_DIR!" goto :path_ok
+if not ERRORLEVEL 1 (
+    rem Has drive letter - check parent exists
+    for %%I in ("!INSTALL_DIR!") do set "PARENT=%%~dpI"
+    if EXIST "!PARENT!" goto :path_ok
+)
+echo   Enter a valid path like E:\VLLM or C:\vllm
+goto :ask_path
+:path_ok
 if not EXIST "!INSTALL_DIR!" mkdir "!INSTALL_DIR!"
 cd /d "!INSTALL_DIR!"
 echo Installed to: !INSTALL_DIR!
