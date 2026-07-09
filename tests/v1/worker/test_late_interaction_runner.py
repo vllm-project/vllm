@@ -23,11 +23,17 @@ def _make_pooling_params(
     )
 
 
+def _make_emb(rows, dim=32):
+    """Create a deterministic embedding tensor with realistic dimensions."""
+    gen = torch.Generator().manual_seed(rows * 1000 + dim)
+    return torch.randn(rows, dim, dtype=torch.float32, generator=gen)
+
+
 def test_postprocess_scores_and_releases_query_cache():
     runner = LateInteractionRunner()
     query_key = "query-0"
-    query_emb = torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32)
-    doc_emb = torch.tensor([[1.0, 0.0], [0.5, 0.5], [0.0, 1.0]], dtype=torch.float32)
+    query_emb = _make_emb(8)
+    doc_emb = _make_emb(12)
 
     query_params = _make_pooling_params(
         build_late_interaction_query_params(query_key=query_key, query_uses=1)
@@ -67,9 +73,9 @@ def test_postprocess_scores_and_releases_query_cache():
 def test_postprocess_scores_docs_in_batch():
     runner = LateInteractionRunner()
     query_key = "query-batch"
-    query_emb = torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32)
-    doc_emb_1 = torch.tensor([[1.0, 0.0], [0.5, 0.5]], dtype=torch.float32)
-    doc_emb_2 = torch.tensor([[0.0, 1.0], [0.3, 0.7], [1.0, 0.0]], dtype=torch.float32)
+    query_emb = _make_emb(8)
+    doc_emb_1 = _make_emb(10)
+    doc_emb_2 = _make_emb(14)
 
     query_params = _make_pooling_params(
         build_late_interaction_query_params(query_key=query_key, query_uses=2)
@@ -108,8 +114,8 @@ def test_postprocess_scores_docs_in_batch():
 def test_finished_request_releases_unscored_doc_use():
     runner = LateInteractionRunner()
     query_key = "query-cancel"
-    query_emb = torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32)
-    doc_emb = torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32)
+    query_emb = _make_emb(8)
+    doc_emb = _make_emb(10)
 
     query_params = _make_pooling_params(
         build_late_interaction_query_params(query_key=query_key, query_uses=1)
@@ -147,7 +153,7 @@ def test_invalid_query_uses_raises():
 
     with pytest.raises(ValueError, match="must be an integer value"):
         runner.postprocess_pooler_output(
-            raw_pooler_output=[torch.ones((2, 2), dtype=torch.float32)],
+            raw_pooler_output=[_make_emb(8)],
             pooling_params=[bad_query_params],
             req_ids=["query-req"],
             finished_mask=[True],
