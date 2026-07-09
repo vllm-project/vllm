@@ -243,6 +243,9 @@ def _make_metadata_with_slice(
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
         seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+        req_state_indices_cpu=attn_metadata.req_state_indices_cpu[request_slice]
+        if attn_metadata.req_state_indices_cpu is not None
+        else None,
         _seq_lens_cpu=seq_lens_cpu,
         _num_computed_tokens_cpu=num_computed_tokens_cpu,
     )

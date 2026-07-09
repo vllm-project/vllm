@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 from math import prod
 from typing import Any, cast
 
+import numpy as np
 import torch
 
 from vllm.config import (
@@ -571,6 +572,7 @@ def build_attn_metadata(
     dcp_local_seq_lens: torch.Tensor | None = None,
     positions: torch.Tensor | None = None,
     mm_req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None,
+    req_state_indices_cpu: np.ndarray | None = None,
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
     causal: bool | Mapping[int, bool] = True,
@@ -611,6 +613,7 @@ def build_attn_metadata(
             positions=positions,
             mm_req_doc_ranges=mm_req_doc_ranges,
             rswa_prefix_lens=rswa_prefix_lens,
+            req_state_indices_cpu=req_state_indices_cpu,
             **common_attn_metadata_extra_kwargs,
         )
 
