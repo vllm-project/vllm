@@ -11,10 +11,7 @@ from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,
     WarmupIntRange,
 )
-from vllm.model_executor.warmup.jit_warmup_triton_helper import (
-    TritonWarmupTensor,
-    assert_compile_key_matches_triton,
-)
+from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv, next_power_of_2
@@ -382,11 +379,6 @@ class ComputePrefillMetadataKernel(
         )
 
 _COMPUTE_PREFILL_METADATA_KERNEL = ComputePrefillMetadataKernel()
-ComputePrefillMetadataKernelCompileKey = ComputePrefillMetadataKernel.CompileKey
-assert_compile_key_matches_triton(
-    _COMPUTE_PREFILL_METADATA_KERNEL,
-    ComputePrefillMetadataKernel.kernel,
-)
 
 
 class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):

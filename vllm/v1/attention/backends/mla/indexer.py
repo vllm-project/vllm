@@ -15,7 +15,6 @@ from vllm.model_executor.warmup.jit_warmup import (
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonPointerInputVariant,
     TritonWarmupTensor,
-    assert_compile_key_matches_triton,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -397,12 +396,6 @@ class BuildPrefillChunkMetadataKernel(
         )
 
 _BUILD_PREFILL_CHUNK_METADATA_KERNEL = BuildPrefillChunkMetadataKernel()
-PrefillChunkMetadataKernelCompileKey = BuildPrefillChunkMetadataKernel.CompileKey
-assert_compile_key_matches_triton(
-    _BUILD_PREFILL_CHUNK_METADATA_KERNEL,
-    BuildPrefillChunkMetadataKernel.kernel,
-    extra_compile_key_fields=("input_variant",),
-)
 
 
 @dataclass

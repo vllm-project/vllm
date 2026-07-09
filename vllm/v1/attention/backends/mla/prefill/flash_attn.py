@@ -273,7 +273,6 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
 
 
 FA4_MLA_PREFILL_KERNEL = FA4MLAPrefillKernel()
-FA4MLAPrefillCompileKey = FA4MLAPrefillKernel.CompileKey
 
 
 class FlashAttnPrefillBackend(MLAPrefillBackend):

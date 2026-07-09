@@ -82,6 +82,26 @@ _CMP_OPS: dict[type[ast.cmpop], Callable[[Any, Any], bool]] = {
     ast.GtE: operator.ge,
 }
 
+_SUPPORTED_DISPATCH_EXPRESSION_HELP = (
+    "Supported dispatch expressions are names, constants, attributes, "
+    "tuple/list literals, conditional expressions, comparisons, boolean "
+    "operators, unary not/minus, arithmetic, and calls without **kwargs."
+)
+
+
+def _dispatch_expr_source(node: ast.AST) -> str:
+    try:
+        return ast.unparse(node)
+    except Exception:
+        return ast.dump(node)
+
+
+def _dispatch_expr_error(node: ast.AST, reason: str) -> ValueError:
+    return ValueError(
+        f"{reason}: {_dispatch_expr_source(node)}. "
+        f"{_SUPPORTED_DISPATCH_EXPRESSION_HELP}"
+    )
+
 
 def get_ast_full_name(node: ast.AST) -> str | None:
     if isinstance(node, ast.Name):
@@ -132,14 +152,21 @@ def _eval_dispatch_expr(
         return [_eval_dispatch_expr(elt, kwargs, globals_) for elt in node.elts]
 
     if isinstance(node, ast.BoolOp):
-        values = (
-            _eval_dispatch_expr(value, kwargs, globals_) for value in node.values
-        )
         if isinstance(node.op, ast.And):
-            return all(values)
+            result = None
+            for value in node.values:
+                result = _eval_dispatch_expr(value, kwargs, globals_)
+                if not result:
+                    return result
+            return result
         if isinstance(node.op, ast.Or):
-            return any(values)
-        raise ValueError(f"Unsupported dispatch boolean op: {ast.dump(node.op)}")
+            result = None
+            for value in node.values:
+                result = _eval_dispatch_expr(value, kwargs, globals_)
+                if result:
+                    return result
+            return result
+        raise _dispatch_expr_error(node, "Unsupported dispatch boolean operator")
 
     if isinstance(node, ast.Compare):
         left = _eval_dispatch_expr(node.left, kwargs, globals_)
@@ -147,8 +174,8 @@ def _eval_dispatch_expr(
             right = _eval_dispatch_expr(comparator, kwargs, globals_)
             op = _CMP_OPS.get(type(op_node))
             if op is None:
-                raise ValueError(
-                    f"Unsupported dispatch comparison op: {ast.dump(op_node)}"
+                raise _dispatch_expr_error(
+                    node, "Unsupported dispatch comparison operator"
                 )
             if not op(left, right):
                 return False
@@ -164,19 +191,22 @@ def _eval_dispatch_expr(
     if isinstance(node, ast.BinOp):
         op = _BIN_OPS.get(type(node.op))
         if op is None:
-            raise ValueError(f"Unsupported dispatch binary op: {ast.dump(node.op)}")
+            raise _dispatch_expr_error(node, "Unsupported dispatch binary operator")
         return op(
             _eval_dispatch_expr(node.left, kwargs, globals_),
             _eval_dispatch_expr(node.right, kwargs, globals_),
         )
 
     if isinstance(node, ast.Call):
+        if any(keyword.arg is None for keyword in node.keywords):
+            raise _dispatch_expr_error(
+                node, "Dispatch helper calls cannot use **kwargs"
+            )
         args = [_eval_dispatch_expr(arg, kwargs, globals_) for arg in node.args]
         fn = _eval_dispatch_expr(node.func, kwargs, globals_)
         call_kwargs = {
             keyword.arg: _eval_dispatch_expr(keyword.value, kwargs, globals_)
             for keyword in node.keywords
-            if keyword.arg is not None
         }
         return fn(*args, **call_kwargs)
 
@@ -184,7 +214,7 @@ def _eval_dispatch_expr(
         value = _eval_dispatch_expr(node.value, kwargs, globals_)
         return getattr(value, node.attr)
 
-    raise ValueError(f"Unsupported dispatch expression: {ast.dump(node)}")
+    raise _dispatch_expr_error(node, "Unsupported dispatch expression")
 
 
 def _collect_input_names(

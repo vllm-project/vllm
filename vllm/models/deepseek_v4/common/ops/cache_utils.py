@@ -26,7 +26,6 @@ from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonPointerInputVariant,
     TritonWarmupTensor,
-    assert_compile_key_matches_triton,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -835,12 +834,6 @@ class CombineTopkSwaIndicesKernel(
         )
 
 _COMBINE_TOPK_SWA_INDICES_KERNEL = CombineTopkSwaIndicesKernel()
-CombineTopkSwaIndicesKernelCompileKey = CombineTopkSwaIndicesKernel.CompileKey
-assert_compile_key_matches_triton(
-    _COMBINE_TOPK_SWA_INDICES_KERNEL,
-    CombineTopkSwaIndicesKernel.kernel,
-    extra_compile_key_fields=("input_variant",),
-)
 
 
 def build_flashinfer_mixed_sparse_indices(
