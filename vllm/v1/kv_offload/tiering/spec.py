@@ -36,14 +36,13 @@ from typing import Any
 import torch
 from typing_extensions import override
 
-from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     OffloadingManager,
     OffloadingMetricMetadata,
 )
+from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
@@ -87,8 +86,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             metrics.update(tier_cls.build_metric_definitions(tier_config))
         return metrics
 
-    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
-        super().__init__(vllm_config, kv_cache_config)
+    def __init__(self, config: OffloadingConfig):
+        super().__init__(config)
         # Redeclare for mypy: parent sets this but `--follow-imports skip` hides it
         self._manager: OffloadingManager | None = None
         if self.kv_events_config.self_describing_kv_events:
@@ -110,10 +109,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
         # engine_id is unique per DP replica (suffixed with _dp{rank} in both
         # the Ray and multiprocessing paths), so it names a per-replica offload
-        # region. Non-None is guaranteed by OffloadingSpec.__init__.
-        assert vllm_config.kv_transfer_config is not None
-        assert vllm_config.kv_transfer_config.engine_id is not None
-        self._engine_id: str = vllm_config.kv_transfer_config.engine_id
+        # region.
+        assert config.engine_id is not None
+        self._engine_id = config.engine_id
 
     @override
     def get_manager(self) -> OffloadingManager:
@@ -196,7 +194,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         # Fold the global physical device index into the replica-local
         # [0, world_size) slot range.
-        world_size = self.vllm_config.parallel_config.world_size
+        world_size = self.config.world_size
         rank = torch.accelerator.current_device_index() % world_size
         worker_mmap = SharedOffloadRegion(
             engine_id=self._engine_id,

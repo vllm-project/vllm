@@ -125,8 +125,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         configuration reference.
 
         Args:
-            offloading_spec: Owning ``OffloadingSpec`` (provides
-                ``vllm_config`` and the offloaded block layout).
+            offloading_spec: Owning ``OffloadingSpec`` (provides normalized
+                model, parallel, and cache layout configuration).
             primary_kv_view: Memoryview over the CPU primary tier; the
                 NIXL agent registers this region for RDMA transfers.
             tier_type: Tier identifier (defaults to ``"p2p"``).

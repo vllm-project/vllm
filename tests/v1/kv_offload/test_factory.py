@@ -11,17 +11,35 @@ These tests verify:
 4. Error paths — unregistered specs, missing config, duplicate registration.
 """
 
+import ast
+from pathlib import Path
+from typing import cast
+from unittest.mock import MagicMock, patch
+
 import pytest
 import torch
 
-from vllm.config import KVTransferConfig
+from vllm.config import KVTransferConfig, ParallelConfig, VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+    build_offloading_config,
+)
+from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MLAAttentionSpec,
 )
-from vllm.v1.kv_offload.base import OffloadingHistogramMetadata, OffloadingSpec
+from vllm.v1.kv_offload.base import (
+    CanonicalKVCaches,
+    OffloadingHistogramMetadata,
+    OffloadingManager,
+    OffloadingSpec,
+    OffloadingWorker,
+)
+from vllm.v1.kv_offload.config import OffloadingConfig
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
@@ -37,6 +55,17 @@ def restore_registry():
     original = dict(OffloadingSpecFactory._registry)
     yield
     OffloadingSpecFactory._registry = original
+
+
+def _get_extra_config(config: VllmConfig) -> dict:
+    assert config.kv_transfer_config is not None
+    return config.kv_transfer_config.kv_connector_extra_config
+
+
+def _create_spec(config: VllmConfig, kv_cache_config: KVCacheConfig) -> OffloadingSpec:
+    return OffloadingSpecFactory.create_spec(
+        build_offloading_config(config, kv_cache_config)
+    )
 
 
 def _make_vllm_config(
@@ -95,6 +124,46 @@ def _make_vllm_config(
     )
 
 
+def _make_layout_vllm_config(
+    spec_name: str = "CPUOffloadingSpec",
+    cpu_bytes_to_use: int | None = None,
+    extra_config: dict | None = None,
+    tensor_parallel_size: int = 1,
+    pipeline_parallel_size: int = 1,
+    prefill_context_parallel_size: int = 1,
+    decode_context_parallel_size: int = 1,
+) -> VllmConfig:
+    config = MagicMock()
+    config.cache_config.block_size = 16
+    config.cache_config.enable_prefix_caching = True
+    config.cache_config.prefix_match_unit = None
+    config.cache_config.cache_dtype = torch.float16
+    config.model_config.model = "test-model"
+    world_size = (
+        tensor_parallel_size * pipeline_parallel_size * prefill_context_parallel_size
+    )
+    with patch.object(current_platform, "device_count", return_value=world_size):
+        config.parallel_config = ParallelConfig(
+            tensor_parallel_size=tensor_parallel_size,
+            pipeline_parallel_size=pipeline_parallel_size,
+            prefill_context_parallel_size=prefill_context_parallel_size,
+            decode_context_parallel_size=decode_context_parallel_size,
+        )
+    config.kv_events_config = None
+    config.use_v2_model_runner = False
+
+    connector_extra_config = dict(extra_config or {})
+    connector_extra_config["spec_name"] = spec_name
+    if cpu_bytes_to_use is not None:
+        connector_extra_config["cpu_bytes_to_use"] = cpu_bytes_to_use
+    config.kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config=connector_extra_config,
+    )
+    return cast(VllmConfig, config)
+
+
 def _make_kv_cache_config():
     """Build a minimal KVCacheConfig with one KV cache tensor."""
     num_blocks = 16
@@ -122,6 +191,136 @@ def _make_kv_cache_config():
     )
 
 
+def _make_sizing_kv_cache_config(packed: bool) -> KVCacheConfig:
+    num_blocks = 4
+    if packed:
+        kv_cache_tensors = [
+            KVCacheTensor(
+                size=64,
+                shared_by=[layer_name],
+                block_stride=16,
+            )
+            for layer_name in ("layer0", "layer1")
+        ]
+    else:
+        kv_cache_tensors = [
+            KVCacheTensor(size=40, shared_by=["layer0"]),
+            KVCacheTensor(size=24, shared_by=["layer1"]),
+        ]
+
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=kv_cache_tensors,
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer0", "layer1"],
+                FullAttentionSpec(
+                    block_size=16,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            )
+        ],
+    )
+
+
+def _make_hybrid_kv_cache_config() -> KVCacheConfig:
+    return KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            KVCacheTensor(size=40, shared_by=["full_layer"]),
+            KVCacheTensor(size=24, shared_by=["mla_layer"]),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full_layer"],
+                FullAttentionSpec(
+                    block_size=12,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mla_layer"],
+                MLAAttentionSpec(
+                    block_size=16,
+                    num_kv_heads=1,
+                    head_size=576,
+                    dtype=torch.float32,
+                ),
+            ),
+        ],
+    )
+
+
+class SingleArgExternalOffloadingSpec(OffloadingSpec):
+    def __init__(self, config: OffloadingConfig) -> None:
+        self.received_config = config
+        super().__init__(config)
+
+    def get_manager(self) -> OffloadingManager:
+        raise NotImplementedError
+
+    def get_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
+        raise NotImplementedError
+
+
+_IMPORT_GUARD_PATHS = (
+    "vllm/v1/kv_offload/base.py",
+    "vllm/v1/kv_offload/config.py",
+    "vllm/v1/kv_offload/factory.py",
+    "vllm/v1/kv_offload/cpu/spec.py",
+    "vllm/v1/kv_offload/tiering/spec.py",
+    "vllm/v1/kv_offload/file_mapper.py",
+)
+_FORBIDDEN_RUNTIME_IMPORTS = (
+    "vllm.config",
+    "vllm.v1.kv_cache_interface",
+    "vllm.v1.core.kv_cache_utils",
+    "vllm.distributed.kv_transfer",
+)
+
+
+def _is_type_checking_test(node: ast.expr) -> bool:
+    return (
+        isinstance(node, ast.Name)
+        and node.id == "TYPE_CHECKING"
+        or (isinstance(node, ast.Attribute) and node.attr == "TYPE_CHECKING")
+    )
+
+
+class _RuntimeImportVisitor(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.forbidden_imports: list[tuple[int, str]] = []
+
+    def _record(self, lineno: int, module: str) -> None:
+        if any(
+            module == prefix or module.startswith(f"{prefix}.")
+            for prefix in _FORBIDDEN_RUNTIME_IMPORTS
+        ):
+            self.forbidden_imports.append((lineno, module))
+
+    def visit_If(self, node: ast.If) -> None:
+        if _is_type_checking_test(node.test):
+            for statement in node.orelse:
+                self.visit(statement)
+            return
+        self.generic_visit(node)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            self._record(node.lineno, alias.name)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if node.module is None:
+            return
+        self._record(node.lineno, node.module)
+        for alias in node.names:
+            self._record(node.lineno, f"{node.module}.{alias.name}")
+
+
 # ---------------------------------------------------------------------------
 # Pre-registration integrity (CI sentinel)
 # ---------------------------------------------------------------------------
@@ -146,6 +345,23 @@ def test_tiering_spec_registered():
     assert cls is TieringOffloadingSpec
 
 
+def test_kv_offload_config_boundary_has_no_reverse_runtime_imports():
+    # Pre-existing connector-metrics imports in cpu/manager.py and
+    # tiering/manager.py are intentionally outside this scoped guard.
+    repo_root = Path(__file__).resolve().parents[3]
+    violations: list[str] = []
+    for relative_path in _IMPORT_GUARD_PATHS:
+        path = repo_root / relative_path
+        visitor = _RuntimeImportVisitor()
+        visitor.visit(ast.parse(path.read_text(), filename=str(path)))
+        violations.extend(
+            f"{relative_path}:{lineno}: {module}"
+            for lineno, module in visitor.forbidden_imports
+        )
+
+    assert not violations, "Reverse runtime imports found:\n" + "\n".join(violations)
+
+
 # ---------------------------------------------------------------------------
 # Normal path — get_spec_cls
 # ---------------------------------------------------------------------------
@@ -154,7 +370,7 @@ def test_tiering_spec_registered():
 def test_get_spec_cls_returns_registered_class():
     """Registered spec_name returns correct class."""
     config = _make_vllm_config(spec_name="CPUOffloadingSpec")
-    spec_cls = OffloadingSpecFactory.get_spec_cls(config)
+    spec_cls = OffloadingSpecFactory.get_spec_cls(_get_extra_config(config))
     assert spec_cls is CPUOffloadingSpec
 
 
@@ -162,7 +378,7 @@ def test_get_spec_cls_default_to_cpu():
     """Default spec_name (absent from config) resolves to CPUOffloadingSpec."""
     config = _make_vllm_config(spec_name=None)
     config.kv_transfer_config.kv_connector_extra_config.pop("spec_name", None)
-    spec_cls = OffloadingSpecFactory.get_spec_cls(config)
+    spec_cls = OffloadingSpecFactory.get_spec_cls(_get_extra_config(config))
     assert spec_cls is CPUOffloadingSpec
 
 
@@ -181,9 +397,110 @@ def test_create_cpu_offloading_spec_end_to_end():
     """
     config = _make_vllm_config(cpu_bytes_to_use=65536)
     kv_cache_config = _make_kv_cache_config()
-    spec = OffloadingSpecFactory.create_spec(config, kv_cache_config)
+    spec = _create_spec(config, kv_cache_config)
     assert isinstance(spec, CPUOffloadingSpec)
     assert spec.num_blocks > 0
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_cpu_spec_sizing_preserves_tensor_layout(packed: bool):
+    cpu_bytes_to_use = 1920
+    config = _make_layout_vllm_config(
+        cpu_bytes_to_use=cpu_bytes_to_use,
+        extra_config={"block_size": 32},
+        tensor_parallel_size=3,
+        pipeline_parallel_size=2,
+    )
+
+    spec = _create_spec(config, _make_sizing_kv_cache_config(packed))
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.cpu_page_size_per_worker == 32
+    assert spec.kv_bytes_per_offloaded_block == 192
+    assert spec.num_blocks == cpu_bytes_to_use // 192
+
+
+def test_cpu_spec_rejects_partially_packed_tensor_layout():
+    config = _make_layout_vllm_config(cpu_bytes_to_use=65536)
+    kv_cache_config = _make_sizing_kv_cache_config(packed=False)
+    kv_cache_config.kv_cache_tensors[0].block_stride = 16
+
+    with pytest.raises(AssertionError):
+        _create_spec(config, kv_cache_config)
+
+
+def test_cpu_spec_zero_blocks_skips_tensor_layout_validation():
+    config = _make_layout_vllm_config(cpu_bytes_to_use=65536)
+    kv_cache_config = _make_sizing_kv_cache_config(packed=False)
+    kv_cache_config.num_blocks = 0
+    kv_cache_config.kv_cache_tensors[0].block_stride = 16
+
+    spec = _create_spec(config, kv_cache_config)
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.cpu_page_size_per_worker == 0
+    assert spec.kv_bytes_per_offloaded_block == 0
+    assert spec.num_blocks == 0
+
+
+def test_tiering_spec_aligns_row_size():
+    alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    cpu_bytes_to_use = alignment * 3
+    config = _make_layout_vllm_config(
+        spec_name="TieringOffloadingSpec",
+        cpu_bytes_to_use=cpu_bytes_to_use,
+        extra_config={"block_size": 32},
+        tensor_parallel_size=3,
+        pipeline_parallel_size=2,
+    )
+
+    spec = _create_spec(config, _make_sizing_kv_cache_config(packed=False))
+
+    assert isinstance(spec, TieringOffloadingSpec)
+    assert spec.cpu_page_size_per_worker == 32
+    assert spec.kv_bytes_per_offloaded_block == alignment
+    assert spec.num_blocks == cpu_bytes_to_use // alignment
+
+
+def test_offloading_spec_resolves_prefill_context_parallel_block_sizes():
+    config = _make_layout_vllm_config(
+        cpu_bytes_to_use=65536,
+        extra_config={"block_size": 64},
+        prefill_context_parallel_size=2,
+    )
+
+    spec = _create_spec(config, _make_kv_cache_config())
+
+    assert spec.gpu_block_size == (32,)
+    assert spec.hash_block_size == 32
+    assert spec.block_size_factor == 2
+
+
+def test_offloading_spec_resolves_heterogeneous_hybrid_block_sizes():
+    config = _make_layout_vllm_config(cpu_bytes_to_use=65536)
+    config.cache_config.block_size = 4
+
+    spec = _create_spec(config, _make_hybrid_kv_cache_config())
+
+    assert spec.gpu_block_size == (12, 16)
+    assert spec.hash_block_size == 4
+    assert spec.block_size_factor == 1
+
+
+def test_create_dynamic_spec_receives_translated_config():
+    config = _make_layout_vllm_config(
+        spec_name="SingleArgExternalOffloadingSpec",
+        extra_config={
+            "spec_module_path": "tests.v1.kv_offload.test_factory",
+        },
+    )
+    kv_cache_config = _make_kv_cache_config()
+    offloading_config = build_offloading_config(config, kv_cache_config)
+
+    spec = OffloadingSpecFactory.create_spec(offloading_config)
+
+    assert isinstance(spec, SingleArgExternalOffloadingSpec)
+    assert spec.received_config is offloading_config
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +522,7 @@ def test_dynamic_load_via_spec_module_path():
     config.kv_transfer_config.kv_connector_extra_config["spec_module_path"] = (
         "vllm.v1.kv_offload.cpu.spec"
     )
-    spec_cls = OffloadingSpecFactory.get_spec_cls(config)
+    spec_cls = OffloadingSpecFactory.get_spec_cls(_get_extra_config(config))
     assert spec_cls is CPUOffloadingSpec
 
 
@@ -218,12 +535,12 @@ def test_unregistered_spec_without_module_path_raises():
     """spec_name not in registry + no spec_module_path → ValueError."""
     config = _make_vllm_config(spec_name="NonexistentSpec")
     with pytest.raises(ValueError, match="Unsupported spec type"):
-        OffloadingSpecFactory.get_spec_cls(config)
+        OffloadingSpecFactory.get_spec_cls(_get_extra_config(config))
 
     # create_spec should also fail (calls get_spec_cls internally)
     kv_cache_config = _make_kv_cache_config()
     with pytest.raises(ValueError, match="Unsupported spec type"):
-        OffloadingSpecFactory.create_spec(config, kv_cache_config)
+        _create_spec(config, kv_cache_config)
 
 
 def test_cpu_spec_missing_cpu_bytes_to_use_raises():
@@ -232,7 +549,7 @@ def test_cpu_spec_missing_cpu_bytes_to_use_raises():
     config.kv_transfer_config.kv_connector_extra_config.pop("cpu_bytes_to_use", None)
     kv_cache_config = _make_kv_cache_config()
     with pytest.raises(Exception, match="cpu_bytes_to_use must be specified"):
-        OffloadingSpecFactory.create_spec(config, kv_cache_config)
+        _create_spec(config, kv_cache_config)
 
 
 def test_duplicate_registration_raises():
@@ -253,7 +570,7 @@ def test_build_metric_definitions_below_threshold():
     from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
 
     config = _make_vllm_config(store_threshold=1)
-    spec_cls = OffloadingSpecFactory.get_spec_cls(config)
+    spec_cls = OffloadingSpecFactory.get_spec_cls(_get_extra_config(config))
     metrics = spec_cls.build_metric_definitions(
         config.kv_transfer_config.kv_connector_extra_config
     )
@@ -266,7 +583,7 @@ def test_build_metric_definitions_allocation_size_histogram():
     from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
 
     config = _make_vllm_config(store_threshold=0)
-    spec_cls = OffloadingSpecFactory.get_spec_cls(config)
+    spec_cls = OffloadingSpecFactory.get_spec_cls(_get_extra_config(config))
     metrics = spec_cls.build_metric_definitions(
         config.kv_transfer_config.kv_connector_extra_config
     )
@@ -291,7 +608,7 @@ def test_build_metric_definitions_returns_counter_at_threshold():
     from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
 
     config = _make_vllm_config(store_threshold=2)
-    spec_cls = OffloadingSpecFactory.get_spec_cls(config)
+    spec_cls = OffloadingSpecFactory.get_spec_cls(_get_extra_config(config))
     metrics = spec_cls.build_metric_definitions(
         config.kv_transfer_config.kv_connector_extra_config
     )

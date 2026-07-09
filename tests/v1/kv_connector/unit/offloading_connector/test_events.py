@@ -8,6 +8,9 @@ import torch
 from tests.v1.kv_connector.unit.utils import create_vllm_config
 from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+    build_offloading_config,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
     OffloadingEventGroupSpec,
     OffloadingEventsTracker,
@@ -351,4 +354,4 @@ def test_tiering_rejects_self_describing_kv_events():
     )
 
     with pytest.raises(ValueError, match="TieringOffloadingSpec"):
-        TieringOffloadingSpec(vllm_config, kv_cache_config)
+        TieringOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))

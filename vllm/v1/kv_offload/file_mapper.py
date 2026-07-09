@@ -4,7 +4,6 @@
 import hashlib
 import json
 
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
 from vllm.v1.kv_offload.base import (
     OffloadingSpec,
     OffloadKey,
@@ -70,41 +69,39 @@ class FileMapper:
         parallel_agnostic: bool = False,
     ) -> "FileMapper":
         """Build a FileMapper from an OffloadingSpec."""
-        vllm_config = offloading_spec.vllm_config
-        kv_cache_config = offloading_spec.kv_cache_config
-
-        parallel_config = vllm_config.parallel_config
-        dtype = str(vllm_config.cache_config.cache_dtype).replace("torch.", "")
+        config = offloading_spec.config
         kv_cache_groups = [
             {
-                "block_size": group.kv_cache_spec.block_size,
+                "block_size": group.block_size,
                 "layer_names": list(group.layer_names),
             }
-            for group in kv_cache_config.kv_cache_groups
+            for group in config.groups
         ]
         # Only a single full-attention group is parallelism-invariant. MLA is
         # excluded: its latent KV is replicated per rank, never head-sharded.
         # The V2 model runner is excluded: its KV layout is not known to be
         # parallelism-invariant.
-        groups = kv_cache_config.kv_cache_groups
-        spec = groups[0].kv_cache_spec if len(groups) == 1 else None
+        groups = config.groups
+        group = groups[0] if len(groups) == 1 else None
         parallel_agnostic = (
             parallel_agnostic
-            and not vllm_config.use_v2_model_runner
-            and isinstance(spec, FullAttentionSpec)
-            and not isinstance(spec, MLAAttentionSpec)
+            and not config.use_v2_model_runner
+            and group is not None
+            and group.is_non_mla_full_attention
         )
         return cls(
             root_dir=root_dir,
-            model_name=vllm_config.model_config.model,
-            hash_block_size=vllm_config.cache_config.block_size,
+            model_name=config.model_name,
+            # Preserve the existing on-disk namespace. This can differ from
+            # the resolved offloading hash block size for heterogeneous groups.
+            hash_block_size=config.namespace_block_size,
             gpu_blocks_per_file=gpu_blocks_per_file,
-            tp_size=parallel_config.tensor_parallel_size,
-            pp_size=parallel_config.pipeline_parallel_size,
-            pcp_size=parallel_config.prefill_context_parallel_size,
-            dcp_size=parallel_config.decode_context_parallel_size,
-            rank=parallel_config.rank,
-            dtype=dtype,
+            tp_size=config.tp_size,
+            pp_size=config.pp_size,
+            pcp_size=config.pcp_size,
+            dcp_size=config.dcp_size,
+            rank=config.rank,
+            dtype=config.kv_cache_dtype,
             kv_cache_groups=kv_cache_groups,
             parallel_agnostic=parallel_agnostic,
         )

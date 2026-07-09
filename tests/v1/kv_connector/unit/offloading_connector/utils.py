@@ -17,7 +17,6 @@ from vllm import SamplingParams
 from vllm.config import (
     KVEventsConfig,
     KVTransferConfig,
-    VllmConfig,
     set_current_vllm_config,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
@@ -57,6 +56,7 @@ from vllm.v1.kv_offload.base import (
     TransferResult,
     make_offload_key,
 )
+from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -123,8 +123,8 @@ class MockOffloadingWorker(OffloadingWorker):
 
 
 class MockOffloadingSpec(OffloadingSpec):
-    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
-        super().__init__(vllm_config, kv_cache_config)
+    def __init__(self, config: OffloadingConfig):
+        super().__init__(config)
 
         self.manager = MagicMock(spec=OffloadingManager)
         self.manager.prepare_load = lambda keys, req_context: MockLoadStoreSpec(keys)

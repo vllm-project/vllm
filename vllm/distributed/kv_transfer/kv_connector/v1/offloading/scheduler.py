@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from itertools import islice
 from typing import Any, NamedTuple
 
+from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
@@ -31,6 +32,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
     SlidingWindowSpec,
@@ -109,7 +111,9 @@ def get_sliding_window_size_in_blocks(
     return None
 
 
-def resolve_mamba_align_size(spec: "OffloadingSpec") -> int | None:
+def resolve_mamba_align_size(
+    spec: "OffloadingSpec", kv_cache_config: KVCacheConfig
+) -> int | None:
     """Scan all KV cache groups in *spec* and return the single mamba alignment
     size, or None if no group requires mamba alignment.
 
@@ -119,7 +123,7 @@ def resolve_mamba_align_size(spec: "OffloadingSpec") -> int | None:
     """
     mamba_align_size: int | None = None
     for idx, gpu_block_size in enumerate(spec.gpu_block_size):
-        kv_spec = spec.kv_cache_config.kv_cache_groups[idx].kv_cache_spec
+        kv_spec = kv_cache_config.kv_cache_groups[idx].kv_cache_spec
         if isinstance(kv_spec, MambaSpec) and kv_spec.mamba_cache_mode == "align":
             offload_block_size = gpu_block_size * spec.block_size_factor
             assert mamba_align_size is None or mamba_align_size == offload_block_size
@@ -134,7 +138,12 @@ class SchedulerOffloadConfig(NamedTuple):
     offload_prompt_only: bool
 
     @classmethod
-    def from_spec(cls, spec: OffloadingSpec) -> "SchedulerOffloadConfig":
+    def from_spec(
+        cls,
+        spec: OffloadingSpec,
+        vllm_config: VllmConfig,
+        kv_cache_config: KVCacheConfig,
+    ) -> "SchedulerOffloadConfig":
         # Determine the alignment token count from the full-attention group(s).
         # This is the offloaded_block_size of the full-attention group; load
         # hits are always aligned to this boundary, so SWA blocks earlier in
@@ -142,7 +151,7 @@ class SchedulerOffloadConfig(NamedTuple):
         # architectures like DeepSeek V4 (MLA + SWA groups).
         full_attn_offloaded_block_sizes: set[int] = set()
         for idx, gpu_block_size in enumerate(spec.gpu_block_size):
-            kv_spec = spec.kv_cache_config.kv_cache_groups[idx].kv_cache_spec
+            kv_spec = kv_cache_config.kv_cache_groups[idx].kv_cache_spec
             sw = get_sliding_window_size_in_blocks(
                 kv_spec, gpu_block_size * spec.block_size_factor
             )
@@ -172,16 +181,16 @@ class SchedulerOffloadConfig(NamedTuple):
 
         eagle_groups = {
             idx
-            for idx, g in enumerate(spec.kv_cache_config.kv_cache_groups)
+            for idx, g in enumerate(kv_cache_config.kv_cache_groups)
             if g.is_eagle_group
         }
 
         use_eagle = (
-            spec.vllm_config.speculative_config is not None
-            and spec.vllm_config.speculative_config.use_eagle()
+            vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.use_eagle()
         )
         if use_eagle and not eagle_groups:
-            eagle_groups = set(range(len(spec.kv_cache_config.kv_cache_groups)))
+            eagle_groups = set(range(len(kv_cache_config.kv_cache_groups)))
 
         if eagle_groups:
             logger.info(
@@ -192,7 +201,7 @@ class SchedulerOffloadConfig(NamedTuple):
             )
 
         return cls(
-            num_workers=spec.vllm_config.parallel_config.world_size,
+            num_workers=vllm_config.parallel_config.world_size,
             kv_group_configs=tuple(
                 GroupOffloadConfig(
                     group_idx=idx,
@@ -204,7 +213,7 @@ class SchedulerOffloadConfig(NamedTuple):
                     ),
                     sliding_window_size_in_blocks=(
                         sw := get_sliding_window_size_in_blocks(
-                            spec.kv_cache_config.kv_cache_groups[idx].kv_cache_spec,
+                            kv_cache_config.kv_cache_groups[idx].kv_cache_spec,
                             gpu_block_size * spec.block_size_factor,
                         )
                     ),
@@ -212,7 +221,7 @@ class SchedulerOffloadConfig(NamedTuple):
                         gpu_block_size * spec.block_size_factor, sw
                     ),
                     kv_event_group_spec=get_offloading_event_group_spec(
-                        spec.kv_cache_config.kv_cache_groups[idx]
+                        kv_cache_config.kv_cache_groups[idx]
                     ),
                     is_eagle_group=idx in eagle_groups,
                 )
@@ -354,8 +363,14 @@ class OffloadingConnectorScheduler:
     def __init__(
         self,
         spec: OffloadingSpec,
+        vllm_config: VllmConfig,
+        kv_cache_config: KVCacheConfig,
     ):
-        self.config = SchedulerOffloadConfig.from_spec(spec)
+        self.vllm_config = vllm_config
+        self.kv_cache_config = kv_cache_config
+        self.config = SchedulerOffloadConfig.from_spec(
+            spec, vllm_config, kv_cache_config
+        )
         self.manager: OffloadingManager = spec.get_manager()
         self._connector_stats = OffloadingConnectorStats()
 
@@ -378,7 +393,9 @@ class OffloadingConnectorScheduler:
         # used by _lookup
         self._sliding_window_groups: tuple[int, ...] = tuple(sliding_window_groups)
         self._lookup_groups = tuple(full_attention_groups) + self._sliding_window_groups
-        self._mamba_align_size: int | None = resolve_mamba_align_size(spec)
+        self._mamba_align_size: int | None = resolve_mamba_align_size(
+            spec, kv_cache_config
+        )
 
         self._req_status: dict[ReqId, RequestOffloadState] = {}
         self._current_batch_load_jobs: dict[int, TransferJob] = {}
@@ -388,7 +405,7 @@ class OffloadingConnectorScheduler:
         # if GPU prefix caching is enabled,
         # track loaded blocks to avoid redundant loads
         self._blocks_being_loaded: set[OffloadKey] | None = (
-            set() if spec.vllm_config.cache_config.enable_prefix_caching else None
+            set() if vllm_config.cache_config.enable_prefix_caching else None
         )
 
         # Job ID counter shared by loads and stores.

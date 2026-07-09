@@ -113,8 +113,8 @@ class FileSystemTierManager(SecondaryTierManager):
     ):
         """
         Args:
-            offloading_spec: contains the vllm_config, kv_cache_config
-                and block_size_factor.
+            offloading_spec: Contains normalized offloading configuration and
+                block_size_factor.
             primary_kv_view: Memoryview of the primary tier's CPU KV cache.
             tier_type: Tier type identifier, set by SecondaryTierFactory.
             root_dir: Root directory for block files.

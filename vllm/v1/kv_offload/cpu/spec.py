@@ -4,10 +4,8 @@ from typing import Any
 
 from typing_extensions import override
 
-from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
-from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     OffloadingCounterMetadata,
@@ -18,6 +16,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingSpec,
     OffloadingWorker,
 )
+from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
@@ -59,8 +58,8 @@ class CPUOffloadingSpec(OffloadingSpec):
             )
         return definitions
 
-    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
-        super().__init__(vllm_config, kv_cache_config)
+    def __init__(self, config: OffloadingConfig):
+        super().__init__(config)
 
         cpu_bytes_to_use = self.extra_config.get("cpu_bytes_to_use")
         if not cpu_bytes_to_use:
@@ -68,24 +67,12 @@ class CPUOffloadingSpec(OffloadingSpec):
                 "cpu_bytes_to_use must be specified in kv_connector_extra_config"
             )
 
-        world_size = vllm_config.parallel_config.world_size
+        world_size = config.world_size
         self.num_blocks = 0
         self.kv_bytes_per_offloaded_block = 0
         self.cpu_page_size_per_worker = 0
-        assert kv_cache_config is not None
-        if kv_cache_config.num_blocks > 0 and world_size > 0:
-            is_packed = any(t.block_stride for t in kv_cache_config.kv_cache_tensors)
-            assert not is_packed or all(
-                t.block_stride for t in kv_cache_config.kv_cache_tensors
-            )
-            total_gpu_kv_bytes = (
-                kv_cache_config.kv_cache_tensors[0].size
-                if is_packed
-                else sum(t.size for t in kv_cache_config.kv_cache_tensors)
-            )
-            kv_bytes_per_block = (
-                total_gpu_kv_bytes // kv_cache_config.num_blocks
-            ) * world_size
+        if config.num_gpu_blocks > 0 and world_size > 0:
+            kv_bytes_per_block = config.worker_kv_bytes_per_gpu_block * world_size
             kv_bytes_per_offloaded_block = kv_bytes_per_block * self.block_size_factor
 
             # calculate cpu_page_size_per_worker
