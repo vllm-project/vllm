@@ -74,6 +74,22 @@ DOTTED_NAME_FUNCTION_CALL = FunctionCall(
         '"deliveryAddress": "845 Willow Lane, Springfield, IL 62704"}'
     ),
 )
+# Agentic shell commands: a bracket inside a string argument must not corrupt
+# the streaming bracket tracker.
+BRACKET_IN_STRING_FUNCTION_OUTPUT = "exec(command='grep -F \"]\" log.txt')"
+BRACKET_IN_STRING_FUNCTION_CALL = FunctionCall(
+    name="exec",
+    arguments='{"command": "grep -F \\"]\\" log.txt"}',
+)
+# A raw newline inside a string argument (multi-line shell command) is invalid
+# Python; the parser must recover the full value instead of dropping the call.
+MULTILINE_FUNCTION_OUTPUT = (
+    "exec(command='cat > f.py << EOF\nimport csv\nprint(1)\nEOF')"
+)
+MULTILINE_FUNCTION_CALL = FunctionCall(
+    name="exec",
+    arguments='{"command": "cat > f.py << EOF\\nimport csv\\nprint(1)\\nEOF"}',
+)
 
 
 @pytest.fixture(scope="module")
@@ -226,6 +242,36 @@ TEST_CASES = [
         [DOTTED_NAME_FUNCTION_CALL],
         None,
         id="dotted_name_nonstreaming",
+    ),
+    # Messy agentic shell commands: literal bracket inside a string argument
+    pytest.param(
+        True,
+        _wrap(BRACKET_IN_STRING_FUNCTION_OUTPUT),
+        [BRACKET_IN_STRING_FUNCTION_CALL],
+        None,
+        id="bracket_in_string_streaming",
+    ),
+    pytest.param(
+        False,
+        _wrap(BRACKET_IN_STRING_FUNCTION_OUTPUT),
+        [BRACKET_IN_STRING_FUNCTION_CALL],
+        None,
+        id="bracket_in_string_nonstreaming",
+    ),
+    # Multi-line string argument (raw newlines in a shell command)
+    pytest.param(
+        True,
+        _wrap(MULTILINE_FUNCTION_OUTPUT),
+        [MULTILINE_FUNCTION_CALL],
+        None,
+        id="multiline_string_arg_streaming",
+    ),
+    pytest.param(
+        False,
+        _wrap(MULTILINE_FUNCTION_OUTPUT),
+        [MULTILINE_FUNCTION_CALL],
+        None,
+        id="multiline_string_arg_nonstreaming",
     ),
 ]
 

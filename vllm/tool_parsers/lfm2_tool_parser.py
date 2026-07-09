@@ -24,6 +24,7 @@ from vllm.tool_parsers.abstract_tool_parser import (
 from vllm.tool_parsers.utils import (
     UnexpectedAstError,
     compute_tool_delta,
+    escape_ctrl_chars_in_strings,
     handle_single_tool,
     make_valid_python,
 )
@@ -171,7 +172,13 @@ class Lfm2ToolParser(ToolParser):
             )
 
         try:
-            module = ast.parse(tool_text)
+            try:
+                module = ast.parse(tool_text)
+            except SyntaxError:
+                # A raw newline/tab inside a string argument (e.g. a multi-line
+                # shell command) is invalid Python; escape control chars inside
+                # string literals and retry instead of dropping the call.
+                module = ast.parse(escape_ctrl_chars_in_strings(tool_text))
             parsed = getattr(module.body[0], "value", None)
             if isinstance(parsed, ast.List) and all(
                 isinstance(e, ast.Call) for e in parsed.elts
