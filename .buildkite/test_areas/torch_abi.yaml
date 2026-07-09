@@ -7,9 +7,8 @@ steps:
   timeout_in_minutes: 5
   source_file_dependencies:
   - .buildkite/check-torch-abi.py
-  - .buildkite/scripts/check-torch-abi.sh
   - csrc/
   - cmake/
   - setup.py
   commands:
-  - bash /vllm-workspace/.buildkite/scripts/check-torch-abi.sh
+  - python3 /vllm-workspace/.buildkite/check-torch-abi.py

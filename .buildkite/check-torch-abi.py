@@ -3,7 +3,6 @@
 
 """Audit vLLM compiled libraries for PyTorch stable ABI compliance."""
 
-import argparse
 import fnmatch
 import sys
 from pathlib import Path
@@ -11,7 +10,8 @@ from pathlib import Path
 from torch_abi_audit import inspect_package
 from torch_abi_audit.report import ExtensionReport, PackageReport
 
-# Temporary allowlist of extensions not yet on the stable ABI; shrink and remove over time.
+# Temporary allowlist of extensions not yet on the stable ABI.
+# Shrink and remove over time.
 ALLOWED_UNSTABLE_LIBRARIES: tuple[str, ...] = (
     "vllm_flash_attn/_vllm_fa2_C.abi3.so",
     "_flashmla_C.abi3.so",
@@ -75,9 +75,7 @@ def check_torch_abi(
 
     unstable = _collect_unstable(report)
     unexpected = [
-        rel_path
-        for rel_path in unstable
-        if not _matches_allowlist(rel_path, patterns)
+        rel_path for rel_path in unstable if not _matches_allowlist(rel_path, patterns)
     ]
     stale = _find_stale_allowlist_entries(report, patterns)
 
@@ -100,16 +98,6 @@ def check_torch_abi(
     return 0
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--package",
-        default="vllm",
-        help="Installed package to inspect (default: vllm)",
-    )
-    args = parser.parse_args()
-    sys.exit(check_torch_abi(args.package))
-
-
 if __name__ == "__main__":
-    main()
+    print(">>> Auditing vLLM extension modules for PyTorch stable ABI compliance")
+    sys.exit(check_torch_abi())
