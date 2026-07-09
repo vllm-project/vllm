@@ -82,13 +82,6 @@ _CMP_OPS: dict[type[ast.cmpop], Callable[[Any, Any], bool]] = {
     ast.GtE: operator.ge,
 }
 
-_SUPPORTED_DISPATCH_EXPRESSION_HELP = (
-    "Supported dispatch expressions are names, constants, attributes, "
-    "tuple/list literals, conditional expressions, comparisons, boolean "
-    "operators, unary not/minus, arithmetic, and calls without **kwargs."
-)
-
-
 def _dispatch_expr_source(node: ast.AST) -> str:
     try:
         return ast.unparse(node)
@@ -99,7 +92,9 @@ def _dispatch_expr_source(node: ast.AST) -> str:
 def _dispatch_expr_error(node: ast.AST, reason: str) -> ValueError:
     return ValueError(
         f"{reason}: {_dispatch_expr_source(node)}. "
-        f"{_SUPPORTED_DISPATCH_EXPRESSION_HELP}"
+        "Supported dispatch expressions are names, constants, attributes, "
+        "tuple/list literals, conditional expressions, comparisons, boolean "
+        "operators, unary not/minus, arithmetic, and calls without **kwargs."
     )
 
 
