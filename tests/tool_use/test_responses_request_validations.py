@@ -182,3 +182,47 @@ def test_responses_request_empty_tools_named_tool_choice():
                 "tool_choice": NAMED_TOOL_CHOICE,
             }
         )
+
+
+# Regression tests for parallel_tool_calls=null crash in ResponsesResponse
+# (from_request() passed None to a non-optional bool field -> Pydantic 500)
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (True, True),
+        (False, False),
+        (None, True),  # null must resolve to the documented default (true)
+    ],
+)
+def test_responses_response_parallel_tool_calls_null_resolves_to_default(
+    value, expected
+):
+    from vllm.entrypoints.openai.responses.protocol import ResponsesResponse
+
+    resolved = value if value is not None else True
+    r = ResponsesResponse.model_validate(
+        {
+            "id": "resp_test",
+            "model": "test-model",
+            "parallel_tool_calls": resolved,
+            "output": [],
+            "status": "completed",
+            "temperature": 1.0,
+            "tool_choice": "auto",
+            "tools": [],
+            "top_p": 1.0,
+            "background": False,
+            "max_output_tokens": 1024,
+            "service_tier": "auto",
+            "truncation": "disabled",
+        }
+    )
+    assert r.parallel_tool_calls == expected
+
+
+def test_responses_request_parallel_tool_calls_null_accepted():
+    """Client sending null must be accepted at request validation time."""
+    req = ResponsesRequest.model_validate(
+        {"input": "Hello", "model": "test-model", "parallel_tool_calls": None}
+    )
+    assert req.parallel_tool_calls is None
