@@ -461,8 +461,13 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_entry.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_entry.cu"
       "csrc/libtorch_stable/quantization/awq/gemm_kernels.cu"
-      "csrc/libtorch_stable/quantization/int4_embedding.cu"
       "csrc/libtorch_stable/minimax_reduce_rms_kernel.cu")
+
+    # INT4 embedding kernels are CUDA-only (the file body is empty on ROCm).
+    if(VLLM_GPU_LANG STREQUAL "CUDA")
+      list(APPEND VLLM_STABLE_EXT_SRC
+        "csrc/libtorch_stable/quantization/int4_embedding.cu")
+    endif()
 
     #
     # Machete kernels

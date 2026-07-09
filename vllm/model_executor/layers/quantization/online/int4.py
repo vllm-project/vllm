@@ -17,12 +17,17 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.platforms import current_platform
 
 
 def _can_use_int4_kernel(x: torch.Tensor, dtype: torch.dtype | None = None) -> bool:
     """The CUDA kernels only support FP16/BF16 on CUDA."""
     check_dtype = dtype if dtype is not None else x.dtype
-    return x.is_cuda and check_dtype in (torch.float16, torch.bfloat16)
+    return (
+        current_platform.is_cuda()
+        and x.is_cuda
+        and check_dtype in (torch.float16, torch.bfloat16)
+    )
 
 
 class Int4PerChannelEmbeddingMethod(QuantizeMethodBase):
@@ -91,18 +96,24 @@ class Int4PerChannelEmbeddingMethod(QuantizeMethodBase):
         packed = q_uint4[:, ::2] | (q_uint4[:, 1::2] << 4)
 
         # Replace weight with packed version.
-        # Save weight_loader before replacing (it lives on the tensor).
+        # Save weight attributes before replacing the parameter.
         old_weight = cast(torch.nn.Parameter, layer.weight)
-        weight_loader = getattr(old_weight, "weight_loader", None)
+        weight_attrs: dict[str, object] = {
+            "input_dim": 1,
+            "output_dim": 0,
+        }
+        for attr in ("input_dim", "output_dim", "weight_loader"):
+            if hasattr(old_weight, attr):
+                weight_attrs[attr] = getattr(old_weight, attr)
         # Must delete from _parameters first because nn.Module.__setattr__
         # doesn't clear _parameters before calling register_parameter.
         if "weight" in layer._parameters:
             del layer._parameters["weight"]
         packed_param = torch.nn.Parameter(packed, requires_grad=False)
-        if weight_loader is not None:
+        if weight_attrs:
             from vllm.model_executor.utils import set_weight_attrs
 
-            set_weight_attrs(packed_param, {"weight_loader": weight_loader})
+            set_weight_attrs(packed_param, weight_attrs)
         layer.register_parameter("weight", packed_param)
         layer.register_parameter(
             "weight_scale",

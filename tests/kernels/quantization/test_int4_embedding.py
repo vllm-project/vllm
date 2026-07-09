@@ -282,6 +282,32 @@ def test_int4_lm_head_gemv_noncontiguous_hidden():
     torch.testing.assert_close(got, expected, atol=1e-2, rtol=1e-2)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="int4 embedding kernels require CUDA"
+)
+def test_int4_embedding_lookup_full_nibble_range():
+    """Exercise every unsigned nibble value [0, 15]."""
+    torch.manual_seed(0)
+    device = "cuda"
+    hidden_size = 32
+    # One row for each nibble value so the reference path is trivial.
+    values = torch.arange(16, dtype=torch.uint8, device=device)
+    packed = torch.zeros(16, hidden_size // 2, dtype=torch.uint8, device=device)
+    packed[:] = values.unsqueeze(1)
+    scale = torch.rand(1, hidden_size, dtype=torch.bfloat16, device=device) * 0.01
+    ids = torch.arange(16, dtype=torch.long, device=device)
+
+    from vllm import _custom_ops as ops
+
+    got = ops.int4_embedding_lookup(packed, scale, ids, torch.bfloat16)
+
+    low = (packed[ids] & 0xF).to(torch.int16)
+    high = (packed[ids] >> 4).to(torch.int16)
+    q_uint4 = torch.stack([low, high], dim=-1).view(ids.numel(), hidden_size)
+    expected = (q_uint4.to(torch.bfloat16) - 8.0) * scale
+    torch.testing.assert_close(got, expected, atol=1e-2, rtol=1e-2)
+
+
 if __name__ == "__main__":
     # Run basic tests
     test_int4_quantization_accuracy(1000, 256, torch.float32)
