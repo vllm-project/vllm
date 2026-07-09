@@ -80,8 +80,10 @@ FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu24.04
 ARG TORCH_VERSION=2.13.0
 
 ENV DEBIAN_FRONTEND=noninteractive
+# gcc + python3-dev: Triton JIT-kompiliert Kernel (GDN, Vision-PosEmbed)
+# zur LAUFZEIT und braucht dafür einen C-Compiler samt Python-Headern.
 RUN apt-get update -q && apt-get install -y -q --no-install-recommends \
-        python3 python3-venv curl && \
+        python3 python3-venv python3-dev gcc curl && \
     rm -rf /var/lib/apt/lists/*
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
