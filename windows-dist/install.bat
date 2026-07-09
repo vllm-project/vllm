@@ -1,127 +1,132 @@
 @echo off
-title vLLM for AMD ROCm - One Click Setup
+title vLLM Installer
 cd /d "%~dp0"
-echo ==============================================
-echo    vLLM for AMD ROCm - One Click Setup
-echo ==============================================
+setlocal enabledelayedexpansion
+
+echo =============================================
+echo    vLLM for AMD ROCm - Interactive Installer
+echo =============================================
 echo.
-echo This will install everything needed to run vLLM
-echo on your AMD GPU. Internet connection required.
+echo This will install vLLM on your system.
+echo.
 echo.
 
-:: ===== 1. CHECK/SETUP FOLDER =====
-set "ROOT=%~dp0"
-if EXIST "%ROOT%..\vllm\__init__.py" set "ROOT=%~dp0.."
-set "VENV_DIR=%ROOT%.venv"
+:: ===== WHERE TO INSTALL =====
+set "DEF_DIR=E:\VLLM"
+set /p "INSTALL_DIR=Where to install? [%DEF_DIR%]: "
+if "!INSTALL_DIR!"=="" set "INSTALL_DIR=%DEF_DIR%"
+echo.
 
-:: ===== 2. CHECK PYTHON =====
-echo [1/6] Checking Python...
-python --version >nul 2>&1
-if ERRORLEVEL 1 (
-    echo   Python not found. Downloading Python 3.12...
-    curl -sL -o "%TEMP%\python-installer.exe" https://www.python.org/ftp/python/3.12.9/python-3.12.9-amd64.exe
+:: Check if directory exists
+if not EXIST "!INSTALL_DIR!" (
+    echo [..] Creating directory...
+    mkdir "!INSTALL_DIR!" >nul 2>&1
+)
+cd /d "!INSTALL_DIR!"
+echo [OK] Installing to: !INSTALL_DIR!
+echo.
+
+:: ===== PYTHON VENV =====
+set /p "CREATE_VENV=Create Python virtual environment? (Y/N) [Y]: "
+if "!CREATE_VENV!"=="" set "CREATE_VENV=Y"
+if /i "!CREATE_VENV!"=="Y" (
+    echo [..] Creating virtual environment...
+    python -m venv "!INSTALL_DIR!\.venv"
     if ERRORLEVEL 1 (
-        echo   Download failed. Install Python 3.12 manually from python.org
+        echo [ERROR] Failed to create venv. Install Python 3.12 first.
         pause
         exit /b 1
     )
-    start /wait "" "%TEMP%\python-installer.exe" /quiet InstallAllUsers=0 PrependPath=1 Include_test=0
-    echo   Python 3.12 installed.
+    echo [OK] Virtual environment created: !INSTALL_DIR!\.venv
+    call "!INSTALL_DIR!\.venv\Scripts\activate.bat"
+    echo [OK] Virtual environment activated.
 ) else (
-    echo   Python found.
+    echo [SKIP] Using system Python.
 )
+echo.
 
-:: ===== 3. CHECK GIT =====
-echo [2/6] Checking Git...
-git --version >nul 2>&1
-if ERRORLEVEL 1 (
-    echo   Git not found. Downloading Git...
-    curl -sL -o "%TEMP%\git-installer.exe" https://github.com/git-for-windows/git/releases/download/v2.48.1.windows.1/Git-2.48.1-64-bit.exe
+:: ===== PYTORCH WITH ROCM =====
+set /p "INSTALL_TORCH=Install PyTorch with ROCm? (Y/N) [Y]: "
+if "!INSTALL_TORCH!"=="" set "INSTALL_TORCH=Y"
+if /i "!INSTALL_TORCH!"=="Y" (
+    echo [..] Installing PyTorch with ROCm...
+    echo     This downloads ~3 GB from repo.amd.com
+    pip install torch --index-url https://repo.amd.com/rocm/whl/gfx120X-all/ --timeout 120
     if ERRORLEVEL 1 (
-        echo   Download failed. Install Git manually from git-scm.com
+        echo [ERROR] PyTorch install failed.
+        echo         Try: pip install torch --index-url https://download.pytorch.org/whl/rocm7.13
         pause
         exit /b 1
     )
-    start /wait "" "%TEMP%\git-installer.exe" /SILENT
-    echo   Git installed.
+    echo [OK] PyTorch with ROCm installed.
 ) else (
-    echo   Git found.
+    echo [SKIP] PyTorch install skipped.
 )
+echo.
 
-:: ===== 4. SETUP VENV =====
-echo [3/6] Creating virtual environment...
-if not EXIST "%VENV_DIR%" (
-    python -m venv "%VENV_DIR%"
-    echo   Virtual environment created.
+:: ===== CLONE vLLM SOURCE =====
+echo [..] Cloning vLLM Windows port...
+if EXIST "!INSTALL_DIR!\vllm-windows" (
+    echo [OK] Already cloned.
 ) else (
-    echo   Virtual environment already exists.
-)
-
-:: ===== 5. INSTALL PYTORCH WITH ROCM =====
-echo [4/6] Installing PyTorch with ROCm (this downloads ~3 GB)...
-echo   This will take a while...
-call "%VENV_DIR%\Scripts\activate.bat"
-pip install torch --index-url https://repo.amd.com/rocm/whl/gfx120X-all/ --timeout 120
-if ERRORLEVEL 1 (
-    echo.
-    echo   PyTorch install failed. Try:
-    echo   pip install torch --index-url https://download.pytorch.org/whl/rocm7.13
-    pause
-)
-echo   PyTorch installed.
-
-:: ===== 6. CLONE vLLM (if needed) =====
-echo [5/6] Setting up vLLM...
-if not EXIST "%ROOT%vllm\__init__.py" (
-    if EXIST "%ROOT%..\vllm\__init__.py" (
-        set "ROOT=%~dp0.."
-    ) else (
-        echo   Cloning vLLM Windows port...
-        cd "%ROOT%"
-        git clone https://github.com/Maxritz/vllm-windows.git vllm-src
-        cd vllm-src
-        git checkout WINDOWS-PORT
-        set "ROOT=%ROOT%vllm-src"
+    git clone https://github.com/Maxritz/vllm-windows.git "!INSTALL_DIR!\vllm-windows"
+    cd "!INSTALL_DIR!\vllm-windows"
+    git checkout WINDOWS-PORT
+    if ERRORLEVEL 1 (
+        echo [WARN] Branch checkout failed, continuing...
     )
 )
+set "VLLM_SRC=!INSTALL_DIR!\vllm-windows"
+echo [OK] vLLM source: !VLLM_SRC!
+echo.
 
-:: Install vLLM package
-cd /d "%ROOT%"
+:: ===== INSTALL vLLM PACKAGE =====
+cd /d "!VLLM_SRC!"
+echo [..] Installing vLLM Python package...
 pip install -e .
-echo   vLLM package installed.
-
-:: Copy _C.pyd
-if EXIST "%~dp0_C.pyd" (
-    copy /Y "%~dp0_C.pyd" "%ROOT%\vllm\_C.pyd" >nul
-    echo   _C.pyd installed.
-) else (
-    echo   WARNING: _C.pyd not found in zip.
+if ERRORLEVEL 1 (
+    echo [WARN] pip install had issues, continuing...
 )
+echo [OK] vLLM package installed.
+echo.
 
-:: ===== 7. DETECT ROCm =====
+:: ===== COPY _C.pyd + vllm.exe =====
+echo [..] Installing binaries...
+set "PYD_SRC=%~dp0_C.pyd"
+if EXIST "!PYD_SRC!" (
+    copy /Y "!PYD_SRC!" "!VLLM_SRC!\vllm\_C.pyd" >nul
+    for %%F in ("!PYD_SRC!") do set /a PYD_MB=%%~zF/1048576
+    echo [OK] _C.pyd installed (!PYD_MB! MB)
+) else (
+    echo [WARN] _C.pyd not found in zip.
+)
+if EXIST "%~dp0vllm.exe" (
+    copy /Y "%~dp0vllm.exe" "!VLLM_SRC!\" >nul
+    echo [OK] vllm.exe copied.
+)
+echo.
+
+:: ===== CONFIGURE ROCm =====
+echo [..] Detecting ROCm...
 set "HIP_PATH="
 if EXIST "C:\Program Files\AMD\ROCm\7.13\bin\hipcc.exe" set "HIP_PATH=C:\Program Files\AMD\ROCm\7.13"
 if EXIST "C:\Program Files\AMD\ROCm\7.12\bin\hipcc.exe" set "HIP_PATH=C:\Program Files\AMD\ROCm\7.12"
-if EXIST "C:\Program Files\AMD\ROCm\7.11\bin\hipcc.exe" set "HIP_PATH=C:\Program Files\AMD\ROCm\7.11"
 if "!HIP_PATH!"=="" (
     for /f "delims=" %%D in ('dir /b "C:\Program Files\AMD\ROCm\*" 2^>nul') do (
         if EXIST "C:\Program Files\AMD\ROCm\%%D\bin\hipcc.exe" set "HIP_PATH=C:\Program Files\AMD\ROCm\%%D"
     )
 )
 if "!HIP_PATH!"=="" (
-    for /f "delims=" %%D in ('dir /b "C:\ROCm\*" 2^>nul') do (
-        if EXIST "C:\ROCm\%%D\bin\hipcc.exe" set "HIP_PATH=C:\ROCm\%%D"
-    )
-)
-if "!HIP_PATH!"=="" (
     if NOT "!ROCM_HOME!"=="" set "HIP_PATH=!ROCM_HOME!"
-    if NOT "!ROCM_PATH!"=="" set "HIP_PATH=!ROCM_PATH!"
     if NOT "!HIP_PATH!"=="" if EXIST "!HIP_PATH!\bin\hipcc.exe" set "HIP_PATH=!HIP_PATH!"
 )
-if "!HIP_PATH!"=="" set "HIP_PATH=C:\Program Files\AMD\ROCm\7.13"
-echo   ROCm: !HIP_PATH!
+if "!HIP_PATH!"=="" (
+    echo [WARN] ROCm not found. Set HIP_PATH manually in sitecustomize.py.
+) else (
+    echo [OK] ROCm found: !HIP_PATH!
+)
 
-:: ===== 8. CREATE sitecustomize.py =====
+:: ===== CREATE sitecustomize.py =====
 for /f "delims=" %%P in ('python -c "import sys; [print(p) for p in sys.path if p.endswith('site-packages')]" 2^>nul') do set "SITE_PKG=%%P"
 if not "!SITE_PKG!"=="" (
     if not EXIST "!SITE_PKG!\sitecustomize.py" (
@@ -129,22 +134,36 @@ if not "!SITE_PKG!"=="" (
         echo os.environ.setdefault('HIP_PATH', '!HIP_PATH!') >> "!SITE_PKG!\sitecustomize.py"
         echo os.environ.setdefault('VLLM_NO_USAGE_STATS', 'true') >> "!SITE_PKG!\sitecustomize.py"
         echo [OK] sitecustomize.py created
+    ) else (
+        echo [OK] sitecustomize.py already exists
     )
 )
+echo.
+
+:: ===== VERIFY =====
+echo [..] Verifying vLLM...
+python -c "import vllm; print('vLLM:', vllm.__version__)" 2>nul
+if ERRORLEVEL 1 (
+    echo [WARN] vLLM import failed. Check the installation.
+) else (
+    python -c "import vllm._C; print('_C.pyd: OK')" 2>nul
+)
+echo.
 
 :: ===== DONE =====
+echo =============================================
+echo   INSTALLATION COMPLETE
+echo =============================================
 echo.
-echo ==============================================
-echo   INSTALL COMPLETE!
-echo ==============================================
+echo   Installed to: !INSTALL_DIR!
+echo   vLLM source:  !VLLM_SRC!
 echo.
-echo   vLLM is ready to use.
-echo.
-echo   To start the server:
-echo     "%ROOT%.venv\Scripts\activate.bat"
+echo   To start the server from terminal:
+echo     "!VLLM_SRC!.venv\Scripts\activate.bat"
 echo     python -m vllm.entrypoints.openai.api_server --model ^<model-path^> --enforce-eager
 echo.
-echo   Or double-click vllm.exe in this folder for the GUI.
+echo   Or use the GUI:
+echo     "!VLLM_SRC!\vllm.exe"
 echo.
 echo   Press any key to exit...
 pause >nul
