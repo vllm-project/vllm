@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 import pytest
 import torch
 
@@ -144,3 +146,109 @@ def test_fused_qk_norm_rope_matches_reference(
         atol=ATOL,
         rtol=RTOL,
     )
+
+
+@pytest.mark.optional
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="fused_qk_norm_rope custom op requires cuda and rocm platform",
+)
+@pytest.mark.skipif(
+    os.getenv("VLLM_TEST_LARGE_FUSED_QK_NORM_ROPE_OVERFLOW") != "1",
+    reason="large 4GiB fused_qk_norm_rope overflow regression is manual",
+)
+@pytest.mark.parametrize(
+    ("forced_token_heads_per_warp", "num_heads_q", "num_heads_k", "head_dim"),
+    [
+        pytest.param(1, 8, 8, 256, id="base_head_dim_256"),
+        pytest.param(4, 32, 32, 64, id="ntokenheads_head_dim_64"),
+    ],
+)
+@torch.inference_mode()
+def test_fused_qk_norm_rope_large_qkv_offsets(
+    default_vllm_config,
+    forced_token_heads_per_warp: int,
+    num_heads_q: int,
+    num_heads_k: int,
+    head_dim: int,
+):
+    torch.set_default_device("cuda:0")
+
+    num_heads_v = 0
+    eps = 1e-6
+    rotary_dim = 64
+    dtype = torch.float16
+
+    row_dim = (num_heads_q + num_heads_k + num_heads_v) * head_dim
+    overflow_token = (2**31) // row_dim
+    num_tokens = overflow_token + 2
+
+    qkv_bytes = num_tokens * row_dim * torch.empty((), dtype=dtype).element_size()
+    torch.cuda.empty_cache()
+    free_bytes, _ = torch.cuda.mem_get_info()
+    if free_bytes < qkv_bytes + 2 * 1024**3:
+        pytest.skip(
+            "large fused_qk_norm_rope overflow regression needs about 6GiB "
+            f"free CUDA memory, got {free_bytes / 2**30:.2f}GiB"
+        )
+
+    probes = torch.tensor(
+        [0, overflow_token - 1, overflow_token, overflow_token + 1],
+        device="cuda",
+        dtype=torch.long,
+    )
+    qkv = torch.empty((num_tokens, row_dim), device="cuda", dtype=dtype)
+    qkv.zero_()
+    # Keep the 4GiB manual test fast while making probed rows meaningful.
+    qkv.index_copy_(
+        0,
+        probes,
+        torch.randn((probes.numel(), row_dim), device="cuda", dtype=dtype),
+    )
+
+    q_weight = torch.ones((head_dim,), device="cuda", dtype=dtype)
+    k_weight = torch.ones((head_dim,), device="cuda", dtype=dtype)
+    cos_sin_cache = torch.zeros((1, rotary_dim), device="cuda", dtype=torch.float32)
+    cos_sin_cache[:, : rotary_dim // 2] = 1.0
+    position_ids = torch.zeros((num_tokens,), device="cuda", dtype=torch.int64)
+
+    before = qkv.index_select(0, probes).clone()
+
+    def reference_rows(rows: torch.Tensor) -> torch.Tensor:
+        rows_f = rows.float()
+        q_size = num_heads_q * head_dim
+        k_size = num_heads_k * head_dim
+
+        q = rows_f[:, :q_size].view(rows.shape[0], num_heads_q, head_dim)
+        k = rows_f[:, q_size : q_size + k_size].view(
+            rows.shape[0], num_heads_k, head_dim
+        )
+        v = rows_f[:, q_size + k_size :]
+
+        q = q / torch.sqrt((q * q).mean(dim=-1, keepdim=True) + eps)
+        k = k / torch.sqrt((k * k).mean(dim=-1, keepdim=True) + eps)
+        return torch.cat(
+            [q.reshape(rows.shape[0], q_size), k.reshape(rows.shape[0], k_size), v],
+            dim=-1,
+        ).to(dtype)
+
+    expected = reference_rows(before)
+
+    torch.ops._C.fused_qk_norm_rope(
+        qkv,
+        num_heads_q,
+        num_heads_k,
+        num_heads_v,
+        head_dim,
+        eps,
+        q_weight,
+        k_weight,
+        cos_sin_cache,
+        True,
+        position_ids,
+        forced_token_heads_per_warp,
+    )
+    torch.cuda.synchronize()
+
+    after = qkv.index_select(0, probes)
+    torch.testing.assert_close(after, expected, atol=3e-3, rtol=3e-3)
