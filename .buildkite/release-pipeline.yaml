@@ -471,7 +471,7 @@ steps:
         agents:
           queue: small_cpu_queue_release
         commands:
-          - "bash .buildkite/scripts/create-xpu-ecr-manifest.sh"
+          - "bash .buildkite/scripts/xpu/create-xpu-ecr-manifest.sh"
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: XPU" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-xpu"'
 
       - label: "Publish nightly multi-arch image to DockerHub"
@@ -855,7 +855,7 @@ steps:
     agents:
       queue: small_cpu_queue_release
     commands:
-      - "bash .buildkite/scripts/push-nightly-builds-xpu.sh"
+      - "bash .buildkite/scripts/xpu/push-nightly-builds-xpu.sh"
       - "bash .buildkite/scripts/cleanup-nightly-builds.sh nightly- vllm/vllm-openai-xpu"
     plugins:
       - docker-login#v3.0.0:
