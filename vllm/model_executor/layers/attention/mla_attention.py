@@ -1710,7 +1710,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 chunk_ends = torch.min(
                     context_lens_cpu.unsqueeze(0), chunk_starts + max_context_chunk
                 )
-                chunk_seq_lens = (chunk_ends - chunk_starts).clamp(min=0)
+                chunk_seq_lens = chunk_ends - chunk_starts
+                chunk_seq_lens.clamp_(min=0)
 
                 cu_seq_lens_cpu = torch.zeros(
                     num_chunks, num_prefills + 1, dtype=torch.int32, pin_memory=True
@@ -1775,9 +1776,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         local_chunk_starts
                         + padded_local_max_context_chunk_across_ranks,
                     )
-                    padded_local_chunk_seq_lens = (
-                        local_chunk_ends - local_chunk_starts
-                    ).clamp(min=0)
+                    padded_local_chunk_seq_lens = local_chunk_ends - local_chunk_starts
+                    padded_local_chunk_seq_lens.clamp_(min=0)
 
                     padded_local_cu_chunk_seq_lens_cpu = torch.zeros(
                         num_chunks, num_prefills + 1, dtype=torch.int32, pin_memory=True
