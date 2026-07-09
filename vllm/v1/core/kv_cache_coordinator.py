@@ -100,6 +100,17 @@ class KVCacheCoordinator(ABC):
         self.eagle_group_ids: set[int] = {
             i for i, g in enumerate(kv_cache_config.kv_cache_groups) if g.is_eagle_group
         }
+        # Subset of eagle_group_ids whose miss must not veto the cache-hit
+        # convergence of other groups (see KVCacheGroupSpec.
+        # eagle_group_is_veto_exempt). Left empty in the "flag all groups"
+        # fallback below: per-group veto-exemption is unknown in that case,
+        # so we conservatively preserve the original all-groups-authoritative
+        # behavior.
+        self.veto_exempt_eagle_group_ids: set[int] = {
+            i
+            for i, g in enumerate(kv_cache_config.kv_cache_groups)
+            if g.is_eagle_group and g.eagle_group_is_veto_exempt
+        }
         # Conservatively fall back to flag all groups when no group is flagged.
         if use_eagle and not self.eagle_group_ids:
             self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
@@ -504,12 +515,20 @@ class SpecGroup(NamedTuple):
     ``use_eagle`` is True iff any member group is an EAGLE/MTP group. Members
     sharing a spec are cached and looked up jointly, so the EAGLE last-block drop
     is necessarily decided for the whole spec group.
+
+    ``veto_exempt`` is True only if EVERY member group is individually
+    veto-exempt (see KVCacheGroupSpec.eagle_group_is_veto_exempt), a
+    conservative AND, since exempting a merged group's miss also exempts it
+    for any non-exempt member sharing the same spec (in practice, members
+    that merge share an identical spec and thus an identical method-level
+    veto-exemption, so this is not expected to matter).
     """
 
     spec: KVCacheSpec
     group_ids: list[int]
     manager_cls: type[SingleTypeKVCacheManager]
     use_eagle: bool
+    veto_exempt: bool = False
 
 
 class HybridKVCacheCoordinator(KVCacheCoordinator):
@@ -584,6 +603,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             manager_cls = self.single_type_managers[i].__class__
             spec = g.kv_cache_spec
             use_eagle = i in self.eagle_group_ids
+            veto_exempt = i in self.veto_exempt_eagle_group_ids
 
             # Try to find an existing group with the same spec
             for idx, group in enumerate(self.attention_groups):
@@ -592,12 +612,21 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                         "Expected same manager class for identical KV cache specs."
                     )
                     group.group_ids.append(i)
-                    if use_eagle and not group.use_eagle:
-                        self.attention_groups[idx] = group._replace(use_eagle=True)
+                    new_use_eagle = group.use_eagle or use_eagle
+                    # AND-merge: a merged group is only veto-exempt if every
+                    # member is (conservative, see SpecGroup docstring).
+                    new_veto_exempt = group.veto_exempt and veto_exempt
+                    if (
+                        new_use_eagle != group.use_eagle
+                        or new_veto_exempt != group.veto_exempt
+                    ):
+                        self.attention_groups[idx] = group._replace(
+                            use_eagle=new_use_eagle, veto_exempt=new_veto_exempt
+                        )
                     break
             else:
                 self.attention_groups.append(
-                    SpecGroup(spec, [i], manager_cls, use_eagle)
+                    SpecGroup(spec, [i], manager_cls, use_eagle, veto_exempt)
                 )
 
         assert len(self.attention_groups) > 1, (
@@ -657,6 +686,14 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         types. This converges because length monotonically decreases and is
         bounded below by 0.
 
+        A veto-exempt eagle group (SpecGroup.veto_exempt, see
+        KVCacheGroupSpec.eagle_group_is_veto_exempt) whose lookup finds
+        exactly zero matching blocks for the current candidate length is
+        left unconfirmed for this round instead of shrinking
+        ``curr_hit_length`` to 0: such a group's stored content has no
+        request-independent reuse value, so a miss from it does not mean
+        the other, independently-confirmed groups' data is unavailable.
+
         Args:
             block_hashes: The block hashes of the request.
             max_cache_hit_length: The maximum length of the cache hit.
@@ -693,8 +730,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         while True:
             curr_hit_length = hit_length
 
-            for idx, (spec, group_ids, manager_cls, use_eagle) in enumerate(
-                self.attention_groups
+            for idx, (spec, group_ids, manager_cls, use_eagle, veto_exempt) in (
+                enumerate(self.attention_groups)
             ):
                 group_block_size = self.single_type_managers[group_ids[0]].block_size
                 cached_blocks = hit_blocks_by_group[group_ids[0]]
@@ -730,6 +767,10 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     ),
                 )
                 _new_hit_length = len(hit_blocks[0]) * group_block_size
+                if veto_exempt and _new_hit_length == 0:
+                    # Not authoritative: leave unconfirmed for this round
+                    # rather than vetoing every other group's confirmed hit.
+                    continue
                 if drop_eagle_block:
                     eagle_verified.add(idx)
                 elif _new_hit_length < curr_hit_length:
@@ -787,7 +828,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         hit_blocks: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
         hit_lengths: list[int] = [0] * num_groups
 
-        for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
+        for spec, group_ids, manager_cls, use_eagle, _veto_exempt in self.attention_groups:
             blocks = manager_cls.find_longest_cache_hit(
                 block_hashes=_get_block_hashes(spec),
                 max_length=max_cache_hit_length,

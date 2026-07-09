@@ -1249,6 +1249,27 @@ class SpeculativeConfig:
     def use_dspark(self) -> bool:
         return self.method == "dspark"
 
+    def has_ephemeral_draft_context(self) -> bool:
+        """Whether this method's draft-model KV-cache group is built from
+        the target model's auxiliary hidden states at generation time,
+        rather than incrementally through the draft's own attention over
+        previously-drafted tokens (EAGLE/EAGLE3/MTP).
+
+        Such a group's stored content has no request-independent, stable
+        meaning: it depends on which tokens were freshly computed by the
+        target vs. restored from cache during this specific serving
+        trajectory. A cache-hit-lookup miss on this group therefore does not
+        mean the group's data is genuinely unavailable for reuse the way it
+        does for other eagle-family groups, so it must not be treated as
+        authoritative when converging a multi-group cache-hit boundary (see
+        KVCacheGroupSpec.eagle_group_is_veto_exempt).
+
+        DFlash shares this same underlying property, but is intentionally
+        left out here: it has not been validated end to end in this PR, so
+        it is scoped to a follow-up rather than claimed for free.
+        """
+        return self.method in ("dspark",)
+
     def uses_dynamic_speculative_decoding(self) -> bool:
         return self.num_speculative_tokens_per_batch_size is not None
 
