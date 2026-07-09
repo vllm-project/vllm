@@ -258,6 +258,19 @@ def test_chat_template_validation_for_missing_installed_examples(tmp_path, monke
         validate_parsed_serve_args(args)
 
 
+@pytest.mark.skip_global_cleanup
+def test_per_request_metrics_requires_log_stats(monkeypatch):
+    import vllm.platforms as platforms
+
+    monkeypatch.setattr(platforms, "_current_platform", CpuPlatform())
+    serve_parser = _build_vllm_parsers()["vllm serve"]
+    args = serve_parser.parse_args(
+        args=["--enable-per-request-metrics", "--disable-log-stats"]
+    )
+    with pytest.raises(ValueError):
+        validate_parsed_serve_args(args)
+
+
 @pytest.mark.parametrize(
     "cli_args, expected_middleware",
     [

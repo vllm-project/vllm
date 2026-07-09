@@ -119,6 +119,11 @@ class CacheConfig:
     mamba_page_size_padded: int | None = None
     """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""
+    skip_page_size_padded: int | None = None
+    """Optional override for the page size of layers skipped from KV cache
+    quantization (``--kv-cache-dtype-skip-layers``); set during block-size
+    alignment so unquantized skip layers pad up to the quantized primary's
+    page."""
     mamba_block_size: int | None = Field(default=None, gt=0)
     """Size of a contiguous cache block in number of tokens for mamba cache.
     Can be set only when prefix caching is enabled.
@@ -156,13 +161,11 @@ class CacheConfig:
     """Per-DP-engine maximum concurrency at max_model_len tokens."""
 
     kv_sharing_fast_prefill: bool = False
-    """This feature is work in progress and no prefill optimization takes place
-    with this flag enabled currently.
-
-    In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
+    """In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
     some layers can skip tokens corresponding to prefill. This flag enables
     attention metadata for eligible layers to be overridden with metadata
     necessary for implementing this optimization in some models (e.g. Gemma3n)
+    NOTE: KV cache sharing is not supported for MRv2 (v2 model runner).
     """
 
     kv_cache_memory_bytes: int | None = None
@@ -200,6 +203,7 @@ class CacheConfig:
         ignored_factors = {
             # Runtime/derived knobs that don't affect compiled graph shape
             "gpu_memory_utilization",
+            "kv_cache_memory_bytes",
             "is_attention_free",
             "num_gpu_blocks_override",
             "enable_prefix_caching",
@@ -207,6 +211,7 @@ class CacheConfig:
             # Prefix-caching implementation detail (doesn't affect compiled graph).
             "hash_block_size",
             "mamba_page_size_padded",
+            "skip_page_size_padded",
             "user_specified_block_size",
             "user_specified_mamba_block_size",
             "_block_size_resolved",

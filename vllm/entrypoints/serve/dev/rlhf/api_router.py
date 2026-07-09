@@ -129,14 +129,7 @@ async def init_weight_transfer_engine(raw_request: Request):
 
 @router.post("/start_weight_update")
 async def start_weight_update(raw_request: Request):
-    try:
-        body = await raw_request.json()
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
-    is_checkpoint_format = body.get("is_checkpoint_format", True)
-    await engine_client(raw_request).start_weight_update(
-        is_checkpoint_format=is_checkpoint_format
-    )
+    await engine_client(raw_request).start_weight_update()
     return JSONResponse(content={"message": "Weight update started"})
 
 

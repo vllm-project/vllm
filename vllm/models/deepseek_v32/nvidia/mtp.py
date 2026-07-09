@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import typing
 from collections.abc import Callable, Iterable
 
@@ -9,6 +8,7 @@ import torch.nn as nn
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
+from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -35,6 +35,7 @@ from vllm.model_executor.models.utils import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
+from .kernels import fused_eh_norm
 from .model import DeepseekV32DecoderLayer
 
 
@@ -75,19 +76,35 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
-        inputs_embeds = torch.where(positions.unsqueeze(-1) == 0, 0, inputs_embeds)
-        inputs_embeds = self.enorm(inputs_embeds)
-        previous_hidden_states = self.hnorm(previous_hidden_states)
-        hidden_states = self.eh_proj(
-            torch.cat([inputs_embeds, previous_hidden_states], dim=-1)
+        # Fused: zero pos-0 embeds + enorm(embeds) + hnorm(prev) + cat -> [N, 2H].
+        eh_input = fused_eh_norm(
+            positions,
+            inputs_embeds,
+            previous_hidden_states,
+            self.enorm.weight,
+            self.hnorm.weight,
+            self.enorm.variance_epsilon,
         )
+        hidden_states = self.eh_proj(eh_input)
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
-        # Return the pre-final-norm recycle hidden (re-fed as the next spec
-        # step's previous_hidden_states); shared_head norm is applied in
-        # compute_logits. Matches the V2-runner / deepseek_v4 MTP contract.
-        return residual + hidden_states
+        # mtp_block's MoE output is left un-reduced (reduce_results=False); the
+        # main model fuses that all-reduce into the next norm, but here the
+        # recycle hidden is consumed directly, so reduce it now.
+        hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+        # Recycle the POST-final-norm hidden into the next draft step. The
+        # residual-add is fused into the final RMSNorm so it is computed
+        # exactly once, and the result is returned for both tuple positions:
+        # the draft-logits hidden (compute_logits applies the LM head only) and
+        # the recycled previous_hidden_states. Recycling the pre-final-norm
+        # hidden mismatches the draft model's hnorm and lowers MTP acceptance;
+        # post-norm recycle matches deepseek_mtp.py (PR #45895). The tuple form
+        # is understood by both the V2 speculator (isinstance-tuple check) and
+        # the legacy proposer (model_returns_tuple is True for the
+        # DeepSeekMTPModel architecture).
+        hidden_states, _ = self.shared_head.norm(hidden_states, residual)
+        return hidden_states, hidden_states
 
 
 class DeepseekV32MultiTokenPredictor(nn.Module):
@@ -121,6 +138,15 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
             if self_attn is not None and hasattr(self_attn, "skip_topk"):
                 self_attn.skip_topk = skip
 
+    def compact_topk_indices(self, slot_ids: torch.Tensor):
+        """Gather the top-k index rows at ``slot_ids`` to the front of the buffer."""
+        num_slots = slot_ids.numel()
+        for layer in self.layers.values():
+            self_attn = getattr(layer.mtp_block, "self_attn", None)
+            if self_attn is not None and hasattr(self_attn, "topk_indices_buffer"):
+                topk_indices_buffer = self_attn.topk_indices_buffer
+                topk_indices_buffer[:num_slots] = topk_indices_buffer[slot_ids]
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -150,9 +176,10 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
     ) -> torch.Tensor:
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
-        return self.logits_processor(
-            mtp_layer.shared_head.head, mtp_layer.shared_head(hidden_states)
-        )
+        # hidden_states is already post-final-norm (produced in the layer
+        # forward and recycled as-is); apply the LM head only, without a
+        # second RMSNorm.
+        return self.logits_processor(mtp_layer.shared_head.head, hidden_states)
 
 
 class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
@@ -166,7 +193,6 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
         self.set_moe_parameters()
 
     def set_moe_parameters(self):
-        self.expert_weights = []
         self.num_moe_layers = self.config.num_nextn_predict_layers
         self.num_expert_groups = self.config.n_group
         self.moe_layers = []
