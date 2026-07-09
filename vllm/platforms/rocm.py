@@ -8,8 +8,15 @@ from typing import TYPE_CHECKING
 
 import regex as re
 import torch
-from torch.distributed import PrefixStore, ProcessGroup
-from torch.distributed.distributed_c10d import is_nccl_available
+try:
+    from torch.distributed import PrefixStore, ProcessGroup
+    from torch.distributed.distributed_c10d import is_nccl_available
+except ImportError:
+    from vllm.platforms.rocm_dist_stubs import PrefixStore, Store, _ensure_dist_stubs
+    from vllm.platforms.rocm_dist_stubs import is_nccl_available
+
+    _ensure_dist_stubs()
+    ProcessGroup = torch.distributed.ProcessGroup
 
 import vllm.envs as envs
 from vllm.logger import init_logger

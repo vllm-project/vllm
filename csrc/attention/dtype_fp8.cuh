@@ -1,7 +1,7 @@
 #pragma once
 
 #include "attention_generic.cuh"
-#include "torch_utils.h"
+#include <torch/headeronly/util/shim_utils.h>
 
 #include <stdint.h>
 #ifdef ENABLE_FP8
@@ -31,7 +31,7 @@ inline Fp8KVCacheDataType get_fp8_kv_cache_data_type(
   } else if (dtype_str == "fp8_e5m2") {
     return Fp8KVCacheDataType::kFp8E5M2;
   }
-  TORCH_UTILS_CHECK(false, "Unsupported fp8 kv cache data type: ", dtype_str);
+  STD_TORCH_CHECK(false, "Unsupported fp8 kv cache data type: ", dtype_str);
 }
 
 // fp8 vector types for quantization of kv cache

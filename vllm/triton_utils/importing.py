@@ -100,6 +100,7 @@ class TritonPlaceholder(types.ModuleType):
         self.heuristics = self._dummy_decorator("heuristics")
         self.Config = self._dummy_decorator("Config")
         self.cdiv = cdiv
+        self.next_power_of_2 = lambda n: 1 << ((n - 1).bit_length())
         self.language = TritonLanguagePlaceholder()
 
     def _dummy_decorator(self, name):

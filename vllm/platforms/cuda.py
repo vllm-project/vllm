@@ -14,8 +14,15 @@ from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
 import torch
-from torch.distributed import PrefixStore, ProcessGroup
-from torch.distributed.distributed_c10d import is_nccl_available
+try:
+    from torch.distributed import PrefixStore, ProcessGroup
+    from torch.distributed.distributed_c10d import is_nccl_available
+except ImportError:
+    from vllm.platforms.rocm_dist_stubs import PrefixStore, _ensure_dist_stubs
+    from vllm.platforms.rocm_dist_stubs import is_nccl_available
+
+    _ensure_dist_stubs()
+    ProcessGroup = torch.distributed.ProcessGroup
 from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration

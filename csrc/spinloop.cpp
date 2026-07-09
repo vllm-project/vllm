@@ -5,6 +5,31 @@ extern "C" {
 #include <stdbool.h>
 #include <time.h>
 
+// Windows fallback for CLOCK_MONOTONIC / clock_gettime (POSIX-only)
+#ifdef _WIN32
+  #ifndef CLOCK_MONOTONIC
+    #define CLOCK_MONOTONIC 0
+  #endif
+  #define CLOCK_MONOTONIC_RAW CLOCK_MONOTONIC
+  #include <windows.h>
+  static inline int clock_gettime_mono(struct timespec *tp) {
+    static LARGE_INTEGER freq = {0};
+    static LARGE_INTEGER start = {0};
+    LARGE_INTEGER now;
+    if (freq.QuadPart == 0) {
+      QueryPerformanceFrequency(&freq);
+      QueryPerformanceCounter(&start);
+    }
+    QueryPerformanceCounter(&now);
+    long long elapsed_ns = (long long)(
+      (now.QuadPart - start.QuadPart) * 1000000000LL / freq.QuadPart);
+    tp->tv_sec = (time_t)(elapsed_ns / 1000000000LL);
+    tp->tv_nsec = (long)(elapsed_ns % 1000000000LL);
+    return 0;
+  }
+  #define clock_gettime(id, tp) clock_gettime_mono(tp)
+#endif
+
 #if defined(__i386__) || defined(__x86_64__)
   #include <cpuid.h>
   #include <mwaitxintrin.h>

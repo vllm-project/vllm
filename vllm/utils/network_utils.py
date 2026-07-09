@@ -139,6 +139,13 @@ def get_tcp_uri(ip: str, port: int) -> str:
 
 
 def get_open_zmq_ipc_path() -> str:
+    if sys.platform == "win32":
+        # Windows does not support ipc:// (Unix domain sockets).
+        # Use tcp://127.0.0.1:0 so ZMQ assigns the port at bind()
+        # time via the kernel. The caller must read
+        # getsockopt(zmq.LAST_ENDPOINT) after bind to discover the
+        # actual address if a connecting peer needs it.
+        return "tcp://127.0.0.1:0"
     base_rpc_path = envs.VLLM_RPC_BASE_PATH
     return f"ipc://{base_rpc_path}/{uuid4()}"
 

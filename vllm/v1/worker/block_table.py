@@ -147,7 +147,16 @@ class BlockTable:
         num_tokens = positions.shape[0]
         total_cp_world_size = self.pcp_world_size * self.dcp_world_size
         total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
-        _compute_slot_mapping_kernel[(num_reqs + 1,)](
+        kernel = _compute_slot_mapping_kernel
+        # When Triton is unavailable (e.g. Windows), _compute_slot_mapping_kernel
+        # is a regular function, not a Triton JIT kernel, so the grid-launch
+        # syntax kernel[(grid,)](...) does not work. Fall back to a Python loop.
+        if not hasattr(kernel, "best_grid") and not hasattr(kernel, "jit"):
+            _compute_slot_mapping_fallback(
+                self, num_reqs, num_tokens, query_start_loc, positions,
+                total_cp_world_size, total_cp_rank)
+            return
+        kernel[(num_reqs + 1,)](
             num_tokens,
             self.max_num_batched_tokens,
             query_start_loc,
@@ -320,6 +329,40 @@ class MultiGroupBlockTable:
     def __getitem__(self, idx: int) -> "BlockTable":
         """Returns the BlockTable for the i-th KV cache group."""
         return self.block_tables[idx]
+
+
+def _compute_slot_mapping_fallback(
+    self,
+    num_reqs: int,
+    num_tokens: int,
+    query_start_loc: torch.Tensor,
+    positions: torch.Tensor,
+    total_cp_world_size: int,
+    total_cp_rank: int,
+) -> None:
+    """Pure-PyTorch fallback when Triton is not available (e.g. Windows)."""
+    virtual_block_size = self.block_size * total_cp_world_size
+    slot_mapping = self.slot_mapping.gpu
+    slot_mapping.fill_(PAD_SLOT_ID)
+    bt_flat = self.block_table.gpu.view(-1)
+    bt_stride = self.block_table.gpu.stride(0)
+    for req_idx in range(num_reqs):
+        start_idx = int(query_start_loc[req_idx].item())
+        end_idx = int(query_start_loc[req_idx + 1].item())
+        row_offset = req_idx * bt_stride
+        for i in range(start_idx, end_idx):
+            pos = int(positions[i].item())
+            block_idx = pos // virtual_block_size
+            block_num = int(bt_flat[row_offset + block_idx].item())
+            vblock_off = pos - block_idx * virtual_block_size
+            is_local = (vblock_off // self.cp_kv_cache_interleave_size) \
+                % total_cp_world_size == total_cp_rank
+            if is_local:
+                lblock_off = (vblock_off // (total_cp_world_size *
+                              self.cp_kv_cache_interleave_size)
+                              ) * self.cp_kv_cache_interleave_size + (
+                    vblock_off % self.cp_kv_cache_interleave_size)
+                slot_mapping[i] = block_num * self.block_size + lblock_off
 
 
 @triton.jit(do_not_specialize=["num_tokens", "max_num_tokens"])

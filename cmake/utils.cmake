@@ -169,6 +169,10 @@ endfunction()
 #   libgomp.so.1  -> libgomp-<hash>.so...
 # OUTPUT: TORCH_GOMP_SHIM_DIR  ("" if not found)
 function(vllm_prepare_torch_gomp_shim TORCH_GOMP_SHIM_DIR)
+  if(WIN32)
+    set(${TORCH_GOMP_SHIM_DIR} "" PARENT_SCOPE)
+    return()
+  endif()
   set(${TORCH_GOMP_SHIM_DIR} "" PARENT_SCOPE)
 
   # Use run_python to locate vendored libgomp; never throw on failure.
@@ -626,5 +630,5 @@ function (define_extension_target MOD_NAME)
     target_link_libraries(${MOD_NAME} PRIVATE torch ${TORCH_LIBRARIES} ${ARG_LIBRARIES})
   endif()
 
-  install(TARGETS ${MOD_NAME} LIBRARY DESTINATION ${ARG_DESTINATION} COMPONENT ${MOD_NAME})
+  install(TARGETS ${MOD_NAME} LIBRARY DESTINATION ${ARG_DESTINATION} RUNTIME DESTINATION ${ARG_DESTINATION} COMPONENT ${MOD_NAME})
 endfunction()

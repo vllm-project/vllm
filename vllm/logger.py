@@ -95,14 +95,18 @@ LogScope = Literal["process", "global", "local"]
 
 def _should_log_with_scope(scope: LogScope) -> bool:
     """Decide whether to log based on scope"""
-    if scope == "global":
-        from vllm.distributed.parallel_state import is_global_first_rank
+    if scope in ("global", "local"):
+        try:
+            if scope == "global":
+                from vllm.distributed.parallel_state import is_global_first_rank
 
-        return is_global_first_rank()
-    if scope == "local":
-        from vllm.distributed.parallel_state import is_local_first_rank
+                return is_global_first_rank()
+            else:
+                from vllm.distributed.parallel_state import is_local_first_rank
 
-        return is_local_first_rank()
+                return is_local_first_rank()
+        except Exception:
+            return True
     return True
 
 

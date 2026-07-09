@@ -268,14 +268,19 @@ def kill_process_tree(pid: int):
     # Get all children recursively
     children = parent.children(recursive=True)
 
-    # Send SIGKILL to all children first
-    for child in children:
+    # Send SIGKILL to all children first (use taskkill on Windows)
+    if sys.platform == "win32":
+        import subprocess
+        for proc in [*children, parent]:
+            with contextlib.suppress(Exception):
+                subprocess.run(["taskkill", "/F", "/PID", str(proc.pid)],
+                               capture_output=True)
+    else:
+        for child in children:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(child.pid, signal.SIGKILL)
         with contextlib.suppress(ProcessLookupError):
-            os.kill(child.pid, signal.SIGKILL)
-
-    # Finally kill the parent
-    with contextlib.suppress(ProcessLookupError):
-        os.kill(pid, signal.SIGKILL)
+            os.kill(pid, signal.SIGKILL)
 
 
 # Resource utilities

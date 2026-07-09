@@ -19,14 +19,34 @@ from datetime import timedelta
 from typing import Any
 
 import torch
-from torch.distributed import ProcessGroup, Store, TCPStore
-from torch.distributed.distributed_c10d import (
-    Backend,
-    PrefixStore,
-    _get_default_timeout,
-    _unregister_process_group,
-)
-from torch.distributed.rendezvous import rendezvous
+try:
+    from torch.distributed import ProcessGroup, Store, TCPStore
+    from torch.distributed.distributed_c10d import (
+        Backend,
+        PrefixStore,
+        _get_default_timeout,
+        _unregister_process_group,
+    )
+    from torch.distributed.rendezvous import rendezvous
+except ImportError:
+    from vllm.platforms.rocm_dist_stubs import (
+        PrefixStore,
+        Store,
+        _ensure_dist_stubs,
+    )
+
+    class Backend:  # type: ignore[no-redef]
+        NCCL = "nccl"
+        GLOO = "gloo"
+        MPI = "mpi"
+        UNDEFINED = "undefined"
+
+    _ensure_dist_stubs()
+    ProcessGroup = torch.distributed.ProcessGroup
+    TCPStore = Store  # use our in-memory Store as TCPStore stub
+    _get_default_timeout = lambda: timedelta(seconds=1800)
+    _unregister_process_group = lambda pg: None
+    rendezvous = None
 
 import vllm.envs as envs
 from vllm.logger import init_logger

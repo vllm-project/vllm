@@ -15,6 +15,7 @@ from .interface import CpuArchEnum, Platform, PlatformEnum
 logger = logging.getLogger(__name__)
 
 
+
 def vllm_version_matches_substr(substr: str) -> bool:
     """
     Check to see if the vLLM version matches a substring.
@@ -117,13 +118,25 @@ def rocm_platform_plugin() -> str | None:
         try:
             if len(amdsmi.amdsmi_get_processor_handles()) > 0:
                 is_rocm = True
-                logger.debug("Confirmed ROCm platform is available.")
+                logger.debug("Confirmed ROCm platform is available (amdsmi).")
             else:
                 logger.debug("ROCm platform is not available because no GPU is found.")
         finally:
             amdsmi.amdsmi_shut_down()
     except Exception as e:
-        logger.debug("ROCm platform is not available because: %s", str(e))
+        logger.debug("ROCm platform not available via amdsmi: %s", str(e))
+        # Fallback: on Windows, amdsmi is not available, use torch.cuda
+        try:
+            import torch
+
+            if torch.cuda.is_available() and torch.version.hip is not None:
+                is_rocm = True
+                logger.debug(
+                    "Confirmed ROCm platform is available (torch.version.hip=%s).",
+                    torch.version.hip,
+                )
+        except Exception as e2:
+            logger.debug("ROCm torch fallback also failed: %s", str(e2))
 
     return "vllm.platforms.rocm.RocmPlatform" if is_rocm else None
 
@@ -260,23 +273,19 @@ if TYPE_CHECKING:
 
 def __getattr__(name: str):
     if name == "current_platform":
-        # lazy init current_platform.
-        # 1. out-of-tree platform plugins need `from vllm.platforms import
-        #    Platform` so that they can inherit `Platform` class. Therefore,
-        #    we cannot resolve `current_platform` during the import of
-        #    `vllm.platforms`.
-        # 2. when users use out-of-tree platform plugins, they might run
-        #    `import vllm`, some vllm internal code might access
-        #    `current_platform` during the import, and we need to make sure
-        #    `current_platform` is only resolved after the plugins are loaded
-        #    (we have tests for this, if any developer violate this, they will
-        #    see the test failures).
         global _current_platform
         if _current_platform is None:
-            platform_cls_qualname = resolve_current_platform_cls_qualname()
-            _current_platform = resolve_obj_by_qualname(platform_cls_qualname)()
-            global _init_trace
-            _init_trace = "".join(traceback.format_stack())
+            try:
+                platform_cls_qualname = resolve_current_platform_cls_qualname()
+                _current_platform = resolve_obj_by_qualname(platform_cls_qualname)()
+                global _init_trace
+                _init_trace = "".join(traceback.format_stack())
+            except Exception:
+                # On Windows/ROCm, vLLM may be imported while the vllm package
+                # is still partially initialized, causing platform resolution
+                # to fail. Fall back to UnspecifiedPlatform in that case.
+                from .interface import UnspecifiedPlatform
+                _current_platform = UnspecifiedPlatform()
         return _current_platform
     elif name in globals():
         return globals()[name]
@@ -302,3 +311,4 @@ __all__ = [
     "_init_trace",
     "_is_amd_zen_cpu",
 ]
+

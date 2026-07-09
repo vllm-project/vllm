@@ -4,6 +4,7 @@ import gc
 import os
 import queue
 import signal
+import sys
 import threading
 import time
 from collections import defaultdict, deque
@@ -1153,6 +1154,18 @@ class EngineCoreProc(EngineCore):
     @staticmethod
     def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
         """Launch EngineCore busy loop in background process."""
+
+        # Capture stderr to a file for debugging spawn crashes on Windows.
+        # Set VLLM_ENGINE_CORE_LOG to a writable path to enable.
+        _engine_core_log = os.environ.get("VLLM_ENGINE_CORE_LOG")
+        if _engine_core_log:
+            try:
+                log_fh = open(_engine_core_log, "a", buffering=1)
+                sys.stderr = log_fh
+                sys.stdout = log_fh
+            except Exception as exc:
+                print(f"EngineCore: could not open log file "
+                      f"{_engine_core_log!r}: {exc}", flush=True)
 
         # Ensure we can serialize transformer config after spawning
         maybe_register_config_serialize_by_value()

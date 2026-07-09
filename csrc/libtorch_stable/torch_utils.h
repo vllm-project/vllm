@@ -6,8 +6,13 @@
 #include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/util/shim_utils.h>
 
+#ifdef USE_ROCM
+#include <hip/hip_runtime.h>
+#include <hipblas/hipblas.h>
+#else
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
+#endif
 
 #include <deque>
 #include <mutex>
@@ -72,7 +77,6 @@ inline cudaDeviceProp* get_device_prop() {
 }
 
 // Utility to get the current CUDA stream for a given device using stable APIs.
-// Returns a cudaStream_t for use in kernel launches.
 inline cudaStream_t get_current_cuda_stream(int32_t device_index = -1) {
   void* stream_ptr = nullptr;
   TORCH_ERROR_CODE_CHECK(
@@ -82,7 +86,13 @@ inline cudaStream_t get_current_cuda_stream(int32_t device_index = -1) {
 
 // Utility to get the current cuBLAS handle using stable APIs.
 inline cublasHandle_t get_current_cuda_blas_handle() {
+#ifdef USE_ROCM
+  cublasHandle_t handle;
+  cublasCreate(&handle);
+  return handle;
+#else
   void* blas_handle_ptr = nullptr;
   TORCH_ERROR_CODE_CHECK(torch_get_current_cuda_blas_handle(&blas_handle_ptr));
   return reinterpret_cast<cublasHandle_t>(blas_handle_ptr);
+#endif
 }

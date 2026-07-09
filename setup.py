@@ -81,26 +81,25 @@ def has_precompiled_rust_extensions() -> bool:
 if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
     logger.warning("VLLM_TARGET_DEVICE automatically set to `cpu` due to macOS")
     VLLM_TARGET_DEVICE = "cpu"
-elif not (sys.platform.startswith("linux") or sys.platform.startswith("darwin")):
-    logger.warning(
-        "vLLM only supports Linux platform (including WSL) and MacOS."
-        "Building on %s, "
-        "so vLLM may not be able to run correctly",
-        sys.platform,
-    )
-    VLLM_TARGET_DEVICE = "empty"
-elif sys.platform.startswith("linux") and os.getenv("VLLM_TARGET_DEVICE") is None:
+elif os.getenv("VLLM_TARGET_DEVICE") is None:
     if torch.version.hip is not None:
         VLLM_TARGET_DEVICE = "rocm"
-        logger.info("Auto-detected ROCm")
+        logger.info("Auto-detected ROCm on %s", sys.platform)
     elif torch.version.xpu is not None:
         VLLM_TARGET_DEVICE = "xpu"
-        logger.info("Auto-detected XPU")
+        logger.info("Auto-detected XPU on %s", sys.platform)
     elif torch.version.cuda is not None:
         VLLM_TARGET_DEVICE = "cuda"
-        logger.info("Auto-detected CUDA")
-    else:
+        logger.info("Auto-detected CUDA on %s", sys.platform)
+    elif sys.platform.startswith("linux") or sys.platform.startswith("darwin"):
         VLLM_TARGET_DEVICE = "cpu"
+    else:
+        logger.warning(
+            "vLLM requires ROCm/CUDA torch for GPU support. "
+            "No GPU backend detected on %s.",
+            sys.platform,
+        )
+        VLLM_TARGET_DEVICE = "empty"
 
 
 def is_sccache_available() -> bool:
@@ -258,14 +257,14 @@ class cmake_build_ext(build_ext):
         if verbose:
             cmake_args += ["-DCMAKE_VERBOSE_MAKEFILE=ON"]
 
-        if is_sccache_available():
+        if is_sccache_available() and sys.platform != "win32":
             cmake_args += [
                 "-DCMAKE_C_COMPILER_LAUNCHER=sccache",
                 "-DCMAKE_CXX_COMPILER_LAUNCHER=sccache",
                 "-DCMAKE_CUDA_COMPILER_LAUNCHER=sccache",
                 "-DCMAKE_HIP_COMPILER_LAUNCHER=sccache",
             ]
-        elif is_ccache_available():
+        elif is_ccache_available() and sys.platform != "win32":
             cmake_args += [
                 "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
                 "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache",
@@ -273,13 +272,43 @@ class cmake_build_ext(build_ext):
                 "-DCMAKE_HIP_COMPILER_LAUNCHER=ccache",
             ]
 
+        # On Windows with HIP, cmake requires the same compiler family for
+        # C/C++/HIP. ROCm's hipcc is Clang-based, so we must use ROCm's
+        # Clang for host .cpp files too (not MSVC).
+        if sys.platform == "win32" and _is_hip():
+            rocm_path = get_system_rocm_path()
+            if rocm_path:
+                clang_c = os.path.join(rocm_path, "bin", "clang.exe")
+                clang_cxx = os.path.join(rocm_path, "bin", "clang++.exe")
+                if os.path.isfile(clang_c) and os.path.isfile(clang_cxx):
+                    cmake_args += [
+                        f"-DCMAKE_C_COMPILER={clang_c.replace(chr(92), '/')}",
+                        f"-DCMAKE_CXX_COMPILER={clang_cxx.replace(chr(92), '/')}",
+                    ]
+                    # Windows-Clang.cmake GNU path calls enable_language(RC)
+                    # which needs rc.exe. Without vcvars64 it's not on PATH.
+                    # Point to the Windows SDK rc.exe.
+                    sdk_rc = "C:/Program Files (x86)/Windows Kits/10/bin/10.0.19041.0/x64/rc.exe"
+                    cmake_args += [
+                        "-DCMAKE_RC_COMPILER={}".format(sdk_rc),
+                    ]
+                    # Purge MSVC CL env vars that inject MSVC flags
+                    # directly into compiler invocations.
+                    for var in ("CL", "_CL_", "CFLAGS", "CXXFLAGS"):
+                        os.environ.pop(var, None)
+                    logger.info("Using ROCm Clang from %s\\bin", rocm_path)
+                else:
+                    logger.warning("ROCm Clang not found at %s\\bin", rocm_path)
+
         # Pass the python executable to cmake so it can find an exact
         # match.
-        cmake_args += ["-DVLLM_PYTHON_EXECUTABLE={}".format(sys.executable)]
+        cmake_args += ["-DVLLM_PYTHON_EXECUTABLE={}".format(
+            sys.executable.replace("\\", "/"))]
 
         # Pass the python path to cmake so it can reuse the build dependencies
         # on subsequent calls to python.
-        cmake_args += ["-DVLLM_PYTHON_PATH={}".format(":".join(sys.path))]
+        cmake_args += ["-DVLLM_PYTHON_PATH={}".format(
+            ":".join(p.replace("\\", "/") for p in sys.path))]
 
         # Override the base directory for FetchContent downloads to $ROOT/.deps
         # This allows sharing dependencies between profiles,
@@ -287,7 +316,7 @@ class cmake_build_ext(build_ext):
         # To override this, set the FETCHCONTENT_BASE_DIR environment variable.
         fc_base_dir = os.path.join(ROOT_DIR, ".deps")
         fc_base_dir = os.environ.get("FETCHCONTENT_BASE_DIR", fc_base_dir)
-        cmake_args += ["-DFETCHCONTENT_BASE_DIR={}".format(fc_base_dir)]
+        cmake_args += ["-DFETCHCONTENT_BASE_DIR={}".format(fc_base_dir.replace("\\", "/"))]
 
         #
         # Setup parallelism and build tool
@@ -309,8 +338,15 @@ class cmake_build_ext(build_ext):
         # Make sure we use the nvcc from CUDA_HOME
         if _is_cuda() and CUDA_HOME is not None:
             cmake_args += [f"-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc"]
-        elif _is_hip() and ROCM_HOME is not None:
-            cmake_args += [f"-DROCM_PATH={ROCM_HOME}"]
+        elif _is_hip():
+            rocm_path = get_system_rocm_path()
+            if rocm_path is not None:
+                cmake_args += [f"-DROCM_PATH={rocm_path.replace(chr(92), '/')}"]
+                # LoadHIP.cmake checks ENV{ROCM_PATH}, so we must set it too.
+                os.environ["ROCM_PATH"] = rocm_path
+            hip_compiler = os.getenv("CMAKE_HIP_COMPILER")
+            if hip_compiler is not None:
+                cmake_args += [f"-DCMAKE_HIP_COMPILER={hip_compiler}"]
 
         other_cmake_args = os.environ.get("CMAKE_ARGS")
         if other_cmake_args:
@@ -517,9 +553,14 @@ class precompiled_wheel_utils:
             return True
         if which("rocminfo") is not None:
             return True
+        if sys.platform == "win32":
+            for p in [r"C:\Program Files\AMD\ROCm", r"E:\ROCM-7.13.0-Windows", r"E:\ROCM-7.2.1-Windows"]:
+                if os.path.isdir(p):
+                    return True
+            if which("hipcc") is not None:
+                return True
         try:
             import torch
-
             return torch.version.hip is not None
         except ImportError:
             return False
@@ -951,16 +992,63 @@ def _build_custom_ops() -> bool:
     return _is_cuda() or _is_hip()
 
 
+def get_system_rocm_path() -> str | None:
+    """Find the actual system ROCm installation path (with hipcc + headers).
+
+    ``torch.utils.cpp_extension.ROCM_HOME`` often points to a venv / pure-Python
+    package directory that lacks ``bin/hipcc``, headers, and libraries.  This
+    helper prefers the real system install over the torch-reported value.
+    """
+    # 1. Explicit env var
+    if env_rocm := os.getenv("ROCM_PATH"):
+        if os.path.isdir(env_rocm):
+            return env_rocm
+
+    # 2. Windows system installs
+    if sys.platform == "win32":
+        for p in [
+            r"E:\ROCM-7.13.0-Windows",
+            r"E:\ROCM-7.2.1-Windows",
+            r"C:\Program Files\AMD\ROCm",
+        ]:
+            if os.path.isdir(p) and os.path.isfile(os.path.join(p, "bin", "hipcc.exe")):
+                return p
+
+    # 3. Generic /opt/rocm
+    if os.path.isdir("/opt/rocm"):
+        return "/opt/rocm"
+
+    # 4. Resolve via hipcc on PATH
+    hipcc = which("hipcc")
+    if hipcc is not None:
+        # hipcc is typically at <rocm>/bin/hipcc
+        bin_dir = os.path.dirname(os.path.realpath(hipcc))
+        rocm_root = os.path.normpath(os.path.join(bin_dir, ".."))
+        if os.path.isdir(rocm_root):
+            return rocm_root
+
+    # 5. Fall back to torch's ROCM_HOME (may be venv, but last resort)
+    if ROCM_HOME and os.path.isdir(ROCM_HOME):
+        return ROCM_HOME
+
+    return None
+
+
 def get_rocm_version():
     # Get the Rocm version from the ROCM_HOME/bin/librocm-core.so
     # see https://github.com/ROCm/rocm-core/blob/d11f5c20d500f729c393680a01fa902ebf92094b/rocm_version.cpp#L21
     try:
-        if ROCM_HOME is None:
+        rocm_path = get_system_rocm_path()
+        if rocm_path is None:
             return None
-        librocm_core_file = Path(ROCM_HOME) / "lib" / "librocm-core.so"
+        librocm_core_file = Path(rocm_path) / "lib" / "librocm-core.so"
+        if sys.platform == "win32":
+            librocm_core_dll = Path(rocm_path) / "bin" / "rocm-core.dll"
+            if librocm_core_dll.is_file():
+                librocm_core_file = librocm_core_dll
         if not librocm_core_file.is_file():
             return None
-        librocm_core = ctypes.CDLL(librocm_core_file)
+        librocm_core = ctypes.CDLL(str(librocm_core_file))
         VerErrors = ctypes.c_uint32
         get_rocm_core_version = librocm_core.getROCmVersion
         get_rocm_core_version.restype = VerErrors

@@ -51,10 +51,20 @@ set(PYTHON_SUPPORTED_VERSIONS "3.10" "3.11" "3.12" "3.13" "3.14")
 # Supported AMD GPU architectures.
 set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201")
 
-# ROCm installation prefix. Default to /opt/rocm but allow override via
-# -DROCM_PATH=/your/rocm/path when invoking cmake.
+# ROCm installation prefix. Default to /opt/rocm (Linux) or auto-detect on
+# Windows. Override via -DROCM_PATH=/your/rocm/path when invoking cmake.
 if(NOT DEFINED ROCM_PATH)
-  set(ROCM_PATH "/opt/rocm" CACHE PATH "ROCm installation prefix")
+  if(WIN32)
+    set(_rocm_default "C:/Program Files/AMD/ROCm")
+    if(EXISTS "E:/ROCM-7.13.0-Windows")
+      set(_rocm_default "E:/ROCM-7.13.0-Windows")
+    elseif(EXISTS "E:/ROCM-7.2.1-Windows")
+      set(_rocm_default "E:/ROCM-7.2.1-Windows")
+    endif()
+    set(ROCM_PATH "${_rocm_default}" CACHE PATH "ROCm installation prefix")
+  else()
+    set(ROCM_PATH "/opt/rocm" CACHE PATH "ROCm installation prefix")
+  endif()
 else()
   set(ROCM_PATH ${ROCM_PATH} CACHE PATH "ROCm installation prefix" FORCE)
 endif()
@@ -102,6 +112,133 @@ endif()
 #
 find_package(Torch REQUIRED)
 
+# ------------------------------------------------------------------
+# Strip MSVC-only flags from PyTorch imported targets (Windows + GNU Clang)
+# PyTorch Windows wheels embed /permissive-, /Z7, /EHsc, /bigobj in
+# INTERFACE_COMPILE_OPTIONS via generator expressions. GNU Clang chokes.
+# ------------------------------------------------------------------
+if(WIN32 AND NOT MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  message(STATUS "[vLLM] Stripping MSVC flags from torch imported targets")
+
+  set(_TORCH_TARGETS c10_hip c10 torch_cpu torch_hip torch)
+  set(_MSVC_FLAGS_TO_STRIP
+    [[$<$<COMPILE_LANGUAGE:CXX>:/permissive->]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/Z7>]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/EHsc>]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/bigobj>]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/W3>]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/W4>]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/Wall>]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/GR>]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/GR->]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/nologo>]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/errorReport:queue>]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/diagnostics:column>]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/MP>]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/Od>]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/Ob0>]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/GF>]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/Gm->]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/GS>]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/GS->]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/Gy>]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/Gy->]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/sdl>]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/sdl->]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/guard:cf>]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/RTC1>]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/RTCc>]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/Gd>]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/Gr>]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/Gv>]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/openmp>]]
+    [[$<$<COMPILE_LANGUAGE:CXX>:/openmp:experimental>]]
+    # Also strip the semicolon-only gen-expr that PyTorch uses as separator
+    [[$<$<COMPILE_LANGUAGE:CXX>:;>]]
+    # And the nested CONFIG gen-expr for /Z7
+    [[$<$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>:/Z7>]]
+    # Standalone flags (without gen-expr wrapper, in case torch changes)
+    /permissive-
+    /Z7
+    /Zi
+    /Zo
+    /EHsc
+    /EHa
+    /EHs
+    /GR
+    /GR-
+    /W3
+    /W4
+    /Wall
+    /bigobj
+    /nologo
+    /errorReport:queue
+    /diagnostics:column
+    /MP
+    /Od
+    /O2
+    /Ob0
+    /Ob1
+    /Ob2
+    /Os
+    /Ot
+    /Ox
+    /Oy
+    /fp:precise
+    /fp:fast
+    /GF
+    /Gm-
+    /GS
+    /GS-
+    /Gy
+    /Gy-
+    /sdl
+    /sdl-
+    /guard:cf
+    /RTC1
+    /RTCc
+    /Gd
+    /Gr
+    /Gv
+    /openmp
+    /openmp:experimental
+  )
+
+  foreach(_tgt IN LISTS _TORCH_TARGETS)
+    if(TARGET ${_tgt})
+      get_target_property(_opts ${_tgt} INTERFACE_COMPILE_OPTIONS)
+      if(_opts)
+        set(_new_opts "${_opts}")
+        # DEBUG: print raw opts for diagnosis
+        message(STATUS "[vLLM]    ${_tgt} RAW: ${_opts}")
+        foreach(_flag IN LISTS _MSVC_FLAGS_TO_STRIP)
+          string(REPLACE "${_flag}" "" _new_opts "${_new_opts}")
+          string(REPLACE "${_flag};" "" _new_opts "${_new_opts}")
+          string(REPLACE ";${_flag}" "" _new_opts "${_new_opts}")
+        endforeach()
+        # Clean up artifacts: empty entries, double semicolons, leading/trailing ;
+        string(REGEX REPLACE ";+" ";" _new_opts "${_new_opts}")
+        string(REGEX REPLACE "^;" "" _new_opts "${_new_opts}")
+        string(REGEX REPLACE ";$" "" _new_opts "${_new_opts}")
+        string(STRIP "${_new_opts}" _new_opts)
+        # Also strip any remaining gen-expr-like MSVC flag fragments
+        string(REGEX REPLACE "\\$<[^;>]*" "" _new_opts "${_new_opts}")
+        string(REGEX REPLACE "\\$<[^>]*>" "" _new_opts "${_new_opts}")
+        string(REGEX REPLACE ";+" ";" _new_opts "${_new_opts}")
+        string(REGEX REPLACE "^;" "" _new_opts "${_new_opts}")
+        string(REGEX REPLACE ";$" "" _new_opts "${_new_opts}")
+        if(_new_opts STREQUAL "" OR _new_opts STREQUAL ";")
+          set_target_properties(${_tgt} PROPERTIES INTERFACE_COMPILE_OPTIONS "")
+        else()
+          set_target_properties(${_tgt} PROPERTIES INTERFACE_COMPILE_OPTIONS "${_new_opts}")
+        endif()
+        message(STATUS "[vLLM] Stripped MSVC flags from ${_tgt}")
+        message(STATUS "[vLLM]    ${_tgt} CLEAN: ${_new_opts}")
+      endif()
+    endif()
+  endforeach()
+endif()
+
 # Supported NVIDIA architectures.
 # This check must happen after find_package(Torch) because that's when CMAKE_CUDA_COMPILER_VERSION gets defined
 if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
@@ -127,8 +264,12 @@ endif()
 if(Python_VERSION VERSION_GREATER_EQUAL "3.11")
   set(VLLM_SPINLOOP_EXT_SRC "csrc/spinloop.cpp")
   set(SPINLOOP_COMPILE_FLAGS "")
-  if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+  message(STATUS "[vLLM] CMAKE_SYSTEM_PROCESSOR = ${CMAKE_SYSTEM_PROCESSOR}")
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
     list(APPEND SPINLOOP_COMPILE_FLAGS "-mmwaitx")
+    message(STATUS "[vLLM] Added -mmwaitx to SPINLOOP_COMPILE_FLAGS")
+  else()
+    message(STATUS "[vLLM] NOT adding -mmwaitx, processor is ${CMAKE_SYSTEM_PROCESSOR}")
   endif()
   define_extension_target(
     spinloop
@@ -171,6 +312,11 @@ elseif(HIP_FOUND OR PYTORCH_FOUND_HIP)
   # not let cmake recognize .hip files. In order to get cmake to understand the
   # .hip extension automatically, HIP must be enabled explicitly.
   enable_language(HIP)
+
+  # On Windows ROCm, add stub headers for missing CUDA compat and stable ABI.
+  if(WIN32)
+    include_directories(BEFORE "${CMAKE_CURRENT_LIST_DIR}/csrc/rocm-stubs")
+  endif()
 
   # ROCm 5.X and 6.X
   if (ROCM_VERSION_DEV_MAJOR GREATER_EQUAL 5 AND
@@ -259,17 +405,29 @@ message(STATUS "FetchContent base directory: ${FETCHCONTENT_BASE_DIR}")
 
 if(VLLM_GPU_LANG STREQUAL "HIP")
   #
+  # Windows math constants (M_SQRT1_2, M_SQRT2, etc.) require _USE_MATH_DEFINES
+  #
+  if(WIN32)
+    set(CMAKE_${VLLM_GPU_LANG}_FLAGS "${CMAKE_${VLLM_GPU_LANG}_FLAGS} -D_USE_MATH_DEFINES")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_USE_MATH_DEFINES")
+  endif()
+
+  #
   # Overriding the default -O set up by cmake, adding ggdb3 for the most verbose devug info
   #
   set(CMAKE_${VLLM_GPU_LANG}_FLAGS_DEBUG "${CMAKE_${VLLM_GPU_LANG}_FLAGS_DEBUG} -O0 -ggdb3")
-  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -ggdb3")
+  if(NOT MSVC)
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -ggdb3")
+  endif()
 
   #
   # Certain HIP functions are marked as [[nodiscard]], yet vllm ignores the result which generates
   # a lot of warnings that always mask real issues. Suppressing until this is properly addressed.
   #
   set(CMAKE_${VLLM_GPU_LANG}_FLAGS "${CMAKE_${VLLM_GPU_LANG}_FLAGS} -Wno-unused-result -Wno-unused-value")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result -Wno-unused-value")
+  if(NOT MSVC)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result -Wno-unused-value")
+  endif()
 
   # When using LTO then *.cpp files must be compiled with same compiler as used linker
   # So if HIP uses clang linker we also must use it
