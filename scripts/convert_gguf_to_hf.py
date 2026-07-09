@@ -4,124 +4,46 @@ Usage:
   python scripts/convert_gguf_to_hf.py E:\OLLAMA-Models\GGUF\qwen3-1.7b-coder-distilled-sft-Q8_0.gguf F:\VLLM-Models\qwen3-1.7b-coder
   python scripts/convert_gguf_to_hf.py E:\OLLAMA-Models\GGUF\ --outdir F:\VLLM-Models  # batch
 """
-import json, os, sys, struct
+import json, os, sys
 from pathlib import Path
 
 import torch
 import gguf
+import gguf.quants as gguf_quants
 import numpy as np
 
-GGUF_TYPE_MAP = {0: "float32", 1: "float16", 2: "int32", 3: "int16",
-                 4: "int8", 5: "uint8", 10: "float64"}
-
 ARCH_MAP = {
-    "llama":      "LlamaForCausalLM",
-    "qwen2":      "Qwen2ForCausalLM",
-    "qwen3":      "Qwen2ForCausalLM",
-    "qwen2moe":   "Qwen2MoeForCausalLM",
-    "gemma2":     "Gemma2ForCausalLM",
-    "phi3":       "Phi3ForCausalLM",
-    "starcoder2": "Starcoder2ForCausalLM",
-    "falcon":     "FalconForCachedCausalModel",
+    "llama":      ("LlamaForCausalLM", "llama"),
+    "qwen2":      ("Qwen2ForCausalLM", "qwen2"),
+    "qwen3":      ("Qwen2ForCausalLM", "qwen2"),
+    "qwen2moe":   ("Qwen2MoeForCausalLM", "qwen2_moe"),
+    "gemma2":     ("Gemma2ForCausalLM", "gemma2"),
+    "phi3":       ("Phi3ForCausalLM", "phi3"),
+    "starcoder2": ("Starcoder2ForCausalLM", "starcoder2"),
+    "falcon":     ("FalconForCachedCausalModel", "falcon"),
 }
 
-HF_CONFIG_TEMPLATES = {
-    "llama": lambda p: {
-        "architectures": ["LlamaForCausalLM"],
-        "model_type": "llama",
-        "hidden_size": p.get("hidden_size") or p.get("embedding_length"),
-        "intermediate_size": p.get("feed_forward_length"),
-        "num_attention_heads": p.get("head_count"),
-        "num_hidden_layers": p.get("block_count"),
-        "num_key_value_heads": p.get("head_count_kv") or p.get("head_count"),
-        "rope_theta": p.get("rope_freq_base", 10000.0),
-        "max_position_embeddings": p.get("context_length", 2048),
-        "rms_norm_eps": 1e-5,
-        "torch_dtype": "float16",
-        "vocab_size": p.get("vocab_size") or 32000,
-        "hidden_act": "silu",
-    },
-    "qwen2": lambda p: {
-        "architectures": ["Qwen2ForCausalLM"],
-        "model_type": "qwen2",
-        "hidden_size": p.get("hidden_size") or p.get("embedding_length"),
-        "intermediate_size": p.get("feed_forward_length"),
-        "num_attention_heads": p.get("head_count"),
-        "num_hidden_layers": p.get("block_count"),
-        "num_key_value_heads": p.get("head_count_kv") or p.get("head_count"),
-        "rope_theta": p.get("rope_freq_base", 1000000.0),
-        "max_position_embeddings": p.get("context_length", 32768),
-        "rms_norm_eps": p.get("layer_norm_rms_epsilon", 1e-6),
-        "torch_dtype": "float16",
-        "vocab_size": p.get("vocab_size") or 151936,
-        "hidden_act": "silu",
-        "sliding_window": p.get("sliding_window"),
-    },
-    "qwen3": lambda p: {
-        "architectures": ["Qwen2ForCausalLM"],
-        "model_type": "qwen2",
-        "hidden_size": p.get("hidden_size") or p.get("embedding_length"),
-        "intermediate_size": p.get("feed_forward_length"),
-        "num_attention_heads": p.get("head_count"),
-        "num_hidden_layers": p.get("block_count"),
-        "num_key_value_heads": p.get("head_count_kv") or p.get("head_count"),
-        "rope_theta": p.get("rope_freq_base", 1000000.0),
-        "max_position_embeddings": p.get("context_length", 32768),
-        "rms_norm_eps": p.get("layer_norm_rms_epsilon", 1e-6),
-        "torch_dtype": "float16",
-        "vocab_size": p.get("vocab_size") or 151936,
-        "hidden_act": "silu",
-        "sliding_window": p.get("sliding_window"),
-    },
-    "gemma2": lambda p: {
-        "architectures": ["Gemma2ForCausalLM"],
-        "model_type": "gemma2",
-        "hidden_size": p.get("hidden_size") or p.get("embedding_length"),
-        "intermediate_size": p.get("feed_forward_length"),
-        "num_attention_heads": p.get("head_count"),
-        "num_hidden_layers": p.get("block_count"),
-        "num_key_value_heads": p.get("head_count_kv") or p.get("head_count"),
-        "max_position_embeddings": p.get("context_length", 8192),
-        "rms_norm_eps": p.get("layer_norm_rms_epsilon", 1e-6),
-        "torch_dtype": "float16",
-        "vocab_size": p.get("vocab_size") or 256000,
-        "hidden_act": "gelu_pytorch_tanh",
-        "head_dim": 256,
-        "attention_logit_softcapping": p.get("attention_logit_softcapping", 50.0),
-        "final_logit_softcapping": p.get("final_logit_softcapping", 30.0),
-        "query_pre_attn_scalar": p.get("query_pre_attn_scalar", 256),
-    },
-    "starcoder2": lambda p: {
-        "architectures": ["Starcoder2ForCausalLM"],
-        "model_type": "starcoder2",
-        "hidden_size": p.get("hidden_size") or p.get("embedding_length"),
-        "intermediate_size": p.get("feed_forward_length"),
-        "num_attention_heads": p.get("head_count"),
-        "num_hidden_layers": p.get("block_count"),
-        "num_key_value_heads": p.get("head_count_kv") or p.get("head_count"),
-        "max_position_embeddings": p.get("context_length", 16384),
-        "rms_norm_eps": p.get("layer_norm_rms_epsilon", 1e-5),
-        "torch_dtype": "float16",
-        "vocab_size": p.get("vocab_size") or 49152,
-        "hidden_act": "gelu_pytorch_tanh",
-        "use_bias": True,
-    },
-    "phi3": lambda p: {
-        "architectures": ["Phi3ForCausalLM"],
-        "model_type": "phi3",
-        "hidden_size": p.get("hidden_size") or p.get("embedding_length"),
-        "intermediate_size": p.get("feed_forward_length"),
-        "num_attention_heads": p.get("head_count"),
-        "num_hidden_layers": p.get("block_count"),
-        "num_key_value_heads": p.get("head_count_kv") or p.get("head_count"),
-        "max_position_embeddings": p.get("context_length", 4096),
-        "rms_norm_eps": p.get("layer_norm_rms_epsilon", 1e-5),
-        "torch_dtype": "float16",
-        "vocab_size": p.get("vocab_size") or 32064,
-        "hidden_act": "silu",
-        "rope_scaling": {"type": "su", "short_factor": [], "long_factor": []},
-    },
+# Arch-specific config defaults (GGUF keys are already mapped to HF names)
+ARCH_CONFIG_DEFAULTS = {
+    "llama":      {"rope_theta": 10000.0, "max_position_embeddings": 2048, "rms_norm_eps": 1e-5, "vocab_size": 32000, "hidden_act": "silu"},
+    "qwen2":      {"rope_theta": 1000000.0, "max_position_embeddings": 32768, "rms_norm_eps": 1e-6, "vocab_size": 151936, "hidden_act": "silu"},
+    "qwen2_moe":  {"rope_theta": 1000000.0, "max_position_embeddings": 32768, "rms_norm_eps": 1e-6, "vocab_size": 151936, "hidden_act": "silu"},
+    "gemma2":     {"max_position_embeddings": 8192, "rms_norm_eps": 1e-6, "vocab_size": 256000, "hidden_act": "gelu_pytorch_tanh", "head_dim": 256, "attention_logit_softcapping": 50.0, "final_logit_softcapping": 30.0, "query_pre_attn_scalar": 256},
+    "phi3":       {"max_position_embeddings": 4096, "rms_norm_eps": 1e-5, "vocab_size": 32064, "hidden_act": "silu", "rope_scaling": {"type": "su", "short_factor": [], "long_factor": []}},
+    "starcoder2": {"max_position_embeddings": 16384, "rms_norm_eps": 1e-5, "vocab_size": 49152, "hidden_act": "gelu_pytorch_tanh", "use_bias": True},
 }
+
+GGUF_TO_HF_KEYS = [
+    ("embedding_length", "hidden_size"),
+    ("feed_forward_length", "intermediate_size"),
+    ("attention.head_count", "num_attention_heads"),
+    ("block_count", "num_hidden_layers"),
+    ("attention.head_count_kv", "num_key_value_heads"),
+    ("rope.freq_base", "rope_theta"),
+    ("context_length", "max_position_embeddings"),
+    ("attention.layer_norm_rms_epsilon", "rms_norm_eps"),
+    ("vocab_size", "vocab_size"),
+]
 
 
 def gguf_to_hf_tensor_name(name: str, arch: str) -> str:
@@ -237,58 +159,68 @@ def convert_gguf_to_hf(gguf_path: str, output_dir: str, max_shard_size_gb: int =
     print(f"  Architecture: {arch_str}")
 
     # Get hyperparameters
-    hf_type = ARCH_MAP.get(arch_str)
-    if hf_type is None:
+    arch_info = ARCH_MAP.get(arch_str)
+    if arch_info is None:
         print(f"  WARNING: unknown architecture '{arch_str}', trying generic config")
         hf_type = "AutoModelForCausalLM"
+        model_type = arch_str
+        arch_defaults = {}
+    else:
+        hf_type, model_type = arch_info
+        arch_defaults = ARCH_CONFIG_DEFAULTS.get(arch_str, {})
 
     params = {}
     for field_name, field in reader.fields.items():
-        if len(field.parts) == 1 and isinstance(field.parts[0], (int, float, str)):
-            val = field.parts[-1]
-            if isinstance(val, bytes):
-                try:
-                    val = val.decode("utf-8")
-                except Exception:
-                    continue
-            params[field_name] = val
+        key = str(field_name)
+        val = field.parts[-1]
+        if isinstance(val, bytes):
+            try:
+                val = val.decode("utf-8")
+            except Exception:
+                continue
+        elif hasattr(val, 'dtype'):
+            # numpy/memmap array: extract scalar or keep array
+            if val.ndim == 0:
+                val = val.item()
+            elif val.size == 1:
+                val = val.item()
+            else:
+                continue  # skip vector fields (e.g. tokenizer arrays)
+        elif not isinstance(val, (int, float, str)):
+            continue
+        params[key] = val
 
-    # Map GGUF metadata keys to HF config
-    hf_params = params.copy()
-    for gguf_key, hf_key in [
-        ("llama.embedding_length", "hidden_size"),
-        ("llama.feed_forward_length", "intermediate_size"),
-        ("llama.attention.head_count", "num_attention_heads"),
-        ("llama.block_count", "num_hidden_layers"),
-        ("llama.attention.head_count_kv", "num_key_value_heads"),
-        ("llama.rope.freq_base", "rope_theta"),
-        ("llama.context_length", "max_position_embeddings"),
-        ("llama.attention.layer_norm_rms_epsilon", "rms_norm_eps"),
-        ("llama.vocab_size", "vocab_size"),
-    ]:
-        if gguf_key in params:
-            hf_params[hf_key] = params[gguf_key]
+    # Map GGUF metadata keys to HF config (try arch-specific prefixes)
+    hf_params = {}
+    prefixes = [arch_str, "llama", "bert"]
+    for gguf_suffix, hf_key in GGUF_TO_HF_KEYS:
+        for prefix in prefixes:
+            gguf_key = f"{prefix}.{gguf_suffix}"
+            if gguf_key in params:
+                hf_params[hf_key] = params[gguf_key]
+                break
 
-    # Build config.json
-    config_fn = HF_CONFIG_TEMPLATES.get(arch_str)
-    if config_fn:
-        config = config_fn(hf_params)
-    else:
-        # Generic fallback
-        config = {
-            "architectures": [hf_type],
-            "model_type": arch_str,
-            "hidden_size": hf_params.get("hidden_size", 2048),
-            "intermediate_size": hf_params.get("intermediate_size", 8192),
-            "num_attention_heads": hf_params.get("num_attention_heads", 32),
-            "num_hidden_layers": hf_params.get("num_hidden_layers", 24),
-            "num_key_value_heads": hf_params.get("num_key_value_heads", 32),
-            "max_position_embeddings": hf_params.get("max_position_embeddings", 2048),
-            "rms_norm_eps": 1e-5,
-            "torch_dtype": "float16",
-            "vocab_size": hf_params.get("vocab_size", 32000),
-            "hidden_act": "silu",
-        }
+    # Build config.json from mapped params + arch defaults
+    config = {
+        "architectures": [hf_type],
+        "model_type": model_type,
+        "torch_dtype": "float16",
+    }
+
+    # Required params (from metadata or tensor inference)
+    core_keys = ["hidden_size", "intermediate_size", "num_attention_heads", "num_hidden_layers", "num_key_value_heads", "rms_norm_eps", "vocab_size"]
+    for k in core_keys + ["rope_theta", "max_position_embeddings"]:
+        if k in hf_params:
+            config[k] = hf_params[k]
+
+    # Arch-specific defaults for keys not in metadata
+    for k, v in arch_defaults.items():
+        config.setdefault(k, v)
+
+    config.setdefault("hidden_size", 2048)
+    config.setdefault("vocab_size", 32000)
+    config.setdefault("rms_norm_eps", 1e-5)
+    config.setdefault("hidden_act", "silu")
 
     with open(out / "config.json", "w") as f:
         json.dump(config, f, indent=2)
@@ -374,26 +306,29 @@ def convert_gguf_to_hf(gguf_path: str, output_dir: str, max_shard_size_gb: int =
         if hf_name is None:
             print(f"    Skipping {tensor.name}")
             continue
-        
-        # GGUF stores as numpy arrays
-        data = tensor.data
-        
-        # Convert to torch tensor
-        if data.dtype == np.float16:
-            t = torch.from_numpy(data.copy()).half()
-        elif data.dtype == np.float32:
-            t = torch.from_numpy(data.copy()).float()
-        elif data.dtype in (np.int8, np.int16, np.int32, np.int64):
-            t = torch.from_numpy(data.copy())
-        elif data.dtype == np.uint8:
-            # Quantized - needs dequantization
-            t = torch.from_numpy(data.copy()).float()
-        else:
-            t = torch.from_numpy(data.copy())
+
+        # Dequantize GGUF tensor data to float32 numpy array
+        # (handles all quantization types including Q8_0, F32, F16, etc.)
+        # Output shape is in PyTorch convention [out_features, in_features]
+        data = gguf_quants.dequantize(tensor.data, tensor.tensor_type)
+        t = torch.from_numpy(data.copy()).half()
 
         tensors[hf_name] = t
 
+    # Post-process: remove tensors not valid for the target architecture
+    if arch_str in ("qwen3", "qwen2") and hf_type == "Qwen2ForCausalLM":
+        # Qwen3 has per-head QK norms but Qwen2ForCausalLM doesn't support them
+        tensors = {k: v for k, v in tensors.items()
+                   if not ("self_attn.q_norm" in k or "self_attn.k_norm" in k)}
+
     print(f"  Converted {len(tensors)} tensors")
+
+    # Infer config values from tensor shapes if metadata was missing
+    embed_key = "model.embed_tokens.weight"
+    if embed_key in tensors and config.get("vocab_size") == 32000:
+        inferred_vocab = tensors[embed_key].shape[0]
+        config["vocab_size"] = inferred_vocab
+        json.dump(config, open(out / "config.json", "w"), indent=2)
 
     # Shard and save as safetensors
     from safetensors.torch import save_file as safe_save
