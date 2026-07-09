@@ -897,3 +897,26 @@ def test_evictable_cache_block_count():
     manager.complete_store(to_keys([14, 15]), _EMPTY_REQ_CTX)
     # cache state [10, 11, 14, 15] <- all blocks idle
     assert manager._num_evictable_cache_blocks == 4
+
+
+def test_touch_forwards_req_context_to_policy(monkeypatch):
+    """Regression: CPUOffloadingManager.touch forwards ReqContext to policy."""
+    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+    received = []
+
+    def spy_touch(keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
+        received.append((list(keys), req_context))
+
+    monkeypatch.setattr(manager._policy, "touch", spy_touch)
+
+    keys = to_keys([1, 2])
+    ctx = make_req_context(
+        req_id="test-req",
+        kv_transfer_params={"test_param": "test_value"},
+    )
+
+    manager.touch(keys, ctx)
+
+    assert len(received) == 1
+    assert received[0][0] == keys
+    assert received[0][1] is ctx
