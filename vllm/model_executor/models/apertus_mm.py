@@ -132,11 +132,14 @@ class ApertusMultiModalProcessor(BaseMultiModalProcessor[ApertusProcessingInfo])
             self, hf_inputs: object, hf_processor_mm_kwargs: Mapping[str, object],
             ) -> Mapping[str, MultiModalFieldConfig]:
         """Routes batched tensors and metadata directly to the GPU Worker's embed_multimodal kwargs."""
+        # The first argument of batched() is the MODALITY
+        # ("image"/"audio"), not the field name -- the engine looks items up
+        # by modality during profiling and scheduling.
         return {
-            "pixel_values":  MultiModalFieldConfig.batched("pixel_values"),
-            "image_sizes":   MultiModalFieldConfig.batched("image_sizes"),
-            "audio_values":  MultiModalFieldConfig.batched("audio_values"),
-            "audio_lengths": MultiModalFieldConfig.batched("audio_lengths"),
+            "pixel_values":  MultiModalFieldConfig.batched("image"),
+            "image_sizes":   MultiModalFieldConfig.batched("image"),
+            "audio_values":  MultiModalFieldConfig.batched("audio"),
+            "audio_lengths": MultiModalFieldConfig.batched("audio"),
             }
 
     def _get_prompt_updates(self, *args: Any, **kwargs: Any) -> Sequence[PromptUpdate]:
