@@ -88,7 +88,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 #   jede Arch-Kombination ab, z. B. 86_120f).
 RUN apt-get update -q && apt-get install -y -q --no-install-recommends \
         python3 python3-venv python3-dev gcc g++ curl \
-        cuda-nvcc-12-9 cuda-cudart-dev-12-9 libcublas-dev-12-9 && \
+        cuda-nvcc-12-9 cuda-cudart-dev-12-9 && \
     rm -rf /var/lib/apt/lists/*
 ENV CUDA_HOME=/usr/local/cuda
 RUN python3 -m venv /opt/venv
