@@ -1557,6 +1557,7 @@ class FusedMoEKernelMonolithicImpl:
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
             a1q_scale=a1q_scale,
+            # grouped topk + fused topk bias parameters
             num_expert_group=num_expert_group,
             e_score_correction_bias=e_score_correction_bias,
             routed_scaling_factor=routed_scaling_factor,
