@@ -113,6 +113,7 @@ def get_attn_backend(
     has_sliding_window: bool = False,
     backend_override: AttentionBackendEnum | None = None,
     apply_required_layout: bool = True,
+    use_non_causal_override: bool | None = None,
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it.
 
@@ -123,6 +124,10 @@ def get_attn_backend(
         apply_required_layout: When False, do not apply the resolved backend's
             required KV cache layout globally. Used when resolving the prefill
             backend so the decode backend keeps ownership of the KV layout.
+        use_non_causal_override: When set, use this instead of
+            `attention_config.use_non_causal`. Used to relax the non-causal
+            requirement for the decode role (decode is causal / modality-
+            agnostic), so it can pick a fast causal-only backend.
     """
 
     if kv_cache_dtype is not None:
@@ -161,7 +166,11 @@ def get_attn_backend(
         use_per_head_quant_scales=use_per_head_quant_scales,
         attn_type=attn_type,
         has_sliding_window=has_sliding_window,
-        use_non_causal=vllm_config.attention_config.use_non_causal,
+        use_non_causal=(
+            use_non_causal_override
+            if use_non_causal_override is not None
+            else vllm_config.attention_config.use_non_causal
+        ),
         use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
         use_kv_connector=use_kv_connector,
         use_pcp=vllm_config.parallel_config.prefill_context_parallel_size > 1,

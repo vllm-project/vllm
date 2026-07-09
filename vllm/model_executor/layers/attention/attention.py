@@ -347,6 +347,17 @@ class Attention(nn.Module, AttentionLayerBase):
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
+        # Decode is modality-agnostic: when a prefill backend is configured for
+        # routing, the decode (primary) backend serves only pure-decode batches,
+        # so it need not satisfy mm_prefix / non-causal (prefill-only concerns,
+        # handled by the prefill backend). This lets decode pick a fast
+        # causal-only backend (e.g. FlashInfer) even for mm-prefix models.
+        routing_enabled = (
+            vllm_config.attention_config.prefill_backend is not None
+            and attn_type == AttentionType.DECODER
+        )
+        decode_use_mm_prefix = self.use_mm_prefix and not routing_enabled
+        decode_use_non_causal_override = False if routing_enabled else None
         if attn_backend is None:
             self.attn_backend = get_attn_backend(
                 head_size,
@@ -354,10 +365,11 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_cache_dtype,
                 use_mla=False,
                 has_sink=self.has_sink,
-                use_mm_prefix=self.use_mm_prefix,
+                use_mm_prefix=decode_use_mm_prefix,
                 use_per_head_quant_scales=use_per_head_quant_scales,
                 attn_type=attn_type,
                 has_sliding_window=sliding_window is not None,
+                use_non_causal_override=decode_use_non_causal_override,
             )
         else:
             self.attn_backend = attn_backend
@@ -442,7 +454,7 @@ class Attention(nn.Module, AttentionLayerBase):
         self.prefill_attn_backend: type[AttentionBackend] | None = None
         self.prefill_impl = None
         prefill_backend_enum = vllm_config.attention_config.prefill_backend
-        if prefill_backend_enum is not None and attn_type == AttentionType.DECODER:
+        if routing_enabled:
             from vllm.v1.attention.backends.utils import kv_layouts_compatible
             from vllm.v1.attention.selector import AttentionSelectorConfig
 
