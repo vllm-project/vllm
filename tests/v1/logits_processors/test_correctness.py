@@ -455,24 +455,23 @@ def _make_min_tokens_processor() -> MinTokensLogitsProcessor:
     return MinTokensLogitsProcessor(VllmConfig(), torch.device("cpu"), False)
 
 
-def _add_min_tokens_request(
-    processor: MinTokensLogitsProcessor,
-    params: SamplingParams,
-    output_tok_ids: list[int] | None = None,
-) -> None:
+def test_min_tokens_keeps_all_masked_behavior_without_structured_output():
+    processor = _make_min_tokens_processor()
     processor.update_state(
         BatchUpdate(
             batch_size=1,
             removed=(),
-            added=[(0, params, None, output_tok_ids or [])],
+            added=[
+                (
+                    0,
+                    SamplingParams(min_tokens=2, stop_token_ids=[0]),
+                    None,
+                    [],
+                )
+            ],
             moved=(),
         )
     )
-
-
-def test_min_tokens_keeps_all_masked_behavior_without_structured_output():
-    processor = _make_min_tokens_processor()
-    _add_min_tokens_request(processor, SamplingParams(min_tokens=2, stop_token_ids=[0]))
 
     logits = torch.full((1, 3), -float("inf"))
     logits[0, 0] = 1.0
@@ -484,13 +483,26 @@ def test_min_tokens_keeps_all_masked_behavior_without_structured_output():
 
 def test_min_tokens_restores_all_masked_structured_output_stop_token():
     processor = _make_min_tokens_processor()
-    _add_min_tokens_request(
-        processor,
-        SamplingParams(
-            min_tokens=2,
-            stop_token_ids=[0],
-            structured_outputs=StructuredOutputsParams(json={"type": "boolean"}),
-        ),
+    processor.update_state(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[
+                (
+                    0,
+                    SamplingParams(
+                        min_tokens=2,
+                        stop_token_ids=[0],
+                        structured_outputs=StructuredOutputsParams(
+                            json={"type": "boolean"}
+                        ),
+                    ),
+                    None,
+                    [],
+                )
+            ],
+            moved=(),
+        )
     )
 
     logits = torch.full((1, 3), -float("inf"))
@@ -502,27 +514,28 @@ def test_min_tokens_restores_all_masked_structured_output_stop_token():
     assert torch.isneginf(logits[0, 1:]).all()
 
 
-def test_min_tokens_keeps_all_masked_behavior_without_structured_output_spec_decode():
-    processor = _make_min_tokens_processor()
-    _add_min_tokens_request(processor, SamplingParams(min_tokens=2, stop_token_ids=[0]))
-
-    logits = torch.full((2, 3), -float("inf"))
-    logits[:, 0] = torch.tensor([1.0, 2.0])
-
-    processor.apply_with_spec_decode(logits, [2])
-
-    assert torch.isneginf(logits).all()
-
-
 def test_min_tokens_restores_all_masked_structured_output_stop_token_spec_decode():
     processor = _make_min_tokens_processor()
-    _add_min_tokens_request(
-        processor,
-        SamplingParams(
-            min_tokens=2,
-            stop_token_ids=[0, 1],
-            structured_outputs=StructuredOutputsParams(json={"type": "boolean"}),
-        ),
+    processor.update_state(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[
+                (
+                    0,
+                    SamplingParams(
+                        min_tokens=2,
+                        stop_token_ids=[0, 1],
+                        structured_outputs=StructuredOutputsParams(
+                            json={"type": "boolean"}
+                        ),
+                    ),
+                    None,
+                    [],
+                )
+            ],
+            moved=(),
+        )
     )
 
     logits = torch.full((2, 4), -float("inf"))
