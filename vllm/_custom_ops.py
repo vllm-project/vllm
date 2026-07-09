@@ -116,6 +116,63 @@ if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "scaled_fp4_quant"):
         return None
 
 
+# INT4 per-channel embedding ops
+if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "int4_embedding_lookup"):
+
+    def int4_embedding_lookup(
+        packed_weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        input_ids: torch.Tensor,
+        out_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Gather selected rows from a packed int4 embedding table."""
+        flat_ids = input_ids.long().view(-1)
+        out = torch.ops._C.int4_embedding_lookup(
+            packed_weight, weight_scale, flat_ids, out_dtype
+        )
+        return out.view(input_ids.shape + (weight_scale.numel(),))
+
+    @register_fake("_C::int4_embedding_lookup")
+    def _int4_embedding_lookup_fake(
+        packed_weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        input_ids: torch.Tensor,
+        out_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        return torch.empty(
+            input_ids.shape + (weight_scale.numel(),),
+            dtype=out_dtype,
+            device=packed_weight.device,
+        )
+
+
+if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "int4_lm_head_gemv"):
+
+    def int4_lm_head_gemv(
+        packed_weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        hidden_states: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Compute logits with an int4 per-channel vocab-parallel lm-head."""
+        return torch.ops._C.int4_lm_head_gemv(
+            packed_weight, weight_scale, hidden_states, bias
+        )
+
+    @register_fake("_C::int4_lm_head_gemv")
+    def _int4_lm_head_gemv_fake(
+        packed_weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        hidden_states: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return torch.empty(
+            (hidden_states.size(0), packed_weight.size(0)),
+            dtype=hidden_states.dtype,
+            device=packed_weight.device,
+        )
+
+
 # page attention ops
 def paged_attention_rocm(
     out: torch.Tensor,

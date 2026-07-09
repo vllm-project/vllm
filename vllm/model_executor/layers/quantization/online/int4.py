@@ -15,7 +15,14 @@ from typing import cast
 
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+
+
+def _can_use_int4_kernel(x: torch.Tensor, dtype: torch.dtype | None = None) -> bool:
+    """The CUDA kernels only support FP16/BF16 on CUDA."""
+    check_dtype = dtype if dtype is not None else x.dtype
+    return x.is_cuda and check_dtype in (torch.float16, torch.bfloat16)
 
 
 class Int4PerChannelEmbeddingMethod(QuantizeMethodBase):
@@ -113,10 +120,13 @@ class Int4PerChannelEmbeddingMethod(QuantizeMethodBase):
         """Compute logits via tied int4 embedding weights.
 
         Used when lm_head shares weights with a quantized embed_tokens.
-        Unpacks and dequantizes the full weight table, then does matmul.
+        Falls back to the Python reference path for non-CUDA or FP32 tensors.
         """
         packed = cast(torch.Tensor, layer.weight)
         weight_scale = cast(torch.Tensor, layer.weight_scale)
+        if _can_use_int4_kernel(x):
+            return ops.int4_lm_head_gemv(packed, weight_scale, x, bias)
+
         low = (packed & 0xF).to(torch.int16)
         high = (packed >> 4).to(torch.int16)
         q_uint4 = torch.stack([low, high], dim=-1).view(packed.shape[0], -1)
@@ -128,12 +138,16 @@ class Int4PerChannelEmbeddingMethod(QuantizeMethodBase):
 
     def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
         """Perform embedding lookup with on-the-fly int4 dequantization."""
-        # Unpack and dequantize only the selected rows.
-        packed = cast(torch.Tensor, layer.weight)[input_]
+        packed = cast(torch.Tensor, layer.weight)
         weight_scale = cast(torch.Tensor, layer.weight_scale)
         params_dtype = cast(torch.dtype, layer.params_dtype)
-        low = (packed & 0xF).to(torch.int16)
-        high = (packed >> 4).to(torch.int16)
-        q_uint4 = torch.stack([low, high], dim=-1).view(packed.shape[0], -1)
+        if _can_use_int4_kernel(packed, params_dtype):
+            return ops.int4_embedding_lookup(packed, weight_scale, input_, params_dtype)
+
+        # Python fallback for unsupported dtypes/devices.
+        packed_rows = packed[input_]
+        low = (packed_rows & 0xF).to(torch.int16)
+        high = (packed_rows >> 4).to(torch.int16)
+        q_uint4 = torch.stack([low, high], dim=-1).view(packed_rows.shape[0], -1)
         q = q_uint4.to(params_dtype) - 8.0
         return q * weight_scale

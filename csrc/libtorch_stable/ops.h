@@ -181,6 +181,19 @@ torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
 // AllSpark ops: declarations are in the source files
 // (allspark_repack.cu and allspark_qgemm_w8a16.cu)
 
+// INT4 per-channel embedding ops
+torch::stable::Tensor int4_embedding_lookup(
+    const torch::stable::Tensor& packed_weight,
+    const torch::stable::Tensor& weight_scale,
+    const torch::stable::Tensor& input_ids,
+    torch::headeronly::ScalarType out_dtype);
+
+torch::stable::Tensor int4_lm_head_gemv(
+    const torch::stable::Tensor& packed_weight,
+    const torch::stable::Tensor& weight_scale,
+    const torch::stable::Tensor& hidden_states,
+    const std::optional<torch::stable::Tensor>& bias);
+
 #endif
 
 // CPU tensor -> CUDA UVA view (shared CUDA/ROCm)

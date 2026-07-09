@@ -321,6 +321,14 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "awq_dequantize(Tensor _kernel, Tensor _scaling_factors, "
       "Tensor _zeros, SymInt split_k_iters, int thx, int thy) -> Tensor");
 
+  // INT4 per-channel embedding ops.
+  ops.def(
+      "int4_embedding_lookup(Tensor packed_weight, Tensor weight_scale, "
+      "Tensor input_ids, ScalarType out_dtype) -> Tensor");
+  ops.def(
+      "int4_lm_head_gemv(Tensor packed_weight, Tensor weight_scale, "
+      "Tensor hidden_states, Tensor? bias) -> Tensor");
+
   // DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
   // conditionally compiled so impl registration is in source file
   ops.def(
@@ -635,6 +643,10 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // AWQ ops
   ops.impl("awq_gemm", TORCH_BOX(&awq_gemm));
   ops.impl("awq_dequantize", TORCH_BOX(&awq_dequantize));
+
+  // INT4 per-channel embedding ops
+  ops.impl("int4_embedding_lookup", TORCH_BOX(&int4_embedding_lookup));
+  ops.impl("int4_lm_head_gemv", TORCH_BOX(&int4_lm_head_gemv));
 
   // DSV3 fused A GEMM: conditionally compiled so impl registration is in
   // source file (dsv3_fused_a_gemm.cu)
