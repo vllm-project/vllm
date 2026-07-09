@@ -867,6 +867,9 @@ class GPUModelRunner(
         )
 
         self.reorder_batch_threshold: int | None = None
+        # True when any attention group has a prefill backend for batch routing;
+        # set in initialize_attn_backend.
+        self.has_prefill_attn_backend: bool = False
 
         # Attention layers that are only in the KVCacheConfig of the runner
         # (e.g., KV sharing, encoder-only attention), but not in the
@@ -2272,6 +2275,7 @@ class GPUModelRunner(
         num_scheduled_tokens: dict[str, int] | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
         slot_mappings: dict[int, torch.Tensor] | None = None,
+        use_prefill: bool = False,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         Returns:
@@ -2455,7 +2459,9 @@ class GPUModelRunner(
             ubid: int | None = None,
         ) -> None:
             attn_group = self.attn_groups[kv_cache_gid][attn_gid]
-            builder = attn_group.get_metadata_builder(ubid or 0)
+            builder = attn_group.get_metadata_builder(
+                ubid or 0, use_prefill=use_prefill
+            )
             kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 kv_cache_spec = kv_cache_spec.kv_cache_specs[attn_group.layer_names[0]]
@@ -4319,6 +4325,17 @@ class GPUModelRunner(
                 ubatch_slices=ubatch_slices_padded,
             )
 
+            # Batch routing: send prefill-containing batches to the prefill
+            # backend. A batch has prefill iff its max query length exceeds the
+            # decode reorder threshold (batch is reordered decodes-first). Never
+            # route on a FULL cudagraph step (uniform-decode ⇒ no prefill ⇒ this
+            # is already False; the check is a defensive backstop).
+            use_prefill_attn_backend = (
+                self.has_prefill_attn_backend
+                and cudagraph_mode != CUDAGraphMode.FULL
+                and max_num_scheduled_tokens > (self.reorder_batch_threshold or 1)
+            )
+
             attn_metadata, spec_decode_common_attn_metadata = (
                 self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded,
@@ -4332,6 +4349,7 @@ class GPUModelRunner(
                     num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                     slot_mappings=slot_mappings_by_group,
+                    use_prefill=use_prefill_attn_backend,
                 )
             )
 
@@ -4384,6 +4402,7 @@ class GPUModelRunner(
                 ubatch_slices=ubatch_slices_padded,
                 slot_mapping=slot_mappings,
                 skip_compiled=has_encoder_input,
+                use_prefill_attn_backend=use_prefill_attn_backend,
             ),
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(
@@ -6970,6 +6989,10 @@ class GPUModelRunner(
             attn_backend: type[AttentionBackend]
             kv_cache_spec: KVCacheSpec
             num_heads_q: int
+            # Optional prefill backend for batch routing. Uniform within a group
+            # since it is resolved from the same config + head count as the
+            # decode backend.
+            prefill_attn_backend: type[AttentionBackend] | None = None
 
         def get_attn_backends_for_group(
             kv_cache_group_spec: KVCacheGroupSpec,
@@ -6994,6 +7017,14 @@ class GPUModelRunner(
                         attn_backend,  # type: ignore[arg-type]
                     )
 
+                # Prefill backend for batch routing, if configured.
+                prefill_attn_backend = layers[layer_name].get_prefill_attn_backend()
+                alt_cls_name = (
+                    prefill_attn_backend.full_cls_name()
+                    if prefill_attn_backend is not None
+                    else None
+                )
+
                 full_cls_name = attn_backend.full_cls_name()
                 layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
                 if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
@@ -7005,9 +7036,12 @@ class GPUModelRunner(
                 # fallback can never spuriously merge them with attention
                 # layers.
                 num_heads_q = getattr(layers[layer_name], "num_heads", 0)
-                key = (full_cls_name, layer_kv_cache_spec, num_heads_q)
+                key = (full_cls_name, layer_kv_cache_spec, num_heads_q, alt_cls_name)
                 attn_backends[key] = AttentionGroupKey(
-                    attn_backend, layer_kv_cache_spec, num_heads_q
+                    attn_backend,
+                    layer_kv_cache_spec,
+                    num_heads_q,
+                    prefill_attn_backend,
                 )
                 attn_backend_layers[key].append(layer_name)
             return (
@@ -7026,6 +7060,7 @@ class GPUModelRunner(
                     layer_names,
                     key.kv_cache_spec,
                     kv_cache_group_id,
+                    prefill_backend=key.prefill_attn_backend,
                 )
 
                 attn_groups.append(attn_group)
@@ -7050,6 +7085,10 @@ class GPUModelRunner(
 
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
+
+        self.has_prefill_attn_backend = any(
+            group.prefill_backend is not None for group in self._attn_group_iterator()
+        )
 
     def initialize_metadata_builders(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
@@ -7153,10 +7192,17 @@ class GPUModelRunner(
         """
         min_none_high = lambda a, b: a if b is None else b if a is None else min(a, b)
 
-        reorder_batch_thresholds: list[int | None] = [
-            group.get_metadata_builder().reorder_batch_threshold
-            for group in self._attn_group_iterator()
-        ]
+        reorder_batch_thresholds: list[int | None] = []
+        for group in self._attn_group_iterator():
+            reorder_batch_thresholds.append(
+                group.get_metadata_builder().reorder_batch_threshold
+            )
+            # The prefill (routing) backend runs over the same reordered batch,
+            # so its threshold must participate in the global minimum too.
+            if group.prefill_backend is not None:
+                reorder_batch_thresholds.append(
+                    group.get_metadata_builder(use_prefill=True).reorder_batch_threshold
+                )
         # If there are no attention groups (attention-free model) or no backend
         # reports a threshold, leave reordering disabled.
         if len(reorder_batch_thresholds) == 0:

@@ -251,6 +251,14 @@ class AttentionGroup:
     metadata_builders: list[AttentionMetadataBuilder] = field(
         default_factory=lambda: []
     )
+    # Optional prefill backend for batch routing: prefill-containing (prefill +
+    # mixed) batches are dispatched to this backend instead of `backend` (the
+    # decode backend). It shares this group's KV cache and layer set. None when
+    # routing is disabled.
+    prefill_backend: type[AttentionBackend] | None = None
+    prefill_metadata_builders: list[AttentionMetadataBuilder] = field(
+        default_factory=lambda: []
+    )
 
     def create_metadata_builders(
         self,
@@ -273,10 +281,27 @@ class AttentionGroup:
             )
             for _ in range(num_metadata_builders)
         ]
+        if self.prefill_backend is not None:
+            self.prefill_metadata_builders = [
+                self.prefill_backend.get_builder_cls()(
+                    kv_cache_spec_builder,
+                    self.layer_names,
+                    vllm_config,
+                    device,
+                )
+                for _ in range(num_metadata_builders)
+            ]
 
-    def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
-        assert len(self.metadata_builders) > ubatch_id
-        return self.metadata_builders[ubatch_id]
+    def get_metadata_builder(
+        self, ubatch_id: int = 0, use_prefill: bool = False
+    ) -> AttentionMetadataBuilder:
+        builders = (
+            self.prefill_metadata_builders
+            if use_prefill and self.prefill_backend is not None
+            else self.metadata_builders
+        )
+        assert len(builders) > ubatch_id
+        return builders[ubatch_id]
 
 
 def select_common_block_size(

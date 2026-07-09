@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.backends.registry import (
+    AttentionBackendEnum,
     MambaAttentionBackendEnum,
 )
 
@@ -110,8 +111,19 @@ def get_attn_backend(
     attn_type: str | None = None,
     num_heads: int | None = None,
     has_sliding_window: bool = False,
+    backend_override: AttentionBackendEnum | None = None,
+    apply_required_layout: bool = True,
 ) -> type[AttentionBackend]:
-    """Selects which attention backend to use and lazily imports it."""
+    """Selects which attention backend to use and lazily imports it.
+
+    Args:
+        backend_override: When set, resolve this backend enum instead of
+            `attention_config.backend`. Used to resolve the prefill backend
+            for batch routing.
+        apply_required_layout: When False, do not apply the resolved backend's
+            required KV cache layout globally. Used when resolving the prefill
+            backend so the decode backend keeps ownership of the KV layout.
+    """
 
     if kv_cache_dtype is not None:
         valid_cache_dtypes = get_args(CacheDType)
@@ -158,19 +170,19 @@ def get_attn_backend(
     # A per-KV-group override (keyed by KVCacheSpecKind) takes precedence over
     # the global backend; kinds not present in the map fall back to it.
     attention_config = vllm_config.attention_config
-    backend = attention_config.backend
-    if attention_config.backend_per_kind:
+    backend = backend_override or attention_config.backend
+    if backend_override is None and attention_config.backend_per_kind:
         kind = get_attn_spec_kind(
             use_mla=use_mla,
             has_sliding_window=has_sliding_window,
             attn_type=attn_type,
         )
         backend = attention_config.backend_per_kind.get(kind.value, backend)
-
     return _cached_get_attn_backend(
         backend=backend,
         attn_selector_config=attn_selector_config,
         num_heads=num_heads,
+        apply_required_layout=apply_required_layout,
     )
 
 
@@ -179,6 +191,7 @@ def _cached_get_attn_backend(
     backend,
     attn_selector_config: AttentionSelectorConfig,
     num_heads: int | None = None,
+    apply_required_layout: bool = True,
 ) -> type[AttentionBackend]:
     from vllm.platforms import current_platform
 
@@ -193,17 +206,20 @@ def _cached_get_attn_backend(
         )
     backend = resolve_obj_by_qualname(attention_cls)
 
-    # Adjust kv cache layout if the selected backend requires a specific one
-    required_layout = backend.get_required_kv_cache_layout()
-    if required_layout is not None:
-        from vllm.v1.attention.backends.utils import set_kv_cache_layout
+    # Adjust kv cache layout if the selected backend requires a specific one.
+    # Skipped for the prefill (routing) backend so the decode backend retains
+    # ownership of the shared KV layout.
+    if apply_required_layout:
+        required_layout = backend.get_required_kv_cache_layout()
+        if required_layout is not None:
+            from vllm.v1.attention.backends.utils import set_kv_cache_layout
 
-        set_kv_cache_layout(required_layout)
-        logger.info(
-            "Using %s KV cache layout for %s backend.",
-            required_layout,
-            backend.get_name(),
-        )
+            set_kv_cache_layout(required_layout)
+            logger.info(
+                "Using %s KV cache layout for %s backend.",
+                required_layout,
+                backend.get_name(),
+            )
 
     return backend
 

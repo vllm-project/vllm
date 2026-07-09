@@ -8,7 +8,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CacheConfig, get_current_vllm_config
+from vllm.config import CacheConfig, CUDAGraphMode, get_current_vllm_config
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
@@ -434,6 +434,67 @@ class Attention(nn.Module, AttentionLayerBase):
         self.backend = AttentionBackendEnum[self.attn_backend.get_name()]
         self.dtype = dtype
 
+        # Optional prefill backend for batch routing: prefill-containing (prefill
+        # + mixed) batches are dispatched to this backend instead of the decode
+        # backend (pure-decode batches always use the decode backend). Only
+        # decoder attention participates; it shares the decode backend's KV
+        # cache layout.
+        self.prefill_attn_backend: type[AttentionBackend] | None = None
+        self.prefill_impl = None
+        prefill_backend_enum = vllm_config.attention_config.prefill_backend
+        if prefill_backend_enum is not None and attn_type == AttentionType.DECODER:
+            from vllm.v1.attention.backends.utils import kv_layouts_compatible
+            from vllm.v1.attention.selector import AttentionSelectorConfig
+
+            self.prefill_attn_backend = get_attn_backend(
+                head_size,
+                dtype,
+                kv_cache_dtype,
+                use_mla=False,
+                has_sink=self.has_sink,
+                use_mm_prefix=self.use_mm_prefix,
+                use_per_head_quant_scales=use_per_head_quant_scales,
+                attn_type=attn_type,
+                backend_override=prefill_backend_enum,
+                apply_required_layout=False,
+            )
+            selector_block_size = (
+                cache_config.block_size
+                if cache_config is not None and cache_config.user_specified_block_size
+                else None
+            )
+            selector_cfg = AttentionSelectorConfig(
+                head_size=head_size,
+                dtype=dtype,
+                kv_cache_dtype=kv_cache_dtype,
+                block_size=selector_block_size,
+            )
+            if not kv_layouts_compatible(
+                self.attn_backend, self.prefill_attn_backend, selector_cfg
+            ):
+                raise ValueError(
+                    f"Prefill attention backend "
+                    f"{self.prefill_attn_backend.get_name()} is not "
+                    f"KV-cache-layout compatible with the decode backend "
+                    f"{self.attn_backend.get_name()}; they cannot share one "
+                    f"physical KV cache. Choose a prefill backend with a "
+                    f"matching KV layout."
+                )
+            prefill_impl_cls = self.prefill_attn_backend.get_impl_cls()
+            self.prefill_impl = prefill_impl_cls(  # type: ignore[assignment]
+                num_heads,
+                head_size,
+                scale,
+                num_kv_heads,
+                alibi_slopes,
+                sliding_window,
+                kv_cache_dtype,
+                logits_soft_cap,
+                attn_type,
+                kv_sharing_target_layer_name,
+                **extra_impl_args,
+            )
+
         # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
         # torch.compile works by registering the attention as one giant
         # opaque custom op. For other platforms, we directly call them
@@ -618,6 +679,10 @@ class Attention(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
 
+    def get_prefill_attn_backend(self) -> type[AttentionBackend] | None:
+        """The prefill backend for batch routing, or None."""
+        return self.prefill_attn_backend
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         # Block size may get updated after model loading, refresh it
         block_size = vllm_config.cache_config.block_size
@@ -771,6 +836,26 @@ def get_attention_context(
     return attn_metadata, attn_layer, kv_cache, layer_slot_mapping
 
 
+def _routed_attention_impl(attn_layer):
+    """Select the impl for the current step (batch routing).
+
+    Returns the layer's prefill impl when the forward context routes this step
+    to it, else the decode impl. Guards that the prefill impl never runs inside
+    a full CUDA graph (it can't: prefill-containing ⇒ not uniform-decode ⇒ not
+    FULL — the assert catches regressions).
+    """
+    prefill_impl = getattr(attn_layer, "prefill_impl", None)
+    if prefill_impl is None:
+        return attn_layer.impl
+    forward_context: ForwardContext = get_forward_context()
+    if not forward_context.use_prefill_attn_backend:
+        return attn_layer.impl
+    assert forward_context.cudagraph_runtime_mode != CUDAGraphMode.FULL, (
+        "Prefill attention backend must not run inside a full CUDA graph."
+    )
+    return prefill_impl
+
+
 def unified_kv_cache_update(
     key: torch.Tensor,
     value: torch.Tensor,
@@ -783,10 +868,11 @@ def unified_kv_cache_update(
     layer_name = _resolve_layer_name(layer_name)
     _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
     if layer_slot_mapping is not None:
-        assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
-            f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
+        impl = _routed_attention_impl(attn_layer)
+        assert hasattr(impl, "do_kv_cache_update"), (
+            f"{impl.__class__.__name__} does not support kv cache update"
         )
-        attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
+        impl.do_kv_cache_update(  # type: ignore[attr-defined]
             attn_layer,
             key,
             value,
@@ -832,7 +918,8 @@ def unified_attention_with_output(
     layer_name = _resolve_layer_name(layer_name)
     attn_metadata, self, kv_cache, _ = get_attention_context(layer_name)
 
-    self.impl.forward(
+    impl = _routed_attention_impl(self)
+    impl.forward(
         self,
         query,
         key,

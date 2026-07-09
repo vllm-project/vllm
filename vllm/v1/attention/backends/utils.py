@@ -21,6 +21,7 @@ from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_te
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 if TYPE_CHECKING:
+    from vllm.v1.attention.selector import AttentionSelectorConfig
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
 
@@ -633,6 +634,110 @@ def split_decodes_and_prefills(
     num_decode_tokens = query_start_loc[first_prefill].item()
     num_prefill_tokens = num_tokens - num_decode_tokens
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
+
+
+def kv_layouts_compatible(
+    decode_backend: type[AttentionBackend],
+    prefill_backend: type[AttentionBackend],
+    selector_config: "AttentionSelectorConfig",
+) -> bool:
+    """Whether two backends can share one physical KV cache.
+
+    Batch routing sends the whole batch to one backend per step, but both
+    backends read/write the same physical KV cache, so their layouts must match
+    exactly. Both must also externalize the KV-cache write (so the layer's
+    separate ``unified_kv_cache_update`` op drives the write for whichever
+    backend runs).
+
+    Args:
+        decode_backend: The default/decode backend (owns the KV layout).
+        prefill_backend: The backend that must match the decode backend's layout.
+        selector_config: The resolved selection config (head size, block size,
+            cache dtype) used to probe the concrete KV cache shape.
+
+    Returns:
+        True if the two backends can share one KV cache.
+    """
+    # Never mix attention families (standard vs MLA).
+    if decode_backend.is_mla() != prefill_backend.is_mla():
+        return False
+
+    # Both must externalize the KV write (the layer writes KV once per step).
+    if (
+        decode_backend.forward_includes_kv_cache_update
+        or prefill_backend.forward_includes_kv_cache_update
+    ):
+        return False
+
+    # Required layout must agree (or be unconstrained on one side).
+    decode_layout = decode_backend.get_required_kv_cache_layout()
+    prefill_layout = prefill_backend.get_required_kv_cache_layout()
+    if (
+        decode_layout is not None
+        and prefill_layout is not None
+        and decode_layout != prefill_layout
+    ):
+        return False
+
+    # The block size must be usable by both.
+    block_size = selector_config.block_size
+    if not (
+        decode_backend.supports_block_size(block_size)
+        and prefill_backend.supports_block_size(block_size)
+    ):
+        return False
+
+    # `indexes_kv_by_block_stride` (num-blocks-first physical layout) must agree.
+    if (
+        decode_backend.indexes_kv_by_block_stride()
+        != prefill_backend.indexes_kv_by_block_stride()
+    ):
+        return False
+
+    # Compare the concrete KV cache shape and physical stride order using the
+    # same representative dims for both backends, so any structural difference
+    # (e.g. NHD vs HND) surfaces.
+    head_size = selector_config.head_size
+    cache_dtype = selector_config.kv_cache_dtype or "auto"
+    probe_block_size = block_size or 16
+    probe_num_blocks = 1024
+    probe_num_kv_heads = 8
+
+    decode_shape = decode_backend.get_kv_cache_shape(
+        probe_num_blocks,
+        probe_block_size,
+        probe_num_kv_heads,
+        head_size,
+        cache_dtype_str=cache_dtype,
+    )
+    prefill_shape = prefill_backend.get_kv_cache_shape(
+        probe_num_blocks,
+        probe_block_size,
+        probe_num_kv_heads,
+        head_size,
+        cache_dtype_str=cache_dtype,
+    )
+    if decode_shape != prefill_shape:
+        return False
+
+    def _stride_order(
+        backend: type[AttentionBackend], include_layers: bool
+    ) -> tuple[int, ...] | None:
+        try:
+            return backend.get_kv_cache_stride_order(
+                include_num_layers_dimension=include_layers
+            )
+        except (NotImplementedError, AttributeError):
+            # No custom stride order: physical layout matches the logical shape.
+            return None
+
+    for include_layers in (False, True):
+        if _stride_order(decode_backend, include_layers) != _stride_order(
+            prefill_backend, include_layers
+        ):
+            return False
+
+    return True
 
 
 def split_prefill_chunks(
