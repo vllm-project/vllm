@@ -18,12 +18,12 @@ def get_object_storage(request: Request) -> ServingObjectStorage:
 
 
 @router.put("/object_storage")
-async def upload_auto(
-    raw_request: Request,
-    file: UploadFile,
-):
-    storage = get_object_storage(raw_request)
-    return await storage.upload(file=file)
+async def upload_auto(*args, **kwargs):
+    print("=" * 80)
+    print("upload_auto")
+    print(args, kwargs)
+    #storage = get_object_storage(raw_request)
+    #return await storage.upload(file=file)
 
 
 @router.put("/object_storage/{uuid}")

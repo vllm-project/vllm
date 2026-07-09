@@ -239,13 +239,16 @@ class PagedShmServerProc:
             target=_zmq_server,
             args=(size, block_size, child_conn, stop_event),
         )
-        proc.start()
-        address = parent_conn.recv()
-        parent_conn.close()
 
         self.proc = proc
-        self.address = address
+        self.address = ""
         self.stop_event = stop_event
+        self.parent_conn = parent_conn
+
+    def start(self):
+        self.proc.start()
+        self.address = self.parent_conn.recv()
+        self.parent_conn.close()
 
     def close(self):
         self.stop_event.set()

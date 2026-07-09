@@ -208,6 +208,9 @@ class MultiModalConfig:
 
     Set to `0` (default) to disable frontend GPU multimodal memory gating."""
 
+    shm_server_address: str = ""
+    """shm_server_address"""
+
     @field_validator("limit_per_prompt", mode="before")
     @classmethod
     def _validate_limit_per_prompt(

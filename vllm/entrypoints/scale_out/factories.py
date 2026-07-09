@@ -76,3 +76,7 @@ def register_scale_out_api_routers(
         )
 
         attach_disagg_router(app)
+
+    from .object_storage.api_router import router as object_storage_router
+
+    app.include_router(object_storage_router)

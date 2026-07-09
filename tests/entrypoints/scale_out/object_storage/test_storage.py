@@ -9,7 +9,7 @@ import pytest_asyncio
 
 from tests.utils import RemoteLaunchRenderServer
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
 # ---------------------------------------------------------------------------

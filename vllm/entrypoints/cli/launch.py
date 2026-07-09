@@ -7,7 +7,7 @@ import signal
 import uvloop
 
 from vllm import envs
-from vllm.config import VllmConfig
+from vllm.config import MultiModalConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.openai.api_server import (
@@ -130,15 +130,27 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
     # Clear quantization so VllmConfig skips quant dtype/capability validation.
     model_config.quantization = None
 
+    model_config.multimodal_config = MultiModalConfig()
+
     # Render servers never allocate KV cache; suppress the spurious CPU KV
     # cache space warning from CpuPlatform.check_and_update_config.
     envs.VLLM_CPU_KVCACHE_SPACE = 0
 
     vllm_config = VllmConfig(model_config=model_config)
+
+    from vllm.renderers.paged_shm.server import PagedShmServerProc
+
+    paged_shm_server = PagedShmServerProc(size=1024 * 1024, block_size=4096)
+    paged_shm_server.start()
+
+    model_config.multimodal_config.shm_server_address = paged_shm_server.address
+
     shutdown_task = await build_and_serve_renderer(
         vllm_config, listen_address, sock, args
     )
+
     try:
         await shutdown_task
     finally:
         sock.close()
+        paged_shm_server.close()
