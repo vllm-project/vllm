@@ -5,7 +5,7 @@
 | Component | Version | Download |
 |-----------|---------|----------|
 | Python | 3.12 | python.org |
-| ROCm for Windows | 7.13.0 | [AMD ROCm](https://rocm.docs.amd.com) |
+| ROCm for Windows | 7.13.0 | [AMD ROCm](https://rocm.docs.amd.com) — pip wheels also at `https://repo.amd.com/rocm/whl/gfx120X-all/` |
 | Visual Studio 2022 | 17.10+ | visualstudio.microsoft.com (Desktop C++ workload) |
 | Git | latest | git-scm.com |
 
@@ -97,6 +97,17 @@ python -m vllm.entrypoints.openai.api_server `
 ```
 
 Then open http://localhost:8001/ for the chat UI.
+
+## Security Notes (Windows)
+
+| Issue | Guidance |
+|-------|----------|
+| **Firewall** | Block ports 8000-8001, 29500 on public profiles: `New-NetFirewallRule -DisplayName 'vLLM' -Direction Inbound -Protocol TCP -LocalPort 8000,8001,29500 -Action Block` |
+| **Network binding** | Do NOT bind to `0.0.0.0` on untrusted networks (VPN, public WiFi). Default `127.0.0.1` is safe. |
+| **Cache permissions** | vLLM cache at `%LOCALAPPDATA%\vllm\cache`. On multi-user systems, restrict: `icacls %LOCALAPPDATA%\vllm /inheritance:r /grant "Users:(OI)(CI)R"` |
+| **IPC** | Uses `tcp://127.0.0.1` loopback only — not accessible from other machines. |
+| **Model loading** | Only load models from trusted sources. Pickle-based formats can execute arbitrary code. |
+| **API auth** | vLLM's OpenAI-compatible API has **no built-in authentication**. Use a reverse proxy (nginx/IIS ARR) for production. |
 
 ## Environment Variables (Required)
 

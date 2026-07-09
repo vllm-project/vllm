@@ -14,26 +14,44 @@ Pre-built binaries and build tools for vLLM on Windows with AMD ROCm.
 | `install.ps1` | — | One-click install script |
 | `INSTALL-WINDOWS-ROCM.md` | — | Full installation guide |
 
+## Files
+
+| File | Purpose |
+|------|---------|
+| `_C.pyd` | Pre-built vLLM C++ extension (13.8 MB) |
+| `install.ps1` | Auto-installer — detects ROCm, vLLM, and venv paths |
+| `INSTALL.md` | Manual installation guide |
+| `INSTALL-WINDOWS-ROCM.md` | Full step-by-step guide |
+| `PR_DESCRIPTION.md` | Ready-to-copy PR description for upstream |
+| `README.md` | This file |
+| `build-harness/` | Source to rebuild `_C.pyd` |
+| `vllm-windows-rocm-dist.zip` | Complete distribution archive (2.9 MB) |
+
 ## Quick Start
 
 ```powershell
-# 1. Install ROCm 7.13.0, Python 3.12, and clone vllm-windows
+# 1. Install ROCm 7.13.0
+#    Download from https://rocm.docs.amd.com
+#    PIP wheels: https://repo.amd.com/rocm/whl/gfx120X-all/
+
+# 2. Clone vLLM Windows port
 git clone https://github.com/Maxritz/vllm-windows.git
 cd vllm-windows
 git checkout WINDOWS-PORT
 
-# 2. Set up venv and install vLLM
+# 3. Set up venv
 uv venv --python 3.12
 .venv\Scripts\activate
-uv pip install torch --index-url https://download.pytorch.org/whl/rocm7.13
+uv pip install torch --index-url https://repo.amd.com/rocm/whl/gfx120X-all/
 VLLM_USE_PRECOMPILED=1 uv pip install -e .
 
-# 3. Run installer (from this dist/ folder)
-.\dist\install.ps1 -VllmDir . -HipPath "E:\ROCM-7.13.0-Windows"
+# 4. Install pre-built _C.pyd
+.\windows-dist\install.ps1
 
-# 4. Run a model
-$env:HIP_PATH = "E:\ROCM-7.13.0-Windows"
-python -m vllm.entrypoints.openai.api_server --model F:\VLLM-Models\Qwen2.5-3B-Instruct --enforce-eager
+# 5. Run a model
+$env:HIP_PATH = "C:\Program Files\AMD\ROCm\7.13"
+$env:PYTHONPATH = "C:\path\to\vllm-windows"
+python -m vllm.entrypoints.openai.api_server --model <your-model-path> --enforce-eager
 ```
 
 ## Build From Source
