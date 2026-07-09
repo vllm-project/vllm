@@ -68,17 +68,18 @@ def main():
 
     # 5. Generate requirements.txt with AMD wheel URLs
     # List wheels the user needs to download
-    py_tag = "cp312"
-    base_amd = "https://repo.amd.com/rocm/whl/gfx120X-all"
+    # repo.radeon.com verified working (821 MB torch download)
+    # repo.amd.com and rocm.nightlies.amd.com block direct .whl downloads
+    base = "https://repo.radeon.com/rocm/windows/.rocm-rel-7.2_a"
     torch_ver, tv_ver = get_torch_versions(rocm_ver)
     wheel_dir = install_dir / "wheels"
     wheel_dir.mkdir(exist_ok=True)
 
     wheels = [
-        f"{base_amd}/rocm-sdk-core/rocm_sdk_core-7.13.0-py3-none-win_amd64.whl",
-        f"{base_amd}/rocm-sdk-devel/rocm_sdk_devel-7.13.0-py3-none-win_amd64.whl",
-        f"{base_amd}/torch/torch-{torch_ver}-{py_tag}-{py_tag}-win_amd64.whl",
-        f"{base_amd}/torchvision/torchvision-{tv_ver}-{py_tag}-{py_tag}-win_amd64.whl",
+        f"{base}/torch-{torch_ver}-cp312-cp312-win_amd64.whl",
+        f"{base}/torchvision-{tv_ver}-cp312-cp312-win_amd64.whl",
+        f"{base}/rocm_sdk_core-7.2.0.dev0-py3-none-win_amd64.whl",
+        f"{base}/rocm_sdk_devel-7.2.0.dev0-py3-none-win_amd64.whl",
     ]
     dl_file = install_dir / "download_urls.txt"
     content = "Open each URL in your browser and save the .whl file.\n"
@@ -223,13 +224,13 @@ def get_rocm_version(hip_path):
     return "7.13"
 
 def get_torch_versions(rocm_ver):
+    # repo.radeon.com uses rocmsdk version format
     v = {
-        "7.13": ("2.11.0+rocm7.13.0", "0.22.0+rocm7.13.0"),
-        "7.12": ("2.10.0+rocm7.12.0", "0.21.0+rocm7.12.0"),
-        "7.11": ("2.9.1+rocm7.11.0", "0.20.1+rocm7.11.0"),
-        "7.10": ("2.9.1+rocm7.10.0", "0.20.1+rocm7.10.0"),
+        "7.13": ("2.9.1+rocmsdk20260116", "0.24.1+rocmsdk20260116"),
+        "7.12": ("2.9.1+rocmsdk20260116", "0.24.1+rocmsdk20260116"),
+        "7.11": ("2.9.1+rocmsdk20260116", "0.24.1+rocmsdk20260116"),
     }
-    return v.get(rocm_ver, ("2.11.0+rocm7.13.0", "0.22.0+rocm7.13.0"))
+    return v.get(rocm_ver, ("2.9.1+rocmsdk20260116", "0.24.1+rocmsdk20260116"))
 
 def get_site_packages(python):
     try:
