@@ -90,7 +90,8 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             dtype=self.dtype,
             sliding_window=self.window_size,
             cache_dtype_str=self.cache_config.cache_dtype,
-            alignment=576 if uses_fp8_ds_mla_layout else None,
+            # 576B for FlashMLA packing; 512B for FlashInfer sparse (#44577).
+            alignment=576 if uses_fp8_ds_mla_layout else 512,
             model_version="deepseek_v4",
             kv_quant_mode=get_kv_quant_mode(self.cache_config.cache_dtype),
         )
