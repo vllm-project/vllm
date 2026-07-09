@@ -11,7 +11,6 @@ correctly with the DeepSeek-V2-Lite model using GSM8K evaluation.
 import pytest
 import torch
 
-from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k
 from tests.utils import RemoteOpenAIServer
 from vllm.utils.import_utils import has_deep_ep
 
@@ -58,6 +57,7 @@ def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
     """
     Test DBO with DP+EP using GSM8K evaluation.
     """
+    lm_eval = pytest.importorskip("lm_eval")
     required_gpus = DP_SIZE
 
     if num_gpus_available < required_gpus:
@@ -79,7 +79,7 @@ def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
         "--dbo-decode-token-threshold",
         "16",
         "--dbo-prefill-token-threshold",
-        "256",
+        "32",
         "--all2all-backend",
         all2all_backend,
     ]
@@ -90,19 +90,26 @@ def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
         max_wait_seconds=600,  # Allow time for model loading with DP+EP
     ) as remote_server:
         # Use host and port directly from RemoteOpenAIServer
-        host = f"http://{remote_server.host}"
-        port = remote_server.port
+
+        base_url = f"http://{remote_server.host}:{remote_server.port}/v1/completions"
 
         # Run GSM8K evaluation
-        results = evaluate_gsm8k(
-            num_questions=NUM_QUESTIONS,
-            num_shots=NUM_SHOTS,
-            host=host,
-            port=port,
+        results = lm_eval.simple_evaluate(
+            model="local-completions",
+            model_args=(
+                f"pretrained={MODEL_NAME},"
+                f"base_url={base_url},"
+                "num_concurrent=512,max_retries=3"
+            ),
+            tasks=["gsm8k"],
         )
-
         # Validate accuracy is reasonable
-        accuracy = results["accuracy"]
+        gsm8k = results["results"]["gsm8k"]
+        accuracy = gsm8k.get(
+            "exact_match,strict-match",
+            gsm8k.get("exact_match,flexible-extract"),
+        )
+        assert accuracy is not None, f"gsm8k exact_match missing: {gsm8k}"
         assert accuracy >= MIN_ACCURACY, (
             f"DBO+DP+EP accuracy too low ({all2all_backend}): "
             f"{accuracy:.3f} < {MIN_ACCURACY:.3f} "
