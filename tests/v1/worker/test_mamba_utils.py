@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpe
 from vllm.v1.worker.mamba_utils import (
     MambaCopyBuffers,
     MambaSpecDecodeGPUContext,
+    _reinterpret_u64_as_i64,
     collect_mamba_copy_meta,
     do_mamba_copy_block,
     preprocess_mamba,
@@ -185,6 +186,94 @@ class _MockCpuGpuBuffer:
         if n is None:
             return self.gpu.copy_(self.cpu, non_blocking=True)
         return self.gpu[:n].copy_(self.cpu[:n], non_blocking=True)
+
+
+class _FakeDataPtrTensor:
+    """Tensor wrapper that exposes a controlled data_ptr for metadata tests."""
+
+    def __init__(self, tensor: torch.Tensor, data_ptr: int):
+        self._tensor = tensor
+        self._data_ptr = data_ptr
+        self.shape = tensor.shape
+
+    def data_ptr(self) -> int:
+        return self._data_ptr
+
+    def dim(self) -> int:
+        return self._tensor.dim()
+
+    def stride(self, *args):
+        return self._tensor.stride(*args)
+
+    def numel(self) -> int:
+        return self._tensor.numel()
+
+    def element_size(self) -> int:
+        return self._tensor.element_size()
+
+    def size(self, *args):
+        return self._tensor.size(*args)
+
+    def __getitem__(self, item):
+        return self._tensor[item]
+
+
+def test_reinterpret_u64_as_i64_preserves_pointer_bits():
+    ptrs = [
+        0,
+        1,
+        (1 << 63) - 1,
+        1 << 63,
+        (1 << 63) + 1234,
+        (1 << 64) - 1,
+    ]
+    ptr_tensor = torch.zeros(len(ptrs), dtype=torch.int64)
+
+    for idx, ptr in enumerate(ptrs):
+        ptr_tensor[idx] = _reinterpret_u64_as_i64(ptr)
+
+    assert ptr_tensor.numpy().view(np.uint64).tolist() == ptrs
+
+
+def test_gpu_context_reinterprets_high_data_ptrs_for_int64_metadata():
+    cfg = _TestConfig(num_layers=1)
+    device = torch.device("cpu")
+    kv_cache_config = _make_kv_cache_config(cfg, ["layer_0"])
+    gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+    conv_ptr = 1 << 63
+    temporal_ptr = (1 << 64) - 1
+    block_table_ptr = (1 << 63) + 42
+
+    conv_state = _FakeDataPtrTensor(
+        torch.empty(
+            cfg.num_blocks,
+            cfg.conv_width,
+            cfg.conv_inner_dim,
+            dtype=cfg.dtype,
+        ),
+        conv_ptr,
+    )
+    temporal_state = _FakeDataPtrTensor(
+        torch.empty(cfg.num_blocks, cfg.temporal_state_dim, dtype=cfg.dtype),
+        temporal_ptr,
+    )
+    block_table = _FakeDataPtrTensor(
+        torch.empty(1, 4, dtype=torch.int32),
+        block_table_ptr,
+    )
+    forward_context = {"layer_0": _make_mock_attention(conv_state, temporal_state)}
+
+    gpu_ctx.initialize_from_forward_context(
+        kv_cache_config, forward_context, _COPY_FUNCS, [block_table]
+    )
+
+    assert gpu_ctx.state_base_addrs.tolist() == [
+        _reinterpret_u64_as_i64(conv_ptr),
+        _reinterpret_u64_as_i64(temporal_ptr),
+    ]
+    assert gpu_ctx.block_table_ptrs.tolist() == [
+        _reinterpret_u64_as_i64(block_table_ptr)
+    ]
 
 
 def _make_postprocess_scheduler_output(
