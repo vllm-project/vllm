@@ -64,7 +64,10 @@ class TrainModel(RDTShardedProducer):
 
     def __init__(self, model_name: str):
         self.model = AutoModelForCausalLM.from_pretrained(model_name).to("cuda:0")
-        self.init_rdt_producer()
+        # M:N: this single trainer serves TP-2 inference (2 consumers), so per-
+        # consumer serve rings keep their interleaved pulls off each other's slots.
+        # (gather-free -> free_gather is a no-op, but the ring count still matters.)
+        self.init_rdt_producer(num_consumers=2)  # tensor_parallel_size * data_parallel_size
         # Live parameters ARE the serve cache: produce replays each spec's op
         # chain on them and packs the slices into the registered serve ring.
         # PyTorch parameters mutate in place during training, so the cached

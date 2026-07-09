@@ -1,24 +1,40 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""RLHF weight sync: 8-GPU FSDP2 trainer -> 8-GPU vLLM (DP+EP) inference via
-the sharded-RDT weight-transfer backend (Qwen3-30B-A3B, bf16).
+"""RLHF weight sync: arbitrary M:N FSDP2 trainer -> vLLM inference via the
+sharded-RDT weight-transfer backend. The canonical M:N example.
+
+Fleet sizes and model come from env (see below), so the SAME file runs both
+M:N regimes end to end:
+  - more trainers than inference (P>C, e.g. 8->4): each consumer binds a
+    contiguous block of producers and SPLITS every chunk-pull evenly across
+    them (load balance);
+  - more inference than trainers (C>P, e.g. 4->8): several consumers share one
+    producer, which keeps a per-consumer serve ring and ref-counts frees (frees
+    a gather group only after all its consumers have).
+The 1:1 case reduces to the pre-M:N behavior. See multi_node_rdt.md and
+assign_producer_indices in sharded_rdt_engine.py for the block rule.
 
 Architecture (single-call design, shared with rlhf_sharded_rdt_kimi.py):
   - trainer ranks mix in RDTShardedProducer (rdt_producer.py): a self-paced
     per-group all-gather plan (``full_tensor()`` collectives rendezvous safely
     because every rank runs the IDENTICAL ordered plan) + the packed serve
-    ring that mirrors the consumer's byte layout.
-  - the driver makes ONE ``engine.update_weights`` per sync carrying all names
-    + group_lens; the engine chunk-plans each group, pipelines packed pulls
-    over its receive ring, and frees each group's gather on the producer as
-    its chunks finish.
-  - tuning knobs (env): NUM_RDT_BUFFERS x LAYERWISE_SPLIT (working set vs the
-    fabric's address-translation reach), RDT_ARENA_PRESIZE_GB, RDT_NIC_RAILS /
-    UCX_IB_NUM_PATHS (fabric), RDT_NOSYNC (paired Ray patch), RDT_PACK_CHECK.
+    ring that mirrors the consumer's byte layout. gather-to-ALL-ranks makes
+    every producer hold every slice, so any bound producer can serve any pull.
+  - the driver makes ONE ``engine.update_weights`` per sync; the engine
+    chunk-plans each group (pre-built at init from group_lens), pipelines the
+    packed pulls over its receive ring, and frees each group's gather on the
+    producer as its chunks finish.
 
-Run on a 2-node 8+8 GPU Ray cluster (trainer fleet pinned to one node via a
-STRICT_PACK placement group; vLLM DP fleet lands on the other). See
-multi_node_rdt.md for the cluster runbook and optimization history.
+Env knobs:
+  - fleet/model: MN_TRAINERS, MN_INFERENCE (or MN_INFERENCE_TP x MN_INFERENCE_DP),
+    MN_MODEL (default Qwen/Qwen3-0.6B), MN_EP (1 for an MoE model). A dense model
+    is served via TP (vLLM rejects DP over dense); an MoE model via DP(+EP).
+  - transport: NUM_RDT_BUFFERS x LAYERWISE_SPLIT (working set vs the fabric's
+    address-translation reach), RDT_ARENA_PRESIZE_GB, RDT_NOSYNC (paired Ray
+    patch), RDT_PACK_CHECK, RDT_SYNC_ITERS.
+
+Run on a 2-node GPU Ray cluster via launch_mn.py (trainer fleet pinned to one
+node, driver+inference on the other). See multi_node_rdt.md for the runbook.
 """
 
 import asyncio
@@ -33,7 +49,10 @@ import ray
 import torch
 import torch.distributed as dist
 from ray.util.placement_group import placement_group, placement_group_table
-from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+from ray.util.scheduling_strategies import (
+    NodeAffinitySchedulingStrategy,
+    PlacementGroupSchedulingStrategy,
+)
 from torch.distributed.fsdp import fully_shard
 from transformers import AutoConfig, AutoModelForCausalLM
 
@@ -55,9 +74,11 @@ from vllm.v1.executor import Executor
 # sharded-RDT producer (packed serve ring + self-paced gather plan).
 from rdt_producer import RDTShardedProducer, layerwise_groups
 
-MODEL_NAME = "Qwen/Qwen3-30B-A3B"
-TRAINER_ACTOR_NAME = "sharded_rdt_fsdp_trainer"
-RAY_NAMESPACE = "sharded_rdt_fsdp_example"
+# M:N test variant: small dense model, EP off, fleet sizes from env so 4/8
+# (fan-in) and 8/4 (split) can be flipped without editing.
+MODEL_NAME = os.environ.get("MN_MODEL", "Qwen/Qwen3-0.6B")
+TRAINER_ACTOR_NAME = "sharded_rdt_mn_trainer"
+RAY_NAMESPACE = "sharded_rdt_mn_example"
 
 
 def trainer_actor_name(rank: int) -> str:
@@ -74,9 +95,15 @@ def trainer_actor_name(rank: int) -> str:
 # replays it on subsequent syncs, so use >=2 to observe the replay speedup.
 SYNC_ITERS = int(os.environ.get("RDT_SYNC_ITERS", "3"))
 
-FSDP_WORLD_SIZE = 8
-INFERENCE_TP_SIZE = 1
-INFERENCE_DP_SIZE = 8
+FSDP_WORLD_SIZE = int(os.environ.get("MN_TRAINERS", "4"))
+# Inference parallelism. Dense models must be served with TENSOR parallelism (vLLM
+# rejects DP over dense models); MoE models use DP (+EP). Either way the fleet size
+# = TP*DP and each worker's distinct global index comes from data_parallel_index *
+# world_size + rank (see the engine's _global_worker_index).
+INFERENCE_TP_SIZE = int(os.environ.get("MN_INFERENCE_TP", "1"))
+INFERENCE_DP_SIZE = int(
+    os.environ.get("MN_INFERENCE_DP", os.environ.get("MN_INFERENCE", "8"))
+)
 # vLLM workers in the inference EP group; each one calls
 # rdt_produce_weights_batched once per layer. Used only to size the actor
 # threadpool (one concurrent produce call per worker, plus gather).
@@ -185,22 +212,22 @@ def _load_sharded_from_disk(model, model_name: str, config) -> None:
         rot.attention_scaling = fresh.attention_scaling
 
 
-# max_concurrency=8 lets each rank service inbound ``gather_layer`` calls AND
-# the concurrent ``rdt_produce_weights_batched`` calls from the vLLM workers it
-# serves, on separate threads in the actor's threadpool. With static 1:1 load
-# balancing each rank serves a single inference worker, but 8 gives ample
-# headroom (and tolerates other routing policies).
+# max_concurrency=8 lets each rank service inbound gather collectives AND the
+# concurrent ``rdt_produce_weights_batched`` calls on separate threads in the
+# actor's threadpool. Under M:N fan-in (C>P) one rank serves several inference
+# workers at once, so it needs headroom for multiple simultaneous produce calls
+# (the producer serializes only first-use NIXL registration; see rdt_producer).
 # Concurrent produce calls are read-only against the cache, so they need no
-# locking beyond the gather/free synchronization: the driver frees a layer
-# group only after its update_weights has fully drained.
+# locking beyond the gather/free synchronization: the engine frees a layer
+# group (via ref-counted free_gather) only after its consumers have drained it.
 @ray.remote(num_gpus=1, max_concurrency=8, enable_tensor_transport=True)
 class FSDPTrainWorker(RDTShardedProducer):
-    """One FSDP2 training worker per GPU.
-
-    Four of these form the FSDP group. Every rank serves RDT-tagged slice
-    requests to the vLLM inference workers: ``full_tensor()`` all-gathers each
-    layer to all ranks, so each rank can serve NIXL pulls. Inference workers are
-    statically mapped 1:1 onto the ranks to spread the trainer-side clone + NIC
+    """One FSDP2 training worker per GPU; MN_TRAINERS of them form the FSDP
+    group. Every rank serves RDT-tagged slice requests to the vLLM inference
+    workers: ``full_tensor()`` all-gathers each layer to ALL ranks, so any rank
+    can serve any NIXL pull. Under the M:N block assignment each inference worker
+    binds a contiguous block of ranks (P>C: splits its pulls across them; C>P:
+    shares a rank with other workers) — spreading the trainer-side clone + NIC
     egress instead of funneling everything through rank 0.
     """
 
@@ -275,8 +302,9 @@ class FSDPTrainWorker(RDTShardedProducer):
 
         Every FSDP rank runs the IDENTICAL ordered plan (run_gather_plan), so
         the per-name ``full_tensor()`` collectives rendezvous safely. Every
-        rank caches the gathered tensors so every rank can serve its 1:1
-        inference worker's pulls (load-balancing, not just rank 0)."""
+        rank caches the gathered tensors so any rank can serve the pulls of the
+        inference worker(s) bound to it under the M:N block assignment (load
+        balancing across ranks, not just rank 0)."""
         entries: dict[str, torch.Tensor] = {}
         for name in names:
             entries[name] = self._param_lookup[name].full_tensor()
@@ -347,30 +375,38 @@ async def main():
     local_model_path = MODEL_NAME
     print(f"[init] Using model id {local_model_path} (pre-cached on each node)")
 
-    # Pin all FSDP ranks to a SINGLE node (STRICT_PACK) so the trainer NCCL
-    # all-gather stays intra-node (NVLink) and the "all trainer ranks
-    # co-located" requirement holds. Filling one 8-GPU node with the trainer
-    # also forces vLLM's 8 inference workers onto the *other* 8-GPU node (the
-    # only remaining GPU capacity), which co-locates inference as well.
-    trainer_pg = placement_group(
-        [{"GPU": 1, "CPU": 1}] * FSDP_WORLD_SIZE, strategy="STRICT_PACK"
+    # Pin the trainer fleet to a specific node (the non-driver node) so the M:N
+    # topology is deterministic: trainer on node B, driver+inference on node A.
+    # Keeping all FSDP ranks on one node also keeps their NCCL all-gather
+    # intra-node (NVLink).
+    # We use NODE-AFFINITY scheduling (NOT a placement group): a partially-filled
+    # node that ALSO hosts a placement group makes vLLM's DP placement trip its
+    # ``len(node_ip_keys)==1`` assertion (Ray adds ``node:<ip>_group_*`` resource
+    # keys for the PG). Node affinity pins each trainer actor to the node with no
+    # such extra resource keys, so vLLM can still place inference DP ranks on the
+    # remaining GPUs of any node. The FSDP ranks rendezvous via MASTER_ADDR/PORT
+    # (TCP store), which needs no PG; affinity to one node keeps NCCL intra-node.
+    _trainer_ip = os.environ.get("RDT_TRAINER_NODE_IP")
+    if _trainer_ip:
+        trainer_node_id = next(
+            n["NodeID"] for n in ray.nodes()
+            if n["Alive"] and n["NodeManagerAddress"] == _trainer_ip
+        )
+    else:
+        trainer_node_id = next(
+            n["NodeID"] for n in ray.nodes()
+            if n["Alive"] and n["Resources"].get("GPU", 0) > 0
+        )
+        _trainer_ip = next(
+            n["NodeManagerAddress"] for n in ray.nodes()
+            if n["NodeID"] == trainer_node_id
+        )
+    fsdp_master_addr = _trainer_ip
+    trainer_sched = NodeAffinitySchedulingStrategy(
+        node_id=trainer_node_id, soft=False
     )
-    ray.get(trainer_pg.ready())
 
-    # The FSDP rank-0 TCP-store rendezvous runs on the trainer node, so
-    # MASTER_ADDR must be that node's IP (not the driver's). Resolve the node
-    # the placement group landed on, and pick a port that is free *there*.
-    pg_node_id = next(iter(placement_group_table(trainer_pg)["bundles_to_node_id"].values()))
-    fsdp_master_addr = next(
-        n["NodeManagerAddress"] for n in ray.nodes() if n["NodeID"] == pg_node_id
-    )
-
-    @ray.remote(
-        num_cpus=0,
-        scheduling_strategy=PlacementGroupSchedulingStrategy(
-            placement_group=trainer_pg
-        ),
-    )
+    @ray.remote(num_cpus=0, scheduling_strategy=trainer_sched)
     def _free_port_on_trainer_node():
         return get_open_port()
 
@@ -378,9 +414,9 @@ async def main():
     print(f"[init] FSDP group on node {fsdp_master_addr}:{fsdp_master_port}")
 
     # Every rank is a named RDT producer so inference workers can spread their
-    # pulls across all ranks (static 1:1). Rank 0 keeps the canonical name for
-    # back-compat; ranks 1+ get a ``_rank{N}`` suffix. ``producer_names`` is
-    # ordered by rank and handed to the engine's ``trainer_actor_names``.
+    # pulls across all ranks (M:N block assignment). Rank 0 keeps the canonical
+    # name; ranks 1+ get a ``_rank{N}`` suffix. ``producer_names`` is ordered by
+    # rank and handed to the engine's ``trainer_actor_names``.
     fsdp_workers = []
     for rank in range(FSDP_WORLD_SIZE):
         common_args = (
@@ -392,10 +428,8 @@ async def main():
         )
         handle = FSDPTrainWorker.options(
             name=trainer_actor_name(rank),
-            scheduling_strategy=PlacementGroupSchedulingStrategy(
-                placement_group=trainer_pg,
-                placement_group_bundle_index=rank,
-            ),
+            num_gpus=1,
+            scheduling_strategy=trainer_sched,
         ).remote(*common_args)
         fsdp_workers.append(handle)
     producer_names = [trainer_actor_name(r) for r in range(FSDP_WORLD_SIZE)]
@@ -403,18 +437,25 @@ async def main():
     print(f"[init] {FSDP_WORLD_SIZE} FSDP training workers ready.")
 
     print("[engine] Creating AsyncLLMEngine...")
-    engine = create_async_engine(
+    engine_kwargs = dict(
         model=local_model_path,
         enforce_eager=True,
         tensor_parallel_size=INFERENCE_TP_SIZE,
-        data_parallel_size=INFERENCE_DP_SIZE,
-        enable_expert_parallel=True,
+        # dense small model (Qwen3-0.6B) -> EP off, served via TP; set MN_EP=1 for
+        # an MoE model (e.g. Qwen3-30B-A3B) to route experts across the DP fleet.
+        enable_expert_parallel=os.environ.get("MN_EP", "0") == "1",
         distributed_executor_backend="ray",
-        data_parallel_backend="ray",
         weight_transfer_config=WeightTransferConfig(backend="sharded_rdt"),
         load_format="dummy",
         gpu_memory_utilization=0.7,
     )
+    # Only engage the DP-ray backend when actually data-parallel (DP>1). Passing
+    # data_parallel_backend="ray" with DP=1 forces vLLM's DP-placement path, which
+    # then fails ("DP master node 127.0.0.1 missing"). Pure-TP (dense) uses no DP.
+    if INFERENCE_DP_SIZE > 1:
+        engine_kwargs["data_parallel_size"] = INFERENCE_DP_SIZE
+        engine_kwargs["data_parallel_backend"] = "ray"
+    engine = create_async_engine(**engine_kwargs)
     print("[engine] AsyncLLMEngine created.")
 
     prompts = [
@@ -447,6 +488,17 @@ async def main():
         f"[sync] {len(names)} params -> {len(layer_groups)} gather groups "
         f"(max group size = {max(len(g) for g in layer_groups)} params)."
     )
+    # Reorder metadata into GROUP-MAJOR order + a group_lens partition so the
+    # engine can PRE-BUILD its static chunk plan (and pre-register all NIXL memory)
+    # at init — before any RDMA churn. update_weights then sends an EMPTY update
+    # info every sync (only the weight DATA changes, not the plan). Mirrors the
+    # Kimi example (multi_node_rdt.md Part XV).
+    _dt = dict(zip(names, dtype_names))
+    _sh = dict(zip(names, shapes))
+    grouped_names = [n for g in layer_groups for n in g]
+    grouped_dtypes = [_dt[n] for n in grouped_names]
+    grouped_shapes = [_sh[n] for n in grouped_names]
+    group_lens = [len(g) for g in layer_groups]
 
     # Truncate the worker-side consumer timing file BEFORE init: the engine
     # writes its per-worker RPC-baseline record (bare Ray RTT + tiny-nixl RTT)
@@ -466,9 +518,16 @@ async def main():
                 ShardedRDTWeightTransferInitInfo(
                     trainer_actor_names=producer_names,
                     trainer_actor_namespace=RAY_NAMESPACE,
-                    names=names,
-                    dtype_names=dtype_names,
-                    shapes=shapes,
+                    names=grouped_names,
+                    dtype_names=grouped_dtypes,
+                    shapes=grouped_shapes,
+                    # Pre-build the static chunk plan at init (group-major names):
+                    # update_weights below then sends an empty update info.
+                    group_lens=group_lens,
+                    # Authoritative total consumer count for the M:N block
+                    # assignment (driver knows it; avoids inferring from a
+                    # per-worker parallel_config that erases DP size for dense).
+                    num_consumers=NUM_INFERENCE_CONSUMERS,
                     # ring depth x chunks per group: keep K x (group/S) under
                     # the fabric's address-translation reach (~2-3 GB/flow)
                     num_rdt_buffers=int(os.environ.get("NUM_RDT_BUFFERS", "2")),
@@ -509,12 +568,12 @@ async def main():
         print(f"[sync] iter {sync_iter} [REPLAY]: gather + update_weights...")
         _sync_t0 = time.perf_counter()
         run_refs = [w.run_gather_plan.remote(layer_groups) for w in fsdp_workers]
-        gi = ShardedRDTWeightTransferUpdateInfo(
-            names=[n for g in layer_groups for n in g],
-            group_lens=[len(g) for g in layer_groups],
-        )
+        # EMPTY update info: the engine pre-built the static chunk plan at init
+        # (from init_info.names + group_lens), so only the weight DATA changes.
         await engine.update_weights(
-            WeightTransferUpdateRequest(update_info=asdict(gi))
+            WeightTransferUpdateRequest(
+                update_info=asdict(ShardedRDTWeightTransferUpdateInfo())
+            )
         )
         ray.get(run_refs)  # surfaces gather errors; ~0s
         await engine.finish_weight_update()
@@ -526,7 +585,7 @@ async def main():
         # Because the ranks clone in PARALLEL, the wall-clock-relevant term is
         # the SLOWEST rank's slice+clone time (``slice_s_max``), not the sum;
         # aggregate throughput = total bytes / slowest-rank time. We also print
-        # per-rank GiB to show how evenly the 1:1 routing balanced the load.
+        # per-rank GiB to show how evenly the M:N block routing balanced the load.
         ptimings = ray.get([w.get_produce_timing.remote() for w in fsdp_workers])
         gib = sum(p["bytes"] for p in ptimings) / (1024**3)
         per_rank_gib = [p["bytes"] / (1024**3) for p in ptimings]

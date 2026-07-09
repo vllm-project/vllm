@@ -88,6 +88,79 @@ def _freeze_kwargs(kwargs: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
     return tuple(sorted(kwargs.items()))
 
 
+# ---------------- M:N producer/consumer assignment (block rule) ----------------
+# The consumer and producer fleets can differ in size. We bind them with a single
+# pure function of ``(num_producers P, num_consumers C, index)`` so both sides agree
+# with no marshalled mapping. The rule is a CONTIGUOUS block partition (keeps a
+# consumer's producers node-local):
+#   * P >= C: consumer c owns producers [c*P//C, (c+1)*P//C); each producer is owned
+#             by exactly ONE consumer (N_p == 1). Consumers with >1 producer split
+#             each pull across them (the P>C load-balance path).
+#   * C  > P: consumer c owns the single producer c*P//C; producer p is served by
+#             N_p = #{c : c*P//C == p} consumers (the fan-in path — per-consumer
+#             serve rings + N-free ref-counting on the producer).
+#   * P == C: identity (today's 1:1).
+# Both partitions cover every producer at least once (surjective), so no gathered
+# group is ever left unfreed. These helpers are the single source of truth: the
+# producer mixin imports ``count_consumers`` to size its free ref-count.
+
+
+def assign_producer_indices(
+    num_producers: int, num_consumers: int, consumer_idx: int
+) -> list[int]:
+    """Producers (global indices) that consumer ``consumer_idx`` binds."""
+    p = max(1, num_producers)
+    c = max(1, num_consumers)
+    if p >= c:
+        return list(range(consumer_idx * p // c, (consumer_idx + 1) * p // c))
+    return [consumer_idx * p // c]
+
+
+def count_consumers(
+    num_producers: int, num_consumers: int, producer_idx: int
+) -> int:
+    """Number of consumers that bind producer ``producer_idx`` (its free target)."""
+    p = max(1, num_producers)
+    c = max(1, num_consumers)
+    if p >= c:
+        return 1
+    return sum(
+        1 for ci in range(c) if ci * p // c == producer_idx
+    )
+
+
+def _arena_alloc_bytes(nbytes: int, presize: int = 0) -> int:
+    """Size a NIXL arena / ring slot for ``nbytes``, rounded up so the buffer is
+    allocated ONCE and never regrows: the max of the request, an optional
+    ``presize`` floor, and a coarse 256MB round-up. Sizing once matters beyond
+    perf — Ray's NIXL desc cache is keyed by ``data_ptr`` and its entries outlive
+    their tensors, so repeated small regrowths can false-hit a recycled pointer
+    and skip registering the new extent (see ``arena_presize_gb``). Shared by both
+    sides (consumer receive arenas + producer serve rings)."""
+    return max(nbytes, presize, -(-nbytes // (256 << 20)) * (256 << 20))
+
+
+def _greedy_run_starts(weights: "list[int]", n: int) -> "list[int]":
+    """Greedy contiguous byte-balanced partition of ``weights`` into at most
+    ``n`` runs; returns the START index of each run (the first is always 0).
+    Walks left to right, accumulating into the current run and cutting before an
+    item that would push the run past the ``ceil(total/n)`` target — never
+    emitting more than ``n`` runs. An item heavier than the target simply makes
+    its run oversized (accepted). Shared by the gather-group -> chunk split
+    (``_chunk_group_scatters``) and the M:N per-pull producer split
+    (``_split_chunk_pull``); both are the same greedy cut over different weights."""
+    total = sum(weights)
+    target = -(-total // max(1, n))  # ceil
+    starts = [0]
+    cur = 0
+    for i, w in enumerate(weights):
+        if i > 0 and cur + w > target and len(starts) < n:
+            starts.append(i)
+            cur = 0
+        cur += w
+    return starts
+
+
 @dataclass
 class _BakedCopy:
     """One recorded scatter: pull ``src`` from the trainer and copy it into
@@ -172,6 +245,12 @@ class _Chunk:
     materialize: "list[Any]"
     quant: "list[Any]"
     free: "list[list[str]]"
+    # M:N load-balance split of the packed pull across bound producers:
+    # (producer_local_idx, run_keys, byte_start, byte_end); a contiguous
+    # byte-balanced run of ``keys`` per producer, byte-exact into
+    # ``arena[byte_start:byte_end]`` (16B-aligned key offsets). One entry covering
+    # the whole chunk when the consumer binds a single producer.
+    subpulls: "list[tuple[int, list[FetchKey], int, int]]"
 
 
 @dataclass
@@ -196,13 +275,17 @@ class _CallPlan:
 
 @dataclass
 class _PendingPull:
-    """An issued-but-not-completed pull: the produce RPC is dispatched and the
-    transfer is pointed at ring-slot arena views, but the blocking ``ray.get``
-    has not run. ``targets``/``blob`` hold the arena views strongly referenced
-    until completion — ``set_target_for_ref`` stores weakrefs, so dropping them
-    would silently reroute the transfer into a fallback buffer."""
+    """An issued-but-not-completed pull: the produce RPC(s) are dispatched and the
+    transfer(s) pointed at ring-slot arena views, but the blocking ``ray.get`` has
+    not run. Under the M:N split ONE chunk fans out to several producers (one
+    produce RPC per bound producer, each filling a disjoint sub-range of the same
+    receive slot), so ``refs`` is a list. ``targets``/``blob`` hold the arena views
+    strongly referenced until completion — ``set_target_for_ref`` stores weakrefs,
+    so dropping them would silently reroute a transfer into a fallback buffer.
+    ``targets`` are the full-chunk per-key views (for the scatter); ``blob`` holds
+    the per-producer sub-range views handed to ``set_target_for_ref``."""
 
-    ref: Any
+    refs: "list[Any]"
     keys: "list[FetchKey]"
     targets: "list[torch.Tensor]"
     blob: "list[torch.Tensor]"
@@ -546,10 +629,12 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     by trainer rank. When the trainer all-gathers each layer to *every* rank
     (not just rank 0), all of them can serve NIXL pulls, so inference workers
     spread their pulls across this list to parallelize the trainer-side clone +
-    NIC egress instead of funneling everything through rank 0. Each inference
-    worker statically binds **one** producer from this list, chosen by its own
-    global worker index modulo ``len(trainer_actor_names)`` (see
-    ``_select_producer_index``). If empty, ``trainer_actor_name`` is used."""
+    NIC egress instead of funneling everything through rank 0. Under the M:N block
+    assignment (see ``_select_producer_indices`` / ``assign_producer_indices``)
+    each inference worker binds its contiguous BLOCK of this list: with more
+    producers than consumers it binds several and splits every pull across them;
+    with more consumers than producers several workers share one producer (which
+    ref-counts frees). If empty, ``trainer_actor_name`` is used."""
 
     trainer_actor_namespace: str | None = None
     """Optional Ray namespace the trainer actor(s) live in."""
@@ -587,6 +672,15 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     syncs) so ``update_weights`` can be called with an EMPTY update info. When
     empty, the plan is instead built lazily from the first ``update_weights``
     call and cached (back-compat: the driver keeps passing names+group_lens)."""
+
+    num_consumers: int = 0
+    """Total inference-worker (consumer) count across the whole fleet, for the M:N
+    producer/consumer block assignment (see ``assign_producer_indices``). The
+    driver knows it (``tensor_parallel_size * data_parallel_size``). Authoritative
+    when > 0; when 0 the engine infers it from ``parallel_config`` (correct for the
+    supported serving modes — dense→TP, MoE→DP+EP). Set it explicitly for M:N so
+    the count is never guessed. Each worker's DISTINCT index comes from
+    ``data_parallel_index * world_size + rank`` (see ``_global_worker_index``)."""
 
     num_rdt_buffers: int = 2
     """[RDT-RING] Depth of the consumer receive-arena ring (the producer mirrors
@@ -689,8 +783,19 @@ class ShardedRDTWeightTransferEngine(
         model: torch.nn.Module,
     ) -> None:
         super().__init__(config, vllm_config, device, model)
-        self._trainer_actor: Any | None = None
-        self._produce_method: Any | None = None
+        # M:N binding: this consumer worker binds a LIST of producers (its share
+        # of the trainer fleet under block assignment; see _select_producer_indices).
+        # ``_producer_actors[i]`` is the Ray actor handle and ``_produce_methods[i]``
+        # its bound producer method, in the consumer's local producer order.
+        # ``_consumer_id`` is this worker's stable global index, passed on every
+        # produce call so a producer serving multiple consumers keeps a per-consumer
+        # serve ring (the C>P fan-in regime).
+        self._producer_actors: list[Any] = []
+        self._produce_methods: list[Any] = []
+        self._consumer_id: int = 0
+        # Driver-supplied total consumer count (init_info.num_consumers); 0 => infer
+        # from parallel_config. See _num_consumers.
+        self._num_consumers_override: int = 0
         # Baked plan: source name -> the _BakedGroup (leaf module) that consumes
         # it. Several names of one fused module map to the same group; replay
         # dedups. A name absent here isn't baked (attention scale / padded /
@@ -771,6 +876,7 @@ class ShardedRDTWeightTransferEngine(
 
     def init_transfer_engine(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
         """Resolve the trainer actor and bind its batched producer method."""
+        self._num_consumers_override = int(getattr(init_info, "num_consumers", 0) or 0)
         self._pack_check = bool(init_info.pack_check)
         # [RDT-RING] Ring depth K + chunk split S. Must be set before
         # _ensure_proc_worker creates the per-slot events/counters and before
@@ -803,43 +909,54 @@ class ShardedRDTWeightTransferEngine(
                 "trainer_actor_name."
             )
 
-        # Static 1:1 load balancing: each inference worker binds exactly ONE
-        # producer, chosen by its global worker index modulo the producer count.
-        # Workers pull disjoint slice sets (their EP-local experts / TP shard),
-        # so spreading them across the trainer ranks parallelizes both the
-        # trainer-side clone and the NIXL egress. One stable (consumer, producer)
-        # pair per worker keeps the NIXL agent cache simple.
-        producer_idx = self._select_producer_index(len(producer_names))
-        chosen_name = producer_names[producer_idx]
+        # M:N block-assignment load balancing: each inference worker binds its
+        # BLOCK of the trainer fleet (see _select_producer_indices). When it binds
+        # more than one producer (the P>C regime) it splits every chunk-pull evenly
+        # across them; when several workers share a producer (C>P) the producer
+        # ref-counts frees. Workers pull disjoint slice sets (their EP-local experts
+        # / TP shard) and gather-to-all makes every producer hold every slice, so any
+        # bound producer can serve any of this worker's keys.
+        #
+        # M:N identity: the block assignment needs each consumer's DISTINCT global
+        # index (0..C-1) and the total count C. The index is computed exactly like
+        # the sibling nccl_engine — ``data_parallel_index * world_size + rank`` (see
+        # _global_worker_index) — which is EP-independent (``data_parallel_index``
+        # is never reset for dense models, unlike ``data_parallel_rank``). The count
+        # C is the driver-supplied ``init_info.num_consumers`` (else inferred). Both
+        # hold for the supported serving modes: dense served via TP, MoE via DP+EP.
+        self._consumer_id = self._global_worker_index()
+        producer_indices = self._select_producer_indices(len(producer_names))
 
-        try:
-            self._trainer_actor = ray.get_actor(
-                chosen_name,
-                namespace=init_info.trainer_actor_namespace,
+        for producer_idx in producer_indices:
+            chosen_name = producer_names[producer_idx]
+            try:
+                actor = ray.get_actor(
+                    chosen_name,
+                    namespace=init_info.trainer_actor_namespace,
+                )
+            except ValueError as e:
+                raise RuntimeError(
+                    f"Sharded RDT engine could not find trainer actor "
+                    f"{chosen_name!r} (namespace="
+                    f"{init_info.trainer_actor_namespace!r})."
+                ) from e
+            # Ray 2.51.1 workaround: actor handles reconstructed via
+            # ray.get_actor lose the actor-level _ray_enable_tensor_transport
+            # flag, so the NIXL dispatch guard at ray/actor.py rejects the
+            # method call even when the trainer was created with
+            # enable_tensor_transport=True. Force it back on.
+            actor._ray_enable_tensor_transport = True
+            self._producer_actors.append(actor)
+            self._produce_methods.append(
+                getattr(actor, init_info.produce_method_name)
             )
-        except ValueError as e:
-            raise RuntimeError(
-                f"Sharded RDT engine could not find trainer actor "
-                f"{chosen_name!r} (namespace="
-                f"{init_info.trainer_actor_namespace!r})."
-            ) from e
-
-        # Ray 2.51.1 workaround: actor handles reconstructed via
-        # ray.get_actor lose the actor-level _ray_enable_tensor_transport
-        # flag, so the NIXL dispatch guard at ray/actor.py rejects the
-        # method call even when the trainer was created with
-        # enable_tensor_transport=True. Force it back on.
-        self._trainer_actor._ray_enable_tensor_transport = True
-
-        self._produce_method = getattr(
-            self._trainer_actor, init_info.produce_method_name
-        )
         logger.info(
-            "Sharded RDT engine bound to trainer actor %r (%d/%d producers, "
-            "batched method %r)",
-            chosen_name,
-            producer_idx,
+            "Sharded RDT engine (consumer %d) bound to %d/%d producers %r "
+            "(batched method %r)",
+            self._consumer_id,
+            len(producer_indices),
             len(producer_names),
+            [producer_names[i] for i in producer_indices],
             init_info.produce_method_name,
         )
 
@@ -876,31 +993,118 @@ class ShardedRDTWeightTransferEngine(
                 len(self._cached_plan.chunks),
                 len(self._cached_plan.residual),
             )
+            # Register ALL NIXL memory now, while the fabric is idle. Concurrent
+            # dma-buf GPUDirect registration that coincides with in-flight RDMA
+            # intermittently fails (ibv_reg_mr 'Bad address' / NIXL_ERR_BACKEND);
+            # this only bites under M:N fan-in, where the per-consumer producer
+            # serve rings add registrations into the sync-0 churn window. Sizes
+            # come from the static plan, so this is exact (no guessing).
+            self._preregister_at_init()
 
         # Start the background post-processing worker (pull/process pipelining).
         self._ensure_proc_worker()
 
-    def _select_producer_index(self, num_producers: int) -> int:
-        """Pick which trainer producer this worker pulls from (static 1:1).
+    def _preregister_at_init(self) -> None:
+        """Register every NIXL buffer this worker will use, at init, before any
+        transfer runs — so nothing registers during the sync-0 RDMA churn.
 
-        Returns ``global_worker_index % num_producers`` where the global index
-        uniquely identifies this inference worker across the cluster:
-        ``data_parallel_rank * tensor_parallel_size + tp_rank``. With DP=4/TP=1
-        and 4 producers this is the identity map (worker i -> trainer rank i),
-        evenly spreading the disjoint per-worker pull volume across the trainer
-        ranks.
+        Both sides are sized from the (static) cached plan:
+          * consumer receive arenas: ``_NSLOTS`` uint8 ring slots, each sized to
+            the largest chunk's packed bytes (``pack_bytes``);
+          * producer serve rings: each bound producer is asked (``reserve_serve_arena``)
+            to pre-register a ring at the max bytes THIS consumer will pull from
+            it (the max ``byte_end-byte_start`` over that producer's sub-pulls).
+        A no-op if there is no pre-built plan (the lazy back-compat path keeps
+        registering on first use, which is safe in the 1:1 / P>=C regimes)."""
+        plan = self._cached_plan
+        if plan is None or not plan.chunks:
+            return
+        from ray.experimental import register_nixl_memory
 
-        Isolated so a future policy (per-layer rotation, per-pull split) can
-        replace this single decision without touching the pull path.
-        """
-        if num_producers <= 1:
-            return 0
+        # (a) consumer receive arenas — one per ring slot, at the largest chunk.
+        max_pack = max(c.pack_bytes for c in plan.chunks)
+        alloc = _arena_alloc_bytes(max_pack, self._arena_presize)
+        for slot in range(self._NSLOTS):
+            arena = self._dest_arenas[slot].get(torch.uint8)
+            if arena is None or arena.numel() < alloc:
+                arena = torch.empty(alloc, dtype=torch.uint8, device=self.device)
+                register_nixl_memory(arena)
+                self._dest_arenas[slot][torch.uint8] = arena
+
+        # (b) producer serve rings — max bytes this consumer pulls from each
+        # bound producer (index into self._produce_methods == producer_local).
+        serve_bytes = [0] * len(self._produce_methods)
+        for c in plan.chunks:
+            for producer_local, _run_keys, byte_start, byte_end in c.subpulls:
+                serve_bytes[producer_local] = max(
+                    serve_bytes[producer_local], byte_end - byte_start
+                )
+        import ray
+
+        refs = [
+            self._producer_actors[p].reserve_serve_arena.remote(
+                self._consumer_id, nb
+            )
+            for p, nb in enumerate(serve_bytes)
+            if nb > 0
+        ]
+        if refs:
+            ray.get(refs)  # block until every serve ring is registered
+        logger.info(
+            "[RDT-PLAN] pre-registered %d receive slots (%.0f MiB each) + serve "
+            "rings on %d producer(s) %s",
+            self._NSLOTS,
+            alloc / (1 << 20),
+            len(refs),
+            [nb // (1 << 20) for nb in serve_bytes],
+        )
+
+    def _global_worker_index(self) -> int:
+        """This inference worker's stable, DISTINCT global index across the whole
+        inference fleet: ``data_parallel_index * world_size + rank`` where
+        ``world_size`` is TP*PP and ``rank`` is the rank within the TP*PP world.
+
+        Uses ``data_parallel_index`` (NOT ``data_parallel_rank``): vLLM resets
+        ``data_parallel_rank`` to 0 in a dense (non-MoE) worker — each dense DP
+        replica is an independent engine — but keeps ``data_parallel_index`` as the
+        distinct global DP rank ("not overridden for dense models"). This is the
+        same worker-rank formula the sibling ``nccl_engine`` uses, so it is correct
+        with EP on or off, ray or mp: dense served via TP (index = tp_rank) and MoE
+        served via DP+EP (index = dp rank) both yield distinct 0..C-1."""
+        pc = self.parallel_config
+        dp_index = getattr(pc, "data_parallel_index", 0) or 0
+        world_size_per_dp = getattr(pc, "world_size", 1) or 1  # TP * PP
+        rank_within_dp = getattr(pc, "rank", 0) or 0
+        return dp_index * world_size_per_dp + rank_within_dp
+
+    def _num_consumers(self) -> int:
+        """Total inference-worker count. Prefer the driver-supplied
+        ``init_info.num_consumers`` (authoritative — the driver knows the full
+        fleet); else infer ``data_parallel_size * tensor_parallel_size``, which is
+        correct for the SUPPORTED serving modes (dense→TP keeps tensor_parallel_size;
+        MoE→DP+EP keeps data_parallel_size). It is only wrong for DP-over-dense,
+        which vLLM itself rejects as "not supported/useful for dense models"."""
+        if self._num_consumers_override > 0:
+            return self._num_consumers_override
         pc = self.parallel_config
         tp_size = getattr(pc, "tensor_parallel_size", 1) or 1
-        tp_rank = getattr(pc, "rank", 0) or 0
-        dp_rank = getattr(pc, "data_parallel_rank", 0) or 0
-        global_worker_index = dp_rank * tp_size + tp_rank
-        return global_worker_index % num_producers
+        dp_size = getattr(pc, "data_parallel_size", 1) or 1
+        return dp_size * tp_size
+
+    def _select_producer_indices(self, num_producers: int) -> list[int]:
+        """The producers this worker binds under the M:N block rule
+        (``assign_producer_indices``). With P==C this is the identity map
+        (worker i -> trainer i, one producer). With P>C the worker binds a
+        contiguous block of producers and splits its pulls across them; with C>P
+        several workers share one producer. Isolated so a future policy
+        (rail-aware, per-layer rotation) can replace this decision without
+        touching the pull path.
+        """
+        if num_producers <= 1:
+            return [0]
+        return assign_producer_indices(
+            num_producers, self._num_consumers(), self._global_worker_index()
+        )
 
     def receive_weights(
         self,
@@ -923,7 +1127,7 @@ class ShardedRDTWeightTransferEngine(
         (true for the per-layer / pre / post partition); if not, the pull
         fails loudly on the missing slice rather than loading wrong data.
         """
-        if self._produce_method is None:
+        if not self._produce_methods:
             raise RuntimeError(
                 "Sharded RDT engine not initialized. Call init_transfer_engine() first."
             )
@@ -983,9 +1187,12 @@ class ShardedRDTWeightTransferEngine(
         # ``.remote`` is Ray-injected; the producer is bound (non-None) before
         # any pull, guarded by ``_replay``'s init check.
         # pack=False: the rare per-name slow path (no packed layout, no
-        # set_target) — the producer returns one slice tensor per spec.
+        # set_target) — the producer returns one slice tensor per spec. Any bound
+        # producer holds every slice (gather-to-all), so route to the first.
         tensors = ray.get(
-            self._produce_method.remote(keys, pack=False)  # type: ignore[union-attr]
+            self._produce_methods[0].remote(
+                keys, pack=False, consumer_id=self._consumer_id
+            )
         )
         if len(tensors) != len(keys):
             raise RuntimeError(
@@ -1023,7 +1230,9 @@ class ShardedRDTWeightTransferEngine(
             _slot_wait = _t2 - _t
 
         # [RDT-PACK] Byte-pack every slice into ONE uint8 arena (16B-aligned,
-        # keys order) so the pull is ONE contiguous NIXL descriptor. The packed
+        # keys order); the M:N split hands each bound producer a contiguous run
+        # (one NIXL descriptor each, all into disjoint sub-ranges of this arena —
+        # a single producer => one descriptor over the whole arena). The packed
         # layout was precomputed at plan time (``chunk.pack_layout``, byte-exact
         # mirror of the producer's rule); ``targets`` carves the dtype views back
         # out for the scatter.
@@ -1037,11 +1246,7 @@ class ShardedRDTWeightTransferEngine(
             # desc cache (keyed by data_ptr, entries outlive their tensor)
             # can false-hit a recycled pointer and skip registering the new
             # extent -> NIXL_ERR_NOT_FOUND (see arena_presize_gb docstring).
-            alloc = max(
-                cur,
-                self._arena_presize,
-                -(-cur // (256 << 20)) * (256 << 20),
-            )
+            alloc = _arena_alloc_bytes(cur, self._arena_presize)
             arena = torch.empty(alloc, dtype=torch.uint8, device=self.device)
             register_nixl_memory(arena)
             arenas[torch.uint8] = arena
@@ -1049,20 +1254,32 @@ class ShardedRDTWeightTransferEngine(
             arena[off : off + n * dt.itemsize].view(dt).reshape(shape)
             for off, dt, n, shape in chunk.pack_layout
         ]
-        blob = [arena[:cur]]
         pack_arena, pack_span = arena, cur
         # Stamp pull-start so the NIXL patch can cleave this pull into
         # produce_wait vs recv_wall. With chunks in flight the cleave is
         # approximate (issues overlap completions) but the transfer sums stand.
         from vllm.distributed.weight_transfer import _nixl_profile
         _nixl_profile.mark_pull_start()
-        ref = self._produce_method.remote(keys)  # type: ignore[union-attr]
-        # ``blob``/``targets`` stay strongly referenced in the returned
-        # _PendingPull through the get — set_target_for_ref stores WEAKREFS, and
-        # a dropped target reroutes the transfer into a fallback buffer.
-        set_target_for_ref(ref, blob)
+        # M:N split: one produce RPC per bound producer, each serving a contiguous
+        # run of keys into its own disjoint sub-range of this receive slot's arena.
+        # With one bound producer there is a single sub-pull over the whole chunk
+        # (identical to the pre-M:N single-descriptor pull). Each sub-range view
+        # (``blob``) stays strongly referenced through the get — set_target_for_ref
+        # stores WEAKREFS, and a dropped target reroutes that transfer into a
+        # fallback buffer. ``consumer_id`` lets a producer serving multiple
+        # consumers keep a per-consumer serve ring (the C>P fan-in regime).
+        refs: list[Any] = []
+        blob: list[torch.Tensor] = []
+        for producer_local, run_keys, byte_start, byte_end in chunk.subpulls:
+            sub = arena[byte_start:byte_end]
+            ref = self._produce_methods[producer_local].remote(
+                run_keys, consumer_id=self._consumer_id
+            )
+            set_target_for_ref(ref, [sub])
+            refs.append(ref)
+            blob.append(sub)
         return _PendingPull(
-            ref=ref,
+            refs=refs,
             keys=keys,
             targets=targets,
             blob=blob,
@@ -1084,27 +1301,28 @@ class ShardedRDTWeightTransferEngine(
         # [RDT-META-WAIT diagnostic] cleave produce_wait into in-get metadata
         # wait vs issue-side work (see _nixl_profile.mark_get_entry).
         _nixl_profile.mark_get_entry()
-        ray.get(pending.ref)
-        if self._pack_check and pending.pack_arena is not None:
-            # [RDT-PACK-CHECK] checksum the received blob; producer logs the
-            # matching sum of what it served (compare offline per pull order).
-            # Chunked sums: .sum(dtype=int64) upcasts its INPUT to int64, so a
-            # whole-blob sum materializes 8x the blob (OOM on the consumer).
-            s = 0
-            _w = 32 << 20
-            cur = pending.pack_span
-            for _i in range(0, cur, _w):
-                s += int(
-                    pending.pack_arena[_i : min(_i + _w, cur)].sum(
-                        dtype=torch.int64
-                    )
-                )
+        # All the chunk's sub-pulls (one per bound producer under the M:N split)
+        # complete during this get; each landed in a disjoint arena sub-range.
+        ray.get(pending.refs)
+        if self._pack_check and pending.blob:
+            # [RDT-PACK-CHECK] checksum each received sub-blob; the producer logs
+            # one matching sum PER produce call (i.e. per sub-blob), so we log one
+            # record per sub-pull too and the two streams line up under the M:N
+            # split (one sub-blob == the pre-M:N whole-arena case). Chunked sums:
+            # .sum(dtype=int64) upcasts its INPUT to int64, so a whole-blob sum
+            # materializes 8x the blob (OOM on the consumer).
             import json as _json
             import os as _os
             _os.makedirs("/tmp/rdt_profile", exist_ok=True)
+            _w = 32 << 20
             with open("/tmp/rdt_profile/packcheck_cons.jsonl", "a") as f:
-                f.write(_json.dumps(
-                    {"pid": _os.getpid(), "bytes": cur, "sum": s}) + "\n")
+                for sub in pending.blob:
+                    n = sub.numel()
+                    s = 0
+                    for _i in range(0, n, _w):
+                        s += int(sub[_i : min(_i + _w, n)].sum(dtype=torch.int64))
+                    f.write(_json.dumps(
+                        {"pid": _os.getpid(), "bytes": n, "sum": s}) + "\n")
         return dict(zip(pending.keys, pending.targets))
 
     # ---------------- Bake (dry run, at init) / replay ----------------
@@ -1126,12 +1344,14 @@ class ShardedRDTWeightTransferEngine(
         _t = time.perf_counter()
         load_weights(
             self._build_lazy_weights(
-                # Producer is bound (non-None) on this path: ``_replay`` raises
-                # before calling ``_load_unbaked`` if it isn't.
+                # Producer is bound on this path: ``receive_weights`` raises before
+                # calling ``_load_unbaked`` if none is. Any bound producer holds
+                # every slice (gather-to-all), so the lazy on-demand pulls use the
+                # first.
                 names,
                 dtype_names,
                 shapes,
-                self._produce_method,  # type: ignore[arg-type]
+                self._produce_methods[0],  # type: ignore[arg-type]
                 device,
             )
         )
@@ -1457,21 +1677,13 @@ class ShardedRDTWeightTransferEngine(
         entries = [(g.layer, c) for g in groups for c in g.copies]
         if s <= 1 or len(entries) <= 1:
             return [[self._scatter_of(layer, c) for layer, c in entries]]
-        weighted = [(layer, c, prod(c.shape)) for layer, c in entries]
-        total = sum(b for _, _, b in weighted)
-        target = -(-total // s)  # ceil (numel is a fine byte proxy for balance)
-        cuts: list[list[_Scatter]] = []
-        cur: list[_Scatter] = []
-        cur_b = 0
-        for layer, c, b in weighted:
-            if cur and cur_b + b > target and len(cuts) < s - 1:
-                cuts.append(cur)
-                cur, cur_b = [], 0
-            cur.append(self._scatter_of(layer, c))
-            cur_b += b
-        if cur:
-            cuts.append(cur)
-        return cuts
+        # numel is a fine byte proxy for balance; greedy contiguous cut.
+        starts = _greedy_run_starts([prod(c.shape) for _layer, c in entries], s)
+        scatters = [self._scatter_of(layer, c) for layer, c in entries]
+        return [
+            scatters[st : (starts[r + 1] if r + 1 < len(starts) else len(scatters))]
+            for r, st in enumerate(starts)
+        ]
 
     def _build_call_plan(
         self, names: list[str], group_lens: list[int]
@@ -1565,8 +1777,47 @@ class ShardedRDTWeightTransferEngine(
                 materialize=materialize_at.get(ci, []),
                 quant=quant_at.get(ci, []),
                 free=free_at.get(ci, []),
+                subpulls=self._split_chunk_pull(keys, pack_layout, cur),
             ))
         return _CallPlan(chunks=chunks, pre_free=pre_free, residual=residual)
+
+    def _split_chunk_pull(
+        self,
+        keys: "list[FetchKey]",
+        pack_layout: "list[tuple[int, torch.dtype, int, tuple[int, ...]]]",
+        pack_bytes: int,
+    ) -> "list[tuple[int, list[FetchKey], int, int]]":
+        """Split one chunk's packed pull across this consumer's bound producers.
+
+        Cuts ``keys`` into ``P = len(self._produce_methods)`` CONTIGUOUS
+        byte-balanced runs (greedy ceil cut on each key's packed nbytes, same rule
+        as ``_chunk_group_scatters``). Each run maps to a contiguous span of the
+        shared packed arena: ``byte_start = pack_layout[first].off`` and
+        ``byte_end = pack_layout[last].off + nbytes[last]`` (the TIGHT end of the
+        run's last key — the packed layout has no trailing pad, so this is exactly
+        the bytes the producer writes; for the final run it equals ``pack_bytes``).
+        Because every ``off`` is 16B-aligned and a producer packs its run from
+        offset 0, ``arena[byte_start:byte_end]`` receives that producer's bytes
+        exactly (span length == producer blob length). Returns one
+        ``(producer_local_idx, run_keys, byte_start, byte_end)`` per non-empty run.
+        P==1 => a single run over the whole chunk. An atomic key larger than the
+        balanced target simply makes its run oversized (accepted; the other
+        producers idle that chunk)."""
+        p = max(1, len(self._produce_methods))
+        if p == 1 or len(keys) <= 1:
+            return [(0, list(keys), 0, pack_bytes)]
+        nbytes = [n * dt.itemsize for _off, dt, n, _shape in pack_layout]
+        # First key index of each contiguous byte-balanced run (at most p runs).
+        starts = _greedy_run_starts(nbytes, p)
+        subpulls: list[tuple[int, list[FetchKey], int, int]] = []
+        for r, s in enumerate(starts):
+            e = starts[r + 1] if r + 1 < len(starts) else len(keys)
+            if e <= s:  # empty run (fewer keys than producers) -> drop
+                continue
+            byte_start = pack_layout[s][0]
+            byte_end = pack_layout[e - 1][0] + nbytes[e - 1]  # tight end of run
+            subpulls.append((r, keys[s:e], byte_start, byte_end))
+        return subpulls
 
     def _run_call_plan(self, plan: "_CallPlan") -> list[str]:
         """Execute a (cached) call plan: run the chunk pipeline (each chunk
@@ -1576,15 +1827,20 @@ class ShardedRDTWeightTransferEngine(
         return plan.residual
 
     def _fire_free_gather(self, gnames: list[str]) -> None:
-        """Fire-and-forget free of one gather group on the bound producer (the
-        engine-side replacement for the driver's free_group in single-call
-        mode). Refs are held and drained in drain_pending so every free has
-        executed before the sync ends."""
-        if self._trainer_actor is None:
-            return
-        self._pending_frees.append(
-            self._trainer_actor.free_gather.remote(list(gnames))
-        )
+        """Fire-and-forget free of one gather group on EVERY bound producer (the
+        engine-side replacement for the driver's free_group in single-call mode).
+
+        Under M:N a producer gathered this group (all ranks gather in lockstep) and
+        may have served part of it to this consumer, so every producer this consumer
+        binds must receive the free — even one that served nothing of this group (a
+        chunk's split may not have handed it a run). Each bound producer ref-counts:
+        it frees the group only after all N of its assigned consumers have called,
+        so every assigned consumer must fire regardless of what it actually pulled.
+        Refs are held and drained in drain_pending so every free has executed before
+        the sync ends."""
+        names = list(gnames)
+        for actor in self._producer_actors:
+            self._pending_frees.append(actor.free_gather.remote(names))
 
     def _run_chunk_pipeline(self, plan: "_CallPlan") -> None:
         """[RDT-RING] Pipelined chunk pulls over the ring of receive slots.
@@ -1903,8 +2159,8 @@ class ShardedRDTWeightTransferEngine(
             self._quant_queue = None
             self._quant_stream = None
         self._slot_read_done = []
-        self._trainer_actor = None
-        self._produce_method = None
+        self._producer_actors = []
+        self._produce_methods = []
         # Drop strong references to baked modules so the model can be freed.
         self._name_to_group.clear()
         self._name_meta.clear()

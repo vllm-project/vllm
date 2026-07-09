@@ -100,7 +100,9 @@ class KimiTrainWorker(RDTShardedProducer):
 
         # Shared sharded-RDT producer state: gather cache + serve ring +
         # scoped-sync + gc.freeze + timing (see examples/rl/rdt_producer.py).
-        self.init_rdt_producer()
+        # M:N: tell the producer how many inference consumers exist so it sizes
+        # its free ref-count (and per-consumer serve rings) correctly.
+        self.init_rdt_producer(num_consumers=NUM_INFERENCE_CONSUMERS)
         # physical (fused stack / individual) -> gathered full tensor; the
         # per-name cache entries are VIEWS into these (freed together).
         self._cache_phys: dict[str, torch.Tensor] = {}
