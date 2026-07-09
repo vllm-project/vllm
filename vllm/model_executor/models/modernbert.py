@@ -240,7 +240,7 @@ class ModernBertModel(nn.Module):
         orig_to_new_prefix={
             "model.layers.": "encoder_layer.layers.",
             "layers.": "encoder_layer.layers.",
-            "model.": ""
+            "model.": "",
         }
     )
 

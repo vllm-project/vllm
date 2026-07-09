@@ -137,7 +137,7 @@ def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     """
     Return True if the input module/layer could be processed with DeepGEMM.
     """
-    
+
     if not (
         isinstance(module, LinearBase)
         and isinstance(module.quant_method, Fp8LinearMethod)
@@ -152,7 +152,7 @@ def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
         DeepGemmFp8BlockScaledMMKernel,
     ):
         return False
-    
+
     block_size = get_mk_alignment_for_contiguous_layout()[0]
 
     w, _, block_sizes = _extract_data_from_linear_base_module(module)
