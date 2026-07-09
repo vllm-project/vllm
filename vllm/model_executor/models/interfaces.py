@@ -70,6 +70,13 @@ The output embeddings must be one of the following formats:
 """
 
 
+class StreamingTranscriptionPostProcessor:
+    """Stateful streaming post-processor for transcription deltas."""
+
+    def process_delta(self, text_delta: str, finished: bool) -> str:
+        return text_delta
+
+
 def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
     """
     A helper function to be used in the context of
@@ -1197,6 +1204,19 @@ class SupportsTranscription(Protocol):
             Cleaned transcription text.
         """
         return text
+
+    @classmethod
+    def get_streaming_post_processor_cls(
+        cls,
+    ) -> type[StreamingTranscriptionPostProcessor]:
+        """
+        Return a stateful post-processor class for streaming output deltas.
+
+        Each instance receives the next decoded text delta and whether the
+        request output is final. It returns the cleaned delta that should be
+        sent to the client.
+        """
+        return StreamingTranscriptionPostProcessor
 
     @classmethod
     def get_language_detection_prompt(
