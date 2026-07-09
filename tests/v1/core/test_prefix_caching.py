@@ -1074,11 +1074,11 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     mock = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=block_size), use_eagle=False
     )
+    req_2.shared_prefix_boundary = shared_prefix_boundary
     num_new_tokens_adjusted = Scheduler._mamba_block_aligned_split(
         self=mock,
         request=req_2,
         num_new_tokens=3 * block_size,
-        shared_prefix_boundary=shared_prefix_boundary,
     )
     assert num_new_tokens_adjusted == 2 * block_size  # adjust to the common prefix
 

@@ -341,7 +341,6 @@ class Scheduler(SchedulerInterface):
         num_new_tokens: int,
         num_new_local_computed_tokens: int = 0,
         num_external_computed_tokens: int = 0,
-        shared_prefix_boundary: int = 0,
     ) -> int:
         num_computed_tokens = (
             request.num_computed_tokens
@@ -386,6 +385,7 @@ class Scheduler(SchedulerInterface):
             # detected shared-prefix junction so its Mamba state is cached there
             # (a later request sharing the prefix can then reuse it). Only applies
             # when the junction lies strictly within the chunk being scheduled.
+            shared_prefix_boundary = request.shared_prefix_boundary
             if shared_prefix_boundary:
                 tokens_to_junction = shared_prefix_boundary - num_computed_tokens
                 if 0 < tokens_to_junction < num_new_tokens:
@@ -871,7 +871,6 @@ class Scheduler(SchedulerInterface):
                         num_new_tokens,
                         num_new_local_computed_tokens,
                         num_external_computed_tokens,
-                        request.shared_prefix_boundary,
                     )
                     if num_new_tokens == 0:
                         break
