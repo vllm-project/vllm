@@ -164,6 +164,7 @@ class FlashMLASparseMetadata(AttentionMetadata):
     seq_lens: torch.Tensor | None = None
     prefill_max_seq_len: int = 0
     prefill: MLACommonPrefillMetadata | None = None
+    cp_kv_cache_interleave_size: int = 1
 
     @dataclass
     class FP8KernelMetadata:

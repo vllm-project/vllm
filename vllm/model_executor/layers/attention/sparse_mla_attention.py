@@ -65,7 +65,8 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
-        self.dcp_local_block_size = parallel_config.cp_kv_cache_interleave_size
+        self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
+        self.dcp_local_block_size = self.cp_kv_cache_interleave_size
         self.dcp_virtual_block_size = self.dcp_local_block_size * self.dcp_world_size
 
         self.chunked_prefill_workspace_size = (
@@ -220,6 +221,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             num_decode_tokens=num_decode_tokens,
             prefill_max_seq_len=prefill_max_seq_len,
             prefill=prefill,
+            cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
         )
 
     @staticmethod

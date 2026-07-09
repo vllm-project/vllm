@@ -24,7 +24,6 @@ from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionMetadata,
     AttentionType,
-    CommonAttentionMetadata,
     MLAAttentionImpl,
     MultipleOf,
 )
@@ -290,18 +289,6 @@ class FlashInferMLASparseMetadataBuilder(
             supports_spec_as_decode=True,
             supports_dcp_with_varlen=True,
         )
-
-    def build(
-        self,
-        common_prefix_len: int,
-        common_attn_metadata: CommonAttentionMetadata,
-        fast_build: bool = False,
-    ) -> FlashInferMLASparseMetadata:
-        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
-        metadata.cp_kv_cache_interleave_size = (
-            self.vllm_config.parallel_config.cp_kv_cache_interleave_size
-        )
-        return metadata
 
 
 # Global workspace buffer (lazily initialized)

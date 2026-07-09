@@ -134,6 +134,7 @@ class FlashAttnMLASparseMetadata(AttentionMetadata):
     num_decode_tokens: int = 0
     prefill_max_seq_len: int = 0
     prefill: MLACommonPrefillMetadata | None = None
+    cp_kv_cache_interleave_size: int = 1
 
 
 class FlashAttnMLASparseMetadataBuilder(
