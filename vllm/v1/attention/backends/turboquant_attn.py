@@ -84,9 +84,9 @@ _CONTINUATION_DECODE_THRESHOLD = 128
 #    * SoA Triton store (write)                                               #
 #    * FlyDSL decode (GQA in {6, 8, 16}; gfx950) — GQA-6 = MiniMax sibling #
 #    * SoA-aware continuation/dequant for chunked prefill                     #
-#    * SoA Triton v3 fallback for ineligible layers / missing FlyDSL          #
-#  The FlyDSL framework is a separate runtime dependency; if unavailable the  #
-#  decode silently falls back to the SoA Triton v3 path.                      #
+#    * SoA Triton v3 fallback for FlyDSL-ineligible layers                    #
+#  The FlyDSL framework is a separate runtime dependency; if it is unavailable #
+#  while opted in, init raises. Per-layer ineligible cases use the SoA path.   #
 # --------------------------------------------------------------------------- #
 _USE_TQ_FLYDSL = os.environ.get("VLLM_ROCM_TQ_FLYDSL_DECODE", "0") == "1"
 if _USE_TQ_FLYDSL:
@@ -101,9 +101,9 @@ if _USE_TQ_FLYDSL:
     )
 
     if not _flydsl_available():
-        logger.warning(
-            "VLLM_ROCM_TQ_FLYDSL_DECODE=1 but FlyDSL is unavailable; the decode path "
-            "will fall back to the SoA Triton v3 kernel."
+        raise ValueError(
+            "VLLM_ROCM_TQ_FLYDSL_DECODE=1 is set but FlyDSL is not available. "
+            "Install FlyDSL (gfx950) or unset VLLM_ROCM_TQ_FLYDSL_DECODE."
         )
 
 
