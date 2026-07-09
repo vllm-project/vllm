@@ -120,7 +120,7 @@ if _SDK_AVAILABLE:
             return JSONResponse(
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
                 content=CohereError(
-                    message=str(e),
+                    message=sanitize_message(str(e)),
                     id=_request_id(raw_request),
                 ).model_dump(exclude_none=True),
             )

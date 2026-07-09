@@ -19,9 +19,17 @@ fields that grounding/citation features require:
 * ``reasoning_type``: ``enabled`` / ``disabled``
 * ``response_prefix``: optional response prefix
 * ``json_schema`` / ``json_mode`` / ``response_format``: structured outputs
-* ``template_id`` / ``template`` / ``template_jinja`` / ``use_jinja``:
-  template overrides
+* ``template_id``: select one of melody's built-in template variants
 * ``cohere_format``: ``cmd3`` (default) or ``cmd4``
+
+Raw Jinja template source is *not* accepted through
+``chat_template_kwargs``. To override the template body, use the
+standard vLLM ``chat_template`` request field (which must be enabled
+server-side with ``--trust-request-chat-template``); this renderer
+forwards that value to melody as its ``template_jinja`` config field.
+The legacy Cohere-only ``chat_template_kwargs.template_jinja`` /
+``chat_template_kwargs.template`` inputs are silently dropped so they
+can neither leak as Jinja variables nor bypass the trust guard.
 
 Any *other* keys in ``chat_template_kwargs`` are forwarded verbatim to
 the melody render config as ``additional_template_fields`` -- i.e. they
@@ -96,7 +104,14 @@ _RENDERER_CONSUMED_KEYS = frozenset(
     {
         "cohere_format",
         "template_id",
+        # ``template_jinja`` / ``template`` used to be Cohere-only inputs
+        # for raw Jinja source. They are now driven exclusively by the
+        # standard vLLM ``chat_template`` request field, but we keep them
+        # in the consumed set so a stray value from an older client is
+        # silently dropped instead of becoming a template variable named
+        # ``template_jinja`` inside the cmd3 / cmd4 templates.
         "template_jinja",
+        "template",
         "use_jinja",
         "documents",
         "available_tools",
@@ -371,8 +386,15 @@ def _conversation_to_melody_messages(
 def _build_render_config(
     conversation: list[ConversationMessage],
     chat_template_kwargs: dict[str, Any],
+    chat_template: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Build the ``render_cmd3`` / ``render_cmd4`` config dict.
+
+    ``chat_template`` is the standard vLLM per-request template override
+    (from ``ChatCompletionRequest.chat_template`` / the server-side
+    ``--chat-template`` flag). When non-``None`` it is forwarded to melody
+    as ``template_jinja`` so a single vLLM-native path drives template
+    source through the trust guard.
 
     Returns ``(format, config_dict)`` where ``format`` is either ``"cmd3"``
     or ``"cmd4"``.
@@ -387,10 +409,15 @@ def _build_render_config(
         "messages": _conversation_to_melody_messages(conversation),
     }
 
-    # Optional template overrides
-    for k in ("template_id", "template_jinja"):
-        if v := chat_template_kwargs.get(k):
-            config[k] = v
+    # ``template_id`` is a selector for one of melody's built-in template
+    # variants (not raw source), so it is safe to accept from the client.
+    if template_id := chat_template_kwargs.get("template_id"):
+        config["template_id"] = template_id
+    # Raw template source flows exclusively through the standard vLLM
+    # ``chat_template`` field so it is subject to the
+    # ``--trust-request-chat-template`` guard in OnlineRenderer.
+    if chat_template:
+        config["template_jinja"] = chat_template
     # Only support Jinja with vllm
     config["use_jinja"] = True
 
@@ -530,7 +557,9 @@ class CohereRenderer(BaseRenderer[HfTokenizer]):
         )
 
         chat_template_kwargs = dict(params.chat_template_kwargs)
-        fmt, config_dict = _build_render_config(conversation, chat_template_kwargs)
+        fmt, config_dict = _build_render_config(
+            conversation, chat_template_kwargs, params.chat_template
+        )
         prompt_text = self._render(fmt, config_dict)
         prompt = parse_dec_only_prompt(prompt_text)
 
@@ -555,7 +584,9 @@ class CohereRenderer(BaseRenderer[HfTokenizer]):
         )
 
         chat_template_kwargs = dict(params.chat_template_kwargs)
-        fmt, config_dict = _build_render_config(conversation, chat_template_kwargs)
+        fmt, config_dict = _build_render_config(
+            conversation, chat_template_kwargs, params.chat_template
+        )
         prompt_text = await self._render_async(fmt, config_dict)
         prompt = parse_dec_only_prompt(prompt_text)
 

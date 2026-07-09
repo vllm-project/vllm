@@ -643,18 +643,55 @@ class TestBuildRenderConfig:
         # Sanity: the consumed key still produced its dedicated config slot.
         assert cfg["documents"] == [{"text": "doc"}]
 
-    def test_template_id_and_template_jinja_passthrough(self):
+    def test_template_id_passthrough(self):
+        # ``template_id`` is a safe selector for one of melody's built-in
+        # template variants (not raw source) and is still accepted via
+        # ``chat_template_kwargs``.
+        _, cfg = _build_render_config(
+            self._conv(),
+            {"template_id": "tpl1"},
+        )  # type: ignore[arg-type]
+        assert cfg["template_id"] == "tpl1"
+        # use_jinja is always True, regardless of caller input.
+        assert cfg["use_jinja"] is True
+
+    def test_template_jinja_kwarg_is_ignored(self):
+        # Raw Jinja source used to be accepted through
+        # ``chat_template_kwargs.template_jinja`` / ``.template``; that
+        # path is intentionally dropped so callers can neither leak it as
+        # a template variable nor bypass the trust guard. It must not
+        # appear in the config, and it must not fall through to
+        # ``additional_template_fields`` either.
         _, cfg = _build_render_config(
             self._conv(),
             {
-                "template_id": "tpl1",
                 "template_jinja": "raw {{ jinja }}",
+                "template": "raw {{ other }}",
             },
         )  # type: ignore[arg-type]
-        assert cfg["template_id"] == "tpl1"
+        assert "template_jinja" not in cfg
+        assert "template" not in cfg
+        assert "additional_template_fields" not in cfg
+
+    def test_chat_template_arg_populates_template_jinja(self):
+        # The standard vLLM ``chat_template`` request field is the sole
+        # supported channel for raw template source and is forwarded to
+        # melody under its ``template_jinja`` config key.
+        _, cfg = _build_render_config(
+            self._conv(),
+            {},
+            "raw {{ jinja }}",
+        )  # type: ignore[arg-type]
         assert cfg["template_jinja"] == "raw {{ jinja }}"
-        # use_jinja is always True, regardless of caller input.
         assert cfg["use_jinja"] is True
+
+    def test_chat_template_arg_none_leaves_template_jinja_unset(self):
+        _, cfg = _build_render_config(
+            self._conv(),
+            {},
+            None,
+        )  # type: ignore[arg-type]
+        assert "template_jinja" not in cfg
 
 
 # ======================================================================
