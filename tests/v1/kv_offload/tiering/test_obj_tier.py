@@ -179,8 +179,19 @@ class MockNixlAgent:
 # ---------------------------------------------------------------------------
 
 
+def _make_events_spec(enable_kv_cache_events: bool) -> SimpleNamespace:
+    """Offloading spec stub with an explicit global KV events flag."""
+    return SimpleNamespace(
+        vllm_config=_make_vllm_config(),
+        kv_cache_config=SimpleNamespace(kv_cache_groups=[]),
+        kv_events_config=SimpleNamespace(enable_kv_cache_events=enable_kv_cache_events),
+    )
+
+
 def _make_tier(
     num_blocks: int = 4,
+    offloading_spec: SimpleNamespace = _OFFLOADING_SPEC,
+    **tier_kwargs,
 ) -> tuple[ObjectStoreSecondaryTierManager, MockNixlAgent]:
     """Create a tier backed by a fresh MockNixlAgent."""
     mock_agent = MockNixlAgent()
@@ -194,11 +205,12 @@ def _make_tier(
         ),
     ):
         tier = ObjectStoreSecondaryTierManager(
-            offloading_spec=_OFFLOADING_SPEC,
+            offloading_spec=offloading_spec,
             primary_kv_view=view,
             tier_type="obj",
             store_config=_STORE_CONFIG,
             prefix=_RUN_PREFIX,
+            **tier_kwargs,
         )
     return tier, mock_agent
 
@@ -419,6 +431,100 @@ class TestMockObjTierShutdown:
         tier, _ = _make_tier(num_blocks=4)
         tier.shutdown()
         tier.shutdown()  # must not raise
+
+
+class TestObjTierKVEvents:
+    def setup_method(self):
+        self.tier, self.agent = _make_tier(
+            offloading_spec=_make_events_spec(enable_kv_cache_events=True),
+            enable_kv_events=True,
+        )
+
+    def test_successful_store_emits_stored_event(self):
+        """A completed store transfer emits one stored event with the job's keys."""
+        keys = [key(1), key(2)]
+        self.tier.submit_store(make_job(1, keys, [0, 1]))
+        assert all(r.success for r in drain(self.tier))
+
+        events = list(self.tier.take_events())
+        assert len(events) == 1
+        assert events[0].keys == keys
+        # Literal medium pins the wire contract, not just the constant choice.
+        assert events[0].medium == "OBJ"
+        assert not events[0].removed
+        # take_events drains the buffer.
+        assert list(self.tier.take_events()) == []
+
+    def test_mixed_job_results_emit_event_only_for_successful_job(self):
+        """With a failed and a successful store job resolving in the same
+        poll, exactly one event is emitted and its keys belong to the
+        successful job."""
+        original = self.agent.check_xfer_state
+        self.agent.check_xfer_state = lambda h: "ERR" if h._id == 0 else original(h)
+        self.tier.submit_store(make_job(1, [key(1)], [0]))  # handle 0: fails
+        self.tier.submit_store(make_job(2, [key(2)], [1]))  # handle 1: succeeds
+        results = drain(self.tier)
+        by_id = {r.job_id: r for r in results}
+        assert not by_id[1].success
+        assert by_id[2].success
+
+        events = list(self.tier.take_events())
+        assert len(events) == 1
+        assert events[0].keys == [key(2)]
+        assert self.tier._store_job_keys == {}
+
+    def test_load_job_emits_no_event(self):
+        self.tier.submit_store(make_job(1, [key(1)], [0]))
+        results = drain(self.tier)
+        assert len(results) == 1
+        assert results[0].success
+        list(self.tier.take_events())
+
+        self.tier.submit_load(make_job(2, [key(1)], [0]))
+        results = drain(self.tier)
+        assert len(results) == 1
+        assert results[0].success
+        assert list(self.tier.take_events()) == []
+
+    def test_failed_transfer_emits_no_event(self):
+        self.agent.check_xfer_state = lambda h: "ERR"
+        self.tier.submit_store(make_job(1, [key(1)], [0]))
+        results = drain(self.tier)
+        assert not results[0].success
+        assert list(self.tier.take_events()) == []
+        assert self.tier._store_job_keys == {}
+
+    def test_submission_failure_emits_no_event(self):
+        self.agent.make_prepped_xfer = lambda *a, **k: None
+        self.tier.submit_store(make_job(1, [key(1)], [0]))
+        results = list(self.tier.get_finished_jobs())
+        assert not results[0].success
+        assert list(self.tier.take_events()) == []
+        assert self.tier._store_job_keys == {}
+
+    def test_events_disabled_by_default(self):
+        tier, _ = _make_tier()
+        tier.submit_store(make_job(1, [key(1)], [0]))
+        results = drain(tier)
+        assert len(results) == 1
+        assert results[0].success
+        assert tier.events is None
+        assert tier._store_job_keys == {}
+        assert list(tier.take_events()) == []
+
+    def test_events_require_global_kv_events_flag(self):
+        """Tier-level opt-in alone is not enough; the global flag gates events."""
+        tier, _ = _make_tier(
+            offloading_spec=_make_events_spec(enable_kv_cache_events=False),
+            enable_kv_events=True,
+        )
+        tier.submit_store(make_job(1, [key(1)], [0]))
+        results = drain(tier)
+        assert len(results) == 1
+        assert results[0].success
+        assert tier.events is None
+        assert tier._store_job_keys == {}
+        assert list(tier.take_events()) == []
 
 
 class TestObjStoreConfig:
