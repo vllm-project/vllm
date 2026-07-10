@@ -397,6 +397,31 @@ fn utility_outputs(call_id: u64, result: UtilityResultEnvelope) -> EngineCoreOut
     .into()
 }
 
+fn assert_collective_rpc_request(
+    utility: &[Bytes],
+    method: &str,
+    kwargs: Vec<(Value, Value)>,
+) -> u64 {
+    assert_eq!(utility[0].as_ref(), &[0x03]);
+
+    let payload = decode_value(&utility[1]).expect("decode utility payload");
+    let array = payload.as_array().expect("utility payload array");
+    let call_id = array[1].as_u64().expect("call id");
+
+    assert_eq!(array[2], Value::from("collective_rpc"));
+    assert_eq!(
+        array[3],
+        Value::Array(vec![
+            Value::from(method),
+            Value::Nil,
+            Value::Array(Vec::new()),
+            Value::Map(kwargs),
+        ])
+    );
+
+    call_id
+}
+
 async fn send_outputs(push: &mut PushSocket, outputs: EngineCoreOutputs) {
     push.send(ZmqMessage::from(
         rmp_serde::to_vec_named(&outputs).expect("encode outputs"),
@@ -4972,6 +4997,151 @@ async fn collective_rpc_route_sends_expected_utility_call_and_returns_results() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn weight_transfer_routes_send_expected_collective_rpcs() {
+    let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let expected = [
+                (
+                    "init_weight_transfer_engine",
+                    vec![(
+                        Value::from("init_info"),
+                        Value::Map(vec![
+                            (Value::from("master_address"), Value::from("127.0.0.1")),
+                            (Value::from("master_port"), Value::from(29500_u64)),
+                        ]),
+                    )],
+                ),
+                ("start_weight_update", Vec::new()),
+                (
+                    "update_weights",
+                    vec![(
+                        Value::from("update_info"),
+                        Value::Map(vec![
+                            (
+                                Value::from("names"),
+                                Value::Array(vec![Value::from("model.weight")]),
+                            ),
+                            (
+                                Value::from("shapes"),
+                                Value::Array(vec![Value::Array(vec![
+                                    Value::from(16_u64),
+                                    Value::from(32_u64),
+                                ])]),
+                            ),
+                        ]),
+                    )],
+                ),
+                ("finish_weight_update", Vec::new()),
+            ];
+
+            for (method, kwargs) in expected {
+                let utility = recv_engine_message(dealer).await;
+                let call_id = assert_collective_rpc_request(&utility, method, kwargs);
+                send_outputs(
+                    push,
+                    utility_outputs(call_id, utility_result_value(Vec::<Value>::new())),
+                )
+                .await;
+            }
+        })
+    })
+    .await;
+
+    let requests = [
+        (
+            "/init_weight_transfer_engine",
+            Some(json!({
+                "init_info": {
+                    "master_address": "127.0.0.1",
+                    "master_port": 29500
+                }
+            })),
+            json!({"message": "Weight transfer initialized"}),
+        ),
+        (
+            "/start_weight_update",
+            None,
+            json!({"message": "Weight update started"}),
+        ),
+        (
+            "/update_weights",
+            Some(json!({
+                "update_info": {
+                    "names": ["model.weight"],
+                    "shapes": [[16, 32]]
+                }
+            })),
+            json!({"message": "Weights updated"}),
+        ),
+        (
+            "/finish_weight_update",
+            None,
+            json!({"message": "Weight update finished"}),
+        ),
+    ];
+
+    for (uri, request_body, expected_body) in requests {
+        let body = request_body.map_or_else(Body::empty, |body| Body::from(body.to_string()));
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(body)
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).expect("decode json"),
+            expected_body
+        );
+    }
+
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn weight_transfer_routes_reject_invalid_request_bodies() {
+    let (app, engine_task) =
+        test_admin_app_with_engine_script(|_dealer, _push| boxed_test_future(async move {})).await;
+
+    for (uri, body, expected_param) in [
+        ("/init_weight_transfer_engine", "{}", Some("init_info")),
+        ("/update_weights", "{}", Some("update_info")),
+        ("/update_weights", r#"{"update_info": "#, None),
+    ] {
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["param"], json!(expected_param));
+    }
+
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn sleep_route_uses_python_compatible_default_query_values() {
     let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
@@ -5374,6 +5544,10 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
         ("POST", "/resume"),
         ("POST", "/collective_rpc"),
         ("POST", "/abort_requests"),
+        ("POST", "/init_weight_transfer_engine"),
+        ("POST", "/start_weight_update"),
+        ("POST", "/update_weights"),
+        ("POST", "/finish_weight_update"),
         ("POST", "/reset_prefix_cache"),
         ("POST", "/reset_mm_cache"),
         ("POST", "/reset_encoder_cache"),
