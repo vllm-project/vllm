@@ -7,7 +7,7 @@ import signal
 import uvloop
 
 from vllm import envs
-from vllm.config import MultiModalConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.openai.api_server import (
@@ -20,6 +20,7 @@ from vllm.entrypoints.openai.cli_args import (
 )
 from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
+from vllm.renderers.paged_shm.server import maybe_start_paged_shm_server
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
@@ -130,35 +131,21 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
     # Clear quantization so VllmConfig skips quant dtype/capability validation.
     model_config.quantization = None
 
-    if model_config.multimodal_config is None:
-        model_config.multimodal_config = MultiModalConfig()
-    multimodal_config = model_config.multimodal_config
-
     # Render servers never allocate KV cache; suppress the spurious CPU KV
     # cache space warning from CpuPlatform.check_and_update_config.
     envs.VLLM_CPU_KVCACHE_SPACE = 0
 
     vllm_config = VllmConfig(model_config=model_config)
 
-    if multimodal_config.is_paged_shm_enabled():
-        from vllm.renderers.paged_shm.server import PagedShmServerProc
-
-        paged_shm_server = PagedShmServerProc(
-            size=multimodal_config.paged_shm_size,
-            block_size=multimodal_config.paged_shm_block_size,
-        )
-        paged_shm_server.start()
-
-        multimodal_config.paged_shm_server_address = paged_shm_server.address
-
     shutdown_task = await build_and_serve_renderer(
         vllm_config, listen_address, sock, args
     )
+
+    paged_shm_server = maybe_start_paged_shm_server(model_config.multimodal_config)
 
     try:
         await shutdown_task
     finally:
         sock.close()
-
-        if multimodal_config.is_paged_shm_enabled():
+        if paged_shm_server is not None:
             paged_shm_server.close()

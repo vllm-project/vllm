@@ -60,6 +60,7 @@ from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.renderers.paged_shm.server import maybe_start_paged_shm_server
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tool_parsers import ToolParserManager
 from vllm.tracing import instrument
@@ -791,10 +792,17 @@ async def run_server_worker(
             engine_client, listen_address, sock, args, **uvicorn_kwargs
         )
     # NB: Await server shutdown only after the backend context is exited
+
+    paged_shm_server = maybe_start_paged_shm_server(
+        engine_client.model_config.multimodal_config
+    )
+
     try:
         await shutdown_task
     finally:
         sock.close()
+        if paged_shm_server is not None:
+            paged_shm_server.close()
 
 
 if __name__ == "__main__":
