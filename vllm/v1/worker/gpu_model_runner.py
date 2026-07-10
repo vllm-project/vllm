@@ -710,10 +710,19 @@ class GPUModelRunner(
         # GPU to CPU when async scheduling is enabled.
         self.async_output_copy_stream: torch.cuda.Stream | None = None
         # cuda event to synchronize use of reused CPU tensors between steps
-        # when async scheduling is enabled.
+        # when async scheduling is enabled, or for pooling models in sync
+        # mode where intermediate prefill chunks skip GPU synchronization.
         self.prepare_inputs_event: torch.Event | None = None
         if self.use_async_scheduling:
             self.async_output_copy_stream = torch.cuda.Stream()
+            self.prepare_inputs_event = torch.Event()
+        elif self.is_pooling_model and current_platform.is_cuda_alike():
+            # Pooling models in sync mode don't sync the GPU between steps
+            # for intermediate prefill chunks (no finished requests). Without
+            # this event, non_blocking H2D copies in _prepare_inputs can be
+            # overwritten by the next step's _update_states while the GPU is
+            # still reading them, leading to stale data and crashes.
+            # LLMs are unaffected because _to_list() syncs the GPU every step.
             self.prepare_inputs_event = torch.Event()
 
         # self.cudagraph_batch_sizes sorts in ascending order.
