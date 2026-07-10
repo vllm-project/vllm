@@ -803,10 +803,8 @@ class MoERunner(MoERunnerInterface):
         # TODO(bnell): this can be removed after MK migration is complete.
         self.routed_experts._ensure_moe_quant_config_init()
 
-        # Run shared experts on the aux stream before dispatch + the routed
-        # kernel so they overlap the DP all-gather, gate, and fused MoE. Waited
-        # on after the routed kernel in _apply_quant_method. Only applies to
-        # MULTI_STREAM_OVERLAPPED; a no-op otherwise.
+        # If using multi-stream overlap for shared experts, we must launch it
+        # before routed expert dispatch.
         shared_experts_running_async = False
         if self._shared_experts is not None:
             shared_experts_running_async = self._shared_experts.maybe_forward_async(
