@@ -8,7 +8,7 @@ import pytest
 import torch
 
 import vllm._custom_ops as ops
-from tests.kernels.utils import opcheck
+from tests.kernels.utils import fp8_ulp_distance, opcheck
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 DTYPES = [torch.bfloat16, torch.float]
 QUANT_DTYPES = [torch.int8, current_platform.fp8_dtype()]
@@ -180,9 +181,7 @@ def test_rms_norm(
     device: str,
     strided_input: bool,
 ) -> None:
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
     torch.accelerator.set_device_index(device)
 
@@ -251,30 +250,54 @@ def test_rms_norm(
 
     assert ref_out.dtype == quant_dtype
     assert ops_out.dtype == quant_dtype
+
+    # Per-block bf16 scales: allow a small relative tolerance for a few groups
+    # whose abs-max flips by one ULP between the fused and reference paths. The
+    # per-token and fp32 paths stay strict.
+    relax_block_rocm = (
+        group_size is not None
+        and dtype == torch.bfloat16
+        and current_platform.is_rocm()
+    )
+
+    def scales_close(rtol: float, atol: float) -> bool:
+        if torch.allclose(ref_scales, ops_scales, rtol=rtol, atol=atol):
+            return True
+        return relax_block_rocm and torch.allclose(
+            ref_scales, ops_scales, rtol=1e-2, atol=atol
+        )
+
     if quant_dtype == torch.int8:
-        assert torch.allclose(ref_scales, ops_scales, atol=1e-6)
+        assert scales_close(rtol=1e-5, atol=1e-6)
         # big atol to account for round-off errors.
         assert torch.allclose(ref_out, ops_out, atol=1)
     else:
-        assert torch.allclose(ref_scales, ops_scales)
+        assert scales_close(rtol=1e-5, atol=1e-8)
         a = ref_out.to(dtype=torch.float32)
         b = ops_out.to(dtype=torch.float32)
         ok = torch.allclose(a, b, atol=1e-6)
         if not ok:
-            # fallback: compare dequantized values with relaxed tolerance
-            if group_size is None:
-                a_deq = a * ref_scales.view(-1, 1)
-                b_deq = b * ops_scales.view(-1, 1)
+            if relax_block_rocm:
+                # ULP-flipped group scale can cross an E4M3 tie; tolerate a
+                # bounded count of isolated fp8 outliers.
+                ulp = fp8_ulp_distance(ref_out, ops_out)
+                max_outliers = ulp.numel() // 100_000 + 8
+                ok = int((ulp > 0).sum().item()) <= max_outliers
             else:
-                a_deq = a * ref_scales.repeat_interleave(group_size[1], dim=1)
-                b_deq = b * ops_scales.repeat_interleave(group_size[1], dim=1)
-            # NOTE: It is possible that some future test cases trigger this
-            # max diff due to precision issues. If such an error is
-            # encountered, it's recommended to inspect the differences between
-            # all corresponding elements from each tensor (e.g. by looping over
-            # them) and checking how many the max diff error shows up on (just
-            # a few bad elements should still be considered acceptable).
-            ok = torch.allclose(a_deq, b_deq, rtol=5e-2, atol=5e-2)
+                # CUDA (& non-bf16): compare dequantized values with relaxed tolerance.
+                if group_size is None:
+                    a_deq = a * ref_scales.view(-1, 1)
+                    b_deq = b * ops_scales.view(-1, 1)
+                else:
+                    a_deq = a * ref_scales.repeat_interleave(group_size[1], dim=1)
+                    b_deq = b * ops_scales.repeat_interleave(group_size[1], dim=1)
+                # NOTE: It is possible that some future test cases trigger this
+                # max diff due to precision issues. If such an error is
+                # encountered, it's recommended to inspect the differences between
+                # all corresponding elements from each tensor (e.g. by looping over
+                # them) and checking how many the max diff error shows up on (just
+                # a few bad elements should still be considered acceptable).
+                ok = torch.allclose(a_deq, b_deq, rtol=5e-2, atol=5e-2)
         assert ok
     if add_residual:
         assert torch.allclose(ref_residual, ops_residual)

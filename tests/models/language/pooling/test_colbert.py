@@ -6,9 +6,13 @@ Tests are parametrized across multiple ColBERT backbones to ensure the
 generic ColBERT support works with different encoder architectures.
 """
 
+from contextlib import contextmanager
+
 import pytest
 import torch
 
+from tests.utils import wait_for_rocm_memory_to_settle
+from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.entrypoints.pooling.scoring.utils import compute_maxsim_score
 
 # -----------------------------------------------------------------------
@@ -109,6 +113,14 @@ def _load_hf_model(model_name: str, hf_spec: dict, device: torch.device):
         **extra,
     ).to(device)
     model.eval()
+
+    # Transformers 5.0 weight materialization can clear non-persistent
+    # buffers (e.g. rotary inv_freq) that were registered with
+    # persistent=False.  Re-compute them so the model produces valid output.
+    for mod in model.modules():
+        if hasattr(mod, "_compute_inv_freq") and hasattr(mod, "inv_freq"):
+            mod.inv_freq = mod._compute_inv_freq(device=device)
+
     return model
 
 
@@ -135,6 +147,24 @@ def _compute_hf_colbert_embeddings(model, tokenizer, linear_weight, texts, devic
             normalised = F.normalize(projected, p=2, dim=-1)
             embeddings.append(normalised.squeeze(0).cpu())
     return embeddings
+
+
+@contextmanager
+def _hf_colbert_model(model_name: str, hf_spec: dict, device: torch.device):
+    """Load the HF backbone + ColBERT projection, freeing the GPU on exit.
+
+    These live outside any runner context, so without explicit cleanup ROCm
+    keeps the VRAM resident and the next backend parametrization (or test)
+    OOMs on startup.
+    """
+    hf_model = _load_hf_model(model_name, hf_spec, device)
+    linear_weight = _load_projection_weight(model_name, hf_spec, device)
+    try:
+        yield hf_model, linear_weight
+    finally:
+        del hf_model, linear_weight
+        cleanup_dist_env_and_memory()
+        wait_for_rocm_memory_to_settle()
 
 
 def _assert_embeddings_close(vllm_outputs, hf_embeddings):
@@ -355,9 +385,11 @@ def test_colbert_hf_comparison(vllm_runner, backend):
 
     spec = COLBERT_MODELS[backend]
     hf_spec = spec["hf_comparison"]
+    extra_kwargs = spec["extra_kwargs"]
     model_name = spec["model"]
     assert isinstance(model_name, str)
     assert isinstance(hf_spec, dict)
+    assert isinstance(extra_kwargs, dict)
     test_texts = [TEXTS_1[0], TEXTS_2[0]]
 
     with vllm_runner(
@@ -366,7 +398,7 @@ def test_colbert_hf_comparison(vllm_runner, backend):
         dtype="float32",
         max_model_len=spec["max_model_len"],
         enforce_eager=True,
-        **spec["extra_kwargs"],
+        **extra_kwargs,
     ) as vllm_model:
         vllm_outputs = vllm_model.token_embed(test_texts)
 
@@ -376,15 +408,13 @@ def test_colbert_hf_comparison(vllm_runner, backend):
         model_name,
         trust_remote_code=hf_spec.get("trust_remote_code", False),
     )
-    hf_model = _load_hf_model(model_name, hf_spec, device)
-    linear_weight = _load_projection_weight(model_name, hf_spec, device)
-
-    hf_embeddings = _compute_hf_colbert_embeddings(
-        hf_model,
-        hf_tokenizer,
-        linear_weight,
-        test_texts,
-        device,
-    )
+    with _hf_colbert_model(model_name, hf_spec, device) as (hf_model, linear_weight):
+        hf_embeddings = _compute_hf_colbert_embeddings(
+            hf_model,
+            hf_tokenizer,
+            linear_weight,
+            test_texts,
+            device,
+        )
 
     _assert_embeddings_close(vllm_outputs, hf_embeddings)

@@ -80,30 +80,24 @@ def _zero_kv_blocks_kernel(
 class KVBlockZeroer:
     """Manages efficient zeroing of KV cache blocks via a Triton kernel.
 
-    Call :meth:`init_meta` once after KV caches are allocated to precompute
-    segment addresses, then call :meth:`zero_block_ids` each step to zero
+    Construct once after KV caches are allocated to precompute segment
+    addresses, then call :meth:`zero_block_ids` each step to zero
     newly-allocated blocks.
     """
 
-    def __init__(self, device: torch.device, pin_memory: bool):
-        self.device = device
-        self.pin_memory = pin_memory
-        self._meta: tuple[torch.Tensor, int, int, int] | None = None
-        self._id_cap: int = 0
-        self._ids_pinned: torch.Tensor | None = None
-        self._ids_gpu: torch.Tensor | None = None
-
-    def init_meta(
+    def __init__(
         self,
+        device: torch.device,
+        pin_memory: bool,
         attn_groups_iter: Iterable["AttentionGroup"],
         kernel_block_sizes: list[int],
         cache_dtype: str,
-        runner_only_attn_layers: set[str],
         static_forward_context: dict[str, Any],
+        runner_only_attn_layers: set[str] | None = None,
+        max_concurrency: int = 1,
     ) -> None:
-        """One-time precomputation for zero_block_ids.
+        """Precompute the absolute-address table for the Triton zeroing kernel.
 
-        Builds absolute-address table for the Triton zeroing kernel.
         Each entry is the absolute byte address of a segment start on the
         GPU, so segments in different CUDA allocations work correctly.
 
@@ -114,13 +108,26 @@ class KVBlockZeroer:
 
         Only AttentionSpec layers are processed; Mamba layers are skipped.
         """
+        self.device = device
+        self.pin_memory = pin_memory
+        if max_concurrency < 1:
+            raise ValueError("max_concurrency must be at least 1")
+        self.max_concurrency = max_concurrency
+        self._meta: tuple[torch.Tensor, int, int, int] | None = None
+        self._id_cap: int = 0
+        self._ids_pinned: list[torch.Tensor] = []
+        self._ids_gpu: list[torch.Tensor] = []
+        self._id_buffer_index = 0
+
+        if runner_only_attn_layers is None:
+            runner_only_attn_layers = set()
         seen_ptrs: set[int] = set()
         seg_addrs: list[int] = []
         page_size_el: int | None = None
 
         for group in attn_groups_iter:
             spec = group.kv_cache_spec
-            if type(spec) is not FullAttentionSpec:
+            if not isinstance(spec, FullAttentionSpec):
                 continue
             if group.kv_cache_group_id >= len(kernel_block_sizes):
                 continue
@@ -173,18 +180,28 @@ class KVBlockZeroer:
 
         blk_size = min(largest_power_of_2_divisor(page_size_el), 1024)
         self._id_cap = 8192
-        self._ids_pinned = torch.empty(
-            self._id_cap,
-            dtype=torch.int64,
-            pin_memory=self.pin_memory,
-        )
-        self._ids_gpu = torch.empty(self._id_cap, dtype=torch.int64, device=self.device)
+        self._allocate_id_buffers()
         self._meta = (
             torch.tensor(seg_addrs, dtype=torch.uint64, device=self.device),
             page_size_el,
             blk_size,
             len(seg_addrs),
         )
+
+    def _allocate_id_buffers(self) -> None:
+        self._ids_pinned = [
+            torch.empty(
+                self._id_cap,
+                dtype=torch.int64,
+                pin_memory=self.pin_memory,
+            )
+            for _ in range(self.max_concurrency)
+        ]
+        self._ids_gpu = [
+            torch.empty(self._id_cap, dtype=torch.int64, device=self.device)
+            for _ in range(self.max_concurrency)
+        ]
+        self._id_buffer_index = 0
 
     def zero_block_ids(self, block_ids: list[int]) -> None:
         """Zero the KV cache memory for the given block IDs."""
@@ -193,19 +210,21 @@ class KVBlockZeroer:
         seg_addrs, page_size_el, blk_size, n_segs = self._meta
         n_blocks = len(block_ids)
         if n_blocks > self._id_cap:
+            # The old pinned buffers may still be the source of an in-flight
+            # nonblocking copy. Growing is rare, so we don't mind the sync overhead
+            torch.accelerator.synchronize()
             self._id_cap = n_blocks * 2
-            self._ids_pinned = torch.empty(
-                self._id_cap,
-                dtype=torch.int64,
-                pin_memory=self.pin_memory,
-            )
-            self._ids_gpu = torch.empty(
-                self._id_cap, dtype=torch.int64, device=self.device
-            )
-        assert self._ids_pinned is not None and self._ids_gpu is not None
-        self._ids_pinned[:n_blocks].numpy()[:] = block_ids
-        idx = self._ids_gpu[:n_blocks]
-        idx.copy_(self._ids_pinned[:n_blocks], non_blocking=True)
+            self._allocate_id_buffers()
+
+        # The H2D copy is nonblocking, so its pinned source must not be mutated
+        # while this batch is in flight. Rotate through as many buffers as concurrent
+        # in-flight batches, to avoid collisions.
+        buffer_index = self._id_buffer_index
+        self._id_buffer_index = (buffer_index + 1) % self.max_concurrency
+        ids_pinned = self._ids_pinned[buffer_index]
+        ids_pinned[:n_blocks].numpy()[:] = block_ids
+        idx = self._ids_gpu[buffer_index][:n_blocks]
+        idx.copy_(ids_pinned[:n_blocks], non_blocking=True)
         grid = (n_blocks * n_segs * (page_size_el // blk_size),)
         _zero_kv_blocks_kernel[grid](
             seg_addrs,
@@ -441,6 +460,9 @@ def add_kv_sharing_layers_to_kv_cache_groups(
             from the KV cache of `shared_kv_cache_layers[layer_name]`.
         kv_cache_groups: The KV cache groups of the model.
     """
+    if not shared_kv_cache_layers:
+        return
+
     layer_to_kv_cache_group: dict[str, KVCacheGroupSpec] = {}
     for kv_cache_group in kv_cache_groups:
         for layer_name in kv_cache_group.layer_names:
@@ -519,12 +541,8 @@ def is_residual_scattered_for_sp(
     """Check if the residual tensor is scattered for sequence parallelism.
 
     The residual tensor is scattered across tensor parallel ranks when sequence
-    parallelism and tensor parallelism is enabled.
-
-    This follows the same logic as SequenceParallelismPass.is_applicable_for_range():
-    - In full-graph compilation mode (no splitting ops or using inductor graph
-      partition), SP is always applied
-    - Otherwise, SP is only applied for specific shapes in compile_sizes
+    parallelism and tensor parallelism is enabled. SP is only supported in
+    full-graph compilation mode.
     """
     if not vllm_config.compilation_config.pass_config.enable_sp:
         return False
@@ -534,16 +552,13 @@ def is_residual_scattered_for_sp(
     if tp == 1:
         return False
 
+    assert (
+        vllm_config.compilation_config.use_inductor_graph_partition
+        or not vllm_config.compilation_config.splitting_ops
+    ), "Sequence parallelism requires full-graph compilation"
+
     # When sequence parallelism is enabled, we always pad num_input_tokens
     # to be a multiple of tensor_parallel_size (tp) earlier.
     assert num_input_tokens % tp == 0
 
-    if (
-        not vllm_config.compilation_config.splitting_ops
-        or vllm_config.compilation_config.use_inductor_graph_partition
-    ):
-        return True
-    compile_sizes = vllm_config.compilation_config.compile_sizes
-    if compile_sizes is None:
-        return False
-    return num_input_tokens in compile_sizes
+    return True

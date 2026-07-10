@@ -27,6 +27,19 @@ If you need a different ROCm version or want to use an existing PyTorch installa
 --8<-- [end:set-up-using-python]
 --8<-- [start:pre-built-wheels]
 
+!!! warning "Python 3.12 required for ROCm wheels"
+
+    ROCm pre-built wheels are only available for **Python 3.12**. If you are using a different Python version (e.g. 3.11 or 3.13), the installer **will silently fall back** to the CUDA wheel from PyPI, which will fail on AMD GPUs with errors like `libcudart.so: cannot open shared object file`.
+
+    To check your Python version: `python3 --version`
+
+    If you need Python 3.12, you can create an isolated environment with `uv`:
+
+    ```bash
+    uv venv --python 3.12 --seed --managed-python
+    source .venv/bin/activate
+    ```
+
 To install the latest version of vLLM for Python 3.12, ROCm 7.0 and `glibc >= 2.35`.
 
 ```bash
@@ -240,7 +253,7 @@ uv pip install vllm==${VLLM_VERSION} \
         # Install dependencies
         pip install --upgrade numba \
             scipy \
-            huggingface-hub[cli,hf_transfer] \
+            huggingface-hub[cli] \
             setuptools_scm
         pip install -r requirements/rocm.txt
 

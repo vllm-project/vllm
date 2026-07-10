@@ -7,10 +7,11 @@ Example online usage of Pooling API for multi vector retrieval.
 Run `vllm serve <model> --runner pooling`
 to start up the server in vLLM. e.g.
 
-vllm serve BAAI/bge-m3
+vllm serve BAAI/bge-m3 --pooler-config.task token_embed
 """
 
 import argparse
+import pprint
 
 import requests
 import torch
@@ -32,7 +33,8 @@ def parse_args():
 
 
 def main(args):
-    api_url = f"http://{args.host}:{args.port}/pooling"
+    pooling_url = f"http://{args.host}:{args.port}/pooling"
+    score_url = f"http://{args.host}:{args.port}/score"
     model_name = args.model
 
     prompts = [
@@ -43,10 +45,22 @@ def main(args):
     ]
     prompt = {"model": model_name, "input": prompts}
 
-    pooling_response = post_http_request(prompt=prompt, api_url=api_url)
+    pooling_response = post_http_request(prompt=prompt, api_url=pooling_url)
     for output in pooling_response.json()["data"]:
         multi_vector = torch.tensor(output["data"])
         print(multi_vector.shape)
+
+    queries = "What is the capital of France?"
+    documents = [
+        "The capital of Brazil is Brasilia.",
+        "The capital of France is Paris.",
+    ]
+    prompt = {"model": model_name, "queries": queries, "documents": documents}
+    score_response = post_http_request(prompt=prompt, api_url=score_url)
+    print("\nPrompt when queries is string and documents is a list:")
+    pprint.pprint(prompt)
+    print("\nScore Response:")
+    pprint.pprint(score_response.json())
 
 
 if __name__ == "__main__":

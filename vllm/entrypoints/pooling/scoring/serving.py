@@ -4,20 +4,18 @@
 from fastapi.responses import JSONResponse, Response
 
 from vllm import PoolingParams
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
-from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
-from vllm.entrypoints.pooling.base.serving import PoolingServing
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
-from vllm.renderers import BaseRenderer
+from vllm.tasks import SCORE_TYPE_MAP, SupportedTask
 from vllm.v1.pool.late_interaction import (
     build_late_interaction_doc_params,
     build_late_interaction_query_params,
 )
 
+from ..base.io_processor import PoolingIOProcessor
+from ..base.serving import PoolingServing
 from .io_processor import ScoringIOProcessors, ScoringServeContext
 from .protocol import (
     RerankDocument,
@@ -41,33 +39,31 @@ class ServingScores(PoolingServing):
         self,
         engine_client: EngineClient,
         *args,
+        supported_tasks: tuple[SupportedTask, ...],
         enable_flash_late_interaction: bool = True,
         **kwargs,
     ):
-        self.score_type = engine_client.model_config.score_type
+        pooling_task = engine_client.model_config.get_pooling_task(supported_tasks)
+        score_type = SCORE_TYPE_MAP.get(pooling_task, None)  # type: ignore[arg-type]
+        assert score_type is not None
+
+        self.io_processor_name: str = score_type
         self.enable_flash_late_interaction = (
-            self.score_type == "late-interaction" and enable_flash_late_interaction
+            self.io_processor_name == "late-interaction"
+            and enable_flash_late_interaction
         )
+
+        if self.enable_flash_late_interaction:
+            self.io_processor_name = "flash-late-interaction"
+
+        if engine_client.model_config.architecture == "JinaForRanking":
+            self.io_processor_name = "jina-reranking-scoring"
+            self.enable_flash_late_interaction = False
 
         super().__init__(engine_client, *args, **kwargs)
 
-    def init_io_processor(
-        self,
-        model_config: ModelConfig,
-        renderer: BaseRenderer,
-        chat_template_config: ChatTemplateConfig,
-    ) -> PoolingIOProcessor:
-        score_type: str = model_config.score_type
-        if self.enable_flash_late_interaction:
-            score_type = "flash-late-interaction"
-
-        assert score_type in ScoringIOProcessors
-        processor_cls = ScoringIOProcessors[score_type]
-        return processor_cls(
-            model_config=model_config,
-            renderer=renderer,
-            chat_template_config=chat_template_config,
-        )
+    def init_io_processor(self, *args, **kwargs) -> PoolingIOProcessor:
+        return ScoringIOProcessors[self.io_processor_name](*args, **kwargs)
 
     async def __call__(self, *args, **kwargs) -> Response:
         if not self.enable_flash_late_interaction:
@@ -75,7 +71,7 @@ class ServingScores(PoolingServing):
 
         return await self.flash_late_interaction(*args, **kwargs)
 
-    async def _build_response(
+    def _build_response(
         self,
         ctx: ScoringServeContext,
     ) -> JSONResponse:
@@ -100,7 +96,7 @@ class ServingScores(PoolingServing):
                 ctx.request.top_n if ctx.request.top_n > 0 else len(final_res_batch),
             )
         else:
-            raise NotImplementedError("")
+            raise ValueError(f"Invalid {self.request_id_prefix} request type")
 
     def _request_output_to_score_response(
         self,
@@ -193,17 +189,15 @@ class ServingScores(PoolingServing):
     ### Can significantly improve late-interaction scoring performance.
 
     async def flash_late_interaction(self, *args, **kwargs) -> Response:
-        ctx = await self._init_ctx(*args, **kwargs)
-        ctx.pooling_params = self.io_processor.create_pooling_params(ctx.request)
-        await self.io_processor.pre_process_online_async(ctx)
+        ctx = await self._init_ctx(self.io_processor, *args, **kwargs)
+        await self._preprocessing_async(self.io_processor, ctx)
 
         # stage 1: encode queries and cache token embeddings on workers.
         await self._flash_late_interaction_encode_queries(ctx)
         # stage 2: encode docs and return scalar scores from workers.
         await self._flash_late_interaction_encode_docs(ctx)
 
-        await self.io_processor.post_process_online_async(ctx)
-        return await self._build_response(ctx)
+        return await self._postprocessing_async(self.io_processor, ctx)
 
     async def _flash_late_interaction_encode_queries(self, ctx: ScoringServeContext):
         assert ctx.n_queries is not None
@@ -247,6 +241,7 @@ class ServingScores(PoolingServing):
 
         await self._prepare_generators(query_ctx)
         await self._collect_batch(query_ctx)
+        ctx.query_final_res_batch = query_ctx.final_res_batch
 
     async def _flash_late_interaction_encode_docs(self, ctx: ScoringServeContext):
         assert ctx.n_queries is not None

@@ -256,8 +256,10 @@ async def test_multi_abort(output_kind: RequestOutputKind):
                 )
             )
 
-        # Let requests start
-        await asyncio.sleep(0.5)
+        # Let requests start generating, use a longer sleep to ensure all
+        # requests have exited prefill and produced at least one
+        # decode token before we abort.
+        await asyncio.sleep(1.0)
 
         # Use multi-abort to abort multiple requests at once
         abort_request_ids = [request_ids[i] for i in REQUEST_IDS_TO_ABORT]
@@ -369,9 +371,10 @@ async def test_mid_stream_cancellation(
         # Wait for all tasks to complete
         results = await asyncio.gather(*tasks)
 
-        # Verify all tasks were cancelled at the expected point
+        # Verify all tasks were cancelled at the expected point.
+        # Uses >= because the cancel check is `count >= cancel_after`.
         for num_generated_tokens, request_id in results:
-            assert num_generated_tokens == NUM_EXPECTED_TOKENS, (
+            assert num_generated_tokens >= NUM_EXPECTED_TOKENS, (
                 f"{request_id} generated {num_generated_tokens} tokens but "
                 f"expected to cancel after {NUM_EXPECTED_TOKENS}"
             )
@@ -509,13 +512,11 @@ async def test_header_dp_rank_argument():
         )
 
         # Create render serving instance (required by OpenAIServingChat)
-        from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+        from vllm.renderers.online_renderer import OnlineRenderer
 
-        serving_render = OpenAIServingRender(
+        online_renderer = OnlineRenderer(
             model_config=engine.model_config,
             renderer=engine.renderer,
-            io_processor=engine.io_processor,
-            model_registry=models.registry,
             request_logger=None,
             chat_template=None,
             chat_template_content_format="auto",
@@ -526,7 +527,7 @@ async def test_header_dp_rank_argument():
             engine_client=engine,
             models=models,
             response_role="assistant",
-            openai_serving_render=serving_render,
+            online_renderer=online_renderer,
             chat_template=None,
             chat_template_content_format="auto",
             request_logger=None,

@@ -17,8 +17,10 @@ from vllm.config.compilation import (
 )
 from vllm.config.scheduler import SchedulerConfig
 from vllm.forward_context import set_forward_context
+from vllm.platforms import current_platform
 
 MLP_SIZE = 64
+DEVICE_TYPE = current_platform.device_type
 
 
 @support_torch_compile
@@ -71,7 +73,7 @@ class TraceStructuredCapture:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_vllm_structured_logging_artifacts(use_fresh_inductor_cache):
     """Test that all expected vLLM artifacts are logged during compilation."""
-    torch.set_default_device("cuda")
+    torch.set_default_device(DEVICE_TYPE)
 
     capture = TraceStructuredCapture()
 

@@ -106,8 +106,8 @@ class UrlSchemesPreprocessor(Preprocessor):
             return f"[{gh_icon} {title}]({url})"
 
         markdown = "\n".join(lines)
-        markdown = relative_link.sub(replace_relative_link, markdown)
         markdown = github_link.sub(replace_github_link, markdown)
+        markdown = relative_link.sub(replace_relative_link, markdown)
         return markdown.split("\n")
 
 
