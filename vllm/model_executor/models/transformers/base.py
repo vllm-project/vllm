@@ -522,6 +522,10 @@ class Base(
         """
         Create `Attention` instances to inform KV cache allocation.
         """
+        # vLLMs MLA replaces the entire attn module, so attention_instances are not used
+        if self.model_config.use_mla:
+            return {}
+
         text_config = self.text_config
 
         num_heads = self.model_config.get_num_attention_heads(self.parallel_config)
