@@ -89,6 +89,7 @@ def initialize_kv_cache(runner: GPUModelRunner):
         kernel_block_sizes=[
             kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
         ],
+        max_num_blocks_per_req=[NUM_BLOCKS],
     )
     runner.initialize_attn_backend(kv_cache_config)
 
@@ -1397,6 +1398,7 @@ def test_input_batch_with_kernel_block_sizes():
         vocab_size=vocab_size,
         block_sizes=block_sizes,
         kernel_block_sizes=kernel_block_sizes,
+        max_num_blocks_per_req=[16, 8],
     )
 
     # Verify that block tables were created with kernel block sizes
@@ -1457,6 +1459,7 @@ def test_hybrid_cache_integration(default_vllm_config, dist_init):
         vocab_size=runner.model_config.get_vocab_size(),
         block_sizes=[kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size],
         kernel_block_sizes=[16],
+        max_num_blocks_per_req=[NUM_BLOCKS],
     )  # Use kernel block size
 
     runner.initialize_attn_backend(kv_cache_config)
