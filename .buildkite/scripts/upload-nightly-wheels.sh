@@ -6,8 +6,14 @@ set -ex
 # manylinux platform tag with auditwheel.
 # Index generation is handled separately by generate-and-upload-nightly-index.sh.
 
-# shellcheck source=lib/manylinux.sh
-source .buildkite/scripts/lib/manylinux.sh
+# macOS wheels already carry a valid macosx_*_arm64 platform tag and auditwheel
+# is Linux-only, so skip the manylinux retag (and its Docker helper) for them.
+WHEEL_PLATFORM="${VLLM_WHEEL_PLATFORM:-linux}"
+
+if [[ "$WHEEL_PLATFORM" == "linux" ]]; then
+  # shellcheck source=lib/manylinux.sh
+  source .buildkite/scripts/lib/manylinux.sh
+fi
 
 BUCKET="vllm-wheels"
 SUBPATH=$BUILDKITE_COMMIT
@@ -27,8 +33,10 @@ wheel="${wheel_files[0]}"
 
 # ========= detect manylinux tag and rename ==========
 
-wheel="$(apply_manylinux_tag "$wheel")"
-echo "Renamed wheel to: $wheel"
+if [[ "$WHEEL_PLATFORM" == "linux" ]]; then
+  wheel="$(apply_manylinux_tag "$wheel")"
+  echo "Renamed wheel to: $wheel"
+fi
 
 # Extract the version from the wheel
 version=$(unzip -p "$wheel" '**/METADATA' | grep '^Version: ' | cut -d' ' -f2)

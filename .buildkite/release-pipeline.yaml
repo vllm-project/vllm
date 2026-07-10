@@ -76,6 +76,20 @@ steps:
         env:
           DOCKER_BUILDKIT: "1"
 
+      - label: "Build wheel - macOS arm64 - CPU"
+        depends_on: ~
+        id: build-wheel-macos-arm64-cpu
+        agents:
+          queue: macmini
+        timeout_in_minutes: 90
+        commands:
+          # Built natively on the macOS agent (macOS wheels cannot be
+          # cross-compiled from Linux); the wheel lands in artifacts/dist for
+          # the normal upload path.
+          - "bash .buildkite/scripts/build-macos-wheel.sh"
+          - "VLLM_WHEEL_PLATFORM=macos bash .buildkite/scripts/upload-nightly-wheels.sh"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "s3://vllm-wheels/$$BUILDKITE_COMMIT/$(cd artifacts/dist && echo *.whl)"'
+
       - label: "Build wheel - x86_64 - CUDA 12.9"
         depends_on: ~
         id: build-wheel-x86-cuda-12-9
