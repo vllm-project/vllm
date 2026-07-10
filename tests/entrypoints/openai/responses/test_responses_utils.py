@@ -9,6 +9,7 @@ from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
 )
 from openai.types.responses.response_output_message import ResponseOutputMessage
+from openai.types.responses.response_output_refusal import ResponseOutputRefusal
 from openai.types.responses.response_output_text import ResponseOutputText
 from openai.types.responses.response_reasoning_item import (
     Content,
@@ -265,6 +266,37 @@ class TestResponsesUtils:
         formatted_item = _single_chat_message(output_item)
         assert formatted_item["role"] == "assistant"
         assert formatted_item["content"] == "dongyi"
+
+    def test_output_message_empty_or_refusal_content(self):
+        # An assistant message replayed through `input` may have empty content
+        # or a refusal-only part (which has no `.text`). Neither carries output
+        # text, and both used to crash here (IndexError / AttributeError).
+        empty = ResponseOutputMessage(
+            id="msg_empty",
+            content=[],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+        formatted_item = _single_chat_message(empty)
+        assert formatted_item["role"] == "assistant"
+        assert formatted_item["content"] == ""
+
+        refusal = ResponseOutputMessage(
+            id="msg_refusal",
+            content=[
+                ResponseOutputRefusal(
+                    refusal="I can't help with that",
+                    type="refusal",
+                )
+            ],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+        formatted_item = _single_chat_message(refusal)
+        assert formatted_item["role"] == "assistant"
+        assert formatted_item["content"] == ""
 
 
 class TestReasoningItemContentPriority:
