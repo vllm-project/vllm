@@ -68,6 +68,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 
 from .attention import Glm5NextLinearAttention, Glm5NextMLAAttention
+from .fused_ops import fused_allreduce_rms_norm
 from .multimodal import Glm5NextProcessingInfo, Glm5NextVisionTransformer
 
 logger = init_logger(__name__)
@@ -98,6 +99,13 @@ class Glm5NextDecoderLayer(nn.Module):
         self.num_experts = config.n_routed_experts
         self.is_mtp_layer = is_mtp_layer
         self.mhc = config.mhc
+        # Fuse the cross-rank all-reduce of this layer's row-parallel outputs
+        # (attention o_proj + MLP) into the following RMSNorm via
+        # fused_allreduce_rms_norm. Applies to the simple-residual path: the
+        # 70B / non-mHC layers, and always to MTP layers (whose recycle hidden
+        # is reduced explicitly in the MTP module). The mHC path keeps reduced
+        # projections and its own hc_pre/hc_post residual flow.
+        self._fuse_allreduce_norm = (not config.mhc) or is_mtp_layer
         self.layer_kind = "kda" if config.is_kda_layer(layer_idx) else "mla"
 
         if config.is_kda_layer(layer_idx):
@@ -154,6 +162,16 @@ class Glm5NextDecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
 
+        if self._fuse_allreduce_norm:
+            # Run the attention o_proj and the MLP un-reduced; their cross-rank
+            # all-reduce is deferred and fused into the next RMSNorm by
+            # fused_allreduce_rms_norm in forward. Mirrors deepseek_v32/nvidia.
+            self.self_attn.o_proj.reduce_results = False
+            if isinstance(self.mlp, Glm5NextMoE):
+                self.mlp.experts.moe_config.skip_final_all_reduce = True
+            else:
+                self.mlp.down_proj.reduce_results = False
+
         if self.mhc and not is_mtp_layer:
             # mhc config
             self.mhc_num_residual_streams = config.mhc_num_residual_streams
@@ -189,29 +207,37 @@ class Glm5NextDecoderLayer(nn.Module):
     def forward(
         self,
         positions: torch.Tensor,
-        x: torch.Tensor,
-        **kwargs,
-    ) -> torch.Tensor:
-        # 70B or MTP layers: KDA + MoE without HC
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # 70B or MTP layers: KDA + MoE without HC. o_proj and MLP run un-reduced
+        # (reduce_results=False / skip_final_all_reduce set in __init__); fold
+        # their cross-rank all-reduce into the following RMSNorm. Returns the
+        # un-reduced MLP output plus the threaded residual so the next layer (or
+        # the final norm) can fuse the reduce.
         if not self.mhc or self.is_mtp_layer:
-            residual = x
-            x = self.input_layernorm(x)
+            if residual is None:
+                residual = hidden_states
+                hidden_states = self.input_layernorm(hidden_states)
+            else:
+                hidden_states, residual = fused_allreduce_rms_norm(
+                    hidden_states, residual, self.input_layernorm
+                )
 
-            attn_output = torch.empty_like(x)
+            attn_output = torch.empty_like(hidden_states)
             self.self_attn(
-                hidden_states=x,
+                hidden_states=hidden_states,
                 positions=positions,
                 output=attn_output,
             )
-            x = residual + attn_output
-
-            residual = x
-            x = self.post_attention_layernorm(x)
-            x = self.mlp(x)
-            x = residual + x
-            return x
+            hidden_states, residual = fused_allreduce_rms_norm(
+                attn_output, residual, self.post_attention_layernorm
+            )
+            hidden_states = self.mlp(hidden_states)
+            return hidden_states, residual
 
         # mHC start
+        x = hidden_states
         if self.layer_idx == 0:
             x = hc_expand(x, self.n)
 
@@ -247,7 +273,7 @@ class Glm5NextDecoderLayer(nn.Module):
         if self.layer_idx == self.num_hidden_layers - 1:
             x = hc_contract(x, self.n)
 
-        return x
+        return x, None
 
     def hc_pre(
         self,
@@ -385,24 +411,33 @@ class Glm5NextModel(nn.Module):
                 hidden_states = inputs_embeds
             else:
                 hidden_states = self.embed_input_ids(input_ids)
+            residual = None
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
 
         for i, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
-            hidden_states = layer(
-                positions=positions,
-                x=hidden_states,
-            )
+            hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
             # PP: intermediate tensor may be 3D [T, n, H] (after hc_expand)
             # or 2D [T, H] (before hc_expand). Layers handle both correctly
             # since hc_expand only runs at layer 0 (first PP rank) and
-            # hc_contract at the last layer (last PP rank).
-            return IntermediateTensors({"hidden_states": hidden_states})
+            # hc_contract at the last layer (last PP rank). residual is None on
+            # the mHC path (those layers are already reduced).
+            return IntermediateTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )
 
-        hidden_states = self.norm(hidden_states)
+        if not self.config.mhc:
+            # Last layer's MLP/MoE output is un-reduced; fuse its all-reduce
+            # into the final norm.
+            hidden_states, _ = fused_allreduce_rms_norm(
+                hidden_states, residual, self.norm
+            )
+        else:
+            hidden_states = self.norm(hidden_states)
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
