@@ -557,14 +557,31 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # different KV cache groups have different block sizes, the actual block size
         # can be a multiple of hash_block_size.
         self.hash_block_size = hash_block_size
+        self.dcp_world_size = dcp_world_size
+        group_block_sizes = [
+            manager.block_size for manager in self.single_type_managers
+        ]
         assert all(
-            g.kv_cache_spec.block_size % hash_block_size == 0
-            for g in kv_cache_config.kv_cache_groups
-        ), "block_size must be divisible by hash_block_size"
-        assert dcp_world_size == 1, "DCP not support hybrid attn now."
+            block_size % hash_block_size == 0 for block_size in group_block_sizes
+        ), (
+            "Each KV cache group's real block_size must be divisible by "
+            f"hash_block_size. block_sizes={group_block_sizes}, "
+            f"hash_block_size={hash_block_size}"
+        )
         assert pcp_world_size == 1, "PCP not support hybrid attn now."
+        if dcp_world_size > 1:
+            # DCP shards full-attention KV across ranks and replicates Mamba
+            # state; other spec types (e.g. sliding window) have no DCP-aware
+            # handling yet, so reject them explicitly.
+            for g in kv_cache_config.kv_cache_groups:
+                assert isinstance(g.kv_cache_spec, (FullAttentionSpec, MambaSpec)), (
+                    "DCP with hybrid KV cache layouts only supports "
+                    "full-attention and Mamba groups, got: "
+                    f"{type(g.kv_cache_spec).__name__}."
+                )
         # Partial hash hits are limited to full-attention + mamba ("align")
-        self.enable_partial_hash_hits = any(
+        # without context parallelism.
+        self.enable_partial_hash_hits = dcp_world_size == 1 and any(
             isinstance(g.kv_cache_spec, MambaSpec)
             and g.kv_cache_spec.mamba_cache_mode == "align"
             and g.kv_cache_spec.block_size > hash_block_size
@@ -704,6 +721,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 self.attention_groups
             ):
                 first_group_id = group_ids[0]
+                # DCP/PCP shard each block's KV across ranks, so the manager's
+                # effective block size may exceed the spec's.
+                group_block_size = self.single_type_managers[first_group_id].block_size
                 cached_blocks = hit_blocks_by_group[first_group_id]
                 if isinstance(spec, FullAttentionSpec) and cached_blocks is not None:
                     # Full attention is downward-closed: we only need to look
@@ -727,8 +747,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                         self.hash_block_size
                         if self.enable_partial_hash_hits
                         and manager_cls.supports_fine_grained_hash_lookup
-                        and spec.block_size > self.hash_block_size
-                        else spec.block_size
+                        and group_block_size > self.hash_block_size
+                        else group_block_size
                     )
                     _max_length = min(
                         curr_hit_length + eagle_margin, max_cache_hit_length
@@ -741,6 +761,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self._cache_hit_alignment_tokens,
+                    dcp_world_size=(
+                        self.dcp_world_size
+                        if isinstance(spec, FullAttentionSpec)
+                        else 1
+                    ),
                 )
                 if drop_eagle_block:
                     eagle_verified.add(idx)
@@ -763,7 +788,10 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # Truncate full attention blocks to final hit_length (if present)
         first_group = self.attention_groups[0]
         if isinstance(first_group.spec, FullAttentionSpec):
-            num_blocks = cdiv(hit_length, first_group.spec.block_size)
+            group_block_size = self.single_type_managers[
+                first_group.group_ids[0]
+            ].block_size
+            num_blocks = cdiv(hit_length, group_block_size)
             for group_id in first_group.group_ids:
                 if (blks := hit_blocks_by_group[group_id]) is not None:
                     del blks[num_blocks:]
