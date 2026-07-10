@@ -735,10 +735,8 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
                 max_w13_scales, requires_grad=False
             )
 
-        self._setup_kernel(layer)
-
-    def _setup_kernel(self, layer: torch.nn.Module) -> None:
-        # TritonExperts consumes the INT8 weights as-is; no relayout needed.
+        # Build the modular MoE kernel. TritonExperts consumes the INT8 weights
+        # as-is; no relayout needed.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
         assert self.experts_cls is not None
