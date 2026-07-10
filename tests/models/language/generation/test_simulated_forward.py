@@ -66,7 +66,7 @@ def test_simulate_forward_model_matrix(
         max_tokens=2,
         ignore_eos=True,
         detokenize=False,
-        extra_args={"simulated_output_token_ids": "501,502"},
+        extra_args={"simulated_output_token_ids": [501, 502]},
     )
 
     with vllm_runner(
@@ -105,7 +105,7 @@ def test_simulate_forward_prefix_cache_hybrid_retention_zero(
         max_tokens=2,
         ignore_eos=True,
         detokenize=False,
-        extra_args={"simulated_output_token_ids": "501,502"},
+        extra_args={"simulated_output_token_ids": [501, 502]},
     )
     prompt = [1000 + (i % 127) for i in range(512)]
 

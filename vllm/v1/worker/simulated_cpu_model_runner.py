@@ -48,24 +48,26 @@ class SimulatedCPUModelRunner(CPUModelRunner):
 
         for new_req_data in scheduler_output.scheduled_new_reqs:
             self._simulated_token_ids_by_req[new_req_data.req_id] = (
-                self._parse_simulated_output(new_req_data)
+                self._get_simulated_output_token_ids(new_req_data)
             )
 
     @staticmethod
-    def _parse_simulated_output(new_req_data: "NewRequestData") -> list[int]:
+    def _get_simulated_output_token_ids(
+        new_req_data: "NewRequestData",
+    ) -> list[int]:
         sampling_params = new_req_data.sampling_params
         extra_args = sampling_params.extra_args if sampling_params else None
-        token_ids: str | None = None
-        if extra_args is not None:
-            raw_token_ids = extra_args.get("simulated_output_token_ids")
-            if raw_token_ids is not None and not isinstance(raw_token_ids, str):
-                raise ValueError(
-                    "simulated_output_token_ids must be a comma-separated string."
-                )
-            token_ids = raw_token_ids
+        token_ids = (
+            None if extra_args is None else extra_args.get("simulated_output_token_ids")
+        )
         if token_ids is None:
             return []
-        return [int(token_id) for token_id in token_ids.split(",") if token_id.strip()]
+        if not isinstance(token_ids, list) or not all(
+            isinstance(token_id, int) and not isinstance(token_id, bool)
+            for token_id in token_ids
+        ):
+            raise ValueError("simulated_output_token_ids must be a list of integers.")
+        return token_ids
 
     @instrument(span_name="Warmup (Simulated CPU)")
     def warming_up_model(self) -> None:
@@ -154,6 +156,11 @@ class SimulatedCPUModelRunner(CPUModelRunner):
             )
 
         self.req_states.total_len.gpu[req_index] = end_idx
+        self.req_states.all_token_ids.gpu[req_index, start_idx:end_idx] = torch.tensor(
+            sampled_ids,
+            dtype=self.req_states.all_token_ids.gpu.dtype,
+            device=self.req_states.all_token_ids.gpu.device,
+        )
         self.req_states.last_sampled_tokens[req_index, 0] = sampled_ids[-1]
 
     def _next_simulated_token_id(self, req_id: str) -> int:
