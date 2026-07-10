@@ -18,6 +18,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.transformers.fusers import (
     BaseFuser,
     GLUFuser,
+    MLAFuser,
     QKVFuser,
     RMSNormFuser,
     StackedFuser,
@@ -42,7 +43,7 @@ def get_fuser(module: nn.Module) -> BaseFuser | None:
         return None
     if (graph := trace(module)) is None:
         return None
-    for fuser_cls in (GLUFuser, QKVFuser, RMSNormFuser):
+    for fuser_cls in (MLAFuser, GLUFuser, QKVFuser, RMSNormFuser):
         if (fuser := fuser_cls.match(graph, module)) is not None:
             if isinstance(fuser, StackedFuser):
                 try:

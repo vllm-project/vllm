@@ -108,6 +108,7 @@ def replace_linear_class(
     quant_config: "QuantizationConfig | None" = None,
     *,
     prefix: str = "",
+    return_bias: bool = False,
 ) -> ColumnParallelLinear | RowParallelLinear | ReplicatedLinear:
     """
     Replace nn.Linear with one of vLLM's tensor parallel linear classes.
@@ -116,6 +117,8 @@ def replace_linear_class(
         linear: `nn.Linear` to be replaced.
         style: Tensor parallel style of the new linear, e.g. "colwise".
         quant_config: Quantization config for the new linear.
+        prefix: Prefix for the new linear's parameter names.
+        return_bias: Whether to return the bias in the forward pass.
     Returns:
         The new linear.
     """
@@ -137,7 +140,7 @@ def replace_linear_class(
         bias=linear.bias is not None,
         quant_config=quant_config,
         prefix=prefix,
-        return_bias=False,
+        return_bias=return_bias,
         **vllm_linear_kwargs,
     )
 

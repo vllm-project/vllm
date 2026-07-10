@@ -1676,7 +1676,16 @@ class ModelConfig:
 
     @property
     def use_mla(self) -> bool:
-        return self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE
+        if envs.VLLM_MLA_DISABLE:
+            return False
+        if self.is_deepseek_mla:
+            # Manually maintained list of model types for vLLM model implementations
+            return True
+        # kv_lora_rank indicates that a Transformers model implementation uses MLA
+        return (
+            self.using_transformers_backend()
+            and getattr(self.hf_text_config, "kv_lora_rank", None) is not None
+        )
 
     @property
     def is_matryoshka(self) -> bool:
