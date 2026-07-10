@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import json
 from copy import deepcopy
 from typing import TYPE_CHECKING
 
@@ -25,7 +24,7 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 
 
 class _NoOpKVBlockZeroer:
@@ -38,7 +37,7 @@ class SimulatedCPUModelRunner(CPUModelRunner):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._simulated_token_ids_by_req: dict[str, list[int] | None] = {}
+        self._simulated_token_ids_by_req: dict[str, list[int]] = {}
 
     def _remove_request(self, req_id: str) -> bool:
         self._simulated_token_ids_by_req.pop(req_id, None)
@@ -48,19 +47,25 @@ class SimulatedCPUModelRunner(CPUModelRunner):
         super().add_requests(scheduler_output)
 
         for new_req_data in scheduler_output.scheduled_new_reqs:
-            self._record_simulated_output(new_req_data)
+            self._simulated_token_ids_by_req[new_req_data.req_id] = (
+                self._parse_simulated_output(new_req_data)
+            )
 
-    def _record_simulated_output(self, new_req_data) -> None:
-        assert new_req_data.prefill_token_ids is not None
-        req_id = new_req_data.req_id
+    @staticmethod
+    def _parse_simulated_output(new_req_data: "NewRequestData") -> list[int]:
         sampling_params = new_req_data.sampling_params
         extra_args = sampling_params.extra_args if sampling_params else None
-        token_ids = (
-            None if extra_args is None else extra_args.get("simulated_output_token_ids")
-        )
-        self._simulated_token_ids_by_req[req_id] = (
-            self._parse_simulated_output_token_ids(token_ids)
-        )
+        token_ids: str | None = None
+        if extra_args is not None:
+            raw_token_ids = extra_args.get("simulated_output_token_ids")
+            if raw_token_ids is not None and not isinstance(raw_token_ids, str):
+                raise ValueError(
+                    "simulated_output_token_ids must be a comma-separated string."
+                )
+            token_ids = raw_token_ids
+        if token_ids is None:
+            return []
+        return [int(token_id) for token_id in token_ids.split(",") if token_id.strip()]
 
     @instrument(span_name="Warmup (Simulated CPU)")
     def warming_up_model(self) -> None:
@@ -158,24 +163,9 @@ class SimulatedCPUModelRunner(CPUModelRunner):
             self.req_states.total_len.gpu[req_index]
             - self.req_states.prompt_len.np[req_index]
         )
-        if isinstance(token_ids, list) and output_idx < len(token_ids):
-            return int(token_ids[output_idx])
+        if output_idx < len(token_ids):
+            return token_ids[output_idx]
         return 0
-
-    @staticmethod
-    def _parse_simulated_output_token_ids(
-        token_ids: list[int | str] | str | None,
-    ) -> list[int] | None:
-        if isinstance(token_ids, list):
-            return [int(token_id) for token_id in token_ids]
-        if isinstance(token_ids, str):
-            try:
-                parsed = json.loads(token_ids)
-            except json.JSONDecodeError:
-                parsed = [part.strip() for part in token_ids.split(",")]
-            if isinstance(parsed, list):
-                return [int(token_id) for token_id in parsed]
-        return None
 
     def initialize_kv_cache(
         self,
