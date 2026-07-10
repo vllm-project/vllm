@@ -77,7 +77,7 @@ def _get_or_create_aiter_qr_rmsnorm_comm(device_comm: object) -> tuple[int, int,
         handles = [None] * world_size
         dist.all_gather_object(handles, handle, group=group)
         aiter.qr_open_handles(ptr, handles)
-    except:
+    except Exception:
         setattr(device_comm, "_aiter_qr_rmsnorm_comm", False)
         return None
 
