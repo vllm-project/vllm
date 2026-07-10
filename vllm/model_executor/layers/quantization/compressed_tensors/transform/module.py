@@ -32,7 +32,7 @@ class HadamardTransform(torch.nn.Module):
     transforms: dict[int, TransformTuple]  # info parsed from transforms config
     weight: SharedWeightParameter  # container for shared tensors
 
-    scales: dict[int, float]  # hadamard scale, usually sqrt(matrix.size(0))
+    scaled_data_ptrs: set[int] = set()
 
     def __init__(
         self,
@@ -44,7 +44,6 @@ class HadamardTransform(torch.nn.Module):
     ):
         super().__init__()
         self.transforms = transforms
-        self.scales = {}
 
         if get_tensor_model_parallel_world_size() > 1:
             raise NotImplementedError(
@@ -75,15 +74,19 @@ class HadamardTransform(torch.nn.Module):
         self._validate_input_transforms()
 
     def process_weights_after_loading(self):
-        for part_id in self.weight.partitions:
-            data = self.weight.partitions[part_id].data
-
+        for part_id, partition in self.weight.partitions.items():
             # required by torch.compile
             self.weight.process_weights_after_loading()
 
-            # precompute scale as a runtime multiply, not division
-            # do not fold into weight in order to utilize FWHT
-            self.scales[part_id] = 1 / math.sqrt(data.size(0))
+            # Merge normalization scale directly into weight, must be done only once
+            # TODO: better way to handle this? cannot each instance of HadamardTransform
+            # has different self.weight.partitions, so updating directly does nothing
+            # and a global cache is required.
+            data_ptr = partition.data.data_ptr()
+            if data_ptr not in HadamardTransform.scaled_data_ptrs:
+                scale = 1 / math.sqrt(partition.data.size(0))
+                partition.data.mul_(scale)
+                HadamardTransform.scaled_data_ptrs.add(data_ptr)
 
             # FUTURE: avoid runtime transpose by processing weights
             # prior to apply
@@ -111,26 +114,19 @@ class HadamardTransform(torch.nn.Module):
             weight = (
                 weight if self.transforms[part_id].args.inverse else weight.T
             )  # linear := x(W.T)
-            scale = self.scales[part_id]
 
             if self.transforms[part_id].scheme.head_dim is not None:
                 value = value.unflatten(-1, (-1, weight.size(0)))
-                value = (
-                    dispatch_unquantized_gemm()(
-                        self, value.to(weight.dtype), weight, None
-                    ).to(value.dtype)
-                    * scale
-                )
+                value = dispatch_unquantized_gemm()(
+                    self, value.to(weight.dtype), weight, None
+                ).to(value.dtype)
                 value = value.flatten(-2, -1)
 
                 return value
 
-            return (
-                dispatch_unquantized_gemm()(
-                    self, value.to(weight.dtype), weight, None
-                ).to(value.dtype)
-                * scale
-            )
+            return dispatch_unquantized_gemm()(
+                self, value.to(weight.dtype), weight, None
+            ).to(value.dtype)
 
     def _get_data_key(self, scheme: TransformScheme, weight_size: int) -> Hashable:
         return (id(scheme), weight_size)

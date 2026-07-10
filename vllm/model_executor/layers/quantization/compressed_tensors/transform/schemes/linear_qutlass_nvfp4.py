@@ -74,9 +74,7 @@ class QutlassNvFP4LinearMethod(CompressedTensorsLinearTransformMethod):
         super().process_weights_after_loading(layer)
 
         assert self.input_transform is not None
-        h = self.input_transform.weight.partitions[0].data
-        h_normalized = (h * self.input_transform.scales[0]).to(torch.bfloat16)
-        layer.hadamard_matrix = Parameter(h_normalized, requires_grad=False)
+        layer.hadamard_matrix = self.input_transform.weight.partitions[0].data
 
         # fusedQuantizeNv stores raw absmax as block scales (sf = absmax),
         # while CT weights use sf = absmax * SFScaleVal / 6.0. The GEMM
@@ -87,7 +85,11 @@ class QutlassNvFP4LinearMethod(CompressedTensorsLinearTransformMethod):
         )
 
         layer.fused_global_scale = Parameter(
-            torch.tensor([NVFP4_MAX], dtype=torch.float32, device=h.device),
+            torch.tensor(
+                [NVFP4_MAX],
+                dtype=torch.float32,
+                device=layer.weight_global_scale.device,
+            ),
             requires_grad=False,
         )
 
