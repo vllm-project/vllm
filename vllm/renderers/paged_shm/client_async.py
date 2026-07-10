@@ -23,6 +23,19 @@ import zmq
 import zmq.asyncio
 from torch._prims_common import DeviceLikeType
 
+from .constant import (
+    CLOSE_READ,
+    DELETE,
+    EMPTY,
+    ERROR,
+    GET_MANAGER_STATE,
+    GET_STORAGE_INFO,
+    OK,
+    OPEN_READ,
+    OPEN_WRITE,
+    PIN,
+    UNPIN,
+)
 from .storage import PagedShmStorage
 
 logger = logging.getLogger(__name__)
@@ -43,10 +56,10 @@ class _AsyncBaseClient:
         if not response:
             raise ConnectionError("Empty response from server")
         status = response[0]
-        data = response[1] if len(response) > 1 else b""
-        if status == b"ERROR":
+        data = response[1] if len(response) > 1 else EMPTY
+        if status == ERROR:
             raise RuntimeError(f"Server error: {data.decode('utf-8')}")
-        if status != b"OK":
+        if status != OK:
             raise RuntimeError(f"Unknown server status: {status!r}")
         return data.decode("utf-8")
 
@@ -175,9 +188,9 @@ class AsyncPagedShmClient(_AsyncBaseClient):
         sock = ctx.socket(zmq.REQ)
         try:
             sock.connect(address)
-            sock.send_multipart([b"get_storage_info"])
+            sock.send_multipart([GET_STORAGE_INFO])
             response = sock.recv_multipart()
-            if response[0] != b"OK":
+            if response[0] != OK:
                 raise RuntimeError(
                     f"Failed to get storage info: server returned {response[0]!r}"
                 )
@@ -267,7 +280,7 @@ class AsyncPagedShmClient(_AsyncBaseClient):
     async def open_write(self, items: list) -> list[dict[str, Any]]:
         """Allocate blocks for a batch of items to be written."""
         payload = json.dumps(items)
-        resp = await self._request(b"open_write", payload)
+        resp = await self._request(OPEN_WRITE, payload)
         return json.loads(resp)
 
     async def close_write(self, uuid: str) -> None:
@@ -276,33 +289,33 @@ class AsyncPagedShmClient(_AsyncBaseClient):
 
     async def open_read(self, uuid: str) -> dict[str, Any]:
         """Acquire a read reference and return block list."""
-        resp = await self._request(b"open_read", uuid)
+        resp = await self._request(OPEN_READ, uuid)
         return json.loads(resp)
 
     async def close_read(self, uuid: str) -> None:
         """Release a read reference."""
-        await self._request(b"close_read", uuid)
+        await self._request(CLOSE_READ, uuid)
 
     async def pin(self, uuid: str) -> None:
         """Pin an item so it is not evicted."""
-        await self._request(b"pin", uuid)
+        await self._request(PIN, uuid)
 
     async def unpin(self, uuid: str) -> None:
         """Unpin an item."""
-        await self._request(b"unpin", uuid)
+        await self._request(UNPIN, uuid)
 
     async def delete(self, uuid: str) -> None:
         """Delete an item and free its blocks."""
-        await self._request(b"delete", uuid)
+        await self._request(DELETE, uuid)
 
     async def get_storage_info(self) -> dict[str, Any]:
         """Return storage metadata."""
-        resp = await self._request(b"get_storage_info")
+        resp = await self._request(GET_STORAGE_INFO)
         return json.loads(resp)
 
     async def get_manager_state(self) -> dict[str, Any]:
         """Return manager statistics."""
-        resp = await self._request(b"get_manager_state")
+        resp = await self._request(GET_MANAGER_STATE)
         return json.loads(resp)
 
     async def get_shm_name(self) -> str:

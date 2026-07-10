@@ -22,6 +22,20 @@ import torch
 import zmq
 from torch._prims_common import DeviceLikeType
 
+from .constant import (
+    CLOSE_READ,
+    CLOSE_WRITE,
+    DELETE,
+    EMPTY,
+    ERROR,
+    GET_MANAGER_STATE,
+    GET_STORAGE_INFO,
+    OK,
+    OPEN_READ,
+    OPEN_WRITE,
+    PIN,
+    UNPIN,
+)
 from .storage import PagedShmStorage
 
 logger = logging.getLogger(__name__)
@@ -47,7 +61,7 @@ class _BaseClient:
         Parse the response from the server.
 
         The server (ROUTER) replies with:
-            [identity, b"", status, data_bytes]
+            [identity, EMPTY, status, data_bytes]
 
         The REQ socket automatically strips the identity and delimiter frames,
         leaving exactly [status, data_bytes] (or just [status] if no data).
@@ -56,11 +70,11 @@ class _BaseClient:
             raise ConnectionError("Empty response from server")
 
         status = response[0]
-        data = response[1] if len(response) > 1 else b""
+        data = response[1] if len(response) > 1 else EMPTY
 
-        if status == b"ERROR":
+        if status == ERROR:
             raise RuntimeError(f"Server error: {data.decode('utf-8')}")
-        if status != b"OK":
+        if status != OK:
             raise RuntimeError(f"Unknown server status: {status!r}")
 
         return data.decode("utf-8")
@@ -175,7 +189,7 @@ class PagedShmClient(_BaseClient):
             self._pool.put(sock)
 
         # Retrieve storage metadata and attach to the shared memory segment
-        info = json.loads(self._request(b"get_storage_info"))
+        info = json.loads(self._request(GET_STORAGE_INFO))
         self._storage = PagedShmStorage(
             size=info["size"],
             block_size=info["block_size"],
@@ -288,42 +302,42 @@ class PagedShmClient(_BaseClient):
     def open_write(self, items: list) -> list[dict[str, Any]]:
         """Allocate blocks for a batch of items to be written."""
         payload = json.dumps(items)
-        resp = self._request(b"open_write", payload)
+        resp = self._request(OPEN_WRITE, payload)
         return json.loads(resp)
 
     def close_write(self, uuid: str) -> None:
         """Finalise a write operation for the given UUID."""
-        self._request(b"close_write", uuid)
+        self._request(CLOSE_WRITE, uuid)
 
     def open_read(self, uuid: str) -> dict[str, Any]:
         """Acquire a read reference to an item and return its block list."""
-        resp = self._request(b"open_read", uuid)
+        resp = self._request(OPEN_READ, uuid)
         return json.loads(resp)
 
     def close_read(self, uuid: str) -> None:
         """Release a read reference for the given UUID."""
-        self._request(b"close_read", uuid)
+        self._request(CLOSE_READ, uuid)
 
     def pin(self, uuid: str) -> None:
         """Pin an item so it is not evicted from the LRU cache."""
-        self._request(b"pin", uuid)
+        self._request(PIN, uuid)
 
     def unpin(self, uuid: str) -> None:
         """Unpin an item, allowing it to be evicted if idle."""
-        self._request(b"unpin", uuid)
+        self._request(UNPIN, uuid)
 
     def delete(self, uuid: str) -> None:
         """Delete an item and free its blocks immediately."""
-        self._request(b"delete", uuid)
+        self._request(DELETE, uuid)
 
     def get_storage_info(self) -> dict[str, Any]:
         """Return storage metadata (name, size, block_size, n_block)."""
-        resp = self._request(b"get_storage_info")
+        resp = self._request(GET_STORAGE_INFO)
         return json.loads(resp)
 
     def get_manager_state(self) -> dict[str, Any]:
         """Return manager statistics (allocations, cache state, etc.)."""
-        resp = self._request(b"get_manager_state")
+        resp = self._request(GET_MANAGER_STATE)
         return json.loads(resp)
 
     def get_shm_name(self) -> str:

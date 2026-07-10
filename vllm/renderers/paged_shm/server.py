@@ -11,10 +11,23 @@ import zmq
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_open_zmq_ipc_path
 
+from .constant import (
+    CLOSE_READ,
+    CLOSE_WRITE,
+    DELETE,
+    EMPTY,
+    ERROR,
+    GET_MANAGER_STATE,
+    GET_STORAGE_INFO,
+    OK,
+    OPEN_READ,
+    OPEN_WRITE,
+    PIN,
+    POLL_INTERVAL,
+    UNPIN,
+)
 from .manager import Item, PagedShmManager
 from .storage import PagedShmStorage
-
-POLL_INTERVAL = 1000
 
 logger = init_logger(__name__)
 
@@ -122,15 +135,15 @@ def _zmq_server(size: int, block_size: int, conn, stop_event: Event):
 
         # Command dispatcher: {command_bytes: (handler, requires_payload)}
         handlers: dict[bytes, tuple[Callable, bool]] = {
-            b"open_write": (server.open_write, True),
-            b"close_write": (server.close_write, True),
-            b"open_read": (server.open_read, True),
-            b"close_read": (server.close_read, True),
-            b"pin": (server.pin, True),
-            b"unpin": (server.unpin, True),
-            b"delete": (server.delete, True),
-            b"get_manager_state": (server.get_manager_state, False),
-            b"get_storage_info": (server.get_storage_info, False),
+            OPEN_WRITE: (server.open_write, True),
+            CLOSE_WRITE: (server.close_write, True),
+            OPEN_READ: (server.open_read, True),
+            CLOSE_READ: (server.close_read, True),
+            PIN: (server.pin, True),
+            UNPIN: (server.unpin, True),
+            DELETE: (server.delete, True),
+            GET_MANAGER_STATE: (server.get_manager_state, False),
+            GET_STORAGE_INFO: (server.get_storage_info, False),
         }
 
         poller = zmq.Poller()
@@ -165,7 +178,7 @@ def _zmq_server(size: int, block_size: int, conn, stop_event: Event):
                 continue
 
             identity, delimiter, command, *payloads = frames
-            if delimiter != b"":
+            if delimiter != EMPTY:
                 logger.warning(
                     "Invalid delimiter in message from %s, ignoring", identity
                 )
@@ -185,8 +198,8 @@ def _zmq_server(size: int, block_size: int, conn, stop_event: Event):
             if handler_info is None:
                 response_frames = [
                     identity,
-                    b"",
-                    b"ERROR",
+                    EMPTY,
+                    ERROR,
                     f"Unknown command: "
                     f"{command.decode('utf-8', errors='replace')}".encode(),
                 ]
@@ -200,11 +213,11 @@ def _zmq_server(size: int, block_size: int, conn, stop_event: Event):
                     result = handler(param)
                 else:
                     result = handler()
-                response_frames = [identity, b"", b"OK", result.encode("utf-8")]
+                response_frames = [identity, EMPTY, OK, result.encode("utf-8")]
             except Exception as e:
                 # Include exception type and message for client debugging
                 error_msg = f"{type(e).__name__}: {e}".encode()
-                response_frames = [identity, b"", b"ERROR", error_msg]
+                response_frames = [identity, EMPTY, ERROR, error_msg]
                 logger.warning(
                     "Command %s failed: %s",
                     command.decode("utf-8", errors="replace"),
