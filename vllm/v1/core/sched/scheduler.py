@@ -178,6 +178,9 @@ class FlowPrefillMixin:
         self._fp_decode_threshold: int = getattr(
             sched_cfg, "preemption_decode_threshold", 1
         )
+        self._fp_max_suspend_ns: int = (
+            getattr(sched_cfg, "preemption_max_suspend_ms", 50) * 1_000_000
+        )
 
         # Suspended prefill state: request_id -> PrefillCheckpointState
         self._suspended_prefills: dict[str, PrefillCheckpointState] = {}
@@ -210,7 +213,10 @@ class FlowPrefillMixin:
         A prefill is resumed when:
 
         1. Its CUDA checkpoint event has fired (non-blocking ``query()``).
-        2. Decode queue depth is below ``preemption_decode_threshold``.
+        2. Decode queue depth is below ``preemption_decode_threshold``, OR
+           it has been suspended longer than ``preemption_max_suspend_ms``
+           (starvation bound — decode pressure alone must not be able to
+           suspend a prefill indefinitely).
 
         Returns a list of ``(request_id, checkpoint, tokens_to_schedule)``
         tuples.  The CUDA query is non-blocking — no CPU synchronization.
@@ -221,6 +227,7 @@ class FlowPrefillMixin:
         resumed: list[tuple] = []
         to_remove: list[str] = []
         decode_depth = self._fp_decode_queue_depth()
+        now_ns = time.perf_counter_ns()
 
         for req_id, checkpoint in self._suspended_prefills.items():
             # Non-blocking GPU query — zero CPU stall
@@ -234,7 +241,8 @@ class FlowPrefillMixin:
                 if not query_result:
                     continue  # GPU hasn't finished this sub-chunk yet
 
-            if decode_depth >= self._fp_decode_threshold:
+            starved = (now_ns - checkpoint.created_at_ns) >= self._fp_max_suspend_ns
+            if decode_depth >= self._fp_decode_threshold and not starved:
                 continue  # Decode pressure still high — keep suspended
 
             assert self._fp_granularity is not None

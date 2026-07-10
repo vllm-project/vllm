@@ -115,6 +115,18 @@ class SchedulerConfig:
     value. Defaults to 1 (any decode request triggers preemption).
     """
 
+    preemption_max_suspend_ms: int = 50
+    """FlowPrefill: maximum time (ms) a checkpointed prefill may stay
+    suspended before it is force-resumed regardless of decode pressure.
+
+    ``preemption_decode_threshold`` gates both suspension (depth >=
+    threshold) and resumption (depth < threshold) with no hysteresis, so
+    under sustained decode load the decode queue may never fully drain and
+    a suspended prefill can starve indefinitely, inflating TTFT. This bound
+    caps the worst case: once a checkpoint has waited this long, it resumes
+    on its next eligible step even if decode requests are still running.
+    """
+
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
 

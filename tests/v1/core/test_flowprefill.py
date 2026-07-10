@@ -52,12 +52,14 @@ def _make_mock_scheduler(
     granularity: int | None = 128,
     decode_threshold: int = 1,
     running_count: int = 0,
+    max_suspend_ms: int = 50,
 ) -> FlowPrefillMixin:
     """Return a minimal FlowPrefillMixin instance with mocked config."""
 
     class _FakeCfg:
         preemption_granularity = granularity
         preemption_decode_threshold = decode_threshold
+        preemption_max_suspend_ms = max_suspend_ms
 
     class _FakeScheduler(FlowPrefillMixin):
         def __init__(self) -> None:
@@ -312,6 +314,55 @@ def test_fp_no_resume_when_event_not_ready():
 def test_fp_no_resume_when_decode_pressure_high():
     """Suspended prefill stays suspended when decode queue is at/above threshold."""
     sched = _make_mock_scheduler(granularity=128, decode_threshold=2, running_count=2)
+    mock_event = _make_mock_event(query_result=True)
+    sched._suspended_prefills["r0"] = PrefillCheckpointState(
+        request_id="r0",
+        checkpoint_pos=128,
+        allocated_kv_blocks_count=8,
+        cuda_event=mock_event,
+    )
+
+    resumed = sched._fp_try_resume_suspended(token_budget=512)
+
+    assert resumed == []
+    assert "r0" in sched._suspended_prefills
+
+
+def test_fp_resume_forced_after_max_suspend_despite_decode_pressure():
+    """A checkpoint older than preemption_max_suspend_ms force-resumes even
+    if decode pressure is still at/above threshold.
+
+    Regression test: preemption_decode_threshold gates suspend (depth >=
+    threshold) and resume (depth < threshold) with no hysteresis, so under
+    sustained decode load a suspended prefill could previously starve
+    indefinitely — decode queue depth rarely drops to zero on a busy
+    server, inflating TTFT. The max-suspend bound caps the worst case.
+    """
+    sched = _make_mock_scheduler(
+        granularity=128, decode_threshold=1, running_count=1, max_suspend_ms=0
+    )
+    mock_event = _make_mock_event(query_result=True)
+    sched._suspended_prefills["r0"] = PrefillCheckpointState(
+        request_id="r0",
+        checkpoint_pos=128,
+        allocated_kv_blocks_count=8,
+        cuda_event=mock_event,
+        created_at_ns=time.perf_counter_ns() - 1,
+    )
+
+    resumed = sched._fp_try_resume_suspended(token_budget=512)
+
+    assert len(resumed) == 1
+    assert resumed[0][0] == "r0"
+    assert "r0" not in sched._suspended_prefills
+
+
+def test_fp_no_forced_resume_before_max_suspend_elapsed():
+    """A fresh checkpoint under decode pressure stays suspended when it
+    hasn't yet reached preemption_max_suspend_ms."""
+    sched = _make_mock_scheduler(
+        granularity=128, decode_threshold=1, running_count=1, max_suspend_ms=60_000
+    )
     mock_event = _make_mock_event(query_result=True)
     sched._suspended_prefills["r0"] = PrefillCheckpointState(
         request_id="r0",
