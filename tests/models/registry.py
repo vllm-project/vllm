@@ -327,6 +327,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GraniteMoeSharedForCausalLM": _HfExamplesInfo(
         "ibm-research/moe-7b-1b-active-shared-experts"
     ),
+    "GraniteMoeSWAForCausalLM": _HfExamplesInfo(
+        "ibm-research/granite-swash-3b-a600m", min_transformers_version="5.14.1"
+    ),
+    "GraniteSWAForCausalLM": _HfExamplesInfo(
+        "ibm-research/granite-swash-2b", min_transformers_version="5.14.1"
+    ),
     "Grok1ModelForCausalLM": _HfExamplesInfo(
         "hpcai-tech/grok-1", trust_remote_code=True
     ),
