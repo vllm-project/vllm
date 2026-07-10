@@ -540,7 +540,7 @@ def _cosmos3_edge_diffusers_weight_map():
     info=Cosmos3EdgeProcessingInfo,
     dummy_inputs=Cosmos3EdgeDummyInputsBuilder,
 )
-class Cosmos3EdgeForConditionCausalLM(
+class Cosmos3EdgeForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
     SupportsPP,
@@ -615,7 +615,7 @@ class Cosmos3EdgeForConditionCausalLM(
 
         self.config = config
         self.multimodal_config = multimodal_config
-        if "Cosmos3EdgeForConditionCausalLM" in (
+        if "Cosmos3EdgeForConditionalGeneration" in (
             getattr(config, "architectures", None) or ()
         ):
             self.allow_patterns_overrides = ["transformer/*.safetensors"]

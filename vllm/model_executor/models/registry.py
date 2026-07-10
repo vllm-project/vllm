@@ -349,9 +349,9 @@ _MULTIMODAL_MODELS = {
         "Cohere2VisionForConditionalGeneration",
     ),
     "Cosmos3ForConditionalGeneration": ("cosmos3", "Cosmos3ForConditionalGeneration"),
-    "Cosmos3EdgeForConditionCausalLM": (
+    "Cosmos3EdgeForConditionalGeneration": (
         "cosmos3_edge",
-        "Cosmos3EdgeForConditionCausalLM",
+        "Cosmos3EdgeForConditionalGeneration",
     ),
     "DeepseekVLV2ForCausalLM": ("deepseek_vl2", "DeepseekVLV2ForCausalLM"),
     "DeepseekOCRForCausalLM": ("deepseek_ocr", "DeepseekOCRForCausalLM"),
