@@ -669,6 +669,7 @@ def main():
 
         # Prefill backends (e.g., ["fa3", "fa4"])
         args.prefill_backends = yaml_config.get("prefill_backends", None)
+        args.prefill_backend = yaml_config.get("prefill_backend", None)
 
         # FP8 output benchmark knobs; CLI wins.
         if args.fp8_output_scale is None:
@@ -1113,6 +1114,9 @@ def main():
 
         sparse_mla_topk_pattern = getattr(args, "sparse_mla_topk_pattern", "random")
         dense_mha_max_seq_len = getattr(args, "sparse_mla_dense_mha_max_seq_len", None)
+        prefill_backend = getattr(args, "prefill_backend", None)
+        if prefill_backend:
+            console.print(f"Prefill backend: {prefill_backend}")
         available_variants = [
             ("dense_mha", False, "dense"),
             ("mqa", True, "auto"),
@@ -1185,6 +1189,7 @@ def main():
                             sparse_mla_mha_mode=mha_mode,
                             sparse_mla_dense_mha_max_seq_len=dense_mha_max_seq_len,
                             sparse_mla_topk_pattern=sparse_mla_topk_pattern,
+                            prefill_backend=prefill_backend,
                         )
 
                         # run_mla_benchmark needs the real backend name
@@ -1197,6 +1202,7 @@ def main():
                             result = run_mla(
                                 backend,
                                 config,
+                                prefill_backend=prefill_backend,
                                 sparse_mla_force_mqa=force_mqa,
                             )
                         except Exception as e:
