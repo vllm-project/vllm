@@ -44,11 +44,39 @@ class SimulatedCPUModelRunner(CPUModelRunner):
         return super()._remove_request(req_id)
 
     def add_requests(self, scheduler_output: "SchedulerOutput") -> None:
-        super().add_requests(scheduler_output)
-
         for new_req_data in scheduler_output.scheduled_new_reqs:
+            assert new_req_data.prompt_token_ids is not None
+            assert new_req_data.prefill_token_ids is not None
+
+            req_id = new_req_data.req_id
+            self._remove_request(req_id)
+
+            sampling_params = new_req_data.sampling_params
+            max_tokens = (
+                sampling_params.max_tokens
+                if sampling_params and sampling_params.max_tokens is not None
+                else 1
+            )
+            self._add_simulated_request_state(
+                req_id=req_id,
+                prompt_len=len(new_req_data.prompt_token_ids),
+                all_token_ids=new_req_data.prefill_token_ids,
+                num_computed_tokens=new_req_data.num_computed_tokens,
+                max_tokens=max_tokens,
+            )
             self._simulated_token_ids_by_req[new_req_data.req_id] = (
                 self._get_simulated_output_token_ids(new_req_data)
+            )
+
+    def update_requests(self, scheduler_output: "SchedulerOutput") -> None:
+        reqs = scheduler_output.scheduled_cached_reqs
+        for req_id, num_computed_tokens in zip(reqs.req_ids, reqs.num_computed_tokens):
+            req_index = self.req_states.req_id_to_index[req_id]
+            self.req_states.num_computed_tokens_np[req_index] = num_computed_tokens
+            self.req_states.num_computed_tokens.gpu[req_index] = num_computed_tokens
+            self.req_states.num_computed_prefill_tokens[req_index] = min(
+                num_computed_tokens,
+                self.req_states.prefill_len.np[req_index],
             )
 
     @staticmethod
@@ -68,6 +96,40 @@ class SimulatedCPUModelRunner(CPUModelRunner):
         ):
             raise ValueError("simulated_output_token_ids must be a list of integers.")
         return token_ids
+
+    def _add_simulated_request_state(
+        self,
+        req_id: str,
+        prompt_len: int,
+        all_token_ids: list[int],
+        num_computed_tokens: int,
+        max_tokens: int,
+    ) -> None:
+        req_states = self.req_states
+        assert len(req_states.free_indices) > 0, "No free indices"
+        req_index = req_states.free_indices.pop()
+        req_states.req_id_to_index[req_id] = req_index
+        req_states.index_to_req_id[req_index] = req_id
+
+        prefill_len = len(all_token_ids)
+        assert prefill_len >= prompt_len, (
+            f"prefill_len {prefill_len} < prompt_len {prompt_len}"
+        )
+        req_states.max_seq_len[req_index] = prompt_len + max_tokens
+        req_states.prompt_len.np[req_index] = prompt_len
+        req_states.prompt_len.gpu[req_index] = prompt_len
+        req_states.prefill_len.np[req_index] = prefill_len
+        req_states.prefill_len.gpu[req_index] = prefill_len
+        req_states.total_len.gpu[req_index] = prefill_len
+        req_states.num_computed_prefill_tokens[req_index] = num_computed_tokens
+        req_states.num_computed_tokens_np[req_index] = num_computed_tokens
+        req_states.num_computed_tokens.gpu[req_index] = num_computed_tokens
+        req_states.all_token_ids.gpu[req_index, :prefill_len] = torch.tensor(
+            all_token_ids,
+            dtype=torch.int32,
+            device=req_states.all_token_ids.gpu.device,
+        )
+        req_states.draft_tokens[req_index].zero_()
 
     @instrument(span_name="Warmup (Simulated CPU)")
     def warming_up_model(self) -> None:
