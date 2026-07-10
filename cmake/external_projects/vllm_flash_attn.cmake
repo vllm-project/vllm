@@ -38,13 +38,8 @@ if(VLLM_FLASH_ATTN_SRC_DIR)
 else()
   FetchContent_Declare(
           vllm-flash-attn
-<<<<<<< HEAD
           GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
           GIT_TAG caaa4eb59845388a20b1f435ecaafb4bd9517ad8
-=======
-          GIT_REPOSITORY https://github.com/arpera/flash-attention.git
-          GIT_TAG 68dfa7c8f9d7939b123aa504b7b53e54cf7700b5
->>>>>>> 42778681e ([CI] Point vllm-flash-attn at arpera/flash-attention#157 (68dfa7c, rebased on #149) for cutlass 4.6.0 validation)
           GIT_PROGRESS TRUE
           # Don't share the vllm-flash-attn build between build types
           BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn
