@@ -42,9 +42,7 @@ logger = init_logger(__name__)
 # find_spec/amdsmi, so it stays HIP-free.
 # Actual aiter imports are deferred to the functions/methods that need them,
 # where HIP initialization is expected.
-_AITER_SUPPORTED = is_aiter_found_and_supported()
-
-if _AITER_SUPPORTED:
+if is_aiter_found_and_supported():
     from vllm.utils.torch_utils import direct_register_custom_op
 
     def gemm_with_dynamic_quant(
@@ -216,7 +214,7 @@ class QuarkOCP_MX(QuarkScheme):
             rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()
         )
 
-        if not self.emulate and not _AITER_SUPPORTED:
+        if not self.emulate and not is_aiter_found_and_supported():
             # Currently need AITER kernels if not emulating
             raise NotImplementedError(
                 f"{self.__class__.__name__} requires AITER to be installed "
