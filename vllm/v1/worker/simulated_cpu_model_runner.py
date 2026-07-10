@@ -10,11 +10,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
-from vllm.model_executor.model_loader.utils import initialize_model
 from vllm.sequence import IntermediateTensors
 from vllm.tracing import instrument
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
@@ -23,7 +21,6 @@ from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.worker.cpu.model_runner import CPUModelRunner
 from vllm.v1.worker.gpu.attn_utils import init_attn_backend
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.model_states import init_model_state
 
 logger = init_logger(__name__)
 
@@ -39,29 +36,10 @@ class _NoOpKVBlockZeroer:
 class SimulatedCPUModelRunner(CPUModelRunner):
     """CPU runner that simulates model execution while preserving scheduler/KV logic."""
 
-    @instrument(span_name="Loading (Simulated CPU)")
-    def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
-        logger.info(
-            "Initializing metadata-only model %s for simulated forward...",
-            self.model_config.model,
-        )
-        self.compilation_config.static_forward_context.clear()
-        with set_default_torch_dtype(self.model_config.dtype), torch.device("meta"):
-            self.model = initialize_model(vllm_config=self.vllm_config)
-        self.model_state = init_model_state(
-            self.vllm_config, self.model, self.encoder_cache, self.device
-        )
-        self.decode_query_len = (
-            self.num_speculative_steps
-            + self.model_state.num_new_sampled_tokens_per_step
-        )
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
         self._simulated_token_ids_by_req: dict[str, list[int] | None] = {}
         self._total_len_by_req: dict[str, int] = {}
-        logger.info(
-            "Initialized metadata-only model %s on the meta device for "
-            "simulated forward.",
-            self.model_config.model,
-        )
 
     def _remove_request(self, req_id: str) -> bool:
         self._simulated_token_ids_by_req.pop(req_id, None)
@@ -69,48 +47,23 @@ class SimulatedCPUModelRunner(CPUModelRunner):
         return super()._remove_request(req_id)
 
     def add_requests(self, scheduler_output: "SchedulerOutput") -> None:
-        # Mirrors the V2 runner request bookkeeping, but skips sampler
-        # registration because simulated execute_model returns tokens directly.
+        super().add_requests(scheduler_output)
+
         for new_req_data in scheduler_output.scheduled_new_reqs:
-            assert new_req_data.prompt_token_ids is not None
-            assert new_req_data.prefill_token_ids is not None
-            req_id = new_req_data.req_id
+            self._record_simulated_output(new_req_data)
 
-            self._remove_request(req_id)
-
-            prompt_len = len(new_req_data.prompt_token_ids)
-            sampling_params = new_req_data.sampling_params
-            self.req_states.add_request(
-                req_id=req_id,
-                prompt_len=prompt_len,
-                all_token_ids=new_req_data.prefill_token_ids,
-                num_computed_tokens=new_req_data.num_computed_tokens,
-                max_tokens=(sampling_params.max_tokens if sampling_params else None)
-                or 1,
-            )
-            req_index = self.req_states.req_id_to_index[req_id]
-            self._total_len_by_req[req_id] = len(new_req_data.prefill_token_ids)
-
-            if self.encoder_cache is not None:
-                self.encoder_cache.add_request(req_id, new_req_data.mm_features)
-
-            self.model_state.add_request(req_index, new_req_data)
-            self.block_tables.append_block_ids(
-                req_index, new_req_data.block_ids, overwrite=True
-            )
-            self.lora_state.add_request(req_id, req_index, new_req_data.lora_request)
-            extra_args = sampling_params.extra_args if sampling_params else None
-            token_ids = (
-                None
-                if extra_args is None
-                else extra_args.get("simulated_output_token_ids")
-            )
-            self._simulated_token_ids_by_req[req_id] = self._parse_simulated_token_ids(
-                token_ids
-            )
-
-        # No staged writes: simulated execution reads CPU-side mirrors only and
-        # never runs sampler/model kernels that consume the GPU buffers.
+    def _record_simulated_output(self, new_req_data) -> None:
+        assert new_req_data.prefill_token_ids is not None
+        req_id = new_req_data.req_id
+        sampling_params = new_req_data.sampling_params
+        self._total_len_by_req[req_id] = len(new_req_data.prefill_token_ids)
+        extra_args = sampling_params.extra_args if sampling_params else None
+        token_ids = (
+            None if extra_args is None else extra_args.get("simulated_output_token_ids")
+        )
+        self._simulated_token_ids_by_req[req_id] = (
+            self._parse_simulated_output_token_ids(token_ids)
+        )
 
     @instrument(span_name="Warmup (Simulated CPU)")
     def warming_up_model(self) -> None:
@@ -161,7 +114,9 @@ class SimulatedCPUModelRunner(CPUModelRunner):
                 [self._next_simulated_token_id(req_id)] if reaches_decode else []
             )
             sampled_token_ids.append(sampled_ids)
-            self._advance_request(req_id, req_index, scheduled_tokens, sampled_ids)
+            self._advance_simulated_request(
+                req_id, req_index, scheduled_tokens, sampled_ids
+            )
 
         return ModelRunnerOutput(
             req_ids=req_ids_output_copy,
@@ -169,7 +124,7 @@ class SimulatedCPUModelRunner(CPUModelRunner):
             sampled_token_ids=sampled_token_ids,
         )
 
-    def _advance_request(
+    def _advance_simulated_request(
         self,
         req_id: str,
         req_index: int,
@@ -210,7 +165,7 @@ class SimulatedCPUModelRunner(CPUModelRunner):
         return 0
 
     @staticmethod
-    def _parse_simulated_token_ids(
+    def _parse_simulated_output_token_ids(
         token_ids: list[int | str] | str | None,
     ) -> list[int] | None:
         if isinstance(token_ids, list):

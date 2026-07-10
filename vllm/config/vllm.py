@@ -2013,6 +2013,17 @@ class VllmConfig:
         if self.model_config.is_hybrid:
             HybridAttentionMambaModelConfig.verify_and_update_config(self)
 
+        if self.cache_config.simulate_forward:
+            self.load_config.load_format = "dummy"
+            self.load_config.device = "meta"
+
+            if (
+                self.speculative_config is not None
+                and self.speculative_config.draft_load_config is not None
+            ):
+                self.speculative_config.draft_load_config.load_format = "dummy"
+                self.speculative_config.draft_load_config.device = "meta"
+
         if self.model_config.convert_type == "classify":
             # Maybe convert ForCausalLM into ForSequenceClassification model.
             from vllm.model_executor.models.adapters import SequenceClassificationConfig
