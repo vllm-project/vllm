@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import math
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -362,7 +363,15 @@ class Scheduler(SchedulerInterface):
             # Additionally, when Eagle mode is enabled, FullAttn prunes the last
             # matching block. To prevent this from causing a Mamba cache miss, the
             # last chunk must be not smaller than `block_size`.
-            block_size = self.cache_config.block_size
+            block_size = getattr(self, "block_size", self.cache_config.block_size)
+            dcp_world_size = getattr(self, "dcp_world_size", 1)
+            if dcp_world_size > 1:
+                block_size = math.lcm(
+                    block_size,
+                    self.cache_config.block_size * dcp_world_size,
+                )
+            if num_new_tokens < block_size:
+                return num_new_tokens
             last_cache_position = request.num_tokens - request.num_tokens % block_size
             # eagle prune
             if self.use_eagle:
