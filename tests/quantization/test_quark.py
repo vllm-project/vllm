@@ -32,8 +32,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms.rocm import on_gfx942, on_gfx950
 else:
+
+    def on_gfx942() -> bool:
+        return False
 
     def on_gfx950() -> bool:
         return False
@@ -172,7 +175,7 @@ def test_quark_int8_w8a8_moe(vllm_runner, tp):
 
 
 @pytest.mark.skipif(
-    not on_gfx950(),
+    not (on_gfx950() or on_gfx942()),
     reason="Quark W4A8 (INT4-FP8) MoE requires the AITER kernel on gfx942/gfx950",
 )
 @pytest.mark.parametrize("tp", [1])
