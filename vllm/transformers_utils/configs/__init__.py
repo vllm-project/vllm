@@ -79,6 +79,9 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "KimiK3VisionConfig": "vllm.transformers_utils.configs.kimi_k3",
     "NemotronConfig": "vllm.transformers_utils.configs.nemotron",
     "NemotronHConfig": "vllm.transformers_utils.configs.nemotron_h",
+    "NemotronLabsDiffusionConfig": (
+        "vllm.transformers_utils.configs.nemotron_labs_diffusion"
+    ),
     "OlmoHybridConfig": "vllm.transformers_utils.configs.olmo_hybrid",
     "OpenVLAConfig": "vllm.transformers_utils.configs.openvla",
     "OvisConfig": "vllm.transformers_utils.configs.ovis",
@@ -154,6 +157,7 @@ __all__ = [
     "MiniMaxM3Config",
     "MiniMaxM3MTPConfig",
     "MiniMaxM3TextConfig",
+    "NemotronLabsDiffusionConfig",
     "MLPSpeculatorConfig",
     "Moondream3Config",
     "Moondream3TextConfig",

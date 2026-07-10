@@ -1051,11 +1051,13 @@ class SamplingParams(
         if not model_config.is_diffusion:
             return
 
-        # Diffusion models denoise a whole canvas per step with a fixed
-        # temperature schedule, so per-request sampling parameters are not
-        # supported. Penalties are ignored by the sampler with a warning.
+        # Nemotron's masked sampler supports a per-request greedy override;
+        # other diffusion models retain their engine-level schedule.
+        greedy_masked = self.temperature == 0.0 and (
+            "NemotronLabsDiffusionModel" in model_config.architectures
+        )
         if (
-            self.temperature != 1.0
+            (self.temperature != 1.0 and not greedy_masked)
             or self.min_p > _SAMPLING_EPS
             or self.seed is not None
             or self.min_tokens > 0

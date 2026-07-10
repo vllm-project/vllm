@@ -461,6 +461,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
         is_available_online=False,
     ),
+    "NemotronLabsDiffusionModel": _HfExamplesInfo(
+        "nvidia/Nemotron-Labs-Diffusion-3B",
+    ),
     "NanbeigeForCausalLM": _HfExamplesInfo(
         "Nanbeige/Nanbeige4.2-3B",
         trust_remote_code=True,
