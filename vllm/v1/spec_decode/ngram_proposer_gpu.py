@@ -545,7 +545,7 @@ def update_ngram_gpu_tensors_incremental(
             num_tokens = input_batch.num_tokens_no_spec[idx]
             if num_tokens > 0:
                 token_ids_gpu_tensor[idx, :num_tokens].copy_(
-                    input_batch.token_ids_cpu_tensor[idx, :num_tokens],
+                    input_batch.token_ids_cpu_tensor[idx, :num_tokens].pin_memory(),
                     non_blocking=True,
                 )
 
@@ -591,7 +591,7 @@ def update_ngram_gpu_tensors_incremental(
         num_tokens = input_batch.num_tokens_no_spec[new_req_idx]
         if num_tokens > 0:
             token_ids_gpu_tensor[new_req_idx, :num_tokens].copy_(
-                input_batch.token_ids_cpu_tensor[new_req_idx, :num_tokens],
+                input_batch.token_ids_cpu_tensor[new_req_idx, :num_tokens].pin_memory(),
                 non_blocking=True,
             )
 

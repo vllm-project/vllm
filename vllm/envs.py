@@ -79,6 +79,7 @@ if TYPE_CHECKING:
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_MAX_AUDIO_DECODE_DURATION_S: int = 600
     VLLM_MAX_AUDIO_PREPROCESS_WORKERS: int = max(1, min(os.cpu_count() or 1, 2))
+    VLLM_MAX_IMAGE_PIXELS: int = 178_956_970
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_MM_HASHER_ALGORITHM: str = "blake3"
@@ -87,18 +88,24 @@ if TYPE_CHECKING:
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
     VLLM_TRITON_ATTN_USE_TD: bool | None = None
+    VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
     VLLM_USE_PRECOMPILED_RUST: bool = False
     VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX: bool = False
     VLLM_DOCKER_BUILD_CONTEXT: bool = False
+    VLLM_BUILD_COMMIT: str = "unknown"
+    VLLM_BUILD_PIPELINE: str = "local"
+    VLLM_BUILD_URL: str = ""
+    VLLM_IMAGE_TAG: str = ""
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
     CMAKE_BUILD_TYPE: Literal["Debug", "Release", "RelWithDebInfo"] | None = None
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_MAX_N_SEQUENCES: int = 16384
+    VLLM_MAX_COMPLETION_PROMPTS: int = 1024
     VLLM_PLUGINS: list[str] | None = None
     VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
     VLLM_LORA_RESOLVER_HF_REPO_LIST: str | None = None
@@ -117,6 +124,7 @@ if TYPE_CHECKING:
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
+    VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
@@ -185,6 +193,7 @@ if TYPE_CHECKING:
         "relax",
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
+    VLLM_MOE_SKIP_PADDING: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
@@ -199,6 +208,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
     VLLM_MOONCAKE_STORE_TIER_LOG: bool = False
+    VLLM_MOONCAKE_LOAD_RECV_THREADS: int = 1
     VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO: float = 0.9
     MOONCAKE_PREFERRED_SEGMENT: str | None = None
     MOONCAKE_REQUESTER_LOCAL_HOSTNAME: str | None = None
@@ -212,7 +222,7 @@ if TYPE_CHECKING:
     VLLM_SSM_CONV_STATE_LAYOUT: Literal["SD", "DS"] | None = None
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: Literal[
-        "FP", "INT8", "INT6", "INT4", "NONE"
+        "FP", "INT8", "INT6", "INT4", "INT3", "NONE"
     ] = "NONE"
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
@@ -228,6 +238,7 @@ if TYPE_CHECKING:
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = False
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
+    VLLM_ENABLE_STARTUP_PLAN: bool = False
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
     VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT: bool = False
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
@@ -485,7 +496,7 @@ def get_vllm_port() -> int | None:
             raise ValueError(
                 f"VLLM_PORT '{port}' appears to be a URI. "
                 "This may be caused by a Kubernetes service discovery issue,"
-                "check the warning in: https://docs.vllm.ai/en/stable/serving/env_vars.html"
+                "check the warning in: https://docs.vllm.ai/en/latest/configuration/env_vars.html"
             ) from None
         raise ValueError(f"VLLM_PORT '{port}' must be a valid integer") from err
 
@@ -582,6 +593,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TRITON_ATTN_USE_TD": lambda: {"1": True, "0": False}.get(
         os.getenv("VLLM_TRITON_ATTN_USE_TD", "").strip()
     ),
+    # If set, enable PyTorch's GPU<->CPU synchronization debug mode around
+    # the worker's `execute_model` and `sample_tokens` calls. Valid values
+    # are "warn" (print a warning on each sync) or "error" (raise on sync).
+    # Unset disables the check. See `torch.cuda.set_sync_debug_mode`.
+    "VLLM_GPU_SYNC_CHECK": env_with_choices(
+        "VLLM_GPU_SYNC_CHECK", None, ["warn", "error"]
+    ),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
     "MAX_JOBS": lambda: os.getenv("MAX_JOBS", None),
@@ -607,6 +625,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DOCKER_BUILD_CONTEXT": lambda: (
         os.environ.get("VLLM_DOCKER_BUILD_CONTEXT", "").strip().lower() in ("1", "true")
     ),
+    # Build provenance metadata embedded in official vllm-openai images.
+    # Set via Docker ENV at image build time; informational only.
+    "VLLM_BUILD_COMMIT": lambda: os.environ.get("VLLM_BUILD_COMMIT", "unknown"),
+    "VLLM_BUILD_PIPELINE": lambda: os.environ.get("VLLM_BUILD_PIPELINE", "local"),
+    "VLLM_BUILD_URL": lambda: os.environ.get("VLLM_BUILD_URL", ""),
+    "VLLM_IMAGE_TAG": lambda: os.environ.get("VLLM_IMAGE_TAG", ""),
     # CMake build type
     # If not set, defaults to "Debug" or "RelWithDebInfo"
     # Available options: "Debug", "Release", "RelWithDebInfo"
@@ -944,6 +968,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
             str(max(1, min(os.cpu_count() or 1, 2))),
         )
     ),
+    # Maximum decoded image size in pixels.  Small compressed images can
+    # expand into gigabytes of raster memory.  This limit is enforced before
+    # decoding so the memory is never allocated.  Default matches PIL's
+    # built-in 2x decompression-bomb threshold (~179M pixels, ~680 MB RGB).
+    "VLLM_MAX_IMAGE_PIXELS": lambda: int(
+        os.getenv("VLLM_MAX_IMAGE_PIXELS", "178956970")
+    ),
     # Backend for Video IO — selects the frame-sampling algorithm.
     # - "opencv": uniform sampling.
     # - "opencv_dynamic": duration-aware dynamic sampling.
@@ -1039,6 +1070,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MAX_N_SEQUENCES": lambda: int(
         os.environ.get("VLLM_MAX_N_SEQUENCES", "16384")
     ),
+    # Maximum number of prompts allowed in a single /v1/completions request
+    # when the prompt field is a list. Prevents unbounded fan-out of engine
+    # requests from a single API call. Default: 1024.
+    "VLLM_MAX_COMPLETION_PROMPTS": lambda: int(
+        os.environ.get("VLLM_MAX_COMPLETION_PROMPTS", "1024")
+    ),
     # a list of plugin names to load, separated by commas.
     # if this is not set, it means all plugins will be loaded
     # if this is set to an empty string, no plugins will be loaded
@@ -1127,6 +1164,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_ROCM_USE_AITER": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
+    ),
+    # Use AITER's CustomAllreduce as the custom-allreduce backend inside vLLM's
+    # CudaCommunicator on ROCm.
+    "VLLM_ROCM_USE_AITER_CUSTOM_AR": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_CUSTOM_AR", "True").lower() in ("true", "1")
     ),
     # Whether to use aiter paged attention.
     # By default is disabled.
@@ -1222,12 +1264,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "False").lower() in ("true", "1")
     ),
     # Custom quick allreduce kernel for MI3* cards
-    # Choice of quantization level: FP, INT8, INT6, INT4 or NONE
+    # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE
     # Recommended for large models to get allreduce
     "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": env_with_choices(
         "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION",
         "NONE",
-        ["FP", "INT8", "INT6", "INT4", "NONE"],
+        ["FP", "INT8", "INT6", "INT4", "INT3", "NONE"],
     ),
     # Custom quick allreduce kernel for MI3* cards
     # Due to the lack of the bfloat16 asm instruction, bfloat16
@@ -1468,6 +1510,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FUSED_MOE_GROUPED_TOPK": lambda: bool(
         int(os.getenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1"))
     ),
+    # Skip cudagraph/DP padding tokens in the MoE path by forcing their expert
+    # ids to -1 so the dispatch and experts drop them. Requires a MoE kernel that
+    # treats topk_id == -1 as a skip sentinel; off by default because not all
+    # kernels support it yet.
+    "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "0"))),
     # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(
@@ -1525,6 +1572,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MOONCAKE_STORE_TIER_LOG": lambda: (
         os.getenv("VLLM_MOONCAKE_STORE_TIER_LOG", "False").lower() in ("true", "1")
     ),
+    # Number of parallel KV-load receive threads per worker rank. Lets the
+    # per-request control overhead (Python prep + master key lookup) of one
+    # request overlap with the RDMA transfer of another, keeping the transfer
+    # engine's queue pairs busy. Helps when that overhead is significant or
+    # per-request batches are too small to saturate the link on their own.
+    "VLLM_MOONCAKE_LOAD_RECV_THREADS": lambda: int(
+        os.getenv("VLLM_MOONCAKE_LOAD_RECV_THREADS", "1")
+    ),
     # Fraction of the owner's DirectIO staging buffer to fill per GET batch.
     "VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO": lambda: float(
         os.getenv("VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO", "0.9")
@@ -1579,10 +1634,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS", "1")
     ),
     # Enforce function parameter schemas in structural-tag based tool calling.
-    "VLLM_ENFORCE_STRICT_TOOL_CALLING": lambda: os.getenv(
-        "VLLM_ENFORCE_STRICT_TOOL_CALLING", "True"
-    ).lower()
-    in ("true", "1"),
+    "VLLM_ENFORCE_STRICT_TOOL_CALLING": lambda: (
+        os.getenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "True").lower() in ("true", "1")
+    ),
     # Control the max chunk bytes (in MB) for the rpc message queue.
     # Object larger than this threshold will be broadcast to worker
     # processes via zmq.
@@ -1685,6 +1739,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Each component first checks this folder, then the configs shipped with
     # vLLM (if any). If no JSON matches, it uses a hard-coded heuristic.
     "VLLM_TUNED_CONFIG_FOLDER": lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
+    # Opt-in persistence of the startup plan. When enabled, each worker
+    # saves the memory-profiling result (the suggested --kv-cache-memory value
+    # and the free-memory baseline) under VLLM_CACHE_ROOT/startup_plan/,
+    # keyed by a hardware+config fingerprint, and later boots auto-apply it
+    # -- skipping memory profiling -- when the fingerprint matches and
+    # current free memory >= the recorded baseline.
+    # See vllm/v1/worker/startup_plan.py.
+    "VLLM_ENABLE_STARTUP_PLAN": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_STARTUP_PLAN", "0"))
+    ),
     # Valid values are container,code_interpreter,web_search_preview
     # ex VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS=container,code_interpreter
     # If the server_label of your mcp tool is not in this list it will
@@ -2019,6 +2083,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_DEBUG_DUMP_PATH",
         "VLLM_PORT",
         "VLLM_CACHE_ROOT",
+        # Runtime memory-plan persistence; does not affect compiled graphs.
+        "VLLM_ENABLE_STARTUP_PLAN",
         "LD_LIBRARY_PATH",
         "VLLM_SERVER_DEV_MODE",
         "VLLM_DP_MASTER_IP",
@@ -2061,6 +2127,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB",
         "VLLM_MAX_AUDIO_DECODE_DURATION_S",
         "VLLM_MAX_AUDIO_PREPROCESS_WORKERS",
+        "VLLM_MAX_IMAGE_PIXELS",
         "VLLM_VIDEO_LOADER_BACKEND",
         "VLLM_MEDIA_CONNECTOR",
         "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",

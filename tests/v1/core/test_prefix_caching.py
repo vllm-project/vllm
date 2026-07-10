@@ -12,7 +12,12 @@ import torch
 
 import vllm.v1.core.kv_cache_manager as kv_cache_manager
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-from vllm.distributed.kv_events import AllBlocksCleared, BlockRemoved, BlockStored
+from vllm.distributed.kv_events import (
+    MEDIUM_GPU,
+    AllBlocksCleared,
+    BlockRemoved,
+    BlockStored,
+)
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -2003,7 +2008,7 @@ def test_maybe_evict_cached_block():
     assert len(pool.blocks) == len(block_hashes)
     # Manually add all blocks to cached_blocks
     for block, block_hash in zip(pool.blocks, block_hashes):
-        block.block_hash = block_hash
+        block.set_block_hash(block_hash)
         pool.cached_block_hash_to_block.insert(block_hash, block)
 
     block0, block1, block2, block3 = pool.blocks
@@ -2452,6 +2457,118 @@ def test_block_removed_event_group_idx(group_id: int):
     assert len(removed_events) == 2
     for event in removed_events:
         assert event.group_idx == group_id
+
+
+def test_emit_cached_block_events():
+    """emit_cached_block_events emits one BlockStored for already-cached
+    (reused) prefix blocks, carrying the correct group_idx /
+    parent_block_hash / token_ids, and without mutating block state."""
+    block_size = 4
+    num_cached_blocks = 3
+    kv_cache_group_id = 1
+    num_tokens = block_size * 4  # 4 full blocks; reuse the first 3
+
+    pool = BlockPool(
+        num_gpu_blocks=8,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+
+    req = make_request(
+        "req_emit_cached",
+        prompt_token_ids=list(range(num_tokens)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+    assert len(req.block_hashes) >= num_cached_blocks
+
+    # Snapshot block state to prove emit_cached_block_events does not mutate it.
+    free_before = pool.get_num_free_blocks()
+    assert len(pool.cached_block_hash_to_block) == 0
+
+    pool.emit_cached_block_events(
+        request=req,
+        num_cached_blocks=num_cached_blocks,
+        block_size=block_size,
+        kv_cache_group_id=kv_cache_group_id,
+    )
+
+    # No block-state mutation: nothing allocated, nothing inserted into the
+    # prefix-cache map.
+    assert pool.get_num_free_blocks() == free_before
+    assert len(pool.cached_block_hash_to_block) == 0
+
+    events = pool.take_events()
+    assert len(events) == 1
+    event = events[0]
+    assert isinstance(event, BlockStored)
+
+    expected_hashes = [
+        kv_cache_utils.maybe_convert_block_hash(req.block_hashes[i])
+        for i in range(num_cached_blocks)
+    ]
+    assert event.block_hashes == expected_hashes
+    # Reused blocks start from block 0, so there is no parent block hash.
+    assert event.parent_block_hash is None
+    assert event.token_ids == list(req.all_token_ids[: num_cached_blocks * block_size])
+    assert event.group_idx == kv_cache_group_id
+    assert event.block_size == block_size
+    assert event.medium == MEDIUM_GPU
+    assert event.lora_id is None
+    assert event.lora_name is None
+
+
+def test_emit_cached_block_events_disabled():
+    """No events are emitted when enable_kv_cache_events is False."""
+    block_size = 4
+    pool = BlockPool(
+        num_gpu_blocks=8,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=False,
+    )
+    req = make_request(
+        "req_emit_disabled",
+        prompt_token_ids=list(range(block_size * 4)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+
+    pool.emit_cached_block_events(
+        request=req,
+        num_cached_blocks=3,
+        block_size=block_size,
+        kv_cache_group_id=0,
+    )
+
+    assert pool.take_events() == []
+
+
+def test_emit_cached_block_events_zero_cached():
+    """No events are emitted when num_cached_blocks == 0."""
+    block_size = 4
+    pool = BlockPool(
+        num_gpu_blocks=8,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+    req = make_request(
+        "req_emit_zero",
+        prompt_token_ids=list(range(block_size * 4)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+
+    pool.emit_cached_block_events(
+        request=req,
+        num_cached_blocks=0,
+        block_size=block_size,
+        kv_cache_group_id=0,
+    )
+
+    assert pool.take_events() == []
 
 
 def test_eagle_enabled_removes_last_block():
@@ -3453,7 +3570,8 @@ def test_can_fit_full_sequence_swa_cap_admits_long_prompt():
     manager = make_kv_cache_manager(
         config,
         max_model_len=max_model_len,
-        max_num_batched_tokens=max_num_batched_tokens,
+        # Single (sync) batch in flight, so in-flight tokens == batched tokens.
+        max_in_flight_tokens=max_num_batched_tokens,
         enable_caching=True,
         hash_block_size=block_size,
     )
@@ -3509,7 +3627,8 @@ def test_can_fit_full_sequence_full_attention_still_gates_oversized():
     manager = make_kv_cache_manager(
         config,
         max_model_len=max_model_len,
-        max_num_batched_tokens=max_num_batched_tokens,
+        # Single (sync) batch in flight, so in-flight tokens == batched tokens.
+        max_in_flight_tokens=max_num_batched_tokens,
         enable_caching=True,
         hash_block_size=block_size,
     )
@@ -3905,3 +4024,41 @@ def test_pure_swa_retention_dense_default_caches_all(monkeypatch):
         is not None
     }
     assert cached == set(range(16))
+
+
+def test_mamba_reachable_block_mask_sparsifies_retention():
+    """Mamba state-snapshot retention: with VLLM_PREFIX_CACHE_RETENTION_INTERVAL
+    the manager keeps one cached state per interval-sized segment (plus the
+    latest replay boundary) instead of a snapshot per block, which is what
+    lets a small attention block_size avoid Mamba dominating the KV pool."""
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+    block_size = 16
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=(1, 1),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+
+    def retained(retention_interval, num_prompt_tokens=256, end_block=16):
+        m = MambaManager.reachable_block_mask(
+            start_block=0,
+            end_block=end_block,
+            alignment_tokens=block_size,
+            kv_cache_spec=spec,
+            use_eagle=False,
+            retention_interval=retention_interval,
+            num_prompt_tokens=num_prompt_tokens,
+        )
+        return None if m is None else {i for i, v in enumerate(m) if v}
+
+    # Dense default (None) -> no mask, every block cached (unchanged behavior).
+    assert retained(None) is None
+    # interval == block_size -> every block is a boundary -> stays dense.
+    assert retained(block_size) is None
+    # interval 64 = 4 blocks: segment tails at i%4==3 -> {3,7,11,15}; latest
+    # replay boundary 240//16 - 1 = 14. Sparse subset of the 16 blocks.
+    assert retained(64) == {3, 7, 11, 14, 15}
+    # interval 0 -> only the latest replay boundary (block 14).
+    assert retained(0) == {14}

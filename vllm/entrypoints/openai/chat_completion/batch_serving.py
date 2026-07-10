@@ -47,7 +47,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         """Validate the model and preprocess a batched chat completion request.
 
         Performs engine-aware checks then delegates per-conversation
-        preprocessing to OpenAIServingRender, validating the chat template
+        preprocessing to OnlineRenderer, validating the chat template
         once for the whole batch.
 
         Returns:
@@ -62,19 +62,19 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
-        render = self.openai_serving_render
+        renderer = self.online_renderer
 
-        if not render.use_harmony:
+        if not renderer.use_harmony:
             # Common case: validate the chat template once for the whole batch.
-            error_check_ret = render.validate_chat_template(
+            error_check_ret = renderer.validate_chat_template(
                 request_chat_template=request.chat_template,
                 chat_template_kwargs=request.chat_template_kwargs,
-                trust_request_chat_template=render.trust_request_chat_template,
+                trust_request_chat_template=renderer.trust_request_chat_template,
             )
             if error_check_ret is not None:
                 return error_check_ret
 
-        parser = render.parser
+        parser = renderer.parser
         tool_dicts: list[dict] | None = None
 
         all_conversations: list[list[ConversationMessage]] = []
@@ -82,17 +82,17 @@ class OpenAIServingChatBatch(OpenAIServingChat):
 
         for messages in request.messages:
             single_request = request.to_chat_completion_request(messages)
-            if render.use_harmony:
-                conversation, engine_prompts = render._make_request_with_harmony(
+            if renderer.use_harmony:
+                conversation, engine_prompts = renderer._make_request_with_harmony(
                     single_request, should_include_tools=tool_dicts is not None
                 )
             else:
-                conversation, engine_prompts = await render.preprocess_chat(
+                conversation, engine_prompts = await renderer.preprocess_chat(
                     single_request,
                     messages,
-                    default_template=render.chat_template,
-                    default_template_content_format=render.chat_template_content_format,
-                    default_template_kwargs=render.default_chat_template_kwargs,
+                    default_template=renderer.chat_template,
+                    default_template_content_format=renderer.chat_template_content_format,
+                    default_template_kwargs=renderer.default_chat_template_kwargs,
                     tool_dicts=tool_dicts,
                     parser=parser,
                 )
@@ -181,7 +181,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     sub_request_id,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    priority=request.priority if hasattr(request, "priority") else 0,
+                    priority=request.priority,
                     data_parallel_rank=data_parallel_rank,
                     reasoning_ended=None,
                 )
@@ -258,7 +258,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                         top_logprobs=output.logprobs,
                         num_output_top_logprobs=request.top_logprobs,
                         tokenizer=tokenizer,
-                        return_as_token_id=request.return_token_ids,
+                        return_as_token_id=request.return_tokens_as_token_ids,
                     )
                 else:
                     logprobs = None
@@ -267,6 +267,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     reasoning, content, _ = parser.parse(
                         output.text,
                         request=request,  # type: ignore[arg-type]
+                        model_output_token_ids=output.token_ids,
                     )
                     if not request.include_reasoning:
                         reasoning = None

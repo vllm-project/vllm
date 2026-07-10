@@ -711,7 +711,6 @@ class SarvamMLAForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SarvamMixtureOfE
             self.model.make_empty_intermediate_tensors
         )
 
-        self.expert_weights = []
         self.num_moe_layers = 0
 
         self.moe_layers = []

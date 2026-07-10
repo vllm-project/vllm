@@ -138,6 +138,10 @@ def _wait_for_prefix_cache_reset(llm: LLM) -> None:
 
 
 def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
+    # TODO: Reintroduce latency test on ROCm once MRV2 supports cross
+    # layer KV Cache. See https://github.com/vllm-project/vllm/pull/45947
+    if current_platform.is_rocm():
+        return
     sampling_params = SamplingParams(max_tokens=1)
 
     num_times_cpu_better_than_cold = 0

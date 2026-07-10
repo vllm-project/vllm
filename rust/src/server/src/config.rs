@@ -10,6 +10,10 @@ use serde_json::Value;
 use vllm_chat::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection};
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 
+/// Default keep-alive idle timeout (seconds); also the head-read bound
+/// when keep-alive is disabled (`0`).
+pub const DEFAULT_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// How the HTTP server obtains its listening socket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum HttpListenerMode {
@@ -99,6 +103,54 @@ impl CorsConfig {
     }
 }
 
+/// TLS settings mirroring Python's uvicorn `ssl_*` arguments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TlsConfig {
+    /// PEM certificate chain file. Required when TLS is configured; may also
+    /// hold the private key (combined PEM) when `key_file` is unset.
+    pub cert_file: Option<String>,
+    /// PEM private key file. When `None`, the key is read from `cert_file`
+    /// (combined PEM).
+    pub key_file: Option<String>,
+    /// PEM CA bundle used to verify client certificates (mTLS). Required when
+    /// `cert_reqs` is non-zero.
+    pub ca_certs: Option<String>,
+    /// Client-certificate requirement, mirroring Python's `ssl.CERT_*`:
+    /// 0 = none, 1 = optional, 2 = required.
+    pub cert_reqs: i32,
+    /// OpenSSL cipher string for TLS 1.2 and below, mirroring Python's
+    /// `ssl.set_ciphers`. `None` keeps the forward-secret AEAD default.
+    pub ciphers: Option<String>,
+}
+
+impl TlsConfig {
+    /// Structurally validate the TLS arguments; the cert/key material is parsed
+    /// later, when the OpenSSL context is built.
+    pub fn validate(&self) -> Result<()> {
+        if self.cert_file.is_none() {
+            bail!(
+                "--ssl-certfile is required to enable TLS; \
+                 --ssl-keyfile/--ssl-ca-certs/--ssl-cert-reqs/--ssl-ciphers \
+                 cannot be used without it"
+            );
+        }
+        if !matches!(self.cert_reqs, 0..=2) {
+            bail!(
+                "--ssl-cert-reqs must be 0 (none), 1 (optional), or 2 (required), got {}",
+                self.cert_reqs
+            );
+        }
+        if self.cert_reqs != 0 && self.ca_certs.is_none() {
+            bail!(
+                "--ssl-ca-certs is required when --ssl-cert-reqs is {} \
+                 (client certificate verification)",
+                self.cert_reqs
+            );
+        }
+        Ok(())
+    }
+}
+
 /// Normalized runtime configuration for the minimal OpenAI-compatible server.
 #[derive(Educe, Clone, PartialEq, Eq, Serialize)]
 #[educe(Debug)]
@@ -138,6 +190,9 @@ pub struct Config {
     pub api_server_options: ApiServerOptions,
     /// CORS settings applied to every HTTP response.
     pub cors: CorsConfig,
+    /// TLS settings. `None` serves plaintext HTTP; `Some` terminates TLS at the
+    /// listener.
+    pub tls: Option<TlsConfig>,
     /// API keys accepted as bearer tokens for guarded routes.
     #[serde(skip_serializing)]
     #[educe(Debug(method(fmt_redacted_api_keys)))]
@@ -150,6 +205,12 @@ pub struct Config {
     pub grpc_port: Option<u16>,
     /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.
     pub shutdown_timeout: Duration,
+    /// Maximum idle time on a keep-alive HTTP connection before the server
+    /// closes it (`VLLM_HTTP_TIMEOUT_KEEP_ALIVE`, default 5s).
+    pub keep_alive_timeout: Duration,
+    /// Profiler mode that registers `/start_profile` and `/stop_profile`
+    /// routes when present.
+    pub profiler: Option<String>,
 }
 
 impl Config {
@@ -158,6 +219,9 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         vllm_chat::validate_parser_overrides(&self.tool_call_parser, &self.reasoning_parser)?;
         self.cors.validate()?;
+        if let Some(tls) = &self.tls {
+            tls.validate()?;
+        }
         if let Some(max_logprobs) = self.max_logprobs
             && max_logprobs < -1
         {

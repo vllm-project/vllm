@@ -67,6 +67,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         self.is_mxfp4 = False
         self.is_block_fp8 = False
         self.is_mxfp8 = False
+        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
         self.fused_moe_impl: XpuFusedMoe | None = None
 
     @property
@@ -176,6 +177,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
                 is_mxfp4=self.is_mxfp4,
                 is_mxfp8=self.is_mxfp8,
                 is_block_fp8=self.is_block_fp8,
+                gemm1_clamp_limit=self.gemm1_clamp_limit,
             )
         assert self.fused_moe_impl is not None
         self.fused_moe_impl.apply(
