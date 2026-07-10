@@ -24,9 +24,6 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
 
-VLLMXArgsValue: TypeAlias = str | int | float | list[str | int | float]
-VLLMXArgs: TypeAlias = dict[str, VLLMXArgsValue]
-
 
 class OpenAIBaseModel(BaseModel):
     # OpenAI API does allow extra fields
