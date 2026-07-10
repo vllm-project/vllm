@@ -877,6 +877,9 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             ):
                 domino_weights.append((f"domino_head.{name}", loaded_weight))
                 continue
+            if getattr(self, "is_domino", False) and name.startswith("domino_head."):
+                domino_weights.append((name, loaded_weight))
+                continue
 
             if "t2d" in name:
                 continue
