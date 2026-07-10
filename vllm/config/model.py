@@ -643,7 +643,7 @@ class ModelConfig:
                 pooler_config_sources: dict[str, str] = {}
             else:
                 pooler_config_sources = {
-                    k: "--pooler-config"
+                    k: "user"
                     for k in POOLER_CONFIG_LOG_FIELDS
                     if getattr(self.pooler_config, k) is not None
                 }
@@ -659,12 +659,12 @@ class ModelConfig:
             default_seq_pooling_type = self._model_info.default_seq_pooling_type
             if self.pooler_config.seq_pooling_type is None:
                 self.pooler_config.seq_pooling_type = default_seq_pooling_type
-                pooler_config_sources["seq_pooling_type"] = "architecture_default"
+                pooler_config_sources["seq_pooling_type"] = "model_default"
             default_tok_pooling_type = self._model_info.default_tok_pooling_type
             if self.pooler_config.tok_pooling_type is None:
                 self.pooler_config.tok_pooling_type = default_tok_pooling_type
-                pooler_config_sources["tok_pooling_type"] = "architecture_default"
-            pooler_config_sources.setdefault("use_activation", "architecture_default")
+                pooler_config_sources["tok_pooling_type"] = "model_default"
+            pooler_config_sources.setdefault("use_activation", "pooler_default")
             self._pooler_config_sources = pooler_config_sources
 
         self.dtype: torch.dtype = _get_and_verify_dtype(

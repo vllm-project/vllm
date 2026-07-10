@@ -385,33 +385,26 @@ class EngineCore:
             else "tok_pooling_type"
         )
 
-        def with_source(name: str, field: str, value: object) -> str:
-            return f"{name}={value}(source={sources.get(field, 'unknown')})"
-
-        field_values: dict[str, object] = {
-            field: getattr(pooler_config, field) for field in POOLER_CONFIG_LOG_FIELDS
-        }
-        field_values["use_activation"] = use_activation
-        log_items = [
-            (
-                "pooling_type",
-                pooling_type_field,
-                getattr(pooler_config, pooling_type_field),
+        def log_field(name: str, field: str) -> str:
+            value = (
+                use_activation
+                if field == "use_activation"
+                else getattr(pooler_config, field)
             )
-        ]
+            source = sources.get(field, "unknown")
+            return f"{name}={value}(source={source})"
+
+        log_items = [("pooling_type", pooling_type_field)]
         log_items.extend(
-            (field, field, field_values[field]) for field in POOLER_CONFIG_LOG_FIELDS
+            (field, field)
+            for field in POOLER_CONFIG_LOG_FIELDS
+            if field != pooling_type_field
         )
-        config_fields = ", ".join(
-            with_source(name, field, value) for name, field, value in log_items
-        )
+        config_fields = ", ".join(log_field(name, field) for name, field in log_items)
 
         logger.info_once(
-            "Resolved pooling config: %s, normalize=%s, activation_or_softmax=%s, "
-            "supported_tasks=%s",
+            "Resolved pooling config: %s, supported_tasks=%s",
             config_fields,
-            use_activation if task_set & {"embed", "token_embed"} else None,
-            use_activation if task_set & {"classify", "token_classify"} else None,
             supported_pooling_tasks,
         )
 
