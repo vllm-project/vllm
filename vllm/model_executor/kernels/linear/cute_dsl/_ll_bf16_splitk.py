@@ -239,6 +239,7 @@ class LLBf16SplitK:
         mcA = cute.make_identity_tensor(mA.layout.shape)
         mcB = cute.make_identity_tensor(mB.layout.shape)
         mcC = cute.make_identity_tensor(mC.layout.shape)
+        # Coordinate modes: cA=(M,K,k_tile), cB=(N,K,k_tile), cC=(M,N).
         cA = cute.local_tile(mcA, tiler=cta_tiler, coord=coord, proj=(1, None, 1))
         cB = cute.local_tile(mcB, tiler=cta_tiler, coord=coord, proj=(None, 1, 1))
         cC = cute.local_tile(mcC, tiler=cta_tiler, coord=coord, proj=(1, 1, None))
