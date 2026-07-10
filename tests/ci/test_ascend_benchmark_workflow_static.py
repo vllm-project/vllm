@@ -152,6 +152,14 @@ def test_main_benchmark_defaults_match_ascend_main_config():
     text = workflow_text()
 
     assert "default: Qwen/Qwen2.5-14B-Instruct" in text
+    assert "BENCH_SCENARIOS:" in text
+    assert "vars.VLLM_HUST_PR_BENCHMARK_SCENARIOS" in text
+    assert "vars.VLLM_HUST_MAIN_BENCHMARK_SCENARIOS" in text
+    assert "run_ascend_benchmark_scenario_list.sh" in text
+    assert "steps.resolve-scenario.outputs.BENCH_SCENARIO_COUNT == '1'" in text
+    assert "multi_scenario_results.tsv" in text
+    assert "Perfgate comparison: `skipped for multi-scenario run" in text
+    assert "vars.VLLM_HUST_MAIN_BENCHMARK_SCENARIOS == ''" in text
     assert (
         "github.event_name == 'pull_request' || github.event_name == 'issue_comment'"
     ) in text
@@ -162,6 +170,10 @@ def test_main_benchmark_defaults_match_ascend_main_config():
     assert "&& '16' || '256'" in text
     assert "PERFGATE_SPEC_FILE: ${{ vars.VLLM_HUST_PERFGATE_SPEC_FILE || '' }}" in text
     assert "VLLM_HUST_PERFGATE_HARDWARE_CHIP_MODEL" in text
+    assert (
+        "HARDWARE_CHIP_MODEL: ${{ vars.VLLM_HUST_PERFGATE_HARDWARE_CHIP_MODEL || '910B2' }}"
+        in text
+    )
     assert "Resolve perfgate spec for Ascend runner" in text
     assert "Resolve main same-spec file" in text
     assert "resolve_perfgate_spec_file.py" in text
@@ -187,8 +199,28 @@ def test_benchmark_script_does_not_default_pr_hardware_to_b3():
         / ".github/workflows/scripts/run_ascend_benchmark_ci.sh"
     ).read_text(encoding="utf-8")
 
-    assert "HARDWARE_CHIP_MODEL=${HARDWARE_CHIP_MODEL:-}" in script
+    assert "HARDWARE_CHIP_MODEL=${HARDWARE_CHIP_MODEL:-910B2}" in script
     assert "HARDWARE_CHIP_MODEL=${HARDWARE_CHIP_MODEL:-910B3}" not in script
+
+
+def test_benchmark_runner_supports_registry_same_spec_scenarios():
+    script = (
+        Path(__file__).resolve().parents[2]
+        / ".github/workflows/scripts/run_ascend_benchmark_ci.sh"
+    ).read_text(encoding="utf-8")
+
+    assert 'if [[ "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then' in script
+    same_spec_block = script[
+        script.index('if [[ "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then') :
+        script.index('else', script.index('if [[ "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then'))
+    ]
+    assert "EFFECTIVE_CONSTRAINTS_FILE=$SAME_SPEC_CONSTRAINTS_FILE" in same_spec_block
+    assert "bench_args=()" in same_spec_block
+    assert 'Unsupported BENCH_SCENARIO without same-spec mode' in script
+    assert (
+        'if [[ "$BENCH_SCENARIO" == "random-online" && "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then'
+        not in script
+    )
 
 
 def test_ascend_benchmark_installs_no_build_isolation_build_dependencies():

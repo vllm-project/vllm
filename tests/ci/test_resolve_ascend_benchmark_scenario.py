@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
+import json
 import importlib.util
 import sys
 from pathlib import Path
@@ -85,6 +86,197 @@ def test_parse_labels_rejects_non_list_json_payload():
         assert "JSON array" in str(exc)
     else:
         raise AssertionError("expected non-list label JSON to be rejected")
+
+
+def test_parse_scenarios_accepts_comma_and_newline_separated_values():
+    resolver = load_resolver()
+
+    scenarios = resolver.parse_scenarios(
+        "random-online, sharegpt-throughput\nagent-research-online"
+    )
+
+    assert scenarios == (
+        "random-online",
+        "sharegpt-throughput",
+        "agent-research-online",
+    )
+
+
+def test_parse_scenarios_rejects_duplicates():
+    resolver = load_resolver()
+
+    try:
+        resolver.parse_scenarios("random-online,random-online")
+    except ValueError as exc:
+        assert "duplicate benchmark scenario" in str(exc)
+        assert "random-online" in str(exc)
+    else:
+        raise AssertionError("expected duplicate scenarios to be rejected")
+
+
+def test_configured_scenario_list_rejects_registry_misses(tmp_path):
+    resolver = load_resolver()
+    registry_dir = tmp_path / "src" / "vllm_hust_benchmark" / "data"
+    registry_dir.mkdir(parents=True)
+    (registry_dir / "perfgate_spec_registry.json").write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "scenario": "random-online",
+                        "hardware_chip_model": "910B2",
+                        "spec_file": "docs/official-baselines/random.json",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        resolver.select_scenario(
+            event_name="pull_request",
+            manual_scenario="",
+            pr_labels=["ready"],
+            default_scenario="random-online",
+            default_dataset_path="",
+            default_constraints_file="",
+            same_spec_spec_file="",
+            same_spec_constraints_file="",
+            configured_scenarios="random-online,unknown-scenario",
+            benchmark_repo=str(tmp_path),
+            hardware_chip_model="910B2",
+        )
+    except ValueError as exc:
+        message = str(exc)
+        assert "No perfgate spec registered" in message
+        assert "unknown-scenario" in message
+        assert "random-online" in message
+    else:
+        raise AssertionError("expected unsupported scenarios to be rejected")
+
+
+def test_configured_scenario_list_rejects_explicit_same_spec_override():
+    resolver = load_resolver()
+
+    try:
+        resolver.select_scenario(
+            event_name="pull_request",
+            manual_scenario="",
+            pr_labels=["ready"],
+            default_scenario="random-online",
+            default_dataset_path="",
+            default_constraints_file="",
+            same_spec_spec_file="/tmp/spec.json",
+            same_spec_constraints_file="",
+            configured_scenarios="random-online,sharegpt-throughput",
+        )
+    except ValueError as exc:
+        message = str(exc)
+        assert "cannot be combined with SAME_SPEC_SPEC_FILE" in message
+        assert "each scenario must resolve its own perfgate spec" in message
+    else:
+        raise AssertionError("expected explicit same-spec override to be rejected")
+
+
+def test_configured_scenario_list_allows_sharegpt_without_legacy_inputs(tmp_path):
+    resolver = load_resolver()
+    registry_dir = tmp_path / "src" / "vllm_hust_benchmark" / "data"
+    registry_dir.mkdir(parents=True)
+    (registry_dir / "perfgate_spec_registry.json").write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "scenario": "random-online",
+                        "hardware_chip_model": "910B2",
+                        "spec_file": "docs/official-baselines/random.json",
+                    },
+                    {
+                        "scenario": "sharegpt-online",
+                        "hardware_chip_model": "910B2",
+                        "spec_file": "docs/official-baselines/sharegpt.json",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    selected = resolver.select_scenario(
+        event_name="pull_request",
+        manual_scenario="",
+        pr_labels=["ready"],
+        default_scenario="random-online",
+        default_dataset_path="",
+        default_constraints_file="",
+        same_spec_spec_file="",
+        same_spec_constraints_file="",
+        configured_scenarios="random-online,sharegpt-online",
+        benchmark_repo=str(tmp_path),
+        hardware_chip_model="910B2",
+    )
+
+    assert selected.scenarios == ("random-online", "sharegpt-online")
+    assert selected.mode == "multi-scenario"
+
+
+def test_configured_scenario_list_uses_default_chip_for_empty_value(tmp_path):
+    resolver = load_resolver()
+    registry_dir = tmp_path / "src" / "vllm_hust_benchmark" / "data"
+    registry_dir.mkdir(parents=True)
+    (registry_dir / "perfgate_spec_registry.json").write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "scenario": "random-online",
+                        "hardware_chip_model": "910B2",
+                        "spec_file": "docs/official-baselines/random.json",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    selected = resolver.select_scenario(
+        event_name="pull_request",
+        manual_scenario="",
+        pr_labels=["ready"],
+        default_scenario="random-online",
+        default_dataset_path="",
+        default_constraints_file="",
+        same_spec_spec_file="",
+        same_spec_constraints_file="",
+        configured_scenarios="random-online",
+        benchmark_repo=str(tmp_path),
+        hardware_chip_model="",
+    )
+
+    assert selected.scenario == "random-online"
+    assert selected.scenarios == ("random-online",)
+
+
+def test_configured_scenario_list_takes_precedence_over_labels():
+    resolver = load_resolver()
+    selected = resolver.select_scenario(
+        event_name="pull_request",
+        manual_scenario="",
+        pr_labels=["ascend-targeted-required"],
+        default_scenario="random-online",
+        default_dataset_path="",
+        default_constraints_file="",
+        same_spec_spec_file="",
+        same_spec_constraints_file="",
+        configured_scenarios="random-online,sharegpt-throughput",
+    )
+
+    assert selected.scenario == "random-online"
+    assert selected.scenarios == ("random-online", "sharegpt-throughput")
+    assert selected.mode == "multi-scenario"
+    assert selected.perfgate_mode == ""
+    assert "configured benchmark scenario list" in selected.reason
 
 
 def test_pr_l2_sharegpt_label_selects_sharegpt_scenario():

@@ -67,6 +67,17 @@ def test_same_spec_pr_preview_uses_ascend_compatibility_overlay():
     assert '"$effective_same_spec_file"' in same_spec_block
 
 
+def test_same_spec_runner_resolves_spec_from_shared_registry():
+    text = script_text("run_ascend_benchmark_ci.sh")
+    same_spec_block = text[text.index("run_same_spec_current_benchmark() {") :]
+
+    assert "SAME_SPEC_SPEC_FILE=${SAME_SPEC_SPEC_FILE:-}" in text
+    assert "vllm_hust_benchmark.perfgate_specs resolve" in same_spec_block
+    assert '--scenario "$BENCH_SCENARIO"' in same_spec_block
+    assert '--hardware-chip-model "$HARDWARE_CHIP_MODEL"' in same_spec_block
+    assert '--repo-root "$VLLM_HUST_BENCHMARK_REPO"' in same_spec_block
+
+
 def test_e2e_inference_scripts_retry_http_requests_and_print_server_log():
     for script_name in (
         "run_e2e_serve_smoke.sh",

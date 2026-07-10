@@ -22,7 +22,7 @@ BENCH_SCENARIO=${BENCH_SCENARIO:-random-online}
 BENCH_DATASET_PATH=${BENCH_DATASET_PATH:-}
 BENCH_CONSTRAINTS_FILE=${BENCH_CONSTRAINTS_FILE:-}
 SAME_SPEC_BENCHMARK_ENABLED=${SAME_SPEC_BENCHMARK_ENABLED:-1}
-SAME_SPEC_SPEC_FILE=${SAME_SPEC_SPEC_FILE:-$VLLM_HUST_BENCHMARK_REPO/docs/official-baselines/official-ascend-jan-2026-v0180-random-online-qwen25-14b-910b2.json}
+SAME_SPEC_SPEC_FILE=${SAME_SPEC_SPEC_FILE:-}
 SAME_SPEC_CONSTRAINTS_FILE=${SAME_SPEC_CONSTRAINTS_FILE:-$VLLM_HUST_BENCHMARK_REPO/docs/official-baselines/official-ascend-constraints.stub.json}
 SAME_SPEC_READY_TIMEOUT_SECONDS=${SAME_SPEC_READY_TIMEOUT_SECONDS:-600}
 SAME_SPEC_PR_PREVIEW_COMPAT=${SAME_SPEC_PR_PREVIEW_COMPAT:-1}
@@ -45,7 +45,7 @@ BENCH_MAX_CONCURRENCY=${BENCH_MAX_CONCURRENCY:-4}
 BENCH_INPUT_LEN=${BENCH_INPUT_LEN:-}
 BENCH_OUTPUT_LEN=${BENCH_OUTPUT_LEN:-}
 HARDWARE_VENDOR=${HARDWARE_VENDOR:-Huawei}
-HARDWARE_CHIP_MODEL=${HARDWARE_CHIP_MODEL:-}
+HARDWARE_CHIP_MODEL=${HARDWARE_CHIP_MODEL:-910B2}
 CHIP_COUNT=${CHIP_COUNT:-1}
 NODE_COUNT=${NODE_COUNT:-1}
 PUBLISH_TO_HF=${PUBLISH_TO_HF:-0}
@@ -941,6 +941,18 @@ run_same_spec_current_benchmark() {
     echo "same-spec benchmark runner not found: $same_spec_runner" >&2
     return 2
   fi
+  if [[ -z "$SAME_SPEC_SPEC_FILE" ]]; then
+    if [[ -z "$HARDWARE_CHIP_MODEL" ]]; then
+      echo "HARDWARE_CHIP_MODEL is required to resolve same-spec benchmark spec for $BENCH_SCENARIO" >&2
+      return 2
+    fi
+    SAME_SPEC_SPEC_FILE=$("$PYTHON_BIN" -m vllm_hust_benchmark.perfgate_specs resolve \
+      --scenario "$BENCH_SCENARIO" \
+      --hardware-chip-model "$HARDWARE_CHIP_MODEL" \
+      --repo-root "$VLLM_HUST_BENCHMARK_REPO")
+    export SAME_SPEC_SPEC_FILE
+    echo "Resolved same-spec benchmark spec file: $SAME_SPEC_SPEC_FILE"
+  fi
   if [[ ! -f "$SAME_SPEC_SPEC_FILE" ]]; then
     echo "same-spec benchmark spec file not found: $SAME_SPEC_SPEC_FILE" >&2
     return 2
@@ -1193,58 +1205,63 @@ if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
   echo "repo benchmark root helper source: $REPO_ASCEND_BENCHMARK_ROOT_HELPER"
 fi
 
-case "$BENCH_SCENARIO" in
-  random-online)
-    EFFECTIVE_DATASET_NAME="random"
-    EFFECTIVE_DATASET_PATH=""
-    EFFECTIVE_INPUT_LEN=${BENCH_INPUT_LEN:-$BENCH_RANDOM_INPUT_LEN}
-    EFFECTIVE_OUTPUT_LEN=${BENCH_OUTPUT_LEN:-$BENCH_RANDOM_OUTPUT_LEN}
-    if [[ "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then
-      EFFECTIVE_CONSTRAINTS_FILE=$SAME_SPEC_CONSTRAINTS_FILE
-    else
+if [[ "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then
+  EFFECTIVE_DATASET_NAME="$BENCH_SCENARIO"
+  EFFECTIVE_DATASET_PATH=""
+  EFFECTIVE_INPUT_LEN=${BENCH_INPUT_LEN:-}
+  EFFECTIVE_OUTPUT_LEN=${BENCH_OUTPUT_LEN:-}
+  EFFECTIVE_CONSTRAINTS_FILE=$SAME_SPEC_CONSTRAINTS_FILE
+  bench_args=()
+else
+  case "$BENCH_SCENARIO" in
+    random-online)
+      EFFECTIVE_DATASET_NAME="random"
+      EFFECTIVE_DATASET_PATH=""
+      EFFECTIVE_INPUT_LEN=${BENCH_INPUT_LEN:-$BENCH_RANDOM_INPUT_LEN}
+      EFFECTIVE_OUTPUT_LEN=${BENCH_OUTPUT_LEN:-$BENCH_RANDOM_OUTPUT_LEN}
       EFFECTIVE_CONSTRAINTS_FILE=${BENCH_CONSTRAINTS_FILE:-$VLLM_HUST_REPO/.github/workflows/data/random-online-ci-constraints.json}
-    fi
-    bench_args=(
-      --backend vllm
-      --endpoint /v1/completions
-      --dataset-name random
-      --random-input-len "$BENCH_RANDOM_INPUT_LEN"
-      --random-output-len "$BENCH_RANDOM_OUTPUT_LEN"
-      --random-batch-size "$BENCH_RANDOM_BATCH_SIZE"
-      --num-prompts "$BENCH_NUM_PROMPTS"
-      --request-rate "$BENCH_REQUEST_RATE"
-      --max-concurrency "$BENCH_MAX_CONCURRENCY"
-    )
-    ;;
-  sharegpt-online)
-    if [[ -z "$BENCH_DATASET_PATH" ]]; then
-      echo "BENCH_DATASET_PATH is required for sharegpt-online" >&2
+      bench_args=(
+        --backend vllm
+        --endpoint /v1/completions
+        --dataset-name random
+        --random-input-len "$BENCH_RANDOM_INPUT_LEN"
+        --random-output-len "$BENCH_RANDOM_OUTPUT_LEN"
+        --random-batch-size "$BENCH_RANDOM_BATCH_SIZE"
+        --num-prompts "$BENCH_NUM_PROMPTS"
+        --request-rate "$BENCH_REQUEST_RATE"
+        --max-concurrency "$BENCH_MAX_CONCURRENCY"
+      )
+      ;;
+    sharegpt-online)
+      if [[ -z "$BENCH_DATASET_PATH" ]]; then
+        echo "BENCH_DATASET_PATH is required for sharegpt-online" >&2
+        exit 2
+      fi
+      if [[ -z "$BENCH_CONSTRAINTS_FILE" ]]; then
+        echo "BENCH_CONSTRAINTS_FILE is required for sharegpt-online" >&2
+        exit 2
+      fi
+      EFFECTIVE_DATASET_NAME="sharegpt"
+      EFFECTIVE_DATASET_PATH="$BENCH_DATASET_PATH"
+      EFFECTIVE_INPUT_LEN=${BENCH_INPUT_LEN:-1024}
+      EFFECTIVE_OUTPUT_LEN=${BENCH_OUTPUT_LEN:-256}
+      EFFECTIVE_CONSTRAINTS_FILE="$BENCH_CONSTRAINTS_FILE"
+      bench_args=(
+        --backend vllm
+        --endpoint /v1/completions
+        --dataset-name sharegpt
+        --dataset-path "$BENCH_DATASET_PATH"
+        --num-prompts "$BENCH_NUM_PROMPTS"
+        --request-rate "$BENCH_REQUEST_RATE"
+        --max-concurrency "$BENCH_MAX_CONCURRENCY"
+      )
+      ;;
+    *)
+      echo "Unsupported BENCH_SCENARIO without same-spec mode: $BENCH_SCENARIO" >&2
       exit 2
-    fi
-    if [[ -z "$BENCH_CONSTRAINTS_FILE" ]]; then
-      echo "BENCH_CONSTRAINTS_FILE is required for sharegpt-online" >&2
-      exit 2
-    fi
-    EFFECTIVE_DATASET_NAME="sharegpt"
-    EFFECTIVE_DATASET_PATH="$BENCH_DATASET_PATH"
-    EFFECTIVE_INPUT_LEN=${BENCH_INPUT_LEN:-1024}
-    EFFECTIVE_OUTPUT_LEN=${BENCH_OUTPUT_LEN:-256}
-    EFFECTIVE_CONSTRAINTS_FILE="$BENCH_CONSTRAINTS_FILE"
-    bench_args=(
-      --backend vllm
-      --endpoint /v1/completions
-      --dataset-name sharegpt
-      --dataset-path "$BENCH_DATASET_PATH"
-      --num-prompts "$BENCH_NUM_PROMPTS"
-      --request-rate "$BENCH_REQUEST_RATE"
-      --max-concurrency "$BENCH_MAX_CONCURRENCY"
-    )
-    ;;
-  *)
-    echo "Unsupported BENCH_SCENARIO: $BENCH_SCENARIO" >&2
-    exit 2
-    ;;
-esac
+      ;;
+  esac
+fi
 
 if [[ "$SAME_SPEC_BENCHMARK_ENABLED" != "1" && "$PUBLISH_TO_HF" == "1" && "$BENCH_SCENARIO" == "random-online" && "$ALLOW_RANDOM_HF_PUBLISH" != "1" ]]; then
   echo "Refusing to publish random-online CI preview to HF without ALLOW_RANDOM_HF_PUBLISH=1" >&2
@@ -1288,7 +1305,7 @@ else
   fi
 fi
 
-if [[ "$BENCH_SCENARIO" == "random-online" && "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then
+if [[ "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then
   run_same_spec_current_benchmark
 else
   start_server
