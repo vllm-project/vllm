@@ -109,18 +109,19 @@ class SimulatedCPUModelRunner(CPUModelRunner):
         sampled_token_ids: list[list[int]] = []
 
         for req_id in req_ids_output_copy:
-            scheduled_tokens = scheduler_output.num_scheduled_tokens.get(req_id, 0)
+            scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             req_index = self.req_states.req_id_to_index[req_id]
             num_computed_tokens = self.req_states.num_computed_tokens_np[req_index]
             prompt_len = self.req_states.prompt_len.np[req_index]
             reaches_decode = num_computed_tokens + scheduled_tokens >= prompt_len
-            sampled_ids = (
-                [self._next_simulated_token_id(req_id)] if reaches_decode else []
-            )
-            sampled_token_ids.append(sampled_ids)
-            self._advance_simulated_request(
-                req_id, req_index, scheduled_tokens, sampled_ids
-            )
+            self._advance_computed_tokens(req_index, scheduled_tokens)
+            if not reaches_decode:
+                sampled_token_ids.append([])
+                continue
+
+            sampled_token_id = self._next_simulated_token_id(req_id, req_index)
+            sampled_token_ids.append([sampled_token_id])
+            self._append_simulated_token(req_index, sampled_token_id)
 
         return ModelRunnerOutput(
             req_ids=req_ids_output_copy,
@@ -128,43 +129,38 @@ class SimulatedCPUModelRunner(CPUModelRunner):
             sampled_token_ids=sampled_token_ids,
         )
 
-    def _advance_simulated_request(
+    def _advance_computed_tokens(
         self,
-        req_id: str,
         req_index: int,
         scheduled_tokens: int,
-        sampled_ids: list[int],
     ) -> None:
         num_computed_tokens = (
             self.req_states.num_computed_tokens_np[req_index] + scheduled_tokens
         )
         self.req_states.num_computed_tokens_np[req_index] = num_computed_tokens
+        self.req_states.num_computed_tokens.gpu[req_index] = num_computed_tokens
         self.req_states.num_computed_prefill_tokens[req_index] = min(
             num_computed_tokens, self.req_states.prefill_len.np[req_index]
         )
 
-        if not sampled_ids:
-            return
-
-        start_idx = int(self.req_states.total_len.gpu[req_index])
-        end_idx = start_idx + len(sampled_ids)
-        if end_idx > self.max_model_len:
+    def _append_simulated_token(
+        self,
+        req_index: int,
+        sampled_token_id: int,
+    ) -> None:
+        token_idx = int(self.req_states.total_len.gpu[req_index])
+        if token_idx >= self.max_model_len:
             raise ValueError(
                 "Simulated sampled token IDs exceed the max model length. "
-                f"Total number of tokens: {end_idx} > max_model_len: "
+                f"Total number of tokens: {token_idx + 1} > max_model_len: "
                 f"{self.max_model_len}"
             )
 
-        self.req_states.total_len.gpu[req_index] = end_idx
-        self.req_states.all_token_ids.gpu[req_index, start_idx:end_idx] = torch.tensor(
-            sampled_ids,
-            dtype=self.req_states.all_token_ids.gpu.dtype,
-            device=self.req_states.all_token_ids.gpu.device,
-        )
-        self.req_states.last_sampled_tokens[req_index, 0] = sampled_ids[-1]
+        self.req_states.total_len.gpu[req_index] = token_idx + 1
+        self.req_states.all_token_ids.gpu[req_index, token_idx] = sampled_token_id
+        self.req_states.last_sampled_tokens[req_index, 0] = sampled_token_id
 
-    def _next_simulated_token_id(self, req_id: str) -> int:
-        req_index = self.req_states.req_id_to_index[req_id]
+    def _next_simulated_token_id(self, req_id: str, req_index: int) -> int:
         token_ids = self._simulated_token_ids_by_req[req_id]
         output_idx = int(
             self.req_states.total_len.gpu[req_index]
