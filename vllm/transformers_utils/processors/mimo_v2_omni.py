@@ -30,7 +30,7 @@ try:
     from torchcodec.decoders import AudioDecoder
 
     _HAS_TORCHCODEC = True
-except ImportError:
+except (ImportError, RuntimeError):
     AudioDecoder = None
     _HAS_TORCHCODEC = False
 
