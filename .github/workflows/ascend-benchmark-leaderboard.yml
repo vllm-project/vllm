@@ -6,9 +6,9 @@ on:
   issue_comment:
     types: [created]
   schedule:
-    # Run formal multi-scenario Ascend benchmarks daily at 02:00
+    # Run formal multi-scenario Ascend benchmarks daily at 01:00
     # Asia/Shanghai time. GitHub Actions schedules use UTC.
-    - cron: "0 18 * * *"
+    - cron: "0 17 * * *"
   workflow_dispatch:
     inputs:
       benchmark_scenario:
