@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Configuration for discrete diffusion (dLLM) models."""
 
+from typing import Literal
+
 from pydantic import Field
 
 from vllm.config.utils import config
@@ -24,3 +26,18 @@ class DiffusionConfig:
     max_denoising_steps: int | None = None
     """Maximum number of denoising iterations per canvas block.
     If not set, read from the model's generation_config.json."""
+
+    temperature: float | None = Field(default=None, ge=0)
+    """Sampling temperature for the denoising sampler (engine-wide, since
+    per-request sampling parameters are not supported for diffusion models).
+    0 means greedy. If not set, read from the model's generation_config.json
+    (model-specific key, e.g. ``diffusion_temperature``), defaulting to
+    greedy for masked-diffusion models."""
+
+    selection_policy: Literal["low_confidence", "leftmost"] | None = None
+    """Which masked positions to unmask each denoising step (masked-diffusion
+    models). ``low_confidence``: the most confident predictions first (LLaDA).
+    ``leftmost``: strictly left-to-right — with one token per step this yields
+    clean per-token policy logprobs matching a leftmost-reveal RL recompute.
+    If not set, read from the model's generation_config.json
+    (``diffusion_selection_policy``), defaulting to ``low_confidence``."""

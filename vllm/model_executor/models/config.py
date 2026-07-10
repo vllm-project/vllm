@@ -314,6 +314,65 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
             )
 
 
+class MinistralDLMForBlockDiffusionConfig(VerifyAndUpdateConfig):
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        """Set up the diffusion config and defaults for the Nemotron
+        Ministral masked block-diffusion LM.
+
+        Auto-creates DiffusionConfig from the HF config (canvas_length ==
+        block_size) when the user didn't pass ``--diffusion-config``.
+        ``max_denoising_steps`` defaults to ``canvas_length`` at
+        sampler-build time when generation_config.json doesn't provide it.
+        """
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        attention_config = vllm_config.attention_config
+        if attention_config.backend == AttentionBackendEnum.FLASHINFER:
+            raise ValueError(
+                "FlashInfer does not support the Nemotron DLM's mixed "
+                "causal/bidirectional attention. Use --attention-backend "
+                "FLASH_ATTN or TRITON_ATTN instead."
+            )
+        if attention_config.backend is None and not attention_config.use_non_causal:
+            attention_config.use_non_causal = True
+            logger.info(
+                "Nemotron DLM uses mixed causal/bidirectional attention "
+                "within a batch; setting use_non_causal=True to exclude "
+                "FlashInfer from auto-selection."
+            )
+
+        # Auto-create DiffusionConfig from HF config if not provided; a
+        # user config passed just to set e.g. temperature backfills
+        # canvas_length from the HF config.
+        hf_config = vllm_config.model_config.hf_config
+        if vllm_config.diffusion_config is None:
+            from vllm.config.diffusion import DiffusionConfig
+
+            vllm_config.diffusion_config = DiffusionConfig(
+                canvas_length=getattr(hf_config, "canvas_length", 32),
+            )
+        elif vllm_config.diffusion_config.canvas_length is None:
+            vllm_config.diffusion_config.canvas_length = getattr(
+                hf_config, "canvas_length", 32
+            )
+
+        # The diffusion sampler materializes [num_seqs, canvas_length, vocab]
+        # fp32 transients, so cap concurrency when the user didn't pass
+        # --max-num-seqs (same policy as DiffusionGemma).
+        from vllm.config.scheduler import SchedulerConfig
+
+        sc = vllm_config.scheduler_config
+        if sc is not None and sc.max_num_seqs >= SchedulerConfig.DEFAULT_MAX_NUM_SEQS:
+            sc.max_num_seqs = 8
+
+        # Remove any generation_config.json cap on max_new_tokens so each
+        # request controls its own output length via max_tokens.
+        model_config = vllm_config.model_config
+        if "max_new_tokens" not in model_config.override_generation_config:
+            model_config.override_generation_config["max_new_tokens"] = None
+
+
 class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -852,6 +911,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "LlamaNemotronVLModel": LlamaNemotronVLConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
     "MambaForCausalLM": MambaModelConfig,
+    "MinistralDiffEncoderModel": MinistralDLMForBlockDiffusionConfig,
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
     "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,

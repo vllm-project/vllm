@@ -160,6 +160,7 @@ _TEXT_GENERATION_MODELS = {
         "MiniMaxM3SparseForCausalLM",
     ),
     "Ministral3ForCausalLM": ("mistral", "MistralForCausalLM"),
+    "MinistralDiffEncoderModel": ("nemotron_dllm", "MinistralDLMForBlockDiffusion"),
     "MistralForCausalLM": ("mistral", "MistralForCausalLM"),
     "MistralLarge3ForCausalLM": ("mistral_large_3", "MistralLarge3ForCausalLM"),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
