@@ -71,16 +71,11 @@ class SharedExperts(torch.nn.Module):
             if self._stream is not None:
                 logger.debug_once("Enabled separate cuda stream for MoE shared_experts")
 
-        # Cross-stream sync via CUDA events (record()/wait()), NOT
-        # record_stream()/wait_stream(). Events are legal inside cudagraph
-        # capture; record_stream (caching-allocator async free) and wait_stream
-        # are not, and cause hangs on ROCm under capture. One (fork, join) pair
-        # per DBO ubatch id. `_fork_event[i]` marks the main-stream point the
-        # aux stream must wait for before running; `_join_event[i]` marks aux
-        # completion the main stream waits for before using the shared output.
+        # Cross-stream sync via CUDA events, which are safe under cudagraph
+        # capture. One pair per DBO ubatch id.
         if self._stream is not None:
-            self._fork_event = [torch.cuda.Event(), torch.cuda.Event()]
-            self._join_event = [torch.cuda.Event(), torch.cuda.Event()]
+            self._input_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
+            self._output_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
 
     # TODO(bnell): Hack for elastic_ep. Get rid of this
     def _set_moe_config(self, new_moe_config: FusedMoEConfig):
@@ -119,24 +114,11 @@ class SharedExperts(torch.nn.Module):
         else:
             return SharedExpertsOrder.NO_OVERLAP
 
-    def launch_overlapped(self, shared_experts_input: torch.Tensor) -> bool:
-        """Enqueue shared experts on the aux stream WITHOUT joining back.
+    def maybe_forward_async(self, shared_experts_input: torch.Tensor) -> bool:
+        """Enqueue shared experts on the aux stream without waiting for them.
 
-        Returns True if work was launched on the aux stream (the caller must
-        then call :meth:`join_overlapped` after enqueuing the routed kernel),
-        or False if the multi-stream order does not apply (caller should fall
-        back to sequential execution).
-
-        Submits shared-expert work to the aux stream *before* the routed
-        kernel/collective so it overlaps the DP all-gather + fused MoE.
-        Ordering is via CUDA events (capture-safe), so this works under
-        cudagraph capture; wait_stream/record_stream would not.
-
-        The fork event is recorded on the main stream first, so the aux stream
-        waits for `shared_experts_input` to be ready before it runs. No
-        record_stream() is needed: the join event ordering in join_overlapped
-        keeps `shared_experts_input` alive until the aux stream is done, and the
-        main stream is event-ordered after the aux output before consuming it.
+        Returns true if the shared experts were enqueued, false otherwise. Call
+        `wait` to wait for the shared experts to finish if this returns true.
         """
         if (
             self._determine_shared_experts_order(shared_experts_input)
@@ -146,21 +128,17 @@ class SharedExperts(torch.nn.Module):
         assert self._stream is not None
         idx = self._output_idx
         assert self._output[idx] is None
-        self._fork_event[idx].record(current_stream())
+        self._input_ready_event[idx].record(current_stream())
         with torch.cuda.stream(self._stream):
-            self._fork_event[idx].wait(self._stream)
+            self._input_ready_event[idx].wait(self._stream)
             self._output[idx] = self._layer(shared_experts_input)
-            self._join_event[idx].record(self._stream)
+            self._output_ready_event[idx].record(self._stream)
         return True
 
-    def join_overlapped(self) -> None:
-        """Join the aux stream back after a :meth:`launch_overlapped` call.
-
-        Makes the main stream wait (via event) for the aux-stream shared-expert
-        work to finish before its output is consumed.
-        """
+    def wait(self) -> None:
+        """Block the main stream until `maybe_forward_async` output is ready."""
         assert self._stream is not None
-        self._join_event[self._output_idx].wait(current_stream())
+        self._output_ready_event[self._output_idx].wait(current_stream())
 
     @property
     def _output_idx(self) -> int:
