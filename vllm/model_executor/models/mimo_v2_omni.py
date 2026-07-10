@@ -664,10 +664,7 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> MiMoOmniProcessor:
         hf_config = self.get_hf_config()
         tokenizer = self.get_tokenizer()
-        return MiMoOmniProcessor.from_hf_config(
-            tokenizer,
-            hf_config,
-        )
+        return MiMoOmniProcessor.from_hf_config(tokenizer, hf_config)
 
     def get_image_processor(self, **kwargs: object):
         return self.get_hf_processor(**kwargs).image_processor
