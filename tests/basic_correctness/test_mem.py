@@ -105,7 +105,7 @@ def test_discard_tags():
     assert kv.shape == (512, 512)
 
     # Full sleep/wake cycle still works after discard
-    allocator.sleep()
+    allocator.sleep(offload_tags="weights")
     allocator.wake_up()
     assert torch.allclose(weights, torch.ones_like(weights))
 
