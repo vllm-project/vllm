@@ -60,7 +60,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, VLLMXArgs
+from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
@@ -265,7 +265,7 @@ class ResponsesRequest(OpenAIBaseModel):
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: str | list[str] | None = []
     ignore_eos: bool = False
-    vllm_xargs: VLLMXArgs | None = Field(
+    vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
         description=(
             "Additional request parameters with (list of) string or "
