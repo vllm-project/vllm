@@ -1,4 +1,51 @@
 <!-- markdownlint-disable MD001 MD041 -->
+
+# shvllm — vLLM fork: heterogeneous rank-to-GPU mapping + Qwen3.5/3.6 GGUF
+
+This fork (branch **`qwen35-gguf-rankgpu`**) adds two features on top of upstream vLLM:
+
+## 1. `--rank-gpu-id` / `--rank-gpu-memory-mib`
+
+Map tensor-parallel ranks to physical GPUs explicitly — including **multiple
+ranks on one GPU** (via CUDA MPS + NCCL ≥ 2.30 multi-rank). Lets you run e.g.
+TP=4 on 3 mixed cards:
+
+```bash
+nvidia-cuda-mps-control -d   # required for co-located ranks
+
+vllm serve MODEL \
+  --tensor-parallel-size 4 \
+  --rank-gpu-id 0,0,1,2 \          # torch device order, duplicates = shared GPU
+  --rank-gpu-memory-mib 14000      # absolute per-rank budget (replaces --gpu-memory-utilization)
+```
+
+Scope: pure TP, single node. Mixing different GPU *models* in one TP group is
+supported (sampled/draft token ids are broadcast from rank 0 to keep ranks
+bit-identical — see commit `af798f32f`).
+
+## 2. Qwen3.5/3.6 GGUF (with MTP + vision)
+
+Core fixes so Qwen3.5/3.6 GGUF files work via the extended
+[vllm-gguf-plugin](https://github.com/efschu/vllm-gguf-plugin/tree/qwen35-support):
+all quant types, MTP speculative decoding from the GGUF's own MTP layer, and
+vision via `mmproj-*.gguf` auto-detection. Put `config.json` + tokenizer files
+next to the `.gguf`.
+
+## Prebuilt Docker image (sm75–sm120, NCCL 2.30)
+
+```bash
+docker pull ghcr.io/efschu/shvllm-qwen35-gguf:cu129
+```
+
+See [`Dockerfile.shvllm`](Dockerfile.shvllm) for build/run details,
+[`BENCHMARKS.md`](BENCHMARKS.md) for measurements (6 quant variants, incl. 8×
+parallel serving) and [`TODO_qwen35_gguf.md`](TODO_qwen35_gguf.md) for the
+GGUF architecture write-up.
+
+---
+
+*Upstream vLLM README below.*
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/assets/logos/vllm-logo-text-dark.png">
