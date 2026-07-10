@@ -12,8 +12,6 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
 
-from sortedcontainers import SortedDict
-
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -444,6 +442,8 @@ class PriorityAwareFreeKVCacheBlockQueue:
     """
 
     def __init__(self, blocks: list[KVCacheBlock]) -> None:
+        from sortedcontainers import SortedDict
+
         self.unhashed_queue = FreeKVCacheBlockQueue(blocks)
         self._num_free_blocks = len(blocks)
         self.priority_to_queue: SortedDict[int, FreeKVCacheBlockQueue] = SortedDict()
@@ -539,6 +539,38 @@ class PriorityAwareFreeKVCacheBlockQueue:
         for priority in reversed(self.priority_to_queue):
             blocks.extend(self.priority_to_queue[priority].get_all_free_blocks())
         return blocks
+
+    def iter_blocks_after(
+        self,
+        cursor: KVCacheBlock | None,
+    ) -> Iterator[KVCacheBlock]:
+        """Iterate free blocks in eviction order after the cursor."""
+
+        if cursor is None:
+            yield from self.unhashed_queue.iter_blocks_after(None)
+            yield from self._iter_priority_blocks(None)
+            return
+
+        cursor_priority = self.block_id_to_priority.get(cursor.block_id)
+        if cursor_priority is None:
+            if cursor.block_id not in self.block_id_to_priority:
+                return
+            yield from self.unhashed_queue.iter_blocks_after(cursor)
+            yield from self._iter_priority_blocks(None)
+            return
+
+        yield from self.priority_to_queue[cursor_priority].iter_blocks_after(cursor)
+        yield from self._iter_priority_blocks(cursor_priority)
+
+    def _iter_priority_blocks(
+        self,
+        priority: int | None,
+    ) -> Iterator[KVCacheBlock]:
+        for queue_priority in reversed(self.priority_to_queue):
+            if priority is None or queue_priority < priority:
+                yield from self.priority_to_queue[queue_priority].iter_blocks_after(
+                    None
+                )
 
     @staticmethod
     def _get_block_priority(block: KVCacheBlock) -> int:
