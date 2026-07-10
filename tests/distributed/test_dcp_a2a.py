@@ -27,6 +27,7 @@ class _FakeCPGroup:
     def __init__(self, world_size: int, device_group: dist.ProcessGroup):
         self.world_size = world_size
         self.device_group = device_group
+        self.rank_in_group = dist.get_rank(device_group)
 
 
 def _dtype_from_name(dtype_name: str) -> torch.dtype:
@@ -374,6 +375,57 @@ class TestPackedA2AKernels:
             torch.testing.assert_close(actual_lse, expected_lse, rtol=1e-4, atol=1e-4)
         else:
             _assert_packed_a2a_close(actual, expected_out, dtype)
+
+    @pytest.mark.skipif(
+        torch.accelerator.device_count() < 1, reason="CUDA is required."
+    )
+    def test_pack_send_zeroes_empty_local_rows(self):
+        from vllm.v1.attention.ops.dcp_alltoall import (
+            _dcp_a2a_lse_pack_dim,
+            _dcp_a2a_pack_send,
+        )
+
+        device = torch.device("cuda")
+        world_size, B, h_per_rank, D = 4, 5, 2, 32
+        H = world_size * h_per_rank
+        cp_attn_out = torch.randn(B, H, D, device=device)
+        cp_attn_lse = torch.randn(B, H, device=device)
+        valid_counts = torch.tensor([3, 0, 1, 0, 2], device=device)
+        lse_pack_dim = _dcp_a2a_lse_pack_dim(cp_attn_out.dtype)
+        send_buffer = torch.empty(
+            (world_size, B, h_per_rank, D + lse_pack_dim),
+            device=device,
+        )
+
+        _dcp_a2a_pack_send(
+            cp_attn_out,
+            cp_attn_lse,
+            send_buffer,
+            world_size,
+            h_per_rank,
+            D,
+            lse_pack_dim,
+            valid_counts=valid_counts,
+        )
+        torch.accelerator.synchronize()
+
+        empty_rows = valid_counts == 0
+        non_empty_rows = ~empty_rows
+        expected_out = (
+            cp_attn_out.view(B, world_size, h_per_rank, D)
+            .permute(1, 0, 2, 3)
+            .contiguous()
+        )
+        empty_payload = send_buffer[:, empty_rows, :, :D]
+        torch.testing.assert_close(empty_payload, torch.zeros_like(empty_payload))
+        torch.testing.assert_close(
+            send_buffer[:, non_empty_rows, :, :D],
+            expected_out[:, non_empty_rows],
+        )
+        torch.testing.assert_close(
+            send_buffer[:, empty_rows, :, D],
+            torch.full_like(send_buffer[:, empty_rows, :, D], float("-inf")),
+        )
 
 
 def _distributed_packed_a2a_worker(env: dict[str, str]) -> None:

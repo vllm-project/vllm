@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FlashInfer sparse MLA attention backend."""
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
@@ -9,13 +10,14 @@ import numpy as np
 import torch
 
 from vllm import envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     get_mla_dims,
 )
 from vllm.platforms.interface import DeviceCapability
+from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import is_quantized_kv_cache, np_to_pinned_tensor
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -42,6 +44,108 @@ if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 
 logger = init_logger(__name__)
+
+_FLASHINFER_SPARSE_MLA_WORKSPACE_SLOP = 64 * 1024 * 1024
+
+
+@triton.jit
+def _zero_empty_sparse_mla_rows_kernel(
+    out_ptr,
+    lse_ptr,
+    seq_lens_ptr,
+    out_stride_t,
+    out_stride_h,
+    out_stride_d,
+    lse_stride_t,
+    lse_stride_h,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    HAS_LSE: tl.constexpr,
+) -> None:
+    token_idx = tl.program_id(0)
+    head_idx = tl.program_id(1)
+    offsets = tl.arange(0, BLOCK_D)
+
+    is_empty = tl.load(seq_lens_ptr + token_idx) == 0
+    out_offsets = (
+        token_idx * out_stride_t + head_idx * out_stride_h + offsets * out_stride_d
+    )
+    tl.store(out_ptr + out_offsets, 0.0, mask=is_empty & (offsets < HEAD_DIM))
+
+    if HAS_LSE:
+        lse_offset = token_idx * lse_stride_t + head_idx * lse_stride_h
+        tl.store(lse_ptr + lse_offset, -float("inf"), mask=is_empty)
+
+
+def _zero_empty_sparse_mla_rows(
+    out: torch.Tensor,
+    lse: torch.Tensor | None,
+    seq_lens: torch.Tensor,
+) -> None:
+    block_d = triton.next_power_of_2(out.shape[2])
+    _zero_empty_sparse_mla_rows_kernel[(out.shape[0], out.shape[1])](
+        out,
+        lse,
+        seq_lens,
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
+        lse.stride(0) if lse is not None else 0,
+        lse.stride(1) if lse is not None else 0,
+        HEAD_DIM=out.shape[2],
+        BLOCK_D=block_d,
+        HAS_LSE=lse is not None,
+    )
+
+
+@triton.jit
+def _sanitize_empty_sparse_mla_rows_kernel(
+    block_tables_ptr,
+    seq_lens_ptr,
+    valid_counts_ptr,
+    block_tables_stride_b,
+    block_tables_stride_k,
+    NUM_TOPK_TOKENS: tl.constexpr,
+    NUM_BLOCKS: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+) -> None:
+    token_idx = tl.program_id(0)
+    k_block = tl.program_id(1)
+    offsets = k_block * BLOCK_K + tl.arange(0, BLOCK_K)
+    mask = offsets < NUM_TOPK_TOKENS
+    block_offsets = token_idx * block_tables_stride_b + offsets * block_tables_stride_k
+    block_ids = tl.load(block_tables_ptr + block_offsets, mask=mask, other=0)
+    tl.store(
+        block_tables_ptr + block_offsets,
+        tl.where((block_ids < 0) | (block_ids >= NUM_BLOCKS), 0, block_ids),
+        mask=mask,
+    )
+
+    count = tl.load(seq_lens_ptr + token_idx)
+    is_first_block = k_block == 0
+    tl.store(valid_counts_ptr + token_idx, count, mask=is_first_block)
+    tl.store(seq_lens_ptr + token_idx, 1, mask=is_first_block & (count == 0))
+
+
+def _sanitize_empty_sparse_mla_rows(
+    block_tables: torch.Tensor,
+    seq_lens: torch.Tensor,
+    num_blocks: int,
+) -> torch.Tensor:
+    valid_counts = torch.empty_like(seq_lens)
+    block_k = min(triton.next_power_of_2(block_tables.shape[1]), 1024)
+    grid = (seq_lens.shape[0], triton.cdiv(block_tables.shape[1], block_k))
+    _sanitize_empty_sparse_mla_rows_kernel[grid](
+        block_tables,
+        seq_lens,
+        valid_counts,
+        block_tables.stride(0),
+        block_tables.stride(1),
+        NUM_TOPK_TOKENS=block_tables.shape[1],
+        NUM_BLOCKS=num_blocks,
+        BLOCK_K=block_k,
+    )
+    return valid_counts
 
 
 class _FlashInferMLASparseBackendBase(AttentionBackend):
@@ -352,13 +456,66 @@ class FlashInferMLASparseMetadataBuilder(
 _fi_sparse_workspace: torch.Tensor | None = None
 
 
-def _get_workspace_buffer(device: torch.device) -> torch.Tensor:
+def _round_up_to_mib(size: int) -> int:
+    mib = 1024 * 1024
+    return ((size + mib - 1) // mib) * mib
+
+
+def _infer_workspace_buffer_size(
+    num_heads: int,
+    topk_indices_buffer: torch.Tensor | None,
+    return_lse: bool,
+    workspace_multiplier: int = 1,
+    min_decode_tokens: int = 1,
+) -> int:
+    configured_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
+    if "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE" in os.environ:
+        return configured_size
+
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return configured_size
+
+    topk_tokens = (
+        topk_indices_buffer.shape[1]
+        if topk_indices_buffer is not None
+        else getattr(vllm_config.model_config.hf_config, "index_topk", 2048)
+    )
+    capture_size = (
+        vllm_config.compilation_config.max_cudagraph_capture_size
+        or vllm_config.scheduler_config.max_num_seqs
+    )
+    max_decode_tokens = max(
+        min(capture_size, vllm_config.scheduler_config.max_num_seqs),
+        min_decode_tokens,
+    )
+
+    # TRTLLM-gen sparse MLA allocates a softmax workspace proportional to the
+    # captured decode batch, sparse top-k, and local query heads.
+    lse_multiplier = 2 if return_lse else 1
+    required_size = (
+        int(max_decode_tokens)
+        * int(topk_tokens)
+        * int(num_heads)
+        * 256
+        * lse_multiplier
+        * int(workspace_multiplier)
+        + _FLASHINFER_SPARSE_MLA_WORKSPACE_SLOP
+    )
+    return max(configured_size, _round_up_to_mib(required_size))
+
+
+def _get_workspace_buffer(
+    device: torch.device,
+    min_size: int | None = None,
+) -> torch.Tensor:
     global _fi_sparse_workspace
-    if _fi_sparse_workspace is None:
+    min_size = min_size or envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
+    if _fi_sparse_workspace is None or _fi_sparse_workspace.numel() < min_size:
         # FlashInfer's CuteDSL MLA-decode tactic requires an int8 workspace;
         # the trtllm-gen path views it as uint8, so int8 is safe for all backends.
         _fi_sparse_workspace = torch.zeros(
-            envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,
+            min_size,
             dtype=torch.int8,
             device=device,
         )
@@ -426,8 +583,30 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         )
 
         self._workspace_buffer: torch.Tensor | None = None
+        # DCP all-gathers the query heads before forward_mqa.
+        self._workspace_buffer_size = _infer_workspace_buffer_size(
+            self.num_heads * max(self.dcp_world_size, 1),
+            self.topk_indices_buffer,
+            self.need_to_return_lse_for_decode,
+            workspace_multiplier=2 if self.dcp_world_size > 1 else 1,
+            min_decode_tokens=64 if self.dcp_world_size > 1 else 1,
+        )
+        if (
+            self.topk_indices_buffer is not None
+            and self.topk_indices_buffer.device.type == "cuda"
+        ):
+            self._workspace_buffer = _get_workspace_buffer(
+                self.topk_indices_buffer.device, self._workspace_buffer_size
+            )
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
+        vllm_config = get_current_vllm_config_or_none()
+        self._zero_empty_in_a2a_pack = (
+            self.dcp_world_size > 1
+            and vllm_config is not None
+            and vllm_config.parallel_config.dcp_comm_backend == "a2a"
+        )
+        self._last_dcp_valid_counts: torch.Tensor | None = None
 
         # fp8 query quantization is required when using fp8 kv_cache,
         # as the TRTLLM-GEN sparse MLA kernel requires matching dtypes
@@ -470,9 +649,20 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
                 NUM_TOPK_TOKENS=topk_indices.shape[1],
                 return_valid_counts=True,
             )
+        self._last_dcp_valid_counts = None
+        if self.dcp_world_size > 1:
+            valid_counts = _sanitize_empty_sparse_mla_rows(
+                topk_indices_physical,
+                seq_lens,
+                kv_c_and_k_pe_cache.shape[0],
+            )
+            if self._zero_empty_in_a2a_pack:
+                self._last_dcp_valid_counts = valid_counts
 
         if self._workspace_buffer is None:
-            self._workspace_buffer = _get_workspace_buffer(q.device)
+            self._workspace_buffer = _get_workspace_buffer(
+                q.device, self._workspace_buffer_size
+            )
 
         if self.bmm1_scale is None:
             self.bmm1_scale = self.scale
@@ -520,9 +710,8 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         out = o.view(-1, o.shape[-2], o.shape[-1])
         if lse is not None:
             lse = self._normalize_lse(lse, out.shape[0], out.shape[1])
-            empty_rows = (topk_indices_physical == -1).all(dim=-1)
-            out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
-            lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
+            if not self._zero_empty_in_a2a_pack:
+                _zero_empty_sparse_mla_rows(out, lse, seq_lens)
         return out, lse
 
     @staticmethod
