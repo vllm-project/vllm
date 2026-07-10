@@ -78,5 +78,10 @@ torch_utils.async_tensor_h2d = async_tensor_h2d
 # Patch model runner APIs
 import vllm.v1.worker.gpu.buffer_utils as gpu_buffer_utils
 import vllm.v1.worker.cpu.buffer_utils as cpu_buffer_utils
+from vllm.triton_utils import HAS_TRITON
 
 gpu_buffer_utils.UvaBuffer = cpu_buffer_utils.UvaBuffer
+
+if not HAS_TRITON:
+    gpu_buffer_utils.StagedWriteTensor = cpu_buffer_utils.StagedWriteTensor
+    gpu_buffer_utils.FusedStagedWriter = cpu_buffer_utils.FusedStagedWriter
