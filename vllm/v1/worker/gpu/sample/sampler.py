@@ -164,7 +164,7 @@ class Sampler:
             expanded_idx_mapping,
             idx_mapping_np,
             pos,
-            preserve_when_all_masked=has_structured_output_reqs,
+            check_all_masked_rows=has_structured_output_reqs,
         )
 
         # Apply penalties in place.

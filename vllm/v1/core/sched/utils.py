@@ -97,7 +97,8 @@ def check_stop(request: Request, max_model_len: int) -> bool:
     sampling_params = request.sampling_params
     assert sampling_params is not None
 
-    if request.num_output_tokens < sampling_params.min_tokens:
+    below_min_tokens = request.num_output_tokens < sampling_params.min_tokens
+    if below_min_tokens and not request.use_structured_output:
         return False
 
     last_token_id = request.output_token_ids[-1]
@@ -109,6 +110,13 @@ def check_stop(request: Request, max_model_len: int) -> bool:
         request.status = RequestStatus.FINISHED_STOPPED
         request.stop_reason = last_token_id
         return True
+
+    if below_min_tokens:
+        # Structured-output masking can leave only a stop token legal. If the
+        # sampler restores that token to avoid an all -inf row, the normal stop
+        # checks above finish the request; otherwise it should keep running.
+        return False
+
     if (
         request.num_tokens >= max_model_len
         or request.num_output_tokens >= request.max_tokens

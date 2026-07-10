@@ -1646,20 +1646,32 @@ class Scheduler(SchedulerInterface):
                         request, new_token_ids
                     )
                 )
-                if advance_token_ids:
-                    if not grammar.accept_tokens(req_id, advance_token_ids):
-                        logger.error(
-                            "Unexpected: grammar rejected tokens %s for request %s. "
-                            "Terminating request.",
-                            advance_token_ids,
-                            req_id,
-                        )
-                        request.status = RequestStatus.FINISHED_ERROR
-                        request.resumable = False
-                        stopped = True
-                    elif not stopped and grammar.is_terminated():
-                        request.status = RequestStatus.FINISHED_STOPPED
-                        stopped = True
+                if stopped and request.status == RequestStatus.FINISHED_STOPPED:
+                    sampling_params = request.sampling_params
+                    assert sampling_params is not None
+                    if advance_token_ids and (
+                        advance_token_ids[-1] == sampling_params.eos_token_id
+                        or advance_token_ids[-1]
+                        in (sampling_params.stop_token_ids or ())
+                    ):
+                        # check_stop() already handled the final stop token.
+                        # Do not feed it back into structured-output backends;
+                        # some backends do not model EOS as a grammar token.
+                        # Tokens before it are still advanced for validation.
+                        advance_token_ids = advance_token_ids[:-1]
+
+                if advance_token_ids and not grammar.accept_tokens(
+                    req_id, advance_token_ids
+                ):
+                    logger.error(
+                        "Unexpected: grammar rejected tokens %s for request %s. "
+                        "Terminating request.",
+                        advance_token_ids,
+                        req_id,
+                    )
+                    request.status = RequestStatus.FINISHED_ERROR
+                    request.resumable = False
+                    stopped = True
 
             routed_experts = None
             if (

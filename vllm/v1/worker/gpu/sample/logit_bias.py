@@ -40,7 +40,7 @@ class LogitBiasState:
         # Min tokens.
         self.min_lens = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
         self.num_stop_token_ids = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
-        self.preserve_when_all_masked = UvaBackedTensor(
+        self.restore_when_all_masked = UvaBackedTensor(
             self.max_num_reqs, dtype=torch.int32
         )
         self.stop_token_ids = StagedWriteTensor(
@@ -103,13 +103,13 @@ class LogitBiasState:
                 )
             self.num_stop_token_ids.np[req_idx] = num_stop_token_ids
             self.stop_token_ids.stage_write(req_idx, 0, stop_token_ids)
-            self.preserve_when_all_masked.np[req_idx] = int(
+            self.restore_when_all_masked.np[req_idx] = int(
                 sampling_params.structured_outputs is not None
             )
             use_logit_bias = True
         else:
             self.num_stop_token_ids.np[req_idx] = 0
-            self.preserve_when_all_masked.np[req_idx] = 0
+            self.restore_when_all_masked.np[req_idx] = 0
 
         self.use_logit_bias[req_idx] = use_logit_bias
 
@@ -123,7 +123,7 @@ class LogitBiasState:
 
         self.min_lens.copy_to_uva()
         self.num_stop_token_ids.copy_to_uva()
-        self.preserve_when_all_masked.copy_to_uva()
+        self.restore_when_all_masked.copy_to_uva()
         self.stop_token_ids.apply_write()
 
     def apply_logit_bias(
@@ -132,7 +132,7 @@ class LogitBiasState:
         expanded_idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
         pos: torch.Tensor,
-        preserve_when_all_masked: bool = False,
+        check_all_masked_rows: bool = False,
     ) -> None:
         if not np.any(self.use_logit_bias[idx_mapping_np]):
             # No request uses logit bias. Skip the kernel launch.
@@ -149,9 +149,9 @@ class LogitBiasState:
             self.logit_bias.gpu,
             self.min_lens.gpu,
             self.num_stop_token_ids.gpu,
-            self.preserve_when_all_masked.gpu,
+            self.restore_when_all_masked.gpu,
             self.stop_token_ids.gpu,
-            preserve_when_all_masked,
+            check_all_masked_rows,
         )
 
 
@@ -175,12 +175,12 @@ def _bias_kernel(
     pos_ptr,
     min_lens_ptr,
     num_stop_token_ids_ptr,
-    preserve_when_all_masked_ptr,
+    restore_when_all_masked_ptr,
     stop_token_ids_ptr,
     stop_token_ids_stride,
     BLOCK_SIZE: tl.constexpr,
     LOGITS_BLOCK_SIZE: tl.constexpr,
-    PRESERVE_WHEN_ALL_MASKED: tl.constexpr,
+    CHECK_ALL_MASKED_ROWS: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
@@ -245,21 +245,21 @@ def _bias_kernel(
             stop_token_ids_ptr + req_state_idx * stop_token_ids_stride + block,
             mask=mask,
         )
-        stop_logits = tl.load(
-            logits_ptr + token_idx * logits_stride + stop_token_ids,
-            mask=mask,
-            other=-float("inf"),
-        )
-        tl.store(
-            logits_ptr + token_idx * logits_stride + stop_token_ids,
-            -float("inf"),
-            mask=mask,
-        )
-        if PRESERVE_WHEN_ALL_MASKED:
-            preserve_when_all_masked = tl.load(
-                preserve_when_all_masked_ptr + req_state_idx
+        if CHECK_ALL_MASKED_ROWS:
+            should_restore_stop_logits = tl.load(
+                restore_when_all_masked_ptr + req_state_idx
             )
-            if preserve_when_all_masked:
+            if should_restore_stop_logits:
+                stop_logits = tl.load(
+                    logits_ptr + token_idx * logits_stride + stop_token_ids,
+                    mask=mask,
+                    other=-float("inf"),
+                )
+                tl.store(
+                    logits_ptr + token_idx * logits_stride + stop_token_ids,
+                    -float("inf"),
+                    mask=mask,
+                )
                 row_max = tl.full((), -float("inf"), tl.float32)
                 for i in range(0, vocab_size, LOGITS_BLOCK_SIZE):
                     offset = i + tl.arange(0, LOGITS_BLOCK_SIZE)
@@ -274,8 +274,22 @@ def _bias_kernel(
                     tl.store(
                         logits_ptr + token_idx * logits_stride + stop_token_ids,
                         stop_logits,
-                        mask=mask,
+                        mask=mask
+                        & (stop_logits > -float("inf"))
+                        & (stop_logits < float("inf")),
                     )
+            else:
+                tl.store(
+                    logits_ptr + token_idx * logits_stride + stop_token_ids,
+                    -float("inf"),
+                    mask=mask,
+                )
+        else:
+            tl.store(
+                logits_ptr + token_idx * logits_stride + stop_token_ids,
+                -float("inf"),
+                mask=mask,
+            )
 
 
 def apply_logit_bias(
@@ -289,9 +303,9 @@ def apply_logit_bias(
     logit_bias: torch.Tensor,
     min_lens: torch.Tensor,
     num_stop_token_ids: torch.Tensor,
-    preserve_when_all_masked: torch.Tensor,
+    restore_when_all_masked: torch.Tensor,
     stop_token_ids: torch.Tensor,
-    preserve_when_all_masked_batch: bool = False,
+    check_all_masked_rows: bool = False,
 ) -> None:
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = triton.next_power_of_2(
@@ -318,10 +332,10 @@ def apply_logit_bias(
         pos,
         min_lens,
         num_stop_token_ids,
-        preserve_when_all_masked,
+        restore_when_all_masked,
         stop_token_ids,
         stop_token_ids.stride(0),
         BLOCK_SIZE=BLOCK_SIZE,
         LOGITS_BLOCK_SIZE=LOGITS_BLOCK_SIZE,
-        PRESERVE_WHEN_ALL_MASKED=preserve_when_all_masked_batch,
+        CHECK_ALL_MASKED_ROWS=check_all_masked_rows,
     )
