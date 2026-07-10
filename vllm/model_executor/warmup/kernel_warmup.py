@@ -169,7 +169,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     skip_ops = _flashinfer_autotune_skip_ops(runner)
     if skip_ops:
         logger.info(
-            "Skipping FlashInfer autotuning for ops %s; using heuristic tactics.",
+            "Skipping FlashInfer autotuning for ops %s",
             sorted(skip_ops),
         )
         autotune_kwargs["skip_ops"] = skip_ops
