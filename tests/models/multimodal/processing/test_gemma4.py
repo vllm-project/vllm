@@ -7,9 +7,13 @@ import pytest
 import torch
 from PIL import Image as PILImage
 
-from vllm.model_executor.models.gemma4_mm import Gemma4ImagePixelInputs
+from vllm.model_executor.models.gemma4_mm import (
+    Gemma4ForConditionalGeneration,
+    Gemma4ImagePixelInputs,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
+from vllm.utils.mem_constants import GiB_bytes
 
 from ....conftest import ImageTestAssets
 from ...utils import build_model_context
@@ -224,3 +228,60 @@ def test_limit_mm_per_prompt(
             mm_items=processor.info.parse_mm_data(mm_data),
             hf_processor_mm_kwargs={},
         )
+
+
+# Regression guard for PR #43169 follow-up: the batched Gemma4 vision encoder
+# admitted ``chunk ~= 53`` on a 22 GiB L4 with a 26B AWQ model loaded,
+# allocating 2.43 GiB int64 inside
+# ``F.one_hot(num_classes=position_embedding_size)`` and OOMing because only
+# 2.41 GiB was actually free.  The fix sizes ``chunk`` from currently-free GPU
+# memory and counts the ``F.one_hot`` transient as the dominant cost.
+
+_encoder_chunk = Gemma4ForConditionalGeneration._encoder_chunk
+
+# Gemma4 vision config default (HF: configuration_gemma4.py).
+_POSITION_EMBEDDING_SIZE = 10240
+# Video frame: max_soft_tokens=70, pooling_kernel_size=2 -> 70 * 4 patches.
+_VIDEO_PATCHES_PER_FRAME = 280
+
+
+def test_encoder_chunk_tight_budget_fits_in_free():
+    free = 3 * GiB_bytes  # L4 22 GiB after 26B AWQ load.
+    total = 22 * GiB_bytes
+    chunk = _encoder_chunk(
+        _VIDEO_PATCHES_PER_FRAME, free, total, _POSITION_EMBEDDING_SIZE
+    )
+    one_hot_bytes = chunk * _VIDEO_PATCHES_PER_FRAME * 2 * _POSITION_EMBEDDING_SIZE * 8
+    assert one_hot_bytes <= free // 2
+
+
+def test_encoder_chunk_roomy_gpu_keeps_batching():
+    chunk = _encoder_chunk(
+        _VIDEO_PATCHES_PER_FRAME,
+        60 * GiB_bytes,
+        80 * GiB_bytes,
+        _POSITION_EMBEDDING_SIZE,
+    )
+    assert chunk > 8
+
+
+def test_encoder_chunk_zero_patches_is_safe():
+    assert (
+        _encoder_chunk(0, 60 * GiB_bytes, 80 * GiB_bytes, _POSITION_EMBEDDING_SIZE) == 1
+    )
+
+
+def test_encoder_chunk_zero_position_embedding_size_is_safe():
+    # Degenerate config: must not raise ZeroDivisionError.
+    assert (
+        _encoder_chunk(_VIDEO_PATCHES_PER_FRAME, 60 * GiB_bytes, 80 * GiB_bytes, 0) == 1
+    )
+
+
+def test_encoder_chunk_no_free_memory_falls_back_to_one():
+    assert (
+        _encoder_chunk(
+            _VIDEO_PATCHES_PER_FRAME, 0, 22 * GiB_bytes, _POSITION_EMBEDDING_SIZE
+        )
+        == 1
+    )

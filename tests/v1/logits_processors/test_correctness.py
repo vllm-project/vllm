@@ -20,7 +20,7 @@ from tests.v1.sample.utils import (
 )
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, validate_thinking_token_budget
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.sample.logits_processor import (
     BatchUpdate,
@@ -145,7 +145,6 @@ def _generate_fake_sampling_metadata(
         vllm_config.scheduler_config.max_num_seqs,
         num_spec,
         device,
-        PIN_MEMORY_AVAILABLE,
     )
     fake_sampling_metadata = SamplingMetadata(
         temperature=torch.full((batch_size,), 0.0),
@@ -880,7 +879,6 @@ def test_maybe_create_thinking_budget_holder_without_reasoning():
             cfg.scheduler_config.max_num_seqs,
             0,
             torch.device("cpu"),
-            False,
         )
         is None
     )
@@ -1194,3 +1192,192 @@ def test_thinking_budget_enforced_without_penalties():
         "Budget exceeded: in_end should be True so that apply_to_logits "
         "forces the end token"
     )
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [
+        (None, None),
+        (-1, None),
+        (10, 10),
+        (0, 0),
+    ],
+)
+def test_validate_thinking_token_budget(raw_value, expected):
+    assert validate_thinking_token_budget(raw_value) == expected
+
+
+def test_sampling_params_minus_one_normalizes_to_none():
+    params = SamplingParams(thinking_token_budget=-1)
+    assert params.thinking_token_budget is None
+
+
+@pytest.mark.parametrize("invalid_budget", [-2, 0.6, 10.5, True])
+def test_validate_thinking_token_budget_rejects_invalid(invalid_budget):
+    from vllm.exceptions import VLLMValidationError
+
+    with pytest.raises(VLLMValidationError, match="thinking_token_budget"):
+        validate_thinking_token_budget(invalid_budget)
+
+
+@pytest.mark.parametrize("invalid_budget", [-2, 0.6, 10.5])
+def test_thinking_budget_invalid_budget_rejected(invalid_budget):
+    from vllm.exceptions import VLLMValidationError
+
+    with pytest.raises(VLLMValidationError, match="thinking_token_budget"):
+        SamplingParams(thinking_token_budget=invalid_budget)
+
+
+def test_thinking_budget_long_thinking_section_end_marker_found_at_correct_index():
+    """Test thinking budget enforced for a long thinking run,
+    then a natural end marker."""
+    h = ThinkingBudgetStateHolder(
+        MockReasoningConfig(), 8, 0, torch.device("cpu"), False
+    )
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[(0, SamplingParams(thinking_token_budget=10_000), None, [])],
+            moved=(),
+        )
+    )
+    start = MockReasoningConfig.reasoning_start_token_ids
+    end = MockReasoningConfig.reasoning_end_token_ids
+
+    out: list[int] = list(start)
+    h.update_state([out], None, None)
+    for tok in range(500):  # 500 filler thinking tokens, one decode step each
+        out.append(tok)
+        h.update_state([out], None, None)
+        assert h._state[0]["end_thinking"] == -1  # not present yet
+    expected_end_idx = len(out)  # marker appended next
+    out.extend(end)
+    h.update_state([out], None, None)
+
+    assert h._state[0]["start_thinking"] == 0
+    assert h._state[0]["end_thinking"] == expected_end_idx
+
+
+# --- Thinking budget re-entry tests (issue #43708) ---
+# Regression tests: after budget forces end-of-thinking token sequence,
+# the state machine must detect and enforce budget on subsequent blocks.
+
+
+class TestThinkingBudgetReentry:
+    THINK_START = 100
+    THINK_END_SINGLE = [200]
+    THINK_END_MULTI = [200, 201, 202]
+    BUDGET = 5
+    CONTENT_TOKEN = 50
+    THINK_TOKEN = 60
+
+    @staticmethod
+    def _make_holder(end_token_ids: list[int]) -> ThinkingBudgetStateHolder:
+        class FakeReasoningConfig:
+            reasoning_start_token_ids = [TestThinkingBudgetReentry.THINK_START]
+            reasoning_end_token_ids: list[int] = []
+            enabled = True
+
+        cfg = FakeReasoningConfig()
+        cfg.reasoning_end_token_ids = end_token_ids
+        return ThinkingBudgetStateHolder(
+            reasoning_config=cfg,
+            max_num_seqs=8,
+            num_spec_tokens=0,
+            device=torch.device("cpu"),
+            is_pin_memory=False,
+        )
+
+    @staticmethod
+    def _sync_batch(holder: ThinkingBudgetStateHolder, budget: int) -> None:
+        holder.sync_batch(
+            BatchUpdate(
+                batch_size=1,
+                removed=(),
+                added=[(0, SamplingParams(thinking_token_budget=budget), None, [])],
+                moved=(),
+            )
+        )
+
+    @staticmethod
+    def _step(holder: ThinkingBudgetStateHolder, output_tok_ids: list[int]) -> None:
+        holder.update_state(
+            output_token_ids=[output_tok_ids],
+            spec_token_ids=None,
+            repeat_indices=None,
+        )
+
+    def _exhaust_budget(self, holder: ThinkingBudgetStateHolder) -> list[int]:
+        output = [self.THINK_START]
+        self._step(holder, list(output))
+        for _ in range(self.BUDGET):
+            output.append(self.THINK_TOKEN)
+            self._step(holder, list(output))
+
+        assert holder._state[0]["in_end"]
+        return output
+
+    def _accept_end_tokens(
+        self,
+        holder: ThinkingBudgetStateHolder,
+        output: list[int],
+        end_token_ids: list[int],
+    ) -> None:
+        for tok in end_token_ids:
+            output.append(tok)
+            self._step(holder, list(output))
+
+    def test_single_token_end_reentry(self):
+        holder = self._make_holder(self.THINK_END_SINGLE)
+        self._sync_batch(holder, self.BUDGET)
+
+        output = self._exhaust_budget(holder)
+        self._accept_end_tokens(holder, output, self.THINK_END_SINGLE)
+
+        for _ in range(3):
+            output.append(self.CONTENT_TOKEN)
+            self._step(holder, list(output))
+
+        output.append(self.THINK_START)
+        self._step(holder, list(output))
+        for _ in range(self.BUDGET):
+            output.append(self.THINK_TOKEN)
+            self._step(holder, list(output))
+
+        assert holder._state[0]["in_end"], (
+            "Second thinking block must also be budget-enforced"
+        )
+
+    def test_multi_token_end_reentry(self):
+        holder = self._make_holder(self.THINK_END_MULTI)
+        self._sync_batch(holder, self.BUDGET)
+
+        output = self._exhaust_budget(holder)
+        self._accept_end_tokens(holder, output, self.THINK_END_MULTI)
+
+        assert not holder._state[0]["in_end"]
+
+        output.append(self.THINK_START)
+        self._step(holder, list(output))
+        for _ in range(self.BUDGET):
+            output.append(self.THINK_TOKEN)
+            self._step(holder, list(output))
+
+        assert holder._state[0]["in_end"], (
+            "Immediate re-entry after multi-token end must be enforced"
+        )
+
+    def test_single_block_not_broken(self):
+        holder = self._make_holder(self.THINK_END_SINGLE)
+        self._sync_batch(holder, self.BUDGET)
+
+        output = self._exhaust_budget(holder)
+        self._accept_end_tokens(holder, output, self.THINK_END_SINGLE)
+
+        for _ in range(20):
+            output.append(self.CONTENT_TOKEN)
+            self._step(holder, list(output))
+
+        assert not holder._state[0]["in_end"]
+        assert not holder._state[0]["in_think"]

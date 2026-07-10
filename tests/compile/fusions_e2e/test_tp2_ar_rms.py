@@ -84,6 +84,7 @@ def test_tp2_ar_rms_fp8_fusions(
     model_kwargs["load_format"] = "dummy"
     model_kwargs["max_model_len"] = 1024
     model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
+    model_kwargs["disable_custom_all_reduce"] = False
 
     compilation_config = dict(
         use_inductor_graph_partition=inductor_graph_partition,
@@ -149,6 +150,7 @@ def test_tp2_ar_rms_fp4_fusions(
     model_kwargs["load_format"] = "dummy"
     model_kwargs["max_model_len"] = 1024
     model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
+    model_kwargs["disable_custom_all_reduce"] = False
 
     compilation_config = dict(
         use_inductor_graph_partition=inductor_graph_partition,
@@ -213,6 +215,7 @@ def test_tp2_ar_rms_fusions(
     model_kwargs["load_format"] = "dummy"
     model_kwargs["max_model_len"] = 1024
     model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
+    model_kwargs["disable_custom_all_reduce"] = False
 
     compilation_config = dict(
         use_inductor_graph_partition=inductor_graph_partition,
@@ -225,8 +228,12 @@ def test_tp2_ar_rms_fusions(
 
     matches_check = [
         "norm_rope_fusion",
-        "ar_rms_fusion",
     ]
+
+    if current_platform.is_rocm():
+        matches_check.append("aiter_ar_rms_fusion")
+    else:
+        matches_check.append("ar_rms_fusion")
 
     run_e2e_fusion_test(
         model_name,

@@ -79,12 +79,15 @@ trap cleanup EXIT HUP INT QUIT PIPE TERM # Register cleanup function to run on s
 
 echo "Updating pyproject.toml completed. Proceeding with build..."
 
+echo "Install dependencies for no-isolation build"
+pip install -r "$VLLM_DIR/requirements/build/tpu.txt"
+
 echo "Building wheel for TPU..."
 rm -rf dist/
 mkdir -p dist/
 
 # User confirmed to use 'python -m build' directly
-if ! VLLM_TARGET_DEVICE=tpu python -m build; then
+if ! VLLM_TARGET_DEVICE=tpu python -m build --no-isolation; then
     echo "Error: Python build command failed. Check if 'python -m build' works and the 'build' module is installed."
     exit 1
 fi

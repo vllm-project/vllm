@@ -203,7 +203,7 @@ class Executor(ABC):
 
     def get_kv_connector_handshake_metadata(
         self,
-    ) -> list[dict[int, KVConnectorHandshakeMetadata]]:
+    ) -> list[dict[tuple[int, int], KVConnectorHandshakeMetadata]]:
         return self.collective_rpc("get_kv_connector_handshake_metadata")
 
     @overload
@@ -252,10 +252,6 @@ class Executor(ABC):
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")
         return output[0]
-
-    @property
-    def max_concurrent_batches(self) -> int:
-        return 1
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         self.collective_rpc("profile", args=(is_start, profile_prefix))

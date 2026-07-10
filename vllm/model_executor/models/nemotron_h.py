@@ -229,7 +229,6 @@ class NemotronHMoE(nn.Module):
             scoring_func="sigmoid",
             e_score_correction_bias=self.gate.e_score_correction_bias,
             activation=activation_without_mul(config.mlp_hidden_act),
-            is_act_and_mul=False,  # non-gated MoE
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
@@ -875,6 +874,7 @@ class NemotronHForCausalLM(
         self.lm_head = ParallelLMHead(
             config.vocab_size,
             config.hidden_size,
+            quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
 
@@ -886,7 +886,6 @@ class NemotronHForCausalLM(
 
         # Set MoE hyperparameters
         if self.model.has_moe:
-            self.expert_weights = []
             self.num_expert_groups = config.n_group
 
             self.moe_layers = []
