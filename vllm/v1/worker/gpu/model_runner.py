@@ -95,8 +95,8 @@ from vllm.v1.worker.gpu.lora_utils import (
 )
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_profile import (
+    EncoderCacheBudget,
     EncoderProfileInputs,
-    compute_encoder_cache_budget,
 )
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
@@ -653,7 +653,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.supports_mm_inputs and self.is_first_pp_rank:
             mm_config = self.model_config.multimodal_config
             if mm_config is not None and not mm_config.skip_mm_profiling:
-                encoder_cache_budget = compute_encoder_cache_budget(
+                encoder_cache_budget = EncoderCacheBudget.compute_encoder_cache_budget(
                     self.vllm_config,
                     self.mm_registry,
                 )

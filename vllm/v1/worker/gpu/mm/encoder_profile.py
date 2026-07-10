@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.multimodal.encoder_budget import get_mm_max_toks_per_item
 from vllm.multimodal.inputs import BatchedTensorInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor
@@ -33,12 +33,27 @@ class EncoderCacheBudget:
     def get_encoder_budget(self) -> int:
         return min(self.encoder_compute_budget, self.encoder_cache_size)
 
+    @classmethod
+    def compute_encoder_cache_budget(
+        cls,
+        vllm_config: VllmConfig,
+        mm_registry: MultiModalRegistry,
+    ) -> "EncoderCacheBudget":
+        """Compute pure multimodal encoder cache budget data for profiling."""
+
+        with set_default_torch_num_threads():
+            processor = mm_registry.create_processor(vllm_config.model_config)
+            return _compute_encoder_cache_budget(
+                vllm_config,
+                mm_registry,
+                processor=processor,
+            )
+
 
 def _get_max_items_per_batch(
-    scheduler_config,
+    scheduler_config: SchedulerConfig,
     mm_limits: Mapping[str, int],
     max_model_len: int,
-    max_num_reqs: int,
     encoder_budget: int,
     modality: str,
     max_tokens_per_item: int,
@@ -52,6 +67,7 @@ def _get_max_items_per_batch(
         min(mm_limits[modality], max_model_len // max_tokens_per_item),
     )
 
+    max_num_reqs = scheduler_config.max_num_seqs
     if not scheduler_config.enable_chunked_prefill:
         max_num_reqs = min(
             max_num_reqs,
@@ -114,7 +130,6 @@ def _compute_encoder_cache_budget(
             scheduler_config,
             mm_limits,
             model_config.max_model_len,
-            scheduler_config.max_num_seqs,
             encoder_budget,
             modality,
             max_toks_per_item,
@@ -128,21 +143,6 @@ def _compute_encoder_cache_budget(
         mm_max_toks_per_item=tower_mm_max_toks_per_item,
         mm_max_items_per_batch=mm_max_items_per_batch,
     )
-
-
-def compute_encoder_cache_budget(
-    vllm_config: VllmConfig,
-    mm_registry: MultiModalRegistry,
-) -> EncoderCacheBudget:
-    """Compute pure multimodal encoder cache budget data for profiling."""
-
-    with set_default_torch_num_threads():
-        processor = mm_registry.create_processor(vllm_config.model_config)
-        return _compute_encoder_cache_budget(
-            vllm_config,
-            mm_registry,
-            processor=processor,
-        )
 
 
 class EncoderProfileInputs:
