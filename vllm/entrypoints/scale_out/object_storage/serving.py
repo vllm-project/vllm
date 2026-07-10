@@ -19,8 +19,8 @@ class ServingObjectStorage:
     Provides upload/download/delete/info endpoints.
     """
 
-    def __init__(self, shm_server_address: str):
-        self.client = AsyncPagedShmClient(shm_server_address, pin=False)
+    def __init__(self, server_address: str):
+        self.client = AsyncPagedShmClient(server_address, pin=False)
 
     async def upload(self, file: UploadFile, uuid: str | None = None) -> UUIDResponse:
         """

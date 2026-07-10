@@ -557,7 +557,9 @@ async def init_render_app_state(
 
     init_render_state(state, request_logger)
 
-    if vllm_config.model_config.multimodal_config is not None:
+    multimodal_config = vllm_config.model_config.multimodal_config
+
+    if multimodal_config is not None and multimodal_config.is_paged_shm_enabled():
         multimodal_config = vllm_config.model_config.multimodal_config
 
         from vllm.entrypoints.scale_out.object_storage.serving import (
@@ -565,7 +567,7 @@ async def init_render_app_state(
         )
 
         state.serving_object_storage = ServingObjectStorage(
-            shm_server_address=multimodal_config.shm_server_address
+            server_address=multimodal_config.paged_shm_server_address
         )
 
     state.vllm_config = vllm_config

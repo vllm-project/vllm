@@ -130,7 +130,9 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
     # Clear quantization so VllmConfig skips quant dtype/capability validation.
     model_config.quantization = None
 
-    model_config.multimodal_config = MultiModalConfig()
+    if model_config.multimodal_config is None:
+        model_config.multimodal_config = MultiModalConfig()
+    multimodal_config = model_config.multimodal_config
 
     # Render servers never allocate KV cache; suppress the spurious CPU KV
     # cache space warning from CpuPlatform.check_and_update_config.
@@ -138,12 +140,16 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
 
     vllm_config = VllmConfig(model_config=model_config)
 
-    from vllm.renderers.paged_shm.server import PagedShmServerProc
+    if multimodal_config.is_paged_shm_enabled():
+        from vllm.renderers.paged_shm.server import PagedShmServerProc
 
-    paged_shm_server = PagedShmServerProc(size=1024 * 1024, block_size=4096)
-    paged_shm_server.start()
+        paged_shm_server = PagedShmServerProc(
+            size=multimodal_config.paged_shm_size,
+            block_size=multimodal_config.paged_shm_block_size,
+        )
+        paged_shm_server.start()
 
-    model_config.multimodal_config.shm_server_address = paged_shm_server.address
+        multimodal_config.paged_shm_server_address = paged_shm_server.address
 
     shutdown_task = await build_and_serve_renderer(
         vllm_config, listen_address, sock, args
@@ -153,4 +159,6 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
         await shutdown_task
     finally:
         sock.close()
-        paged_shm_server.close()
+
+        if multimodal_config.is_paged_shm_enabled():
+            paged_shm_server.close()

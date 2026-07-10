@@ -9,7 +9,7 @@ import pytest_asyncio
 
 from tests.utils import RemoteLaunchRenderServer
 
-MODEL_NAME = "Qwen/Qwen3-0.6B"
+MODEL_NAME = "Qwen/Qwen3-VL-2B-Instruct"
 
 
 # ---------------------------------------------------------------------------
@@ -20,7 +20,15 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 @pytest.fixture(scope="module")
 def server():
     """Start a vLLM render server with the object storage routes enabled."""
-    with RemoteLaunchRenderServer(MODEL_NAME, []) as remote_server:
+    with RemoteLaunchRenderServer(
+        MODEL_NAME,
+        [
+            "--paged-shm-size",
+            f"{1024 * 1024 * 1024}",  # 1G
+            "--paged-shm-block-size",
+            f"{1024 * 10244}",  # 1M
+        ],
+    ) as remote_server:
         yield remote_server
 
 
@@ -135,7 +143,7 @@ class TestInfo:
         assert head_resp.status_code == 200
         assert int(head_resp.headers["size"]) > 0
         assert head_resp.headers["uuid"] == custom_uuid
-        assert not head_resp.headers["use_cache"]
+        assert head_resp.headers["use_cache"] == "True"
 
     async def test_info_not_found(self, client: httpx.AsyncClient):
         """HEAD on a non‑existent UUID returns 404."""

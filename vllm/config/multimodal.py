@@ -208,8 +208,16 @@ class MultiModalConfig:
 
     Set to `0` (default) to disable frontend GPU multimodal memory gating."""
 
-    shm_server_address: str = ""
-    """shm_server_address"""
+    paged_shm_size: int = Field(default=0)
+    """Total size (in bytes) of the paged shared memory segment. Set to 0 to 
+    disable paged shared memory (default)."""
+    paged_shm_block_size: int = Field(default=1024*1024) # 1MB
+    """Size (in bytes) of each allocation block in the paged shared memory. 
+    Defaults to 1048576 (1MiB). Smaller blocks reduce internal fragmentation 
+    but may decrease transfer speed .
+    """
+    paged_shm_server_address: str = ""
+    """IPC address for the paged shared memory server."""
 
     @field_validator("limit_per_prompt", mode="before")
     @classmethod
@@ -349,3 +357,6 @@ class MultiModalConfig:
 
     def is_multimodal_pruning_enabled(self):
         return self.video_pruning_rate is not None and self.video_pruning_rate > 0
+
+    def is_paged_shm_enabled(self):
+        return self.paged_shm_size > 0
