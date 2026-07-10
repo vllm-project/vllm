@@ -588,7 +588,7 @@ class VllmConfig:
         if model_config is None:
             return False
 
-        if model_config.runner_type != "generate":
+        if model_config.runner_type not in ("generate", "pooling"):
             return False
 
         if getattr(model_config, "is_hybrid", False):
