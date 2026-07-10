@@ -30,7 +30,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
-    TrtLlmBf16Experts,
+    TrtLlmBf16ExpertsMonolithic,
 )
 from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
     TrtLlmFp8ExpertsMonolithic,
@@ -83,7 +83,7 @@ def _make_bf16_monolithic_experts(
     intermediate_size: int,
     routing_method: RoutingMethodType,
     device: torch.device,
-) -> tuple[TrtLlmBf16Experts, torch.Tensor, torch.Tensor]:
+) -> tuple[TrtLlmBf16ExpertsMonolithic, torch.Tensor, torch.Tensor]:
     """Construct the monolithic BF16 experts plus the BlockMajorK weights
     expected by ``trtllm_bf16_moe``.
     """
@@ -109,7 +109,7 @@ def _make_bf16_monolithic_experts(
         block_shape=None,
     )
 
-    experts = TrtLlmBf16Experts(moe_config=moe_config, quant_config=quant_config)
+    experts = TrtLlmBf16ExpertsMonolithic(moe_config=moe_config, quant_config=quant_config)
 
     gemm1 = (
         torch.randn(
@@ -137,7 +137,7 @@ def _make_bf16_monolithic_experts(
 
 
 def _run_bf16_monolithic(
-    experts: TrtLlmBf16Experts,
+    experts: TrtLlmBf16ExpertsMonolithic,
     hidden_states: torch.Tensor,
     w13: torch.Tensor,
     w2: torch.Tensor,
