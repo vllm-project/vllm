@@ -42,6 +42,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -239,6 +240,80 @@ def _make_mock_backend_for_kernel_block_size(
 
 def _make_kv_cache_spec() -> FullAttentionSpec:
     return FullAttentionSpec(block_size=1, num_kv_heads=1, head_size=1, dtype="float16")
+
+
+def test_minimal_cudagraph_profiling_blocks_scales_tokens_to_blocks():
+    attn_spec = FullAttentionSpec(
+        block_size=592,
+        num_kv_heads=4,
+        head_size=128,
+        dtype=torch.float16,
+    )
+    groups = [KVCacheGroupSpec(["attn"], attn_spec)]
+
+    min_blocks, has_mamba_cache = (
+        GPUModelRunner._get_minimal_kv_cache_blocks_for_cudagraph_profiling(
+            groups,
+            max_capture_tokens=8192,
+            max_num_reqs=8,
+            cp_size=3,
+        )
+    )
+
+    assert min_blocks == 5  # ceil(8192 / (592 * 3))
+    assert not has_mamba_cache
+
+
+def test_minimal_cudagraph_profiling_blocks_cover_mamba_cache_lines():
+    attn_spec = FullAttentionSpec(
+        block_size=592,
+        num_kv_heads=4,
+        head_size=128,
+        dtype=torch.float16,
+    )
+    mamba_spec = MambaSpec(
+        shapes=((256, 4),),
+        dtypes=(torch.float16,),
+        block_size=592,
+    )
+    groups = [
+        KVCacheGroupSpec(["attn"], attn_spec),
+        KVCacheGroupSpec(["mamba"], mamba_spec),
+    ]
+
+    min_blocks, has_mamba_cache = (
+        GPUModelRunner._get_minimal_kv_cache_blocks_for_cudagraph_profiling(
+            groups,
+            max_capture_tokens=4096,
+            max_num_reqs=8,
+            cp_size=3,
+        )
+    )
+
+    assert min_blocks == 8  # max(ceil(4096 / (592 * 3)), max_num_reqs)
+    assert has_mamba_cache
+
+
+def test_minimal_cudagraph_profiling_blocks_without_capture_size():
+    attn_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=128,
+        dtype=torch.float16,
+    )
+    groups = [KVCacheGroupSpec(["attn"], attn_spec)]
+
+    min_blocks, has_mamba_cache = (
+        GPUModelRunner._get_minimal_kv_cache_blocks_for_cudagraph_profiling(
+            groups,
+            max_capture_tokens=None,
+            max_num_reqs=8,
+            cp_size=1,
+        )
+    )
+
+    assert min_blocks == 1
+    assert not has_mamba_cache
 
 
 def test_select_common_block_size_prefers_manager_block_size():
