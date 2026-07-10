@@ -18,8 +18,11 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 DEVICE = current_platform.device_type
 
 pytestmark = pytest.mark.skipif(
-    not (current_platform.is_cuda_alike() or current_platform.is_xpu()
-         or current_platform.is_cpu()),
+    not (
+        current_platform.is_cuda_alike()
+        or current_platform.is_xpu()
+        or current_platform.is_cpu()
+    ),
     reason="causal_conv1d Triton kernels require CUDA-alike, XPU, or CPU",
 )
 
