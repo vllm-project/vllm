@@ -302,8 +302,7 @@ class RejectionSampler(nn.Module):
         # Calculate indices of target logits.
         repeat_indices: torch.Tensor | None = None
         need_repeat_indices = (
-            sampling_metadata.allowed_token_ids_mask is not None
-            or has_penalties
+            sampling_metadata.allowed_token_ids_mask is not None or has_penalties
         )
         if need_repeat_indices:
             num_requests = len(metadata.num_draft_tokens)
