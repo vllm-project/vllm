@@ -204,3 +204,42 @@ KV-Kapazität des Q8-Laufs ist dadurch leicht begünstigt
 | Turn 3 | 41269 | 19.03 s | 723 | 96.2 |
 | Turn 4 | 55028 | 20.54 s | 670 | 87.8 |
 | Turn 5 | 68789 | 21.55 s | 639 | 91.0 |
+
+## AWQ BF16-INT4 — NACH dem Heterogene-TP-Fix (af798f32f)
+
+**Wichtige Einordnung aller obigen Ergebnisse:** Alle früheren Läufe
+liefen mit einem später gefundenen Korrektheits-Bug: Bei gemischten
+GPU-Architekturen im TP-Verbund (5090+3080er via `--rank-gpu-id`)
+divergierte das redundante Per-Rank-Sampling sporadisch (~1/1000
+Tokens), was sich in langen Ausgaben zu Wiederholungs-Loops
+aufschaukelte. Die **Geschwindigkeits**-Werte oben bleiben gültig
+(der Bug kostete keine Zeit), die **Ausgabequalität** der früheren
+Läufe war jedoch beeinträchtigt. Fix: Broadcast der gesampelten und
+MTP-Draft-Tokens von Rank 0 (Commit af798f32f), Overhead <1 ms/Step.
+
+Setup wie oben, aber: 14000 MiB/Rank, --max-num-batched-tokens 4096,
+Docker-Image-Build lief PARALLEL auf der CPU (TTFT/Prefill dadurch
+leicht konservativ). max_model_len 262144 (kein Auto-Fit-Limit),
+KV-Cache 4.3 GiB/Rank = 456.921 Tokens Kapazität.
+
+| Test | Prompt | Gen | TTFT | Prefill t/s | Decode t/s |
+|---|---|---|---|---|---|
+| Prosa 800 | 46 | 800 | 0.09 s | 514 | 73.4 |
+| Code 800 | 48 | 800 | 0.09 s | 525 | 108.1 |
+| Prefill 5k | 6215 | 60 | 4.45 s | 1396 | 124.2 |
+| Prefill 15k | 19113 | 60 | 13.51 s | 1414 | 122.8 |
+| Prefill 50k | 64063 | 60 | 49.25 s | 1301 | 105.4 |
+| Prefill 100k | 130364 | 60 | 114.50 s | 1139 | 102.7 |
+
+| Multiturn | Kontext | TTFT | Prefill-neu t/s | Decode t/s |
+|---|---|---|---|---|
+| Turn 1 | 16308 | 11.87 s | 1374 | 109.2 |
+| Turn 2 | 32612 | 13.62 s | 1197 | 118.4 |
+| Turn 3 | 48919 | 15.61 s | 1045 | 93.7 |
+| Turn 4 | 65228 | 16.89 s | 965 | 91.0 |
+| Turn 5 | 81539 | 18.21 s | 896 | 96.5 |
+
+Qualitätsvalidierung (erstmals systematisch): 8/8 (2B) + 4/4 (27B LXC)
++ 4/4 (27B Docker/Host) lange Generierungen ohne Loops/Doppelwörter;
+2245-Wörter-Prosa sauber; generierter 164-Zeilen-Python-Code
+kompiliert fehlerfrei.
