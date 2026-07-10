@@ -169,6 +169,7 @@ def glm47_moe_config(thinking: bool = True) -> ParserEngineConfig:
         stream_arg_deltas=True,
         tool_args_json=False,
         validate_tool_names=True,
+        deserialize_untyped_args=True,
     )
 
 

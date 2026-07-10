@@ -95,6 +95,12 @@ class ParserEngineConfig:
     # Reject tool calls whose names are absent from the request tools.
     validate_tool_names: bool = False
 
+    # Heuristically deserialize (JSON, then Python literal) argument values
+    # that have no schema type: keys absent from the tool's properties, or
+    # every value when the request carries no tool schema. For formats whose
+    # arg_converter emits all values as JSON strings (e.g. XML arg tags).
+    deserialize_untyped_args: bool = False
+
     @cached_property
     def terminal_defs(self):
         from vllm.parser.engine.incremental_lexer import terminals_from_literals

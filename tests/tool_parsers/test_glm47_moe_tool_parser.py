@@ -266,3 +266,95 @@ class TestGlm47Streaming:
         ]
         args = json.loads("".join(arguments))
         assert args["city"] == "Beijing"
+
+
+TYPED_ARGS_OUT = (
+    "<tool_call>get_weather"
+    "<arg_key>city</arg_key><arg_value>Beijing</arg_value>"
+    "<arg_key>days</arg_key><arg_value>5</arg_value>"
+    "<arg_key>metric</arg_key><arg_value>true</arg_value>"
+    "<arg_key>ids</arg_key><arg_value>[1, 2.5]</arg_value>"
+    "</tool_call>"
+)
+TYPED_ARGS_EXPECTED = {
+    "city": "Beijing",
+    "days": 5,
+    "metric": True,
+    "ids": [1, 2.5],
+}
+
+
+class TestGlm47UntypedArgDeserialization:
+    """Values with no schema type must deserialize like the legacy parser
+    (json, then Python literal) instead of staying JSON strings."""
+
+    @pytest.fixture
+    def no_tools_request(self) -> ChatCompletionRequest:
+        request = Mock(spec=ChatCompletionRequest)
+        request.tools = None
+        request.tool_choice = "auto"
+        return request
+
+    def test_no_schema_values_typed(self, glm47_tokenizer, no_tools_request):
+        parser = Glm47MoeModelToolParser(glm47_tokenizer, tools=None)
+        r = parser.extract_tool_calls(TYPED_ARGS_OUT, request=no_tools_request)
+        assert r.tools_called
+        assert json.loads(r.tool_calls[0].function.arguments) == TYPED_ARGS_EXPECTED
+
+    def test_undeclared_keys_typed_with_schema(self, glm47_tool_parser, mock_request):
+        # city is declared as string; days/metric/ids are not in the schema
+        r = glm47_tool_parser.extract_tool_calls(TYPED_ARGS_OUT, request=mock_request)
+        assert r.tools_called
+        assert json.loads(r.tool_calls[0].function.arguments) == TYPED_ARGS_EXPECTED
+
+    def test_schema_string_beats_heuristic(self, glm47_tokenizer):
+        tools = [
+            ChatCompletionToolsParam(
+                function=FunctionDefinition(
+                    name="get_weather",
+                    parameters={
+                        "type": "object",
+                        "properties": {"zip": {"type": "string"}},
+                    },
+                ),
+            ),
+        ]
+        request = Mock(spec=ChatCompletionRequest)
+        request.tools = tools
+        request.tool_choice = "auto"
+        parser = Glm47MoeModelToolParser(glm47_tokenizer, tools=tools)
+        out = (
+            "<tool_call>get_weather"
+            "<arg_key>zip</arg_key><arg_value>02139</arg_value>"
+            "</tool_call>"
+        )
+        r = parser.extract_tool_calls(out, request=request)
+        assert r.tools_called
+        assert json.loads(r.tool_calls[0].function.arguments) == {"zip": "02139"}
+
+    @pytest.mark.parametrize("chunk_size", [1, 7, len(TYPED_ARGS_OUT)])
+    def test_streaming_matches_nonstreaming(
+        self, glm47_tokenizer, no_tools_request, chunk_size
+    ):
+        parser = Glm47MoeModelToolParser(glm47_tokenizer, tools=None)
+        previous_text = ""
+        arguments = []
+        for i in range(0, len(TYPED_ARGS_OUT), chunk_size):
+            current_text = TYPED_ARGS_OUT[: i + chunk_size]
+            delta = parser.extract_tool_calls_streaming(
+                previous_text=previous_text,
+                current_text=current_text,
+                delta_text=current_text[len(previous_text) :],
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[],
+                request=no_tools_request,
+            )
+            previous_text = current_text
+            if delta:
+                arguments.extend(
+                    tool_call.function.arguments
+                    for tool_call in (delta.tool_calls or [])
+                    if tool_call.function and tool_call.function.arguments
+                )
+        assert json.loads("".join(arguments)) == TYPED_ARGS_EXPECTED

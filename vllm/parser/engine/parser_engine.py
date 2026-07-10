@@ -32,6 +32,7 @@ from vllm.tool_parsers.utils import (
     extract_types_from_schema,
     find_tool_name,
     find_tool_properties,
+    safe_literal_eval,
 )
 
 if TYPE_CHECKING:
@@ -125,6 +126,7 @@ class ParserEngine(Parser):
         self._arg_converter = parser_engine_config.arg_converter
         self._arg_structural_chars = parser_engine_config.arg_structural_chars
         self._stream_arg_deltas = parser_engine_config.stream_arg_deltas
+        self._deserialize_untyped_args = parser_engine_config.deserialize_untyped_args
         self._strip_trailing_reasoning_ws = (
             parser_engine_config.strip_trailing_reasoning_whitespace
         )
@@ -360,15 +362,42 @@ class ParserEngine(Parser):
                 streamable.add(key)
         return streamable
 
+    def _slot_string_keys(self, name: str) -> set[str] | None:
+        """Streamable string keys for a named tool.
+
+        With ``deserialize_untyped_args``, schema-less values may change type
+        once complete, so no key is prefix-stable without a schema.
+        """
+        keys = self._streamable_string_keys(find_tool_properties(self._tools, name))
+        if keys is None and self._deserialize_untyped_args:
+            return set()
+        return keys
+
+    @staticmethod
+    def _deserialize_untyped(value: str) -> object:
+        """Deserialize a schema-less value: JSON, then Python literal."""
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            pass
+        try:
+            return safe_literal_eval(value)
+        except (ValueError, SyntaxError):
+            pass
+        return value
+
     def _fix_arg_types(self, args_json: str, func_name: str) -> str:
         """Correct parameter types using the tool schema.
 
         String values are coerced via :func:`coerce_to_schema_type`.
         Nested objects and arrays are recursed into when the schema
         defines ``properties`` or ``items``.  Without a schema, values
-        stay as strings.
+        stay as strings — unless ``deserialize_untyped_args`` is set, in
+        which case values missing from the schema (or all values, when no
+        schema is available) are deserialized heuristically.
         """
-        if not self._tools or not func_name:
+        heuristic = self._deserialize_untyped_args
+        if not heuristic and (not self._tools or not func_name):
             return args_json
         try:
             args = json.loads(args_json)
@@ -377,11 +406,23 @@ class ParserEngine(Parser):
         if not isinstance(args, dict):
             return args_json
 
-        properties = find_tool_properties(self._tools, func_name)
-        if not properties:
+        properties = {}
+        if self._tools and func_name:
+            properties = find_tool_properties(self._tools, func_name)
+        if not properties and not heuristic:
             return args_json
 
-        _, changed = self._coerce_dict(args, properties)
+        changed = False
+        if properties:
+            _, changed = self._coerce_dict(args, properties)
+        if heuristic:
+            for key, value in args.items():
+                if key in properties or not isinstance(value, str):
+                    continue
+                converted = self._deserialize_untyped(value)
+                if converted is not value:
+                    args[key] = converted
+                    changed = True
 
         if changed:
             return json.dumps(args, ensure_ascii=False)
@@ -802,9 +843,7 @@ class ParserEngine(Parser):
         slot = self._tool_slots[idx]
         slot.name = name
         slot.name_sent = True
-        slot.string_keys = self._streamable_string_keys(
-            find_tool_properties(self._tools, name)
-        )
+        slot.string_keys = self._slot_string_keys(name)
         self._ensure_tool_id(slot, name)
         deltas.append(
             DeltaToolCall(
@@ -860,9 +899,7 @@ class ParserEngine(Parser):
             if name and self._is_valid_tool_name(name):
                 slot.name = name
                 slot.name_sent = True
-                slot.string_keys = self._streamable_string_keys(
-                    find_tool_properties(self._tools, name)
-                )
+                slot.string_keys = self._slot_string_keys(name)
                 self._ensure_tool_id(slot, name)
                 deltas.append(
                     DeltaToolCall(
