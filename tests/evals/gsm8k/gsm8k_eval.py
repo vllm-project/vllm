@@ -83,26 +83,46 @@ async def call_vllm_api(
     stop: list[str] | None = None,
     url: str | None = None,
     seed: int | None = None,
+    eval_mode: str = "completions",
 ) -> tuple[str, int]:
-    """Call vLLM's OpenAI-compatible completions endpoint.
+    """Call vLLM's OpenAI-compatible completions or chat endpoint.
+
+    ``eval_mode="chat"`` routes the few-shot prompt through
+    ``/v1/chat/completions`` (applying the model's chat template), which is
+    required for chat/reasoning models such as gpt-oss that do not follow the
+    plain completion format. Any other value uses ``/v1/completions``.
 
     Returns:
         Tuple of (response_text, completion_tokens)
     """
-    data = {
-        "prompt": prompt,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "stop": stop,
-    }
+    if eval_mode == "chat":
+        endpoint = f"{url}/v1/chat/completions"
+        data = {
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stop": stop,
+        }
+    else:
+        endpoint = f"{url}/v1/completions"
+        data = {
+            "prompt": prompt,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stop": stop,
+        }
     if seed is not None:
         data["seed"] = seed
 
     try:
-        async with session.post(f"{url}/v1/completions", json=data) as response:
+        async with session.post(endpoint, json=data) as response:
             response.raise_for_status()
             result = await response.json()
-            text = result["choices"][0]["text"]
+            choice = result["choices"][0]
+            if eval_mode == "chat":
+                text = choice["message"].get("content") or ""
+            else:
+                text = choice["text"]
             completion_tokens = result.get("usage", {}).get("completion_tokens", 0)
             return text, completion_tokens
     except Exception as e:
@@ -178,6 +198,7 @@ def evaluate_gsm8k(
     temperature: float = 0.0,
     seed: int | None = 42,
     request_timeout_seconds: float = 600,
+    eval_mode: str = "completions",
 ) -> dict[str, float | int]:
     """
     Evaluate GSM8K accuracy using vLLM serve endpoint.
@@ -201,6 +222,7 @@ def evaluate_gsm8k(
                 stop=["Question", "Assistant:", "<|separator|>"],
                 url=base_url,
                 seed=seed,
+                eval_mode=eval_mode,
             )
             states[i] = answer
             output_tokens[i] = tokens
@@ -281,6 +303,13 @@ def main() -> None:
         "--seed", type=int, default=42, help="Random seed for reproducibility"
     )
     parser.add_argument("--save-results", type=str, help="Save results to JSON file")
+    parser.add_argument(
+        "--eval-mode",
+        type=str,
+        default="completions",
+        choices=["completions", "chat"],
+        help="Endpoint to evaluate against: plain completions or chat template",
+    )
 
     args = parser.parse_args()
 
@@ -292,6 +321,7 @@ def main() -> None:
         port=args.port,
         temperature=args.temperature,
         seed=args.seed,
+        eval_mode=args.eval_mode,
     )
 
     # Print results to terminal

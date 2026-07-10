@@ -68,6 +68,7 @@ def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
         host=host,
         port=port,
         request_timeout_seconds=request_timeout_seconds,
+        eval_mode=eval_config.get("eval_mode", "completions"),
     )
 
     return results
