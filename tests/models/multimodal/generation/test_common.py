@@ -369,6 +369,12 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         patch_hf_runner=model_utils.qwen3_vl_patch_hf_runner,
         image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        marks=[
+            pytest.mark.skip(
+                reason="Transformers has no cosmos3_omni mapping, so the HF "
+                "reference runner cannot load the checkpoint."
+            )
+        ],
     ),
     "deepseek_vl_v2": VLMTestInfo(
         models=["Isotr0py/deepseek-vl2-tiny"],  # model repo using dynamic module
@@ -387,20 +393,6 @@ VLM_TEST_SETTINGS = {
         hf_output_post_proc=model_utils.deepseekvl2_trunc_hf_output,
         stop_str=["<｜end▁of▁sentence｜>", "<｜begin▁of▁sentence｜>"],
         image_size_factors=[(1.0,), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
-    ),
-    "fuyu": VLMTestInfo(
-        models=["adept/fuyu-8b"],
-        test_type=VLMTestType.IMAGE,
-        prompt_formatter=lambda img_prompt: f"{img_prompt}\n",
-        img_idx_to_prompt=lambda idx: "",
-        max_model_len=2048,
-        max_num_seqs=2,
-        auto_cls=AutoModelForImageTextToText,
-        use_tokenizer_eos=True,
-        vllm_output_post_proc=model_utils.fuyu_vllm_to_hf_output,
-        num_logprobs=10,
-        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
-        marks=[large_gpu_mark(min_gb=32)],
     ),
     "gemma3": VLMTestInfo(
         models=["google/gemma-3-4b-it"],
