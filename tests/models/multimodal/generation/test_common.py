@@ -369,6 +369,12 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         patch_hf_runner=model_utils.qwen3_vl_patch_hf_runner,
         image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        marks=[
+            pytest.mark.skip(
+                reason="Transformers has no cosmos3_omni mapping, so the HF "
+                "reference runner cannot load the checkpoint."
+            )
+        ],
     ),
     "deepseek_vl_v2": VLMTestInfo(
         models=["Isotr0py/deepseek-vl2-tiny"],  # model repo using dynamic module

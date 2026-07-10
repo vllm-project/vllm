@@ -478,11 +478,14 @@ class Worker(WorkerBase):
             )
 
             # Profile CUDA graph memory if graphs will be captured.
-            # Skip on ROCm/HIP/XPU as graph pool handles and get_memory_info
-            # behave differently and can produce incorrect/negative estimates.
+            # ROCm is included: #44825 moved the profiler to
+            # torch.accelerator.get_memory_info (reliable on ROCm, as used by
+            # the AMD-CI mem tests), and graph_pool_handle resolves to the same
+            # torch.cuda handle the live capture path already uses on ROCm.
+            # XPU stays excluded (see #39977).
             cudagraph_memory_estimate = 0
             if (
-                current_platform.is_cuda()
+                current_platform.is_cuda_alike()
                 and self.vllm_config.compilation_config.cudagraph_mode
                 != CUDAGraphMode.NONE
             ):
@@ -498,8 +501,7 @@ class Worker(WorkerBase):
             + profile_result.weights_memory
         )
 
-        # On ROCm, cudagraph_memory_estimate is always 0 so this is a no-op.
-        # On CUDA, respect the opt-in flag as originally designed.
+        # Respect the opt-in flag as originally designed.
         cudagraph_memory_estimate_applied = (
             cudagraph_memory_estimate
             if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
@@ -729,11 +731,6 @@ class Worker(WorkerBase):
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
         warmup_sizes: list[int] = []
-        cg_capture_sizes: list[int] = []
-
-        if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-            cg_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
-            cg_capture_sizes = [] if cg_sizes is None else cg_sizes
 
         if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
             # warm up sizes that are not in cudagraph capture sizes,
@@ -741,8 +738,11 @@ class Worker(WorkerBase):
             # e.g. for the max-num-batched token size in chunked prefill.
             compile_sizes = self.vllm_config.compilation_config.compile_sizes
             warmup_sizes = compile_sizes.copy() if compile_sizes is not None else []  # type: ignore[assignment]
+            cg_capture_sizes: list[int] = []
 
             if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+                cg_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
+                cg_capture_sizes = [] if cg_sizes is None else cg_sizes
                 warmup_sizes = [x for x in warmup_sizes if x not in cg_capture_sizes]
 
             compile_ranges = self.vllm_config.compilation_config.get_compile_ranges()
@@ -754,23 +754,6 @@ class Worker(WorkerBase):
             for compile_range in compile_ranges:
                 if not any(x in compile_range for x in all_sizes):
                     warmup_sizes.append(compile_range.end)
-
-        # TODO(LucasWilkinson, akaratza): Remove when MRV1 is deprecated
-        if (
-            current_platform.is_rocm()
-            and not self.use_v2_model_runner
-            and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and get_pp_group().is_last_rank
-        ):
-            max_num_reqs = min(
-                self.scheduler_config.max_num_seqs,
-                self.scheduler_config.max_num_batched_tokens,
-            )
-            if (
-                max_num_reqs not in cg_capture_sizes
-                and max_num_reqs not in warmup_sizes
-            ):
-                warmup_sizes.append(max_num_reqs)
 
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):
