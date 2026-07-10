@@ -443,7 +443,15 @@ class ParserEngine(Parser):
         if finished:
             events.extend(self._engine.finish())
         result = self._events_to_delta(events, finished=finished)
-        return self._strip_trailing_reasoning(result)
+        result = self._strip_trailing_reasoning(result)
+
+        # Suppress reasoning deltas if not requested
+        if result and not request.include_reasoning:
+            result.reasoning = None
+            if not result.content and not result.tool_calls:
+                result = None
+
+        return result
 
     def _strip_trailing_reasoning(
         self,

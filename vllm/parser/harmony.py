@@ -293,6 +293,16 @@ class HarmonyParser(DelegatingParser):
             delta_message.reasoning = combined_reasoning
         if tool_messages:
             delta_message.tool_calls = tool_messages
+
+        # Suppress reasoning deltas if not requested
+        if delta_message and not request.include_reasoning:
+            delta_message.reasoning = None
+
+            # If only reasoning was in the message (no content, no tool_calls)
+            # skip emitting entirely
+            if not delta_message.content and not delta_message.tool_calls:
+                return None
+
         return delta_message
 
     def process_chunk(self, token_ids: Sequence[int]) -> ChunkResult:
