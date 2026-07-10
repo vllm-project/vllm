@@ -165,9 +165,41 @@ pub struct MultimodalConfigFiles<'a> {
     pub preprocessor_config: Option<&'a Path>,
     /// Video-specific preprocessor config (`video_preprocessor_config.json`).
     pub video_preprocessor_config: Option<&'a Path>,
-    /// Combined processor config (`processor_config.json`), whose
-    /// `video_processor` section is the fallback video config source.
+    /// Combined processor config (`processor_config.json`), whose modality
+    /// sections are fallback preprocessor config sources.
     pub processor_config: Option<&'a Path>,
+}
+
+/// Load a modality's dedicated preprocessor config, falling back to its section
+/// in the combined processor config.
+fn load_preprocessor_config(
+    dedicated_path: Option<&Path>,
+    dedicated_name: &str,
+    processor_config_path: Option<&Path>,
+    processor_section: &str,
+) -> Result<Option<PreProcessorConfig>> {
+    if let Some(path) = dedicated_path {
+        let text = fs::read_to_string(path)
+            .map_err(|error| multimodal!("failed to read {dedicated_name}: {error}"))?;
+        let config = PreProcessorConfig::from_json(&text)
+            .map_err(|error| multimodal!("failed to parse {dedicated_name}: {error}"))?;
+        return Ok(Some(config));
+    }
+
+    let Some(path) = processor_config_path else {
+        return Ok(None);
+    };
+    let text = fs::read_to_string(path)
+        .map_err(|error| multimodal!("failed to read processor_config.json: {error}"))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| multimodal!("failed to parse processor_config.json: {error}"))?;
+    let Some(processor) = value.get(processor_section) else {
+        return Ok(None);
+    };
+    let config = PreProcessorConfig::from_value(processor.clone()).map_err(|error| {
+        multimodal!("failed to parse {processor_section} from processor_config.json: {error}")
+    })?;
+    Ok(Some(config))
 }
 
 /// Request-scoped fetched media, split per modality with tracker UUID
@@ -218,21 +250,20 @@ impl MultimodalModelInfo {
             }
             None => serde_json::Value::Object(Default::default()),
         };
-        let preprocessor_config = match files.preprocessor_config {
-            Some(path) => {
-                let text = fs::read_to_string(path).map_err(|error| {
-                    multimodal!("failed to read preprocessor_config.json: {error}")
-                })?;
-                PreProcessorConfig::from_json(&text).map_err(|error| {
-                    multimodal!("failed to parse preprocessor_config.json: {error}")
-                })?
-            }
-            None => PreProcessorConfig::default(),
-        };
-        let video_preprocessor_config = video::load_video_preprocessor_config(
-            files.video_preprocessor_config,
+        let image_preprocessor_config = load_preprocessor_config(
+            files.preprocessor_config,
+            "preprocessor_config.json",
             files.processor_config,
-        )?;
+            "image_processor",
+        )?
+        .unwrap_or_default();
+        let video_preprocessor_config = load_preprocessor_config(
+            files.video_preprocessor_config,
+            "video_preprocessor_config.json",
+            files.processor_config,
+            "video_processor",
+        )?
+        .unwrap_or_else(|| image_preprocessor_config.clone());
 
         let context = MultimodalModelContext {
             model_id,
@@ -241,15 +272,19 @@ impl MultimodalModelInfo {
             tokenizer: TokenizerResolver(tokenizer),
         };
 
-        Self::from_loaded(context, preprocessor_config, video_preprocessor_config)
+        Self::from_loaded(
+            context,
+            image_preprocessor_config,
+            video_preprocessor_config,
+        )
     }
 
     /// Resolve multimodal support from an assembled context and parsed
     /// preprocessor configs.
     fn from_loaded(
         context: MultimodalModelContext,
-        preprocessor_config: PreProcessorConfig,
-        video_preprocessor_config: Option<PreProcessorConfig>,
+        image_preprocessor_config: PreProcessorConfig,
+        video_preprocessor_config: PreProcessorConfig,
     ) -> Result<Option<Self>> {
         let Some(raw_spec) = context.resolve_model_spec() else {
             warn!(
@@ -287,7 +322,7 @@ impl MultimodalModelInfo {
         let image = resolve_placeholder(Modality::Image).map(|placeholder| ModalitySupport {
             placeholder,
             processor,
-            config: preprocessor_config.clone(),
+            config: image_preprocessor_config,
         });
 
         let video = resolve_placeholder(Modality::Video).and_then(|placeholder| {
@@ -305,8 +340,7 @@ impl MultimodalModelInfo {
                 Some(ModalitySupport {
                     placeholder,
                     processor,
-                    config: video_preprocessor_config
-                        .unwrap_or_else(|| preprocessor_config.clone()),
+                    config: video_preprocessor_config,
                 })
             }
         });
@@ -598,9 +632,13 @@ mod tests {
             tokenizer: TokenizerResolver(Arc::new(tokenizer)),
         };
 
-        MultimodalModelInfo::from_loaded(context, PreProcessorConfig::default(), None)
-            .unwrap()
-            .unwrap_or_else(|| panic!("{model_type} multimodal support should resolve"))
+        MultimodalModelInfo::from_loaded(
+            context,
+            PreProcessorConfig::default(),
+            PreProcessorConfig::default(),
+        )
+        .unwrap()
+        .unwrap_or_else(|| panic!("{model_type} multimodal support should resolve"))
     }
 
     fn llama4_info() -> MultimodalModelInfo {
@@ -622,6 +660,42 @@ mod tests {
             "vision_config": {"patch_size": 16}
         });
         test_info("qwen3_vl", config, qwen3_vl_tokenizer())
+    }
+
+    #[test]
+    fn from_paths_resolves_image_config_from_processor_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::json!({
+                "model_type": "qwen3_vl",
+                "image_token_id": QWEN3_IMAGE_PAD_ID,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let processor_config_path = dir.path().join("processor_config.json");
+        std::fs::write(
+            &processor_config_path,
+            r#"{"image_processor":{"size":{"shortest_edge":64}}}"#,
+        )
+        .unwrap();
+
+        let info = MultimodalModelInfo::from_paths(
+            "qwen3-vl-test".to_string(),
+            Some("qwen3_vl".to_string()),
+            MultimodalConfigFiles {
+                config: Some(&config_path),
+                processor_config: Some(&processor_config_path),
+                ..Default::default()
+            },
+            Arc::new(qwen3_vl_tokenizer()),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(info.image.unwrap().config.get_shortest_edge(), Some(64));
     }
 
     #[test]

@@ -1,14 +1,10 @@
 //! Video-modality preparation: per-clip preprocessing, config resolution,
 //! and per-item feature build.
 
-use std::fs;
-use std::path::Path;
 use std::sync::Arc;
 
 use itertools::izip;
-use llm_multimodal::{
-    FieldLayout, Modality, PreProcessorConfig, PreprocessedEncoderInputs, VideoClip,
-};
+use llm_multimodal::{FieldLayout, Modality, PreprocessedEncoderInputs, VideoClip};
 use thiserror_ext::AsReport as _;
 use tracing::warn;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
@@ -25,44 +21,6 @@ use crate::error::{Error, Result, bail_multimodal, multimodal};
 /// Video-capable vLLM models read `pixel_values_videos` alongside
 /// `video_grid_thw`, mirroring the HF processor output naming.
 const VIDEO_PRIMARY_KEY: &str = "pixel_values_videos";
-
-/// Load the video preprocessor config from its dedicated file, falling back
-/// to the `video_processor` section of the combined processor config.
-///
-/// Returns `Ok(None)` when neither source provides one; callers then reuse
-/// the image preprocessor config, mirroring HF processor behavior.
-pub(super) fn load_video_preprocessor_config(
-    video_preprocessor_config_path: Option<&Path>,
-    processor_config_path: Option<&Path>,
-) -> Result<Option<PreProcessorConfig>> {
-    if let Some(path) = video_preprocessor_config_path {
-        let text = fs::read_to_string(path).map_err(|error| {
-            multimodal!("failed to read video_preprocessor_config.json: {error}")
-        })?;
-        let config = PreProcessorConfig::from_json(&text).map_err(|error| {
-            multimodal!("failed to parse video_preprocessor_config.json: {error}")
-        })?;
-        return Ok(Some(config));
-    }
-
-    if let Some(path) = processor_config_path {
-        let text = fs::read_to_string(path)
-            .map_err(|error| multimodal!("failed to read processor_config.json: {error}"))?;
-        let value: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|error| multimodal!("failed to parse processor_config.json: {error}"))?;
-        if let Some(video_processor) = value.get("video_processor") {
-            let config =
-                PreProcessorConfig::from_value(video_processor.clone()).map_err(|error| {
-                    multimodal!(
-                        "failed to parse video_processor from processor_config.json: {error}"
-                    )
-                })?;
-            return Ok(Some(config));
-        }
-    }
-
-    Ok(None)
-}
 
 impl MultimodalModelInfo {
     /// Preprocess fetched video clips one at a time and build per-item
