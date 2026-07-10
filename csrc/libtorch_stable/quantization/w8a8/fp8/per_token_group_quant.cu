@@ -302,7 +302,14 @@ __global__ void per_token_group_quant_8bit_register_kernel(
   const int sf_k_idx = blockIdx.y * kGroupsPerBlockX + sf_k_local;
   const int mn_idx = blockIdx.x * kRowsPerBlock + row_local;
 
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  cudaGridDependencySynchronize();
+#endif
+
   if (mn_idx >= mn) {
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+    cudaTriggerProgrammaticLaunchCompletion();
+#endif
     return;
   }
 
@@ -336,6 +343,9 @@ __global__ void per_token_group_quant_8bit_register_kernel(
   }
 
   if (!is_valid_group) {
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+    cudaTriggerProgrammaticLaunchCompletion();
+#endif
     return;
   }
 
@@ -347,6 +357,10 @@ __global__ void per_token_group_quant_8bit_register_kernel(
       static_cast<int64_t>(mn_idx) * groups_per_row * GROUP_SIZE +
       sf_k_idx * GROUP_SIZE + lane_id * VEC_SIZE;
   *reinterpret_cast<uint4*>(group_output) = packed_out;
+
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  cudaTriggerProgrammaticLaunchCompletion();
+#endif
 }
 
 void per_token_group_quant_8bit(const torch::stable::Tensor& input,
@@ -436,21 +450,48 @@ void per_token_group_quant_8bit(const torch::stable::Tensor& input,
     }                                                                   \
   } while (0)
 
-#define LAUNCH_REG_KERNEL_INST(T, DST_DTYPE, IS_COLUMN_MAJOR, SCALE_UE8M0, KX, \
-                               RY)                                             \
-  do {                                                                         \
-    dim3 grid(static_cast<unsigned int>(blocks_x),                             \
-              static_cast<unsigned int>(blocks_y));                            \
-    dim3 block(num_threads_fast);                                              \
-    per_token_group_quant_8bit_register_kernel<T, DST_DTYPE, IS_COLUMN_MAJOR,  \
-                                               SCALE_UE8M0, 128, KX, RY>       \
-        <<<grid, block, 0, stream>>>(                                          \
-            static_cast<const T*>(input.data_ptr()), output_q.data_ptr(),      \
-            static_cast<float*>(output_s.data_ptr()),                          \
-            static_cast<int>(groups_per_row), static_cast<int>(mn),            \
-            static_cast<float>(eps), static_cast<float>(min_8bit),             \
-            static_cast<float>(max_8bit), scale_stride);                       \
-  } while (0)
+#ifndef USE_ROCM
+  #define LAUNCH_REG_KERNEL_INST(T, DST_DTYPE, IS_COLUMN_MAJOR, SCALE_UE8M0, \
+                                 KX, RY)                                     \
+    do {                                                                     \
+      cudaLaunchConfig_t config = {};                                        \
+      config.gridDim = dim3(static_cast<unsigned int>(blocks_x),             \
+                            static_cast<unsigned int>(blocks_y));            \
+      config.blockDim = dim3(num_threads_fast);                              \
+      config.dynamicSmemBytes = 0;                                           \
+      config.stream = stream;                                                \
+      cudaLaunchAttribute attrs[1];                                          \
+      attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;      \
+      attrs[0].val.programmaticStreamSerializationAllowed = 1;               \
+      config.numAttrs = 1;                                                   \
+      config.attrs = attrs;                                                  \
+      cudaLaunchKernelEx(                                                    \
+          &config,                                                           \
+          per_token_group_quant_8bit_register_kernel<                        \
+              T, DST_DTYPE, IS_COLUMN_MAJOR, SCALE_UE8M0, 128, KX, RY>,      \
+          static_cast<const T*>(input.data_ptr()), output_q.data_ptr(),      \
+          static_cast<float*>(output_s.data_ptr()),                          \
+          static_cast<int>(groups_per_row), static_cast<int>(mn),            \
+          static_cast<float>(eps), static_cast<float>(min_8bit),             \
+          static_cast<float>(max_8bit), scale_stride);                       \
+    } while (0)
+#else
+  #define LAUNCH_REG_KERNEL_INST(T, DST_DTYPE, IS_COLUMN_MAJOR, SCALE_UE8M0, \
+                                 KX, RY)                                     \
+    do {                                                                     \
+      dim3 grid(static_cast<unsigned int>(blocks_x),                         \
+                static_cast<unsigned int>(blocks_y));                        \
+      dim3 block(num_threads_fast);                                          \
+      per_token_group_quant_8bit_register_kernel<                            \
+          T, DST_DTYPE, IS_COLUMN_MAJOR, SCALE_UE8M0, 128, KX, RY>           \
+          <<<grid, block, 0, stream>>>(                                      \
+              static_cast<const T*>(input.data_ptr()), output_q.data_ptr(),  \
+              static_cast<float*>(output_s.data_ptr()),                      \
+              static_cast<int>(groups_per_row), static_cast<int>(mn),        \
+              static_cast<float>(eps), static_cast<float>(min_8bit),         \
+              static_cast<float>(max_8bit), scale_stride);                   \
+    } while (0)
+#endif
 
 #define LAUNCH_REG_KERNEL(T, DST_DTYPE, IS_COLUMN_MAJOR, SCALE_UE8M0)        \
   do {                                                                       \
