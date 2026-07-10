@@ -1,5 +1,7 @@
 # default base image
 ARG REMOTE_VLLM="0"
+ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
+ARG VLLM_BRANCH="main"
 ARG COMMON_WORKDIR=/app
 ARG BASE_IMAGE=rocm/vllm-dev:base
 ARG CI_BASE_IMAGE=rocm/vllm-dev:ci_base
@@ -110,10 +112,8 @@ WORKDIR ${COMMON_WORKDIR}
 FROM base AS fetch_vllm_0
 ONBUILD COPY ./ vllm/
 FROM base AS fetch_vllm_1
-ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
-ARG VLLM_BRANCH="main"
-ENV VLLM_REPO=${VLLM_REPO}
-ENV VLLM_BRANCH=${VLLM_BRANCH}
+ARG VLLM_REPO
+ARG VLLM_BRANCH
 ONBUILD RUN git clone ${VLLM_REPO} \
 	    && cd vllm \
 	    && git fetch -v --prune -- origin ${VLLM_BRANCH} \
@@ -133,8 +133,8 @@ COPY rust-toolchain.toml /rust-toolchain-input/vllm/rust-toolchain.toml
 COPY tools/install_protoc.sh /rust-toolchain-input/vllm/tools/install_protoc.sh
 
 FROM base AS rust_toolchain_input_1
-ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
-ARG VLLM_BRANCH="main"
+ARG VLLM_REPO
+ARG VLLM_BRANCH
 RUN git clone --no-checkout --filter=blob:none ${VLLM_REPO} /rust-toolchain-input/vllm \
     && cd /rust-toolchain-input/vllm \
     && git fetch -v --prune -- origin ${VLLM_BRANCH} \
@@ -161,8 +161,8 @@ COPY tools/build_rust.py /rust-input/vllm/tools/build_rust.py
 COPY build_rust.sh /rust-input/vllm/build_rust.sh
 
 FROM base AS rust_input_1
-ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
-ARG VLLM_BRANCH="main"
+ARG VLLM_REPO
+ARG VLLM_BRANCH
 RUN git clone --no-checkout --filter=blob:none ${VLLM_REPO} /rust-input/vllm \
     && cd /rust-input/vllm \
     && git fetch -v --prune -- origin ${VLLM_BRANCH} \
