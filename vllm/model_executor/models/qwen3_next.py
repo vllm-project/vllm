@@ -14,11 +14,15 @@ from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
+    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.head_partition import (
+    make_attention_head_partition,
+)
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
 )
@@ -28,6 +32,7 @@ from vllm.model_executor.layers.layernorm import (
 )
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
+    QKVParallelLinearOverlappingGQA,
     ReplicatedLinear,
     RowParallelLinear,
 )
@@ -235,19 +240,34 @@ class Qwen3NextAttention(nn.Module):
         self.config = config
         self.hidden_size = config.hidden_size
         tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
         self.total_num_heads = config.num_attention_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = config.num_key_value_heads
-        if self.total_num_kv_heads >= tp_size:
+        self.attn_head_partition = None
+        use_overlapping_gqa = (
+            self.total_num_kv_heads % tp_size != 0
+            and tp_size % self.total_num_kv_heads != 0
+        )
+        if use_overlapping_gqa:
+            self.attn_head_partition = make_attention_head_partition(
+                total_num_heads=self.total_num_heads,
+                total_num_kv_heads=self.total_num_kv_heads,
+                tp_size=tp_size,
+                tp_rank=tp_rank,
+            )
+            self.num_kv_heads = self.attn_head_partition.num_kv_heads
+        elif self.total_num_kv_heads >= tp_size:
             # Number of KV heads is greater than TP size, so we partition
             # the KV heads across multiple tensor parallel GPUs.
             assert self.total_num_kv_heads % tp_size == 0
+            self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         else:
             # Number of KV heads is less than TP size, so we replicate
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+            self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         self.head_dim = config.head_dim or (self.hidden_size // self.num_heads)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
@@ -257,7 +277,15 @@ class Qwen3NextAttention(nn.Module):
         )
         self.attn_output_gate = getattr(config, "attn_output_gate", True)
 
-        self.qkv_proj = QKVParallelLinear(
+        qkv_proj_cls = (
+            QKVParallelLinearOverlappingGQA
+            if use_overlapping_gqa
+            else QKVParallelLinear
+        )
+        qkv_kwargs = {}
+        if self.attn_head_partition is not None:
+            qkv_kwargs["kv_head_indices"] = self.attn_head_partition.kv_head_indices
+        self.qkv_proj = qkv_proj_cls(
             config.hidden_size,
             self.head_dim,
             self.total_num_heads * (1 + self.attn_output_gate),
@@ -265,6 +293,7 @@ class Qwen3NextAttention(nn.Module):
             bias=getattr(config, "qkv_bias", False),
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
+            **qkv_kwargs,
         )
 
         self.o_proj = RowParallelLinear(
@@ -766,6 +795,11 @@ class Qwen3NextForCausalLM(
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_text_config
         tp_size = parallel_config.tensor_parallel_size
+        if (
+            hf_config.linear_num_key_heads % tp_size != 0
+            or hf_config.linear_num_value_heads % tp_size != 0
+        ):
+            tp_size = 1
         num_spec = (
             vllm_config.speculative_config.num_speculative_tokens
             if vllm_config.speculative_config

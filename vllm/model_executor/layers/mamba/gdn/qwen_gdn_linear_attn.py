@@ -15,9 +15,6 @@ from vllm.config import (
     VllmConfig,
     get_current_vllm_config,
 )
-from vllm.distributed import (
-    divide,
-)
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp, PluggableLayer
@@ -34,10 +31,17 @@ from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE
 from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    ExplicitPaddedMergedColumnParallelLinear,
+    ExplicitPaddedRowParallelLinear,
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.gdn.head_partition import (
+    explicit_gdn_conv_weight_loader,
+    explicit_vector_weight_loader,
+    make_gdn_head_partition,
+)
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
@@ -81,7 +85,6 @@ if GDN_AITER_TRITON_AVAILABLE:
     )
 
 logger = init_logger(__name__)
-
 
 # TODO(arpera): remove ``_is_libs_cu13_install_intact`` and its caller in
 # ``_resolve_gdn_prefill_backend`` once the upstream packaging bug is
@@ -421,6 +424,22 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def get_state_shape(
         self,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        if getattr(self, "gdn_explicit_partition", False):
+            conv_state_shape = MambaStateShapeCalculator._orient_conv_shape(
+                self.padded_local_conv_dim,
+                self.conv_kernel_size - 1 + self.num_spec,
+            )
+            temporal_state_shape = (
+                self.padded_local_num_v_heads,
+                self.head_v_dim,
+                self.head_k_dim,
+            )
+            return (
+                conv_state_shape,
+                temporal_state_shape,
+                conv_state_shape,
+                temporal_state_shape,
+            )
         return MambaStateShapeCalculator.gated_delta_net_state_shape(
             self.tp_size,
             self.num_k_heads,
@@ -448,6 +467,37 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.key_dim = self.head_k_dim * self.num_k_heads
         self.value_dim = self.head_v_dim * self.num_v_heads
         self.gqa_interleaved_layout = gqa_interleaved_layout
+        incompatible_gdn_tp = (
+            self.num_k_heads % self.tp_size != 0
+            or self.num_v_heads % self.tp_size != 0
+        )
+        self.gdn_explicit_partition = incompatible_gdn_tp and (
+            not self.gqa_interleaved_layout
+        )
+        self.disable_tp_for_gdn = incompatible_gdn_tp and (
+            not self.gdn_explicit_partition
+        )
+        if self.disable_tp_for_gdn:
+            self.tp_size = 1
+            self.tp_rank = 0
+        self.gdn_partition = make_gdn_head_partition(
+            num_k_heads=self.num_k_heads,
+            num_v_heads=self.num_v_heads,
+            head_k_dim=self.head_k_dim,
+            head_v_dim=self.head_v_dim,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+        )
+        self.local_num_k_heads = self.gdn_partition.k_count
+        self.local_num_v_heads = self.gdn_partition.v_count
+        self.padded_local_num_k_heads = self.gdn_partition.max_k_count
+        self.padded_local_num_v_heads = self.gdn_partition.max_v_count
+        self.local_key_dim = self.gdn_partition.local_key_dim
+        self.local_value_dim = self.gdn_partition.local_value_dim
+        self.padded_local_key_dim = self.gdn_partition.padded_key_dim
+        self.padded_local_value_dim = self.gdn_partition.padded_value_dim
+        self.local_conv_dim = self.gdn_partition.local_conv_dim
+        self.padded_local_conv_dim = self.gdn_partition.padded_conv_dim
         if current_platform.is_xpu():
             self._forward_method = self.forward_xpu
         elif current_platform.is_cpu():
@@ -464,11 +514,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # QKV
         self.conv_dim = self.key_dim * 2 + self.value_dim
+        conv_output_size = (
+            self.padded_local_conv_dim * self.tp_size
+            if self.gdn_explicit_partition
+            else self.conv_dim
+        )
         self.conv1d = ColumnParallelLinear(
             input_size=self.conv_kernel_size,
-            output_size=self.conv_dim,
+            output_size=conv_output_size,
             bias=False,
             prefix=f"{prefix}.conv1d",
+            disable_tp=self.disable_tp_for_gdn,
         )
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
 
@@ -483,6 +539,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             value_dim=self.value_dim,
             quant_config=self.quant_config,
             prefix=f"{prefix}.in_proj_qkvz",
+            disable_tp=self.disable_tp_for_gdn,
         )
 
         # ba_proj doesn't support blockwise fp8 quantization.
@@ -493,38 +550,62 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             num_v_heads=self.num_v_heads,
             quant_config=self.quant_config,
             prefix=f"{prefix}.in_proj_ba",
+            disable_tp=self.disable_tp_for_gdn,
         )
         self.disable_tp_for_ba_proj = self.maybe_disable_tp(self.quant_config)
 
         query_key_settings = (self.key_dim, 0, False)
         value_settings = (self.value_dim, 0, False)
 
-        self.conv1d.weight.weight_loader = mamba_v2_sharded_weight_loader(
-            [
-                query_key_settings,
-                query_key_settings,
-                value_settings,
-            ],
-            self.tp_size,
-            self.tp_rank,
-        )
+        if self.gdn_explicit_partition:
+            self.conv1d.weight.weight_loader = explicit_gdn_conv_weight_loader(
+                self.gdn_partition
+            )
+        else:
+            self.conv1d.weight.weight_loader = mamba_v2_sharded_weight_loader(
+                [
+                    query_key_settings,
+                    query_key_settings,
+                    value_settings,
+                ],
+                self.tp_size,
+                self.tp_rank,
+            )
 
         # selective projection used to make dt, B and C input dependent
 
         # time step projection (discretization)
         # instantiate once and copy inv_dt in init_weights of PretrainedModel
         self.dt_bias = nn.Parameter(
-            torch.ones(self.num_v_heads // self.tp_size),
+            torch.ones(self.padded_local_num_v_heads),
         )
         self.A_log = nn.Parameter(
             torch.empty(
-                divide(self.num_v_heads, self.tp_size),
+                self.padded_local_num_v_heads,
                 dtype=torch.float32,
             )
         )
 
-        set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(0)})
-        set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
+        if self.gdn_explicit_partition:
+            set_weight_attrs(
+                self.A_log,
+                {
+                    "weight_loader": explicit_vector_weight_loader(
+                        self.gdn_partition.v_start, self.local_num_v_heads
+                    )
+                },
+            )
+            set_weight_attrs(
+                self.dt_bias,
+                {
+                    "weight_loader": explicit_vector_weight_loader(
+                        self.gdn_partition.v_start, self.local_num_v_heads
+                    )
+                },
+            )
+        elif not self.disable_tp_for_gdn:
+            set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(0)})
+            set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
 
         output_gate_type = getattr(config, "output_gate_type", "silu")
         if output_gate_type == "swish":
@@ -542,20 +623,35 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             device=current_platform.current_device(),
         )
 
-        self.out_proj = RowParallelLinear(
-            self.value_dim,
-            self.hidden_size,
-            bias=False,
-            input_is_parallel=True,
-            quant_config=self.quant_config,
-            prefix=f"{prefix}.out_proj",
-        )
+        if self.gdn_explicit_partition:
+            self.out_proj = ExplicitPaddedRowParallelLinear(
+                input_size=self.value_dim,
+                padded_input_size=self.padded_local_value_dim * self.tp_size,
+                local_start=self.gdn_partition.v_start * self.head_v_dim,
+                local_size=self.local_value_dim,
+                output_size=self.hidden_size,
+                bias=False,
+                input_is_parallel=True,
+                quant_config=self.quant_config,
+                prefix=f"{prefix}.out_proj",
+            )
+        else:
+            self.out_proj = RowParallelLinear(
+                self.value_dim,
+                self.hidden_size,
+                bias=False,
+                input_is_parallel=True,
+                quant_config=self.quant_config,
+                prefix=f"{prefix}.out_proj",
+                disable_tp=self.disable_tp_for_gdn,
+            )
 
         self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
         self.gdn_prefill_backend = self.chunk_gated_delta_rule.gdn_prefill_backend
         self._prefill_kernels_warmed_up = False
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
+            and not self.gdn_explicit_partition
         )
 
         compilation_config = get_current_vllm_config().compilation_config
@@ -570,6 +666,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         value_dim: int,
         quant_config: QuantizationConfig | None,
         prefix: str,
+        disable_tp: bool = False,
     ) -> MergedColumnParallelLinear:
         # When gqa_interleaved_layout=True (Qwen3-Next), qkvz weights are
         # stored as a single fused tensor with interleaved GQA layout, so we
@@ -581,12 +678,35 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             if self.gqa_interleaved_layout
             else [key_dim, key_dim, value_dim, value_dim]
         )
+        if self.gdn_explicit_partition and not self.gqa_interleaved_layout:
+            partition = self.gdn_partition
+            return ExplicitPaddedMergedColumnParallelLinear(
+                input_size=hidden_size,
+                output_sizes=output_sizes,
+                padded_output_sizes=partition.padded_qkvz_output_sizes,
+                local_starts=[
+                    partition.k_start * self.head_k_dim,
+                    partition.k_start * self.head_k_dim,
+                    partition.v_start * self.head_v_dim,
+                    partition.v_start * self.head_v_dim,
+                ],
+                local_sizes=[
+                    partition.local_key_dim,
+                    partition.local_key_dim,
+                    partition.local_value_dim,
+                    partition.local_value_dim,
+                ],
+                bias=False,
+                quant_config=quant_config,
+                prefix=prefix,
+            )
         return MergedColumnParallelLinear(
             input_size=hidden_size,
             output_sizes=output_sizes,
             bias=False,
             quant_config=quant_config,
             prefix=prefix,
+            disable_tp=disable_tp,
         )
 
     def create_ba_proj(
@@ -595,6 +715,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         num_v_heads: int,
         quant_config: QuantizationConfig | None,
         prefix: str,
+        disable_tp: bool = False,
     ) -> MergedColumnParallelLinear:
         # When gqa_interleaved_layout=True (Qwen3-Next), in_proj_ba is stored
         # as a single fused weight [b_g0, a_g0, b_g1, a_g1, ...] interleaved
@@ -604,13 +725,26 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         output_sizes = (
             [num_v_heads * 2] if self.gqa_interleaved_layout else [num_v_heads] * 2
         )
+        if self.gdn_explicit_partition and not self.gqa_interleaved_layout:
+            partition = self.gdn_partition
+            return ExplicitPaddedMergedColumnParallelLinear(
+                input_size=hidden_size,
+                output_sizes=output_sizes,
+                padded_output_sizes=partition.padded_ba_output_sizes,
+                local_starts=[partition.v_start, partition.v_start],
+                local_sizes=[partition.v_count, partition.v_count],
+                bias=False,
+                quant_config=quant_config,
+                prefix=prefix,
+                disable_tp=self.maybe_disable_tp(quant_config),
+            )
         return MergedColumnParallelLinear(
             input_size=hidden_size,
             output_sizes=output_sizes,
             bias=False,
             quant_config=quant_config,
             prefix=prefix,
-            disable_tp=self.maybe_disable_tp(quant_config),
+            disable_tp=disable_tp or self.maybe_disable_tp(quant_config),
         )
 
     def maybe_disable_tp(self, quant_config: QuantizationConfig | None) -> bool:
@@ -633,6 +767,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
     def split_ba(self, ba: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         b, a = ba.chunk(2, dim=-1)
+        if self.gdn_explicit_partition:
+            b = b[:, : self.local_num_v_heads]
+            a = a[:, : self.local_num_v_heads]
+            return b, a
         if self.disable_tp_for_ba_proj and self.tp_size > 1:
             # ba_proj is replicated for Marlin; slice b/a to local TP rank.
             ba_chunk = self.num_v_heads // self.tp_size
@@ -640,6 +778,53 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             b = b[:, ba_start : ba_start + ba_chunk]
             a = a[:, ba_start : ba_start + ba_chunk]
         return b, a
+
+    def _split_non_interleaved_qkvz(
+        self, mixed_qkvz: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.gdn_explicit_partition:
+            qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
+            z_size = self.value_dim // self.tp_size
+            mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
+            return mixed_qkv, z.reshape(z.size(0), -1, self.head_v_dim)
+
+        qkv_size = self.padded_local_key_dim * 2 + self.padded_local_value_dim
+        z_size = self.padded_local_value_dim
+        mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
+        z = z[:, : self.local_value_dim].reshape(
+            z.size(0), self.local_num_v_heads, self.head_v_dim
+        )
+        return mixed_qkv, z
+
+    def _strip_padded_mixed_qkv(self, mixed_qkv: torch.Tensor | None):
+        if mixed_qkv is None or not self.gdn_explicit_partition:
+            return mixed_qkv
+        q, k, v = mixed_qkv.split(
+            [
+                self.padded_local_key_dim,
+                self.padded_local_key_dim,
+                self.padded_local_value_dim,
+            ],
+            dim=-1,
+        )
+        return torch.cat(
+            [
+                q[:, : self.local_key_dim],
+                k[:, : self.local_key_dim],
+                v[:, : self.local_value_dim],
+            ],
+            dim=-1,
+        )
+
+    def _pad_local_value_flat(self, value: torch.Tensor) -> torch.Tensor:
+        if not self.gdn_explicit_partition:
+            return value
+        if self.local_value_dim == self.padded_local_value_dim:
+            return value
+        return torch.nn.functional.pad(
+            value,
+            (0, self.padded_local_value_dim - self.local_value_dim),
+        )
 
     def fix_query_key_value_ordering(
         self,
@@ -709,12 +894,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if not self.gqa_interleaved_layout:
             # Qwen3.5: weights are in [q, k, v, z] order
             assert num_tokens == mixed_qkvz.shape[0]
-            qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
-            z_size = self.value_dim // self.tp_size
-            mixed_qkv, z_flat = mixed_qkvz.split([qkv_size, z_size], dim=-1)
-            n = mixed_qkvz.shape[0]
-            z_out = z_flat.reshape(n, -1, self.head_v_dim)
-            b, a = mixed_ba.chunk(2, dim=-1)
+            mixed_qkv, z_out = self._split_non_interleaved_qkvz(mixed_qkvz)
+            b, a = self.split_ba(mixed_ba)
             return mixed_qkv, z_out, b, a
 
         # Qwen3-Next: interleaved GQA layout
@@ -818,9 +999,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             return None, None, None
 
         seq_len = mixed_qkv.shape[0]
-        q_dim = self.key_dim // self.tp_size
-        k_dim = self.key_dim // self.tp_size
-        v_dim = self.value_dim // self.tp_size
+        q_dim = self.local_key_dim
+        k_dim = self.local_key_dim
+        v_dim = self.local_value_dim
 
         query, key, value = torch.split(mixed_qkv, [q_dim, k_dim, v_dim], dim=-1)
 
@@ -863,6 +1044,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
+        core_attn_out = self._pad_local_value_flat(core_attn_out)
         output, _ = self.out_proj(core_attn_out)
         return output
 
@@ -879,12 +1061,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             projected_states_qkvz = projected_states_qkvz.view(num_tokens, -1)
             projected_states_ba = projected_states_ba.view(num_tokens, -1)
             core_attn_out = torch.empty(
-                (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+                (num_tokens, self.local_num_v_heads, self.head_v_dim),
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
             )
             z = torch.empty(
-                (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+                (num_tokens, self.local_num_v_heads, self.head_v_dim),
                 dtype=projected_states_qkvz.dtype,
                 device=projected_states_qkvz.device,
             )
@@ -930,10 +1112,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             mixed_qkv = torch.cat((query, key, value), dim=-1)
         else:
             # Qwen3.5: weights are already in [q, k, v, z] and [b, a] order
-            qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
-            z_size = self.value_dim // self.tp_size
-            mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
-            z = z.reshape(z.size(0), -1, self.head_v_dim)
+            mixed_qkv, z = self._split_non_interleaved_qkvz(mixed_qkvz)
             b, a = self.split_ba(ba)
             b = b.contiguous()
             a = a.contiguous()
@@ -944,7 +1123,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # Note: we should not use torch.empty here like other attention backends,
         # see discussions in https://github.com/vllm-project/vllm/pull/28182
         core_attn_out = torch.zeros(
-            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+            (num_tokens, self.local_num_v_heads, self.head_v_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
@@ -984,7 +1163,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # Part 2: Core Attention
         # ============================================================
         core_attn_out = torch.zeros(
-            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+            (num_tokens, self.local_num_v_heads, self.head_v_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
@@ -1031,15 +1210,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             mixed_qkv = torch.cat((query, key, value), dim=-1)
         else:
             # Qwen3.5: weights are already in [q, k, v, z] and [b, a] order
-            qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
-            z_size = self.value_dim // self.tp_size
-            mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
-            z = z.reshape(z.size(0), -1, self.head_v_dim)
-            b, a = ba.chunk(2, dim=-1)
+            mixed_qkv, z = self._split_non_interleaved_qkvz(mixed_qkvz)
+            b, a = self.split_ba(ba)
 
         num_tokens = hidden_states.size(0)
         core_attn_out = torch.zeros(
-            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+            (num_tokens, self.local_num_v_heads, self.head_v_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
@@ -1058,6 +1234,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
+        core_attn_out = self._pad_local_value_flat(core_attn_out)
         out, _ = self.out_proj(core_attn_out)
         return out
 
@@ -1092,8 +1269,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         device = qkv_or_qkvz.device
         dtype = qkv_or_qkvz.dtype
-        num_k_heads = self.num_k_heads // self.tp_size
-        num_v_heads = self.num_v_heads // self.tp_size
+        num_k_heads = self.local_num_k_heads
+        num_v_heads = self.local_num_v_heads
         _, state_dtype = self.get_state_dtype()
 
         # All kernels use BT = chunk_size, so a single pass with T = chunk_size
@@ -1102,7 +1279,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # then run chunk_gated_delta_rule with in-kernel L2 norm disabled.
         T = FLA_CHUNK_SIZE
         dummy_mixed_qkv = torch.randn(
-            T, qkv_or_qkvz.shape[-1] - v_dim, device=device, dtype=dtype
+            T,
+            self.local_conv_dim
+            if self.gdn_explicit_partition
+            else qkv_or_qkvz.shape[-1] - v_dim,
+            device=device,
+            dtype=dtype,
         )
         dummy_a = torch.randn(T, num_v_heads, device=device, dtype=dtype)
         dummy_b = torch.randn(T, num_v_heads, device=device, dtype=dtype)
@@ -1110,8 +1292,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             conv_output=dummy_mixed_qkv,
             a=dummy_a,
             b=dummy_b,
-            A_log=self.A_log,
-            dt_bias=self.dt_bias,
+            A_log=self.A_log[:num_v_heads],
+            dt_bias=self.dt_bias[:num_v_heads],
             num_k_heads=num_k_heads,
             head_k_dim=self.head_k_dim,
             head_v_dim=self.head_v_dim,
@@ -1310,6 +1492,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             else self_kv_cache[0].transpose(-1, -2)
         )
         ssm_state = self_kv_cache[1]
+        ssm_state = (
+            ssm_state[:, : self.local_num_v_heads, :, :]
+            if self.gdn_explicit_partition
+            else ssm_state
+        )
+        A_log = self.A_log[: self.local_num_v_heads]
+        dt_bias = self.dt_bias[: self.local_num_v_heads]
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_accepted_tokens = attn_metadata.num_accepted_tokens
 
@@ -1385,6 +1574,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             mixed_qkv_non_spec = None
 
+        mixed_qkv_spec = self._strip_padded_mixed_qkv(mixed_qkv_spec)
+        mixed_qkv_non_spec = self._strip_padded_mixed_qkv(mixed_qkv_non_spec)
         query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
 
         # Split mixed non-spec-decode+prefill to process independently
@@ -1425,9 +1616,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 conv_output=conv_output_prefill,
                 a=a_prefill,
                 b=b_prefill,
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
-                num_k_heads=self.num_k_heads // self.tp_size,
+                A_log=A_log,
+                dt_bias=dt_bias,
+                num_k_heads=self.local_num_k_heads,
                 head_k_dim=self.head_k_dim,
                 head_v_dim=self.head_v_dim,
                 apply_l2norm=True,
@@ -1451,10 +1642,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if spec_sequence_masks is not None:
             core_attn_out_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
-                    A_log=self.A_log,
+                    A_log=A_log,
                     a=a,
                     b=b,
-                    dt_bias=self.dt_bias,
+                    dt_bias=dt_bias,
                     q=query_spec,
                     k=key_spec,
                     v=value_spec,
@@ -1478,10 +1669,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
             )
             core_attn_out_decode, _ = fused_sigmoid_gating_delta_rule_update(
-                A_log=self.A_log,
+                A_log=A_log,
                 a=a[:num_decode_tokens],
                 b=b[:num_decode_tokens],
-                dt_bias=self.dt_bias,
+                dt_bias=dt_bias,
                 q=query_decode,
                 k=key_decode,
                 v=value_decode,
@@ -1536,10 +1727,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         elif attn_metadata.num_decodes > 0:
             core_attn_out_non_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
-                    A_log=self.A_log,
+                    A_log=A_log,
                     a=a,
                     b=b,
-                    dt_bias=self.dt_bias,
+                    dt_bias=dt_bias,
                     q=query_non_spec,
                     k=key_non_spec,
                     v=value_non_spec,
