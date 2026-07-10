@@ -348,7 +348,10 @@ def test_selective_scan(
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
 @pytest.mark.skipif(
     current_platform.is_cpu(),
-    reason="CPU kernel for selective_state_update only supports Mamba 2 (scalar A/dt), not Mamba 1.",
+    reason=(
+        "CPU kernel for selective_state_update only supports "
+        "Mamba 2 (scalar A/dt), not Mamba 1."
+    ),
 )
 def test_selective_state_update(dim, dstate, has_z, itype):
     device = DEVICE
@@ -442,7 +445,10 @@ def test_selective_state_update_stochastic_rounding(dim, dstate, has_z, philox_r
 @pytest.mark.parametrize("max_seq_len", [1, 2, 4])
 @pytest.mark.skipif(
     current_platform.is_cpu(),
-    reason="CPU kernel for selective_state_update only supports Mamba 2 (scalar A/dt), not Mamba 1.",
+    reason=(
+        "CPU kernel for selective_state_update only supports "
+        "Mamba 2 (scalar A/dt), not Mamba 1."
+    ),
 )
 def test_selective_state_update_varlen(dim, dstate, has_z, itype, max_seq_len):
     device = DEVICE
@@ -707,7 +713,10 @@ def test_selective_scan_varlen(
 @pytest.mark.parametrize("with_padding", [True, False])
 @pytest.mark.skipif(
     current_platform.is_cpu(),
-    reason="CPU kernel for selective_state_update only supports Mamba 2 (scalar A/dt), not Mamba 1.",
+    reason=(
+        "CPU kernel for selective_state_update only supports "
+        "Mamba 2 (scalar A/dt), not Mamba 1."
+    ),
 )
 def test_selective_state_update_with_batch_indices(
     with_padding, dim, dstate, has_z, itype
@@ -803,7 +812,10 @@ def test_selective_state_update_with_batch_indices(
 @pytest.mark.parametrize("dim", [2048, 4096])
 @pytest.mark.skipif(
     current_platform.is_cpu(),
-    reason="CPU kernel for selective_state_update only supports Mamba 2 (scalar A/dt), not Mamba 1.",
+    reason=(
+        "CPU kernel for selective_state_update only supports "
+        "Mamba 2 (scalar A/dt), not Mamba 1."
+    ),
 )
 def test_selective_state_update_with_heads_with_batch_indices(
     dim, dstate, ngroups, has_z, tie_hdim, itype
@@ -880,7 +892,10 @@ def test_selective_state_update_with_heads_with_batch_indices(
 @pytest.mark.parametrize("max_seq_len", [2, 4])
 @pytest.mark.skipif(
     current_platform.is_cpu(),
-    reason="CPU kernel for selective_state_update only supports Mamba 2 (scalar A/dt), not Mamba 1.",
+    reason=(
+        "CPU kernel for selective_state_update only supports "
+        "Mamba 2 (scalar A/dt), not Mamba 1."
+    ),
 )
 def test_selective_state_update_with_num_accepted_tokens(
     dim, dstate, has_z, itype, max_seq_len
@@ -1010,7 +1025,10 @@ def test_selective_state_update_with_num_accepted_tokens(
 @pytest.mark.parametrize("max_seq_len", [2, 4])
 @pytest.mark.skipif(
     current_platform.is_cpu(),
-    reason="CPU kernel for selective_state_update only supports Mamba 2 (scalar A/dt), not Mamba 1.",
+    reason=(
+        "CPU kernel for selective_state_update only supports "
+        "Mamba 2 (scalar A/dt), not Mamba 1."
+    ),
 )
 def test_selective_state_update_varlen_with_num_accepted(
     dim, dstate, has_z, itype, max_seq_len
