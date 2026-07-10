@@ -387,7 +387,7 @@ async fn collect_beam_search_completion(
 ) -> CompletionResponse {
     let prompt_len = beam_result.prompt_token_ids.len();
     let output_tokens: usize = beam_result
-        .beams
+        .sequences
         .iter()
         .map(|b| b.tokens.len().saturating_sub(prompt_len))
         .sum();
@@ -410,7 +410,7 @@ async fn collect_beam_search_completion(
     let prompt_token_ids = return_token_ids.then(|| beam_result.prompt_token_ids.clone());
 
     let choices: Vec<CompletionChoice> = beam_result
-        .beams
+        .sequences
         .iter()
         .enumerate()
         .map(|(i, beam)| {
@@ -451,7 +451,7 @@ async fn collect_beam_search_completion(
             model = %response_model,
             prompt_tokens = usage.prompt_tokens,
             output_tokens = usage.completion_tokens.unwrap_or(0),
-            num_beams = beam_result.beams.len(),
+            num_beams = beam_result.sequences.len(),
             "beam search completion finished"
         );
     }
