@@ -39,8 +39,8 @@ def _get_mm_max_toks_per_item(
 
 
 @dataclass(frozen=True)
-class EncoderCacheBudget:
-    """Pure GPU encoder-cache budget data."""
+class EncoderProfileBudget:
+    """Pure multimodal encoder profiling budget data."""
 
     encoder_compute_budget: int
     encoder_cache_size: int
@@ -88,11 +88,11 @@ def _get_max_items_per_batch(
     )
 
 
-def _compute_encoder_cache_budget(
+def _compute_encoder_profile_budget(
     vllm_config: VllmConfig,
     mm_registry: MultiModalRegistry,
     processor: BaseMultiModalProcessor,
-) -> EncoderCacheBudget:
+) -> EncoderProfileBudget:
     model_config = vllm_config.model_config
     scheduler_config = vllm_config.scheduler_config
     mm_config = model_config.get_multimodal_config()
@@ -145,7 +145,7 @@ def _compute_encoder_cache_budget(
         for modality, max_toks_per_item in tower_mm_max_toks_per_item.items()
     }
 
-    return EncoderCacheBudget(
+    return EncoderProfileBudget(
         encoder_compute_budget=encoder_compute_budget,
         encoder_cache_size=encoder_cache_size,
         mm_max_toks_per_item=tower_mm_max_toks_per_item,
@@ -153,8 +153,8 @@ def _compute_encoder_cache_budget(
     )
 
 
-class EncoderCacheProfilerInputs:
-    """Budget data and dummy inputs for encoder-cache profiling."""
+class EncoderProfileInputs:
+    """Budget data and dummy inputs for multimodal encoder profiling."""
 
     def __init__(
         self,
@@ -166,7 +166,7 @@ class EncoderCacheProfilerInputs:
 
         with set_default_torch_num_threads():
             processor = mm_registry.create_processor(self.model_config)
-            self.budget = _compute_encoder_cache_budget(
+            self.budget = _compute_encoder_profile_budget(
                 vllm_config,
                 mm_registry,
                 processor=processor,

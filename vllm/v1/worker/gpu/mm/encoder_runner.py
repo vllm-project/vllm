@@ -8,6 +8,7 @@ from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_r
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.utils import get_mm_features_in_window, group_and_batch_mm_kwargs
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
+from vllm.v1.worker.gpu.mm.encoder_profile import EncoderProfileInputs
 from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
 
 logger = init_logger(__name__)
@@ -52,18 +53,13 @@ class EncoderRunner:
         return mm_hashes, mm_kwargs
 
     @torch.inference_mode()
-    def profile_encoder_cache(self) -> None:
+    def profile_encoder_cache(self, profile_inputs: EncoderProfileInputs) -> None:
         """Profile multimodal encoder and temporary encoder cache memory."""
-        profile_inputs = self.encoder_cache.profile_inputs
-        if profile_inputs is None:
-            return
-
         budget = profile_inputs.budget
         mm_config = profile_inputs.model_config.multimodal_config
         if mm_config is not None and mm_config.skip_mm_profiling:
             logger.info(
-                "Skipping memory profiling for multimodal encoder and "
-                "encoder cache."
+                "Skipping memory profiling for multimodal encoder and encoder cache."
             )
             return
 
@@ -93,9 +89,7 @@ class EncoderRunner:
             max_mm_items_per_batch,
             self.device,
         )
-        dummy_encoder_outputs = self.model.embed_multimodal(
-            **batched_dummy_mm_inputs
-        )
+        dummy_encoder_outputs = self.model.embed_multimodal(**batched_dummy_mm_inputs)
 
         sanity_check_mm_encoder_outputs(
             dummy_encoder_outputs,

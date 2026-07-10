@@ -94,7 +94,7 @@ from vllm.v1.worker.gpu.lora_utils import (
     get_num_active_loras_for_dispatch,
 )
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
-from vllm.v1.worker.gpu.mm.encoder_cache_budget import EncoderCacheProfilerInputs
+from vllm.v1.worker.gpu.mm.encoder_profile import EncoderProfileInputs
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
@@ -183,11 +183,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.model_config
         )
         self.encoder_cache = None
+        self.encoder_profile_inputs = None
         if self.supports_mm_inputs and self.is_first_pp_rank:
             self.encoder_cache = EncoderCache()
             mm_config = self.model_config.multimodal_config
             if mm_config is None or not mm_config.skip_mm_profiling:
-                self.encoder_cache.profile_inputs = EncoderCacheProfilerInputs(
+                self.encoder_profile_inputs = EncoderProfileInputs(
                     self.vllm_config, self.mm_registry
                 )
 
@@ -652,8 +653,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def profile_run(self) -> None:
-        if self.encoder_cache is not None:
-            self.model_state.encoder_runner.profile_encoder_cache()
+        if self.encoder_profile_inputs is not None:
+            self.model_state.encoder_runner.profile_encoder_cache(
+                self.encoder_profile_inputs
+            )
 
         hidden_states, sample_hidden_states = self._dummy_run(
             self.max_num_tokens, skip_attn=True, is_profile=True

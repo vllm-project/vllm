@@ -3,12 +3,10 @@
 import torch
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec
-from vllm.v1.worker.gpu.mm.encoder_cache_budget import EncoderCacheProfilerInputs
 
 
 class EncoderCache:
     def __init__(self):
-        self.profile_inputs: EncoderCacheProfilerInputs | None = None
         # req_id -> MM features
         self.mm_features: dict[str, list[MultiModalFeatureSpec]] = {}
         # MM hash -> encoder outputs
