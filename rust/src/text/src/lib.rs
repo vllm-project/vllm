@@ -200,7 +200,7 @@ impl TextLlm {
             prompt_token_ids.len() as u32,
         )?;
 
-        let config = crate::beam_search::BeamSearchParams {
+        let params = crate::beam_search::BeamSearchParams {
             beam_width: request.sampling_params.n.unwrap_or(1),
             max_tokens,
             temperature: request
@@ -219,7 +219,7 @@ impl TextLlm {
             stop_token_ids: request.sampling_params.stop_token_ids.unwrap_or_default(),
         };
 
-        crate::beam_search::run_beam_search(&self.llm, prompt_token_ids, config).await
+        crate::beam_search::run_beam_search(&self.llm, prompt_token_ids, params).await
     }
 
     /// Abort in-flight requests by their external (user-supplied) request ids.

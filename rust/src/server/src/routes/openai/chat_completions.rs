@@ -332,7 +332,7 @@ fn collect_beam_search_chat_completion(
     let output_tokens: usize = beam_result
         .sequences
         .iter()
-        .map(|b| b.tokens.len().saturating_sub(prompt_len))
+        .map(|s| s.tokens.len().saturating_sub(prompt_len))
         .sum();
     let usage = Usage::from_counts(
         prompt_len,
@@ -344,19 +344,19 @@ fn collect_beam_search_chat_completion(
         .sequences
         .iter()
         .enumerate()
-        .map(|(i, beam)| {
-            let generated_tokens = beam.tokens[beam_result.prompt_token_ids.len()..].to_vec();
-            let openai_finish_reason = beam
+        .map(|(i, seq)| {
+            let generated_tokens = seq.tokens[beam_result.prompt_token_ids.len()..].to_vec();
+            let openai_finish_reason = seq
                 .finish_reason
                 .as_ref()
                 .map(|fr| chat_finish_reason_to_openai(fr, false).unwrap_or("error"))
                 .unwrap_or("length");
-            let stop_reason = beam
+            let stop_reason = seq
                 .stop_reason
                 .map(|token_id| serde_json::Value::Number(serde_json::Number::from(token_id)));
             let decoded = tokenizer.decode(&generated_tokens, false).unwrap_or_default();
             let logprobs = requested_logprobs
-                .then(|| build_beam_chat_logprobs(&beam.logprobs, &generated_tokens, tokenizer))
+                .then(|| build_beam_chat_logprobs(&seq.logprobs, &generated_tokens, tokenizer))
                 .flatten();
             ChatCompletionChoice {
                 index: i as u32,
