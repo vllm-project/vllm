@@ -22,7 +22,7 @@ else()
         # testing. Before merging, repoint to vllm-project/FlashMLA and pin to the
         # merged commit (a branch ref is not reproducible).
         GIT_REPOSITORY https://github.com/janeyx99/FlashMLA
-        GIT_TAG vllm-flashmla-abi-stable
+        GIT_TAG abi-stable-review-fixes
         GIT_PROGRESS TRUE
         CONFIGURE_COMMAND ""
         BUILD_COMMAND ""
