@@ -810,7 +810,7 @@ def test_dcp_global_topk_physical_attention_matches_non_dcp(interleave: int):
 def test_correct_attn_out_zeroes_empty_nan_partial(is_lse_base_on_e: bool):
     out = torch.full((1, 1, 4), float("nan"), device="cuda")
     lses = torch.tensor(
-        [[[0.0]], [[float("-inf")]]],
+        [[[0.0]], [[float("-inf")]], [[float("-inf")]]],
         dtype=torch.float32,
         device="cuda",
     )
