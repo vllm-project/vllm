@@ -3269,10 +3269,7 @@ class GPUModelRunner(
         drafter = getattr(self, "drafter", None)
         if drafter is None:
             return None
-        if hasattr(drafter, "get_model"):
-            model = drafter.get_model()
-        else:
-            model = getattr(drafter, "model", None)
+        model = getattr(drafter, "model", None)
         if isinstance(
             model, (CUDAGraphWrapper, UBatchWrapper, BreakableCUDAGraphWrapper)
         ):

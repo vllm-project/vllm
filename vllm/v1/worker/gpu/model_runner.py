@@ -372,12 +372,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return self.model
 
     def get_draft_model(self) -> nn.Module | None:
-        speculator = getattr(self, "speculator", None)
-        if speculator is None:
+        speculator = self.speculator
+        if not isinstance(speculator, DraftModelSpeculator):
             return None
-        if hasattr(speculator, "get_model"):
-            return speculator.get_model()
-        return getattr(speculator, "model", None)
+        return speculator.model
 
     def reload_weights(self, *args, **kwargs) -> None:
         # TODO(Wentao): Use full version instead of import when fully migrated to v2
