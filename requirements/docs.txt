@@ -30,7 +30,7 @@ gitdb==4.0.12
     # via gitpython
 gitpython==3.1.50
     # via mkdocs-git-revision-date-localized-plugin
-griffelib==2.0.2
+griffelib==2.1.0
     # via mkdocstrings-python
 htmlmin2==0.1.13
     # via mkdocs-minify-plugin
@@ -167,6 +167,7 @@ smmap==5.0.3
     # via gitdb
 typing-extensions==4.15.0
     # via
+    #   mkdocstrings-python
     #   pydantic
     #   pydantic-core
     #   typing-inspection
