@@ -72,6 +72,7 @@ def _fused_marlin_moe(
     num_tokens_post_padded: torch.Tensor,
     activation: MoEActivation = MoEActivation.SILU,
     activation_func: Callable[..., None] = apply_moe_activation,
+    topk_ids: torch.Tensor | None = None,
     input_global_scale1: torch.Tensor | None = None,
     input_global_scale2: torch.Tensor | None = None,
     global_scale1: torch.Tensor | None = None,
@@ -167,6 +168,8 @@ def _fused_marlin_moe(
         clamp_limit=clamp_limit,
         alpha=gemm1_alpha,
         beta=gemm1_beta,
+        topk_ids=topk_ids,
+        expert_map=expert_map,
     )
 
     if output is None:
@@ -341,6 +344,7 @@ def fused_marlin_moe(
         w1_scale=w1_scale,
         w2_scale=w2_scale,
         topk_weights=topk_weights,
+        topk_ids=topk_ids,
         num_topk=topk,
         quant_type=quant_type,
         apply_router_weight_on_input=apply_router_weight_on_input,
@@ -822,6 +826,7 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
             clamp_limit: float | None = None,
             alpha: float = 1.0,
             beta: float = 0.0,
+            topk_ids: torch.Tensor | None = None,
         ) -> None:
             # act_input  = intermediate_cache1 (M*topk, 2N for gated)
             # act_output = intermediate_cache2 (M*topk, N)
@@ -858,6 +863,7 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
                 clamp_limit=clamp_limit,
                 alpha=alpha,
                 beta=beta,
+                topk_ids=topk_ids,
             )
             lora_state["cache2"] = act_output
 
