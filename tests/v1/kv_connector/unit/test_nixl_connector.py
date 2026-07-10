@@ -1816,8 +1816,7 @@ def test_register_kv_caches(
         kv_caches: dict[str, torch.Tensor]
         if str(enable_cross_layers).lower() == "true":
             assert connector.prefer_cross_layer_blocks == (
-                attn_backend
-                in ("FLASH_ATTN", "FLASHINFER", "ROCM_ATTN", "TRITON_ATTN")
+                attn_backend in ("FLASH_ATTN", "FLASHINFER", "ROCM_ATTN", "TRITON_ATTN")
             )
         else:
             assert not connector.prefer_cross_layer_blocks

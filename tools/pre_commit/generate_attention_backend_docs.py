@@ -1845,6 +1845,16 @@ def generate_docs() -> str:
             "Default is FA4 on SM100+ (Blackwell), FA3 on SM90 (Hopper), "
             "FA2 otherwise."
         )
+    if any(backend["name"] == "ROCM_ATTN" for backend in non_mla_backends):
+        footnotes.append(
+            "> **ROCM_ATTN KV layout:** ROCM_ATTN uses the content-packed logical "
+            "KV cache shape `[num_blocks, num_kv_heads, block_size, "
+            "2 * head_size]`. Cache update, transfer, and attention paths expose "
+            "split K/V views over that storage. Feature-bearing paths use the "
+            "shared Triton unified-attention kernel. Native HIP paged attention "
+            "can also consume content-backed K/V views for profiled feature-free "
+            "decode shapes where it is faster."
+        )
     if footnotes:
         doc_lines.append("\n>\n".join(footnotes) + "\n")
 

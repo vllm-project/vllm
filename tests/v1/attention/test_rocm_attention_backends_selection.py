@@ -431,10 +431,10 @@ def test_rocm_aiter_unified_stride_order_matches_shape():
 
 
 def test_rocm_attn_content_packed_split_views():
+    from vllm.v1.attention.backends.rocm_attn import RocmAttentionImpl
     from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
         has_native_kv_cache_layout,
     )
-    from vllm.v1.attention.backends.rocm_attn import RocmAttentionImpl
 
     impl = RocmAttentionImpl(
         num_heads=2,

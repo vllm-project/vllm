@@ -564,21 +564,21 @@ class RocmAttentionImpl(AttentionImpl):
     ) -> bool:
         """Return whether content-packed decode should use ROCm native pages.
 
-        The native ROCm paged-attention kernel only wins for short-context
-        decode. For long context the shared Triton unified-attention path is
-        faster because its split-softmax (3D) reduction parallelizes the long
-        KV scan, while the native kernel serializes it per query-head. This was
-        measured with rocprof on a clean MI300 (bf16, GQA>4, 8 seqs):
+        Kernel choice depends on both context length and batch size:
 
-            ctx   native (paged_attention_rocm)   unified (3D split)
-            1k    ~25 us                           ~38 us   -> native
-            8k    ~81 us  (Qwen) / ~32 us (Llama)  ~41/23us -> unified
+        - Short context: the native single-pass paged kernel wins at any batch.
+        - Long context, small batch: the Triton unified split-KV (3D) kernel
+          wins -- its split-softmax reduction parallelizes the long KV scan
+          while the native kernel serializes it per query-head (rocprof, MI300,
+          bf16, GQA>4, 8 seqs, 8k ctx: native ~81us Qwen / ~32us Llama vs
+          unified 3D ~41 / ~23us).
+        - Long context, large batch (num_seqs > seq_threshold_3D): unified can
+          no longer use the 3D split and drops to a 2D single-pass scan, so the
+          native partitioned kernel wins again.
 
-        So gate native to short context only; longer decode uses the Triton
-        unified kernel. Sinks, sliding window and softcap are served natively.
+        Sinks and sliding window are served natively. Softcap decode is kept on
+        the unified path: the native softcap kernel is numerically wrong here.
         """
-        # Native paged kernel for short-context decode; sinks, sliding_window
-        # and softcap are handled natively.
         if (
             attn_metadata.max_query_len != 1
             or output_scale is not None
@@ -586,6 +586,9 @@ class RocmAttentionImpl(AttentionImpl):
             or self.num_queries_per_kv > 16  # kernel dispatch tops out at 16
             or attn_metadata.rswa_prefix_lens is not None
             or attn_metadata.causal is not True
+            # Native softcap decode is numerically wrong (gemma-2 gsm8k 0.01 vs
+            # 0.72 on unified); serve softcap on the unified path until fixed.
+            or self.logits_soft_cap
         ):
             return False
 
@@ -601,19 +604,20 @@ class RocmAttentionImpl(AttentionImpl):
         if block_size not in (16, 32):
             return False
 
-        # Large batches are faster on the unified split-KV path.
-        num_seqs = attn_metadata.seq_lens.shape[0]
-        if num_seqs > attn_metadata.seq_threshold_3D:
-            return False
-
-        # Native single-pass wins for short context; the unified split wins
-        # beyond the crossover. For a sliding window the effective span is the
-        # window (the kernel skips out-of-window partitions).
+        # For a sliding window the effective span is the window (the kernel
+        # skips out-of-window partitions).
         native_decode_max_seq_len = 2048
         effective_seq_len = attn_metadata.max_seq_len
         if self.sliding_window[0] >= 0:
             effective_seq_len = min(effective_seq_len, self.sliding_window[0] + 1)
-        return effective_seq_len <= native_decode_max_seq_len
+        if effective_seq_len <= native_decode_max_seq_len:
+            return True
+
+        # Long context: the unified 3D split only wins while it fits the batch.
+        # Above seq_threshold_3D unified drops to a 2D single-pass scan and the
+        # native partitioned kernel is faster, so keep large batches native.
+        num_seqs = attn_metadata.seq_lens.shape[0]
+        return num_seqs > attn_metadata.seq_threshold_3D
 
     def _native_decode(
         self,
@@ -820,9 +824,7 @@ class RocmAttentionImpl(AttentionImpl):
             )
             return output
 
-        if self._can_use_native_decode_fast_path(
-            kv_cache, attn_metadata, output_scale
-        ):
+        if self._can_use_native_decode_fast_path(kv_cache, attn_metadata, output_scale):
             self._native_decode(
                 layer,
                 query[:num_actual_tokens],

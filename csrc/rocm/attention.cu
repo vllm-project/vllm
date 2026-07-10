@@ -220,7 +220,7 @@ __device__ __forceinline__ _B16x8 load_b16x8_strided(const T* ptr,
                                                      const int stride) {
   _B16x8 ret;
   T* ret_ptr = reinterpret_cast<T*>(&ret);
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < 16 / sizeof(T); i++) {
     ret_ptr[i] = ptr[i * stride];
   }
@@ -434,14 +434,13 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
       partition_start_token_idx + T_PAR_SIZE <= seq_len - window) {
     if (threadIdx.x < GQA_RATIO) {
       const int skip_qhead_idx = lane16id;
-      const int64_t skip_offset =
-          static_cast<int64_t>(seq_idx) *
-              static_cast<int64_t>(total_num_heads) *
-              static_cast<int64_t>(max_num_partitions) +
-          (static_cast<int64_t>(wg_start_head_idx) +
-           static_cast<int64_t>(skip_qhead_idx)) *
-              static_cast<int64_t>(max_num_partitions) +
-          static_cast<int64_t>(partition_idx);
+      const int64_t skip_offset = static_cast<int64_t>(seq_idx) *
+                                      static_cast<int64_t>(total_num_heads) *
+                                      static_cast<int64_t>(max_num_partitions) +
+                                  (static_cast<int64_t>(wg_start_head_idx) +
+                                   static_cast<int64_t>(skip_qhead_idx)) *
+                                      static_cast<int64_t>(max_num_partitions) +
+                                  static_cast<int64_t>(partition_idx);
       max_logits[skip_offset] = -FLT_MAX;
       exp_sums[skip_offset] = 0.0f;
     }
@@ -611,8 +610,7 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
         const int64_t vblock_number = static_cast<int64_t>(
             vphysical_block_number[vtoken_depth][vblock_depth]);
         const int vtoken_offset =
-            v_row_token_offset +
-            vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
+            v_row_token_offset + vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
         const cache_t* v_fetch_ptr =
             v_cache + vblock_number * kv_block_stride +
             static_cast<int64_t>(wg_start_kv_head_idx) * kv_head_stride +
@@ -737,8 +735,7 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     for (int i = 0; i < 4; i++) {
       const int tok_idx = local_token_idx + i;
       const bool in_window =
-          (tok_idx < seq_len) &&
-          (window <= 0 || tok_idx >= seq_len - window);
+          (tok_idx < seq_len) && (window <= 0 || tok_idx >= seq_len - window);
       const float tmp = in_window ? d_out[token_depth][i] : -FLT_MAX;
       qk_max = fmaxf(qk_max, tmp);
     }
@@ -753,8 +750,7 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     for (int i = 0; i < 4; i++) {
       const int tok_idx = local_token_idx + i;
       const bool in_window =
-          (tok_idx < seq_len) &&
-          (window <= 0 || tok_idx >= seq_len - window);
+          (tok_idx < seq_len) && (window <= 0 || tok_idx >= seq_len - window);
       const float tmp =
           in_window ? __expf(d_out[token_depth][i] - qk_max) : 0.0f;
       d_out[token_depth][i] = tmp;
@@ -1300,8 +1296,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
       qk_max[h] = -FLT_MAX;
       for (int i = 0; i < 4; i++) {
         qk_max[h] = (lane4_token_idx + i < seq_len &&
-                     (window <= 0 ||
-                      lane4_token_idx + i >= seq_len - window))
+                     (window <= 0 || lane4_token_idx + i >= seq_len - window))
                         ? fmaxf(qk_max[h], d_out[h][i])
                         : qk_max[h];
       }
@@ -1333,8 +1328,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
       exp_sum[h] = 0.0f;
       for (int i = 0; i < 4; i++) {
         d_out[h][i] = (lane4_token_idx + i < seq_len &&
-                       (window <= 0 ||
-                        lane4_token_idx + i >= seq_len - window))
+                       (window <= 0 || lane4_token_idx + i >= seq_len - window))
                           ? __expf(d_out[h][i] - qk_max[h])
                           : 0.0f;
         exp_sum[h] += d_out[h][i];
@@ -2095,8 +2089,7 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     for (int i = 0; i < 8; i++) {
       const int tok_idx = local_token_idx + 2 * i;
       const bool in_window =
-          (tok_idx < seq_len) &&
-          (window <= 0 || tok_idx >= seq_len - window);
+          (tok_idx < seq_len) && (window <= 0 || tok_idx >= seq_len - window);
       const float tmp = in_window ? dout[token_depth][i] : -FLT_MAX;
       qk_max = fmaxf(qk_max, tmp);
     }
@@ -2109,8 +2102,7 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     for (int i = 0; i < 8; i++) {
       const int tok_idx = local_token_idx + 2 * i;
       const bool in_window =
-          (tok_idx < seq_len) &&
-          (window <= 0 || tok_idx >= seq_len - window);
+          (tok_idx < seq_len) && (window <= 0 || tok_idx >= seq_len - window);
       const float tmp =
           in_window ? __expf(dout[token_depth][i] - qk_max) : 0.0f;
       dout[token_depth][i] = tmp;
@@ -2894,8 +2886,7 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     for (int i = 0; i < 8; i++) {
       const int tok_idx = local_token_idx + i;
       const bool in_window =
-          (tok_idx < seq_len) &&
-          (window <= 0 || tok_idx >= seq_len - window);
+          (tok_idx < seq_len) && (window <= 0 || tok_idx >= seq_len - window);
       const float tmp = in_window ? dout[token_depth][i] : -FLT_MAX;
       qk_max = fmaxf(qk_max, tmp);
     }
@@ -2908,8 +2899,7 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     for (int i = 0; i < 8; i++) {
       const int tok_idx = local_token_idx + i;
       const bool in_window =
-          (tok_idx < seq_len) &&
-          (window <= 0 || tok_idx >= seq_len - window);
+          (tok_idx < seq_len) && (window <= 0 || tok_idx >= seq_len - window);
       const float tmp =
           in_window ? __expf(dout[token_depth][i] - qk_max) : 0.0f;
       dout[token_depth][i] = tmp;
@@ -3392,7 +3382,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
                                       PARTITION_SIZE, NPAR_LOOPS>           \
       <<<reduce_grid, reduce_block, 0, stream>>>(                           \
           out_ptr, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, seq_lens_ptr, \
-          query_start_loc_ptr, max_num_partitions, fp8_out_scale_ptr,      \
+          query_start_loc_ptr, max_num_partitions, fp8_out_scale_ptr,       \
           sinks_ptr);
 
 template <typename T, typename KVT, vllm::Fp8KVCacheDataType KV_DTYPE,
@@ -3755,8 +3745,8 @@ void paged_attention_custom_launcher_navi(
         out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,  \
         num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
         max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale, sinks,  \
-        static_cast<int>(sliding_window),                                  \
-        static_cast<float>(logits_soft_cap));                              \
+        static_cast<int>(sliding_window),                                   \
+        static_cast<float>(logits_soft_cap));                               \
   } else {                                                                  \
     paged_attention_custom_launcher_navi<T, KVT, KV_DTYPE, BLK_SIZE,        \
                                          HEAD_SIZE, OUTT, PSIZE,            \
@@ -3764,8 +3754,8 @@ void paged_attention_custom_launcher_navi(
         out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,  \
         num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
         max_seq_len, alibi_slopes, k_scale, v_scale, sinks,                 \
-        static_cast<int>(sliding_window),                                  \
-        static_cast<float>(logits_soft_cap));                              \
+        static_cast<int>(sliding_window),                                   \
+        static_cast<float>(logits_soft_cap));                               \
   }
 
 #define CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,    \
