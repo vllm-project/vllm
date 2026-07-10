@@ -9,7 +9,7 @@ use crate::error::Result;
 
 /// One beam in the beam search.
 #[derive(Debug, Clone)]
-pub struct BeamSearchBeam {
+pub struct BeamSearchSequence {
     /// Full token sequence (prompt + generated tokens).
     pub tokens: Vec<u32>,
     /// Cumulative log probability of the beam.
@@ -34,11 +34,11 @@ pub struct BeamSearchOutput {
     /// Original prompt token IDs (without generated tokens).
     pub prompt_token_ids: Vec<u32>,
     /// Best beams after beam search, sorted by score.
-    pub beams: Vec<BeamSearchBeam>,
+    pub sequences: Vec<BeamSearchSequence>,
 }
 
 /// Configuration for one beam search invocation.
-pub(crate) struct BeamSearchConfig {
+pub(crate) struct BeamSearchParams {
     pub beam_width: u32,
     pub max_tokens: u32,
     pub temperature: f32,
@@ -86,7 +86,7 @@ fn get_beam_search_score(
     }
 }
 
-fn all_stop_ids(config: &BeamSearchConfig) -> BTreeSet<u32> {
+fn all_stop_ids(config: &BeamSearchParams) -> BTreeSet<u32> {
     let mut ids: BTreeSet<u32> = config.stop_token_ids.iter().copied().collect();
     ids.extend(config.extra_eos_token_ids.iter().copied());
     if let Some(eos) = config.eos_token_id {
@@ -95,7 +95,7 @@ fn all_stop_ids(config: &BeamSearchConfig) -> BTreeSet<u32> {
     ids
 }
 
-fn stop_ids_for_engine(config: &BeamSearchConfig) -> Vec<u32> {
+fn stop_ids_for_engine(config: &BeamSearchParams) -> Vec<u32> {
     let mut ids = config.stop_token_ids.clone();
     if !config.ignore_eos {
         ids.extend(config.extra_eos_token_ids.iter().copied());
@@ -107,12 +107,12 @@ fn stop_ids_for_engine(config: &BeamSearchConfig) -> Vec<u32> {
 pub(crate) async fn run_beam_search(
     llm: &vllm_llm::Llm,
     prompt_token_ids: Vec<u32>,
-    config: BeamSearchConfig,
+    config: BeamSearchParams,
 ) -> Result<BeamSearchOutput> {
     let beam_width = config.beam_width.max(1) as usize;
     let logprobs_num = 2 * beam_width;
 
-    let mut all_beams: Vec<BeamSearchBeam> = vec![BeamSearchBeam {
+    let mut all_beams: Vec<BeamSearchSequence> = vec![BeamSearchSequence {
         tokens: prompt_token_ids.clone(),
         cum_logprob: 0.0,
         logprobs: vec![],
@@ -120,7 +120,7 @@ pub(crate) async fn run_beam_search(
         stop_reason: None,
         lora_request: config.lora_request.clone(),
     }];
-    let mut completed: Vec<BeamSearchBeam> = vec![];
+    let mut completed: Vec<BeamSearchSequence> = vec![];
 
     let stop_token_ids = stop_ids_for_engine(&config);
     let all_stop_token_ids = all_stop_ids(&config);
@@ -135,7 +135,11 @@ pub(crate) async fn run_beam_search(
                 min_tokens: 0,
                 logprobs: Some(logprobs_num as i32),
                 stop_token_ids: stop_token_ids.clone(),
-                eos_token_id: config.eos_token_id,
+                eos_token_id: if config.ignore_eos {
+                    None
+                } else {
+                    config.eos_token_id
+                },
                 all_stop_token_ids: all_stop_token_ids.clone(),
                 ..Default::default()
             };
@@ -144,8 +148,8 @@ pub(crate) async fn run_beam_search(
                 request_id: format!("beam-{i}-step-{step}"),
                 prompt_token_ids: beam.tokens.clone(),
                 sampling_params,
-                // TODO: pass through beam.mm_features once BeamSearchBeam
-                // stores them (see TODO on BeamSearchBeam struct).
+                // TODO: pass through beam.mm_features once BeamSearchSequence
+                // stores them (see TODO on BeamSearchSequence struct).
                 mm_features: None,
                 arrival_time: None,
                 cache_salt: config.cache_salt.clone(),
@@ -197,7 +201,7 @@ pub(crate) async fn run_beam_search(
                                     ),
                                 ))
                             };
-                            completed.push(BeamSearchBeam {
+                            completed.push(BeamSearchSequence {
                                 tokens: current_beam.tokens.clone(),
                                 cum_logprob: candidate_logprob,
                                 logprobs,
@@ -218,7 +222,7 @@ pub(crate) async fn run_beam_search(
             } else {
                 // Engine stopped (e.g. on a stop token) without returning
                 // logprobs.  Push the beam as-is into completed.
-                completed.push(BeamSearchBeam {
+                completed.push(BeamSearchSequence {
                     tokens: current_beam.tokens.clone(),
                     cum_logprob: current_beam.cum_logprob,
                     logprobs: current_beam.logprobs.clone(),
@@ -236,14 +240,14 @@ pub(crate) async fn run_beam_search(
         candidates.sort_by(|a, b| b.cum_logprob.total_cmp(&a.cum_logprob));
         let top_candidates: Vec<_> = candidates.into_iter().take(beam_width).collect();
 
-        let mut new_beams: Vec<BeamSearchBeam> = Vec::with_capacity(top_candidates.len());
+        let mut new_beams: Vec<BeamSearchSequence> = Vec::with_capacity(top_candidates.len());
         for candidate in top_candidates {
             let parent = &all_beams[candidate.parent_beam];
             let mut tokens = parent.tokens.clone();
             tokens.push(candidate.token_id);
             let mut logprobs = parent.logprobs.clone();
             logprobs.push(candidate.logprobs);
-            new_beams.push(BeamSearchBeam {
+            new_beams.push(BeamSearchSequence {
                 tokens,
                 cum_logprob: candidate.cum_logprob,
                 logprobs,
@@ -266,23 +270,20 @@ pub(crate) async fn run_beam_search(
         completed.push(beam);
     }
 
-    if let Some(eos) = config.eos_token_id {
-        completed.sort_by(|a, b| {
-            let score_a =
-                get_beam_search_score(&a.tokens, a.cum_logprob, eos, config.length_penalty);
-            let score_b =
-                get_beam_search_score(&b.tokens, b.cum_logprob, eos, config.length_penalty);
-            score_b.total_cmp(&score_a)
-        });
-    } else {
-        completed.sort_by(|a, b| b.cum_logprob.total_cmp(&a.cum_logprob));
-    }
+    let eos = config
+        .eos_token_id
+        .expect("eos_token_id always present from backend sampling_hints");
+    completed.sort_by(|a, b| {
+        let score_a = get_beam_search_score(&a.tokens, a.cum_logprob, eos, config.length_penalty);
+        let score_b = get_beam_search_score(&b.tokens, b.cum_logprob, eos, config.length_penalty);
+        score_b.total_cmp(&score_a)
+    });
 
-    let best_beams: Vec<BeamSearchBeam> = completed.into_iter().take(beam_width).collect();
+    let best_sequences: Vec<BeamSearchSequence> = completed.into_iter().take(beam_width).collect();
 
     Ok(BeamSearchOutput {
         prompt_token_ids,
-        beams: best_beams,
+        sequences: best_sequences,
     })
 }
 
@@ -305,8 +306,8 @@ mod tests {
         tokens: Vec<u32>,
         cum_logprob: f32,
         logprobs: Vec<Vec<TokenLogprob>>,
-    ) -> BeamSearchBeam {
-        BeamSearchBeam {
+    ) -> BeamSearchSequence {
+        BeamSearchSequence {
             tokens,
             cum_logprob,
             logprobs,
@@ -391,7 +392,7 @@ mod tests {
 
     #[test]
     fn stop_ids_includes_extra_eos_when_not_ignore_eos() {
-        let config = BeamSearchConfig {
+        let config = BeamSearchParams {
             beam_width: 1,
             max_tokens: 10,
             temperature: 1.0,
@@ -417,7 +418,7 @@ mod tests {
 
     #[test]
     fn stop_ids_excludes_extra_eos_when_ignore_eos() {
-        let config = BeamSearchConfig {
+        let config = BeamSearchParams {
             beam_width: 1,
             max_tokens: 10,
             temperature: 1.0,
@@ -442,18 +443,18 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // BeamSearchBeam / BeamSearchOutput
+    // BeamSearchSequence / BeamSearchOutput
     // -----------------------------------------------------------------------
 
     #[test]
     fn beam_output_preserves_prompt_token_ids() {
         let output = BeamSearchOutput {
             prompt_token_ids: vec![1, 2, 3],
-            beams: vec![make_beam(vec![1, 2, 3, 4], -1.0, vec![])],
+            sequences: vec![make_beam(vec![1, 2, 3, 4], -1.0, vec![])],
         };
         assert_eq!(output.prompt_token_ids, vec![1, 2, 3]);
-        assert_eq!(output.beams.len(), 1);
-        assert_eq!(output.beams[0].tokens, vec![1, 2, 3, 4]);
+        assert_eq!(output.sequences.len(), 1);
+        assert_eq!(output.sequences[0].tokens, vec![1, 2, 3, 4]);
     }
 
     #[test]
@@ -485,12 +486,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // BeamSearchConfig default behavior
+    // BeamSearchParams default behavior
     // -----------------------------------------------------------------------
 
     #[test]
     fn config_beam_width_clamped_to_one() {
-        let config = BeamSearchConfig {
+        let config = BeamSearchParams {
             beam_width: 0,
             max_tokens: 10,
             temperature: 1.0,

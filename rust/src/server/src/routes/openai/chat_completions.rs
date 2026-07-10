@@ -330,7 +330,7 @@ fn collect_beam_search_chat_completion(
 ) -> ChatCompletionResponse {
     let prompt_len = beam_result.prompt_token_ids.len();
     let output_tokens: usize = beam_result
-        .beams
+        .sequences
         .iter()
         .map(|b| b.tokens.len().saturating_sub(prompt_len))
         .sum();
@@ -341,7 +341,7 @@ fn collect_beam_search_chat_completion(
     );
 
     let choices: Vec<ChatCompletionChoice> = beam_result
-        .beams
+        .sequences
         .iter()
         .enumerate()
         .map(|(i, beam)| {
@@ -379,7 +379,7 @@ fn collect_beam_search_chat_completion(
             model = %response_model,
             prompt_tokens = usage.prompt_tokens,
             output_tokens = usage.completion_tokens.unwrap_or(0),
-            num_beams = beam_result.beams.len(),
+            num_beams = beam_result.sequences.len(),
             "beam search chat completion finished"
         );
     }

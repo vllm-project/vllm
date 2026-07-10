@@ -200,7 +200,7 @@ impl TextLlm {
             prompt_token_ids.len() as u32,
         )?;
 
-        let config = crate::beam_search::BeamSearchConfig {
+        let config = crate::beam_search::BeamSearchParams {
             beam_width: request.sampling_params.n.unwrap_or(1),
             max_tokens,
             temperature: request
@@ -210,9 +210,7 @@ impl TextLlm {
                 .unwrap_or(1.0),
             length_penalty: request.sampling_params.length_penalty.unwrap_or(1.0),
             ignore_eos: request.sampling_params.ignore_eos,
-            eos_token_id: (!request.sampling_params.ignore_eos)
-                .then_some(sampling_hints.primary_eos_token_id)
-                .flatten(),
+            eos_token_id: sampling_hints.primary_eos_token_id,
             extra_eos_token_ids: sampling_hints.extra_eos_token_ids.clone(),
             lora_request: request.lora_request,
             cache_salt: request.cache_salt,
