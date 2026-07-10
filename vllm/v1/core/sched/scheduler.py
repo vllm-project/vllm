@@ -712,7 +712,10 @@ class Scheduler(SchedulerInterface):
                         # already cached on D-side. The Mamba state (always
                         # the last block) is transferred unconditionally by
                         # _apply_prefix_caching in nixl/worker.py.
-                        num_new_local_computed_tokens = max(per_group_hits)
+                        # NOTE: FA group is always first (sorted in
+                        # coordinator L593-594). Use FA hit to prevent OOB
+                        # when Mamba state blocks survive longer (#46453).
+                        num_new_local_computed_tokens = per_group_hits[0]
                         if self.kv_cache_manager.log_stats:
                             assert self.kv_cache_manager.prefix_cache_stats is not None
                             self.kv_cache_manager.prefix_cache_stats.record(
