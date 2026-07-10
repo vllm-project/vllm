@@ -55,7 +55,7 @@ from vllm.multimodal.video import (
     PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
     PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
     PYNVVIDEOCODEC_MAX_RETAINED_DECODERS,
-    PYNVVIDEOCODEC_VIDEO_BACKEND,
+    VIDEO_LOADER_REGISTRY,
 )
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
@@ -75,6 +75,10 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.worker.startup_plan import (
+    maybe_apply_startup_plan,
+    maybe_save_startup_plan,
+)
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -374,7 +378,7 @@ class Worker(WorkerBase):
                 "worker requested memory: %sGiB", format_gib(self.requested_memory)
             )
         else:
-            raise RuntimeError(f"Not support device type: {self.device_config.device}")
+            raise RuntimeError(f"Unsupported device type: {self.device_config.device}")
 
         # Initialize workspace manager
         num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
@@ -439,6 +443,8 @@ class Worker(WorkerBase):
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
+        maybe_apply_startup_plan(self)
+
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
@@ -472,11 +478,14 @@ class Worker(WorkerBase):
             )
 
             # Profile CUDA graph memory if graphs will be captured.
-            # Skip on ROCm/HIP/XPU as graph pool handles and get_memory_info
-            # behave differently and can produce incorrect/negative estimates.
+            # ROCm is included: #44825 moved the profiler to
+            # torch.accelerator.get_memory_info (reliable on ROCm, as used by
+            # the AMD-CI mem tests), and graph_pool_handle resolves to the same
+            # torch.cuda handle the live capture path already uses on ROCm.
+            # XPU stays excluded (see #39977).
             cudagraph_memory_estimate = 0
             if (
-                current_platform.is_cuda()
+                current_platform.is_cuda_alike()
                 and self.vllm_config.compilation_config.cudagraph_mode
                 != CUDAGraphMode.NONE
             ):
@@ -492,8 +501,7 @@ class Worker(WorkerBase):
             + profile_result.weights_memory
         )
 
-        # On ROCm, cudagraph_memory_estimate is always 0 so this is a no-op.
-        # On CUDA, respect the opt-in flag as originally designed.
+        # Respect the opt-in flag as originally designed.
         cudagraph_memory_estimate_applied = (
             cudagraph_memory_estimate
             if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
@@ -584,15 +592,15 @@ class Worker(WorkerBase):
         )
 
     @staticmethod
-    def _uses_pynvvideocodec_video_backend(mm_config) -> bool:
+    def _uses_gpu_video_backend(mm_config) -> bool:
         video_kwargs = mm_config.media_io_kwargs.get("video", {})
         video_loader_backend = (
             video_kwargs.get("video_backend") or envs.VLLM_VIDEO_LOADER_BACKEND
         )
         codec_backend = video_kwargs.get("backend")
-        return (
-            video_loader_backend == PYNVVIDEOCODEC_VIDEO_BACKEND
-            or codec_backend == PYNVVIDEOCODEC_VIDEO_BACKEND
+        return VIDEO_LOADER_REGISTRY.backend_requires_gpu(video_loader_backend) or (
+            codec_backend is not None
+            and VIDEO_LOADER_REGISTRY.backend_requires_gpu(codec_backend)
         )
 
     def _reserve_mm_ipc_gpu_memory(self, available_kv_cache_memory_bytes: int) -> int:
@@ -623,7 +631,7 @@ class Worker(WorkerBase):
         )
         decoder_reserved_bytes = (
             num_api_servers * per_server_decoder_bytes
-            if self._uses_pynvvideocodec_video_backend(mm_config)
+            if self._uses_gpu_video_backend(mm_config)
             else 0
         )
         reserved_bytes = raw_frame_reserved_bytes + decoder_reserved_bytes
@@ -832,7 +840,9 @@ class Worker(WorkerBase):
                 f"{format_gib(self.available_kv_cache_memory_bytes)} GiB."
             )
 
-            logger.debug(msg)
+            logger.info(msg)
+
+            maybe_save_startup_plan(self, kv_cache_memory_bytes_to_requested_limit)
 
         if self.use_v2_model_runner:
             # V2: Run full execute_model + sample_tokens to JIT compile triton kernels.

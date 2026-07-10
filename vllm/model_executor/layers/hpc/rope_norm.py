@@ -7,6 +7,7 @@ Decoupled from HpcAttentionImpl; extra params are passed via layer attrs.
 
 from __future__ import annotations
 
+import importlib.util
 from enum import IntEnum
 from typing import Any
 
@@ -122,6 +123,12 @@ class HpcRopeNorm(CustomOp, HpcModule):
         qk_norm_policy: QkNormPolicy = QkNormPolicy.ROPE_THEN_NORM,
     ) -> None:
         super().__init__()
+        if importlib.util.find_spec("hpc") is None:
+            raise ImportError(
+                "HPCRopeNorm requires the hpc module to be installed. "
+                "Please install it from https://github.com/Tencent/hpc-ops"
+            )
+
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
@@ -171,6 +178,15 @@ class HpcRopeNorm(CustomOp, HpcModule):
         # module-level custom op (hpc_rope_norm_forward) can route back here.
         self.layer_name: str | None = None
         self.register_layer_name(layer_name)
+
+        import hpc
+
+        if self.use_fp8:
+            self._quant_type = (
+                hpc.QuantType.QPERTOKEN_PERHEAD_KPERTENSOR_VPERTENSOR.value
+            )
+        else:
+            self._quant_type = None
 
     @classmethod
     def support(
@@ -304,12 +320,6 @@ class HpcRopeNorm(CustomOp, HpcModule):
             self.knorm_weight if self.qk_norm_policy != QkNormPolicy.NONE else None
         )
 
-        # Dynamic per-token-per-head Q quant + per-tensor K/V (dqskv).
-        # rope_norm_store_kv_fp8 is registered as a torch op whose ``quant_policy``
-        # argument is typed as ``int``; pybind cannot cast the hpc.QuantType enum
-        # automatically, so pass its integer ``.value``.
-        QUANT_POLICY_DQSKV = hpc.QuantType.QPERTOKEN_PERHEAD_KPERTENSOR_VPERTENSOR.value
-
         # --- Prefill ---
         if num_prefill_reqs > 0:
             seq_lens_prefill = attn_metadata.seq_lens[num_decode_reqs:]
@@ -333,7 +343,7 @@ class HpcRopeNorm(CustomOp, HpcModule):
                     is_prefill=True,
                     k_scale=k_scale,
                     v_scale=v_scale,
-                    quant_policy=QUANT_POLICY_DQSKV,
+                    quant_policy=self._quant_type,
                     max_seqlens=max_seqlens,
                     q_norm_weight=q_norm_weight,
                     k_norm_weight=k_norm_weight,
@@ -364,9 +374,7 @@ class HpcRopeNorm(CustomOp, HpcModule):
             qkv_decode = qkv[:num_decode_tokens]
             # Single-token decode: q_index is the per-request prefix sum
             # [0, 1, ..., num_decode_reqs].
-            qo_indptr_decode = torch.arange(
-                num_decode_reqs + 1, dtype=torch.int32, device=qkv.device
-            )
+            decode_query_len = attn_metadata.decode_query_len
             out_q_decode = output[:num_decode_tokens]
 
             if self.use_fp8:
@@ -376,13 +384,13 @@ class HpcRopeNorm(CustomOp, HpcModule):
                     qkv=qkv_decode,
                     cos_sin=self.cos_sin_cache,
                     num_seqlen_per_req=num_seq_kvcache,
-                    q_index=qo_indptr_decode,
+                    q_index=attn_metadata.qo_indptr_decode,
                     kvcache_indices=block_table_decode,
                     is_prefill=False,
                     k_scale=k_scale,
                     v_scale=v_scale,
-                    quant_policy=QUANT_POLICY_DQSKV,
-                    max_seqlens=1,
+                    quant_policy=self._quant_type,
+                    max_seqlens=decode_query_len,
                     q_norm_weight=q_norm_weight,
                     k_norm_weight=k_norm_weight,
                     qk_norm_policy=self.qk_norm_policy,
@@ -398,7 +406,7 @@ class HpcRopeNorm(CustomOp, HpcModule):
                     qkv_decode,
                     self.cos_sin_cache,
                     num_seq_kvcache,
-                    qo_indptr_decode,
+                    attn_metadata.qo_indptr_decode,
                     block_table_decode,
                     False,  # is_prefill
                     q_norm_weight=q_norm_weight,
