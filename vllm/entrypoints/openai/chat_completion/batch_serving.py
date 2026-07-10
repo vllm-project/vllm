@@ -181,7 +181,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     sub_request_id,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    priority=request.priority if hasattr(request, "priority") else 0,
+                    priority=request.priority,
                     data_parallel_rank=data_parallel_rank,
                     reasoning_ended=None,
                 )
@@ -258,7 +258,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                         top_logprobs=output.logprobs,
                         num_output_top_logprobs=request.top_logprobs,
                         tokenizer=tokenizer,
-                        return_as_token_id=request.return_token_ids,
+                        return_as_token_id=request.return_tokens_as_token_ids,
                     )
                 else:
                     logprobs = None

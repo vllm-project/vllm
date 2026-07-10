@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use enum_as_inner::EnumAsInner;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_default::DefaultFromSerde;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
@@ -131,33 +131,33 @@ impl EngineCoreOutput {
     }
 }
 
-/// Batch of engine-core outputs returned to a frontend client.
+/// Raw Python/msgpack engine-core output envelope.
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/__init__.py#L186-L214>
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, DefaultFromSerde)]
-pub struct EngineCoreOutputs {
+struct WireEngineCoreOutputs {
     #[serde(default)]
-    pub engine_index: u32,
+    engine_index: u32,
     /// Outputs grouped for this client in the current engine tick.
     #[serde(default)]
-    pub outputs: Vec<EngineCoreOutput>,
+    outputs: Vec<EngineCoreOutput>,
     #[serde(default)]
-    pub scheduler_stats: Option<Box<SchedulerStats>>,
+    scheduler_stats: Option<Box<SchedulerStats>>,
     #[serde(default)]
-    pub timestamp: f64,
+    timestamp: f64,
     #[serde(default)]
-    pub utility_output: Option<UtilityOutput>,
+    utility_output: Option<UtilityOutput>,
     #[serde(default)]
-    pub finished_requests: Option<BTreeSet<String>>,
+    finished_requests: Option<BTreeSet<String>>,
     /// In DP mode, signals that the current wave finished and engines are
     /// paused.
     #[serde(default)]
-    pub wave_complete: Option<u32>,
+    wave_complete: Option<u32>,
     /// In DP mode, signals that a request arrived for an old wave and the next
     /// wave needs to start in other engines.
     #[serde(default)]
-    pub start_wave: Option<u32>,
+    start_wave: Option<u32>,
 }
 
 /// Data-parallel control notifications multiplexed through `EngineCoreOutputs`.
@@ -167,7 +167,7 @@ pub enum DpControlMessage {
     StartWave(u32),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct RequestBatchOutputs {
     pub engine_index: u32,
     pub outputs: Vec<EngineCoreOutput>,
@@ -176,30 +176,48 @@ pub struct RequestBatchOutputs {
     pub finished_requests: Option<BTreeSet<String>>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct UtilityCallOutput {
     pub engine_index: u32,
     pub timestamp: f64,
     pub output: UtilityOutput,
 }
 
-/// Semantic classification of a raw `EngineCoreOutputs` message.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DpControlOutput {
+    pub engine_index: u32,
+    pub timestamp: f64,
+    pub control: DpControlMessage,
+}
+
+/// Semantic engine-core output families.
 ///
-/// Python currently uses one product-shaped wire struct for several distinct
-/// output families. This enum exposes those families more explicitly without
-/// changing the wire format.
+/// Python currently uses one product-shaped wire struct. The Rust protocol
+/// exposes the finite semantic families while preserving the same msgpack shape
+/// for serialization.
 #[derive(Debug, Clone, PartialEq, EnumAsInner)]
-pub enum ClassifiedEngineCoreOutputs {
+pub enum EngineCoreOutputs {
     RequestBatch(RequestBatchOutputs),
     Utility(UtilityCallOutput),
-    DpControl {
-        engine_index: u32,
-        timestamp: f64,
-        control: DpControlMessage,
-    },
-    /// Fallback for wire-shape combinations that do not map cleanly onto the
-    /// current semantic families.
-    Other(EngineCoreOutputs),
+    DpControl(DpControlOutput),
+}
+
+impl From<RequestBatchOutputs> for EngineCoreOutputs {
+    fn from(outputs: RequestBatchOutputs) -> Self {
+        Self::RequestBatch(outputs)
+    }
+}
+
+impl From<UtilityCallOutput> for EngineCoreOutputs {
+    fn from(output: UtilityCallOutput) -> Self {
+        Self::Utility(output)
+    }
+}
+
+impl From<DpControlOutput> for EngineCoreOutputs {
+    fn from(output: DpControlOutput) -> Self {
+        Self::DpControl(output)
+    }
 }
 
 impl EngineCoreOutputs {
@@ -209,52 +227,116 @@ impl EngineCoreOutputs {
     where
         Frame: AsRef<[u8]>,
     {
-        for output in &mut self.outputs {
-            output.resolve_in_place(frames)?;
+        if let Self::RequestBatch(batch) = self {
+            for output in &mut batch.outputs {
+                output.resolve_in_place(frames)?;
+            }
         }
         Ok(())
     }
+}
 
-    /// Classify the raw wire message into a more semantic Rust enum.
-    pub fn classify(self) -> ClassifiedEngineCoreOutputs {
-        let has_request_payload = !self.outputs.is_empty()
-            || self.scheduler_stats.is_some()
-            || self.finished_requests.is_some();
+/// Classify the raw wire message into a more semantic Rust enum.
+impl TryFrom<WireEngineCoreOutputs> for EngineCoreOutputs {
+    type Error = Error;
+
+    fn try_from(value: WireEngineCoreOutputs) -> Result<Self> {
+        let has_request_payload = !value.outputs.is_empty()
+            || value.scheduler_stats.is_some()
+            || value.finished_requests.is_some();
 
         match (
             has_request_payload,
-            &self.utility_output,
-            &self.wave_complete,
-            &self.start_wave,
+            &value.utility_output,
+            &value.wave_complete,
+            &value.start_wave,
         ) {
-            (true, None, None, None) => {
-                ClassifiedEngineCoreOutputs::RequestBatch(RequestBatchOutputs {
-                    engine_index: self.engine_index,
-                    outputs: self.outputs,
-                    scheduler_stats: self.scheduler_stats,
-                    timestamp: self.timestamp,
-                    finished_requests: self.finished_requests,
-                })
+            (true, None, None, None) => Ok(RequestBatchOutputs {
+                engine_index: value.engine_index,
+                outputs: value.outputs,
+                scheduler_stats: value.scheduler_stats,
+                timestamp: value.timestamp,
+                finished_requests: value.finished_requests,
             }
-            (false, Some(_), None, None) => {
-                ClassifiedEngineCoreOutputs::Utility(UtilityCallOutput {
-                    engine_index: self.engine_index,
-                    timestamp: self.timestamp,
-                    output: self.utility_output.unwrap(),
-                })
+            .into()),
+            (false, Some(_), None, None) => Ok(UtilityCallOutput {
+                engine_index: value.engine_index,
+                timestamp: value.timestamp,
+                output: value.utility_output.unwrap(),
             }
-            (false, None, Some(_), None) => ClassifiedEngineCoreOutputs::DpControl {
-                engine_index: self.engine_index,
-                timestamp: self.timestamp,
-                control: DpControlMessage::WaveComplete(self.wave_complete.unwrap()),
-            },
-            (false, None, None, Some(_)) => ClassifiedEngineCoreOutputs::DpControl {
-                engine_index: self.engine_index,
-                timestamp: self.timestamp,
-                control: DpControlMessage::StartWave(self.start_wave.unwrap()),
-            },
-            _ => ClassifiedEngineCoreOutputs::Other(self),
+            .into()),
+            (false, None, Some(_), None) => Ok(DpControlOutput {
+                engine_index: value.engine_index,
+                timestamp: value.timestamp,
+                control: DpControlMessage::WaveComplete(value.wave_complete.unwrap()),
+            }
+            .into()),
+            (false, None, None, Some(_)) => Ok(DpControlOutput {
+                engine_index: value.engine_index,
+                timestamp: value.timestamp,
+                control: DpControlMessage::StartWave(value.start_wave.unwrap()),
+            }
+            .into()),
+
+            _ => Err(Error::Decode {
+                target_type: "EngineCoreOutputs",
+                message: "invalid wire shape".to_string(),
+            }),
         }
+    }
+}
+
+impl From<EngineCoreOutputs> for WireEngineCoreOutputs {
+    fn from(value: EngineCoreOutputs) -> Self {
+        match value {
+            EngineCoreOutputs::RequestBatch(batch) => Self {
+                engine_index: batch.engine_index,
+                outputs: batch.outputs,
+                scheduler_stats: batch.scheduler_stats,
+                timestamp: batch.timestamp,
+                finished_requests: batch.finished_requests,
+                ..Default::default()
+            },
+            EngineCoreOutputs::Utility(utility) => Self {
+                engine_index: utility.engine_index,
+                timestamp: utility.timestamp,
+                utility_output: Some(utility.output),
+                ..Default::default()
+            },
+            EngineCoreOutputs::DpControl(control) => {
+                let (wave_complete, start_wave) = match control.control {
+                    DpControlMessage::WaveComplete(wave) => (Some(wave), None),
+                    DpControlMessage::StartWave(wave) => (None, Some(wave)),
+                };
+                Self {
+                    engine_index: control.engine_index,
+                    timestamp: control.timestamp,
+                    wave_complete,
+                    start_wave,
+                    ..Default::default()
+                }
+            }
+        }
+    }
+}
+
+impl Serialize for EngineCoreOutputs {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        WireEngineCoreOutputs::from(self.clone()).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for EngineCoreOutputs {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        WireEngineCoreOutputs::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -281,7 +363,7 @@ mod tests {
 
     #[test]
     fn engine_core_outputs_roundtrip_finished_fields() {
-        let outputs = EngineCoreOutputs {
+        let outputs = WireEngineCoreOutputs {
             outputs: vec![EngineCoreOutput {
                 request_id: "req-1".to_string(),
                 new_token_ids: vec![42],
@@ -302,7 +384,7 @@ mod tests {
         };
 
         let encoded = encode_msgpack(&outputs).unwrap();
-        let decoded: EngineCoreOutputs = decode_msgpack(&encoded).unwrap();
+        let decoded: WireEngineCoreOutputs = decode_msgpack(&encoded).unwrap();
 
         assert_eq!(decoded.outputs.len(), 1);
         assert_eq!(
@@ -317,7 +399,7 @@ mod tests {
 
     #[test]
     fn engine_core_outputs_classify_request_batch() {
-        let outputs = EngineCoreOutputs {
+        let outputs = WireEngineCoreOutputs {
             outputs: vec![EngineCoreOutput {
                 request_id: "req-1".to_string(),
                 new_token_ids: vec![7],
@@ -360,12 +442,12 @@ mod tests {
                 },
             )
         "#]]
-        .assert_debug_eq(&outputs.classify());
+        .assert_debug_eq(&EngineCoreOutputs::try_from(outputs).unwrap());
     }
 
     #[test]
     fn engine_core_outputs_classify_utility() {
-        let outputs = EngineCoreOutputs {
+        let outputs = WireEngineCoreOutputs {
             utility_output: Some(UtilityOutput {
                 call_id: 42_u64.into(),
                 failure_message: None,
@@ -387,31 +469,33 @@ mod tests {
                 },
             )
         "#]]
-        .assert_debug_eq(&outputs.classify());
+        .assert_debug_eq(&EngineCoreOutputs::try_from(outputs).unwrap());
     }
 
     #[test]
     fn engine_core_outputs_classify_control() {
-        let outputs = EngineCoreOutputs {
+        let outputs = WireEngineCoreOutputs {
             start_wave: Some(3),
             ..Default::default()
         };
 
         expect_test::expect![[r#"
-            DpControl {
-                engine_index: 0,
-                timestamp: 0.0,
-                control: StartWave(
-                    3,
-                ),
-            }
+            DpControl(
+                DpControlOutput {
+                    engine_index: 0,
+                    timestamp: 0.0,
+                    control: StartWave(
+                        3,
+                    ),
+                },
+            )
         "#]]
-        .assert_debug_eq(&outputs.classify());
+        .assert_debug_eq(&EngineCoreOutputs::try_from(outputs).unwrap());
     }
 
     #[test]
-    fn engine_core_outputs_classify_mixed_shape_as_raw() {
-        let outputs = EngineCoreOutputs {
+    fn engine_core_outputs_rejects_mixed_shape() {
+        let outputs = WireEngineCoreOutputs {
             outputs: vec![EngineCoreOutput {
                 request_id: "req-1".to_string(),
                 new_token_ids: vec![7],
@@ -425,44 +509,10 @@ mod tests {
             ..Default::default()
         };
 
-        expect_test::expect![[r#"
-            Other(
-                EngineCoreOutputs {
-                    engine_index: 0,
-                    outputs: [
-                        EngineCoreOutput {
-                            request_id: "req-1",
-                            new_token_ids: [
-                                7,
-                            ],
-                            new_logprobs: None,
-                            new_prompt_logprobs_tensors: None,
-                            pooling_output: None,
-                            finish_reason: None,
-                            stop_reason: None,
-                            events: None,
-                            kv_transfer_params: None,
-                            trace_headers: None,
-                            prefill_stats: None,
-                            routed_experts: None,
-                            num_nans_in_logits: 0,
-                        },
-                    ],
-                    scheduler_stats: None,
-                    timestamp: 0.0,
-                    utility_output: Some(
-                        UtilityOutput {
-                            call_id: 1,
-                            failure_message: None,
-                            result: None,
-                        },
-                    ),
-                    finished_requests: None,
-                    wave_complete: None,
-                    start_wave: None,
-                },
-            )
-        "#]]
-        .assert_debug_eq(&outputs.classify());
+        let error = EngineCoreOutputs::try_from(outputs).unwrap_err();
+        expect_test::expect![[
+            r#"messagepack decode failed for EngineCoreOutputs: invalid wire shape"#
+        ]]
+        .assert_eq(&error.to_string());
     }
 }

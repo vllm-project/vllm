@@ -127,6 +127,8 @@ void fp32_router_gemm(
     return;
   }
 
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      mat_a.get_device_index());
   STD_TORCH_CHECK(getSMVersion() >= 90, "fp32_router_gemm: requires SM90+");
 
   auto stream = get_current_cuda_stream(mat_a.get_device_index());

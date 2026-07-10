@@ -122,6 +122,7 @@ pub(super) fn prepare_chat_request(
             frequency_penalty: request.frequency_penalty,
             presence_penalty: request.presence_penalty,
             repetition_penalty: request.repetition_penalty,
+            repetition_detection: request.repetition_detection,
             stop_token_ids: request.stop_token_ids,
             ignore_eos: request.ignore_eos,
             logit_bias: convert_logit_bias(request.logit_bias)?,
@@ -829,7 +830,7 @@ mod tests {
         let message = ChatCompletionMessage {
             role: AssistantRole,
             content: Some("answer".to_string()),
-            tool_calls: None,
+            tool_calls: Vec::new(),
             reasoning: Some("inner".to_string()),
         };
         let message_json = serde_json::to_value(message).expect("message serializes");
