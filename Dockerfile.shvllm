@@ -119,20 +119,21 @@ ENV CUDA_HOME=/usr/local/cuda
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 
+# A pip constraint file pins torch/torchvision to the cu129 builds for
+# EVERY subsequent pip invocation — otherwise resolving the vLLM wheel's
+# dependencies can silently swap in PyPI's cu13 default builds.
+RUN printf 'torch==%s+cu129\ntorchvision==0.28.0+cu129\n' "${TORCH_VERSION}" \
+        > /opt/pip-constraints.txt
+ENV PIP_CONSTRAINT=/opt/pip-constraints.txt \
+    PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu129
+
 # torch + torchvision (own layer, identical to the builder)
 RUN pip install -U pip && \
-    pip install "torch==${TORCH_VERSION}" "torchvision==0.28.0" \
-        --index-url https://download.pytorch.org/whl/cu129
+    pip install "torch==${TORCH_VERSION}+cu129" "torchvision==0.28.0+cu129"
 
 # vLLM wheel + dependencies (own layer)
 COPY --from=builder /wheels/vllm-*.whl /tmp/wheels/
-RUN pip install /tmp/wheels/vllm-*.whl --no-cache-dir
-
-# Repair step: PyPI dependency resolution can replace torch/torchvision
-# with cu13 defaults — force-restore the cu129 builds.
-RUN pip install --force-reinstall --no-deps --no-cache-dir \
-        "torch==${TORCH_VERSION}+cu129" "torchvision==0.28.0+cu129" \
-        --index-url https://download.pytorch.org/whl/cu129 && \
+RUN pip install /tmp/wheels/vllm-*.whl --no-cache-dir && \
     python3 -c "import torch, torchvision; \
 assert torch.version.cuda.startswith('12.9'), torch.version.cuda; \
 print('torch', torch.__version__, '| torchvision', torchvision.__version__, '| CUDA', torch.version.cuda)"
@@ -143,11 +144,14 @@ RUN pip install /tmp/wheels/vllm_gguf_plugin-*.whl "gguf>=0.19" --no-cache-dir &
     rm -rf /tmp/wheels
 
 # --- NCCL >= 2.30: the centerpiece for multi-rank-per-GPU ---
-# torch pins nvidia-nccl-cu12==2.29.x; libnccl.so.2 is ABI-stable, so we
-# deliberately upgrade. The actually loaded library is verified via
+# The one deliberate override in this image: torch wheels pin
+# nvidia-nccl-cu12==2.29.x exactly, but multi-rank-per-GPU needs >= 2.30.
+# libnccl.so.2 is ABI-stable within the major version, so replacing the
+# library under an unchanged torch is safe (--no-deps keeps pip from
+# touching anything else). The actually loaded library is verified via
 # ncclGetVersion() — torch.cuda.nccl.version() only reports the
 # compile-time header version of the torch build and would be misleading.
-RUN pip install --no-cache-dir "nvidia-nccl-cu12==2.30.7" && \
+RUN pip install --no-deps --no-cache-dir "nvidia-nccl-cu12==2.30.7" && \
     python3 - <<'EOF'
 import ctypes
 import glob
