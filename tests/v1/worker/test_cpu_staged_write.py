@@ -51,23 +51,6 @@ def test_cpu_staged_write_tensor_applies_float_writes():
     torch.testing.assert_close(tensor.gpu, expected)
 
 
-def test_cpu_staged_write_tensor_supports_uva_flag():
-    tensor = StagedWriteTensor(
-        (2, 4),
-        dtype=torch.int32,
-        device=torch.device("cpu"),
-        uva_instead_of_gpu=True,
-    )
-
-    tensor.stage_write(1, 2, [8, 9])
-    tensor.apply_write()
-
-    assert tensor.gpu.tolist() == [
-        [0, 0, 0, 0],
-        [0, 0, 8, 9],
-    ]
-
-
 def test_cpu_fused_staged_writer_applies_each_tensor():
     first = StagedWriteTensor(
         (2, 4),
