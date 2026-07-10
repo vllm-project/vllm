@@ -290,7 +290,10 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
                     detail: image_url.detail,
                     uuid,
                 }),
-                _ => bail_invalid_request!("Only text and image_url content parts are supported."),
+                ContentPart::VideoUrl { video_url, uuid } => Ok(ChatContentPart::VideoUrl {
+                    video_url: video_url.url,
+                    uuid,
+                }),
             })
             .try_collect()
             .map(ChatContent::Parts),
@@ -772,28 +775,34 @@ mod tests {
     }
 
     #[test]
-    fn prepare_chat_request_rejects_video_content_parts() {
+    fn prepare_chat_request_accepts_video_content_parts() {
         let request = ChatCompletionRequest {
             messages: vec![ChatMessage::User {
                 content: MessageContent::Parts(vec![ContentPart::VideoUrl {
                     video_url: VideoUrl {
                         url: "https://example.com/video.mp4".to_string(),
                     },
+                    uuid: Some("video-uuid".to_string()),
                 }]),
                 name: None,
             }],
             ..base_request()
         };
 
-        let error = prepare_chat_request(
+        let prepared = prepare_chat_request(
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
-        .unwrap_err();
+        .expect("request is valid");
 
-        expect!["Only text and image_url content parts are supported."]
-            .assert_eq(&error.to_error_response().error.message);
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::user(vec![ChatContentPart::VideoUrl {
+                video_url: "https://example.com/video.mp4".to_string(),
+                uuid: Some("video-uuid".to_string()),
+            }])]
+        );
     }
 
     #[test]

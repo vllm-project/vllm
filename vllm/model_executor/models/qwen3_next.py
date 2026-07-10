@@ -381,15 +381,15 @@ class Qwen3NextAttention(nn.Module):
     def forward(
         self,
         positions: torch.Tensor,
-        output: torch.Tensor,
         hidden_states: torch.Tensor,
-    ):
+    ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v, gate = self._project_qkv_gate(qkv, positions)
         attn_output = self.attn(q, k, v)
         if gate is not None:
             attn_output = attn_output * torch.sigmoid(gate)
-        output[:], _ = self.o_proj(attn_output)
+        output, _ = self.o_proj(attn_output)
+        return output
 
 
 class Qwen3NextDecoderLayer(nn.Module):
@@ -484,21 +484,15 @@ class Qwen3NextDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        self_attention_output = torch.empty_like(hidden_states)
         if self.layer_type == "linear_attention":
-            self.linear_attn(
-                hidden_states=hidden_states,
-                output=self_attention_output,
-            )
+            hidden_states = self.linear_attn(hidden_states=hidden_states)
         elif self.layer_type == "full_attention":
-            self.self_attn(
+            hidden_states = self.self_attn(
                 hidden_states=hidden_states,
-                output=self_attention_output,
                 positions=positions,
             )
         else:
             raise ValueError("Invalid layer_type")
-        hidden_states = self_attention_output
 
         if self.layer_scale:
             if len(hidden_states.shape) == 2:
