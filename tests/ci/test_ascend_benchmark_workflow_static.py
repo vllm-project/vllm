@@ -185,7 +185,7 @@ def test_schedule_runs_registered_multi_scenario_benchmark_publish():
     text = workflow_text()
     workflow = workflow_yaml()[True]
 
-    assert workflow["schedule"][0]["cron"] == "0 18 * * 5"
+    assert workflow["schedule"][0]["cron"] == "0 18 * * *"
     assert "github.event_name == 'schedule'" in text
     assert "VLLM_HUST_SCHEDULE_BENCHMARK_SCENARIOS" in text
     assert "VLLM_HUST_SCHEDULE_PUBLISH_BENCHMARK != '0'" in text
