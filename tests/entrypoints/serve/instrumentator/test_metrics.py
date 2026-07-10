@@ -182,6 +182,7 @@ async def test_metrics_counts(
 EXPECTED_METRICS_V1 = [
     "vllm:num_requests_running",
     "vllm:num_requests_waiting",
+    "vllm:num_requests_waiting_by_reason",
     "vllm:kv_cache_usage_perc",
     "vllm:prefix_cache_queries",
     "vllm:prefix_cache_hits",
@@ -287,6 +288,17 @@ async def test_metrics_exist(
         if metric in HIDDEN_DEPRECATED_METRICS and not server.show_hidden_metrics:
             continue
         assert metric in response.text
+
+    cache_config_samples = [
+        sample
+        for family in text_string_to_metric_families(response.text)
+        if family.name == "vllm:cache_config_info"
+        for sample in family.samples
+    ]
+    assert cache_config_samples
+    for sample in cache_config_samples:
+        assert sample.labels.get("kv_cache_size_tokens") not in (None, "None", "")
+        assert sample.labels.get("kv_cache_max_concurrency") not in (None, "None", "")
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,8 @@ import copy
 import gc
 import weakref
 from collections.abc import Iterable, Sequence
+from dataclasses import replace
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -37,12 +39,21 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.layer import FusedMoEParallelConfig
+from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+from vllm.model_executor.layers.fused_moe.eep_reconfigure import (
+    make_eep_staged_quant_method,
+)
+from vllm.utils import is_moe_layer
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.workspace import lock_workspace, unlock_workspace
 
 logger = init_logger(__name__)
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+        FusedMoEMethodBase,
+    )
 
 
 def batch_transfer_weights(
@@ -65,7 +76,7 @@ def batch_transfer_weights(
     all_params = []
 
     for name, param in state_dict.items():
-        if name.endswith("expert_map"):
+        if name.endswith("expert_map") or name.find("._shared_experts") != -1:
             continue
         if param.data_ptr() not in expert_weights_set:
             all_params.append(param.data)
@@ -133,6 +144,7 @@ class ElasticEPScalingExecutor:
     def __init__(self, worker):
         self.worker_ref = weakref.ref(worker)
         self.reconfig_request = None
+        self._staged_moe_quant_methods: dict[nn.Module, FusedMoEMethodBase] = {}
 
     @property
     def worker(self):
@@ -195,6 +207,11 @@ class ElasticEPScalingExecutor:
             )
         if new_dp_size > old_dp_size:
             self._set_eplb_suppressed(True)
+            eplb_state = self.worker.model_runner.eplb_state
+            if eplb_state is not None:
+                eplb_state.drain_async()
+        elif new_dp_size < old_dp_size:
+            self._stage_standby_moe_quant_methods()
 
     def transfer_weights(self, old_dp_size: int, new_dp_size: int) -> None:
         standby_dp_group = get_standby_dp_group()
@@ -261,6 +278,58 @@ class ElasticEPScalingExecutor:
             src_rank=0,
             device=self.worker.device,
         )
+        # New workers enter load_model after receiving the expert mapping.
+        # Stage replacement MoE kernels before returning to the state machine
+        # so existing ranks can participate in collective EP comm creation.
+        self._stage_standby_moe_quant_methods()
+
+    def _make_eep_moe_config(self, module, dp_group, ep_group):
+        parallel_config = self.worker.vllm_config.parallel_config
+        tp_size = get_tp_group().world_size
+        sp_size = tp_size if parallel_config.use_sequence_parallel_moe else 1
+        moe_parallel_config = FusedMoEParallelConfig.make(
+            tp_size_=tp_size,
+            pcp_size_=get_pcp_group().world_size,
+            dp_size_=dp_group.world_size,
+            sp_size_=sp_size,
+            vllm_parallel_config=parallel_config,
+        )
+        return replace(
+            module.moe_config,
+            num_experts=module.moe_config.num_local_experts * ep_group.world_size,
+            moe_parallel_config=moe_parallel_config,
+        )
+
+    def _stage_standby_moe_quant_methods(self) -> None:
+        standby_dp_group = get_standby_dp_group()
+        standby_ep_group = get_standby_ep_group()
+        model = self.worker.model_runner.get_model()
+        moe_modules = [module for module in model.modules() if is_moe_layer(module)]
+        self._staged_moe_quant_methods.clear()
+        with set_current_vllm_config(self.worker.vllm_config):
+            for module in moe_modules:
+                staged_quant_method = make_eep_staged_quant_method(
+                    module,
+                    self._make_eep_moe_config(
+                        module,
+                        standby_dp_group,
+                        standby_ep_group,
+                    ),
+                )
+                if staged_quant_method is not None:
+                    self._staged_moe_quant_methods[module] = staged_quant_method
+
+    def _commit_staged_moe_quant_methods(self) -> None:
+        model = self.worker.model_runner.get_model()
+        moe_modules = [module for module in model.modules() if is_moe_layer(module)]
+        for module in moe_modules:
+            staged_quant_method = self._staged_moe_quant_methods.pop(module, None)
+            if staged_quant_method is None:
+                continue
+            assert staged_quant_method.moe_kernel is not None
+            module._replace_quant_method(staged_quant_method)
+            staged_quant_method.moe_kernel.prepare_finalize.on_commit()
+        self._staged_moe_quant_methods.clear()
 
     def _release_cuda_graphs(self) -> None:
         if isinstance(self.worker.model_runner.model, CUDAGraphWrapper):
@@ -319,30 +388,18 @@ class ElasticEPScalingExecutor:
         moe_modules = [
             module
             for module in self.worker.model_runner.model.modules()
-            if (
-                module.__class__.__name__ == "FusedMoE"
-                or module.__class__.__name__ == "SharedFusedMoE"
-            )
+            if is_moe_layer(module)
         ]
         num_local_experts = moe_modules[0].moe_config.num_local_experts
         assert all(
             module.moe_config.num_local_experts == num_local_experts
             for module in moe_modules
         ), "All MoE modules must have the same number of experts"
+        dp_group = get_dp_group()
+        ep_group = get_ep_group()
         for module in moe_modules:
-            module.moe_config.num_experts = num_local_experts * new_ep_size
-            module.global_num_experts = module.moe_config.num_experts
-            tp_size = get_tp_group().world_size
-            is_sequence_parallel = parallel_config.use_sequence_parallel_moe
-            sp_size = tp_size if is_sequence_parallel else 1
-            module.moe_parallel_config = FusedMoEParallelConfig.make(
-                tp_size_=tp_size,
-                pcp_size_=get_pcp_group().world_size,
-                dp_size_=get_dp_group().world_size,
-                sp_size_=sp_size,
-                vllm_parallel_config=parallel_config,
-            )
-            module.moe_config.moe_parallel_config = module.moe_parallel_config
+            new_moe_config = self._make_eep_moe_config(module, dp_group, ep_group)
+            module._set_moe_config(new_moe_config)
 
         # Update EPLB state
         eplb_state = self.worker.model_runner.eplb_state
@@ -401,22 +458,31 @@ class ElasticEPScalingExecutor:
                 eplb_model_state.logical_to_physical_map,
                 eplb_model_state.logical_replica_count,
             )
-            eplb_state._init_should_record_tensor(model)
+            eplb_state._propagate_shared_tensors(
+                model, eplb_model_state.num_unpadded_tokens_tensors
+            )
             model.update_physical_experts_metadata(
                 num_physical_experts=num_physical_experts,
                 num_local_physical_experts=num_local_experts,
             )
-            # Force re-creation of the modular kernel (and all2all manager)
-            # for the new EP size by resetting quant_method to base
+            self._commit_staged_moe_quant_methods()
+            # Legacy modular methods need to be recreated for the new EP size.
             for module in moe_modules:
-                if hasattr(module.quant_method, "old_quant_method"):
-                    module._replace_quant_method(module.quant_method.old_quant_method)
+                if getattr(module._quant_method, "wraps_legacy_quant_method", False):
+                    module._replace_quant_method(module._quant_method.old_quant_method)
             prepare_communication_buffer_for_model(self.worker.model_runner.model)
 
+        eplb_model_state.expert_buffer = [
+            torch.empty_like(w) for w in model.expert_weights[0]
+        ]
+        assert parallel_config.eplb_config.communicator is not None, (
+            "EPLB communicator backend must be set by ParallelConfig"
+        )
         eplb_model_state.communicator = create_eplb_communicator(
             group_coordinator=get_eplb_group(),
             backend=parallel_config.eplb_config.communicator,
-            expert_weights=model.expert_weights[0],
+            expert_weights=model.expert_weights,
+            expert_buffer=eplb_model_state.expert_buffer,
         )
 
         if (
@@ -479,6 +545,11 @@ class ElasticEPScalingExecutor:
             eplb_model_state.physical_to_logical_map.shape[1]
         )
         eplb_state.is_async = is_async_enabled
+        # Start the async worker thread if it doesn't exist yet (idempotent).
+        # This is needed for new workers after scale-up: they create EplbState
+        # in setup_eplb_from_mapping() but don't start the thread there because
+        # groups aren't ready yet.
+        eplb_state.start_async_loop()
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Expert resharding completed")
 
@@ -488,6 +559,9 @@ class ElasticEPScalingExecutor:
 
     def perform_scale_down_eplb_reshuffle(self, new_dp_size: int) -> None:
         self._set_eplb_suppressed(True)
+        eplb_state = self.worker.model_runner.eplb_state
+        if eplb_state is not None:
+            eplb_state.drain_async()
         parallel_config = self.worker.vllm_config.parallel_config
         tp_size = parallel_config.tensor_parallel_size
         old_ep_size = parallel_config.data_parallel_size * tp_size
@@ -568,3 +642,45 @@ class ElasticEPScalingExecutor:
     def prepare_new_worker(self) -> None:
         with set_current_vllm_config(self.worker.vllm_config):
             prepare_communication_buffer_for_model(self.worker.model_runner.get_model())
+
+    def rewarm_workspace(self) -> None:
+        # Must run on every DP sibling in lockstep: _dummy_run calls
+        # coordinate_batch_across_dp whenever data_parallel_size > 1
+        # (gpu_model_runner.py:3663), which deadlocks if any rank skips it.
+
+        # Save and clear block tables so profile_run/compile_or_warm_up_model
+        # don't write dummy slot mappings into real KV-cache blocks (mirrors
+        # switch_and_prepare's pattern).
+        multi_block_table = self.worker.model_runner.input_batch.block_table
+        saved_block_tables: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for bt in multi_block_table.block_tables:
+            saved_block_tables.append(
+                (bt.block_table.gpu.clone(), bt.block_table.cpu.clone())
+            )
+        multi_block_table.clear()
+
+        # _ensure_workspace_size allocates a fresh tensor on grow, leaving
+        # captured CUDA graphs with stale data pointers; drop graphs before
+        # re-warm so captures realign with the resized buffer.
+        self._release_cuda_graphs()
+        unlock_workspace()
+
+        # Grow the MoE workspace at max_num_tokens.
+        # compile_or_warm_up_model alone only exercises cudagraph-capture
+        # sizes (≤64 tokens for this test) and leaves the workspace at
+        # ~10-14 MB; the post-all-to-all per-rank token count under real
+        # post-reshuffle routing needs hundreds of MB. Use _dummy_run
+        # directly (rather than profile_run) with skip_eplb=True so dummy
+        # routing doesn't pollute the just-rebalanced EPLB stats — same
+        # convention compile_or_warm_up_model itself uses.
+        runner = self.worker.model_runner
+        runner._dummy_run(runner.max_num_tokens, is_profile=True, skip_eplb=True)
+        self.worker.compile_or_warm_up_model()
+
+        lock_workspace()
+
+        for bt, (saved_gpu, saved_cpu) in zip(
+            multi_block_table.block_tables, saved_block_tables
+        ):
+            bt.block_table.gpu.copy_(saved_gpu)
+            bt.block_table.cpu.copy_(saved_cpu)

@@ -7,16 +7,20 @@ import json
 from unittest.mock import Mock
 
 import pytest
+from openai.types.responses import ResponseFunctionToolCall
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
     FunctionDefinition,
 )
+from vllm.entrypoints.openai.engine.protocol import FunctionCall
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.openai.responses.utils import build_response_output_items
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 
-MODEL = "zai-org/GLM-4.5"
+MODEL = "zai-org/GLM-4.7"
 
 
 @pytest.fixture(scope="module")
@@ -58,7 +62,69 @@ def mock_request(sample_tools) -> ChatCompletionRequest:
     return request
 
 
+@pytest.fixture
+def namespace_tool_request() -> ResponsesRequest:
+    return ResponsesRequest.model_validate(
+        {
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "mcp__computer_use",
+                    "description": "Computer use tools.",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "get_app_state",
+                            "description": "Get app state.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "app": {"type": "string"},
+                                },
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+
 class TestGlm47ExtractToolCalls:
+    def test_namespace_tool_call_round_trip_to_responses_output(
+        self, glm47_tokenizer, namespace_tool_request
+    ):
+        parser = Glm47MoeModelToolParser(
+            glm47_tokenizer, tools=namespace_tool_request.tools
+        )
+        out = (
+            "<tool_call>mcp__computer_use__get_app_state"
+            "<arg_key>app</arg_key>"
+            "<arg_value>Google Chrome</arg_value>"
+            "</tool_call>"
+        )
+
+        result = parser.extract_tool_calls(out, request=namespace_tool_request)
+
+        assert result.tools_called
+        tool_call = result.tool_calls[0].function
+        assert tool_call == FunctionCall(
+            name="mcp__computer_use__get_app_state",
+            arguments='{"app": "Google Chrome"}',
+        )
+
+        output_items = build_response_output_items(
+            reasoning=None,
+            content=None,
+            tool_calls=[tool_call],
+            tools=namespace_tool_request.tools,
+        )
+        output_tool_call = output_items[0]
+        assert isinstance(output_tool_call, ResponseFunctionToolCall)
+        assert output_tool_call.name == "get_app_state"
+        assert output_tool_call.namespace == "mcp__computer_use"
+
     def test_no_tool_call(self, glm47_tool_parser, mock_request):
         out = "This is a plain response."
         r = glm47_tool_parser.extract_tool_calls(out, request=mock_request)
@@ -91,6 +157,12 @@ class TestGlm47ExtractToolCalls:
         assert r.tools_called
         assert json.loads(r.tool_calls[0].function.arguments) == {"city": "Beijing"}
 
+    def test_whitespace_preserved_in_arg_values(self, glm47_tool_parser, mock_request):
+        out = "<tool_call>get_weather<arg_key>city</arg_key><arg_value>  Beijing  </arg_value></tool_call>"
+        r = glm47_tool_parser.extract_tool_calls(out, request=mock_request)
+        assert r.tools_called
+        assert json.loads(r.tool_calls[0].function.arguments) == {"city": "  Beijing  "}
+
     def test_content_before(self, glm47_tool_parser, mock_request):
         out = "Checking.<tool_call>get_current_date</tool_call>"
         r = glm47_tool_parser.extract_tool_calls(out, request=mock_request)
@@ -117,42 +189,52 @@ class TestGlm47ExtractToolCalls:
 
 
 def _reset(parser):
-    parser._buffer = ""
-    parser._in_tool_call = False
     parser.current_tool_name_sent = False
-    parser._current_tool_name = None
-    parser._pending_key = None
-    parser._streaming_string_value = False
     parser.prev_tool_call_arr = []
     parser.current_tool_id = -1
     parser.streamed_args_for_tool = []
     parser._tool_call_ids = []
-    parser._args_started = []
-    parser._args_closed = []
-    parser._seen_keys = []
+    parser._sent_content_idx = 0
 
 
 class TestGlm47Streaming:
     def test_no_args(self, glm47_tool_parser, mock_request):
         _reset(glm47_tool_parser)
-        for chunk in ["<tool_call>", "get_current_date", "</tool_call>"]:
-            glm47_tool_parser.extract_tool_calls_streaming(
+        chunks = ["<tool_call>", "get_current_date", "</tool_call>"]
+        current_text = ""
+        deltas = []
+        for chunk in chunks:
+            current_text += chunk
+            delta = glm47_tool_parser.extract_tool_calls_streaming(
                 previous_text="",
-                current_text="",
+                current_text=current_text,
                 delta_text=chunk,
                 previous_token_ids=[],
                 current_token_ids=[],
                 delta_token_ids=[],
                 request=mock_request,
             )
-        assert len(glm47_tool_parser.prev_tool_call_arr) >= 1
+            if delta:
+                deltas.append(delta)
+        tool_calls = [
+            tool_call for delta in deltas for tool_call in (delta.tool_calls or [])
+        ]
+        names = [
+            tool_call.function.name
+            for tool_call in tool_calls
+            if tool_call.function and tool_call.function.name
+        ]
+        arguments = [
+            tool_call.function.arguments
+            for tool_call in tool_calls
+            if tool_call.function and tool_call.function.arguments
+        ]
+        assert names == ["get_current_date"]
+        assert "".join(arguments) == "{}"
 
     def test_with_args(self, glm47_tool_parser, mock_request):
         _reset(glm47_tool_parser)
-        # Split chunks so that the incremental string streaming path
-        # processes the value, its closing tag, and the tool-call closing
-        # tag in separate calls.
-        for chunk in [
+        chunks = [
             "<tool_call>",
             "get_weather\n",
             "<arg_key>city</arg_key>",
@@ -160,14 +242,27 @@ class TestGlm47Streaming:
             "Beijing",
             "</arg_value>",
             "</tool_call>",
-        ]:
-            glm47_tool_parser.extract_tool_calls_streaming(
+        ]
+        current_text = ""
+        deltas = []
+        for chunk in chunks:
+            current_text += chunk
+            delta = glm47_tool_parser.extract_tool_calls_streaming(
                 previous_text="",
-                current_text="",
+                current_text=current_text,
                 delta_text=chunk,
                 previous_token_ids=[],
                 current_token_ids=[],
                 delta_token_ids=[],
                 request=mock_request,
             )
-        assert glm47_tool_parser.prev_tool_call_arr[0]["arguments"]["city"] == "Beijing"
+            if delta:
+                deltas.append(delta)
+        arguments = [
+            tool_call.function.arguments
+            for delta in deltas
+            for tool_call in (delta.tool_calls or [])
+            if tool_call.function and tool_call.function.arguments
+        ]
+        args = json.loads("".join(arguments))
+        assert args["city"] == "Beijing"

@@ -7,7 +7,7 @@ import sys
 import textwrap
 import traceback
 from argparse import SUPPRESS, Action, HelpFormatter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from importlib.machinery import ModuleSpec
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -38,21 +38,59 @@ class MockCustomOp:
         return decorator
 
 
+class MockPluggableLayer:
+    @staticmethod
+    def register(name):
+        def decorator(cls):
+            return cls
+
+        return decorator
+
+
 mock_if_no_torch("vllm._C", MagicMock())
-mock_if_no_torch("vllm.model_executor.custom_op", MagicMock(CustomOp=MockCustomOp))
+mock_if_no_torch("vllm._C_stable_libtorch", MagicMock())
+mock_if_no_torch(
+    "vllm.model_executor.custom_op",
+    MagicMock(CustomOp=MockCustomOp, PluggableLayer=MockPluggableLayer),
+)
 mock_if_no_torch(
     "vllm.utils.torch_utils", MagicMock(direct_register_custom_op=lambda *a, **k: None)
 )
 
 
 # Mock any version checks by reading from compiled CI requirements
-with open(ROOT_DIR / "requirements/test.txt") as f:
+with open(ROOT_DIR / "requirements/test/cuda.txt") as f:
     VERSIONS = dict(line.strip().split("==") for line in f if "==" in line)
 importlib.metadata.version = lambda name: VERSIONS.get(name) or "0.0.0"
 
 
 # Make torch.nn.Parameter safe to inherit from
 mock_if_no_torch("torch.nn", MagicMock(Parameter=object))
+
+
+# Mock torch.library.infer_schema for vllm.ir.ops.IrOpInplaceOverload.__init__
+# We need to return the corresponding number of inputs, as IR infra will assert it
+def get_outputs(native_fn: Callable) -> str:
+    """
+    Extract output schema from function's return type annotation,
+    e.g. 'Tensor' or 'Tensor, Tensor'.
+    """
+    import typing
+
+    return_type = typing.get_type_hints(native_fn)["return"]
+    origin = typing.get_origin(return_type)
+    arg_name = lambda a: a.__name__ if hasattr(a, "__name__") else str(a)
+    if origin is tuple:
+        args = typing.get_args(return_type)
+        return ", ".join(arg_name(arg) for arg in args)
+    else:
+        return f"{arg_name(return_type)}"
+
+
+mock_if_no_torch(
+    "torch.library",
+    MagicMock(infer_schema=lambda fn, **k: f"(Tensor x) -> {get_outputs(fn)}"),
+)
 
 
 class PydanticMagicMock(MagicMock):
@@ -109,6 +147,7 @@ AsyncEngineArgs = auto_mock("vllm.engine.arg_utils", "AsyncEngineArgs")
 EngineArgs = auto_mock("vllm.engine.arg_utils", "EngineArgs")
 ChatCommand = auto_mock("vllm.entrypoints.cli.openai", "ChatCommand")
 CompleteCommand = auto_mock("vllm.entrypoints.cli.openai", "CompleteCommand")
+RenderSubcommand = auto_mock("vllm.entrypoints.cli.launch", "RenderSubcommand")
 openai_cli_args = auto_mock("vllm.entrypoints.openai", "cli_args")
 openai_run_batch = auto_mock("vllm.entrypoints.openai", "run_batch")
 
@@ -222,6 +261,7 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
         "serve": create_parser(openai_cli_args.make_arg_parser),
         "chat": create_parser(ChatCommand.add_cli_args),
         "complete": create_parser(CompleteCommand.add_cli_args),
+        "launch_render": create_parser(RenderSubcommand.add_cli_args),
         "run-batch": create_parser(openai_run_batch.make_arg_parser),
         # Benchmark CLI
         "bench_latency": create_parser(bench_latency.add_cli_args),

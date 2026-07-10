@@ -35,28 +35,26 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
+    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+)
+from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mamba.linear_attn import MiniMaxText01RMSNormTP
+from vllm.model_executor.layers.minimax_rms_norm import MiniMaxText01RMSNormTP
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
-)
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
 )
 from vllm.sequence import IntermediateTensors
 
@@ -64,7 +62,7 @@ from .interfaces import EagleModelMixin, SupportsEagle3, SupportsLoRA, SupportsP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
-    is_pp_missing_parameter,
+    WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -104,19 +102,19 @@ class MiniMaxM2MoE(nn.Module):
             e_score_correction_bias=self.e_score_correction_bias,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
-            reduce_results=False,
             renormalize=True,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
             router_logits_dtype=torch.float32,
+            ckpt_names=("w1", "w2", "w3"),
         )
 
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.num_local_experts,
             bias=False,
             params_dtype=torch.float32,
-            quant_config=None,
+            out_dtype=torch.float32,
             prefix=f"{prefix}.gate",
         )
 
@@ -130,13 +128,10 @@ class MiniMaxM2MoE(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states.to(torch.float32))
+        router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
-        final_hidden_states = final_hidden_states
-        if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
@@ -222,9 +217,21 @@ class MiniMaxM2Attention(nn.Module):
         self.q_norm = MiniMaxText01RMSNormTP(
             self.head_dim * self.total_num_heads, eps=rms_norm_eps
         )
-        self.k_norm = MiniMaxText01RMSNormTP(
-            self.head_dim * self.total_num_kv_heads, eps=rms_norm_eps
-        )
+        if self.total_num_kv_heads >= tp_size:
+            self.k_norm = MiniMaxText01RMSNormTP(
+                self.head_dim * self.total_num_kv_heads, eps=rms_norm_eps
+            )
+        else:
+            # KV heads are replicated across TP ranks; shard k_norm weight by
+            # total_num_kv_heads rather than tp_size to avoid incorrect sharding.
+            num_kv_head_replicas = tp_size // self.total_num_kv_heads
+            self.k_norm = MiniMaxText01RMSNormTP(
+                self.head_dim * self.total_num_kv_heads,
+                eps=rms_norm_eps,
+                weight_shard_world_size=self.total_num_kv_heads,
+                weight_shard_rank=get_tensor_model_parallel_rank()
+                // num_kv_head_replicas,
+            )
 
     def forward(
         self,
@@ -232,9 +239,8 @@ class MiniMaxM2Attention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = MiniMaxText01RMSNormTP.forward_qk(
-            self.q_norm, self.k_norm, q.contiguous(), k.contiguous()
+        q, k, v = MiniMaxText01RMSNormTP.forward_qkv(
+            self.q_norm, self.k_norm, qkv, self.q_size, self.kv_size
         )
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
@@ -316,6 +322,15 @@ class MiniMaxM2DecoderLayer(nn.Module):
 @support_torch_compile
 class MiniMaxM2Model(nn.Module, EagleModelMixin):
     fall_back_to_pt_during_load = False
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            # weight_name: (param_name, shard_id)
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        }
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -399,13 +414,17 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
 
         return hidden_states
 
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return FusedMoE.make_expert_params_mapping(
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # Skip spec-decode (MTP) layers; they are appended after the main
+        # decoder layers and have no destination in the main model.
+        skip_prefixes = None
+        num_mtp = getattr(self.config, "num_mtp_modules", 0)
+        if num_mtp:
+            base = self.config.num_hidden_layers
+            skip_prefixes = [f"layers.{base + i}." for i in range(num_mtp)]
+        loader = AutoWeightsLoader(
             self,
-            ckpt_gate_proj_name="w1",
-            ckpt_down_proj_name="w2",
-            ckpt_up_proj_name="w3",
-            num_experts=self.config.num_local_experts,
+            skip_prefixes=skip_prefixes,
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -508,9 +527,11 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class MiniMaxM2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
+    hf_to_vllm_mapper = MiniMaxM2Model.hf_to_vllm_mapper
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -570,17 +591,3 @@ class MiniMaxM2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
-
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return self.model.get_expert_mapping()
-
-
-def get_spec_layer_idx_from_weight_name(
-    config: PretrainedConfig, weight_name: str
-) -> int | None:
-    if hasattr(config, "num_mtp_modules") and (config.num_mtp_modules > 0):
-        layer_idx = config.num_hidden_layers
-        for i in range(config.num_mtp_modules):
-            if weight_name.startswith(f"model.layers.{layer_idx + i}."):
-                return layer_idx + i
-    return None

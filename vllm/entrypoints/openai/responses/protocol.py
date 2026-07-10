@@ -23,7 +23,9 @@ from openai.types.responses import (
     ResponseOutputItem,
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
+    ResponseOutputMessage,
     ResponsePrompt,
+    ResponseReasoningItem,
     ResponseReasoningTextDeltaEvent,
     ResponseReasoningTextDoneEvent,
     ResponseStatus,
@@ -274,6 +276,13 @@ class ResponsesRequest(OpenAIBaseModel):
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
     )
+    chat_template_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Additional keyword args to pass to the chat template renderer. "
+            "Will be accessible by the template."
+        ),
+    )
     # --8<-- [end:responses-extra-params]
 
     def build_chat_params(
@@ -289,17 +298,28 @@ class ResponsesRequest(OpenAIBaseModel):
         continue_final = should_continue_final_message(self.input)
 
         reasoning = self.reasoning
+        reasoning_effort = None if reasoning is None else reasoning.effort
+
+        extra_kwargs: dict[str, Any] = dict(
+            add_generation_prompt=not continue_final,
+            continue_final_message=continue_final,
+            reasoning_effort=reasoning_effort,
+        )
+
+        # When reasoning is requested, activate thinking for models whose
+        # chat templates require explicit opt-in (e.g., Gemma4 defaults
+        # enable_thinking to false). For templates that don't declare the
+        # variable, resolve_chat_template_kwargs filters it out harmlessly.
+        user_kwargs = self.chat_template_kwargs or {}
+        if reasoning_effort is not None and "enable_thinking" not in user_kwargs:
+            extra_kwargs["enable_thinking"] = reasoning_effort != "none"
 
         return ChatParams(
             chat_template=default_template,
             chat_template_content_format=default_template_content_format,
-            chat_template_kwargs=merge_kwargs(  # To remove unset values
-                {},
-                dict(
-                    add_generation_prompt=not continue_final,
-                    continue_final_message=continue_final,
-                    reasoning_effort=None if reasoning is None else reasoning.effort,
-                ),
+            chat_template_kwargs=merge_kwargs(
+                self.chat_template_kwargs,
+                extra_kwargs,
             ),
             media_io_kwargs=self.media_io_kwargs,
         )
@@ -352,8 +372,6 @@ class ResponsesRequest(OpenAIBaseModel):
         if (frequency_penalty := self.frequency_penalty) is None:
             frequency_penalty = default_sampling_params.get("frequency_penalty", 0.0)
 
-        stop_token_ids = default_sampling_params.get("stop_token_ids")
-
         # Structured output
         structured_outputs = self.structured_outputs
 
@@ -389,7 +407,6 @@ class ResponsesRequest(OpenAIBaseModel):
             top_k=top_k,
             max_tokens=max_tokens,
             logprobs=self.top_logprobs if self.is_include_output_logprobs() else None,
-            stop_token_ids=stop_token_ids,
             stop=stop,
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,
@@ -451,18 +468,21 @@ class ResponsesRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def function_call_parsing(cls, data):
-        """Parse function_call dictionaries into ResponseFunctionToolCall objects.
-        This ensures Pydantic can properly resolve union types in the input field.
-        Function calls provided as dicts are converted to ResponseFunctionToolCall
-        objects before validation, while invalid structures are left for Pydantic
-        to reject with appropriate error messages.
-        """
+    def input_item_parsing(cls, data):
+        """Parse input items that are missing required fields or that Pydantic
+        cannot disambiguate in a Union of TypedDict / BaseModel types.
 
+        Specifically handles:
+        - function_call -> ResponseFunctionToolCall
+        - reasoning     -> ResponseReasoningItem (auto-generates id)
+        - message(role=assistant) -> ResponseOutputMessage (auto-generates
+          id/status and annotations)
+
+        Invalid structures are left for Pydantic to reject.
+        """
         input_data = data.get("input")
 
         # Early return for None, strings, or bytes
-        # (strings are iterable but shouldn't be processed)
         if input_data is None or isinstance(input_data, (str, bytes)):
             return data
 
@@ -476,20 +496,121 @@ class ResponsesRequest(OpenAIBaseModel):
 
         processed_input = []
         for item in input_data:
-            if isinstance(item, dict) and item.get("type") == "function_call":
+            if not isinstance(item, dict):
+                processed_input.append(item)
+                continue
+
+            item_type = item.get("type")
+
+            if item_type == "function_call":
                 try:
                     processed_input.append(ResponseFunctionToolCall(**item))
                 except ValidationError:
-                    # Let Pydantic handle validation for malformed function calls
                     logger.debug(
                         "Failed to parse function_call to ResponseFunctionToolCall, "
                         "leaving for Pydantic validation"
                     )
                     processed_input.append(item)
+
+            elif item_type == "reasoning":
+                if "id" not in item:
+                    item = {**item, "id": f"rs_{random_uuid()}"}
+                try:
+                    processed_input.append(ResponseReasoningItem(**item))
+                except ValidationError:
+                    logger.debug(
+                        "Failed to parse reasoning to ResponseReasoningItem, "
+                        "leaving for Pydantic validation"
+                    )
+                    processed_input.append(item)
+
+            elif item_type == "message" and item.get("role") == "assistant":
+                content = item.get("content")
+                if not isinstance(content, list):
+                    # String content is a valid EasyInputMessageParam,
+                    # do not coerce it to ResponseOutputMessage
+                    processed_input.append(item)
+                    continue
+
+                original_item = item
+                item = dict(item)
+                if "id" not in item:
+                    item["id"] = f"msg_{random_uuid()}"
+                if "status" not in item:
+                    item["status"] = "completed"
+                # ResponseOutputText requires annotations
+                new_content = []
+                for c in content:
+                    if (
+                        isinstance(c, dict)
+                        and c.get("type") == "output_text"
+                        and "annotations" not in c
+                    ):
+                        c = {**c, "annotations": []}
+                    new_content.append(c)
+                item["content"] = new_content
+                try:
+                    processed_input.append(ResponseOutputMessage(**item))
+                except ValidationError:
+                    logger.debug(
+                        "Failed to parse assistant message to ResponseOutputMessage, "
+                        "leaving for Pydantic validation"
+                    )
+                    processed_input.append(original_item)
+
             else:
                 processed_input.append(item)
 
         data["input"] = processed_input
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_tool_usage(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        tools = data.get("tools")
+        tool_choice = data.get("tool_choice", "auto")
+        has_tools = tools is not None and len(tools) > 0
+        is_named_tool_choice = (
+            isinstance(tool_choice, dict) and tool_choice.get("type") == "function"
+        )
+
+        if not has_tools:
+            if tool_choice in ("auto", "none"):
+                data["tool_choice"] = "none"
+            elif tool_choice == "required":
+                raise VLLMValidationError(
+                    "Tool choice 'required' must be specified with 'tools' parameter.",
+                    parameter="tool_choice",
+                )
+            elif is_named_tool_choice:
+                raise VLLMValidationError(
+                    "Tool choice 'function' not found in 'tools' parameter.",
+                    parameter="tool_choice",
+                )
+        elif is_named_tool_choice and tools is not None:
+            tool_name = tool_choice.get("name")
+            tool_names = set()
+            for tool in tools:
+                if isinstance(tool, dict):
+                    if tool.get("type") == "namespace":
+                        namespace = tool.get("name")
+                        for namespaced_tool in tool.get("tools", []):
+                            namespaced_name = namespaced_tool.get("name")
+                            tool_names.add(namespaced_name)
+                            tool_names.add(f"{namespace}__{namespaced_name}")
+                    else:
+                        tool_names.add(tool.get("name"))
+                else:
+                    tool_names.add(getattr(tool, "name", None))
+            if not tool_name or tool_name not in tool_names:
+                raise VLLMValidationError(
+                    "Tool choice 'function' not found in 'tools' parameter.",
+                    parameter="tool_choice",
+                )
+
         return data
 
 

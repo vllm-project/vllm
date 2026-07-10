@@ -11,9 +11,12 @@ import psutil
 import torch
 import torch.types
 
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 from .mem_constants import GiB_bytes, KiB_bytes, MiB_bytes
+
+logger = init_logger(__name__)
 
 
 def format_kib(b: int) -> str:
@@ -43,6 +46,41 @@ def get_max_shared_memory_bytes(gpu: int = 0) -> int:
 def get_cpu_memory() -> int:
     """Returns the total CPU memory of the node in bytes."""
     return psutil.virtual_memory().total
+
+
+_UMA_PRESSURE_THRESHOLD = 0.8
+_UMA_MIN_RELEASE_BYTES = 512 * MiB_bytes
+
+
+def release_device_memory_under_pressure(device: torch.device) -> bool:
+    """On integrated (UMA) GPUs, release caching-allocator memory back to the
+    OS when system memory pressure is high. The OS may start thrashing before
+    an allocation failure would trigger PyTorch's own cache release.
+
+    Returns:
+        True if memory was released.
+    """
+    if device.type != "cuda" or not current_platform.is_integrated_gpu(device.index):
+        return False
+
+    releasable = torch.accelerator.memory_reserved(
+        device
+    ) - torch.accelerator.memory_allocated(device)
+    if releasable < _UMA_MIN_RELEASE_BYTES:
+        return False
+
+    # cudaMemGetInfo underreports free memory on UMA, see MemorySnapshot.measure
+    mem = psutil.virtual_memory()
+    if mem.available > (1 - _UMA_PRESSURE_THRESHOLD) * mem.total:
+        return False
+
+    torch.accelerator.synchronize(device)
+    torch.accelerator.empty_cache()
+    logger.debug(
+        "Released %sGiB of cached device memory under memory pressure",
+        format_gib(releasable),
+    )
+    return True
 
 
 class DeviceMemoryProfiler:
@@ -105,23 +143,13 @@ class MemorySnapshot:
             "allocated_bytes.all.peak", 0
         )
 
-        self.free_memory, self.total_memory = current_platform.mem_get_info(device)
-        shared_sysmem_device_mem_sms = ((8, 7), (11, 0), (12, 1))  # Orin, Thor, Spark
-        if (
-            current_platform.is_cuda()
-            and current_platform.get_device_capability(device.index)
-            in shared_sysmem_device_mem_sms
-        ):
-            # On UMA (Orin, Thor and Spark) platform,
-            # where both CPU and GPU rely on system memory,
-            # the cudaMemGetInfo function shows the amount of free system memory
-            # rather than what’s actually available.
-            # In the case,
-            # torch.cuda.mem_get_info() only reports "free" memory,
-            # which can be lower than what is actually
-            # available due to not including cache memory.
-            # There’s also a comprehensive reference page
-            # that explains how you can compute the proper value yourself.
+        self.free_memory, self.total_memory = torch.accelerator.get_memory_info(device)
+        if current_platform.is_integrated_gpu(device.index):
+            # On UMA (Unified Memory Architecture) platforms where CPU and
+            # GPU share physical memory (e.g. GH200, DGX Spark, Jetson Orin),
+            # cudaMemGetInfo underreports free memory because it does not
+            # account for reclaimable OS memory (page cache, buffers).
+            # Use psutil to get the true available memory.
             # https://docs.nvidia.com/cuda/cuda-for-tegra-appnote/#estimating-total-allocatable-device-memory-on-an-integrated-gpu-device
             self.free_memory = psutil.virtual_memory().available
 

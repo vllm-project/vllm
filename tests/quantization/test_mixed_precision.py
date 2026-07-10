@@ -15,6 +15,10 @@ import lm_eval
 import pytest
 from packaging import version
 
+from tests.utils import (
+    multi_gpu_only,
+)
+
 QUARK_MXFP4_AVAILABLE = importlib.util.find_spec("quark") is not None and version.parse(
     importlib.metadata.version("amd-quark")
 ) >= version.parse("0.8.99")
@@ -43,7 +47,7 @@ TEST_CONFIGS = {
     "amd/Qwen3-8B-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8": {"arc_challenge": 0.52, "mmlu": 0.72},
     # Non-mixed-precision (PTQ) model
     # - Reference for pipeline compatibility verification -> No conflicts or breakings
-    "amd/Llama-2-70b-chat-hf-FP8-MLPerf-fp8_attn_quark_format": {
+    "amd/Llama-2-70b-chat-hf_FP8_MLPerf_V2": {
         "arc_challenge": 0.53,
         "mmlu": 0.61,
     },
@@ -52,6 +56,7 @@ TEST_CONFIGS = {
 
 @pytest.mark.parametrize("model_name, accuracy_numbers", TEST_CONFIGS.items())
 @pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason="amd-quark>=0.9 is not available")
+@multi_gpu_only(num_gpus=4)
 def test_mixed_precision_model_accuracies(model_name: str, accuracy_numbers: dict):
     results = lm_eval.simple_evaluate(
         model="vllm",
