@@ -8,7 +8,10 @@ from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_r
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.utils import get_mm_features_in_window, group_and_batch_mm_kwargs
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
-from vllm.v1.worker.gpu.mm.encoder_profile import EncoderProfileInputs
+from vllm.v1.worker.gpu.mm.encoder_profile import (
+    EncoderCacheBudget,
+    EncoderProfileInputs,
+)
 from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
 
 logger = init_logger(__name__)
@@ -53,10 +56,12 @@ class EncoderRunner:
         return mm_hashes, mm_kwargs
 
     @torch.inference_mode()
-    def profile_encoder_cache(self, profile_inputs: EncoderProfileInputs) -> None:
+    def profile_encoder_cache(
+        self,
+        profile_inputs: EncoderProfileInputs,
+        budget: EncoderCacheBudget,
+    ) -> None:
         """Profile multimodal encoder and temporary encoder cache memory."""
-        budget = profile_inputs.budget
-
         if (encoder_budget := budget.get_encoder_budget()) <= 0:
             return
 

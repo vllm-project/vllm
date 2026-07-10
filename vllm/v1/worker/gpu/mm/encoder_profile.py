@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.multimodal.encoder_budget import get_mm_max_toks_per_item
 from vllm.multimodal.inputs import BatchedTensorInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor
@@ -16,8 +16,8 @@ from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 
 
 @dataclass(frozen=True)
-class EncoderProfileBudget:
-    """Pure multimodal encoder profiling budget data."""
+class EncoderCacheBudget:
+    """Pure encoder cache budget data for multimodal profiling."""
 
     encoder_compute_budget: int
     encoder_cache_size: int
@@ -65,11 +65,11 @@ def _get_max_items_per_batch(
     )
 
 
-def _compute_encoder_profile_budget(
+def _compute_encoder_cache_budget(
     vllm_config: VllmConfig,
     mm_registry: MultiModalRegistry,
     processor: BaseMultiModalProcessor,
-) -> EncoderProfileBudget:
+) -> EncoderCacheBudget:
     model_config = vllm_config.model_config
     scheduler_config = vllm_config.scheduler_config
     mm_config = model_config.get_multimodal_config()
@@ -122,7 +122,7 @@ def _compute_encoder_profile_budget(
         for modality, max_toks_per_item in tower_mm_max_toks_per_item.items()
     }
 
-    return EncoderProfileBudget(
+    return EncoderCacheBudget(
         encoder_compute_budget=encoder_compute_budget,
         encoder_cache_size=encoder_cache_size,
         mm_max_toks_per_item=tower_mm_max_toks_per_item,
@@ -130,24 +130,31 @@ def _compute_encoder_profile_budget(
     )
 
 
+def compute_encoder_cache_budget(
+    vllm_config: VllmConfig,
+    mm_registry: MultiModalRegistry,
+) -> EncoderCacheBudget:
+    """Compute pure multimodal encoder cache budget data for profiling."""
+
+    with set_default_torch_num_threads():
+        processor = mm_registry.create_processor(vllm_config.model_config)
+        return _compute_encoder_cache_budget(
+            vllm_config,
+            mm_registry,
+            processor=processor,
+        )
+
+
 class EncoderProfileInputs:
-    """Budget data and dummy inputs for multimodal encoder profiling."""
+    """Dummy inputs for multimodal encoder profiling."""
 
     def __init__(
         self,
-        vllm_config: VllmConfig,
+        model_config: ModelConfig,
         mm_registry: MultiModalRegistry,
     ) -> None:
-        self.model_config = vllm_config.model_config
+        self.model_config = model_config
         self.mm_registry = mm_registry
-
-        with set_default_torch_num_threads():
-            processor = mm_registry.create_processor(self.model_config)
-            self.budget = _compute_encoder_profile_budget(
-                vllm_config,
-                mm_registry,
-                processor=processor,
-            )
 
     def get_dummy_batch(
         self,

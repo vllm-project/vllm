@@ -94,7 +94,10 @@ from vllm.v1.worker.gpu.lora_utils import (
     get_num_active_loras_for_dispatch,
 )
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
-from vllm.v1.worker.gpu.mm.encoder_profile import EncoderProfileInputs
+from vllm.v1.worker.gpu.mm.encoder_profile import (
+    EncoderProfileInputs,
+    compute_encoder_cache_budget,
+)
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
@@ -183,7 +186,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.model_config
         )
         self.encoder_cache = None
-        self.encoder_profile_inputs = None
         if self.supports_mm_inputs and self.is_first_pp_rank:
             self.encoder_cache = EncoderCache()
 
@@ -648,16 +650,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def profile_run(self) -> None:
-        needs_mm_profiling = (
-            mm_config := self.model_config.multimodal_config
-        ) is not None and not mm_config.skip_mm_profiling
-        if needs_mm_profiling:
-            encoder_profile_inputs = EncoderProfileInputs(
-                self.vllm_config, self.mm_registry
-            )
-            self.model_state.encoder_runner.profile_encoder_cache(
-                encoder_profile_inputs
-            )
+        if self.supports_mm_inputs and self.is_first_pp_rank:
+            mm_config = self.model_config.multimodal_config
+            if mm_config is not None and not mm_config.skip_mm_profiling:
+                encoder_cache_budget = compute_encoder_cache_budget(
+                    self.vllm_config,
+                    self.mm_registry,
+                )
+                encoder_profile_inputs = EncoderProfileInputs(
+                    self.model_config,
+                    self.mm_registry,
+                )
+                self.model_state.encoder_runner.profile_encoder_cache(
+                    encoder_profile_inputs,
+                    encoder_cache_budget,
+                )
 
         hidden_states, sample_hidden_states = self._dummy_run(
             self.max_num_tokens, skip_attn=True, is_profile=True
