@@ -341,13 +341,30 @@ class CudaCommunicator(DeviceCommunicatorBase):
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         # Route uniform dim-0 all-gathers through NVLS symmetric memory when
         # enabled (mirrors reduce_scatter); otherwise fall back to the
-        # base-class ring all-gather. Sequence parallelism's gather-before-GEMM
-        # uses dim=0 with tp-aligned (uniform) shards.
+        # PyNccl/base-class all-gather. Sequence parallelism's
+        # gather-before-GEMM uses dim=0 with tp-aligned (uniform) shards.
         if dim < 0:
             dim += input_.dim()
         if dim == 0 and should_nccl_symm_mem_ag_rs():
             return self._all_gather_symm_mem(input_.contiguous())
-        return super().all_gather(input_, dim)
+
+        pynccl_comm = self.pynccl_comm
+        if pynccl_comm is None or pynccl_comm.disabled:
+            return super().all_gather(input_, dim)
+
+        input_size = input_.size()
+        output_size = (input_size[0] * self.world_size,) + input_size[1:]
+        output_tensor = torch.empty(
+            output_size, dtype=input_.dtype, device=input_.device
+        )
+        pynccl_comm.all_gather(output_tensor, input_.contiguous())
+        output_tensor = output_tensor.reshape((self.world_size,) + input_size)
+        output_tensor = output_tensor.movedim(0, dim)
+        return output_tensor.reshape(
+            input_size[:dim]
+            + (self.world_size * input_size[dim],)
+            + input_size[dim + 1 :]
+        )
 
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1):
         world_size = self.world_size
