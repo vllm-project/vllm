@@ -115,6 +115,7 @@ def parallel_launch(
             join=True,
         )
     except Exception as exc:
+        # pytest.skip cannot propagate directly through torch.multiprocessing.
         if "GINNotAvailableError" in str(exc):
             import pytest
 
@@ -238,13 +239,15 @@ def make_deepep_v2_a2a(
 
     from vllm.utils.nccl import query_nccl_gin_type
 
-    # GIN availability can only be checked after NCCL comm init, which
-    # happens inside the spawned workers. Raise GINNotAvailableError so
-    # parallel_launch() can catch it (via string match across the process
-    # boundary) and convert to pytest.skip.
+    # ElasticBuffer can segfault when GIN is unavailable. Initialize the
+    # lazy communicator and reject unsupported systems before entering DeepEP.
+    probe = torch.zeros(1, device=pgi.device)
+    torch.distributed.all_reduce(probe, group=pg)
     gin_type = query_nccl_gin_type(pg)
-    if gin_type is None or gin_type == 0:
-        raise GINNotAvailableError(f"NCCL GIN not available (ginType={gin_type})")
+    if gin_type is None:
+        raise RuntimeError("Failed to determine NCCL GIN support")
+    if gin_type == 0:
+        raise GINNotAvailableError("NCCL GIN not available")
 
     buffer = deep_ep.ElasticBuffer(
         group=pg,

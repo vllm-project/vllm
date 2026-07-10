@@ -51,10 +51,8 @@ class ncclUniqueId(ctypes.Structure):
     _fields_ = [("internal", ctypes.c_byte * 128)]
 
 
-# NCCL 2.30+ ncclCommProperties_t — mirrors src/include/nccl_device/core.h.
-# The struct has a versioned header (size/magic/version) followed by
-# user-visible fields.  We only read ginType so padding mismatches for
-# trailing fields are harmless.
+# NCCL 2.30+ ncclCommProperties_t. Only fields through ginType are read;
+# trailing fields keep the layout aligned with NCCL's versioned structure.
 class ncclCommProperties(ctypes.Structure):
     _fields_ = [
         ("size", ctypes.c_size_t),
@@ -71,13 +69,6 @@ class ncclCommProperties(ctypes.Structure):
         ("hostRmaSupport", ctypes.c_bool),
         ("railedGinType", ctypes.c_int),
     ]
-
-
-class ncclGinTypeEnum:
-    NONE = 0
-    PROXY = 2
-    GDAKI = 3
-    GPI = 4
 
 
 cudaStream_t = ctypes.c_void_p
@@ -346,9 +337,7 @@ class NCCLLibrary:
         # ncclResult_t ncclCommWindowDeregister(
         #   ncclComm_t comm, ncclWindow_t win);
         Function("ncclCommWindowDeregister", ncclResult_t, [ncclComm_t, ncclWindow_t]),
-        # ncclResult_t ncclCommQueryProperties(
-        #   ncclComm_t comm, ncclCommProperties_t* props);
-        # Available since NCCL 2.29; used to detect GIN support.
+        # Query runtime properties of a specific initialized communicator.
         Function(
             "ncclCommQueryProperties",
             ncclResult_t,
@@ -413,7 +402,7 @@ class NCCLLibrary:
                             # not allowed during graph capturing
                             continue
                     elif func.name == "ncclCommQueryProperties":
-                        # NCCL >= 2.29 only; silently skip on older versions
+                        # Optional on NCCL versions older than 2.29.
                         continue
                     raise
             NCCLLibrary.path_to_dict_mapping[so_file] = _funcs

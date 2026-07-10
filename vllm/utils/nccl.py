@@ -83,15 +83,8 @@ def find_nccl_library_paths() -> list[str] | None:
     return paths or None
 
 
-def query_nccl_gin_type(
-    group: torch.distributed.ProcessGroup,
-) -> int | None:
-    """Query NCCL GIN (GPU-Initiated Networking) support for a process group.
-
-    Returns the ``ncclGinType_t`` value (0 = NONE, 2 = PROXY, 3 = GDAKI,
-    4 = GPI), or ``None`` if the query could not be performed (e.g. NCCL
-    too old or the PyTorch backend does not expose the comm pointer).
-    """
+def query_nccl_gin_type(group: torch.distributed.ProcessGroup) -> int | None:
+    """Return the GIN type for an initialized group, or ``None`` on failure."""
     from vllm.distributed.device_communicators.pynccl_wrapper import (
         NCCLLibrary,
         ncclCommProperties,
@@ -99,9 +92,8 @@ def query_nccl_gin_type(
 
     try:
         backend = group._get_backend(torch.device("cuda"))
-        if not hasattr(backend, "_comm_ptr"):
-            logger.warning("PyTorch NCCL backend does not expose _comm_ptr")
-            return None
+        # GIN is a property of this initialized communicator, not just the
+        # NCCL version. ncclCommQueryProperties requires its ncclComm_t.
         comm_ptr = backend._comm_ptr()
         if comm_ptr == 0:
             return None
@@ -114,30 +106,21 @@ def query_nccl_gin_type(
 
     try:
         nccl = NCCLLibrary()
-    except Exception:
-        logger.warning("Failed to load NCCL library", exc_info=True)
-        return None
+        query_fn = nccl._funcs.get("ncclCommQueryProperties")
+        if query_fn is None:
+            return None
 
-    query_fn = nccl._funcs.get("ncclCommQueryProperties")
-    if query_fn is None:
-        logger.warning("ncclCommQueryProperties not available (NCCL < 2.29)")
-        return None
-
-    props = ncclCommProperties()
-    ctypes.memset(ctypes.addressof(props), 0, ctypes.sizeof(props))
-    # NCCL validates these fields (mirrors NCCL_COMM_PROPERTIES_INITIALIZER)
-    props.size = ctypes.sizeof(props)
-    props.magic = 0xCAFEBEEF
-    props.version = nccl.ncclGetRawVersion()
-
-    try:
+        props = ncclCommProperties()
+        ctypes.memset(ctypes.addressof(props), 0, ctypes.sizeof(props))
+        props.size = ctypes.sizeof(props)
+        props.magic = 0xCAFEBEEF
+        props.version = nccl.ncclGetRawVersion()
         result = query_fn(ctypes.c_void_p(comm_ptr), ctypes.byref(props))
     except Exception:
-        logger.warning("ncclCommQueryProperties call failed", exc_info=True)
+        logger.warning("Failed to query NCCL communicator properties", exc_info=True)
         return None
 
     if result != 0:
         logger.warning("ncclCommQueryProperties returned error %d", result)
         return None
-
     return props.ginType

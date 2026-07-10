@@ -74,7 +74,7 @@ def _spawn_workers(worker_fn, world_size, *, dp_size=None):
     err_queue.join_thread()
     if errors:
         combined = "\n---\n".join(errors)
-        if "NCCL GIN" in combined or "ginType=" in combined:
+        if "NCCL GIN" in combined:
             pytest.skip("NCCL GIN not available on this system")
         pytest.fail("Worker(s) failed:\n" + combined)
 
@@ -889,8 +889,11 @@ def _deepep_v2_lifecycle_worker(rank, world_size):
         DeepEPV2All2AllManager,
     )
 
-    cpu_group = get_ep_group().cpu_group
-    manager = DeepEPV2All2AllManager(cpu_group)
+    ep_group = get_ep_group()
+    manager = DeepEPV2All2AllManager(
+        ep_group.cpu_group,
+        device_group=ep_group.device_group,
+    )
 
     assert manager.rank == rank
     assert manager.world_size == world_size

@@ -962,22 +962,28 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
             explicitly_destroy=True,
         )
 
-    def _check_gin_support(self, group) -> bool:
-        """Check GIN support. Returns True if confirmed, False if
-        inconclusive (e.g. NCCL comm not yet initialized)."""
+    def _check_gin_support(self, group) -> None:
         from vllm.utils.nccl import query_nccl_gin_type
+
+        # ProcessGroupNCCL creates communicators lazily. Initialize this exact
+        # group before querying so a null comm pointer is not mistaken for
+        # missing GIN support.
+        probe = torch.zeros(1, device="cuda")
+        torch.distributed.all_reduce(probe, group=group)
 
         gin_type = query_nccl_gin_type(group)
         if gin_type is None:
-            return False
+            raise RuntimeError(
+                "DeepEPv2 communicator properties query failed; "
+                "networking capability could not be determined."
+            )
         if gin_type == 0:
             raise RuntimeError(
-                "DeepEPv2 requires NCCL GIN (GPU-Initiated Networking) but "
-                f"ginType={gin_type}. This usually means IBGDA-capable "
-                "InfiniBand NICs or drivers are not available. "
-                "See tools/ep_kernels/README.md for requirements."
+                "DeepEPv2 requires NCCL GIN (GPU-Initiated Networking). "
+                "This usually means IBGDA-capable InfiniBand NICs or drivers "
+                "are not available. See tools/ep_kernels/README.md for "
+                "requirements."
             )
-        return True
 
     def get_handle(self, kwargs):
         import deep_ep  # type: ignore[import-not-found]
@@ -985,7 +991,8 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
         num_experts = kwargs.pop("num_experts", 256)
         buffer_kwargs = self._make_all2all_kwargs(**kwargs)
         if not self._gin_checked:
-            self._gin_checked = self._check_gin_support(buffer_kwargs["group"])
+            self._check_gin_support(buffer_kwargs["group"])
+            self._gin_checked = True
         logger.debug("DeepEP v2 all2all args %s", buffer_kwargs)
         handle: deep_ep.ElasticBuffer = self.handle_cache.get_or_create(
             buffer_kwargs, deep_ep.ElasticBuffer
