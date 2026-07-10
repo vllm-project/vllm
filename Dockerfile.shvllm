@@ -53,8 +53,15 @@ RUN pip install torch==${TORCH_VERSION} torchvision torchaudio \
         --index-url https://download.pytorch.org/whl/cu129
 
 # ---- vLLM-Fork bauen (der teure Schritt) ----
+# VLLM_COMMIT dient als Cache-Buster: BuildKit cached RUN-Layer nach
+# Instruktionstext, nicht nach Remote-Inhalt. Beim Bauen immer
+# --build-arg VLLM_COMMIT=$(git rev-parse origin/<branch>) mitgeben,
+# sonst wird ein veralteter Clone aus dem Layer-Cache verwendet.
+ARG VLLM_COMMIT=unpinned
 WORKDIR /src
-RUN git clone --depth 1 -b ${VLLM_BRANCH} ${VLLM_REPO} vllm
+RUN echo "vllm ref: ${VLLM_COMMIT}" && \
+    git clone --depth 1 -b ${VLLM_BRANCH} ${VLLM_REPO} vllm && \
+    cd vllm && git log -1 --oneline
 WORKDIR /src/vllm
 RUN python3 use_existing_torch.py && \
     pip install -r requirements/build/cuda.txt --no-cache-dir
