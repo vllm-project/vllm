@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copyreg
 import functools
+import io
 import pickle
 import sys
 import threading
@@ -349,6 +351,69 @@ class ShmRingBuffer:
         assert self.shared_memory.buf is not None, "Buffer has been closed"
         with self.shared_memory.buf[start:end] as buf:
             yield buf
+
+
+def _rebuild_tensor(buf: Any, shape: tuple[int, ...], dtype_str: str) -> torch.Tensor:
+    """Rebuild a tensor from an out-of-band pickle buffer.
+
+    Counterpart of `_reduce_tensor`. Note that pickle passes the original
+    buffer-providing object from `loads(buffers=...)` straight to this
+    function (no `PickleBuffer` wrapper on the receiving side), so `buf` is
+    a `zmq.Frame`, a `memoryview` of a shared-memory ring chunk, or `bytes`
+    if the buffer was serialized in-band.
+    """
+    dtype = getattr(torch, dtype_str)
+    assert isinstance(dtype, torch.dtype)
+    if isinstance(buf, zmq.Frame):
+        # ZMQ frames own their message memory independently of any context,
+        # so the tensor can safely alias it with zero copies. The tensor's
+        # storage keeps the frame (and thus its bytes) alive via a strong
+        # reference for as long as the tensor is.
+        try:
+            return torch.frombuffer(buf, dtype=torch.uint8).view(dtype).view(shape)
+        except ValueError:
+            # Empty or read-only frame buffer; fall through to the copy path.
+            pass
+    # Shared-memory ring buffer chunks are reused by the writer once all
+    # readers have marked them read, so we must copy out of them. bytearray
+    # (vs bytes) keeps the resulting tensor writable, matching normal tensor
+    # semantics.
+    raw = bytearray(buf)
+    if not raw:
+        return torch.empty(shape, dtype=dtype)
+    return torch.frombuffer(raw, dtype=torch.uint8).view(dtype).view(shape)
+
+
+def _reduce_tensor(tensor: torch.Tensor):
+    """Reduce a CPU tensor to a `PickleBuffer` for out-of-band pickling.
+
+    `torch.Tensor.__reduce_ex__` copies the tensor bytes into the pickle
+    byte stream via `torch.serialization` and never emits a `PickleBuffer`,
+    which defeats the out-of-band buffer handling in `MessageQueue.enqueue`.
+    This reducer instead exposes the tensor's memory directly, so large
+    tensors (e.g. `prompt_embeds` in `SchedulerOutput`) traverse the queue
+    without being copied into and back out of the pickled message.
+    """
+    if (
+        tensor.device.type != "cpu"
+        or tensor.layout != torch.strided
+        or tensor.requires_grad
+    ):
+        # Fall back to torch's default (copying) reduction.
+        return tensor.__reduce_ex__(pickle.HIGHEST_PROTOCOL)
+    if not tensor.is_contiguous():
+        tensor = tensor.contiguous()
+    try:
+        # The uint8 view exposes the raw bytes via the buffer protocol,
+        # including for dtypes numpy doesn't recognize (bfloat16, fp8, ...).
+        # reshape(-1) first so that 0-dim tensors can be viewed as well.
+        raw = tensor.reshape(-1).view(torch.uint8).numpy()
+    except RuntimeError:
+        # Exotic tensors (e.g. with the conjugate bit set) that don't
+        # support aliasing views; let torch handle them.
+        return tensor.__reduce_ex__(pickle.HIGHEST_PROTOCOL)
+    dtype_str = str(tensor.dtype).removeprefix("torch.")
+    return _rebuild_tensor, (PickleBuffer(raw), tuple(tensor.shape), dtype_str)
 
 
 @dataclass
@@ -740,9 +805,23 @@ class MessageQueue:
             total_bytes += len(raw_buf) + 4
             return False
 
-        all_buffers[0] = pickle.dumps(
-            obj, protocol=pickle.HIGHEST_PROTOCOL, buffer_callback=oob_callback
-        )
+        # CPU tensors are routed through `_reduce_tensor` so that their
+        # bytes are emitted as out-of-band buffers instead of being
+        # copied into the pickle stream by torch's default reducer.
+        # Start from `copyreg.dispatch_table` to preserve globally
+        # registered reducers (e.g. `re.Pattern`); the per-pickler
+        # dispatch table would otherwise shadow them.
+        dispatch_table = dict(copyreg.dispatch_table)
+        dispatch_table[torch.Tensor] = _reduce_tensor
+        with io.BytesIO() as bio:
+            pickler = pickle.Pickler(
+                bio,
+                protocol=pickle.HIGHEST_PROTOCOL,
+                buffer_callback=oob_callback,
+            )
+            pickler.dispatch_table = dispatch_table
+            pickler.dump(obj)
+            all_buffers[0] = bio.getvalue()
         if self.n_local_reader > 0:
             if total_bytes + len(all_buffers[0]) >= self.buffer.max_chunk_bytes:
                 with self.acquire_write(timeout) as buf:
