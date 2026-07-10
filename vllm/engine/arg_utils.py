@@ -591,9 +591,7 @@ class EngineArgs:
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
     mm_ipc_gpu_memory_gb: float = MultiModalConfig.mm_ipc_gpu_memory_gb
     paged_shm_size: int = MultiModalConfig.paged_shm_size
-    paged_shm_block_size: int = (
-        MultiModalConfig.paged_shm_block_size
-    )
+    paged_shm_block_size: int = MultiModalConfig.paged_shm_block_size
     # LoRA fields
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras

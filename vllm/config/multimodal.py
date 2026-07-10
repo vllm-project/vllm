@@ -211,7 +211,7 @@ class MultiModalConfig:
     paged_shm_size: int = Field(default=0)
     """Total size (in bytes) of the paged shared memory segment. Set to 0 to 
     disable paged shared memory (default)."""
-    paged_shm_block_size: int = Field(default=1024*1024) # 1MB
+    paged_shm_block_size: int = Field(default=1024 * 1024)  # 1MB
     """Size (in bytes) of each allocation block in the paged shared memory. 
     Defaults to 1048576 (1MiB). Smaller blocks reduce internal fragmentation 
     but may decrease transfer speed .

@@ -270,6 +270,10 @@ def build_app(
 
         register_pooling_api_routers(app, supported_tasks, model_config)
 
+    from vllm.entrypoints.scale_out.factories import register_paged_shm_server__routers
+
+    register_paged_shm_server__routers(app)
+
     # Endpoint plugins are attached last so their routes are registered after all core
     # routers. This runs even for the CPU only render server. A plugin eligible for
     # the `render` task still gets its routes registered. It receives
@@ -473,6 +477,10 @@ async def init_app_state(
 
         init_pooling_state(engine_client, state, args, request_logger, supported_tasks)
 
+    from vllm.entrypoints.scale_out.factories import init_paged_shm_server_state
+
+    init_paged_shm_server_state(state, vllm_config.model_config.multimodal_config)
+
     await _init_endpoint_plugins_state(engine_client, state, args)
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
@@ -558,18 +566,9 @@ async def init_render_app_state(
 
     init_render_state(state, request_logger)
 
-    multimodal_config = vllm_config.model_config.multimodal_config
+    from vllm.entrypoints.scale_out.factories import init_paged_shm_server_state
 
-    if multimodal_config is not None and multimodal_config.is_paged_shm_enabled():
-        multimodal_config = vllm_config.model_config.multimodal_config
-
-        from vllm.entrypoints.scale_out.object_storage.serving import (
-            ServingObjectStorage,
-        )
-
-        state.serving_object_storage = ServingObjectStorage(
-            server_address=multimodal_config.paged_shm_server_address
-        )
+    init_paged_shm_server_state(state, vllm_config.model_config.multimodal_config)
 
     state.vllm_config = vllm_config
     # Disable stats logging — there is no engine to poll.
