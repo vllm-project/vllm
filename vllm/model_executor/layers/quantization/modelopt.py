@@ -189,6 +189,21 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         # handle exclusion
         if self.is_layer_excluded(prefix):
             if isinstance(layer, (LinearBase, ParallelLMHead)):
+                # Opt-in: requant an otherwise-bf16 dense QKV projection to FP8
+                # at load time (weight_layout_transform). Halves the weight
+                # bytes streamed from HBM on the decode-dominant QKV GEMV/GEMM.
+                # Scoped to *.self_attn.qkv_proj only; everything else stays
+                # bf16 unquantized.
+                if (
+                    envs.VLLM_QKV_FP8_REQUANT
+                    and isinstance(layer, LinearBase)
+                    and prefix.endswith("self_attn.qkv_proj")
+                ):
+                    from vllm.model_executor.layers.quantization.qkv_fp8_requant import (  # noqa: E501
+                        QkvFp8RequantLinearMethod,
+                    )
+
+                    return QkvFp8RequantLinearMethod()
                 return UnquantizedLinearMethod()
             return None
 

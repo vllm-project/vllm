@@ -175,6 +175,7 @@ if TYPE_CHECKING:
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_TPU_MOST_MODEL_LEN: int | None = None
     VLLM_TPU_USING_PATHWAYS: bool = False
+    VLLM_QKV_FP8_REQUANT: bool = False
     VLLM_USE_DEEP_GEMM: bool = True
     VLLM_MOE_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
@@ -572,6 +573,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
+    # Requant an otherwise-bf16 dense QKV projection (attention qkv_proj) to
+    # FP8 e4m3 at load time and dispatch through the FP8 CUTLASS GEMM, halving
+    # the weight bytes streamed from HBM on the decode-bound QKV matmul. Only
+    # affects layers that would otherwise be bf16-unquantized (ignore-listed)
+    # and whose prefix ends with ``self_attn.qkv_proj``. Lossy (per-tensor FP8
+    # weight + per-token dynamic activation quant); off by default.
+    "VLLM_QKV_FP8_REQUANT": lambda: bool(
+        int(os.getenv("VLLM_QKV_FP8_REQUANT", "0"))
+    ),
     # Use tensor descriptors for Q/K/V loads and output stores in the
     # Triton unified-attention kernel.  Enables HW 2D block reads on
     # Intel Xe2/Xe3; the non-TD branch is dead-code-eliminated at Triton
