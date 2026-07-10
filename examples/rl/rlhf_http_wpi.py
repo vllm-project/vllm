@@ -138,10 +138,12 @@ def main():
     driver_port = 50051
 
     # Calculate model size in bytes
-    total_model_bytes = sum(p.numel() * p.element_size() for p in train_model.parameters())
+    total_model_bytes = sum(
+        p.numel() * p.element_size() for p in train_model.parameters()
+    )
     print(f"Calculated model size: {total_model_bytes} bytes")
 
-    print(f"Initializing weight transfer on server...")
+    print("Initializing weight transfer on server...")
 
     # Initialize weight transfer on vLLM server
     init_weight_transfer_engine(
@@ -171,7 +173,7 @@ def main():
         url=BASE_URL,
         trainer_ctx=ctx,
     )
-    
+
     # This will pack weights, trigger WPI propagate, and call /update_weights on server
     WPIWeightTransferEngine.trainer_send_weights(param_iter, args)
 

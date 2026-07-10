@@ -1,8 +1,8 @@
 # WPI Engine
 
-The WPI (Weight Propagation Interface) weight transfer engine uses the [Weight Propagation Interface](https://github.com/llm-d-incubation/weight-propagation-interface) to enable high-throughput, cross-node zero-copy weight updates. 
+The WPI (Weight Propagation Interface) weight transfer engine uses the [Weight Propagation Interface](https://github.com/llm-d-incubation/weight-propagation-interface) to enable high-throughput, cross-node zero-copy weight updates.
 
-Unlike the [NCCL](nccl.md) or [IPC](ipc.md) engines where vLLM itself manages communication channels and CPU/GPU memory allocation, the WPI backend relies on a persistent VRAM buffer and an internal NCCL communicator managed externally by a node-level WPI driver. 
+Unlike the [NCCL](nccl.md) or [IPC](ipc.md) engines where vLLM itself manages communication channels and CPU/GPU memory allocation, the WPI backend relies on a persistent VRAM buffer and an internal NCCL communicator managed externally by a node-level WPI driver.
 
 ## When to Use WPI
 
@@ -126,5 +126,3 @@ The WPI engine achieves high fabric utilization by avoiding CPU staging and runt
 
 - **Cross-Node (8-GPU Scatter, A4)**: **251 GB/s aggregate throughput** for a 600 GB tensor-parallel sharded scatter over InfiniBand (GPUDirect RDMA enabled).
 - **Cross-Node (A3 Ultra InfiniBand)**: **36.57 GB/s** for a 75 GB model broadcast, achieving over 73% of maximum physical fabric bandwidth (a 565% improvement over standard socket routing).
-
-
