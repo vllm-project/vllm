@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -16,19 +17,24 @@ pub(crate) struct ResetPrefixCacheParams {
     reset_external: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct ResetPrefixCacheResponse {
+    success: bool,
+}
+
 /// Reset the local prefix cache and optionally the connector-managed external
 /// cache.
 pub async fn reset_prefix_cache(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ResetPrefixCacheParams>,
-) -> Result<StatusCode, ApiError> {
-    state
+) -> Result<Json<ResetPrefixCacheResponse>, ApiError> {
+    let success = state
         .engine_core_client()
         .reset_prefix_cache(params.reset_running_requests, params.reset_external)
         .await
         .map_err(|error| utility_call_error("reset_prefix_cache", error))?;
 
-    Ok(StatusCode::OK)
+    Ok(Json(ResetPrefixCacheResponse { success }))
 }
 
 /// Reset the multi-modal cache.
