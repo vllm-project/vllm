@@ -4,6 +4,7 @@
 
 import functools
 import os
+import time
 from typing import Literal
 
 import torch
@@ -89,6 +90,43 @@ if GDN_AITER_TRITON_AVAILABLE:
     )
 
 logger = init_logger(__name__)
+
+
+_AG2_GDN_TRACE_COUNT = 0
+
+
+def _ag2_gdn_trace_bool(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _ag2_gdn_trace_enabled(num_tokens: int) -> bool:
+    if not _ag2_gdn_trace_bool("AG2_VLLM_GDN_TRACE"):
+        return False
+    min_tokens = int(os.environ.get("AG2_VLLM_GDN_TRACE_MIN_TOKENS", "8192"))
+    if num_tokens < min_tokens:
+        return False
+    if _ag2_gdn_trace_bool("AG2_VLLM_GDN_TRACE_RANK0_ONLY", "1"):
+        if os.environ.get("LOCAL_RANK") is not None:
+            return os.environ.get("LOCAL_RANK") == "0"
+        if torch.cuda.is_available():
+            return torch.cuda.current_device() == 0
+        return True
+    return True
+
+
+def _ag2_gdn_trace_mark(enabled: bool, device: torch.device) -> float:
+    if enabled and _ag2_gdn_trace_bool("AG2_VLLM_GDN_TRACE_SYNC"):
+        torch.cuda.synchronize(device)
+    return time.perf_counter()
+
+
+def _ag2_gdn_trace_log_allowed() -> bool:
+    global _AG2_GDN_TRACE_COUNT
+    limit = int(os.environ.get("AG2_VLLM_GDN_TRACE_LIMIT", "96"))
+    if limit >= 0 and _AG2_GDN_TRACE_COUNT >= limit:
+        return False
+    _AG2_GDN_TRACE_COUNT += 1
+    return True
 
 
 
@@ -214,6 +252,18 @@ def _resolve_gdn_prefill_backend(
                 "--force-reinstall "
                 "--no-deps nvidia-cutlass-dsl-libs-cu13"
             )
+    elif (
+        os.environ.get("VLLM_EXPERIMENTAL_GDN_SM120_FAST_BACKEND", "0") == "1"
+        and current_platform.is_device_capability(120)
+        and head_k_dim == 128
+        and current_platform.get_cuda_runtime_major() >= 13
+    ):
+        supports_flashinfer = _is_libs_cu13_install_intact()
+        supports_cutedsl = True
+        logger.warning_once(
+            "Enabling experimental SM120 GDN fast prefill backend probe. "
+            "This is an opt-in research path, not a production default."
+        )
 
     if backend in ["flashinfer", "auto"] and supports_flashinfer:
         return backend, "flashinfer"
@@ -1070,14 +1120,31 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         The RMSNormGated + quant sequence is eligible for fusion
         by the compilation pass when fuse_norm_quant is enabled.
         """
+        trace_enabled = _ag2_gdn_trace_enabled(num_tokens)
+        trace_allowed = trace_enabled and _ag2_gdn_trace_log_allowed()
+        device = core_attn_out.device
+        t0 = _ag2_gdn_trace_mark(trace_enabled, device) if trace_enabled else 0.0
         z_shape_og = z.shape
         core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
         z = z.reshape(-1, z.shape[-1])
         core_attn_out = self.norm(core_attn_out, z)
+        t1 = _ag2_gdn_trace_mark(trace_enabled, device) if trace_enabled else 0.0
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
         core_attn_out = self._pad_local_value_flat(core_attn_out)
         output[:num_tokens], _ = self.out_proj(core_attn_out)
+        t2 = _ag2_gdn_trace_mark(trace_enabled, device) if trace_enabled else 0.0
+        if trace_allowed:
+            logger.warning(
+                "AG2_GDN_TRACE_OUTPUT layer=%s tokens=%d local_v_heads=%d "
+                "norm=%.6f out_proj=%.6f total=%.6f",
+                self.prefix,
+                num_tokens,
+                self.local_num_v_heads,
+                t1 - t0,
+                t2 - t1,
+                t2 - t0,
+            )
 
     def forward_hip(
         self,
@@ -1127,11 +1194,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         3. Output projection
         """
         num_tokens = hidden_states.size(0)
+        trace_enabled = _ag2_gdn_trace_enabled(num_tokens)
+        trace_allowed = trace_enabled and _ag2_gdn_trace_log_allowed()
+        device = hidden_states.device
+        t0 = _ag2_gdn_trace_mark(trace_enabled, device) if trace_enabled else 0.0
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
         mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+        t1 = _ag2_gdn_trace_mark(trace_enabled, device) if trace_enabled else 0.0
         ba, _ = self.in_proj_ba(hidden_states)
+        t2 = _ag2_gdn_trace_mark(trace_enabled, device) if trace_enabled else 0.0
 
         if self.gqa_interleaved_layout:
             # Qwen3-Next: unpack the interleaved GQA layout
@@ -1148,6 +1221,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             b, a = self.split_ba(ba)
             b = b.contiguous()
             a = a.contiguous()
+        t3 = _ag2_gdn_trace_mark(trace_enabled, device) if trace_enabled else 0.0
 
         # ============================================================
         # Part 2: Core Attention (Custom Op)
@@ -1167,11 +1241,28 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out,
             layer_name=_encode_layer_name(self.prefix),
         )
+        t4 = _ag2_gdn_trace_mark(trace_enabled, device) if trace_enabled else 0.0
 
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
         self._output_projection(core_attn_out, z, output, num_tokens)
+        t5 = _ag2_gdn_trace_mark(trace_enabled, device) if trace_enabled else 0.0
+        if trace_allowed:
+            logger.warning(
+                "AG2_GDN_TRACE_FULL layer=%s tokens=%d backend=%s "
+                "in_qkvz=%.6f in_ba=%.6f split_pack=%.6f core=%.6f "
+                "norm_out_proj=%.6f total=%.6f",
+                self.prefix,
+                num_tokens,
+                self.gdn_prefill_backend,
+                t1 - t0,
+                t2 - t1,
+                t3 - t2,
+                t4 - t3,
+                t5 - t4,
+                t5 - t0,
+            )
 
     def forward_xpu(
         self,
@@ -1507,6 +1598,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 attn_metadata=attn_metadata,
             )
 
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        trace_enabled = _ag2_gdn_trace_enabled(num_actual_tokens)
+        trace_allowed = trace_enabled and _ag2_gdn_trace_log_allowed()
+        device = core_attn_out.device
+        t0 = _ag2_gdn_trace_mark(trace_enabled, device) if trace_enabled else 0.0
+
         has_initial_state = attn_metadata.has_initial_state
         spec_query_start_loc = attn_metadata.spec_query_start_loc
         non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
@@ -1531,7 +1628,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
         A_log = self.A_log[: self.local_num_v_heads]
         dt_bias = self.dt_bias[: self.local_num_v_heads]
-        num_actual_tokens = attn_metadata.num_actual_tokens
         num_accepted_tokens = attn_metadata.num_accepted_tokens
 
         mixed_qkv = mixed_qkv[:num_actual_tokens]
@@ -1606,6 +1702,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             mixed_qkv_non_spec = None
 
+        t1 = _ag2_gdn_trace_mark(trace_enabled, device) if trace_enabled else 0.0
+
         mixed_qkv_spec = self._strip_padded_mixed_qkv(mixed_qkv_spec)
         mixed_qkv_non_spec = self._strip_padded_mixed_qkv(mixed_qkv_non_spec)
         query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
@@ -1667,6 +1765,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
             g_non_spec = None
             beta_non_spec = None
+
+        t2 = _ag2_gdn_trace_mark(trace_enabled, device) if trace_enabled else 0.0
 
         # 2. Recurrent attention
 
@@ -1779,6 +1879,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
 
+        t3 = _ag2_gdn_trace_mark(trace_enabled, device) if trace_enabled else 0.0
+
         # 3. Merge core attention output
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
             merged_out = torch.empty(
@@ -1793,6 +1895,24 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
+        t4 = _ag2_gdn_trace_mark(trace_enabled, device) if trace_enabled else 0.0
+        if trace_allowed:
+            logger.warning(
+                "AG2_GDN_TRACE_CORE layer=%s tokens=%d prefills=%d decodes=%d "
+                "backend=%s spec=%s conv=%.6f prep=%.6f delta=%.6f "
+                "merge_store=%.6f total=%.6f",
+                self.prefix,
+                num_actual_tokens,
+                attn_metadata.num_prefills,
+                attn_metadata.num_decodes,
+                self.gdn_prefill_backend,
+                spec_sequence_masks is not None,
+                t1 - t0,
+                t2 - t1,
+                t3 - t2,
+                t4 - t3,
+                t4 - t0,
+            )
 
     def _forward_core_decode_aiter(
         self,

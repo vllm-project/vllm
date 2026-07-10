@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+import os
+import time
 from abc import abstractmethod
 from collections.abc import Iterable
 from typing import Any
@@ -44,6 +46,33 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+
+def _ag2_row_linear_trace_bool(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _ag2_row_linear_trace_enabled(prefix: str, input_: torch.Tensor) -> bool:
+    if not _ag2_row_linear_trace_bool("AG2_VLLM_ROW_LINEAR_TRACE"):
+        return False
+    min_tokens = int(os.environ.get("AG2_VLLM_ROW_LINEAR_TRACE_MIN_TOKENS", "8192"))
+    if input_.dim() == 0 or int(input_.shape[0]) < min_tokens:
+        return False
+    prefix_filter = os.environ.get("AG2_VLLM_ROW_LINEAR_TRACE_PREFIX", "")
+    if prefix_filter and prefix_filter not in prefix:
+        return False
+    if _ag2_row_linear_trace_bool("AG2_VLLM_ROW_LINEAR_TRACE_RANK0_ONLY", "1"):
+        if os.environ.get("LOCAL_RANK") is not None:
+            return os.environ.get("LOCAL_RANK") == "0"
+        if torch.cuda.is_available():
+            return torch.cuda.current_device() == 0
+    return True
+
+
+def _ag2_row_linear_mark(enabled: bool, device: torch.device) -> float:
+    if enabled and _ag2_row_linear_trace_bool("AG2_VLLM_ROW_LINEAR_TRACE_SYNC"):
+        torch.cuda.synchronize(device)
+    return time.perf_counter()
 
 WEIGHT_LOADER_V2_SUPPORTED = [
     "UnquantizedLinearMethod",
@@ -2203,6 +2232,9 @@ class RowParallelLinear(LinearBase):
         self,
         input_,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        trace_enabled = _ag2_row_linear_trace_enabled(self.prefix, input_)
+        device = input_.device
+        t0 = _ag2_row_linear_mark(trace_enabled, device) if trace_enabled else 0.0
         if self.input_is_parallel:
             input_parallel = input_
         else:
@@ -2210,17 +2242,37 @@ class RowParallelLinear(LinearBase):
                 input_, num_partitions=self.tp_size
             )
             input_parallel = split_input[self.tp_rank].contiguous()
+        t1 = _ag2_row_linear_mark(trace_enabled, device) if trace_enabled else 0.0
 
         # Matrix multiply.
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
         output_parallel = self.quant_method.apply(self, input_parallel, bias_)
+        t2 = _ag2_row_linear_mark(trace_enabled, device) if trace_enabled else 0.0
 
         if self.reduce_results and self.tp_size > 1:
             output = tensor_model_parallel_all_reduce(output_parallel)
         else:
             output = output_parallel
+        t3 = _ag2_row_linear_mark(trace_enabled, device) if trace_enabled else 0.0
+        if trace_enabled:
+            logger.warning(
+                "AG2_ROW_LINEAR_TRACE prefix=%s tokens=%d input_shape=%s "
+                "output_shape=%s tp_size=%d reduce=%s quant=%s split=%.6f "
+                "gemm=%.6f all_reduce=%.6f total=%.6f",
+                self.prefix,
+                int(input_.shape[0]) if input_.dim() > 0 else 0,
+                tuple(input_.shape),
+                tuple(output.shape),
+                self.tp_size,
+                self.reduce_results and self.tp_size > 1,
+                self.quant_method.__class__.__name__,
+                t1 - t0,
+                t2 - t1,
+                t3 - t2,
+                t3 - t0,
+            )
 
         if not self.return_bias:
             return output

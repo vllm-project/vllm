@@ -21,6 +21,9 @@ except ImportError:  # pragma: no cover
 
 logger = init_logger(__name__)
 _INT8_WORKSPACES: dict[tuple[int, int, int, int], tuple[torch.Tensor, torch.Tensor]] = {}
+_INT8_BF16PACK_WORKSPACES: dict[
+    tuple[int, int, int, int], tuple[torch.Tensor, torch.Tensor, int]
+] = {}
 _FP4_WORKSPACES: dict[tuple[int, int, int, int], tuple[torch.Tensor, torch.Tensor]] = {}
 _SHARED_ROW_WORKSPACES: dict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor]] = {}
 
@@ -287,6 +290,7 @@ def should_use_tp3_lowbit_hidden_reduce(
             "fp4_block16",
             "fp4_block16_packed",
             "int8_shared_row",
+            "int8_bf16pack",
         )
         and should_use_tp3_int8_hidden_reduce(input_, world_size, min_tokens)
     )
@@ -326,6 +330,29 @@ def _int8_workspace(
     gathered = torch.empty((world_size, total), device=device, dtype=torch.uint8)
     _INT8_WORKSPACES[key] = (send, gathered)
     return send, gathered
+
+
+def _int8_bf16pack_workspace(
+    device: torch.device,
+    world_size: int,
+    rows: int,
+    cols: int,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    device_index = device.index if device.index is not None else torch.cuda.current_device()
+    q_nbytes = rows * cols
+    s_nbytes = rows * 4
+    total_nbytes = q_nbytes + s_nbytes
+    packed_numel = (total_nbytes + 1) // 2
+    key = (device_index, world_size, rows, cols)
+    cached = _INT8_BF16PACK_WORKSPACES.get(key)
+    if cached is not None and cached[0].numel() == packed_numel:
+        return cached
+    send = torch.empty(packed_numel, device=device, dtype=torch.bfloat16)
+    gathered = torch.empty((world_size, packed_numel), device=device,
+                           dtype=torch.bfloat16)
+    cached = (send, gathered, total_nbytes)
+    _INT8_BF16PACK_WORKSPACES[key] = cached
+    return cached
 
 
 def _fp4_workspace(
@@ -399,6 +426,58 @@ def tp3_int8_hidden_all_reduce(
             "AG2_LOWBIT_REDUCE_TRACE mode=int8 tokens=%d hidden=%d "
             "quant=%.6f gather=%.6f dequant=%.6f total=%.6f payload_mib=%.3f",
             rows, cols, t1 - t0, t2 - t1, t3 - t2, t3 - t0, send.numel() / 2**20,
+        )
+    return out
+
+
+def tp3_int8_bf16pack_hidden_all_reduce(
+    input_: torch.Tensor,
+    group: ProcessGroup,
+) -> torch.Tensor:
+    """Approximate SUM all-reduce with int8 bytes transported as BF16.
+
+    This does not use BF16 arithmetic. The BF16 tensor is only a 16-bit NCCL
+    transport container for the existing int8 codes plus fp32 row scales.
+    """
+    assert triton is not None
+    world_size = dist.get_world_size(group)
+    assert world_size == 3
+    rows, cols = input_.shape
+    trace, trace_sync = _trace_enabled(input_)
+    t0 = _mark_trace(trace, trace_sync, input_.device)
+    q_nbytes = rows * cols
+    send_bf16, gathered_bf16, total_nbytes = _int8_bf16pack_workspace(
+        input_.device, world_size, rows, cols
+    )
+    send = send_bf16.view(torch.uint8)[:total_nbytes]
+    gathered = gathered_bf16.view(torch.uint8).view(world_size, -1)[:, :total_nbytes]
+    q_local = send[:q_nbytes].view(rows, cols)
+    s_local = send[q_nbytes:].view(torch.float32)
+    block = triton.next_power_of_2(cols)
+    _quantize_i8_row_kernel[(rows,)](input_, q_local, s_local, cols, block)
+    t1 = _mark_trace(trace, trace_sync, input_.device)
+    dist.all_gather_into_tensor(gathered_bf16, send_bf16, group=group)
+    t2 = _mark_trace(trace, trace_sync, input_.device)
+    out = torch.empty_like(input_)
+    q_gathered = gathered[:, :q_nbytes].view(world_size, rows, cols)
+    s_gathered = gathered[:, q_nbytes:].view(torch.float32).view(world_size, rows)
+    _dequant_sum_i8_row_kernel[(rows,)](
+        q_gathered[0], q_gathered[1], q_gathered[2],
+        s_gathered[0], s_gathered[1], s_gathered[2],
+        out, cols, block,
+    )
+    t3 = _mark_trace(trace, trace_sync, input_.device)
+    if trace:
+        logger.warning(
+            "AG2_LOWBIT_REDUCE_TRACE mode=int8_bf16pack tokens=%d hidden=%d "
+            "quant=%.6f gather=%.6f dequant=%.6f total=%.6f payload_mib=%.3f",
+            rows,
+            cols,
+            t1 - t0,
+            t2 - t1,
+            t3 - t2,
+            t3 - t0,
+            send_bf16.numel() * send_bf16.element_size() / 2**20,
         )
     return out
 
@@ -588,6 +667,8 @@ def tp3_lowbit_hidden_all_reduce(
     group: ProcessGroup,
     mode: str,
 ) -> torch.Tensor:
+    if mode == "int8_bf16pack":
+        return tp3_int8_bf16pack_hidden_all_reduce(input_, group)
     if mode == "int8_shared_row":
         return tp3_int8_shared_row_hidden_all_reduce(input_, group)
     if mode == "int8_tensor":

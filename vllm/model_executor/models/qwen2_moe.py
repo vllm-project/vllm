@@ -28,6 +28,8 @@
 from collections.abc import Iterable
 from itertools import islice
 import math
+import os
+import time
 from typing import Any
 
 import torch
@@ -146,14 +148,65 @@ class Qwen2MoeMLP(nn.Module):
             )
         self.act_fn = SiluAndMul()
         self.expert_gate = expert_gate
+        self.prefix = prefix
 
     def forward(self, x):
+        is_compiling = (
+            hasattr(torch, "compiler")
+            and hasattr(torch.compiler, "is_compiling")
+            and torch.compiler.is_compiling()
+        )
+        token_count = int(x.shape[0]) if x.dim() > 0 else 0
+        trace_enabled = (
+            os.environ.get("AG2_VLLM_DENSE_MLP_TRACE") == "1"
+            and not is_compiling
+            and token_count
+            >= int(os.environ.get("AG2_VLLM_DENSE_MLP_TRACE_MIN_TOKENS", "4096"))
+        )
+        trace_sync = os.environ.get("AG2_VLLM_DENSE_MLP_TRACE_SYNC") == "1"
+        trace_rank0_only = (
+            os.environ.get("AG2_VLLM_DENSE_MLP_TRACE_RANK0_ONLY", "1") != "0"
+        )
+        trace_allowed = trace_enabled
+        if trace_allowed and trace_rank0_only:
+            if os.environ.get("LOCAL_RANK") is not None:
+                trace_allowed = os.environ.get("LOCAL_RANK") == "0"
+            elif torch.cuda.is_available():
+                trace_allowed = torch.cuda.current_device() == 0
+
+        def mark() -> float:
+            if trace_enabled and trace_sync and torch.cuda.is_available():
+                torch.cuda.synchronize(x.device)
+            return time.perf_counter()
+
+        t0 = mark() if trace_enabled else 0.0
         gate_up, _ = self.gate_up_proj(x)
+        t1 = mark() if trace_enabled else 0.0
         out = self.act_fn(gate_up)
+        t2 = mark() if trace_enabled else 0.0
         out, _ = self.down_proj(out)
+        t3 = mark() if trace_enabled else 0.0
 
         if self.expert_gate is not None:
             out = F.sigmoid(self.expert_gate(x)[0]) * out
+        t4 = mark() if trace_enabled else 0.0
+
+        if trace_allowed:
+            logger.warning(
+                "AG2_DENSE_MLP_TRACE prefix=%s tokens=%d input_shape=%s "
+                "gate_up_shape=%s output_shape=%s gate_up=%.6f act=%.6f "
+                "down_proj=%.6f expert_gate=%.6f total=%.6f",
+                self.prefix,
+                token_count,
+                tuple(x.shape),
+                tuple(gate_up.shape),
+                tuple(out.shape),
+                t1 - t0,
+                t2 - t1,
+                t3 - t2,
+                t4 - t3,
+                t4 - t0,
+            )
 
         return out
 

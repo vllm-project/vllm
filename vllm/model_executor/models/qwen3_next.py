@@ -165,6 +165,7 @@ def _is_shared_expert_fse_compatible(quant_config) -> bool:
 class Qwen3NextSparseMoeBlock(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        self.prefix = prefix
 
         config = vllm_config.model_config.hf_text_config
         parallel_config = vllm_config.parallel_config
@@ -260,28 +261,82 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         # NOTE: hidden_states can have either 1D or 2D shape.
         orig_shape = hidden_states.shape
         num_tokens, hidden_dim = hidden_states.shape
+        is_compiling = (
+            hasattr(torch, "compiler")
+            and hasattr(torch.compiler, "is_compiling")
+            and torch.compiler.is_compiling()
+        )
+        trace_enabled = (
+            os.environ.get("AG2_VLLM_MOE_TRACE") == "1"
+            and not is_compiling
+            and num_tokens >= int(os.environ.get("AG2_VLLM_MOE_TRACE_MIN_TOKENS", "4096"))
+        )
+        trace_sync = os.environ.get("AG2_VLLM_MOE_TRACE_SYNC") == "1"
+        trace_rank0_only = os.environ.get("AG2_VLLM_MOE_TRACE_RANK0_ONLY", "1") != "0"
+        trace_allowed = trace_enabled
+        if trace_allowed and trace_rank0_only:
+            if os.environ.get("LOCAL_RANK") is not None:
+                trace_allowed = os.environ.get("LOCAL_RANK") == "0"
+            elif torch.cuda.is_available():
+                trace_allowed = torch.cuda.current_device() == 0
+
+        def mark() -> float:
+            if trace_enabled and trace_sync and torch.cuda.is_available():
+                torch.cuda.synchronize(hidden_states.device)
+            return time.perf_counter()
+
+        t0 = mark() if trace_enabled else 0.0
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         if self.is_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
+        t1 = mark() if trace_enabled else 0.0
 
         if self.experts.is_internal_router:
             # In this case, the gate/router runs inside the FusedMoE class
+            router_logits = hidden_states
+            t2 = t1
             final_hidden_states = self.experts(
-                hidden_states=hidden_states, router_logits=hidden_states
+                hidden_states=hidden_states, router_logits=router_logits
             )
         else:
             # router_logits: (num_tokens, n_experts)
             router_logits, _ = self.gate(hidden_states)
+            t2 = mark() if trace_enabled else 0.0
             final_hidden_states = self.experts(
                 hidden_states=hidden_states, router_logits=router_logits
             )
+        t3 = mark() if trace_enabled else 0.0
 
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
                 final_hidden_states, 0
             )
             final_hidden_states = final_hidden_states[:num_tokens]
+        t4 = mark() if trace_enabled else 0.0
+
+        if trace_allowed:
+            logger.warning(
+                "AG2_MOE_TRACE prefix=%s tokens=%d hidden=%d tp=%d ep=%d "
+                "local_experts=%d routed_experts=%d top_k=%s internal_router=%s "
+                "sequence_parallel=%s reshape_chunk=%.6f gate=%.6f experts=%.6f "
+                "sp_gather=%.6f total=%.6f",
+                getattr(self, "prefix", ""),
+                num_tokens,
+                hidden_dim,
+                self.tp_size,
+                self.ep_size,
+                self.n_local_physical_experts,
+                self.n_routed_experts,
+                getattr(self.experts, "top_k", "unknown"),
+                self.experts.is_internal_router,
+                self.is_sequence_parallel,
+                t1 - t0,
+                t2 - t1,
+                t3 - t2,
+                t4 - t3,
+                t4 - t0,
+            )
 
         return final_hidden_states.view(orig_shape)
 
