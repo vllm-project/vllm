@@ -5,7 +5,6 @@
 # ruff: noqa: E402
 # mypy: disable-error-code="misc, assignment"
 
-from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -84,36 +83,6 @@ from vllm.triton_utils import HAS_TRITON
 gpu_buffer_utils.UvaBuffer = cpu_buffer_utils.UvaBuffer
 
 
-class CPUStagedWriteTensor(gpu_buffer_utils.StagedWriteTensor):
-    def apply_write(self) -> None:
-        offset = 0
-        for index, start, end in zip(
-            self._staged_write_indices,
-            self._staged_write_starts,
-            self._staged_write_cu_lens,
-        ):
-            values = torch.tensor(
-                self._staged_write_contents[offset:end],
-                dtype=self.dtype,
-                device=self.gpu.device,
-            )
-            row_offset = index * self.gpu.stride(0) + start
-            self.gpu.reshape(-1)[row_offset : row_offset + len(values)] = values
-            offset = end
-        self.clear_staged_writes()
-
-
-class CPUFusedStagedWriter(gpu_buffer_utils.FusedStagedWriter):
-    def apply(
-        self,
-        tensors: Sequence[gpu_buffer_utils.StagedWriteTensor],
-        output_ptrs: torch.Tensor,
-        output_strides: torch.Tensor,
-    ) -> None:
-        for tensor in tensors:
-            tensor.apply_write()
-
-
 if not HAS_TRITON:
-    gpu_buffer_utils.StagedWriteTensor = CPUStagedWriteTensor
-    gpu_buffer_utils.FusedStagedWriter = CPUFusedStagedWriter
+    gpu_buffer_utils.StagedWriteTensor = cpu_buffer_utils.StagedWriteTensor
+    gpu_buffer_utils.FusedStagedWriter = cpu_buffer_utils.FusedStagedWriter
