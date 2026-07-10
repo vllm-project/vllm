@@ -1530,10 +1530,7 @@ def group_and_unify_kv_cache_specs(
     ):
         return None
 
-    # DeepseekV4-style tuple packing is only needed when layers have different
-    # page sizes (e.g. C4 vs C128 MLA layers). A non-DeepseekV4 model that mixes
-    # full MLA and sliding-window MLA layers with a uniform page size does not
-    # need it; let the generic uniform-page-size path handle it instead.
+    # SlidingWindowMLASpec models with uniform page sizes don't need tuple packing.
     page_sizes = {spec.page_size_bytes for spec in kv_cache_spec.values()}
     if len(page_sizes) <= 1:
         return None
