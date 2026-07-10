@@ -205,26 +205,27 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             input_batch.num_tokens,
             max_query_len,
         )
-        prefill_batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
-            self.prefill_cudagraph_manager,
-            num_reqs,
-            num_tokens,
-            uniform_token_count,
-            dp_size=self.dp_size,
-            dp_rank=self.dp_rank,
-            need_eager=is_profile,
+        # Requests whose drafts can never be scheduled (and have no lookahead
+        # KV slots allocated). The prefill forward pass below still runs for
+        # them to keep the drafter KV cache in sync. Skipping is done only when
+        # no DP rank requires draft tokens this step.
+        no_draft_mask = input_batch.no_draft_mask_np
+        want_skip_drafts = bool(no_draft_mask is not None and no_draft_mask.all())
+
+        prefill_batch_desc, num_tokens_across_dp, skip_all_drafts = (
+            dispatch_cg_and_sync_dp(
+                self.prefill_cudagraph_manager,
+                num_reqs,
+                num_tokens,
+                uniform_token_count,
+                dp_size=self.dp_size,
+                dp_rank=self.dp_rank,
+                need_eager=is_profile,
+                want_skip_drafts=want_skip_drafts,
+            )
         )
 
         self._prepare_eplb_forward(input_batch.num_tokens)
-
-        # Requests whose drafts can never be scheduled (and have no lookahead
-        # KV slots allocated). The prefill forward pass below still runs for
-        # them to keep the drafter KV cache in sync. With DP, skipping is not
-        # safe: dispatch_cg_and_sync_dp all_reduce must run on every rank.
-        no_draft_mask = input_batch.no_draft_mask_np
-        skip_all_drafts = bool(
-            no_draft_mask is not None and self.dp_size == 1 and no_draft_mask.all()
-        )
 
         if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Replay the full graph for draft prefill.
@@ -267,7 +268,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         # Each request produces exactly 1 token per draft generation step,
         # enabling FULL graph replay.
-        decode_batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
+        decode_batch_desc, num_tokens_across_dp, _ = dispatch_cg_and_sync_dp(
             self.decode_cudagraph_manager,
             num_reqs,
             num_reqs,
