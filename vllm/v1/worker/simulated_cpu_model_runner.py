@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
@@ -27,16 +28,11 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 
 
-class _NoOpKVBlockZeroer:
-    def zero_block_ids(self, block_ids: list[int]) -> None:
-        pass
-
-
 class SimulatedCPUModelRunner(CPUModelRunner):
     """CPU runner that simulates model execution while preserving scheduler/KV logic."""
 
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(self, vllm_config: VllmConfig, device: torch.device) -> None:
+        super().__init__(vllm_config, device)
         self._simulated_token_ids_by_req: dict[str, list[int]] = {}
 
     def _remove_request(self, req_id: str) -> bool:
@@ -64,7 +60,7 @@ class SimulatedCPUModelRunner(CPUModelRunner):
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 max_tokens=max_tokens,
             )
-            self._simulated_token_ids_by_req[new_req_data.req_id] = (
+            self._simulated_token_ids_by_req[req_id] = (
                 self._get_simulated_output_token_ids(new_req_data)
             )
 
@@ -286,7 +282,6 @@ class SimulatedCPUModelRunner(CPUModelRunner):
             self.vllm_config.mamba_config, self.kv_cache_config
         )
         self.kv_caches = []
-        self.kv_block_zeroer = _NoOpKVBlockZeroer()  # type: ignore[assignment]
         logger.info(
             "Initialized virtual KV cache with %d groups and %d blocks; "
             "skipped KV tensor allocation.",
