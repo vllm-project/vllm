@@ -306,6 +306,37 @@ def prepare_fp4_layer_for_marlin(
     return
 
 
+def _repack_marlin_experts(
+    weight: torch.Tensor,
+    size_n: int,
+    size_k: int,
+    perm: torch.Tensor,
+    is_a_8bit: bool,
+) -> torch.Tensor:
+    """Repack each expert to marlin format into a preallocated output."""
+    num_experts = weight.shape[0]
+    out: torch.Tensor | None = None
+    for i in range(num_experts):
+        qweight = weight[i].view(torch.int32).T.contiguous()
+        marlin_qweight = ops.gptq_marlin_repack(
+            b_q_weight=qweight,
+            perm=perm,
+            size_k=size_k,
+            size_n=size_n,
+            num_bits=4,
+            is_a_8bit=is_a_8bit,
+        )
+        if out is None:
+            out = torch.empty(
+                (num_experts, *marlin_qweight.shape),
+                dtype=marlin_qweight.dtype,
+                device=marlin_qweight.device,
+            )
+        out[i] = marlin_qweight
+    assert out is not None
+    return out
+
+
 def prepare_nvfp4_moe_layer_for_marlin(
     layer: RoutedExperts,
     w13: torch.Tensor,
@@ -382,36 +413,7 @@ def prepare_nvfp4_moe_layer_for_marlin(
             weight = pad_w2(weight, packing=2)
             size_k = padded_N
 
-        # Fill a preallocated ``[E, ...]`` output expert-by-expert instead of
-        # collecting every repacked expert in a Python list and ``torch.cat``-ing
-        # at the end. The list-plus-cat form holds the per-expert list and the
-        # concatenated result at the same time, transiently doubling the repacked
-        # weight footprint. That extra copy matters for large MoE checkpoints on
-        # unified-memory devices (e.g. GB10 / GH200, where "GPU" memory is shared
-        # host DRAM) and can exhaust the box during load. Output is byte-identical
-        # to the cat.
-        out: torch.Tensor | None = None
-        for i in range(E):
-            qweight = weight[i].view(torch.int32).T.contiguous()
-
-            marlin_qweight = ops.gptq_marlin_repack(
-                b_q_weight=qweight,
-                perm=perm,
-                size_k=size_k,
-                size_n=size_n,
-                num_bits=4,
-                is_a_8bit=is_a_8bit,
-            )
-            if out is None:
-                out = torch.empty(
-                    (E, *marlin_qweight.shape),
-                    dtype=marlin_qweight.dtype,
-                    device=marlin_qweight.device,
-                )
-            out[i].copy_(marlin_qweight)
-
-        assert out is not None
-        return out
+        return _repack_marlin_experts(weight, size_n, size_k, perm, is_a_8bit)
 
     w13 = repack_weight(w13, "w13")
     w2 = repack_weight(w2, "w2")
@@ -494,34 +496,8 @@ def prepare_moe_fp4_layer_for_marlin(
 
         assert weight.shape == (e, size_n, size_k // 2)
 
-        # Fill a preallocated ``[e, ...]`` output expert-by-expert rather than
-        # appending to a list and ``torch.cat``-ing, which transiently holds the
-        # per-expert list and the concatenated result at once (~2x the repacked
-        # weight footprint). That matters for large MoE checkpoints on
-        # unified-memory devices (e.g. GB10 / GH200, where "GPU" memory is shared
-        # host DRAM) during load. Output is byte-identical to the cat.
-        out: torch.Tensor | None = None
-        for i in range(e):
-            qweight = weight[i].view(torch.int32).T.contiguous()
-
-            marlin_qweight = ops.gptq_marlin_repack(
-                b_q_weight=qweight,
-                perm=perm,
-                size_k=size_k,
-                size_n=size_n,
-                num_bits=4,
-                is_a_8bit=is_a_8bit,
-            )
-            if out is None:
-                out = torch.empty(
-                    (e, *marlin_qweight.shape),
-                    dtype=marlin_qweight.dtype,
-                    device=marlin_qweight.device,
-                )
-            out[i].copy_(marlin_qweight)
-
-        assert out is not None
-        weight = torch.nn.Parameter(out, requires_grad=False)
+        weight = _repack_marlin_experts(weight, size_n, size_k, perm, is_a_8bit)
+        weight = torch.nn.Parameter(weight, requires_grad=False)
 
         setattr(layer, name, weight)
 
@@ -649,30 +625,7 @@ def prepare_moe_mxfp4_layer_for_marlin(
 
         assert weight.shape == (e, size_n, size_k // 2)
 
-        # See prepare_nvfp4_moe_layer_for_marlin: preallocate the ``[e, ...]``
-        # output and fill it expert-by-expert to avoid the transient
-        # list-plus-cat copy of the repacked weights, which doubles peak memory
-        # on unified-memory devices during load. Output is byte-identical.
-        out: torch.Tensor | None = None
-        for i in range(e):
-            qweight = weight[i].view(torch.int32).T.contiguous()
-            marlin_qweight = ops.gptq_marlin_repack(
-                b_q_weight=qweight,
-                perm=perm,
-                size_k=size_k,
-                size_n=size_n,
-                num_bits=4,
-                is_a_8bit=is_a_8bit,
-            )
-            if out is None:
-                out = torch.empty(
-                    (e, *marlin_qweight.shape),
-                    dtype=marlin_qweight.dtype,
-                    device=marlin_qweight.device,
-                )
-            out[i].copy_(marlin_qweight)
-        assert out is not None
-        return out
+        return _repack_marlin_experts(weight, size_n, size_k, perm, is_a_8bit)
 
     w13 = repack_weight(w13, "w13")
     w2 = repack_weight(w2, "w2")
