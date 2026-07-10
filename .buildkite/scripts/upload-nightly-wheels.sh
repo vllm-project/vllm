@@ -6,8 +6,8 @@ set -ex
 # manylinux platform tag with auditwheel.
 # Index generation is handled separately by generate-and-upload-nightly-index.sh.
 
-# macOS wheels already carry a valid macosx_*_arm64 platform tag and auditwheel
-# is Linux-only, so skip the manylinux retag (and its Docker helper) for them.
+# auditwheel is Linux-only; macOS wheels already carry a valid tag, so skip the
+# manylinux retag for them.
 WHEEL_PLATFORM="${VLLM_WHEEL_PLATFORM:-linux}"
 
 if [[ "$WHEEL_PLATFORM" == "linux" ]]; then

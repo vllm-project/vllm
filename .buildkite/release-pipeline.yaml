@@ -83,9 +83,6 @@ steps:
           queue: macmini
         timeout_in_minutes: 90
         commands:
-          # Built natively on the macOS agent (macOS wheels cannot be
-          # cross-compiled from Linux); the wheel lands in artifacts/dist for
-          # the normal upload path.
           - "bash .buildkite/scripts/build-macos-wheel.sh"
           - "VLLM_WHEEL_PLATFORM=macos bash .buildkite/scripts/upload-nightly-wheels.sh"
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "s3://vllm-wheels/$$BUILDKITE_COMMIT/$(cd artifacts/dist && echo *.whl)"'
