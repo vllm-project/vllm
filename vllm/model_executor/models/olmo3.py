@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
-# https://github.com/huggingface/transformers/blob/main/src/transformers/models/olmo2/modeling_olmo2.py
+# https://github.com/huggingface/transformers/blob/main/src/transformers/models/olmo3/modeling_olmo3.py
 # Copyright 2024 The vLLM team.
 # Copyright 2024 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
@@ -22,7 +22,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only OLMo2 model compatible with HuggingFace weights."""
+"""Inference-only OLMo3 model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
 from functools import partial
@@ -30,7 +30,7 @@ from itertools import islice
 
 import torch
 from torch import nn
-from transformers import Olmo2Config, Olmo3Config
+from transformers import Olmo3Config
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -64,7 +64,7 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 
-class Olmo2Attention(nn.Module):
+class Olmo3Attention(nn.Module):
     """
     This is the attention block where the output is computed as
     `Attention(LN(x))` in `MLP(LN(x + Attention(LN(x))))`
@@ -74,7 +74,7 @@ class Olmo2Attention(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
-        assert isinstance(self.config, (Olmo2Config, Olmo3Config))
+        assert isinstance(self.config, Olmo3Config)
 
         hidden_size = self.config.hidden_size
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -185,7 +185,7 @@ class Olmo2Attention(nn.Module):
         return output
 
 
-class Olmo2MLP(nn.Module):
+class Olmo3MLP(nn.Module):
     """
     This is the MLP block where the output is computed as
     `MLP(x)` in `LN(MLP(x + LN(Attention(x))))`
@@ -195,7 +195,7 @@ class Olmo2MLP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        assert isinstance(config, (Olmo2Config, Olmo3Config))
+        assert isinstance(config, Olmo3Config)
         hidden_size = config.hidden_size
         intermediate_size = config.intermediate_size
 
@@ -230,7 +230,7 @@ class Olmo2MLP(nn.Module):
         return x
 
 
-class Olmo2DecoderLayer(nn.Module):
+class Olmo3DecoderLayer(nn.Module):
     """
     This is a typical transformer block where the output is
     computed as `MLP(LN(x + Attention(LN(x))))`
@@ -240,14 +240,14 @@ class Olmo2DecoderLayer(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        assert isinstance(config, (Olmo2Config, Olmo3Config))
+        assert isinstance(config, Olmo3Config)
         # Attention block.
-        self.self_attn = Olmo2Attention(
+        self.self_attn = Olmo3Attention(
             vllm_config=vllm_config, prefix=f"{prefix}.self_attn"
         )
 
         # MLP block.
-        self.mlp = Olmo2MLP(vllm_config=vllm_config, prefix=f"{prefix}.mlp")
+        self.mlp = Olmo3MLP(vllm_config=vllm_config, prefix=f"{prefix}.mlp")
 
         # LayerNorm
         self.post_attention_layernorm = RMSNorm(
@@ -278,11 +278,11 @@ class Olmo2DecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class Olmo2Model(nn.Module):
+class Olmo3Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
-        assert isinstance(self.config, (Olmo2Config, Olmo3Config))
+        assert isinstance(self.config, Olmo3Config)
 
         self.embed_tokens = VocabParallelEmbedding(
             self.config.vocab_size,
@@ -291,7 +291,7 @@ class Olmo2Model(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.config.num_hidden_layers,
-            lambda prefix: Olmo2DecoderLayer(vllm_config=vllm_config, prefix=prefix),
+            lambda prefix: Olmo3DecoderLayer(vllm_config=vllm_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
         self.norm = RMSNorm(
@@ -343,7 +343,7 @@ class Olmo2Model(nn.Module):
         return hidden_states
 
 
-class Olmo2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
+class Olmo3ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     """
     Extremely barebones HF model wrapper.
     """
@@ -366,9 +366,9 @@ class Olmo2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        assert isinstance(config, (Olmo2Config, Olmo3Config))
+        assert isinstance(config, Olmo3Config)
         self.config = config
-        self.model = Olmo2Model(
+        self.model = Olmo3Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         if config.tie_word_embeddings:
