@@ -1518,6 +1518,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "Eagle3Qwen3vlForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen3-VL-8B-Instruct",
         speculative_model="taobao-mnn/Qwen3-VL-8B-Instruct-Eagle3",
+        use_original_num_layers=True,
     ),
     "Eagle3Qwen3ForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen3-8B",
