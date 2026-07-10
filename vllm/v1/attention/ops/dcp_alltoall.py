@@ -32,6 +32,33 @@ if TYPE_CHECKING:
     from vllm.v1.attention.ops.common import CPTritonContext
 
 
+# Module-level cache of the DCP A2A backend choice. Set by
+# ``gpu_worker.py`` at workspace pre-init (where vllm_config is reliably
+# available). The dispatcher reads from cache during forward, avoiding
+# a dependency on ``get_current_vllm_config()`` that raises in V1's
+# async scheduling path.
+_DCP_A2A_BACKEND: str | None = None
+
+
+def set_dcp_a2a_backend(backend: str) -> None:
+    """Cache the DCP A2A backend on this worker process."""
+    global _DCP_A2A_BACKEND
+    _DCP_A2A_BACKEND = backend
+
+
+def _get_dcp_a2a_backend() -> str:
+    """Return the resolved DCP A2A kernel (``"nccl"`` or ``"flashinfer"``).
+
+    There is no user-facing flag: the choice is made automatically at worker
+    init (``gpu_worker._init_dcp_a2a_flashinfer_workspace``) — FlashInfer on
+    Blackwell (sm_100+, where its fused LL128 kernel is CUDA-graph captured and
+    wins), NCCL packed everywhere else — and cached here.
+    """
+    if _DCP_A2A_BACKEND is not None:
+        return _DCP_A2A_BACKEND
+    return "nccl"
+
+
 def _lse_weighted_combine(
     outputs: torch.Tensor,
     lses: torch.Tensor,
@@ -432,8 +459,22 @@ def dcp_a2a_lse_reduce(
         cp_attn_lse = cp_attn_lse.to(torch.float32)
     lse_pack_dim = _dcp_a2a_lse_pack_dim(cp_attn_out.dtype)
 
+    use_fi = _get_dcp_a2a_backend() == "flashinfer"
+    if use_fi:
+        # FlashInfer's LL128 kernel requires partial_o last-dim × elem_size
+        # to be 16-byte aligned. Pad ``D + lse_pack_dim`` up to the next
+        # 16-byte multiple. Pack writes only the first ``D + lse_pack_dim``
+        # slots; the padding is unread by unpack_combine (which loads via
+        # explicit offsets HEAD_DIM and HEAD_DIM+1).
+        elem_size = cp_attn_out.element_size()
+        elems_per_16B = 16 // elem_size
+        D_prime_raw = D + lse_pack_dim
+        D_prime = ((D_prime_raw + elems_per_16B - 1) // elems_per_16B) * elems_per_16B
+    else:
+        D_prime = D + lse_pack_dim
+
     send_buffer, recv_buffer = _dcp_a2a_send_recv_buffers(
-        (world_size, B, H_per_rank, D + lse_pack_dim),
+        (world_size, B, H_per_rank, D_prime),
         device=cp_attn_out.device,
         dtype=cp_attn_out.dtype,
     )
@@ -448,13 +489,47 @@ def dcp_a2a_lse_reduce(
         lse_pack_dim,
     )
 
-    work = dist.all_to_all_single(
-        recv_buffer.view(-1),
-        send_buffer.view(-1),
-        group=cp_group.device_group,
-        async_op=True,
-    )
-    work.wait()
+    if use_fi:
+        from vllm.distributed.dcp_alltoall_flashinfer import (
+            DCPAllToAllFlashInfer,
+        )
+
+        # send_buffer is [N, B, H_per_rank, D_prime]; permute to
+        # FlashInfer's convention [B*H_per_rank, N, D_prime] (cp_size
+        # is the second-to-last dim).
+        send_for_fi = (
+            send_buffer.permute(1, 2, 0, 3)
+            .reshape(B * H_per_rank, world_size, D_prime)
+            .contiguous()
+        )
+        # FlashInfer takes a softmax_stats arg as well. LSE is already
+        # bit-packed inside send_for_fi; pass a small placeholder.
+        placeholder = torch.zeros(
+            B * H_per_rank,
+            world_size,
+            2,
+            dtype=torch.float32,
+            device=send_buffer.device,
+        )
+        mgr = DCPAllToAllFlashInfer.get(
+            cp_rank=cp_group.rank_in_group,
+            cp_size=world_size,
+            cp_cpu_group=cp_group.cpu_group,
+        )
+        recv_fi, _ = mgr.run(send_for_fi, placeholder)
+        recv_buffer.copy_(
+            recv_fi.reshape(B, H_per_rank, world_size, D_prime)
+            .permute(2, 0, 1, 3)
+            .contiguous()
+        )
+    else:
+        work = dist.all_to_all_single(
+            recv_buffer.view(-1),
+            send_buffer.view(-1),
+            group=cp_group.device_group,
+            async_op=True,
+        )
+        work.wait()
 
     return _dcp_a2a_unpack_combine(
         recv_buffer, D, lse_pack_dim, return_lse, is_lse_base_on_e
