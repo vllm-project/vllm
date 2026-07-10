@@ -81,12 +81,25 @@ def test_v2_thinking_budget_forces_end_after_budget_reached():
     state.add_request(3, SamplingParams(thinking_token_budget=3))
     state.apply_staged_writes()
 
+    logits = torch.arange(VOCAB_SIZE, dtype=torch.float32, device=DEVICE).view(1, -1)
+    expected = logits.cpu()
+    out = _apply(state, logits, input_ids=[12], local_pos=[0])
+
+    expected[0, END] = 1.0e9
+    torch.testing.assert_close(out, expected)
+
+
+def test_v2_thinking_budget_restores_masked_end_token():
+    req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+
     logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    logits[0, END] = -float("inf")
     out = _apply(state, logits, input_ids=[12], local_pos=[0])
 
     assert out[0, END] == pytest.approx(1.0e9)
-    assert torch.isneginf(out[0, :END]).all()
-    assert torch.isneginf(out[0, END + 1 :]).all()
 
 
 def test_v2_thinking_budget_allows_tokens_before_budget():
