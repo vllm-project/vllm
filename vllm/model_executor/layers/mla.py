@@ -119,7 +119,6 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             indexer=self.indexer,
             topk_indices_buffer=mla_modules.topk_indices_buffer,
         )
-
         self.prefix = prefix
 
     def forward(
@@ -130,6 +129,8 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
     ) -> torch.Tensor:
         q_c = None
         kv_lora = None
+        run_indexer = self.indexer and self.is_sparse and not self.skip_topk
+        indexer_dummy_dep = None
 
         if self.q_lora_rank is not None:
             assert self.fused_qkv_a_proj is not None, (
@@ -148,6 +149,11 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 dim=-1,
             )
             q_c = self.q_a_layernorm(q_c)
+            if run_indexer:
+                assert self.indexer is not None
+                indexer_dummy_dep = self.indexer(
+                    hidden_states, q_c, positions, self.indexer_rope_emb
+                )
             q_proj_layer = self.q_b_proj
             q_proj_input = q_c
         else:
@@ -157,6 +163,11 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             assert self.q_proj is not None, (
                 "q_proj is required when q_lora_rank is None"
             )
+            if run_indexer:
+                assert self.indexer is not None
+                indexer_dummy_dep = self.indexer(
+                    hidden_states, q_c, positions, self.indexer_rope_emb
+                )
             kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
             q_proj_layer = self.q_proj
             q_proj_input = hidden_states
@@ -177,9 +188,6 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 positions, q[..., self.qk_nope_head_dim :], k_pe
             )
 
-        if self.indexer and self.is_sparse and not self.skip_topk:
-            self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
-
         if llama_4_scaling is not None:
             q *= llama_4_scaling
 
@@ -193,6 +201,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             k_pe,
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
             q_dcp_replicated=q_dcp_replicated,
+            indexer_dummy_dep=indexer_dummy_dep,
         )
 
         return self.o_proj(attn_out)[0]
