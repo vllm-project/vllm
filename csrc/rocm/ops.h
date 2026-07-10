@@ -45,4 +45,6 @@ void paged_attention(
     int64_t max_seq_len, const std::optional<torch::Tensor>& alibi_slopes,
     const std::string& kv_cache_dtype, torch::Tensor& k_scale,
     torch::Tensor& v_scale, const std::optional<torch::Tensor>& fp8_out_scale,
-    const std::string& mfma_type);
+    const std::string& mfma_type,
+    const std::optional<torch::Tensor>& sinks, int64_t sliding_window,
+    double logits_soft_cap);

@@ -407,6 +407,8 @@ class RocmAttentionImpl(AttentionImpl):
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: int | None = None,
         sinks: torch.Tensor | None = None,
+        layer_idx: int | None = None,
+        dual_chunk_attention_config: dict | None = None,
     ) -> None:
         self.attn_type = attn_type
         self.num_heads = num_heads
@@ -433,7 +435,19 @@ class RocmAttentionImpl(AttentionImpl):
 
         self.fp8_dtype = current_platform.fp8_dtype()
 
+        # Dual-chunk attention has no v1 implementation; accept and ignore its
+        # kwargs so the model still loads (attention degrades to standard).
+        if dual_chunk_attention_config is not None:
+            logger.warning_once(
+                "ROCM_ATTN does not implement dual-chunk attention masking; "
+                "falling back to standard attention. Results are exact only for "
+                "context lengths <= the model's dual-chunk size."
+            )
+
         self.sinks = sinks
+        # fp32 sinks for the native kernel; filled lazily in _native_decode
+        # (sinks is an uninitialized Parameter here).
+        self._sinks_fp32: torch.Tensor | None = None
         if sinks is not None:
             assert sinks.shape[0] == num_heads, (
                 "Sinks must have the same number of heads as the number of "
@@ -563,14 +577,14 @@ class RocmAttentionImpl(AttentionImpl):
         So gate native to short context only. Keep it narrow otherwise so
         feature-bearing paths continue through the stride-aware Triton kernel.
         """
+        # Native paged kernel for short-context decode (sinks, sliding_window
+        # and softcap are handled natively). Everything it can't serve falls
+        # through to the Triton unified kernel below.
         if (
             attn_metadata.max_query_len != 1
-            or self.sinks is not None
-            or self.logits_soft_cap
             or output_scale is not None
             or self.kv_cache_dtype != "auto"
-            or self.num_queries_per_kv <= 4
-            or self.sliding_window != (-1, -1)
+            or self.num_queries_per_kv > 16
             or attn_metadata.rswa_prefix_lens is not None
             or attn_metadata.causal is not True
         ):
@@ -588,16 +602,19 @@ class RocmAttentionImpl(AttentionImpl):
         if block_size not in (16, 32):
             return False
 
+        # Large batches are faster on the unified split-KV path.
         num_seqs = attn_metadata.seq_lens.shape[0]
         if num_seqs > attn_metadata.seq_threshold_3D:
             return False
 
-        # Native only wins for short context; long context stays on unified,
-        # which matches the 2D/3D switch inside unified_attention itself. 2048 is
-        # the rocprof crossover on MI300 where unified's KV-parallel 3D reduction
-        # starts beating the single-pass native paged-attention kernel.
+        # Native single-pass wins for short context; the unified split wins
+        # beyond the crossover. For a sliding window the effective span is the
+        # window (the kernel skips out-of-window partitions).
         native_decode_max_seq_len = 2048
-        return attn_metadata.max_seq_len <= native_decode_max_seq_len
+        effective_seq_len = attn_metadata.max_seq_len
+        if self.sliding_window[0] >= 0:
+            effective_seq_len = min(effective_seq_len, self.sliding_window[0] + 1)
+        return effective_seq_len <= native_decode_max_seq_len
 
     def _native_decode(
         self,
@@ -613,7 +630,9 @@ class RocmAttentionImpl(AttentionImpl):
         num_seqs = attn_metadata.block_table.shape[0]
         block_size = kv_cache.shape[2]
         max_num_partitions = (attn_metadata.max_seq_len + 255) // 256
-        tmp_output = torch.empty(
+        # zeros, not empty: SWA-skipped partitions leave tmp_out unwritten and
+        # the reduce reads every partition (0 * NaN otherwise).
+        tmp_output = torch.zeros(
             (num_seqs, self.num_heads, max_num_partitions, self.head_size),
             dtype=query.dtype,
             device=output.device,
@@ -624,6 +643,11 @@ class RocmAttentionImpl(AttentionImpl):
             device=output.device,
         )
         max_logits = torch.empty_like(exp_sums)
+
+        # sliding_window[0] is the flash-attn left window W-1; +1 gives the raw
+        # window W the kernel masks against (and -1 -> 0 disabled).
+        if self.sinks is not None and self._sinks_fp32 is None:
+            self._sinks_fp32 = self.sinks.to(torch.float32)
 
         ops.paged_attention_rocm(
             output,
@@ -644,6 +668,9 @@ class RocmAttentionImpl(AttentionImpl):
             kv_cache_dtype=self.kv_cache_dtype,
             k_scale=layer._k_scale,
             v_scale=layer._v_scale,
+            sinks=self._sinks_fp32,
+            sliding_window=self.sliding_window[0] + 1,
+            logits_soft_cap=self.logits_soft_cap,
         )
         return output
 
@@ -786,7 +813,9 @@ class RocmAttentionImpl(AttentionImpl):
                 k_scale=layer._k_scale,
                 v_scale=layer._v_scale,
                 alibi_slopes=self.alibi_slopes,
-                sliding_window=self.sliding_window[0],
+                # +1: context_attention_fwd wants the raw window W (strict <),
+                # not the flash-attn left value W-1.
+                sliding_window=self.sliding_window[0] + 1,
                 sm_scale=self.scale,
                 fp8_out_scale=output_scale,
                 sinks=self.sinks,

@@ -353,7 +353,8 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     float* __restrict__ max_logits,         // [num_seqs, num_heads, max_num_partitions]
     scalar_t* __restrict__ out,             // [num_seqs, num_heads, max_num_partitions, head_size]
     OUTT* __restrict__ final_out,           // [num_seqs, num_heads, head_size]
-    int max_ctx_blocks, const float* k_scale, const float* v_scale) {
+    int max_ctx_blocks, const float* k_scale, const float* v_scale,
+    const int window, const float logits_soft_cap) {
   // clang-format on
   constexpr int NWARPS = NUM_THREADS / WARP_SIZE;
   const auto warpid = threadIdx.x / WARP_SIZE;
@@ -426,6 +427,26 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
   const auto wg_start_head_idx = blockIdx.z * GQA_RATIO;
   const auto wg_start_kv_head_idx = blockIdx.z;
   const auto total_num_heads = gridDim.z * GQA_RATIO;
+
+  // Sliding-window fast skip: partitions fully below (seq_len - window) are
+  // masked out. Write neutral stats and bail (tmp_out stays zero-inited).
+  if (window > 0 &&
+      partition_start_token_idx + T_PAR_SIZE <= seq_len - window) {
+    if (threadIdx.x < GQA_RATIO) {
+      const int skip_qhead_idx = lane16id;
+      const int64_t skip_offset =
+          static_cast<int64_t>(seq_idx) *
+              static_cast<int64_t>(total_num_heads) *
+              static_cast<int64_t>(max_num_partitions) +
+          (static_cast<int64_t>(wg_start_head_idx) +
+           static_cast<int64_t>(skip_qhead_idx)) *
+              static_cast<int64_t>(max_num_partitions) +
+          static_cast<int64_t>(partition_idx);
+      max_logits[skip_offset] = -FLT_MAX;
+      exp_sums[skip_offset] = 0.0f;
+    }
+    return;
+  }
 
   // for QK mfma, tokens in multiples of TOKENS_PER_WARP are spread across warps
   // each mfma takes QH16xT16x16HE across warp
@@ -683,6 +704,16 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     d_out[token_depth] *= scale2;
   }
 
+  // Logit softcap on the scaled QK logits (before softmax; sinks uncapped).
+  if (logits_soft_cap > 0.0f) {
+    for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
+      for (int i = 0; i < 4; i++) {
+        d_out[token_depth][i] =
+            logits_soft_cap * tanhf(d_out[token_depth][i] / logits_soft_cap);
+      }
+    }
+  }
+
   const int qkout_token_idx =
       partition_start_token_idx + TOKENS_PER_WARP * warpid + rowid * 4;
 
@@ -704,8 +735,11 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
   for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
     const int local_token_idx = qkout_token_idx + token_depth * 16;
     for (int i = 0; i < 4; i++) {
-      const float tmp =
-          (local_token_idx + i < seq_len) ? d_out[token_depth][i] : -FLT_MAX;
+      const int tok_idx = local_token_idx + i;
+      const bool in_window =
+          (tok_idx < seq_len) &&
+          (window <= 0 || tok_idx >= seq_len - window);
+      const float tmp = in_window ? d_out[token_depth][i] : -FLT_MAX;
       qk_max = fmaxf(qk_max, tmp);
     }
   }
@@ -717,9 +751,12 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
   for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
     const int local_token_idx = qkout_token_idx + token_depth * 16;
     for (int i = 0; i < 4; i++) {
-      const float tmp = (local_token_idx + i < seq_len)
-                            ? __expf(d_out[token_depth][i] - qk_max)
-                            : 0.0f;
+      const int tok_idx = local_token_idx + i;
+      const bool in_window =
+          (tok_idx < seq_len) &&
+          (window <= 0 || tok_idx >= seq_len - window);
+      const float tmp =
+          in_window ? __expf(d_out[token_depth][i] - qk_max) : 0.0f;
       d_out[token_depth][i] = tmp;
       exp_sum += tmp;
     }
@@ -973,7 +1010,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     float* __restrict__ max_logits,         // [num_seqs, num_heads, max_num_partitions]
     scalar_t* __restrict__ out,             // [num_seqs, num_heads, max_num_partitions, head_size]
     OUTT* __restrict__ final_out,           // [num_seqs, num_heads, head_size]
-    int max_ctx_blocks, const float* k_scale, const float* v_scale) {
+    int max_ctx_blocks, const float* k_scale, const float* v_scale,
+    const int window, const float logits_soft_cap) {
   // clang-format on
   constexpr int NWARPS = NUM_THREADS / WARP_SIZE;
   const auto warpid = threadIdx.x / WARP_SIZE;
@@ -1225,6 +1263,15 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
       d_out[h] *= scale2;
     }
 
+    // Logit softcap (see mfma16 kernel).
+    if (logits_soft_cap > 0.0f) {
+      for (int h = 0; h < QHLOOP; h++) {
+        for (int i = 0; i < 4; i++) {
+          d_out[h][i] = logits_soft_cap * tanhf(d_out[h][i] / logits_soft_cap);
+        }
+      }
+    }
+
     // transpose d_out so that 4 token ids are in each lane, and 4 heads are
     // across 4 lanes
     for (int h = 0; h < QHLOOP; h++) {
@@ -1252,7 +1299,9 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     for (int h = 0; h < QHLOOP; h++) {
       qk_max[h] = -FLT_MAX;
       for (int i = 0; i < 4; i++) {
-        qk_max[h] = (lane4_token_idx + i < seq_len)
+        qk_max[h] = (lane4_token_idx + i < seq_len &&
+                     (window <= 0 ||
+                      lane4_token_idx + i >= seq_len - window))
                         ? fmaxf(qk_max[h], d_out[h][i])
                         : qk_max[h];
       }
@@ -1283,7 +1332,9 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     for (int h = 0; h < QHLOOP; h++) {
       exp_sum[h] = 0.0f;
       for (int i = 0; i < 4; i++) {
-        d_out[h][i] = (lane4_token_idx + i < seq_len)
+        d_out[h][i] = (lane4_token_idx + i < seq_len &&
+                       (window <= 0 ||
+                        lane4_token_idx + i >= seq_len - window))
                           ? __expf(d_out[h][i] - qk_max[h])
                           : 0.0f;
         exp_sum[h] += d_out[h][i];
@@ -1463,7 +1514,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
                                            // max_num_partitions, head_size]
     const int* __restrict__ seq_lens,      // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,  // [num_seqs]
-    const int max_num_partitions, const float* __restrict__ fp8_out_scale_ptr) {
+    const int max_num_partitions, const float* __restrict__ fp8_out_scale_ptr,
+    const float* __restrict__ sinks) {
   const auto num_heads = gridDim.x;
   const auto head_idx = blockIdx.x;
   const auto seq_idx = blockIdx.y;
@@ -1515,6 +1567,11 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
       max_logit = fmaxf(max_logit, __shfl_xor(max_logit, mask));
     }
 
+    // Fold the per-head attention sink into the running max (it has no value).
+    if (sinks != nullptr) {
+      max_logit = fmaxf(max_logit, sinks[head_idx]);
+    }
+
     const float* exp_sums_ptr = exp_sums +
                                 seq_idx * num_heads * max_num_partitions +
                                 head_idx * max_num_partitions;
@@ -1547,6 +1604,10 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
       global_exp_sum += __shfl_xor(global_exp_sum, mask);
     }
     if (threadIdx.x == 0) {
+      // Add the sink to the denominator once per (head, seq).
+      if (sinks != nullptr) {
+        global_exp_sum += expf(sinks[head_idx] - max_logit);
+      }
       shared_global_exp_sum = global_exp_sum;
     }
   }  // warpid == 0
@@ -1777,7 +1838,8 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     scalar_t* __restrict__ out,    // [num_seqs, num_heads, max_num_partitions,
                                    // head_size]
     OUTT* __restrict__ final_out,  // [num_seqs, num_heads, head_size]
-    int max_ctx_blocks, const float* k_scale, const float* v_scale) {
+    int max_ctx_blocks, const float* k_scale, const float* v_scale,
+    const int window, const float logits_soft_cap) {
   // clang-format on
   constexpr int NWARPS = NUM_THREADS / WARP_SIZE;  // 8 warps on gfx11
   const int warpid = threadIdx.x / WARP_SIZE;
@@ -2013,6 +2075,16 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     dout[token_depth] *= scale;
   }
 
+  // Logit softcap (see GFX9 mfma16 kernel).
+  if (logits_soft_cap > 0.0f) {
+    for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
+      for (int i = 0; i < 8; i++) {
+        dout[token_depth][i] =
+            logits_soft_cap * tanhf(dout[token_depth][i] / logits_soft_cap);
+      }
+    }
+  }
+
   // calculate qk_max and exp_sum per warp and write to shared memory
   float qk_max = -FLT_MAX;
   float exp_sum = 0.0f;
@@ -2021,8 +2093,11 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
   for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
     const int local_token_idx = qkout_token_idx + token_depth * 16;
     for (int i = 0; i < 8; i++) {
-      const float tmp =
-          (local_token_idx + 2 * i < seq_len) ? dout[token_depth][i] : -FLT_MAX;
+      const int tok_idx = local_token_idx + 2 * i;
+      const bool in_window =
+          (tok_idx < seq_len) &&
+          (window <= 0 || tok_idx >= seq_len - window);
+      const float tmp = in_window ? dout[token_depth][i] : -FLT_MAX;
       qk_max = fmaxf(qk_max, tmp);
     }
   }
@@ -2032,9 +2107,12 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
   for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
     const int local_token_idx = qkout_token_idx + token_depth * 16;
     for (int i = 0; i < 8; i++) {
-      const float tmp = (local_token_idx + 2 * i < seq_len)
-                            ? __expf(dout[token_depth][i] - qk_max)
-                            : 0.0f;
+      const int tok_idx = local_token_idx + 2 * i;
+      const bool in_window =
+          (tok_idx < seq_len) &&
+          (window <= 0 || tok_idx >= seq_len - window);
+      const float tmp =
+          in_window ? __expf(dout[token_depth][i] - qk_max) : 0.0f;
       dout[token_depth][i] = tmp;
       exp_sum += tmp;
     }
@@ -2216,7 +2294,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     scalar_t* __restrict__ out,    // [num_seqs, num_heads, max_num_partitions,
                                    // head_size]
     OUTT* __restrict__ final_out,  // [num_seqs, num_heads, head_size]
-    int max_ctx_blocks, const float* k_scale, const float* v_scale) {
+    int max_ctx_blocks, const float* k_scale, const float* v_scale,
+    const int window, const float logits_soft_cap) {
   UNREACHABLE_CODE
 }
 
@@ -2234,7 +2313,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
                                            // max_num_partitions, head_size]
     const int* __restrict__ seq_lens,      // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,  // [num_seqs]
-    const int max_num_partitions, const float* __restrict__ fp8_out_scale_ptr) {
+    const int max_num_partitions, const float* __restrict__ fp8_out_scale_ptr,
+    const float* __restrict__ sinks) {
   const auto num_heads = gridDim.x;
   const auto head_idx = blockIdx.x;
   const auto seq_idx = blockIdx.y;
@@ -2286,6 +2366,11 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
       max_logit = fmaxf(max_logit, __shfl_xor(max_logit, mask));
     }
 
+    // Fold the per-head attention sink into the running max (it has no value).
+    if (sinks != nullptr) {
+      max_logit = fmaxf(max_logit, sinks[head_idx]);
+    }
+
     const float* exp_sums_ptr = exp_sums +
                                 seq_idx * num_heads * max_num_partitions +
                                 head_idx * max_num_partitions;
@@ -2318,6 +2403,10 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
       global_exp_sum += __shfl_xor(global_exp_sum, mask);
     }
     if (threadIdx.x == 0) {
+      // Add the sink to the denominator once per (head, seq).
+      if (sinks != nullptr) {
+        global_exp_sum += expf(sinks[head_idx] - max_logit);
+      }
       shared_global_exp_sum = global_exp_sum;
     }
   }  // warpid == 0
@@ -2549,7 +2638,8 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     scalar_t* __restrict__ out,    // [num_seqs, num_heads, max_num_partitions,
                                    // head_size]
     OUTT* __restrict__ final_out,  // [num_seqs, num_heads, head_size]
-    int max_ctx_blocks, const float* k_scale, const float* v_scale) {
+    int max_ctx_blocks, const float* k_scale, const float* v_scale,
+    const int window, const float logits_soft_cap) {
   // clang-format on
   constexpr int NWARPS = NUM_THREADS / WARP_SIZE;  // 8 warps on gfx11
   const int warpid = threadIdx.x / WARP_SIZE;
@@ -2784,6 +2874,16 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     dout[token_depth] *= scale;
   }
 
+  // Logit softcap (see GFX9 mfma16 kernel).
+  if (logits_soft_cap > 0.0f) {
+    for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
+      for (int i = 0; i < 8; i++) {
+        dout[token_depth][i] =
+            logits_soft_cap * tanhf(dout[token_depth][i] / logits_soft_cap);
+      }
+    }
+  }
+
   // calculate qk_max and exp_sum per warp and write to shared memory
   float qk_max = -FLT_MAX;
   float exp_sum = 0.0f;
@@ -2792,8 +2892,11 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
   for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
     const int local_token_idx = qkout_token_idx + token_depth * 16;
     for (int i = 0; i < 8; i++) {
-      const float tmp =
-          (local_token_idx + i < seq_len) ? dout[token_depth][i] : -FLT_MAX;
+      const int tok_idx = local_token_idx + i;
+      const bool in_window =
+          (tok_idx < seq_len) &&
+          (window <= 0 || tok_idx >= seq_len - window);
+      const float tmp = in_window ? dout[token_depth][i] : -FLT_MAX;
       qk_max = fmaxf(qk_max, tmp);
     }
   }
@@ -2803,9 +2906,12 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
   for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
     const int local_token_idx = qkout_token_idx + token_depth * 16;
     for (int i = 0; i < 8; i++) {
-      const float tmp = (local_token_idx + i < seq_len)
-                            ? __expf(dout[token_depth][i] - qk_max)
-                            : 0.0f;
+      const int tok_idx = local_token_idx + i;
+      const bool in_window =
+          (tok_idx < seq_len) &&
+          (window <= 0 || tok_idx >= seq_len - window);
+      const float tmp =
+          in_window ? __expf(dout[token_depth][i] - qk_max) : 0.0f;
       dout[token_depth][i] = tmp;
       exp_sum += tmp;
     }
@@ -2953,7 +3059,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     scalar_t* __restrict__ out,    // [num_seqs, num_heads, max_num_partitions,
                                    // head_size]
     OUTT* __restrict__ final_out,  // [num_seqs, num_heads, head_size]
-    int max_ctx_blocks, const float* k_scale, const float* v_scale) {
+    int max_ctx_blocks, const float* k_scale, const float* v_scale,
+    const int window, const float logits_soft_cap) {
   UNREACHABLE_CODE
 }
 
@@ -2971,7 +3078,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
                                            // max_num_partitions, head_size]
     const int* __restrict__ seq_lens,      // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,  // [num_seqs]
-    const int max_num_partitions, const float* __restrict__ fp8_out_scale_ptr) {
+    const int max_num_partitions, const float* __restrict__ fp8_out_scale_ptr,
+    const float* __restrict__ sinks) {
   const auto num_heads = gridDim.x;
   const auto head_idx = blockIdx.x;
   const auto seq_idx = blockIdx.y;
@@ -3023,6 +3131,11 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
       max_logit = fmaxf(max_logit, __shfl_xor(max_logit, mask));
     }
 
+    // Fold the per-head attention sink into the running max (it has no value).
+    if (sinks != nullptr) {
+      max_logit = fmaxf(max_logit, sinks[head_idx]);
+    }
+
     const float* exp_sums_ptr = exp_sums +
                                 seq_idx * num_heads * max_num_partitions +
                                 head_idx * max_num_partitions;
@@ -3055,6 +3168,10 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
       global_exp_sum += __shfl_xor(global_exp_sum, mask);
     }
     if (threadIdx.x == 0) {
+      // Add the sink to the denominator once per (head, seq).
+      if (sinks != nullptr) {
+        global_exp_sum += expf(sinks[head_idx] - max_logit);
+      }
       shared_global_exp_sum = global_exp_sum;
     }
   }  // warpid == 0
@@ -3187,7 +3304,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_kernel(
     float* __restrict__ max_logits,           // [num_seqs, num_heads, max_num_partitions]
     scalar_t* __restrict__ out,               // [num_seqs, num_heads, max_num_partitions, head_size]
     OUTT* __restrict__ final_out,             // [num_seqs, num_heads, head_size]
-    int max_ctx_blocks, const float* k_scale, const float* v_scale) {
+    int max_ctx_blocks, const float* k_scale, const float* v_scale,
+    const int window, const float logits_soft_cap) {
   UNREACHABLE_CODE
 }
 
@@ -3219,7 +3337,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     float* __restrict__ max_logits,          // [num_seqs, num_heads, max_num_partitions]
     scalar_t* __restrict__ out,              // [num_seqs, num_heads, max_num_partitions, head_size]
     OUTT* __restrict__ final_out,            // [num_seqs, num_heads, head_size]
-    int max_ctx_blocks, const float* k_scale, const float* v_scale) {
+    int max_ctx_blocks, const float* k_scale, const float* v_scale,
+    const int window, const float logits_soft_cap) {
   UNREACHABLE_CODE
 }
 
@@ -3234,7 +3353,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
     const scalar_t* __restrict__ tmp_out,  // [num_seqs, num_heads, max_num_partitions, head_size]
     const int* __restrict__ seq_lens,  // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,  // [num_seqs]
-    const int max_num_partitions, const float* __restrict__ fp8_out_scale_ptr) {
+    const int max_num_partitions, const float* __restrict__ fp8_out_scale_ptr,
+    const float* __restrict__ sinks) {
   UNREACHABLE_CODE
 }
 // clang-format on
@@ -3251,7 +3371,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
           max_num_blocks_per_seq, alibi_slopes_ptr, q_stride, kv_block_stride, \
           kv_head_stride, k_dim_stride, k_token_stride, k_x_stride,            \
           v_dim_stride, v_token_stride, exp_sums_ptr, max_logits_ptr,          \
-          tmp_out_ptr, out_ptr, max_ctx_blocks, k_scale_ptr, v_scale_ptr);
+          tmp_out_ptr, out_ptr, max_ctx_blocks, k_scale_ptr, v_scale_ptr,      \
+          window, logits_soft_cap);
 
 #define LAUNCH_CUSTOM_ATTENTION_MFMA4(GQA_RATIO)                               \
   paged_attention_ll4mi_QKV_mfma4_kernel<T, KVT, KV_DTYPE, OUTT, BLOCK_SIZE,   \
@@ -3263,14 +3384,16 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
           max_num_blocks_per_seq, alibi_slopes_ptr, q_stride, kv_block_stride, \
           kv_head_stride, k_dim_stride, k_token_stride, k_x_stride,            \
           v_dim_stride, v_token_stride, exp_sums_ptr, max_logits_ptr,          \
-          tmp_out_ptr, out_ptr, max_ctx_blocks, k_scale_ptr, v_scale_ptr);
+          tmp_out_ptr, out_ptr, max_ctx_blocks, k_scale_ptr, v_scale_ptr,      \
+          window, logits_soft_cap);
 
 #define LAUNCH_CUSTOM_REDUCTION(NPAR_LOOPS)                                 \
   paged_attention_ll4mi_reduce_kernel<T, OUTT, HEAD_SIZE, HEAD_SIZE,        \
                                       PARTITION_SIZE, NPAR_LOOPS>           \
       <<<reduce_grid, reduce_block, 0, stream>>>(                           \
           out_ptr, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, seq_lens_ptr, \
-          query_start_loc_ptr, max_num_partitions, fp8_out_scale_ptr);
+          query_start_loc_ptr, max_num_partitions, fp8_out_scale_ptr,      \
+          sinks_ptr);
 
 template <typename T, typename KVT, vllm::Fp8KVCacheDataType KV_DTYPE,
           int BLOCK_SIZE, int HEAD_SIZE, typename OUTT, int PARTITION_SIZE_OLD,
@@ -3282,7 +3405,9 @@ void paged_attention_custom_launcher(
     torch::Tensor& block_tables, torch::Tensor& seq_lens,
     const std::optional<torch::Tensor>& query_start_loc, int max_seq_len,
     const std::optional<torch::Tensor>& alibi_slopes, torch::Tensor& k_scale,
-    torch::Tensor& v_scale, const std::optional<torch::Tensor>& fp8_out_scale) {
+    torch::Tensor& v_scale, const std::optional<torch::Tensor>& fp8_out_scale,
+    const std::optional<torch::Tensor>& sinks, int sliding_window,
+    float logits_soft_cap) {
   int num_seqs = block_tables.size(0);
   int num_heads = query.size(1);
   int head_size = query.size(2);
@@ -3308,6 +3433,11 @@ void paged_attention_custom_launcher(
       alibi_slopes
           ? reinterpret_cast<const float*>(alibi_slopes.value().data_ptr())
           : nullptr;
+
+  const float* sinks_ptr =  // optional, one fp32 logit per query head
+      sinks ? reinterpret_cast<const float*>(sinks.value().data_ptr())
+            : nullptr;
+  const int window = sliding_window;  // raw width W; <= 0 disables
 
   float* exp_sums_ptr = reinterpret_cast<float*>(exp_sums.data_ptr());
   float* max_logits_ptr = reinterpret_cast<float*>(max_logits.data_ptr());
@@ -3443,7 +3573,8 @@ void paged_attention_custom_launcher_navi(
     torch::Tensor& block_tables, torch::Tensor& seq_lens,
     const std::optional<torch::Tensor>& query_start_loc, int max_seq_len,
     const std::optional<torch::Tensor>& alibi_slopes, torch::Tensor& k_scale,
-    torch::Tensor& v_scale) {
+    torch::Tensor& v_scale, const std::optional<torch::Tensor>& sinks,
+    int sliding_window, float logits_soft_cap) {
   int num_seqs = block_tables.size(0);
   int num_heads = query.size(1);
   int head_size = query.size(2);
@@ -3466,6 +3597,11 @@ void paged_attention_custom_launcher_navi(
 
   // NOTE: Navi does not support alibi_slopes.
   const float* alibi_slopes_ptr = nullptr;
+
+  const float* sinks_ptr =  // optional, one fp32 logit per query head
+      sinks ? reinterpret_cast<const float*>(sinks.value().data_ptr())
+            : nullptr;
+  const int window = sliding_window;  // raw width W; <= 0 disables
 
   float* exp_sums_ptr = reinterpret_cast<float*>(exp_sums.data_ptr());
   float* max_logits_ptr = reinterpret_cast<float*>(max_logits.data_ptr());
@@ -3618,14 +3754,18 @@ void paged_attention_custom_launcher_navi(
                                     OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE>( \
         out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,  \
         num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
-        max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);        \
+        max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale, sinks,  \
+        static_cast<int>(sliding_window),                                  \
+        static_cast<float>(logits_soft_cap));                              \
   } else {                                                                  \
     paged_attention_custom_launcher_navi<T, KVT, KV_DTYPE, BLK_SIZE,        \
                                          HEAD_SIZE, OUTT, PSIZE,            \
                                          ALIBI_ENABLED, MFMA_TYPE>(         \
         out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,  \
         num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
-        max_seq_len, alibi_slopes, k_scale, v_scale);                       \
+        max_seq_len, alibi_slopes, k_scale, v_scale, sinks,                 \
+        static_cast<int>(sliding_window),                                  \
+        static_cast<float>(logits_soft_cap));                              \
   }
 
 #define CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,    \
@@ -3722,7 +3862,10 @@ void paged_attention(
     const std::string& kv_cache_dtype, torch::Tensor& k_scale,
     torch::Tensor& v_scale,
     const std::optional<torch::Tensor>& fp8_out_scale,
-    const std::string& mfma_type) {
+    const std::string& mfma_type,
+    const std::optional<torch::Tensor>& sinks, // [num_heads]
+    int64_t sliding_window,
+    double logits_soft_cap) {
   // clang-format on
   bool is_navi = is_navi_gpu();
   const int head_size = query.size(2);
