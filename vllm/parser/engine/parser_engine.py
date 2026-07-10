@@ -281,13 +281,16 @@ class ParserEngine(Parser):
     def _safe_arg_prefix(json_str: str, string_keys: set[str] | None = None) -> str:
         """Return the prefix of *json_str* up to the last top-level value.
 
-        Middle values (followed by a comma) are stable across streaming
-        ticks and included.  The trailing value is excluded for non-string
-        values because type coercion may change its serialised form between
-        ticks, which would violate the ``startswith(prev)`` prefix invariant.
-        String values for keys in ``string_keys`` are prefix-stable, so stream
-        their unterminated content instead of buffering long arguments until
-        the closing tag arrives.
+        The trailing value is excluded for non-string keys because type
+        coercion may change its serialised form, which would violate the
+        ``startswith(prev)`` prefix invariant.  String values for keys in
+        ``string_keys`` are prefix-stable, so their unterminated content is
+        streamed incrementally.
+
+        Middle (comma-terminated) values for non-string keys are also excluded
+        for the same coercion reason: the prefix is clipped at the start of the
+        first non-string-typed value so that ``_fix_arg_types`` at flush time
+        never rewrites anything already sent to the client.
         """
         last_colon = -1
         last_key: str | None = None
@@ -296,6 +299,9 @@ class ParserEngine(Parser):
         escape = False
         string_start = -1
         depth = 0
+        # Index of the first non-string-typed value start; -1 if none seen yet.
+        non_string_clip: int = -1
+
         for i, c in enumerate(json_str):
             if escape:
                 escape = False
@@ -319,8 +325,24 @@ class ParserEngine(Parser):
                 last_colon = i
                 last_key = pending_key
                 pending_key = None
+                if string_keys is not None and last_key not in string_keys:
+                    # Record where this key's value starts; clip here so the
+                    # value is never partially sent before flush-time coercion.
+                    val_start = i + 1
+                    while val_start < len(json_str) and json_str[val_start] in (
+                        " ", "\t", "\n", "\r"
+                    ):
+                        val_start += 1
+                    if non_string_clip < 0:
+                        non_string_clip = val_start
+
         if last_colon < 0:
             return ""
+
+        # If a non-string-typed key's value has started, clip before it.
+        if non_string_clip >= 0:
+            return json_str[:non_string_clip]
+
         end = last_colon + 1
         while end < len(json_str) and json_str[end] in (" ", "\t", "\n", "\r"):
             end += 1
