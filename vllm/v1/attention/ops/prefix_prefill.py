@@ -67,9 +67,9 @@ def _paged_kv_cache_offsets(
     Returns `(off_k, off_v)` with shapes [D, N] and [N, D] respectively.
     """
     bn_logical = token_indices // PHYSICAL_BLOCK_SIZE
-    bn = tl.load(
-        B_Loc + cur_batch * stride_b_loc_b + bn_logical * stride_b_loc_s
-    ).to(tl.int64)
+    bn = tl.load(B_Loc + cur_batch * stride_b_loc_b + bn_logical * stride_b_loc_s).to(
+        tl.int64
+    )
     internal = token_indices % PHYSICAL_BLOCK_SIZE
     off_k = (
         bn[None, :] * stride_k_cache_bs
