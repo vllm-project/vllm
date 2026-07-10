@@ -4,9 +4,6 @@
 #
 # Build the macOS arm64 CPU wheel natively on a macOS agent (the `macmini`
 # queue) into artifacts/dist/ for upload-nightly-wheels.sh.
-#
-# Agent prerequisites (see vllm-project/ci-infra): Xcode command line tools,
-# git, uv, protobuf, and aws CLI + credentials for the S3 upload.
 
 set -euo pipefail
 
