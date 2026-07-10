@@ -727,6 +727,7 @@ class SparseAttnIndexerKpool(CustomOp):
                 gate_score=gate_score,
                 compress_ape=compress_ape,
                 index_kpool=index_kpool,
+                positions=positions,
             )
         elif current_platform.is_rocm():
             return self.forward_hip(hidden_states, q_quant, k, weights)
