@@ -308,6 +308,43 @@ def test_int4_embedding_lookup_full_nibble_range():
     torch.testing.assert_close(got, expected, atol=1e-2, rtol=1e-2)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="int4 embedding kernels require CUDA",
+)
+def test_int4_per_channel_weight_only_online_quantization(
+    vllm_runner,
+    monkeypatch,
+) -> None:
+    """End-to-end smoke: load a local Qwen3-0.6B checkpoint with
+    `quantization='int4_per_channel_weight_only'`, check the token embedding is
+    wrapped by `Int4PerChannelEmbeddingMethod`, its weights are packed uint8 with
+    per-channel scales, and a short greedy generation works.
+    """
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
+
+    local_model = "/root/.cache/modelscope/models/Qwen--Qwen3-0.6B/snapshots/master"
+
+    with vllm_runner(
+        local_model,
+        quantization="int4_per_channel_weight_only",
+        enforce_eager=True,
+    ) as llm:
+
+        def check_model(model):
+            embed = model.model.embed_tokens
+            assert isinstance(embed.quant_method, Int4PerChannelEmbeddingMethod)
+            assert embed.weight.dtype == torch.uint8
+            assert embed.weight_scale.ndim == 2
+            assert embed.weight_scale.shape[-1] == embed.weight.shape[1] * 2
+
+        llm.apply_model(check_model)
+        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
+        print(outputs[0][1])
+
+
 if __name__ == "__main__":
     # Run basic tests
     test_int4_quantization_accuracy(1000, 256, torch.float32)
