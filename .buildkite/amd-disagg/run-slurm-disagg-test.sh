@@ -59,7 +59,7 @@ MORIIO_READ_MODE="${MORIIO_READ_MODE:-0}"
 WAIT="${WAIT:-0}"
 
 # Front door: toy (in-container proxy, default) | vllm-router (external container).
-ROUTER_TYPE="${ROUTER_TYPE:-toy}"
+ROUTER_TYPE="${ROUTER_TYPE:-vllm-router}"
 ROUTER_PORT="${ROUTER_PORT:-30000}"
 VLLM_ROUTER_IMAGE="${VLLM_ROUTER_IMAGE:-vllm/vllm-router:nightly}"
 # Dry-run only validates wiring; cap its walltime low so it never holds the queue.
