@@ -535,6 +535,11 @@ class NixlBaseConnectorWorker:
         # Enable different block lengths for different layers *only* when MLA is used.
         # This is not used for SSM layers, which use the counterpart `mamba_ssm_size`.
         self.block_len_per_layer = list[int]()
+        # Physical byte stride between consecutive blocks per region.
+        self.block_stride_per_layer = list[int]()
+        self.spec_per_region: list = []
+        # True when all layers share one packed backing (DSv4-style).
+        self._is_packed_kv = False
 
         # Per-engine TP mappings. Generated during handshake.
         self.tp_mappings: dict[EngineId, TPMapping] = {}
@@ -983,6 +988,10 @@ class NixlBaseConnectorWorker:
         caches_data = [(base_addr, total_size, self.device_id, "")]
 
         self.block_len_per_layer = [block_stride]
+        self.block_stride_per_layer = [block_stride]
+        self.spec_per_region = []
+        self._region_is_mla = [self.use_mla]
+        self._is_packed_kv = True
         self.num_regions = 1
         self.num_descs = self.num_blocks
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = [base_addr]
@@ -1006,6 +1015,7 @@ class NixlBaseConnectorWorker:
             ),
             num_blocks=self.num_blocks,
             block_lens=self.block_len_per_layer,
+            block_strides=self.block_stride_per_layer,
             kv_cache_layout=self.kv_cache_layout,
             block_size=self.block_size,
             ssm_sizes=self._mamba_ssm_size,
@@ -1020,6 +1030,12 @@ class NixlBaseConnectorWorker:
             compatibility_hash=self.compat_hash,
             agent_metadata_bytes=encoder.encode(agent_metadata),
         )
+
+    def _on_kv_caches_registered(self) -> None:
+        """Hook called after NIXL memory regions are registered but before
+        local descriptors are built.  No-op in the base class; multiview
+        overrides this to build DescriptorViews."""
+        pass
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
@@ -1151,13 +1167,17 @@ class NixlBaseConnectorWorker:
                     "Registering layer %s with cache shape: %s", layer_name, cache.shape
                 )
                 seen_base_addresses.append(base_addr)
-                # Only record non-Mamba page sizes.
                 if isinstance(layer_spec, MambaSpec):
                     self.block_len_per_layer.append(
                         physical_page_size // self._physical_blocks_per_logical_kv_block
                     )
+                    self.block_stride_per_layer.append(self.block_len_per_layer[-1])
                 else:
                     self.block_len_per_layer.append(physical_page_size)
+                    self.block_stride_per_layer.append(
+                        cache.stride(0) * cache.element_size()
+                    )
+                self.spec_per_region.append(layer_spec)
                 is_mla_region = isinstance(
                     layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
                 )
@@ -1201,6 +1221,8 @@ class NixlBaseConnectorWorker:
         )
         assert (
             len(self.block_len_per_layer)
+            == len(self.block_stride_per_layer)
+            == len(self.spec_per_region)
             == len(seen_base_addresses)
             == len(self._region_is_mla)
         )
@@ -1229,6 +1251,8 @@ class NixlBaseConnectorWorker:
         self.device_kv_caches = kv_caches
         self.dst_num_blocks[self.engine_id] = self.num_blocks
 
+        self._on_kv_caches_registered()
+
         if self._has_mamba:
             logger.info(
                 "Hybrid SSM registration: num_blocks=%s, "
@@ -1256,7 +1280,7 @@ class NixlBaseConnectorWorker:
             kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id][self.tp_rank],
             num_blocks=self.num_blocks,
             block_lens=self.block_len_per_layer,
-            block_strides=self.block_len_per_layer,
+            block_strides=self.block_stride_per_layer,
             kv_cache_layout=self.kv_cache_layout
             if not self.use_host_buffer
             else self.host_buffer_kv_cache_layout,

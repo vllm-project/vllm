@@ -39,8 +39,8 @@ import msgspec
 import numpy as np
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
-    NixlBaseConnectorWorker,
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker_multiview import (
+    NixlBaseConnectorWorkerMultiview as NixlBaseConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
