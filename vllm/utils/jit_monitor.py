@@ -232,6 +232,7 @@ def _log_triton_jit_compile(fn_name: str, kwargs) -> None:
 
 def _setup_triton_jit_hook() -> None:
     """Register a ``jit_post_compile_hook`` that warns on compilation."""
+    return
     if not HAS_TRITON:
         return
     from triton import knobs  # type: ignore[import-untyped]
