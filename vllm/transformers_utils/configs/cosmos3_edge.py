@@ -8,75 +8,43 @@ from .nemotron_h import NemotronHConfig
 
 
 def _normalize_mrope_parameters(config: NemotronHConfig) -> None:
-    """Expose legacy mRoPE fields in vLLM's canonical configuration.
-
-    Transformers 4.x can leave ``rope_parameters`` unset, while 5.x creates a
-    partial dictionary. vLLM's model runner detects 3-axis position tracking
-    from ``mrope_section`` in this dictionary, so normalize it during loading.
-    """
+    """Normalize the checkpoint's mRoPE configuration for vLLM."""
     rope_parameters = dict(getattr(config, "rope_parameters", None) or {})
     mrope_section = rope_parameters.get("mrope_section")
-    if mrope_section is None and getattr(config, "enable_mrope", False):
-        mrope_section = getattr(config, "mrope_section", None)
     if mrope_section is None:
         return
 
-    rope_parameters.setdefault("rope_type", "default")
-    rope_parameters.setdefault("rope_theta", config.rope_theta)
     rope_parameters["mrope_section"] = list(mrope_section)
     rope_parameters.setdefault("mrope_interleaved", True)
     config.rope_parameters = rope_parameters
 
 
 class Cosmos3EdgeTextConfig(NemotronHConfig):
-    """Dense Cosmos3 Edge text config backed by Nemotron-H layers.
-
-    Native Cosmos3 Edge checkpoints describe each layer with
-    ``layers_block_type``. The inherited Nemotron-H implementation expects the
-    equivalent compact ``hybrid_override_pattern`` instead.
-    """
+    """Dense Cosmos3 Edge text config backed by Nemotron-H layers."""
 
     model_type = "cosmos3_edge_text"
     has_no_defaults_at_init = True
 
     def __init__(
         self,
-        layers_block_type: list[str] | None = None,
-        num_hidden_layers: int = 56,
+        num_hidden_layers: int = 28,
+        hidden_act: str = "relu2",
+        rms_norm_eps: float = 1e-5,
         **kwargs,
     ) -> None:
-        if layers_block_type is None:
-            raise ValueError("Cosmos3 Edge text config requires layers_block_type.")
-
-        if len(layers_block_type) != num_hidden_layers:
-            raise ValueError(
-                "layers_block_type must contain one entry per layer: "
-                f"expected {num_hidden_layers}, got {len(layers_block_type)}"
-            )
-
-        layer_type_map = {"full_attention": "*", "mlp": "-"}
-        try:
-            native_pattern = "".join(
-                layer_type_map[layer_type] for layer_type in layers_block_type
-            )
-        except KeyError as exc:
-            raise ValueError(
-                "Cosmos3 Edge only supports full_attention and mlp "
-                f"layers, but found {exc.args[0]!r}."
-            ) from exc
-
         super().__init__(
-            num_hidden_layers=num_hidden_layers,
-            hybrid_override_pattern=native_pattern,
+            num_hidden_layers=2 * num_hidden_layers,
+            hybrid_override_pattern="*-" * num_hidden_layers,
+            mlp_hidden_act=hidden_act,
+            layer_norm_epsilon=rms_norm_eps,
             **kwargs,
         )
 
     def to_dict(self) -> dict:
         config_dict = super().to_dict()
-        config_dict["layers_block_type"] = [
-            "full_attention" if layer_type == "attention" else layer_type
-            for layer_type in self.layers_block_type
-        ]
+        config_dict["num_hidden_layers"] = self.num_hidden_layers // 2
+        config_dict["hidden_act"] = config_dict.pop("mlp_hidden_act")
+        config_dict["rms_norm_eps"] = config_dict.pop("layer_norm_epsilon")
         config_dict.pop("hybrid_override_pattern", None)
         return config_dict
 
