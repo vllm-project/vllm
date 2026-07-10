@@ -19,6 +19,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     StreamOptions,
     StructuralTagResponseFormat,
     UsageInfo,
+    VLLMXArgs,
     validate_structural_tag_response_format,
     validate_structured_outputs_structural_tag,
 )
@@ -186,10 +187,10 @@ class CompletionRequest(OpenAIBaseModel):
         description="KVTransfer parameters used for disaggregated serving.",
     )
 
-    vllm_xargs: dict[str, str | int | float] | None = Field(
+    vllm_xargs: VLLMXArgs | None = Field(
         default=None,
         description=(
-            "Additional request parameters with string or "
+            "Additional request parameters with (list of) string or "
             "numeric values, used by custom extensions."
         ),
     )
