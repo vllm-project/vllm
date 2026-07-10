@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from typing_extensions import override
 
@@ -26,6 +26,7 @@ from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
+    ScheduleEndContext,
     SecondaryTierManager,
 )
 from vllm.v1.kv_offload.tiering.p2p.control import ControlTransport, ZmqTransport
@@ -114,7 +115,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         port: int = 7777,
         backends: list[str] | None = None,
         num_threads: int = 4,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         """Initialize the P2P secondary tier manager.
 
@@ -426,7 +427,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             time.sleep(_DRAIN_SLEEP_S)
 
     @override
-    def on_schedule_end(self) -> None:
+    def on_schedule_end(self, context: ScheduleEndContext) -> None:
         return
 
     # ------------------------------------------------------------------

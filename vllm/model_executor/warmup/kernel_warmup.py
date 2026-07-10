@@ -12,6 +12,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
     deepseek_v4_mhc_warmup,
@@ -125,6 +126,9 @@ def kernel_warmup(worker: "Worker"):
             create_mixed_batch=True,
         )
 
+    if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
+        cutedsl_warmup()
+
 
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     """
@@ -144,15 +148,8 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
 
     use_persistent_cache = True
 
-    deepep_a2a_backends = {
-        "deepep_high_throughput",
-        "deepep_low_latency",
-        "deepep_v2",
-    }
-    if runner.vllm_config.parallel_config.all2all_backend in deepep_a2a_backends:
-        # DeepEP dispatch/combine can timeout when only rank 0
-        # performs autotune and falls behind other ranks.
-        # Thus we skip persistent cache in this case.
+    # When distributed, tune on every rank so the collectives stay synchronized.
+    if get_world_group().world_size > 1:
         use_persistent_cache = False
 
     if not use_persistent_cache:

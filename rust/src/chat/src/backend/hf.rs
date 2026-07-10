@@ -10,7 +10,7 @@ use crate::backend::{
     NewChatOutputProcessorOptions,
 };
 use crate::error::Result;
-use crate::multimodal::MultimodalModelInfo;
+use crate::multimodal::{MultimodalConfigFiles, MultimodalModelInfo};
 use crate::output::{
     DefaultChatOutputProcessor, HarmonyChatOutputProcessor, validate_harmony_parser_overrides,
 };
@@ -46,8 +46,12 @@ impl HfChatBackend {
             MultimodalModelInfo::from_paths(
                 model_id.clone(),
                 (!model_type.is_empty()).then_some(model_type.to_string()),
-                files.config_path.as_deref(),
-                files.preprocessor_config_path.as_deref(),
+                MultimodalConfigFiles {
+                    config: files.config_path.as_deref(),
+                    preprocessor_config: files.preprocessor_config_path.as_deref(),
+                    video_preprocessor_config: files.video_preprocessor_config_path.as_deref(),
+                    processor_config: files.processor_config_path.as_deref(),
+                },
                 tokenizer.clone(),
             )?
         };
@@ -139,8 +143,11 @@ pub(super) async fn load_model_backends(
 fn resolve_multimodal_render_info(
     info: Option<&MultimodalModelInfo>,
 ) -> Option<MultimodalRenderInfo> {
+    use llm_multimodal::Modality;
+
     info.map(|info| MultimodalRenderInfo {
-        placeholder_token: info.placeholder_token().to_string(),
+        image_token: info.placeholder_token(Modality::Image).map(str::to_string),
+        video_token: info.placeholder_token(Modality::Video).map(str::to_string),
     })
 }
 
@@ -154,7 +161,8 @@ mod tests {
     use thiserror_ext::AsReport as _;
     use vllm_text::Prompt;
     use vllm_text::backend::hf::TokenizerSource;
-    use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
+    use vllm_text::tokenizer::DynTokenizer;
+    use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::HfChatBackend;
     use crate::backend::{ChatBackend, LoadModelBackendsOptions, NewChatOutputProcessorOptions};
@@ -191,37 +199,15 @@ mod tests {
             tokenizer_config_path: Some(tokenizer_config_path),
             generation_config_path: None,
             preprocessor_config_path: None,
+            video_preprocessor_config_path: None,
+            processor_config_path: None,
             chat_template_path: None,
             config_path: Some(config_path),
         }
     }
 
-    struct TestTokenizer;
-
-    impl Tokenizer for TestTokenizer {
-        fn encode(
-            &self,
-            _text: &str,
-            _add_special_tokens: bool,
-        ) -> vllm_text::tokenizer::Result<Vec<u32>> {
-            Ok(Vec::new())
-        }
-
-        fn decode(
-            &self,
-            _token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> vllm_text::tokenizer::Result<String> {
-            Ok(String::new())
-        }
-
-        fn token_to_id(&self, _token: &str) -> Option<u32> {
-            None
-        }
-    }
-
     fn test_tokenizer() -> DynTokenizer {
-        Arc::new(TestTokenizer)
+        Arc::new(TestTokenizer::new())
     }
 
     fn backend_for_selection(
@@ -326,7 +312,7 @@ mod tests {
             .unwrap()
             .join("preprocessor_config.json");
         write_json(&preprocessor_config_path, r#"{"size":[672,672]}"#);
-        files.preprocessor_config_path = Some(preprocessor_config_path);
+        files.preprocessor_config_path = Some(preprocessor_config_path.clone());
 
         let backend = HfChatBackend::from_resolved_model_files(
             files.clone(),
@@ -343,6 +329,9 @@ mod tests {
         .unwrap();
 
         assert!(backend.multimodal_model_info().is_none());
+
+        let invalid_preprocessor_config = r#"{"size":[672,672]"#;
+        write_json(&preprocessor_config_path, invalid_preprocessor_config);
 
         let error = HfChatBackend::from_resolved_model_files(
             files,
