@@ -686,8 +686,20 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
+                    # Per-group cache hit logic only applies to NIXL/PD
+                    # connectors. Offloading connectors have different
+                    # cache semantics (#46453, #48195).
+                    offloading = (
+                        self.vllm_config.kv_transfer_config is not None
+                        and self.vllm_config.kv_transfer_config.kv_connector
+                        is not None
+                        and "Offloading" in type(
+                            self.vllm_config.kv_transfer_config.kv_connector
+                        ).__name__
+                    )
                     if (
                         self.connector is not None
+                        and not offloading
                         and self.has_mamba_layers
                         and isinstance(
                             self.kv_cache_manager.coordinator,
@@ -703,33 +715,11 @@ class Scheduler(SchedulerInterface):
                         new_computed_blocks = (
                             self.kv_cache_manager.create_kv_cache_blocks(computed)
                         )
-                        # NOTE(ZhanqiuHu): For Mamba hybrid models,
-                        # num_new_local_computed_tokens should be the FA hit
-                        # length. This value is passed to the connector's
-                        # get_num_new_matched_tokens which computes:
-                        # external = total - local_computed.
-                        # Using the FA hit skips re-transferring FA blocks
-                        # already cached on D-side. The Mamba state (always
-                        # the last block) is transferred unconditionally by
-                        # _apply_prefix_caching in nixl/worker.py.
-                        # NOTE: FA group is always first (sorted in
-                        # coordinator L593-594). For offloading connectors,
-                        # DRAM may contain no live cache, so we must use the
-                        # FA hit as the safe boundary (#46453). For NIXL/PD,
-                        # max() is correct: Mamba state is transferred
-                        # unconditionally by _apply_prefix_caching.
-                        use_fa_boundary = (
-                            self.vllm_config.kv_transfer_config is not None
-                            and self.vllm_config.kv_transfer_config.kv_connector
-                            is not None
-                            and "Offloading" in type(
-                                self.vllm_config.kv_transfer_config.kv_connector
-                            ).__name__
-                        )
-                        if use_fa_boundary:
-                            num_new_local_computed_tokens = per_group_hits[0]
-                        else:
-                            num_new_local_computed_tokens = max(per_group_hits)
+                        # NOTE(ZhanqiuHu): For Mamba hybrid models with
+                        # NIXL/PD connectors: Mamba state (always the last
+                        # block) is transferred unconditionally by
+                        # _apply_prefix_caching, so max() is safe.
+                        num_new_local_computed_tokens = max(per_group_hits)
                         if self.kv_cache_manager.log_stats:
                             assert self.kv_cache_manager.prefix_cache_stats is not None
                             self.kv_cache_manager.prefix_cache_stats.record(
