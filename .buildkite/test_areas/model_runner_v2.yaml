@@ -5,7 +5,7 @@ steps:
 - label: Model Runner V2 Core Tests
   device: h200_35gb
   key: model-runner-v2-core-tests
-  timeout_in_minutes: 45
+  timeout_in_minutes: 35
   source_file_dependencies:
   - vllm/v1/worker/gpu/
   - vllm/v1/worker/gpu_worker.py
@@ -27,7 +27,7 @@ steps:
 - label: Model Runner V2 Examples
   device: h200_35gb
   key: model-runner-v2-examples
-  timeout_in_minutes: 45
+  timeout_in_minutes: 35
   working_dir: "/vllm-workspace/examples"
   source_file_dependencies:
     - vllm/v1/worker/gpu/
@@ -63,7 +63,7 @@ steps:
 
 - label: Model Runner V2 Distributed (2 GPUs)
   key: model-runner-v2-distributed-2-gpus
-  timeout_in_minutes: 45
+  timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
   source_file_dependencies:
@@ -84,7 +84,7 @@ steps:
 
 - label: Model Runner V2 Pipeline Parallelism (4 GPUs)
   key: model-runner-v2-pipeline-parallelism-4-gpus
-  timeout_in_minutes: 60
+  timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
   source_file_dependencies:
