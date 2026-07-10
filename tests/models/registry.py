@@ -799,9 +799,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Cosmos3ForConditionalGeneration": _HfExamplesInfo(
         "nvidia/Cosmos3-Nano",
+        extras={"super": "nvidia/Cosmos3-Super"},
         max_model_len=4096,
         min_transformers_version="4.57",
-        is_available_online=False,
     ),
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/deepseek-vl2-tiny",
@@ -1403,7 +1403,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     # ),
     # [DFlash]
     "DFlashDraftModel": _HfExamplesInfo(
-        "Qwen/Qwen3.5-4B",
+        "Qwen/Qwen3-4B",
         speculative_model="z-lab/Qwen3-4B-DFlash-b16",
         use_original_num_layers=True,  # Need all layers since DFlash has >1 layer,
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env

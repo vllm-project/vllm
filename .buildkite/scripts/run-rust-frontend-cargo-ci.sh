@@ -168,8 +168,8 @@ run_style_clippy() {
   log_section "Checking Rust dependency bans"
   cargo deny \
     --manifest-path rust/Cargo.toml \
-    check \
     --config rust/deny.toml \
+    check \
     bans
 
   log_section "Running clippy"

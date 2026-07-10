@@ -2493,7 +2493,11 @@ class EngineArgs:
         self, model_config: ModelConfig
     ) -> None:
         default_chunked_prefill = model_config.is_chunked_prefill_supported
-        default_prefix_caching = model_config.is_prefix_caching_supported
+        # Hybrid models support prefix caching but keep it opt-in for now
+        # while the feature matures.
+        default_prefix_caching = (
+            model_config.is_prefix_caching_supported and not model_config.is_hybrid
+        )
 
         if self.enable_chunked_prefill is None:
             self.enable_chunked_prefill = default_chunked_prefill
