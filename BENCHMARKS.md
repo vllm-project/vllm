@@ -52,7 +52,8 @@ contain no SpecDecoding metrics. Two post-fix logs survived:
 | Model | Acceptance | Mean acceptance length | Drafted tokens | Workload |
 |---|---|---|---|---|
 | AWQ BF16-INT4 | 58.0 % | 2.74 | 29,829 | full benchmark suite (prose/code/prefill/multiturn) |
-| FP8 AEON | 41.5 % | 2.24 | 3,162 | 2× prose (t=0.8) + 2× code (t=0.6), 800 tok each |
+| FP8 AEON — prose | ~32 % | ~1.98 | 2,226 | 2× prose, temp 0.8, 800 tok each |
+| FP8 AEON — code | ~64 % | ~2.93 | 1,782 | 2× code, temp 0.6, 800 tok each |
 | GGUF Q6_K | 98.1 % | 3.94 | 3,999 | short interactive session (small sample, not comparable) |
 
 ### FP8 AEON — serving config quick check (2026-07-10)
