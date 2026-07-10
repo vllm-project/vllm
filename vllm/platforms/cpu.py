@@ -50,7 +50,7 @@ class CpuPlatform(Platform):
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
         if self.get_cpu_architecture() == CpuArchEnum.POWERPC:
-            return [torch.bfloat16, torch.float32]
+            return [torch.bfloat16, torch.float32, torch.float16]
         elif self.get_cpu_architecture() == CpuArchEnum.ARM and sys.platform.startswith(
             "darwin"
         ):
@@ -149,22 +149,8 @@ class CpuPlatform(Platform):
             parallel_config.worker_cls = "vllm.v1.worker.cpu_worker.CPUWorker"
         # Disable DBO
         if parallel_config.enable_dbo:
-            logger.warning("Dual-Batch Overlap is not supported on CPU, disabled.")
+            logger.warning_once("Dual-Batch Overlap is not supported on CPU, disabled.")
             parallel_config.enable_dbo = False
-
-        if torch.cpu._is_amx_tile_supported() and (
-            model_config is not None
-            and model_config.get_num_layers_by_block_type(
-                parallel_config, "linear_attention"
-            )
-            > 0
-        ):
-            cache_config.enable_prefix_caching = False
-            scheduler_config.enable_chunked_prefill = False
-            logger.warning(
-                "Disabled unsupported prefix caching and chunked prefill "
-                "for linear attention on AMX CPU platforms."
-            )
 
         # Note: workaround for v1 gpu_model_runner
         from vllm.config import CompilationMode
@@ -207,6 +193,18 @@ class CpuPlatform(Platform):
             and "-gelu" not in compilation_config.custom_ops
         ):
             compilation_config.custom_ops.append("+gelu")
+        if (
+            cls.get_cpu_architecture() == CpuArchEnum.ARM
+            and "+gelu_tanh" not in compilation_config.custom_ops
+            and "-gelu_tanh" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+gelu_tanh")
+        if (
+            cls.get_cpu_architecture() == CpuArchEnum.ARM
+            and "+gelu_and_mul" not in compilation_config.custom_ops
+            and "-gelu_and_mul" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+gelu_and_mul")
 
         vllm_config.profiler_config.torch_profiler_dump_cuda_time_total = False
 
@@ -304,7 +302,7 @@ class CpuPlatform(Platform):
         )
 
         if model_config is not None and model_config.use_mla:
-            logger.info(
+            logger.info_once(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled."
             )
@@ -409,6 +407,10 @@ class CpuPlatform(Platform):
         return True
 
     @classmethod
+    def num_compute_units(cls, device_id: int = 0) -> int:
+        return torch.get_num_threads()
+
+    @classmethod
     def import_kernels(cls) -> None:
         if Platform.get_cpu_architecture() in (CpuArchEnum.X86,):
             # Note: The lib name is _C_AVX2/AVX512, but the module name is _C.
@@ -422,13 +424,13 @@ class CpuPlatform(Platform):
                     try:
                         import vllm._C  # noqa: F401
                     except ImportError as e:
-                        logger.warning("Failed to import from vllm._C: %r", e)
+                        logger.warning_once("Failed to import from vllm._C: %r", e)
                 else:
                     try:
                         import vllm._C_AVX512  # noqa: F401
                     except ImportError as e:
                         if ignored_msg not in e.msg:
-                            logger.warning(
+                            logger.warning_once(
                                 "Failed to import from vllm._C_AVX512: %r", e
                             )
             else:
@@ -436,12 +438,12 @@ class CpuPlatform(Platform):
                     import vllm._C_AVX2  # noqa: F401
                 except ImportError as e:
                     if ignored_msg not in e.msg:
-                        logger.warning("Failed to import from vllm._C_AVX2: %r", e)
+                        logger.warning_once("Failed to import from vllm._C_AVX2: %r", e)
         else:
             try:
                 import vllm._C  # noqa: F401
             except ImportError as e:
-                logger.warning("Failed to import from vllm._C: %r", e)
+                logger.warning_once("Failed to import from vllm._C: %r", e)
 
     @classmethod
     def pack_kv_cache(

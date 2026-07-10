@@ -24,15 +24,17 @@
 """Inference-only GLM-4.5, GLM-4.6, GLM-4.7 MTP
 model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable
+import typing
+from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    MoERunner,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -195,13 +197,11 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-        self.expert_weights = []
-
         # Set MoE hyperparameters
         self.num_moe_layers = self.config.num_nextn_predict_layers
         self.num_expert_groups = self.config.n_group
 
-        self.moe_layers: list[FusedMoE] = []
+        self.moe_layers: list[MoERunner] = []
         self.moe_mlp_layers: list[Glm4MoE] = []
         example_moe = None
         for layer in self.model.layers.values():
@@ -239,6 +239,10 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
         return self.model.compute_logits(hidden_states, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # FSE weight loading mirrors glm4_moe.py / deepseek_mtp.py.
+        rocm_aiter_moe_shared_expert_enabled = (
+            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        )
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -250,12 +254,15 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
+        num_experts = self.config.n_routed_experts
+        if rocm_aiter_moe_shared_expert_enabled and self.config.n_shared_experts:
+            num_experts += self.config.n_shared_experts
         expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts,
+            num_experts=num_experts,
         )
 
         params_dict = dict(self.named_parameters())
@@ -271,6 +278,11 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
                 if spec_layer is None:
                     continue
                 name = self._rewrite_spec_layer_name(spec_layer, name)
+
+            is_fusion_moe_shared_experts_layer = (
+                rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
+            )
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
@@ -283,6 +295,8 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
                 # for mlp.experts[0].gate_gate_up_proj, which breaks load.
                 if ("mlp.experts." in name) and name not in params_dict:
                     continue
+                if is_fusion_moe_shared_experts_layer:
+                    continue
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
@@ -293,47 +307,105 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
-                    if weight_name not in name:
-                        continue
-                    name = name.replace(weight_name, param_name)
-
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
+                # FSE: split a widened mlp.shared_experts tensor into
+                # n_shared_experts chunks; see deepseek_v2.py for details.
+                num_chunks = 1
+                split_dim = 0
+                chunk_size = 0
+                if is_fusion_moe_shared_experts_layer:
+                    num_chunks = getattr(self.config, "n_shared_experts", 1) or 1
+                    split_dim = (
+                        1
+                        if ("down_proj.weight" in name and loaded_weight.ndim > 1)
+                        else 0
                     )
-                    break
-                else:
-                    # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    # Some checkpoints include weight scale tensors for the
-                    # LM head even when the quantized head isn't built. Skip
-                    # them if the model does not expose a matching parameter
-                    # to avoid KeyError during load.
-                    if name.endswith(".weight_scale") and name not in params_dict:
-                        continue
+                    total = loaded_weight.shape[split_dim]
+                    if total % num_chunks != 0:
+                        raise ValueError(
+                            f"FSE shared-expert weight {name} has dim "
+                            f"{total} along axis {split_dim} which is "
+                            f"not divisible by "
+                            f"n_shared_experts={num_chunks}."
+                        )
+                    chunk_size = total // num_chunks
 
-                    # According to DeepSeek-V3 Technical Report, MTP modules
-                    # shares embedding layer. We only load the first weights.
-                    if (
-                        spec_layer != self.model.mtp_start_layer_idx
-                        and ".layers" not in name
-                    ):
-                        continue
+                for j in range(num_chunks):
+                    chunk_name = name
+                    weight_to_load = loaded_weight
 
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-            loaded_params.add(name)
+                    if is_fusion_moe_shared_experts_layer:
+                        chunk_slice = slice(j * chunk_size, (j + 1) * chunk_size)
+                        if loaded_weight.ndim == 1:
+                            weight_to_load = loaded_weight[chunk_slice]
+                        elif split_dim == 0:
+                            weight_to_load = loaded_weight[chunk_slice, :]
+                        else:
+                            weight_to_load = loaded_weight[:, chunk_slice]
+                        chunk_name = name.replace(
+                            "mlp.shared_experts",
+                            f"mlp.experts.{self.config.n_routed_experts + j}",
+                        )
+
+                    is_expert_weight = False
+                    for mapping in expert_params_mapping:
+                        param_name, weight_name, expert_id, shard_id = mapping
+                        if weight_name not in chunk_name:
+                            continue
+
+                        is_expert_weight = True
+                        name_mapped = chunk_name.replace(weight_name, param_name)
+
+                        param = params_dict[name_mapped]
+                        # Use return_success so we don't blindly mark
+                        # remote-expert replicas as loaded on this rank.
+                        weight_loader = typing.cast(
+                            Callable[..., bool], param.weight_loader
+                        )
+                        success = weight_loader(
+                            param,
+                            weight_to_load,
+                            name_mapped,
+                            shard_id=shard_id,
+                            expert_id=expert_id,
+                            return_success=True,
+                        )
+                        if success:
+                            if not is_fusion_moe_shared_experts_layer:
+                                name = name_mapped
+                            else:
+                                loaded_params.add(name_mapped)
+                            break
+                    else:
+                        if is_expert_weight:
+                            # Expert weight not local to this rank; skip.
+                            continue
+
+                        # Skip loading extra bias for GPTQ models.
+                        if name.endswith(".bias") and name not in params_dict:
+                            continue
+                        # Some checkpoints include weight scale tensors for
+                        # the LM head even when the quantized head isn't
+                        # built. Skip them if the model does not expose a
+                        # matching parameter to avoid KeyError during load.
+                        if name.endswith(".weight_scale") and name not in params_dict:
+                            continue
+
+                        # According to DeepSeek-V3 Technical Report, MTP
+                        # modules share the embedding layer. We only load
+                        # the first weights.
+                        if (
+                            spec_layer != self.model.mtp_start_layer_idx
+                            and ".layers" not in name
+                        ):
+                            continue
+
+                        param = params_dict[name]
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(param, loaded_weight)
+            if not is_fusion_moe_shared_experts_layer:
+                loaded_params.add(name)
         return loaded_params
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:

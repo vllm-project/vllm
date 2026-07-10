@@ -26,8 +26,6 @@ from vllm.config import KVTransferConfig
 # LMCache-related environment variables
 # The port to start LMCache server
 port = 8100
-# Use experimental features in LMCache
-os.environ["LMCACHE_USE_EXPERIMENTAL"] = "True"
 # LMCache is set to use 256 tokens per chunk
 os.environ["LMCACHE_CHUNK_SIZE"] = "256"
 # Disable local CPU backend in LMCache

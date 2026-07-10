@@ -41,6 +41,19 @@ info = json.loads(
 cuda_home = cpp_extension.CUDA_HOME
 if cuda_home is None:
     sys.exit("CUDA_HOME not found; cannot build DeepGEMM _C")
+
+nvrtc_library = os.environ.get("CUDA_NVRTC_LIBRARY")
+nvrtc_link_args: list[str]
+if nvrtc_library:
+    nvrtc_path = Path(nvrtc_library).resolve()
+    if not nvrtc_path.is_file():
+        sys.exit(
+            f"CUDA_NVRTC_LIBRARY is set but does not point to a file: {nvrtc_path}"
+        )
+    nvrtc_link_args = [str(nvrtc_path)]
+else:
+    nvrtc_link_args = ["-lnvrtc"]
+
 # CCCL lives outside the standard CUDAToolkit search (mirrors DeepGEMM's setup.py).
 includes = [
     info["INCLUDEPY"],
@@ -77,7 +90,7 @@ cmd = [
     "-lc10",
     "-lc10_cuda",
     "-lcudart",
-    "-lnvrtc",
+    *nvrtc_link_args,
     "-o",
     str(out / f"_C{info['EXT_SUFFIX']}"),
 ]

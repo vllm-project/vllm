@@ -1,22 +1,78 @@
-group: Hardware - AMD Build 
+group: Hardware - AMD Build
+
+# ROCm image flow:
+# 1. Refresh the long-lived ROCm base image only when Dockerfile.rocm_base changes.
+# 2. Build ci_base from either the stable base or the freshly refreshed base.
+# 3. Build the per-commit ROCm CI image and smoke-test it before GPU jobs run.
 steps:
-  - label: "AMD: :docker: build image"
-    key: image-build-amd
+  - label: "AMD: :docker: refresh ROCm base"
+    key: refresh-rocm-base-amd
     depends_on: []
     device: amd_cpu
     no_plugin: true
     commands:
-    - >
-      docker build
-      --build-arg max_jobs=16
-      --build-arg REMOTE_VLLM=1
-      --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942;gfx950'
-      --build-arg VLLM_BRANCH=$BUILDKITE_COMMIT
-      --tag "rocm/vllm-ci:${BUILDKITE_COMMIT}"
-      -f docker/Dockerfile.rocm
-      --target test
-      --no-cache
-      --progress plain .
-    - docker push "rocm/vllm-ci:${BUILDKITE_COMMIT}"
+      - bash .buildkite/scripts/rocm/refresh-base-image.sh
     env:
       DOCKER_BUILDKIT: "1"
+      BUILDKIT_PROGRESS: "tty"
+      TERM: "xterm-256color"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+
+  # Ensure ci_base is up-to-date before building the test image.
+  # Compares a content hash of ci_base-affecting files against the remote
+  # image label. If hashes match the build is skipped (< 30 s); if they
+  # differ ci_base is rebuilt and pushed automatically.
+  - label: "AMD: :docker: ensure ci_base"
+    key: ensure-ci-base-amd
+    soft_fail: false
+    depends_on:
+      - refresh-rocm-base-amd
+    device: amd_cpu
+    no_plugin: true
+    commands:
+      - bash .buildkite/scripts/rocm/build-ci-base.sh
+    env:
+      DOCKER_BUILDKIT: "1"
+      BUILDKIT_PROGRESS: "tty"
+      TERM: "xterm-256color"
+      VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
+      PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
+      REMOTE_VLLM: "1"
+      VLLM_BRANCH: "$BUILDKITE_COMMIT"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+
+  - label: "AMD: :docker: build test image and artifacts"
+    key: image-build-amd
+    soft_fail: false
+    depends_on:
+      - ensure-ci-base-amd
+    device: amd_cpu
+    no_plugin: true
+    commands:
+      - bash .buildkite/scripts/rocm/build-test-image.sh
+      - bash .buildkite/scripts/rocm/smoke-test-image.sh
+    env:
+      DOCKER_BUILDKIT: "1"
+      BUILDKIT_PROGRESS: "tty"
+      TERM: "xterm-256color"
+      VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
+      PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
+      IMAGE_TAG: "rocm/vllm-ci:$BUILDKITE_COMMIT"
+      REMOTE_VLLM: "1"
+      VLLM_BRANCH: "$BUILDKITE_COMMIT"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1

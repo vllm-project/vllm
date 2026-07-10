@@ -13,15 +13,19 @@ from pathlib import Path
 from typing import Any, TypeVar
 from urllib.request import url2pathname
 
+import aiohttp
 import numpy as np
 import numpy.typing as npt
+import requests
 import torch
 from PIL import Image, UnidentifiedImageError
 from urllib3.util import Url, parse_url
 
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
+from vllm.exceptions import VLLMUnprocessableEntityError
 from vllm.logger import init_logger
+from vllm.multimodal.video import get_video_loader_backend_for_processor
 from vllm.utils.registry import ExtensionManager
 
 from .audio import AudioEmbeddingMediaIO, AudioMediaIO
@@ -45,6 +49,65 @@ MODALITY_IO_MAP: dict[str, type[MediaIO]] = {
     "image": ImageMediaIO,
     "video": VideoMediaIO,
 }
+
+
+def _wrap_media_fetch_error(
+    url: str, exc: Exception
+) -> VLLMUnprocessableEntityError | Exception:
+    """Convert media fetch exceptions to VLLMUnprocessableEntityError.
+
+    This handles HTTP errors that indicate the media resource is invalid
+    (4xx responses except 408/429, malformed URLs) and converts them to a
+    422 Unprocessable Entity error instead of 500.
+
+    Transient errors (5xx, 408, 429, DNS failures, connection errors,
+    timeouts) are returned as-is to allow retry logic to handle them
+    appropriately.
+
+    Returns:
+        VLLMUnprocessableEntityError for permanent client errors (4xx except
+            408/429, invalid URL)
+        Original exception for transient errors (5xx, 408, 429, network blips)
+            or other exceptions
+    """
+    if isinstance(exc, aiohttp.ClientResponseError):
+        if exc.status in (408, 429):
+            return exc
+        if exc.status < 500:
+            return VLLMUnprocessableEntityError(
+                f"Failed to fetch media from URL: HTTP {exc.status} error",
+                parameter="image_url",
+                value=url,
+            )
+        return exc
+
+    if isinstance(exc, requests.exceptions.HTTPError):
+        if exc.response is not None:
+            status_code = exc.response.status_code
+            if status_code in (408, 429):
+                return exc
+            if status_code < 500:
+                return VLLMUnprocessableEntityError(
+                    f"Failed to fetch media from URL: HTTP {status_code} error",
+                    parameter="image_url",
+                    value=url,
+                )
+        return exc
+
+    if isinstance(exc, requests.exceptions.InvalidURL):
+        return VLLMUnprocessableEntityError(
+            "Failed to fetch media from URL: Invalid URL format",
+            parameter="image_url",
+            value=url,
+        )
+
+    if isinstance(exc, ValueError):
+        return VLLMUnprocessableEntityError(
+            "Failed to fetch media from URL: Invalid URL",
+            parameter="image_url",
+            value=url,
+        )
+    return exc
 
 
 def merge_media_io_kwargs(
@@ -104,7 +167,7 @@ class MediaConnector:
         self.connection = connection
 
         if allowed_local_media_path:
-            allowed_local_media_path_ = Path(allowed_local_media_path)
+            allowed_local_media_path_ = Path(allowed_local_media_path).resolve()
 
             if not allowed_local_media_path_.exists():
                 raise ValueError(
@@ -302,11 +365,17 @@ class MediaConnector:
                 return media_io.load_bytes(cached)
 
             connection = self.connection
-            data = connection.get_bytes(
-                url_spec.url,
-                timeout=fetch_timeout,
-                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
-            )
+            try:
+                data = connection.get_bytes(
+                    url_spec.url,
+                    timeout=fetch_timeout,
+                    allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                )
+            except Exception as e:
+                wrapped = _wrap_media_fetch_error(url, e)
+                if isinstance(wrapped, VLLMUnprocessableEntityError):
+                    raise wrapped from e
+                raise
 
             self._put_cached_bytes(url, data)
             return media_io.load_bytes(data)
@@ -347,11 +416,17 @@ class MediaConnector:
                 return await future
 
             connection = self.connection
-            data = await connection.async_get_bytes(
-                url_spec.url,
-                timeout=fetch_timeout,
-                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
-            )
+            try:
+                data = await connection.async_get_bytes(
+                    url_spec.url,
+                    timeout=fetch_timeout,
+                    allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                )
+            except Exception as e:
+                wrapped = _wrap_media_fetch_error(url, e)
+                if isinstance(wrapped, VLLMUnprocessableEntityError):
+                    raise wrapped from e
+                raise
 
             await loop.run_in_executor(
                 global_thread_pool, self._put_cached_bytes, url, data
@@ -452,6 +527,7 @@ class MediaConnector:
         video_url: str,
         *,
         image_mode: str = "RGB",
+        video_processor: str | None = None,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
         Load video from an HTTP or base64 data URL.
@@ -459,7 +535,12 @@ class MediaConnector:
         image_io = ImageMediaIO(
             image_mode=image_mode, **self.media_io_kwargs.get("image", {})
         )
-        video_io = VideoMediaIO(image_io, **self.media_io_kwargs.get("video", {}))
+        video_io_kwargs = dict(self.media_io_kwargs.get("video", {}))
+        if "video_backend" not in video_io_kwargs and (
+            video_backend := get_video_loader_backend_for_processor(video_processor)
+        ):
+            video_io_kwargs["video_backend"] = video_backend
+        video_io = VideoMediaIO(image_io, **video_io_kwargs)
 
         return self.load_from_url(
             video_url,
@@ -472,6 +553,7 @@ class MediaConnector:
         video_url: str,
         *,
         image_mode: str = "RGB",
+        video_processor: str | None = None,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
         Asynchronously load video from an HTTP or base64 data URL.
@@ -481,7 +563,12 @@ class MediaConnector:
         image_io = ImageMediaIO(
             image_mode=image_mode, **self.media_io_kwargs.get("image", {})
         )
-        video_io = VideoMediaIO(image_io, **self.media_io_kwargs.get("video", {}))
+        video_io_kwargs = dict(self.media_io_kwargs.get("video", {}))
+        if "video_backend" not in video_io_kwargs and (
+            video_backend := get_video_loader_backend_for_processor(video_processor)
+        ):
+            video_io_kwargs["video_backend"] = video_backend
+        video_io = VideoMediaIO(image_io, **video_io_kwargs)
 
         return await self.load_from_url_async(
             video_url,

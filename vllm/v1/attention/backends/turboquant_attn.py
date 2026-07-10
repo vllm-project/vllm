@@ -30,6 +30,7 @@ from vllm.model_executor.layers.quantization.turboquant.centroids import (
     get_centroids,
 )
 from vllm.triton_utils import triton
+from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -201,6 +202,44 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=False)
+        self._reserve_workspace()
+
+    def _reserve_workspace(self) -> None:
+        if not is_workspace_manager_initialized():
+            return
+
+        scheduler_config = self.vllm_config.scheduler_config
+        model_config = self.vllm_config.model_config
+        parallel_config = self.vllm_config.parallel_config
+
+        max_num_reqs = scheduler_config.max_num_seqs
+        num_heads = model_config.get_num_attention_heads(parallel_config)
+        num_kv_heads = self.kv_cache_spec.num_kv_heads
+        head_size = self.kv_cache_spec.head_size
+        max_num_splits = (
+            self.vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
+        )
+
+        current_workspace_manager().get_simultaneous(
+            ((max_num_reqs, num_heads, max_num_splits, head_size + 1), torch.float32),
+            ((max_num_reqs, num_heads, head_size), model_config.dtype),
+            ((max_num_reqs, num_heads), torch.float32),
+        )
+
+        reserve_continuation_prefill = (
+            scheduler_config.enable_chunked_prefill
+            and scheduler_config.max_num_batched_tokens > _CONTINUATION_DECODE_THRESHOLD
+        )
+        if not reserve_continuation_prefill:
+            return
+
+        max_cached_len = max(0, model_config.max_model_len - 1)
+        alloc_len = round_up(max_cached_len, self.kv_cache_spec.block_size)
+        cache_buf_shape = (1, num_kv_heads, alloc_len, head_size)
+        current_workspace_manager().get_simultaneous(
+            (cache_buf_shape, torch.float16),
+            (cache_buf_shape, torch.float16),
+        )
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata

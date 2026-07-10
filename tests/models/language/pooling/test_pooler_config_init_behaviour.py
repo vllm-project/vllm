@@ -106,7 +106,7 @@ def test_reward_models_using_activation(
         dtype=dtype,
         pooler_config=PoolerConfig(use_activation=False),
     ) as vllm_model:
-        wo_activation = vllm_model.reward(example_prompts)
+        wo_activation = vllm_model.token_classify(example_prompts)
 
     with vllm_runner(
         model,
@@ -114,7 +114,7 @@ def test_reward_models_using_activation(
         dtype=dtype,
         pooler_config=PoolerConfig(use_activation=True),
     ) as vllm_model:
-        w_activation = vllm_model.reward(example_prompts)
+        w_activation = vllm_model.token_classify(example_prompts)
 
     for wo, w in zip(wo_activation, w_activation):
         wo = torch.tensor(wo)

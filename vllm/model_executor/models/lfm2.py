@@ -32,7 +32,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import HasInnerState, IsHybrid, SupportsLoRA, SupportsPP, SupportsQuant
@@ -41,7 +40,6 @@ from .utils import (
     PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -297,6 +295,20 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
 
 @support_torch_compile
 class Lfm2Model(nn.Module):
+    # HF uses .conv. but vLLM uses .short_conv. to avoid LoRA regex collision
+    # with the inner .conv.conv child (ShortConv has a child self.conv, so
+    # naming the container .conv too makes _match_target_modules match both).
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={".conv.": ".short_conv."},
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+            ".w1": (".w13", 0),
+            ".w3": (".w13", 1),
+        },
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -375,40 +387,8 @@ class Lfm2Model(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-            (".w13", ".w1", 0),
-            (".w13", ".w3", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            if ".conv." in name:
-                name = name.replace(".conv.", ".short_conv.", 1)
-
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                # Use segment-boundary matching (trailing dot) to prevent
-                # e.g. ".w1" from matching inside ".w13" in pre-fused keys.
-                if weight_name + "." not in name:
-                    continue
-                name = name.replace(weight_name + ".", param_name + ".")
-
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class Lfm2ForCausalLM(
@@ -427,12 +407,8 @@ class Lfm2ForCausalLM(
         "in_proj": ["in_proj"],
     }
 
-    # HF uses .conv. but vLLM uses .short_conv. to avoid LoRA regex collision
-    # with the inner .conv.conv child (ShortConv has a child self.conv, so
-    # naming the container .conv too makes _match_target_modules match both)
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={".conv.": ".short_conv."},
-    )
+    # Reuse the backbone mapper so LoRA/quantization see the same name mapping.
+    hf_to_vllm_mapper = Lfm2Model.hf_to_vllm_mapper
 
     # LoRA specific attributes
     embedding_modules = {

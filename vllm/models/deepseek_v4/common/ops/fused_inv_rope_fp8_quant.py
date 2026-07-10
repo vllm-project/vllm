@@ -37,16 +37,29 @@ def _fused_inv_rope_fp8_quant_per_head(
     ROPE_START: tl.constexpr,
     HALF_ROPE: tl.constexpr,
     TMA_ALIGNED_SCALES: tl.constexpr,
+    USE_GDC: tl.constexpr,
+    launch_pdl: tl.constexpr,  # triton metadata
 ):
-    # int64: stride multiply overflows int32 past num_tokens=32768 (IMA).
+    # Cast every stride to int64 — without this, Python-int strides are
+    # inferred as int32 and `pid_token(int64) × stride(int32)` can lower to
+    # int32 arithmetic, wrapping past 2³¹ for large prefill batches → IMA.
     pid_token = tl.program_id(0).to(tl.int64)
     pid_gh = tl.program_id(1).to(tl.int64)
+    o_stride_token = o_stride_token.to(tl.int64)
+    o_stride_head = o_stride_head.to(tl.int64)
+    cache_stride_pos = cache_stride_pos.to(tl.int64)
+    fp8_stride_group = fp8_stride_group.to(tl.int64)
+    fp8_stride_token = fp8_stride_token.to(tl.int64)
+    scale_stride_group = scale_stride_group.to(tl.int64)
+    scale_stride_k = scale_stride_k.to(tl.int64)
 
     g = pid_gh // heads_per_group
     head_in_group = pid_gh % heads_per_group
     global_head = pid_gh
     qb_start = head_in_group * CHUNKS_PER_HEAD
-
+    if USE_GDC:
+        tl.extra.cuda.gdc_launch_dependents()
+        tl.extra.cuda.gdc_wait()
     # Padding rows in the TMA-aligned scale buffer: fill with zero and skip quant.
     if pid_token >= num_tokens:
         if TMA_ALIGNED_SCALES:
@@ -243,11 +256,8 @@ def _fused_inv_rope_fp8_quant_kernel_impl(
         (scale_inner * tma_aligned_T, 1, tma_aligned_T),
     )
     grid = (tma_aligned_T, n_groups * heads_per_group)
-    pdl_kwargs = (
-        {}
-        if current_platform.is_rocm() or current_platform.is_xpu()
-        else {"launch_pdl": False}
-    )
+    use_gdc = current_platform.is_arch_support_pdl()
+    pdl_kwargs = {"launch_pdl": True} if use_gdc else {}
     _fused_inv_rope_fp8_quant_per_head[grid](
         o,
         positions,
@@ -270,6 +280,7 @@ def _fused_inv_rope_fp8_quant_kernel_impl(
         ROPE_START=rope_start,
         HALF_ROPE=half_rope,
         TMA_ALIGNED_SCALES=tma_aligned_scales,
+        USE_GDC=use_gdc,
         num_stages=1,
         **pdl_kwargs,
         num_warps=1,

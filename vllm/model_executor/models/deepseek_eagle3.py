@@ -20,10 +20,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2ForCausalLM,
     DeepseekV2MLAAttention,
@@ -31,8 +27,10 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.multimodal.inputs import NestedTensors
 
+from .interfaces import LocalArgmaxMixin
 from .utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     get_draft_quant_config,
     maybe_prefix,
     process_eagle_weight,
@@ -269,60 +267,23 @@ class DeepseekV2Eagle3Model(nn.Module):
 
         return hidden_states, aux_output
 
+    # midlayer rename + gate_up / MLA fused_qkv_a merges
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={"midlayer.": "layers.0."},
+        orig_to_new_stacked={
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+            ".q_a_proj": (".fused_qkv_a_proj", 0),
+            ".kv_a_proj_with_mqa": (".fused_qkv_a_proj", 1),
+        },
+    )
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
-            (".fused_qkv_a_proj", ".q_a_proj", 0),
-            (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            if "midlayer." in name:
-                name = name.replace("midlayer.", "layers.0.")
-
-            # Handle kv cache quantization scales
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-
-            # Remapping the name FP8 kv-scale
-            if "scale" in name:
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    continue
-
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                if name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
-class Eagle3DeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
+class Eagle3DeepseekV2ForCausalLM(LocalArgmaxMixin, DeepseekV2ForCausalLM):
     """Eagle3 speculative decoding model for DeepseekV2/V3."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

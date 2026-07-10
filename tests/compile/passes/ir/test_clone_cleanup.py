@@ -132,6 +132,25 @@ class TestCloneCleanup:
         assert count_clones(graph_module.graph) == 0
         torch.testing.assert_close(actual, expected)
 
+    def test_keep_clone_that_changes_layout(self, clone_cleanup_pass):
+        """Clone must be kept when it materializes a compact slice layout."""
+
+        def f(x: torch.Tensor) -> torch.Tensor:
+            return x[:, :3].contiguous()
+
+        inp = torch.randn(4, 5)
+        graph_module = make_fx(f)(inp)
+        assert count_clones(graph_module.graph) == 1
+
+        expected = graph_module(inp)
+        clone_cleanup_pass(graph_module.graph)
+        graph_module.recompile()
+        actual = graph_module(inp)
+
+        assert count_clones(graph_module.graph) == 1
+        assert actual.stride() == expected.stride() == (3, 1)
+        torch.testing.assert_close(actual, expected)
+
     def test_multiple_clones_of_same_input(self, clone_cleanup_pass):
         """Test multiple independent clones of the same input."""
 

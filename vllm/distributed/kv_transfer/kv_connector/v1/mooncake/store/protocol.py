@@ -11,7 +11,10 @@ Wire format (REQ/REP over IPC):
 
       msg_type == LOOKUP_MSG:
           frame 1: token_len (u32 big-endian, 4 bytes)
-          frame 2..n: msgpack-encoded list[str] of block-hash hex digests
+          frame 2: hash_len (u16 big-endian, 2 bytes) — byte length of each
+                   fixed-size block hash (0 when there are no hashes)
+          frame 3: raw block hashes concatenated back-to-back (each hash_len
+                   bytes); the server splits on hash_len
         Response: [hit_count: u32 big-endian, 4 bytes]
 
       msg_type == RESET_MSG:

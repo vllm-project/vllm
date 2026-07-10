@@ -167,15 +167,6 @@ def llava_onevision_vllm_to_hf_output(
     return hf_output_ids, hf_output_str, out_logprobs
 
 
-def mantis_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOutput:
-    """Sanitize vllm output [mantis] to compare with hf output."""
-    output_ids, output_str, out_logprobs = vllm_output
-
-    hf_output_str = output_str + "<|eot_id|>"
-
-    return output_ids, hf_output_str, out_logprobs
-
-
 def phi3v_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOutput:
     """Sanitize vllm output [phi3v] to be comparable with hf output."""
     _, output_str, out_logprobs = vllm_output
@@ -242,13 +233,6 @@ def minicpmv_trunc_hf_output(hf_output: RunnerOutput, model: str) -> RunnerOutpu
     output_ids, output_str, out_logprobs = hf_output
     if output_str.endswith("<|eot_id|>"):
         output_str = output_str.split("<|eot_id|>")[0]
-    return output_ids, output_str, out_logprobs
-
-
-def minimax_vl_01_hf_output(hf_output: RunnerOutput, model: str) -> RunnerOutput:
-    output_ids, output_str, out_logprobs = hf_output
-    if output_str.endswith("<end_of_sentence>"):
-        output_str = output_str.split("<end_of_sentence>")[0]
     return output_ids, output_str, out_logprobs
 
 
@@ -947,29 +931,6 @@ def _internvl_generate(
     return outputs
 
 
-def mantis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
-    from mantis.models.mllava import MLlavaProcessor
-
-    hf_model.processor = MLlavaProcessor.from_pretrained(hf_model.model_name)
-
-    orig_generate = hf_model.model.generate
-    tokenizer = hf_model.processor.tokenizer
-
-    def _generate(self, *args, **kwargs):
-        return orig_generate(
-            *args,
-            **kwargs,
-            eos_token_id=[
-                tokenizer.eos_token_id,
-                tokenizer.convert_tokens_to_ids("<|eot_id|>"),
-            ],
-        )
-
-    hf_model.model.generate = types.MethodType(_generate, hf_model.model)
-
-    return hf_model
-
-
 def minicpmv_25_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     orig_generate = hf_model.model.generate
 
@@ -1013,17 +974,6 @@ def minicpmo_26_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
 
 def minicpmv_26_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
-    orig_generate = hf_model.model.generate
-
-    def _generate(self, *args, image_sizes=None, **kwargs):
-        return orig_generate(*args, decode_text=False, **kwargs)
-
-    hf_model.model.generate = types.MethodType(_generate, hf_model.model)
-
-    return hf_model
-
-
-def minimax_vl_01_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     orig_generate = hf_model.model.generate
 
     def _generate(self, *args, image_sizes=None, **kwargs):
@@ -1235,18 +1185,6 @@ def qwen3_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         )
 
     hf_model.processor = processor
-    return hf_model
-
-
-def tarsier_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
-    from vllm.model_executor.models.tarsier import get_vision_encoder_info
-
-    vision_encoder_info = get_vision_encoder_info(hf_model.config)
-
-    hf_processor = hf_model.processor
-    if hf_processor.patch_size is None:
-        hf_processor.patch_size = vision_encoder_info.get_patch_size()
-
     return hf_model
 
 
@@ -1553,95 +1491,4 @@ def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             return sequences
 
     hf_model.model.generate = types.MethodType(_generate, hf_model.model)
-    return hf_model
-
-
-def qianfan_ocr_hf_model_kwargs(model_name: str) -> dict:
-    """Return hf_model_kwargs with a patched config for QianfanOCR."""
-    from vllm.transformers_utils.configs.qianfan_ocr import QianfanOCRConfig
-
-    config = QianfanOCRConfig.from_pretrained(model_name)
-    vc = config.vision_config
-    if isinstance(vc.image_size, int):
-        vc.image_size = (vc.image_size, vc.image_size)
-    if isinstance(vc.patch_size, int):
-        vc.patch_size = (vc.patch_size, vc.patch_size)
-    return {"config": config}
-
-
-def qianfan_ocr_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
-    """Patches an HfRunner instance to run QianfanOCR model inference.
-
-    QianfanOCR shares the same architecture as InternVLChatModel, so the
-    patching logic mirrors ``internvl_patch_hf_runner``.  The only difference
-    is that we load the config via vllm's registered ``QianfanOCRConfig``
-    instead of relying on ``trust_remote_code``.
-    """
-
-    class QianfanOCRProcessor:
-        def __init__(self, hf_runner: HfRunner):
-            self.tokenizer = hf_runner.tokenizer
-
-            from vllm.transformers_utils.configs.qianfan_ocr import QianfanOCRConfig
-
-            self.config = QianfanOCRConfig.from_pretrained(hf_runner.model_name)
-            self.vision_config = self.config.vision_config
-            self.use_thumbnail = self.config.use_thumbnail
-            self.min_num = self.config.min_dynamic_patch
-            self.max_num = self.config.max_dynamic_patch
-            self.image_size = self.vision_config.image_size
-
-            # Compute num_image_token from config instead of model attribute,
-            # since the transformers-native model doesn't expose it.
-            image_size = self.config.force_image_size or self.vision_config.image_size
-            patch_size = self.vision_config.patch_size
-            downsample_ratio = self.config.downsample_ratio
-            self.num_image_token = int(
-                (image_size // patch_size) ** 2 * (downsample_ratio**2)
-            )
-
-        def __call__(
-            self,
-            text: str,
-            images: PIL.Image.Image | list[PIL.Image.Image] = None,
-            **kwargs,
-        ):
-            from vllm.transformers_utils.processors.internvl import (
-                image_to_pixel_values_internvl,
-            )
-
-            IMG_START = "<img>"
-            IMG_END = "</img>"
-            IMG_CONTEXT = "<IMG_CONTEXT>"
-
-            images = [images] if isinstance(images, PIL.Image.Image) else images
-            pixel_values_list = [
-                image_to_pixel_values_internvl(
-                    image,
-                    input_size=self.image_size,
-                    min_num=self.min_num,
-                    max_num=self.max_num,
-                    use_thumbnail=self.use_thumbnail,
-                )
-                for image in images
-            ]
-            num_patches_list = [pv.shape[0] for pv in pixel_values_list]
-            pixel_values = torch.cat(pixel_values_list, dim=0)
-
-            for num_patches in num_patches_list:
-                context_tokens = IMG_CONTEXT * self.num_image_token * num_patches
-                image_tokens = IMG_START + context_tokens + IMG_END
-                text = text.replace("<image>", image_tokens, 1)
-
-            prompt = self.tokenizer(text, return_tensors="pt")
-            prompt.update({"pixel_values": pixel_values})
-            return prompt
-
-    img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
-    hf_model.model.img_context_token_id = img_context_token_id
-    hf_model.processor = QianfanOCRProcessor(hf_model)
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.language_model.get_output_embeddings()
-    )
-    hf_model.model.generate = types.MethodType(_internvl_generate, hf_model.model)
     return hf_model

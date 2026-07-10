@@ -14,7 +14,7 @@ Wheels are built in the `Release` pipeline (`.buildkite/release-pipeline.yaml`) 
 Each build step:
 
 1. Builds the wheel in a Docker container.
-2. Renames the wheel filename to use the correct manylinux tag (currently `manylinux_2_31`) for PEP 600 compliance.
+2. Renames the wheel filename to use the correct manylinux tag (currently `manylinux_2_28`) for PEP 600 compliance.
 3. Uploads the wheel to S3 bucket `vllm-wheels` under `/{commit_hash}/`.
 
 ### Index Generation

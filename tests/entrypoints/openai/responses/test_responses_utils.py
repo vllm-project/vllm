@@ -782,6 +782,16 @@ class TestConstructChatMessagesCombinePolicy:
                 ["call_123", "call_456"],
                 id="reasoning-output-tool-call",
             ),
+            pytest.param(
+                [
+                    make_reasoning_item(content_text="Let me think"),
+                    {"type": "message", "role": "assistant", "content": "Hello"},
+                ],
+                "Hello",
+                "Let me think",
+                None,
+                id="reasoning-easyinput-assistant",
+            ),
         ],
     )
     def test_assistant_side_items_merge_until_tool_output(

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use half::{bf16, f16};
-use llm_multimodal::{ModelSpecificValue, PreprocessedImages};
-use vllm_engine_core_client::protocol::ModelDtype;
+use llm_multimodal::{ModelSpecificValue, PreprocessedEncoderInputs as PreprocessedImages};
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::MmKwargValue as ProtocolKwargValue;
 use vllm_engine_core_client::protocol::tensor::{ShapeExt as _, WireTensor};
 
@@ -31,14 +31,14 @@ pub(super) fn collect_tensors(
     float_dtype: ModelDtype,
 ) -> Result<HashMap<String, KwargValue>> {
     let PreprocessedImages {
-        pixel_values,
+        encoder_input,
         model_specific,
         ..
     } = preprocessed;
 
     let pixel_values = {
-        let shape = pixel_values.shape().to_vec();
-        let data = pixel_values.into_iter().collect();
+        let shape = encoder_input.shape().to_vec();
+        let data = encoder_input.into_iter().collect();
         KwargValue::from_f32_tensor(data, shape, float_dtype)?
     };
 

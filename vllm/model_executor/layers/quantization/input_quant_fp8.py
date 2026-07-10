@@ -46,16 +46,17 @@ class QuantFP8(CustomOp):
         compile_native: bool = True,
     ):
         """
-        :param static: static or dynamic quantization
-        :param group_shape: quantization group shape (PER_TOKEN, PER_TENSOR,
-            PER_CHANNEL, or arbitrary block size)
-        :param num_token_padding: Pad the token dimension of output to this
-            size
-        :param tma_aligned_scales: For group quantization, output scales in
-            TMA-aligned layout
-        :param column_major_scales: For group quantization, output scales in
-            column major format
-        :param compile_native: Manually compile forward_native if compile mode > None
+        Args:
+            static: static or dynamic quantization
+            group_shape: quantization group shape (PER_TOKEN, PER_TENSOR,
+                PER_CHANNEL, or arbitrary block size)
+            num_token_padding: Pad the token dimension of output to this
+                size
+            tma_aligned_scales: For group quantization, output scales in
+                TMA-aligned layout
+            column_major_scales: For group quantization, output scales in
+                column major format
+            compile_native: Manually compile forward_native if compile mode > None
         """
         super().__init__(compile_native=compile_native)
         self.static = static
@@ -157,11 +158,6 @@ class QuantFP8(CustomOp):
             return rocm_aiter_ops.per_tensor_quant(x, _FP8_DTYPE, scale)
         if use_aiter_per_token_quant:
             return rocm_aiter_ops.per_token_quant(x, _FP8_DTYPE, scale)
-
-        # Fallback to native implementation for group quantization.
-        if self.is_group_quant:
-            assert scale is None, "Dynamic group quantization does not use scale"
-            return self._quantize_group_native(x)
 
         # Fallback to CUDA implementation
         return self.forward_cuda(x, scale, scale_ub)

@@ -1045,7 +1045,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const scalar_t* q_ptr =
         q + query_start_off * q_stride + wg_start_head_idx * HEAD_SIZE;
     const _B16x8* q_ptrh8 = reinterpret_cast<const _B16x8*>(q_ptr);
-    const int qhead_elemh8 = laneid / 4;
+    const int qhead_elemh8 = MIN(laneid / 4, HEAD_SIZE / 8 - 1);
 
     for (int h = 0; h < QHLOOP - 1; h++) {
       const int qhead_idx = h * 4 + lane4id;

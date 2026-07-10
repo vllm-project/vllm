@@ -544,13 +544,15 @@ def native_sample_recovered_tokens(
     target_probs: torch.Tensor,  # [num_tokens, vocab_size]
     sampling_metadata: SamplingMetadata,
     device: torch.device,
+    use_fp64_gumbel: bool = False,
 ) -> torch.Tensor:
     batch_size = len(num_draft_tokens)
     vocab_size = target_probs.shape[-1]
+    q_dtype = torch.float64 if use_fp64_gumbel else torch.float32
 
     q = torch.empty(
         (batch_size, vocab_size),
-        dtype=torch.float32,
+        dtype=q_dtype,
         device=device,
     )
     q.exponential_()
@@ -935,6 +937,160 @@ def test_sample_recovered_tokens(
     assert torch.equal(recovered_token_ids, ref_recovered_token_ids)
 
 
+def test_sample_recovered_tokens_uses_fp64_exponential_race_when_requested():
+    batch_size = 2
+    vocab_size = 64
+    max_spec_len = 2
+    num_tokens = batch_size * max_spec_len
+
+    draft_probs = torch.rand(
+        num_tokens,
+        vocab_size,
+        dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+    draft_probs = F.softmax(draft_probs, dim=-1)
+    target_probs = torch.rand(
+        num_tokens,
+        vocab_size,
+        dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+    target_probs = F.softmax(target_probs, dim=-1)
+    draft_token_ids = torch.multinomial(draft_probs, num_samples=1).to(torch.int32)
+
+    generators = {
+        i: torch.Generator(device=DEVICE_TYPE).manual_seed(i) for i in range(batch_size)
+    }
+    sampling_metadata = create_sampling_metadata(
+        all_greedy=False,
+        temperature=torch.ones(batch_size, dtype=torch.float32, device=DEVICE_TYPE),
+        generators=generators,
+    )
+    spec_decode_metadata = create_spec_decode_metadata(
+        draft_token_ids.reshape(batch_size, max_spec_len).tolist(),
+        target_probs.log(),
+    )
+
+    expected = native_sample_recovered_tokens(
+        max_spec_len,
+        spec_decode_metadata.num_draft_tokens,
+        spec_decode_metadata.cu_num_draft_tokens,
+        draft_token_ids,
+        draft_probs,
+        target_probs,
+        sampling_metadata,
+        device=torch.device(DEVICE_TYPE),
+        use_fp64_gumbel=True,
+    )
+    actual = sample_recovered_tokens(
+        max_spec_len,
+        spec_decode_metadata.num_draft_tokens,
+        spec_decode_metadata.cu_num_draft_tokens,
+        draft_token_ids,
+        draft_probs,
+        target_probs,
+        sampling_metadata,
+        device=torch.device(DEVICE_TYPE),
+        use_fp64_gumbel=True,
+    )
+
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize("no_draft_probs", [True, False])
+@pytest.mark.parametrize(
+    "vocab_size",
+    [
+        100,  # below BLOCK_SIZE: single partial tile with many padding entries
+        8193,  # BLOCK_SIZE + 1: only 1 valid entry in the last tile
+        10000,  # non-aligned, moderate tail
+        151936,  # real-world Qwen3 vocab size from the CVE report
+    ],
+)
+def test_sample_recovered_tokens_vocab_boundary(vocab_size: int, no_draft_probs: bool):
+    """Regression test for GHSA-8wr5-jm2h-8r4f.
+
+    When vocab_size is not a multiple of BLOCK_SIZE (8192), the last Triton
+    tile extends beyond the vocabulary.  If all valid entries in that tail tile
+    have zero target probability, the out-of-range masked positions (score 0)
+    could win the tl.max tie-break, producing recovered_id >= vocab_size.
+    This test forces that scenario and asserts every recovered token is valid.
+    """
+    BLOCK_SIZE = 8192
+    batch_size = 2
+    max_spec_len = 3
+    num_tokens = batch_size * max_spec_len
+
+    last_tile_start = (vocab_size // BLOCK_SIZE) * BLOCK_SIZE
+
+    target_probs = torch.rand(
+        num_tokens, vocab_size, dtype=torch.float32, device=DEVICE_TYPE
+    )
+    if last_tile_start > 0:
+        # Zero out valid entries in the last partial tile so the only
+        # non-zero scores come from earlier, fully-covered tiles.
+        target_probs[:, last_tile_start:] = 0.0
+    else:
+        # vocab_size < BLOCK_SIZE: single tile. Concentrate all mass on
+        # entry 0 so the NO_DRAFT_PROBS path (which zeroes the draft
+        # token entry) can drive all valid scores to zero.
+        target_probs = torch.zeros_like(target_probs)
+        target_probs[:, 0] = 1.0
+    # Re-normalize so it's a valid distribution.
+    target_probs = target_probs / target_probs.sum(dim=-1, keepdim=True)
+
+    draft_probs = torch.rand(
+        num_tokens, vocab_size, dtype=torch.float32, device=DEVICE_TYPE
+    )
+    draft_probs = torch.nn.functional.softmax(draft_probs, dim=-1)
+
+    if last_tile_start == 0:
+        # Force draft token to 0 so the NO_DRAFT_PROBS path zeroes the
+        # only non-zero entry, leaving all valid scores at zero.
+        draft_token_ids = torch.zeros(
+            num_tokens, 1, dtype=torch.int32, device=DEVICE_TYPE
+        )
+    else:
+        draft_token_ids = torch.randint(
+            0, vocab_size, (num_tokens, 1), dtype=torch.int32, device=DEVICE_TYPE
+        )
+
+    temperature = torch.ones(batch_size, dtype=torch.float32, device=DEVICE_TYPE)
+    generators = {
+        i: torch.Generator(device=DEVICE_TYPE).manual_seed(42 + i)
+        for i in range(batch_size)
+    }
+    sampling_metadata = create_sampling_metadata(
+        all_greedy=False, temperature=temperature, generators=generators
+    )
+
+    spec_decode_metadata = create_spec_decode_metadata(
+        draft_token_ids.reshape(batch_size, max_spec_len).tolist(),
+        torch.rand(num_tokens, vocab_size, device=DEVICE_TYPE),
+    )
+
+    recovered = sample_recovered_tokens(
+        max_spec_len,
+        spec_decode_metadata.num_draft_tokens,
+        spec_decode_metadata.cu_num_draft_tokens,
+        draft_token_ids.squeeze(-1),
+        None if no_draft_probs else draft_probs,
+        target_probs,
+        sampling_metadata,
+        device=DEVICE_TYPE,
+    )
+
+    assert (recovered >= 0).all(), (
+        f"Recovered token IDs contain negative values: "
+        f"{recovered[recovered < 0].tolist()}"
+    )
+    assert (recovered < vocab_size).all(), (
+        f"Recovered token IDs >= vocab_size ({vocab_size}): "
+        f"{recovered[recovered >= vocab_size].tolist()}"
+    )
+
+
 ########################### Tests for Synthetic Rejection Sampling #########
 
 
@@ -994,3 +1150,36 @@ def test_synthetic_all_rejected(all_greedy: bool):
     for row in result:
         assert row[0] != PLACEHOLDER_TOKEN_ID
         assert (row[1:] == PLACEHOLDER_TOKEN_ID).all()
+
+
+def test_placeholder_draft_token_rejected_random(rejection_sampler):
+    """A placeholder draft id (-1) must be rejected in non-greedy sampling
+    without indexing the probability tensors by the invalid id.
+    """
+    vocab_size = 100
+    spec_tokens = [[1, vocab_size - 1, PLACEHOLDER_TOKEN_ID]]
+    output_tokens = [[1, vocab_size - 1, 7, 9]]
+
+    temperature = torch.ones(1, dtype=torch.float32, device=DEVICE_TYPE)
+    metadata = create_sampling_metadata(
+        all_greedy=False,
+        temperature=temperature,
+        generators={0: torch.Generator(device=DEVICE_TYPE).manual_seed(0)},
+    )
+    logits = create_logits_tensor(output_tokens, vocab_size=vocab_size)
+    bonus_token_tensor = torch.tensor([output_tokens[0][-1]], device=logits.device)
+    spec_decode_metadata = create_spec_decode_metadata(spec_tokens, logits)
+
+    mock_sampler_output(rejection_sampler, bonus_token_tensor)
+    output = rejection_sampler(
+        spec_decode_metadata,
+        draft_probs=None,
+        logits=logits,
+        sampling_metadata=metadata,
+    )
+    sampled = output.sampled_token_ids
+
+    assert sampled[0, 0].item() == 1
+    assert sampled[0, 1].item() == vocab_size - 1
+    recovered = sampled[0, 2].item()
+    assert 0 <= recovered < vocab_size

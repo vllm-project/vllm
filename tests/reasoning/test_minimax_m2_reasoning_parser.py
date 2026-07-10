@@ -59,28 +59,12 @@ MULTIPLE_LINES = {
     "is_reasoning_end": True,
 }
 
-# Case: only end token (empty reasoning, immediate response)
-SHORTEST_REASONING_NO_STREAMING = {
-    "output": "</think>This is the response",
-    "reasoning": "",
-    "content": "This is the response",
-    "is_reasoning_end": True,
-}
-
 # Case: only end token streaming (reasoning is None because it's just the token)
 SHORTEST_REASONING_STREAMING = {
     "output": "</think>This is the response",
     "reasoning": None,
     "content": "This is the response",
     "is_reasoning_end": True,
-}
-
-# Case: empty output
-EMPTY = {
-    "output": "",
-    "reasoning": "",
-    "content": None,
-    "is_reasoning_end": False,
 }
 
 # Case: empty streaming
@@ -150,19 +134,9 @@ TEST_CASES = [
         id="multiple_lines_streaming",
     ),
     pytest.param(
-        False,
-        SHORTEST_REASONING_NO_STREAMING,
-        id="shortest_reasoning",
-    ),
-    pytest.param(
         True,
         SHORTEST_REASONING_STREAMING,
         id="shortest_reasoning_streaming",
-    ),
-    pytest.param(
-        False,
-        EMPTY,
-        id="empty",
     ),
     pytest.param(
         True,

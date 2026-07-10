@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import ast
 import json
 from collections.abc import Sequence
 from typing import Any
@@ -27,6 +26,7 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
+from vllm.tool_parsers.utils import safe_literal_eval
 
 logger = init_logger(__name__)
 
@@ -108,6 +108,14 @@ class HYV3ToolParser(ToolParser):
         Note: single ``type`` has the highest priority.
         """
         if "type" in arg_schema:
+            type_val = arg_schema["type"]
+            # JSON Schema allows "type" to be an array to represent union types,
+            # e.g. "type": ["string", "object"].
+            # Expand it into an anyOf-equivalent format:
+            #   [{"type": "string"}, {"type": "object"}]
+            # so that _get_types / _parse_value can handle it uniformly later.
+            if isinstance(type_val, list):
+                return [{"type": t} for t in type_val]
             return [arg_schema]
         if "anyOf" in arg_schema:
             return arg_schema["anyOf"]
@@ -183,13 +191,13 @@ class HYV3ToolParser(ToolParser):
 
     @staticmethod
     def _deserialize(value: str) -> Any:
-        """Deserialize a string value using json.loads then ast.literal_eval."""
+        """Deserialize a string value using json.loads then safe_literal_eval."""
         try:
             return json.loads(value)
         except Exception:
             pass
         try:
-            return ast.literal_eval(value)
+            return safe_literal_eval(value)
         except Exception:
             pass
         return value
@@ -246,7 +254,6 @@ class HYV3ToolParser(ToolParser):
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 
-        self.current_tool_name_sent: bool = False
         self.prev_tool_call_arr: list[dict] = []
         self.current_tool_id: int = -1
         self.streamed_args_for_tool: list[
@@ -262,19 +269,22 @@ class HYV3ToolParser(ToolParser):
         self._current_arg_is_string: bool = False  # is current arg pure string?
         self._streamed_json_len: int = 0  # bytes of JSON already sent
 
-        self.tool_calls_start_token: str = "<tool_calls>"
-        self.tool_calls_end_token: str = "</tool_calls>"
+        init_kwargs = getattr(tokenizer, "init_kwargs", None) or {}
+        self.suffix: str = init_kwargs.get("token_suffix") or ""
 
-        self.tool_call_start_token: str = "<tool_call>"
-        self.tool_call_end_token: str = "</tool_call>"
+        self.tool_calls_start_token: str = f"<tool_calls{self.suffix}>"
+        self.tool_calls_end_token: str = f"</tool_calls{self.suffix}>"
 
-        self.tool_sep_token: str = "<tool_sep>"
+        self.tool_call_start_token: str = f"<tool_call{self.suffix}>"
+        self.tool_call_end_token: str = f"</tool_call{self.suffix}>"
 
-        self.arg_key_start_token: str = "<arg_key>"
-        self.arg_key_end_token: str = "</arg_key>"
+        self.tool_sep_token: str = f"<tool_sep{self.suffix}>"
 
-        self.arg_value_start_token: str = "<arg_value>"
-        self.arg_value_end_token: str = "</arg_value>"
+        self.arg_key_start_token: str = f"<arg_key{self.suffix}>"
+        self.arg_key_end_token: str = f"</arg_key{self.suffix}>"
+
+        self.arg_value_start_token: str = f"<arg_value{self.suffix}>"
+        self.arg_value_end_token: str = f"</arg_value{self.suffix}>"
 
         self.tool_call_regex = re.compile(
             rf"{self.tool_call_start_token}(.*?){self.tool_sep_token}"

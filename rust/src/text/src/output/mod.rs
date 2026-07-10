@@ -23,6 +23,7 @@ pub struct CollectedTextOutput {
     pub logprobs: Option<DecodedLogprobs>,
     pub token_ids: Vec<u32>,
     pub finish_reason: FinishReason,
+    pub usage: vllm_llm::TokenUsage,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<serde_json::Value>,
 }
@@ -74,6 +75,7 @@ impl<T: TextOutputStream> T {
                                 logprobs: delta_logprobs,
                                 token_ids: delta_token_ids,
                                 finish_reason: FinishReason::Error,
+                                usage: vllm_llm::TokenUsage::default(),
                                 kv_transfer_params: None,
                             })
                         };
@@ -81,6 +83,7 @@ impl<T: TextOutputStream> T {
                         if let Some(finished) = finished {
                             let mut collected = collected.unwrap();
                             collected.finish_reason = finished.finish_reason;
+                            collected.usage = finished.usage;
                             collected.kv_transfer_params = finished.kv_transfer_params;
                             return Ok(collected);
                         }
@@ -146,8 +149,11 @@ mod tests {
                     ],
                 }),
                 finished: Some(Finished {
-                    prompt_token_count: 2,
-                    output_token_count: 2,
+                    usage: vllm_llm::TokenUsage {
+                        prompt_token_count: 2,
+                        output_token_count: 2,
+                        cached_token_count: 0,
+                    },
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                 }),
@@ -260,8 +266,11 @@ mod tests {
                     ],
                 }),
                 finished: Some(Finished {
-                    prompt_token_count: 2,
-                    output_token_count: 5,
+                    usage: vllm_llm::TokenUsage {
+                        prompt_token_count: 2,
+                        output_token_count: 5,
+                        cached_token_count: 0,
+                    },
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                 }),

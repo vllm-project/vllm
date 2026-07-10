@@ -292,7 +292,7 @@ def test_async_intermediate_tensors_lazy_wait() -> None:
     )
 
     # accessing non-tensor attributes should not trigger wait.
-    assert it.kv_connector_output is None
+    assert it._comm_handles is not None
     assert work.wait_calls == 0
     assert post_calls["n"] == 0
 

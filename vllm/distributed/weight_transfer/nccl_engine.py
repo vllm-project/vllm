@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""NCCL-based weight transfer engine."""
+"""NCCL-based (dense) weight transfer engine."""
 
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -9,14 +9,18 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
-from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
-    WeightTransferInitInfo,
     WeightTransferUpdateInfo,
+)
+from vllm.distributed.weight_transfer.nccl_common import (
+    NCCLWeightTransferInitInfo,
+    trainer_init,
+    worker_init_process_group,
 )
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
@@ -24,15 +28,13 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     packed_nccl_broadcast_consumer,
 )
 
-
-@dataclass
-class NCCLWeightTransferInitInfo(WeightTransferInitInfo):
-    """Initialization info for NCCL weight transfer backend."""
-
-    master_address: str
-    master_port: int
-    rank_offset: int
-    world_size: int
+# Re-exported for backward compatibility; canonical home is nccl_common.
+__all__ = [
+    "NCCLWeightTransferInitInfo",
+    "NCCLTrainerSendWeightsArgs",
+    "NCCLWeightTransferUpdateInfo",
+    "NCCLWeightTransferEngine",
+]
 
 
 @dataclass
@@ -100,8 +102,10 @@ class NCCLWeightTransferEngine(
     """
     Weight transfer engine using NCCL for communication between trainer and workers.
 
-    This implementation uses NCCL broadcast operations to transfer weights from
-    the trainer (rank 0) to all inference workers in a process group.
+    This implementation uses NCCL broadcast operations to transfer dense
+    checkpoint-format weights from the trainer (rank 0) to all inference workers
+    in a process group. Received weights are loaded via the model's
+    `load_weights` using the layerwise reload lifecycle.
     """
 
     # Define backend-specific dataclass types
@@ -111,18 +115,11 @@ class NCCLWeightTransferEngine(
     def __init__(
         self,
         config: WeightTransferConfig,
-        parallel_config: ParallelConfig,
+        vllm_config: "VllmConfig",
+        device: torch.device,
         model: torch.nn.Module,
     ) -> None:
-        """
-        Initialize the NCCL weight transfer engine.
-
-        Args:
-            config: The configuration for the weight transfer engine
-            parallel_config: The configuration for the parallel setup
-            model: The local model instance which will receive the weights
-        """
-        super().__init__(config, parallel_config, model)
+        super().__init__(config, vllm_config, device, model)
         self.model_update_group: PyNcclCommunicator | None = None
 
     def init_transfer_engine(self, init_info: NCCLWeightTransferInitInfo) -> None:
@@ -133,35 +130,29 @@ class NCCLWeightTransferEngine(
             init_info: NCCL initialization info containing master address, port,
                       rank offset, and world size
         """
-
-        # Calculate the global rank in the trainer-worker process group
-        # Must account for data parallel to get unique ranks across all workers
-        dp_rank = self.parallel_config.data_parallel_index
-        world_size_per_dp = self.parallel_config.world_size  # TP * PP
-        rank_within_dp = self.parallel_config.rank
-
-        # Unique rank across all DP groups
-        worker_rank = dp_rank * world_size_per_dp + rank_within_dp
-        rank = worker_rank + init_info.rank_offset
-        # Create stateless process group
-        device = torch.accelerator.current_device_index()
-        self.model_update_group = (
-            NCCLWeightTransferEngine._stateless_init_process_group(
-                init_info.master_address,
-                init_info.master_port,
-                rank,
-                init_info.world_size,
-                device=device,
-            )
+        self.model_update_group = worker_init_process_group(
+            init_info, self.parallel_config
         )
 
-    def receive_weights(
-        self,
-        update_info: NCCLWeightTransferUpdateInfo,
-        load_weights: Callable[[list[tuple[str, torch.Tensor]]], None],
-    ) -> None:
+    def start_weight_update(self) -> None:
+        """Initialize layerwise reloading for the incoming checkpoint weights."""
+        from vllm.model_executor.model_loader.reload import (
+            initialize_layerwise_reload,
+        )
+
+        initialize_layerwise_reload(self.model)
+
+    def finish_weight_update(self) -> None:
+        """Finalize layerwise reloading after all weights have been received."""
+        from vllm.model_executor.model_loader.reload import (
+            finalize_layerwise_reload,
+        )
+
+        finalize_layerwise_reload(self.model, self.model_config)
+
+    def receive_weights(self, update_info: NCCLWeightTransferUpdateInfo) -> None:
         """
-        Receive weights from trainer via NCCL broadcast and load them incrementally.
+        Receive weights from trainer via NCCL broadcast.
 
         If update_info.packed is True, uses packed tensor broadcasting for
         efficient transfer of multiple weights in batches. Otherwise, uses simple
@@ -170,8 +161,6 @@ class NCCLWeightTransferEngine(
         Args:
             update_info: NCCL update info containing parameter names, dtypes, shapes,
                         and packed flag
-            load_weights: Callable that loads weights into the model. Called
-                         incrementally for each batch of weights to avoid OOM.
         """
         if self.model_update_group is None:
             raise RuntimeError(
@@ -192,9 +181,10 @@ class NCCLWeightTransferEngine(
                 iterator=state_dict_info_iterator(),
                 group=self.model_update_group,
                 src=0,
-                post_unpack_func=load_weights,
+                post_unpack_func=self.model.load_weights,
                 buffer_size_bytes=update_info.packed_buffer_size_bytes,
                 num_buffers=update_info.packed_num_buffers,
+                device=self.device,
             )
         else:
             # Use simple one-by-one broadcasting
@@ -202,11 +192,11 @@ class NCCLWeightTransferEngine(
                 update_info.names, update_info.dtype_names, update_info.shapes
             ):
                 dtype = getattr(torch, dtype_name)
-                weight = torch.empty(shape, dtype=dtype, device="cuda")
+                weight = torch.empty(shape, dtype=dtype, device=self.device)
                 self.model_update_group.broadcast(
                     weight, src=0, stream=torch.cuda.current_stream()
                 )
-                load_weights([(name, weight)])
+                self.model.load_weights([(name, weight)])
                 del weight
 
     def shutdown(self) -> None:
@@ -219,7 +209,7 @@ class NCCLWeightTransferEngine(
         iterator: Iterator[tuple[str, torch.Tensor]],
         trainer_args: dict[str, Any] | NCCLTrainerSendWeightsArgs,
     ) -> None:
-        """Broadcast weights from trainer to vLLM workers.
+        """Broadcast dense weights from trainer to vLLM workers.
 
         Args:
             iterator: Iterator of model parameters. Returns (name, tensor) tuples
@@ -272,73 +262,6 @@ class NCCLWeightTransferEngine(
                     stream=args.stream or torch.cuda.current_stream(),
                 )
 
-    @staticmethod
-    def trainer_init(
-        init_info: NCCLWeightTransferInitInfo | dict,
-    ) -> "PyNcclCommunicator":
-        """
-        Initialize NCCL process group for trainer-side weight transfer.
-
-        The trainer is always rank 0 in the process group. Uses the current
-        CUDA device (torch.accelerator.current_device_index()).
-
-        Args:
-            init_info: Either an NCCLWeightTransferInitInfo object or a dict with keys:
-                - master_address: str
-                - master_port: int
-                - world_size: int
-
-        Returns:
-            PyNcclCommunicator for weight transfer.
-
-        Example:
-            >>> from vllm.distributed.weight_transfer.nccl_engine import (
-            ...     NCCLWeightTransferEngine,
-            ... )
-            >>> group = NCCLWeightTransferEngine.trainer_init(
-            ...     dict(
-            ...         master_address=master_address,
-            ...         master_port=master_port,
-            ...         world_size=world_size,
-            ...     ),
-            ... )
-        """
-        if isinstance(init_info, dict):
-            master_address = init_info["master_address"]
-            master_port = init_info["master_port"]
-            world_size = init_info["world_size"]
-        else:
-            # NCCLWeightTransferInitInfo object
-            master_address = init_info.master_address
-            master_port = init_info.master_port
-            world_size = init_info.world_size
-
-        # Trainer is always rank 0
-        device = torch.accelerator.current_device_index()
-        return NCCLWeightTransferEngine._stateless_init_process_group(
-            master_address,
-            master_port,
-            0,
-            world_size,
-            device,
-        )
-
-    @staticmethod
-    def _stateless_init_process_group(
-        master_address, master_port, rank, world_size, device
-    ):
-        """
-        vLLM provides `StatelessProcessGroup` to create a process group
-        without considering the global process group in torch.distributed.
-        It is recommended to create `StatelessProcessGroup`, and then initialize
-        the data-plane communication (NCCL) between external (train processes)
-        and vLLM workers.
-        """
-        from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-        from vllm.distributed.utils import StatelessProcessGroup
-
-        pg = StatelessProcessGroup.create(
-            host=master_address, port=master_port, rank=rank, world_size=world_size
-        )
-        pynccl = PyNcclCommunicator(pg, device=device)
-        return pynccl
+    # Trainer-side process-group setup. Delegates to the shared helper so the
+    # sparse engine can reuse the exact same rendezvous without subclassing.
+    trainer_init = staticmethod(trainer_init)

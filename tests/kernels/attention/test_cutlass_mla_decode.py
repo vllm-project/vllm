@@ -212,3 +212,69 @@ def test_cutlass_mla_decode(
     print(
         f"{t:.3f} ms, {FLOPS / 10**9 / t:.0f} TFLOPS,", f"{bytes / 10**6 / t:.0f} GB/s"
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason=CUTLASS_MLA_UNSUPPORTED_REASON,
+)
+@torch.inference_mode()
+def test_cutlass_mla_decode_cross_layer_view():
+    """The kernel must read the cache's page-dim stride instead of assuming
+    pages are packed back-to-back. A per-layer view into a cross-layer
+    (block-major) cache has stride(0) inflated by num_layers; outputs must
+    match a contiguous cache holding the same data exactly."""
+    device = torch.device("cuda:0")
+    torch.set_default_dtype(torch.bfloat16)
+    torch.set_default_device(device)
+    torch.manual_seed(42)
+
+    b, mean_sk, d, dv, block_size = 4, 512, 576, 512, 64
+    num_layers, layer_idx = 3, 1
+    scale = math.sqrt(d) ** (-1)
+
+    num_pages = b * (mean_sk // block_size)
+    cache_seqlens = torch.full((b,), mean_sk, dtype=torch.int32)
+    block_table = torch.arange(num_pages, dtype=torch.int32).view(
+        b, mean_sk // block_size
+    )
+
+    kv_contig = torch.randn(num_pages, block_size, d)
+    # Neighbor layers hold random data so packed-pages addressing reads
+    # garbage rather than zeros.
+    kv_cross_layer = torch.randn(num_pages, num_layers, block_size, d)
+    kv_view = kv_cross_layer[:, layer_idx]
+    kv_view.copy_(kv_contig)
+    assert kv_view.stride(0) == num_layers * block_size * d
+
+    q_nope = torch.randn(b, 128, dv)
+    q_pe = torch.randn(b, 128, d - dv)
+    sm_count = num_compute_units(device.index)
+    workspace_size = ops.sm100_cutlass_mla_get_workspace_size(
+        mean_sk, b, sm_count, num_kv_splits=1
+    )
+    workspace = torch.empty(workspace_size, dtype=torch.uint8)
+
+    def run(cache):
+        out = torch.empty(b, 128, dv)
+        lse = torch.empty(b, 128, dtype=torch.float32)
+        ops.sm100_cutlass_mla_decode(
+            out,
+            lse,
+            q_nope,
+            q_pe,
+            cache,
+            cache_seqlens,
+            block_table,
+            workspace,
+            scale,
+            1,
+        )
+        return out, lse
+
+    out_contig, lse_contig = run(kv_contig)
+    out_view, lse_view = run(kv_view)
+
+    # Same data and same compute order; only addressing differs.
+    assert torch.equal(out_contig, out_view)
+    assert torch.equal(lse_contig, lse_view)

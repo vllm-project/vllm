@@ -778,7 +778,7 @@ Then, you can use the OpenAI client as follows:
         base_url=openai_api_base,
     )
 
-    video_url = "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4"
+    video_url = "https://huggingface.co/datasets/raushan-testing-hf/videos-test/resolve/main/sample_demo_1.mp4"
 
     ## Use video url in the payload
     chat_completion_from_url = client.chat.completions.create(
@@ -815,6 +815,44 @@ Full example: [examples/generate/multimodal/openai_chat_completion_client_for_mu
     ```bash
     export VLLM_VIDEO_FETCH_TIMEOUT=<timeout>
     ```
+
+#### Video Decoding Backend
+
+vLLM decodes video bytes into frames using a selectable decoding backend. Three
+backends are supported:
+
+- `opencv` (default): OpenCV-based decoder.
+- `pyav`: PyAV decoder.
+- `torchcodec`: TorchCodec (PyTorch-native) decoder.
+
+All three backends are ultimately backed by FFmpeg. `torchcodec` lets
+you choose which FFmpeg version is used while `opencv` and `pyav` rely on
+whichever FFmpeg build they were linked against.
+
+Select the backend by passing the `backend` parameter via `--media-io-kwargs`:
+
+```bash
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --media-io-kwargs '{"video": {"backend": "torchcodec"}}'
+```
+
+**TorchCodec-specific parameters:**
+
+The following parameters only apply to the `torchcodec` backend:
+
+- `num_ffmpeg_threads`: Number of FFmpeg decoding threads. `0` (default) relies
+  on the FFmpeg default, which is `min(cpu_count + 1, 16)`. This allows you to
+  control thread over-subscription.
+- `seek_mode`: Seek mode for the decoder. `"exact"` (default) guarantees
+  frame-accurate sampling by scanning the file when the decoder is created.
+  `"approximate"` skips that scan for faster decoder creation, at the cost of
+  relying on the file's metadata (which may yield less accurate seeking).
+
+```bash
+# Example: TorchCodec with approximate seek mode and 4 FFmpeg threads
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --media-io-kwargs '{"video": {"backend": "torchcodec", "seek_mode": "approximate", "num_ffmpeg_threads": 4}}'
+```
 
 #### Video Frame Recovery
 

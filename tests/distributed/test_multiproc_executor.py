@@ -283,9 +283,14 @@ def test_multiproc_executor_pipeline_parallel():
         output_rank = executor._get_output_rank()
         assert output_rank == 2, "Output rank should be 2 (first rank of last PP stage)"
 
-        # Verify max_concurrent_batches for pipeline parallel
-        assert executor.max_concurrent_batches == 2, (
-            "Max concurrent batches should equal PP size"
+        # V2 model runner uses one extra batch to overlap async scheduling.
+        expected_concurrent_batches = 2 + int(
+            vllm_config.scheduler_config.async_scheduling
+            and vllm_config.use_v2_model_runner
+        )
+        assert vllm_config.max_concurrent_batches == expected_concurrent_batches, (
+            "Max concurrent batches should follow the configured PP/async "
+            "scheduling policy"
         )
 
     finally:

@@ -101,7 +101,7 @@ vLLM's `pre-commit` hooks will now run automatically every time you commit.
     Some `pre-commit` hooks only run in CI. If you need to, you can run them locally with:
 
     ```bash
-    pre-commit run --hook-stage manual mypy-3.10
+    pre-commit run --hook-stage manual mypy-3.11
     ```
 
 ### Documentation
@@ -304,9 +304,15 @@ review process:
   resources. The reviewer will add `ready` label to the PR when the PR is
   ready to merge or a full CI run is needed.
 
-### Escalating Stalled Contributions
+### Pull Request Limits and Escalation
 
-If you have an important contribution that has not yet received maintainer attention, please email us at:
+vLLM uses GitHub's [pull request limit](https://github.blog/open-source/maintainers/how-pull-request-limits-are-cutting-down-the-noise/)
+for contributors without write access. The current cap is 6 open PRs. If this
+blocks well-intentioned critical work, contact a committer to request bypass
+list access.
+
+If you need an expedited review for an important contribution, please email us
+at:
 
 <pr-review-request@vllm.ai>
 

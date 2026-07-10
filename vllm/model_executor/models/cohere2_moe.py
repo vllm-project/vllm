@@ -16,7 +16,9 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+)
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
@@ -28,8 +30,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
     row_parallel_weight_loader,
 )
 from vllm.model_executor.utils import set_weight_attrs
@@ -40,12 +40,19 @@ from .commandr import LayerNorm
 from .interfaces import SupportsPP, SupportsQuant
 from .utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     extract_layer_index,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
 )
+
+
+def is_prefix_dense_layer(config: CohereConfig, layer_idx: int) -> bool:
+    """True when layer_idx lies in the contiguous dense MLP prefix."""
+    if layer_idx >= len(config.mlp_layer_types):
+        return False
+    return all(t == "dense" for t in config.mlp_layer_types[: layer_idx + 1])
 
 
 @torch.compile(backend=current_platform.simple_compile_backend)
@@ -204,17 +211,15 @@ class Cohere2MoeAttention(nn.Module):
         ):
             self.sliding_window = config.sliding_window
 
-        # Prefix-dense layers (layer_idx < first_k_dense_replace) have full
-        # attention (no sliding window). When prefix_dense_sliding_window_pattern
-        # == 1, they keep RoPE even though they are not sliding-window layers.
-        first_k_dense_replace = getattr(config, "first_k_dense_replace", 0)
+        # Prefix-dense layers have full attention (no sliding window). When
+        # prefix_dense_sliding_window_pattern == 1, they keep RoPE even though
+        # they are not sliding-window layers.
         prefix_dense_sliding_window_pattern = getattr(
             config, "prefix_dense_sliding_window_pattern", 1
         )
         self.force_rope = bool(
-            first_k_dense_replace
+            is_prefix_dense_layer(config, self.layer_idx)
             and prefix_dense_sliding_window_pattern == 1
-            and self.layer_idx < first_k_dense_replace
         )
 
         self.attn = Attention(
@@ -343,9 +348,7 @@ class Cohere2MoeDecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
         )
 
-        # Layers before first_k_dense_replace use a dense MLP instead of MoE.
-        first_k_dense_replace = getattr(config, "first_k_dense_replace", 0)
-        if self.layer_idx < first_k_dense_replace:
+        if config.mlp_layer_types[self.layer_idx] == "dense":
             self.mlp = Cohere2MoeMLP(
                 config=config,
                 intermediate_size=getattr(
@@ -399,6 +402,21 @@ class Cohere2MoeModel(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size, config.hidden_size
         )
+
+        # Decoder layers read per-layer MLP layout from config.mlp_layer_types
+        # (dense MLP vs MoE) and use it for weight loading. Transformers >=5.10
+        # populates this field; older versions only expose first_k_dense_replace.
+        # Normalize here so layer construction below sees a consistent layout.
+        if getattr(config, "mlp_layer_types", None) is None:
+            first_k_dense_replace = getattr(config, "first_k_dense_replace", None)
+            n = config.num_hidden_layers
+            if first_k_dense_replace is not None:
+                config.mlp_layer_types = ["dense"] * first_k_dense_replace + [
+                    "sparse"
+                ] * (n - first_k_dense_replace)
+            else:
+                config.mlp_layer_types = ["sparse"] * n
+
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Cohere2MoeDecoderLayer(
@@ -441,100 +459,23 @@ class Cohere2MoeModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts,
-        )
-
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-
-            for param_name, shard_name, shard_id in stacked_params_mapping:
-                if shard_name not in name:
-                    continue
-                if "mlp.experts" in name:
-                    continue
-                name = name.replace(shard_name, param_name)
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
-                    if weight_name not in name:
-                        continue
-                    name = name.replace(weight_name, param_name)
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    if (
-                        name.endswith(".bias") or name.endswith("_bias")
-                    ) and name not in params_dict:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                    )
-                    break
-                else:
-                    if (
-                        name.endswith(".bias") or name.endswith("_bias")
-                    ) and name not in params_dict:
-                        continue
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-
-        return loaded_params
-
 
 class Cohere2MoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
     is_text_generation_model = True
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            # weight_name: (param_name, shard_id)
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+            # .experts.gate_up_proj must be handled by MoERunner.load_weights for EP
+            ".mlp.gate_proj": (".mlp.gate_up_proj", 0),
+            ".mlp.up_proj": (".mlp.gate_up_proj", 1),
+            ".shared_experts.gate_proj": (".shared_experts.gate_up_proj", 0),
+            ".shared_experts.up_proj": (".shared_experts.gate_up_proj", 1),
+        }
+    )
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -590,4 +531,4 @@ class Cohere2MoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=["lm_head."])
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

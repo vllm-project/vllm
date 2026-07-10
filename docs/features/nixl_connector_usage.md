@@ -50,7 +50,7 @@ To select a different backend, set `kv_connector_extra_config.backends` in `--kv
 vllm serve <MODEL> \
   --kv-transfer-config '{
     "kv_connector":"NixlConnector",
-    "kv_role":"kv_both",
+    "kv_role":"kv_producer",
     "kv_connector_extra_config":{"backends":["LIBFABRIC"]}
   }'
 ```
@@ -60,7 +60,7 @@ You can also pass JSON keys individually using dotted arguments, and you can app
 ```bash
 vllm serve <MODEL> \
   --kv-transfer-config.kv_connector NixlConnector \
-  --kv-transfer-config.kv_role kv_both \
+  --kv-transfer-config.kv_role kv_producer \
   --kv-transfer-config.kv_connector_extra_config.backends+ LIBFABRIC
 ```
 
@@ -81,7 +81,7 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=5600 \
 vllm serve Qwen/Qwen3-0.6B \
   --port 8100 \
   --enforce-eager \
-  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail"}'
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
 ```
 
 ### Consumer (Decoder) Configuration
@@ -96,7 +96,7 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=5601 \
 vllm serve Qwen/Qwen3-0.6B \
   --port 8200 \
   --enforce-eager \
-  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail"}'
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}'
 ```
 
 ### Proxy Server
@@ -212,10 +212,21 @@ sequenceDiagram
 Enable bidirectional KV transfer by setting `bidirectional_kv_xfer` in `kv_connector_extra_config` on **both** P and D instances:
 
 ```bash
+# Prefill instance
 vllm serve <MODEL> \
   --kv-transfer-config '{
     "kv_connector": "NixlConnector",
-    "kv_role": "kv_both",
+    "kv_role": "kv_producer",
+    "kv_connector_extra_config": {
+      "bidirectional_kv_xfer": true
+    }
+  }'
+
+# Decode instance
+vllm serve <MODEL> \
+  --kv-transfer-config '{
+    "kv_connector": "NixlConnector",
+    "kv_role": "kv_consumer",
     "kv_connector_extra_config": {
       "bidirectional_kv_xfer": true
     }
@@ -282,6 +293,21 @@ curl http://localhost:8000/v1/chat/completions \
 
 !!! note
     The `conversation_id` field is a non-standard extension to the OpenAI API. It is consumed by the proxy and not forwarded to the vLLM engine.
+
+### Benchmarking the multi-turn proxy
+
+[`benchmarks/multi_turn/benchmark_serving_multi_turn.py`](../../benchmarks/multi_turn/benchmark_serving_multi_turn.py) supports targeting the disaggregated multi-turn proxy with the `--send-conversation-id` flag, which injects a per-conversation `conversation_id` into every request payload so the proxy can key cross-turn KV cache reuse.
+
+The flag is **off by default** so the benchmark is compatible with strict OpenAI-compatible frontends that reject unknown top-level fields. When benchmarking the multi-turn proxy you must pass it explicitly — otherwise every turn lands as a cache MISS and the bidirectional KV transfer path is never exercised.
+
+```bash
+python benchmarks/multi_turn/benchmark_serving_multi_turn.py \
+  --model <MODEL> --served-model-name <NAME> \
+  --url http://<proxy_host>:8000 \
+  --input-file benchmarks/multi_turn/generate_multi_turn.json \
+  --num-clients 2 --max-active-conversations 6 \
+  --send-conversation-id
+```
 
 ### Limitations
 
@@ -359,11 +385,10 @@ For multi-host DP deployment, only need to provide the host/port of the head ins
 
 - **kv_producer**: For prefiller instances that generate KV caches
 - **kv_consumer**: For decoder instances that consume KV caches from prefiller
-- **kv_both**: Enables symmetric functionality where the connector can act as both producer and consumer. This provides flexibility for experimental setups and scenarios where the role distinction is not predetermined.
+- **kv_both** (deprecated): Previously used as a catch-all when the role was not predetermined. This value is now deprecated for NixlConnector and will be removed in a future release.
 
-!!! tip
-    NixlConnector currently does not distinguish `kv_role`; the actual prefiller/decoder roles are determined by the upper-level proxy (e.g., `toy_proxy_server.py` using `--prefiller-hosts` and `--decoder-hosts`).
-    Therefore, `kv_role` in `--kv-transfer-config` is effectively a placeholder and does not affect NixlConnector's behavior.
+!!! warning
+    `kv_role="kv_both"` is deprecated for NixlConnector. Please set `kv_role="kv_producer"` for prefill instances and `kv_role="kv_consumer"` for decode instances. See [#33702](https://github.com/vllm-project/vllm/issues/33702) for details.
 
 ### KV Load Failure Policy
 
@@ -397,6 +422,54 @@ To enable this feature:
 ```bash
 --kv-transfer-config '{..., "kv_connector_extra_config": {"enable_cross_layers_blocks": "True"}}'
 ```
+
+## Metrics Reference
+
+vLLM periodically logs a `KV Transfer metrics` line summarising NIXL transfer
+activity for the last reporting interval. Example output:
+
+```text
+KV Transfer metrics: Num successful transfers=4, Avg xfer time (ms)=1.381,
+P90 xfer time (ms)=2.601, Avg post time (ms)=0.672, P90 post time (ms)=0.801,
+Avg MB per transfer=2.25, Throughput (MB/s)=1629.549, Avg number of descriptors=72.0
+```
+
+The table below describes each field. All timing values cover only the
+successful transfers recorded in the current interval; failed transfers are
+counted separately via Prometheus (see
+[Prometheus metrics](#prometheus-metrics) below).
+
+| Metric | Unit | Description |
+| -------- | ------ | ------------- |
+| `Num successful transfers` | count | Number of NIXL KV-block transfers that completed without error during the interval. A transfer corresponds to one prefill request's worth of KV cache being moved from the prefiller to the decoder (or vice versa in bidirectional mode). |
+| `Avg xfer time (ms)` | ms | Mean end-to-end transfer duration (`xferDuration` in NIXL telemetry, converted from µs). Measured from when the request is posted to when the backend reports completion, so it includes both the posting step and the actual data movement. |
+| `P90 xfer time (ms)` | ms | 90th-percentile transfer duration. Use this to identify tail latency: a large gap between average and P90 suggests occasional stragglers (e.g., network congestion or large KV blocks). |
+| `Avg post time (ms)` | ms | Mean time to submit the transfer request to the RDMA backend (`postDuration` in NIXL telemetry). This is the synchronous cost of posting work to the NIC queue (descriptor setup, etc.) before the async data movement begins. |
+| `P90 post time (ms)` | ms | 90th-percentile request-posting duration. Elevated P90 here (with low xfer P90) points to overhead in submitting requests rather than in the data transfer itself. |
+| `Avg MB per transfer` | MB | Mean payload size per transfer, computed as `total bytes transferred / number of transfers`. Reflects the average KV cache footprint of a single request (sequence length × layers × head dimension × dtype bytes). |
+| `Throughput (MB/s)` | MB/s | Effective bandwidth over the interval: `total MB transferred / total xfer time (s)` across all successful transfers. This is aggregate throughput, not per-request bandwidth. |
+| `Avg number of descriptors` | count | Mean number of NIXL memory descriptors (scatter-gather segments) submitted per transfer. More descriptors indicate more fragmented or larger KV cache allocations; very high counts can increase descriptor-registration overhead. |
+
+### Prometheus metrics
+
+In addition to the periodic log line, the following Prometheus metrics are
+exported when NixlConnector is active:
+
+| Metric name | Type | Description |
+| ------------- | ------ | ------------- |
+| `vllm:nixl_xfer_time_seconds` | Histogram | Per-transfer RDMA copy duration (seconds). |
+| `vllm:nixl_post_time_seconds` | Histogram | Time to submit the transfer request to the RDMA backend (seconds). |
+| `vllm:nixl_bytes_transferred` | Histogram | Bytes moved per transfer. |
+| `vllm:nixl_num_descriptors` | Histogram | Descriptor count per transfer. |
+| `vllm:nixl_num_failed_transfers` | Counter | Cumulative count of failed NIXL KV-block transfers. |
+| `vllm:nixl_num_failed_notifications` | Counter | Cumulative count of failed completion notifications (`send_notif`). |
+| `vllm:nixl_num_kv_expired_reqs` | Counter | Requests whose KV blocks expired on the prefiller before the decoder read them (tracked on the P instance). |
+
+!!! tip
+    High `vllm:nixl_num_kv_expired_reqs` indicates that the prefiller's lease
+    duration (`kv_lease_duration`) is too short for your network or workload.
+    Increase it via `--kv-transfer-config '{"kv_connector_extra_config":
+    {"kv_lease_duration": <seconds>}}'`.
 
 ## Example Scripts/Code
 

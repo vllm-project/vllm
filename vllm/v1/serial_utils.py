@@ -33,7 +33,7 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     NestedTensors,
 )
-from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.utils import tensor_data
 
 logger = init_logger(__name__)
@@ -327,7 +327,7 @@ class MsgpackDecoder:
         oob_tensor_provider: OOBTensorProvider | None = None,
     ):
         self.share_mem = share_mem
-        self.pin_tensors = is_pin_memory_available()
+        self.pin_tensors = PIN_MEMORY
         args = () if t is None else (t,)
         self.decoder = msgpack.Decoder(
             *args, ext_hook=self.ext_hook, dec_hook=self.dec_hook

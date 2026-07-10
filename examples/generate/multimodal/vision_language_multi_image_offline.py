@@ -74,39 +74,6 @@ def load_aria(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
-def load_aya_vision(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "CohereLabs/aya-vision-8b"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        max_num_seqs=2,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-
-    placeholders = [{"type": "image", "image": url} for url in image_urls]
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        }
-    ]
-
-    processor = AutoProcessor.from_pretrained(model_name)
-
-    prompt = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
-    )
-
-
 def load_bee(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "Open-Bee/Bee-8B-RL"
 
@@ -1042,49 +1009,6 @@ def load_phi4siglip(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
-def load_qwen_vl_chat(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "Qwen/Qwen-VL-Chat"
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=1024,
-        max_num_seqs=2,
-        hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]},
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-    placeholders = "".join(
-        f"Picture {i}: <img></img>\n" for i, _ in enumerate(image_urls, start=1)
-    )
-
-    # This model does not have a chat_template attribute on its tokenizer,
-    # so we need to explicitly pass it. We use ChatML since it's used in the
-    # generation utils of the model:
-    # https://huggingface.co/Qwen/Qwen-VL-Chat/blob/main/qwen_generation_utils.py#L265
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-
-    # Copied from: https://huggingface.co/docs/transformers/main/en/chat_templating
-    chat_template = "{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"  # noqa: E501
-
-    messages = [{"role": "user", "content": f"{placeholders}\n{question}"}]
-    prompt = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        chat_template=chat_template,
-    )
-
-    stop_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>"]
-    stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        stop_token_ids=stop_token_ids,
-        image_data=[fetch_image(url) for url in image_urls],
-        chat_template=chat_template,
-    )
-
-
 def load_qwen2_vl(question: str, image_urls: list[str]) -> ModelRequestData:
     try:
         from qwen_vl_utils import smart_resize
@@ -1318,55 +1242,6 @@ def load_step_vl(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
-def load_tarsier(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "omni-research/Tarsier-7b"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=4096,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-
-    prompt = f"USER: {'<image>' * len(image_urls)}\n{question}\n ASSISTANT:"
-    image_data = [fetch_image(url) for url in image_urls]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
-    )
-
-
-def load_tarsier2(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "omni-research/Tarsier2-Recap-7b"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=32768,
-        limit_mm_per_prompt={"image": len(image_urls)},
-        hf_overrides={
-            "architectures": ["Tarsier2ForConditionalGeneration"],
-            "model_type": "tarsier2",
-        },
-    )
-
-    prompt = (
-        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-        f"<|im_start|>user\n<|vision_start|>{'<|image_pad|>' * len(image_urls)}"
-        f"<|vision_end|>{question}<|im_end|>\n"
-        "<|im_start|>assistant\n"
-    )
-    image_data = [fetch_image(url) for url in image_urls]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
-    )
-
-
 # GLM-4.1V
 def load_glm4_1v(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "zai-org/GLM-4.1V-9B-Thinking"
@@ -1512,7 +1387,6 @@ def load_molmo2(question: str, image_urls: list[str]) -> ModelRequestData:
 
 model_example_map = {
     "aria": load_aria,
-    "aya_vision": load_aya_vision,
     "bee": load_bee,
     "command_a_vision": load_command_a_vision,
     "deepseek_vl_v2": load_deepseek_vl2,
@@ -1544,15 +1418,12 @@ model_example_map = {
     "phi4_mm": load_phi4mm,
     "phi4_siglip": load_phi4siglip,
     "pixtral_hf": load_pixtral_hf,
-    "qwen_vl_chat": load_qwen_vl_chat,
     "qwen2_vl": load_qwen2_vl,
     "qwen2_5_vl": load_qwen2_5_vl,
     "rvl": load_r_vl,
     "smolvlm": load_smolvlm,
     "step3": load_step3,
     "stepvl": load_step_vl,
-    "tarsier": load_tarsier,
-    "tarsier2": load_tarsier2,
     "glm4_1v": load_glm4_1v,
     "glm4_5v": load_glm4_5v,
     "glm4_5v_fp8": load_glm4_5v_fp8,

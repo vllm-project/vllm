@@ -3,6 +3,7 @@
 
 import torch
 
+import vllm.envs as envs
 from tests.v1.kv_connector.unit.utils import MockKVConfig
 from vllm.config import (
     CacheConfig,
@@ -24,6 +25,7 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -52,12 +54,15 @@ def create_scheduler(
     block_size: int = 16,
     max_model_len: int | None = None,
     num_speculative_tokens: int | None = None,
-    speculative_config_kwargs: dict[str, object] | None = None,
+    speculative_method: str | None = None,
     skip_tokenizer_init: bool = False,
     async_scheduling: bool = False,
     pipeline_parallel_size: int = 1,
+    data_parallel_size: int = 1,
+    num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None,
     use_ec_connector: bool = False,
     ec_role: str | None = None,
+    use_v2_model_runner: bool | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -90,6 +95,8 @@ def create_scheduler(
         enable_chunked_prefill=enable_chunked_prefill,
         async_scheduling=async_scheduling,
         is_encoder_decoder=model_config.is_encoder_decoder,
+        # Ensure admission/preemption mechanics are deterministic
+        watermark=0.0,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(
@@ -121,11 +128,18 @@ def create_scheduler(
         )
 
     speculative_config: SpeculativeConfig | None = None
-    if num_speculative_tokens is not None or speculative_config_kwargs is not None:
-        spec_kwargs = dict(speculative_config_kwargs or {})
-        spec_kwargs.setdefault("model", "ngram")
-        if num_speculative_tokens is not None:
-            spec_kwargs.setdefault("num_speculative_tokens", num_speculative_tokens)
+    if num_speculative_tokens is not None:
+        spec_kwargs: dict = dict(
+            model="ngram", num_speculative_tokens=num_speculative_tokens
+        )
+        if num_speculative_tokens_per_batch_size is not None:
+            spec_kwargs["num_speculative_tokens_per_batch_size"] = (
+                num_speculative_tokens_per_batch_size
+            )
+        if speculative_method is not None:
+            spec_kwargs["method"] = speculative_method
+            spec_kwargs["prompt_lookup_max"] = num_speculative_tokens
+            spec_kwargs["prompt_lookup_min"] = 1
         speculative_config = SpeculativeConfig(**spec_kwargs)
 
     ec_transfer_config = (
@@ -142,7 +156,10 @@ def create_scheduler(
         scheduler_config=scheduler_config,
         model_config=model_config,
         cache_config=cache_config,
-        parallel_config=ParallelConfig(pipeline_parallel_size=pipeline_parallel_size),
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=pipeline_parallel_size,
+            data_parallel_size=data_parallel_size,
+        ),
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,
         ec_transfer_config=ec_transfer_config,
@@ -163,14 +180,19 @@ def create_scheduler(
         ],
     )
     cache_config.num_gpu_blocks = num_blocks
+    register_all_kvcache_specs(vllm_config)
     scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
-    return scheduler_cls(
+    scheduler = scheduler_cls(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         block_size=block_size,
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
+    if use_v2_model_runner is None:
+        use_v2_model_runner = bool(envs.VLLM_USE_V2_MODEL_RUNNER)
+    scheduler.use_v2_model_runner = use_v2_model_runner
+    return scheduler
 
 
 _none_hash_initialized = False

@@ -100,6 +100,8 @@ void run_get_group_gemm_starts(
   int64_t k = a_tensors.size(1);
   int64_t scale_k = cutlass::ceil_div(k, b_group_size);
 
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      a_tensors.get_device_index());
   auto stream = get_current_cuda_stream(a_tensors.get_device_index());
 
   if (false) {

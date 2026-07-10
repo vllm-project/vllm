@@ -22,15 +22,17 @@ use crate::protocol::multimodal::{
     MmFeatureSpec, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmSlice, PlaceholderRange,
     SliceSpec,
 };
+use crate::protocol::output::{
+    DpControlMessage, DpControlOutput, EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs,
+    RequestBatchOutputs, UtilityCallOutput, decode_engine_core_outputs,
+};
+use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
+use crate::protocol::sampling::EngineCoreSamplingParams;
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::tensor::WireTensor;
 use crate::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
-use crate::protocol::{
-    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest,
-    EngineCoreRequestType, EngineCoreSamplingParams, decode_engine_core_outputs,
-};
 use crate::test_utils::{
-    IpcNamespace, setup_bootstrapped_mock_engine, setup_mock_engine_connections,
+    IpcNamespace, setup_bootstrapped_mock_engine, setup_mock_engine_sockets,
     setup_mock_engine_with_init, spawn_mock_engine_task,
 };
 use crate::{
@@ -150,6 +152,7 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
             top_k: 8,
             max_tokens: 32,
             min_tokens: 1,
+            thinking_token_budget: Some(256),
             stop_token_ids: vec![151643],
             eos_token_id: Some(151645),
             all_stop_token_ids: BTreeSet::from([151643, 151645]),
@@ -303,6 +306,7 @@ fn bootstrapped_test_config(
         transport_mode: TransportMode::Bootstrapped {
             input_address,
             output_address,
+            engine_start_index: 0,
             engine_count,
             ready_timeout,
         },
@@ -310,6 +314,34 @@ fn bootstrapped_test_config(
         model_name: "test-model".to_string(),
         client_index,
     }
+}
+
+fn bootstrapped_test_config_with_start_index(
+    input_address: String,
+    output_address: String,
+    engine_start_index: u32,
+    engine_count: usize,
+    ready_timeout: Duration,
+    client_index: u32,
+    coordinator_mode: Option<CoordinatorMode>,
+) -> EngineCoreClientConfig {
+    let mut config = bootstrapped_test_config(
+        input_address,
+        output_address,
+        engine_count,
+        ready_timeout,
+        client_index,
+        coordinator_mode,
+    );
+    let TransportMode::Bootstrapped {
+        engine_start_index: start,
+        ..
+    } = &mut config.transport_mode
+    else {
+        unreachable!("bootstrapped_test_config returns bootstrapped transport")
+    };
+    *start = engine_start_index;
+    config
 }
 
 async fn recv_xpub_message(xpub: &mut XPubSocket) -> Vec<bytes::Bytes> {
@@ -477,8 +509,8 @@ async fn coordinator_handshake_includes_engine_control_addresses() {
     let (init_tx, init_rx) = oneshot::channel();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let engine_task = tokio::spawn(async move {
-        let connections = setup_mock_engine_connections(handshake_address, &engine_id).await;
-        let _ = init_tx.send(connections.init.clone());
+        let sockets = setup_mock_engine_sockets(handshake_address, &engine_id).await;
+        let _ = init_tx.send(sockets.init.clone());
         let _ = shutdown_rx.await;
     });
 
@@ -515,14 +547,15 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
     let engine0_task = tokio::spawn({
         let handshake_address = handshake_address.clone();
         async move {
-            let mut engine = setup_mock_engine_connections(handshake_address, &[0x00, 0x00]).await;
+            let mut engine = setup_mock_engine_sockets(handshake_address, &[0x00, 0x00]).await;
             let mut coordinator =
                 engine.coordinator.take().expect("coordinator sockets should be present");
+            let data_socket = engine.data_sockets.first_mut().expect("data socket");
 
             let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
             assert_eq!((wave, exclude_engine), (0, 0));
 
-            let add = recv_engine_message(&mut engine.dealer).await;
+            let add = recv_engine_message(&mut data_socket.dealer).await;
             assert_eq!(add[0].as_ref(), &[0x00]);
             let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
             assert_eq!(request.request_id, "req-1");
@@ -538,9 +571,8 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
             );
 
             send_outputs(
-                &mut engine.push,
-                EngineCoreOutputs {
-                    engine_index: 0,
+                &mut data_socket.push,
+                RequestBatchOutputs {
                     outputs: vec![request_output(
                         "req-1",
                         vec![],
@@ -548,33 +580,34 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
                     )],
                     finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
                     ..Default::default()
-                },
+                }
+                .into(),
             )
             .await;
 
             send_outputs(
                 &mut coordinator.output_push,
-                EngineCoreOutputs {
+                DpControlOutput {
                     engine_index: 0,
-                    wave_complete: Some(0),
-                    ..Default::default()
-                },
+                    timestamp: 0.0,
+                    control: DpControlMessage::WaveComplete(0),
+                }
+                .into(),
             )
             .await;
 
             let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
             assert_eq!((wave, exclude_engine), (1, 0));
 
-            let add = recv_engine_message(&mut engine.dealer).await;
+            let add = recv_engine_message(&mut data_socket.dealer).await;
             assert_eq!(add[0].as_ref(), &[0x00]);
             let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
             assert_eq!(request.request_id, "req-3");
             assert_eq!(request.current_wave, 1);
 
             send_outputs(
-                &mut engine.push,
-                EngineCoreOutputs {
-                    engine_index: 0,
+                &mut data_socket.push,
+                RequestBatchOutputs {
                     outputs: vec![request_output(
                         "req-3",
                         vec![],
@@ -582,7 +615,8 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
                     )],
                     finished_requests: Some(BTreeSet::from(["req-3".to_string()])),
                     ..Default::default()
-                },
+                }
+                .into(),
             )
             .await;
 
@@ -594,14 +628,15 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
     let engine1_task = tokio::spawn({
         let handshake_address = handshake_address.clone();
         async move {
-            let mut engine = setup_mock_engine_connections(handshake_address, &[0x01, 0x00]).await;
+            let mut engine = setup_mock_engine_sockets(handshake_address, &[0x01, 0x00]).await;
             let mut coordinator =
                 engine.coordinator.take().expect("coordinator sockets should be present");
+            let data_socket = engine.data_sockets.first_mut().expect("data socket");
 
             let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
             assert_eq!((wave, exclude_engine), (0, 0));
 
-            let add = recv_engine_message(&mut engine.dealer).await;
+            let add = recv_engine_message(&mut data_socket.dealer).await;
             assert_eq!(add[0].as_ref(), &[0x00]);
             let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
             assert_eq!(request.request_id, "req-2");
@@ -617,8 +652,8 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
             );
 
             send_outputs(
-                &mut engine.push,
-                EngineCoreOutputs {
+                &mut data_socket.push,
+                RequestBatchOutputs {
                     engine_index: 1,
                     outputs: vec![request_output(
                         "req-2",
@@ -627,7 +662,8 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
                     )],
                     finished_requests: Some(BTreeSet::from(["req-2".to_string()])),
                     ..Default::default()
-                },
+                }
+                .into(),
             )
             .await;
 
@@ -637,7 +673,7 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
             assert!(
                 timeout(
                     Duration::from_millis(200),
-                    recv_engine_message(&mut engine.dealer)
+                    recv_engine_message(&mut data_socket.dealer)
                 )
                 .await
                 .is_err()
@@ -712,7 +748,7 @@ async fn coordinator_rebroadcasts_engine_start_wave_control() {
     let engine0_task = tokio::spawn({
         let handshake_address = handshake_address.clone();
         async move {
-            let mut engine = setup_mock_engine_connections(handshake_address, &[0x00, 0x00]).await;
+            let mut engine = setup_mock_engine_sockets(handshake_address, &[0x00, 0x00]).await;
             let mut coordinator =
                 engine.coordinator.take().expect("coordinator sockets should be present");
 
@@ -727,17 +763,18 @@ async fn coordinator_rebroadcasts_engine_start_wave_control() {
     let engine1_task = tokio::spawn({
         let handshake_address = handshake_address.clone();
         async move {
-            let mut engine = setup_mock_engine_connections(handshake_address, &[0x01, 0x00]).await;
+            let mut engine = setup_mock_engine_sockets(handshake_address, &[0x01, 0x00]).await;
             let mut coordinator =
                 engine.coordinator.take().expect("coordinator sockets should be present");
 
             send_outputs(
                 &mut coordinator.output_push,
-                EngineCoreOutputs {
+                DpControlOutput {
                     engine_index: 1,
-                    start_wave: Some(4),
-                    ..Default::default()
-                },
+                    timestamp: 0.0,
+                    control: DpControlMessage::StartWave(4),
+                }
+                .into(),
             )
             .await;
 
@@ -778,36 +815,37 @@ async fn coordinator_accepts_stats_only_outputs() {
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let engine_task = tokio::spawn(async move {
-        let mut engine = setup_mock_engine_connections(handshake_address, &[0x00, 0x00]).await;
+        let mut engine = setup_mock_engine_sockets(handshake_address, &[0x00, 0x00]).await;
         let mut coordinator =
             engine.coordinator.take().expect("coordinator sockets should be present");
+        let data_socket = engine.data_sockets.first_mut().expect("data socket");
 
         let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
         assert_eq!((wave, exclude_engine), (0, 0));
 
         send_outputs(
             &mut coordinator.output_push,
-            EngineCoreOutputs {
-                engine_index: 0,
+            RequestBatchOutputs {
+                outputs: Vec::new(),
                 scheduler_stats: Some(Box::new(SchedulerStats {
                     num_running_reqs: 1,
                     current_wave: 0,
                     ..Default::default()
                 })),
                 ..Default::default()
-            },
+            }
+            .into(),
         )
         .await;
 
-        let add = recv_engine_message(&mut engine.dealer).await;
+        let add = recv_engine_message(&mut data_socket.dealer).await;
         assert_eq!(add[0].as_ref(), &[0x00]);
         let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
         assert_eq!(request.request_id, "req-stats");
 
         send_outputs(
-            &mut engine.push,
-            EngineCoreOutputs {
-                engine_index: 0,
+            &mut data_socket.push,
+            RequestBatchOutputs {
                 outputs: vec![request_output(
                     "req-stats",
                     vec![],
@@ -815,7 +853,8 @@ async fn coordinator_accepts_stats_only_outputs() {
                 )],
                 finished_requests: Some(BTreeSet::from(["req-stats".to_string()])),
                 ..Default::default()
-            },
+            }
+            .into(),
         )
         .await;
 
@@ -876,30 +915,34 @@ async fn client_fail_closes_when_main_output_path_receives_dp_control() {
 
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        utility_output: Some(UtilityOutput {
+                    UtilityCallOutput {
+                        output: UtilityOutput {
                             call_id: 1_u64.into(),
                             failure_message: None,
                             result: None,
-                        }),
+                        },
                         ..Default::default()
-                    },
+                    }
+                    .into(),
                 )
                 .await;
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        start_wave: Some(3),
-                        ..Default::default()
-                    },
+                    DpControlOutput {
+                        engine_index: 0,
+                        timestamp: 0.0,
+                        control: DpControlMessage::StartWave(3),
+                    }
+                    .into(),
                 )
                 .await;
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
+                    RequestBatchOutputs {
                         outputs: vec![request_output("req-1", vec![999], None)],
                         ..Default::default()
-                    },
+                    }
+                    .into(),
                 )
                 .await;
 
@@ -922,91 +965,7 @@ async fn client_fail_closes_when_main_output_path_receives_dp_control() {
     .await;
     assert_eq!(client.engine_identities()[0], b"engine-0");
     assert!(client.ready_responses()[0].max_model_len > 0);
-
-    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
-    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();
-
-    let error_2 = timeout(Duration::from_secs(1), stream_2.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap_err();
-    assert!(is_unexpected_dispatcher_output(&error_2));
-
-    let error_1 = timeout(Duration::from_secs(1), stream_1.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap_err();
-    assert!(is_unexpected_dispatcher_output(&error_1));
-
-    assert!(matches!(
-        client.health_error().as_deref(),
-        Some(error) if is_unexpected_dispatcher_output(error)
-    ));
-
-    let _ = shutdown_tx.send(());
-    engine_task.await.unwrap();
-    client.shutdown().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn client_fail_closes_when_main_output_path_receives_mixed_shape_output() {
-    init_tracing();
-    let ipc = IpcNamespace::new().unwrap();
-    let handshake_address = ipc.handshake_endpoint();
-    let engine_id = b"engine-0".to_vec();
-
-    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
-        handshake_address.clone(),
-        engine_id.clone(),
-        |dealer, push| {
-            Box::pin(async move {
-                let add_1 = recv_engine_message(dealer).await;
-                assert_eq!(add_1[0].as_ref(), &[0x00]);
-                let request_1: EngineCoreRequest = rmp_serde::from_slice(&add_1[1]).unwrap();
-                assert_eq!(request_1.client_index, 7);
-                assert_eq!(request_1.request_id, "req-1");
-
-                let add_2 = recv_engine_message(dealer).await;
-                assert_eq!(add_2[0].as_ref(), &[0x00]);
-                let request_2: EngineCoreRequest = rmp_serde::from_slice(&add_2[1]).unwrap();
-                assert_eq!(request_2.client_index, 7);
-                assert_eq!(request_2.request_id, "req-2");
-
-                send_outputs(
-                    push,
-                    EngineCoreOutputs {
-                        utility_output: Some(UtilityOutput {
-                            call_id: 1_u64.into(),
-                            failure_message: None,
-                            result: None,
-                        }),
-                        outputs: vec![request_output("req-1", vec![999], None)],
-                        ..Default::default()
-                    },
-                )
-                .await;
-
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            })
-        },
-    );
-
-    let client = connect_client_with_ipc(
-        handshake_test_config(
-            handshake_address,
-            1,
-            "test-model",
-            Duration::from_secs(2),
-            7,
-            None,
-        ),
-        &ipc,
-    )
-    .await;
-    assert_eq!(client.engine_identities()[0], b"engine-0");
-    assert!(client.ready_responses()[0].max_model_len > 0);
+    assert_eq!(client.vllm_version(), "test-vllm-version");
 
     let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
     let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();
@@ -1056,7 +1015,7 @@ async fn duplicate_request_ids_are_rejected_without_sending_a_second_add() {
 
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
+                    RequestBatchOutputs {
                         outputs: vec![request_output(
                             "req-1",
                             vec![],
@@ -1064,7 +1023,8 @@ async fn duplicate_request_ids_are_rejected_without_sending_a_second_add() {
                         )],
                         finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
                         ..Default::default()
-                    },
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -1123,10 +1083,12 @@ async fn finished_requests_without_final_output_is_treated_as_unexpected_close()
 
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
+                    RequestBatchOutputs {
+                        outputs: Vec::new(),
                         finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
                         ..Default::default()
-                    },
+                    }
+                    .into(),
                 )
                 .await;
 
@@ -1182,10 +1144,11 @@ async fn dropping_a_live_stream_triggers_abort() {
                 assert_eq!(add[0].as_ref(), &[0x00]);
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
+                    RequestBatchOutputs {
                         outputs: vec![request_output("req-1", vec![99], None)],
                         ..Default::default()
-                    },
+                    }
+                    .into(),
                 )
                 .await;
 
@@ -1215,6 +1178,93 @@ async fn dropping_a_live_stream_triggers_abort() {
     let first = timeout(Duration::from_secs(1), stream.next()).await.unwrap().unwrap().unwrap();
     assert_eq!(first.new_token_ids, vec![99]);
     drop(stream);
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn dropping_multiple_live_streams_aborts_all_in_a_burst() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-burst".to_vec();
+    let request_ids = ["req-1", "req-2", "req-3"];
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                for _ in 0..3 {
+                    let add = recv_engine_message(dealer).await;
+                    assert_eq!(add[0].as_ref(), &[0x00]);
+                }
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![
+                            request_output("req-1", vec![99], None),
+                            request_output("req-2", vec![99], None),
+                            request_output("req-3", vec![99], None),
+                        ],
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+
+                // Aborts may coalesce into one burst or split across several.
+                let mut aborted = BTreeSet::new();
+                while aborted.len() < 3 {
+                    let abort =
+                        timeout(Duration::from_secs(1), recv_engine_message(dealer)).await.unwrap();
+                    assert_eq!(abort[0].as_ref(), &[0x01]);
+                    let ids: Vec<String> = rmp_serde::from_slice(&abort[1]).unwrap();
+                    aborted.extend(ids);
+                }
+                assert_eq!(
+                    aborted,
+                    BTreeSet::from([
+                        "req-1".to_string(),
+                        "req-2".to_string(),
+                        "req-3".to_string()
+                    ])
+                );
+                // No spurious extra aborts.
+                assert!(
+                    timeout(Duration::from_millis(100), recv_engine_message(dealer)).await.is_err()
+                );
+            })
+        },
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    // Open every request first so all three adds reach the engine before it
+    // emits outputs, then drain the first token from each stream.
+    let mut streams = Vec::new();
+    for id in request_ids {
+        streams.push(client.call(sample_request_with_id(id)).await.unwrap());
+    }
+    for stream in streams.iter_mut() {
+        let first = timeout(Duration::from_secs(1), stream.next()).await.unwrap().unwrap().unwrap();
+        assert_eq!(first.new_token_ids, vec![99]);
+    }
+    // Drop the whole burst back-to-back so the abort worker can batch them.
+    drop(streams);
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
@@ -1315,14 +1365,16 @@ async fn is_sleeping_wrapper_sends_typed_request_and_returns_typed_response() {
 
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        utility_output: Some(UtilityOutput {
+                    UtilityCallOutput {
+                        engine_index: 0,
+                        timestamp: 0.0,
+                        output: UtilityOutput {
                             call_id: call_id.into(),
                             failure_message: None,
                             result: Some(utility_result_value(true)),
-                        }),
-                        ..Default::default()
-                    },
+                        },
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -1370,14 +1422,16 @@ async fn call_utility_failure_message_surfaces_as_error() {
 
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        utility_output: Some(UtilityOutput {
+                    UtilityCallOutput {
+                        engine_index: 0,
+                        timestamp: 0.0,
+                        output: UtilityOutput {
                             call_id: call_id.into(),
                             failure_message: Some("boom".to_string()),
                             result: None,
-                        }),
-                        ..Default::default()
-                    },
+                        },
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -1694,8 +1748,7 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
                 finish_req_1_rx.await.unwrap();
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![request_output(
                             &request_1.request_id,
                             vec![10],
@@ -1703,7 +1756,8 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
                         )],
                         finished_requests: Some(BTreeSet::from([request_1.request_id.clone()])),
                         ..Default::default()
-                    },
+                    }
+                    .into(),
                 )
                 .await;
 
@@ -1715,8 +1769,7 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
                 finish_req_3_rx.await.unwrap();
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![request_output(
                             &request_3.request_id,
                             vec![30],
@@ -1724,7 +1777,8 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
                         )],
                         finished_requests: Some(BTreeSet::from([request_3.request_id.clone()])),
                         ..Default::default()
-                    },
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -1743,7 +1797,7 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
                 finish_req_2_rx.await.unwrap();
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
+                    RequestBatchOutputs {
                         engine_index: 1,
                         outputs: vec![request_output(
                             &request_2.request_id,
@@ -1752,7 +1806,8 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
                         )],
                         finished_requests: Some(BTreeSet::from([request_2.request_id.clone()])),
                         ..Default::default()
-                    },
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -1855,7 +1910,7 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
 
     let (shutdown_tx_0, engine_task_0) = spawn_mock_engine_task(
         handshake_address.clone(),
-        b"engine-0".to_vec(),
+        EngineId::from_engine_index(0).into_frame().to_vec(),
         |dealer, push| {
             Box::pin(async move {
                 let utility = recv_engine_message(dealer).await;
@@ -1869,14 +1924,16 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
                 assert_eq!(array[2], Value::from("is_sleeping"));
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        utility_output: Some(UtilityOutput {
+                    UtilityCallOutput {
+                        engine_index: 0,
+                        timestamp: 0.0,
+                        output: UtilityOutput {
                             call_id: call_id.into(),
                             failure_message: None,
                             result: Some(utility_result_value(true)),
-                        }),
-                        ..Default::default()
-                    },
+                        },
+                    }
+                    .into(),
                 )
                 .await;
 
@@ -1891,8 +1948,7 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
                 assert_eq!(aborted_ids, vec!["req-1".to_string()]);
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![request_output(
                             "req-1",
                             vec![],
@@ -1900,7 +1956,8 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
                         )],
                         finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
                         ..Default::default()
-                    },
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -1909,7 +1966,7 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     let (shutdown_tx_1, engine_task_1) = spawn_mock_engine_task(
         handshake_address.clone(),
-        b"engine-1".to_vec(),
+        EngineId::from_engine_index(1).into_frame().to_vec(),
         |dealer, push| {
             Box::pin(async move {
                 let utility = recv_engine_message(dealer).await;
@@ -1923,14 +1980,16 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
                 assert_eq!(array[2], Value::from("is_sleeping"));
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        utility_output: Some(UtilityOutput {
+                    UtilityCallOutput {
+                        engine_index: 0,
+                        timestamp: 0.0,
+                        output: UtilityOutput {
                             call_id: call_id.into(),
                             failure_message: None,
                             result: Some(utility_result_value(true)),
-                        }),
-                        ..Default::default()
-                    },
+                        },
+                    }
+                    .into(),
                 )
                 .await;
 
@@ -1945,7 +2004,7 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
                 assert_eq!(aborted_ids, vec!["req-2".to_string()]);
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
+                    RequestBatchOutputs {
                         engine_index: 1,
                         outputs: vec![request_output(
                             "req-2",
@@ -1954,7 +2013,8 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
                         )],
                         finished_requests: Some(BTreeSet::from(["req-2".to_string()])),
                         ..Default::default()
-                    },
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -2034,14 +2094,16 @@ async fn collective_rpc_flattens_results_from_all_engines() {
 
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        utility_output: Some(UtilityOutput {
+                    UtilityCallOutput {
+                        engine_index: 0,
+                        timestamp: 0.0,
+                        output: UtilityOutput {
                             call_id: call_id.into(),
                             failure_message: None,
                             result: Some(utility_result_value(vec!["engine-0-worker"])),
-                        }),
-                        ..Default::default()
-                    },
+                        },
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -2065,14 +2127,16 @@ async fn collective_rpc_flattens_results_from_all_engines() {
 
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        utility_output: Some(UtilityOutput {
+                    UtilityCallOutput {
+                        engine_index: 0,
+                        timestamp: 0.0,
+                        output: UtilityOutput {
                             call_id: call_id.into(),
                             failure_message: None,
                             result: Some(utility_result_value(vec!["engine-1-worker"])),
-                        }),
-                        ..Default::default()
-                    },
+                        },
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -2116,6 +2180,228 @@ async fn collective_rpc_flattens_results_from_all_engines() {
     client.shutdown().await.unwrap();
 }
 
+/// Spawn a mock engine that handles a single utility call, asserts the method
+/// name and serialized args match, and replies with `result`.
+fn spawn_mock_utility_engine(
+    handshake_address: String,
+    engine_id: Vec<u8>,
+    expected_method: &'static str,
+    expected_args: Value,
+    result: bool,
+) -> (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    spawn_mock_engine_task(handshake_address, engine_id, move |dealer, push| {
+        Box::pin(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+            let payload = decode_value(&utility[1]);
+            let array = match payload {
+                Value::Array(array) => array,
+                other => panic!("expected utility payload array, got {other:?}"),
+            };
+            // Utility requests serialize as `(client_index, call_id, method, args)`.
+            let call_id = array[1].as_u64().expect("call_id");
+            assert_eq!(array[2], Value::from(expected_method));
+            assert_eq!(array[3], expected_args, "unexpected utility args");
+            send_outputs(
+                push,
+                UtilityCallOutput {
+                    engine_index: 0,
+                    timestamp: 0.0,
+                    output: UtilityOutput {
+                        call_id: call_id.into(),
+                        failure_message: None,
+                        result: Some(utility_result_value(result)),
+                    },
+                }
+                .into(),
+            )
+            .await;
+        })
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn is_sleeping_returns_error_when_engines_disagree() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (shutdown_tx_0, engine_task_0) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-0".to_vec(),
+        "is_sleeping",
+        Value::Array(vec![]),
+        true,
+    );
+    let (shutdown_tx_1, engine_task_1) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-1".to_vec(),
+        "is_sleeping",
+        Value::Array(vec![]),
+        false,
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            5,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    let error = client.is_sleeping().await.unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            Error::InconsistentUtilityResults { method, .. } if method == "is_sleeping"
+        ),
+        "expected InconsistentUtilityResults, got {error:?}",
+    );
+
+    let _ = shutdown_tx_0.send(());
+    let _ = shutdown_tx_1.send(());
+    engine_task_0.await.unwrap();
+    engine_task_1.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn is_sleeping_returns_value_when_all_engines_agree() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (shutdown_tx_0, engine_task_0) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-0".to_vec(),
+        "is_sleeping",
+        Value::Array(vec![]),
+        true,
+    );
+    let (shutdown_tx_1, engine_task_1) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-1".to_vec(),
+        "is_sleeping",
+        Value::Array(vec![]),
+        true,
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            5,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    assert!(client.is_sleeping().await.unwrap());
+
+    let _ = shutdown_tx_0.send(());
+    let _ = shutdown_tx_1.send(());
+    engine_task_0.await.unwrap();
+    engine_task_1.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reset_prefix_cache_returns_true_when_all_engines_succeed() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (shutdown_tx_0, engine_task_0) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-0".to_vec(),
+        "reset_prefix_cache",
+        Value::Array(vec![Value::from(false), Value::from(false)]),
+        true,
+    );
+    let (shutdown_tx_1, engine_task_1) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-1".to_vec(),
+        "reset_prefix_cache",
+        Value::Array(vec![Value::from(false), Value::from(false)]),
+        true,
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            5,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    assert!(client.reset_prefix_cache(false, false).await.unwrap());
+
+    let _ = shutdown_tx_0.send(());
+    let _ = shutdown_tx_1.send(());
+    engine_task_0.await.unwrap();
+    engine_task_1.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reset_prefix_cache_returns_false_when_any_engine_fails() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (shutdown_tx_0, engine_task_0) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-0".to_vec(),
+        "reset_prefix_cache",
+        Value::Array(vec![Value::from(false), Value::from(false)]),
+        true,
+    );
+    let (shutdown_tx_1, engine_task_1) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-1".to_vec(),
+        "reset_prefix_cache",
+        Value::Array(vec![Value::from(false), Value::from(false)]),
+        false,
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            5,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    assert!(!client.reset_prefix_cache(false, false).await.unwrap());
+
+    let _ = shutdown_tx_0.send(());
+    let _ = shutdown_tx_1.send(());
+    engine_task_0.await.unwrap();
+    engine_task_1.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
 #[test]
 fn python_msgpack_fixtures_match_rust_encoding() {
     init_tracing();
@@ -2134,6 +2420,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let mut lines = stdout.lines();
     let request_hex = lines.next().expect("missing request fixture line");
+    let defaults_request_hex = lines.next().expect("missing defaults request fixture line");
     let multimodal_request_hex = lines.next().expect("missing multimodal request fixture line");
     let outputs_hex = lines.next().expect("missing outputs fixture line");
     let inline_logprobs_frames = lines.next().expect("missing inline logprobs fixture line");
@@ -2141,6 +2428,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let inline_prompt_frames = lines.next().expect("missing inline prompt logprobs fixture line");
     let multipart_prompt_frames =
         lines.next().expect("missing multipart prompt logprobs fixture line");
+    let ready_response_hex = lines.next().expect("missing ready response fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
     let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
@@ -2149,6 +2437,44 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let decoded_request: EngineCoreRequest = rmp_serde::from_slice(&request_bytes).unwrap();
     let expected_request = sample_request();
     assert_eq!(decoded_request, expected_request);
+
+    // All-default sampling params -> empty map; must decode to Python defaults.
+    let defaults_request_bytes = hex::decode(defaults_request_hex).unwrap();
+    let decoded_defaults: EngineCoreRequest =
+        rmp_serde::from_slice(&defaults_request_bytes).unwrap();
+    assert_eq!(decoded_defaults.request_id, "req-defaults");
+    let sampling = decoded_defaults
+        .sampling_params
+        .expect("defaults request carries sampling params");
+    assert_eq!(
+        sampling,
+        EngineCoreSamplingParams {
+            temperature: 1.0,
+            top_p: 1.0,
+            top_k: 0,
+            seed: None,
+            max_tokens: 16,
+            min_tokens: 0,
+            thinking_token_budget: None,
+            logprobs: None,
+            prompt_logprobs: None,
+            min_p: 0.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            repetition_penalty: 1.0,
+            repetition_detection: None,
+            stop_token_ids: Vec::new(),
+            eos_token_id: None,
+            all_stop_token_ids: BTreeSet::new(),
+            logit_bias: None,
+            allowed_token_ids: None,
+            bad_words_token_ids: None,
+            structured_outputs: None,
+            logprob_token_ids: None,
+            skip_reading_prefix_cache: None,
+            extra_args: None,
+        },
+    );
 
     let decoded_multimodal_request: EngineCoreRequest =
         rmp_serde::from_slice(&multimodal_request_bytes).unwrap();
@@ -2172,41 +2498,40 @@ fn python_msgpack_fixtures_match_rust_encoding() {
 
     let decoded_outputs: EngineCoreOutputs = rmp_serde::from_slice(&outputs_bytes).unwrap();
     expect_test::expect![[r#"
-        EngineCoreOutputs {
-            engine_index: 0,
-            outputs: [
-                EngineCoreOutput {
-                    request_id: "req-1",
-                    new_token_ids: [
-                        7,
-                        8,
-                    ],
-                    new_logprobs: None,
-                    new_prompt_logprobs_tensors: None,
-                    pooling_output: None,
-                    finish_reason: Some(
-                        Length,
-                    ),
-                    stop_reason: None,
-                    events: None,
-                    kv_transfer_params: None,
-                    trace_headers: None,
-                    prefill_stats: None,
-                    routed_experts: None,
-                    num_nans_in_logits: 0,
-                },
-            ],
-            scheduler_stats: None,
-            timestamp: 0.0,
-            utility_output: None,
-            finished_requests: Some(
-                {
-                    "req-1",
-                },
-            ),
-            wave_complete: None,
-            start_wave: None,
-        }
+        RequestBatch(
+            RequestBatchOutputs {
+                engine_index: 0,
+                outputs: [
+                    EngineCoreOutput {
+                        request_id: "req-1",
+                        new_token_ids: [
+                            7,
+                            8,
+                        ],
+                        new_logprobs: None,
+                        new_prompt_logprobs_tensors: None,
+                        pooling_output: None,
+                        finish_reason: Some(
+                            Length,
+                        ),
+                        stop_reason: None,
+                        events: None,
+                        kv_transfer_params: None,
+                        trace_headers: None,
+                        prefill_stats: None,
+                        routed_experts: None,
+                        num_nans_in_logits: 0,
+                    },
+                ],
+                scheduler_stats: None,
+                timestamp: 0.0,
+                finished_requests: Some(
+                    {
+                        "req-1",
+                    },
+                ),
+            },
+        )
     "#]]
     .assert_debug_eq(&decoded_outputs);
 
@@ -2219,7 +2544,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let inline_logprobs =
         decode_engine_core_outputs(&decode_frames(inline_logprobs_frames)).unwrap();
     expect_sample_logprobs(
-        inline_logprobs.outputs[0]
+        inline_logprobs.as_request_batch().unwrap().outputs[0]
             .new_logprobs
             .as_ref()
             .expect("inline logprobs decoded"),
@@ -2228,7 +2553,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let multipart_logprobs =
         decode_engine_core_outputs(&decode_frames(multipart_logprobs_frames)).unwrap();
     expect_sample_logprobs(
-        multipart_logprobs.outputs[0]
+        multipart_logprobs.as_request_batch().unwrap().outputs[0]
             .new_logprobs
             .as_ref()
             .expect("multipart logprobs decoded"),
@@ -2236,7 +2561,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
 
     let inline_prompt = decode_engine_core_outputs(&decode_frames(inline_prompt_frames)).unwrap();
     expect_prompt_logprobs(
-        inline_prompt.outputs[0]
+        inline_prompt.as_request_batch().unwrap().outputs[0]
             .new_prompt_logprobs_tensors
             .as_ref()
             .expect("inline prompt logprobs decoded"),
@@ -2245,10 +2570,27 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let multipart_prompt =
         decode_engine_core_outputs(&decode_frames(multipart_prompt_frames)).unwrap();
     expect_prompt_logprobs(
-        multipart_prompt.outputs[0]
+        multipart_prompt.as_request_batch().unwrap().outputs[0]
             .new_prompt_logprobs_tensors
             .as_ref()
             .expect("multipart prompt logprobs decoded"),
+    );
+
+    let map_keys = |bytes: &[u8]| -> BTreeSet<String> {
+        match decode_value(bytes) {
+            Value::Map(entries) => entries
+                .into_iter()
+                .filter_map(|(key, _)| key.as_str().map(str::to_owned))
+                .collect(),
+            other => panic!("ready response should encode as a map, got {other:?}"),
+        }
+    };
+    let python_ready_keys = map_keys(&hex::decode(ready_response_hex).unwrap());
+    let rust_ready_keys =
+        map_keys(&rmp_serde::to_vec_named(&crate::mock_engine::default_ready_response()).unwrap());
+    assert_eq!(
+        rust_ready_keys, python_ready_keys,
+        "EngineCoreReadyResponse drifted from the Python dataclass",
     );
 }
 
@@ -2328,6 +2670,90 @@ async fn bootstrapped_connects_with_contiguous_engine_ids() {
     assert_eq!(engine_ids, vec![vec![0x00, 0x00], vec![0x01, 0x00]]);
 
     client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bootstrapped_connects_with_nonzero_engine_start_index() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let input_address = ipc.input_endpoint();
+    let output_address = ipc.output_endpoint();
+
+    let client_task = tokio::spawn({
+        let input_address = input_address.clone();
+        let output_address = output_address.clone();
+        async move {
+            EngineCoreClient::connect(bootstrapped_test_config_with_start_index(
+                input_address,
+                output_address,
+                3,
+                1,
+                Duration::from_secs(2),
+                0,
+                None,
+            ))
+            .await
+            .unwrap()
+        }
+    });
+
+    let (_dealer, _push) =
+        setup_bootstrapped_mock_engine(input_address, output_address, &[0x03, 0x00]).await;
+    let client = client_task.await.unwrap();
+
+    assert_eq!(client.engine_count(), 1);
+    let engine_ids =
+        client.engine_identities().into_iter().map(|id| id.to_vec()).collect::<Vec<_>>();
+    assert_eq!(engine_ids, vec![vec![0x03, 0x00]]);
+
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bootstrapped_rejects_unexpected_engine_id_for_start_index() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let input_address = ipc.input_endpoint();
+    let output_address = ipc.output_endpoint();
+
+    let client_task = tokio::spawn({
+        let input_address = input_address.clone();
+        let output_address = output_address.clone();
+        async move {
+            EngineCoreClient::connect(bootstrapped_test_config_with_start_index(
+                input_address,
+                output_address,
+                3,
+                1,
+                Duration::from_secs(2),
+                0,
+                None,
+            ))
+            .await
+        }
+    });
+
+    let _ = crate::mock_engine::connect_to_bootstrapped_frontend(
+        input_address,
+        output_address,
+        &[0x00, 0x00],
+        crate::mock_engine::MockEngineConfig {
+            local: true,
+            headless: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let error = match client_task.await.unwrap() {
+        Ok(_) => panic!("bootstrapped connect should reject unexpected engine id"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("received input registration for unexpected engine id")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2464,8 +2890,7 @@ async fn bootstrapped_external_coordinator_updates_wave_ignores_counts_and_sends
 
     send_outputs(
         &mut push,
-        EngineCoreOutputs {
-            engine_index: 0,
+        RequestBatchOutputs {
             outputs: vec![request_output(
                 "req-1",
                 vec![],
@@ -2473,7 +2898,8 @@ async fn bootstrapped_external_coordinator_updates_wave_ignores_counts_and_sends
             )],
             finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
             ..Default::default()
-        },
+        }
+        .into(),
     )
     .await;
 
@@ -2539,8 +2965,7 @@ async fn bootstrapped_external_coordinator_running_state_suppresses_wakeup() {
 
     send_outputs(
         &mut push,
-        EngineCoreOutputs {
-            engine_index: 0,
+        RequestBatchOutputs {
             outputs: vec![request_output(
                 "req-1",
                 vec![],
@@ -2548,7 +2973,8 @@ async fn bootstrapped_external_coordinator_running_state_suppresses_wakeup() {
             )],
             finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
             ..Default::default()
-        },
+        }
+        .into(),
     )
     .await;
 
