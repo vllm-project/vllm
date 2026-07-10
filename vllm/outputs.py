@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import warnings
 from collections.abc import MutableSequence
 from collections.abc import Sequence as GenericSequence
 from dataclasses import dataclass
@@ -35,6 +36,7 @@ class CompletionOutput:
             to stop, None if the completion finished for some other reason
             including encountering the EOS token.
         lora_request: The LoRA request that was used to generate the output.
+        kv_transfer_params: The params for remote K/V transfer.
     """
 
     index: int
@@ -46,6 +48,7 @@ class CompletionOutput:
     finish_reason: str | None = None
     stop_reason: int | str | None = None
     lora_request: LoRARequest | None = None
+    kv_transfer_params: dict[str, Any] | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -59,7 +62,8 @@ class CompletionOutput:
             f"cumulative_logprob={self.cumulative_logprob}, "
             f"logprobs={self.logprobs}, "
             f"finish_reason={self.finish_reason}, "
-            f"stop_reason={self.stop_reason})"
+            f"stop_reason={self.stop_reason}, "
+            f"kv_transfer_params={self.kv_transfer_params})"
         )
 
 
@@ -103,7 +107,6 @@ class RequestOutput:
         encoder_prompt_token_ids: The token IDs of the encoder prompt.
                                   None if decoder-only.
         num_cached_tokens: The number of tokens with prefix cache hit.
-        kv_transfer_params: The params for remote K/V transfer.
     """
 
     def __init__(
@@ -120,6 +123,9 @@ class RequestOutput:
         encoder_prompt_token_ids: list[int] | None = None,
         num_cached_tokens: int | None = None,
         *,
+        # Deprecated compatibility path for callers that still pass request-
+        # level kv_transfer_params. Use CompletionOutput.kv_transfer_params;
+        # it preserves choice-index alignment for parallel sampling.
         kv_transfer_params: dict[str, Any] | None = None,
         # Forward compatibility, code that uses args added in new release can
         # still run with older versions of vLLM without breaking.
@@ -140,13 +146,48 @@ class RequestOutput:
         self.encoder_prompt = encoder_prompt
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
-        self.kv_transfer_params = kv_transfer_params
+        if kv_transfer_params is not None:
+            warnings.warn(
+                "Passing kv_transfer_params to RequestOutput is deprecated. "
+                "Set kv_transfer_params on each CompletionOutput instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            self._set_kv_transfer_params(kv_transfer_params)
+
+    @property
+    def kv_transfer_params(self) -> dict[str, Any] | None:
+        if len(self.outputs) == 1:
+            return self.outputs[0].kv_transfer_params
+
+        if len(self.outputs) > 1:
+            params_list: list[dict[str, Any] | None] = [None] * (
+                max(output.index for output in self.outputs) + 1
+            )
+            for output in self.outputs:
+                params_list[output.index] = output.kv_transfer_params
+            if any(params is not None for params in params_list):
+                return {"parallel_kv_transfer_params": params_list}
+        return None
+
+    def _set_kv_transfer_params(self, kv_transfer_params: dict[str, Any]) -> None:
+        if not self.outputs:
+            return
+
+        per_child_params = kv_transfer_params.get("parallel_kv_transfer_params")
+        if isinstance(per_child_params, list):
+            for output in self.outputs:
+                if output.index < len(per_child_params):
+                    output.kv_transfer_params = per_child_params[output.index]
+            return
+
+        if len(self.outputs) == 1:
+            self.outputs[0].kv_transfer_params = kv_transfer_params
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
 
         self.finished |= next_output.finished
-        self.kv_transfer_params = next_output.kv_transfer_params
 
         for next_completion in next_output.outputs:
             for i, completion in enumerate(self.outputs):
@@ -165,6 +206,9 @@ class RequestOutput:
                         )
                         completion.finish_reason = next_completion.finish_reason
                         completion.stop_reason = next_completion.stop_reason
+                        completion.kv_transfer_params = (
+                            next_completion.kv_transfer_params
+                        )
                     else:
                         # Replace the output with the new one
                         self.outputs[i] = next_completion

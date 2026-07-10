@@ -31,6 +31,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     StructuralTagResponseFormat,
     ToolCall,
     UsageInfo,
+    normalize_kv_transfer_params,
     validate_structural_tag_response_format,
     validate_structured_outputs_structural_tag,
 )
@@ -697,6 +698,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
         )
+
+    @model_validator(mode="after")
+    def validate_kv_transfer_params(self) -> "ChatCompletionRequest":
+        self.kv_transfer_params = normalize_kv_transfer_params(
+            self.kv_transfer_params, self.n or 1
+        )
+        return self
 
     @model_validator(mode="before")
     @classmethod

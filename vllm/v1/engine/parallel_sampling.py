@@ -72,9 +72,31 @@ class ParentRequest:
         # Build child sampling_params
         child_sampling_params = copy(self.sampling_params)
         child_sampling_params.n = 1
+        extra_args = child_sampling_params.extra_args or {}
+        kv_transfer = extra_args.get("kv_transfer_params")
+        per_child_kv_transfer = (
+            kv_transfer.get("parallel_kv_transfer_params")
+            if isinstance(kv_transfer, dict)
+            else None
+        )
+        if per_child_kv_transfer is not None:
+            if not isinstance(per_child_kv_transfer, list):
+                raise ValueError(
+                    "kv_transfer_params.parallel_kv_transfer_params must be a list"
+                )
+            if len(per_child_kv_transfer) != self.sampling_params.n:
+                raise ValueError(
+                    "kv_transfer_params.parallel_kv_transfer_params "
+                    "length must match sampling_params.n"
+                )
+            child_sampling_params.extra_args = {
+                **extra_args,
+                "kv_transfer_params": per_child_kv_transfer[index],
+            }
         if seed is None:
-            # Cache child sampling_params for later reuse
-            self.cached_child_sampling_params = child_sampling_params
+            if per_child_kv_transfer is None:
+                # Cache child sampling_params for later reuse
+                self.cached_child_sampling_params = child_sampling_params
         else:
             # Each child gets a clone with a unique seed
             child_sampling_params.seed = seed + index
