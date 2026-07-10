@@ -4,9 +4,6 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
-from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
-    KimiGatedDeltaNetAttention,
-)
 
 from vllm.config import (
     CacheConfig,
@@ -22,6 +19,9 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+)
+from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
+    KimiGatedDeltaNetAttention,
 )
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
@@ -552,4 +552,3 @@ class Glm5NextLinearAttention(KimiGatedDeltaNetAttention):
             return sharded_weight_loader(2)(param, loaded_weight)
 
         self.A_log.weight_loader = a_log_weight_loader
-

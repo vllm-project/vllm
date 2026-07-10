@@ -314,7 +314,10 @@ class Glm5NextConfig(PretrainedConfig):
 
     def __getattribute__(self, key):
         unmirrored = type(self)._UNMIRRORED_KEYS
-        if "text_config" in super().__getattribute__("__dict__") and key not in unmirrored:
+        if (
+            "text_config" in super().__getattribute__("__dict__")
+            and key not in unmirrored
+        ):
             text_config = super().__getattribute__("text_config")
             # Forward both instance attributes AND class-defined properties/
             # methods of the text config, so a flat text-only checkpoint
