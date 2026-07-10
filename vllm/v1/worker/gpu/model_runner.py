@@ -186,11 +186,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.encoder_profile_inputs = None
         if self.supports_mm_inputs and self.is_first_pp_rank:
             self.encoder_cache = EncoderCache()
-            mm_config = self.model_config.multimodal_config
-            if mm_config is None or not mm_config.skip_mm_profiling:
-                self.encoder_profile_inputs = EncoderProfileInputs(
-                    self.vllm_config, self.mm_registry
-                )
 
         # Speculative decoding.
         self.speculator = None
@@ -653,9 +648,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def profile_run(self) -> None:
-        if self.encoder_profile_inputs is not None:
+        needs_mm_profiling = (
+            mm_config := self.model_config.multimodal_config
+        ) is not None and not mm_config.skip_mm_profiling
+        if needs_mm_profiling:
+            encoder_profile_inputs = EncoderProfileInputs(
+                self.vllm_config, self.mm_registry
+            )
             self.model_state.encoder_runner.profile_encoder_cache(
-                self.encoder_profile_inputs
+                encoder_profile_inputs
             )
 
         hidden_states, sample_hidden_states = self._dummy_run(

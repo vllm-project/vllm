@@ -5,37 +5,14 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import VllmConfig
+from vllm.multimodal.encoder_budget import get_mm_max_toks_per_item
 from vllm.multimodal.inputs import BatchedTensorInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.registry import MultiModalRegistry
 from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.utils.torch_utils import PIN_MEMORY, set_default_torch_num_threads
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
-
-
-def _get_mm_max_toks_per_item(
-    model_config: ModelConfig,
-    mm_registry: MultiModalRegistry,
-    processor: BaseMultiModalProcessor,
-    mm_counts: Mapping[str, int],
-) -> Mapping[str, int]:
-    max_tokens_per_item = processor.info.get_mm_max_tokens_per_item(
-        seq_len=model_config.max_model_len,
-        mm_counts=mm_counts,
-    )
-    if max_tokens_per_item is not None:
-        return max_tokens_per_item
-
-    mm_inputs = mm_registry.get_dummy_mm_inputs(
-        model_config,
-        mm_counts=mm_counts,
-        processor=processor,
-    )
-    return {
-        modality: sum(item.get_num_embeds() for item in placeholders)
-        for modality, placeholders in mm_inputs["mm_placeholders"].items()
-    }
 
 
 @dataclass(frozen=True)
@@ -110,7 +87,7 @@ def _compute_encoder_profile_budget(
     }
     active_modalities = tower_modalities | embed_only_modalities
 
-    all_mm_max_toks_per_item = _get_mm_max_toks_per_item(
+    all_mm_max_toks_per_item = get_mm_max_toks_per_item(
         model_config,
         mm_registry,
         processor,

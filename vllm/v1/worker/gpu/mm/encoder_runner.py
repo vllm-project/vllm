@@ -56,12 +56,6 @@ class EncoderRunner:
     def profile_encoder_cache(self, profile_inputs: EncoderProfileInputs) -> None:
         """Profile multimodal encoder and temporary encoder cache memory."""
         budget = profile_inputs.budget
-        mm_config = profile_inputs.model_config.multimodal_config
-        if mm_config is not None and mm_config.skip_mm_profiling:
-            logger.info(
-                "Skipping memory profiling for multimodal encoder and encoder cache."
-            )
-            return
 
         if (encoder_budget := budget.get_encoder_budget()) <= 0:
             return
