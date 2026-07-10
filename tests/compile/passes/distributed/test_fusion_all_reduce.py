@@ -13,6 +13,7 @@ from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.compilation.passes.fusion.allreduce_rms_fusion import (
     AllReduceFusionPass,
     RocmAiterAllReduceFusionPass,
+    _select_flashinfer_allreduce_use_oneshot,
 )
 from vllm.compilation.passes.fx_utils import find_op_nodes
 from vllm.compilation.passes.utility.fix_functionalization import (
@@ -46,6 +47,35 @@ from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE_TYPE = current_platform.device_type
+
+
+@pytest.mark.parametrize(
+    ("workspace_backend", "device_capability", "world_size", "tensor_size", "expected"),
+    [
+        ("mnnvl", 103, 8, 2 * 1024 * 1024, None),
+        ("trtllm", 103, 8, 2 * 1024 * 1024, True),
+        ("trtllm", 103, 8, 2 * 1024 * 1024 + 1, False),
+        ("trtllm", 100, 4, 4 * 1024 * 1024, True),
+        ("trtllm", 100, 4, 4 * 1024 * 1024 + 1, False),
+        ("trtllm", None, 8, 128 * 1024 * 1024, True),
+    ],
+)
+def test_select_flashinfer_allreduce_use_oneshot(
+    workspace_backend: str,
+    device_capability: int | None,
+    world_size: int,
+    tensor_size: int,
+    expected: bool | None,
+):
+    assert (
+        _select_flashinfer_allreduce_use_oneshot(
+            workspace_backend,
+            device_capability,
+            world_size,
+            tensor_size,
+        )
+        is expected
+    )
 
 
 class TestAllReduceRMSNormModel(torch.nn.Module):

@@ -14,6 +14,7 @@ pub use output::{
     GenerateOutputStreamExt, GeneratePromptInfo, TokenUsage,
 };
 pub use request::GenerateRequest;
+pub use request_metrics::current_unix_timestamp_secs;
 pub use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs, TokenLogprob};
 
 use crate::inflight::InflightRequests;

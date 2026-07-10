@@ -168,7 +168,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             tiering_manager = TieringOffloadingManager(
                 primary_tier=primary_tier,
                 secondary_tiers=secondary_tiers,
-                enable_events=self.kv_events_config.enable_kv_cache_events,
             )
             if int(self.extra_config.get("store_threshold", 0)) >= 2:
                 raise ValueError(

@@ -43,6 +43,9 @@ class KVCacheEvent(
 
 
 MEDIUM_GPU = "GPU"
+MEDIUM_CPU = "CPU"
+MEDIUM_FS = "FS"
+MEDIUM_OBJ = "OBJ"
 
 
 class BlockStored(KVCacheEvent):
@@ -458,15 +461,12 @@ class ZmqEventPublisher(EventPublisher):
 
         for seq, buf in self._buffer:
             if seq >= start_seq:
-                # [identity, empty_delim, seq_bytes, payload]
-                # (identity, empty_delim) are stripped off by the router
-                # receiving payload is (seq_bytes, payload)
+                # Subscriber receives (topic, seq_bytes, payload)
                 self._replay.send_multipart(
-                    (client_id, b"", seq.to_bytes(8, "big"), buf)
+                    (client_id, b"", self._topic_bytes, seq.to_bytes(8, "big"), buf)
                 )
         # Send end of sequence marker
-        # receiving payload is (-1, b""")
-        self._replay.send_multipart((client_id, b"", self.END_SEQ, b""))
+        self._replay.send_multipart((client_id, b"", b"", self.END_SEQ, b""))
 
     @staticmethod
     def offset_endpoint_port(

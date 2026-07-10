@@ -200,6 +200,7 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
                 fp8_backend=self.fp8_backend,
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
+                layer=layer,
             )
 
     def get_fused_moe_quant_config(
@@ -226,6 +227,7 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             gemm1_alpha=getattr(layer, "swiglu_alpha", None),
             gemm1_beta=getattr(layer, "swiglu_beta", None),
+            layer=layer,
         )
 
     def process_weights_after_loading(self, layer: Module) -> None:
