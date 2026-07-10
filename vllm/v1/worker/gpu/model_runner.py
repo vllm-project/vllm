@@ -473,7 +473,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if isinstance(self.speculator, DraftModelSpeculator):
             # HACK(woosuk)
             self.speculator.set_attn(
-                self.model_state, self.kv_cache_config, self.block_tables
+                self.model_state,
+                self.kv_cache_config,
+                self.block_tables,
+                self.input_buffers,
+                self.attn_groups,
             )
 
         self.kv_caches: list[torch.Tensor] = []
@@ -700,7 +704,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
         with self.maybe_setup_dummy_loras(self.lora_config):
-            attn_states = self.cudagraph_manager.capture(
+            self.cudagraph_manager.capture(
                 self.model,
                 self.model_state,
                 self.input_buffers,
@@ -713,7 +717,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 lora_capture_hook=create_lora_capture_hook(self.lora_config, self),
             )
             if self.speculator is not None:
-                self.speculator.capture(attn_states)
+                self.speculator.capture()
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
