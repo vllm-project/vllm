@@ -4,10 +4,12 @@
 from collections.abc import AsyncGenerator
 from uuid import UUID, uuid4
 
-from fastapi import HTTPException, UploadFile
+from fastapi import HTTPException, Response, UploadFile
 from starlette.responses import StreamingResponse
 
 from vllm.renderers.paged_shm.client_async import AsyncPagedShmClient
+
+from .protocol import UUIDResponse
 
 
 class ServingObjectStorage:
@@ -20,7 +22,7 @@ class ServingObjectStorage:
     def __init__(self, shm_server_address: str):
         self.client = AsyncPagedShmClient(shm_server_address, pin=False)
 
-    async def upload(self, file: UploadFile, uuid: str | None = None):
+    async def upload(self, file: UploadFile, uuid: str | None = None) -> UUIDResponse:
         """
         Upload a file to shared memory.
 
@@ -43,35 +45,36 @@ class ServingObjectStorage:
             uid = str(uuid4())
 
         try:
-            await self.client.write(uid, content)
+            size = await self.client.write(uid, content)
         except RuntimeError as e:
             raise HTTPException(
                 status_code=500, detail=f"Failed to write to shared memory: {e}"
             ) from None
 
-        return {"uuid": uid}
+        return UUIDResponse(uuid=uid, size=size)
 
-    async def download(self, uuid: str):
+    async def download(self, uuid: str) -> StreamingResponse:
         """Stream the object identified by the given UUID."""
 
-        async def stream_data() -> AsyncGenerator[bytes, None]:
-            try:
-                async with self.client.get_iterator_numpy(uuid) as it:
+        try:
+            async with self.client.get_iterator_numpy(uuid) as it:
+
+                async def stream_data() -> AsyncGenerator[bytes, None]:
                     for array, offset in it:
                         yield array[:offset].tobytes()
-            except RuntimeError as e:
-                # Map server-side "not found" errors to 404
-                if "not found" in str(e).lower():
-                    raise HTTPException(
-                        status_code=404, detail="Object not found"
-                    ) from None
-                raise HTTPException(status_code=500, detail=str(e)) from None
 
-        return StreamingResponse(
-            stream_data(),
-            media_type="application/octet-stream",
-            headers={"Content-Disposition": f'attachment; filename="{uuid}"'},
-        )
+                return StreamingResponse(
+                    stream_data(),
+                    media_type="application/octet-stream",
+                    headers={"Content-Disposition": f'attachment; filename="{uuid}"'},
+                )
+        except RuntimeError as e:
+            # Map server-side "not found" errors to 404
+            if "not found" in str(e).lower():
+                raise HTTPException(
+                    status_code=404, detail="Object not found"
+                ) from None
+            raise HTTPException(status_code=500, detail=str(e)) from None
 
     async def delete(self, uuid: str):
         """Delete the object with the specified UUID."""
@@ -84,14 +87,11 @@ class ServingObjectStorage:
                 ) from None
             raise HTTPException(status_code=500, detail=str(e)) from None
 
-    async def info(self, uuid: str):
-        """Return metadata (currently only size) for the given UUID."""
+    async def info(self, uuid: str) -> Response:
+        """Return info for the given UUID."""
         try:
-            # Temporarily acquire a read lock to obtain the object size
-            ctx = self.client.read_context(uuid)
-            async with ctx:
-                size = ctx.size
-            return {"uuid": uuid, "size": size}
+            info = await self.client.get_info(uuid)
+            return Response(headers={k: str(v) for k, v in info.items()})
         except RuntimeError as e:
             if "not found" in str(e).lower():
                 raise HTTPException(

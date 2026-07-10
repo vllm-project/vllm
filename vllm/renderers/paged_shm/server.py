@@ -17,6 +17,7 @@ from .constant import (
     DELETE,
     EMPTY,
     ERROR,
+    GET_INFO,
     GET_MANAGER_STATE,
     GET_STORAGE_INFO,
     OK,
@@ -108,6 +109,11 @@ class PagedShmServer:
         }
         return json.dumps(info)
 
+    def get_info(self, uuid: str) -> str:
+        """Return object info as a JSON string."""
+        info = self.manager.get_info(uuid)
+        return json.dumps(info)
+
     def close(self):
         """Close the shared memory storage."""
         self.storage.close()
@@ -140,6 +146,7 @@ def _zmq_server(size: int, block_size: int, conn, stop_event: Event):
             PIN: (server.pin, True),
             UNPIN: (server.unpin, True),
             DELETE: (server.delete, True),
+            GET_INFO: (server.get_info, True),
             GET_MANAGER_STATE: (server.get_manager_state, False),
             GET_STORAGE_INFO: (server.get_storage_info, False),
         }

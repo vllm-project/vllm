@@ -133,6 +133,9 @@ class TestInfo:
 
         head_resp = await client.head(f"/object_storage/{custom_uuid}")
         assert head_resp.status_code == 200
+        assert int(head_resp.headers["size"]) > 0
+        assert head_resp.headers["uuid"] == custom_uuid
+        assert not head_resp.headers["use_cache"]
 
     async def test_info_not_found(self, client: httpx.AsyncClient):
         """HEAD on a non‑existent UUID returns 404."""

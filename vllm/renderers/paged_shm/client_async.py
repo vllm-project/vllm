@@ -28,6 +28,7 @@ from .constant import (
     DELETE,
     EMPTY,
     ERROR,
+    GET_INFO,
     GET_MANAGER_STATE,
     GET_STORAGE_INFO,
     OK,
@@ -222,7 +223,7 @@ class AsyncPagedShmClient(_AsyncBaseClient):
         uuid: str,
         data: bytes | np.ndarray | torch.Tensor,
         use_cache: bool = True,
-    ) -> None:
+    ) -> int:
         """Asynchronously write an item to shared memory."""
         if isinstance(data, torch.Tensor):
             size = data.numel() * data.element_size()
@@ -235,6 +236,8 @@ class AsyncPagedShmClient(_AsyncBaseClient):
 
         async with self.write_context(uuid, size, use_cache) as ctx:
             self._storage.write(data, ctx.blocks)
+
+        return size
 
     async def read(
         self, uuid: str, device: DeviceLikeType = "cpu"
@@ -322,6 +325,11 @@ class AsyncPagedShmClient(_AsyncBaseClient):
         """Return the shared memory name."""
         info = await self.get_storage_info()
         return info["name"]
+
+    async def get_info(self, uuid: str) -> dict[str, Any]:
+        """Return object info."""
+        resp = await self._request(GET_INFO, uuid)
+        return json.loads(resp)
 
     async def close(self) -> None:
         """Close all async sockets, terminate context,

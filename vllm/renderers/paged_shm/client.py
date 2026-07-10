@@ -28,6 +28,7 @@ from .constant import (
     DELETE,
     EMPTY,
     ERROR,
+    GET_INFO,
     GET_MANAGER_STATE,
     GET_STORAGE_INFO,
     OK,
@@ -231,7 +232,7 @@ class PagedShmClient(_BaseClient):
         uuid: str,
         data: bytes | np.ndarray | torch.Tensor,
         use_cache: bool = True,
-    ) -> None:
+    ) -> int:
         """
         Write an item to the shared memory store.
 
@@ -251,6 +252,7 @@ class PagedShmClient(_BaseClient):
 
         with self.write_context(uuid, size, use_cache) as ctx:
             self._storage.write(data, ctx.blocks)
+        return size
 
     def read(
         self, uuid: str, device: DeviceLikeType = "cpu"
@@ -343,6 +345,11 @@ class PagedShmClient(_BaseClient):
     def get_shm_name(self) -> str:
         """Return only the shared memory name."""
         return self.get_storage_info()["name"]
+
+    async def get_info(self) -> str:
+        """Return object info."""
+        resp = self._request(GET_INFO)
+        return json.loads(resp)
 
     def close(self) -> None:
         """

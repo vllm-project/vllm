@@ -12,6 +12,7 @@ items when free blocks run low.
 
 from collections import deque
 from dataclasses import dataclass
+from typing import Any
 
 from vllm.utils.cache import LRUCache
 
@@ -224,12 +225,12 @@ class PagedShmManager:
         self._all_items.pop(uuid)
         self._free_blocks.extend(item.blocks)
 
-    def get_info(self, uuid: str) -> AllocatedItem:
+    def get_info(self, uuid: str) -> dict[str, Any]:
         item = self._all_items.get(uuid, None)
         if item is None:
             raise ValueError(f"UUID {uuid} not found")
 
-        return item
+        return {"uuid": item.uuid, "size": item.size, "use_cache": item.use_cache}
 
     def get_manager_state(self) -> dict[str, int]:
         idle_count = 0
