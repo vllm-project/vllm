@@ -9,7 +9,10 @@ from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import RoutedExperts
+from vllm.model_executor.layers.fused_moe import (
+    RoutedExperts,
+    UnquantizedFusedMoEMethod,
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -144,7 +147,7 @@ class QuarkConfig(QuantizationConfig):
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
         # Check if the layer is skipped for quantization.
-        exclude_layers = cast(list[str], self.quant_config.get("exclude"))
+        exclude_layers = cast(list[str], self.quant_config.get("exclude")) or []
         if should_ignore_layer(
             prefix, ignore=exclude_layers, fused_mapping=self.packed_modules_mapping
         ):
@@ -170,6 +173,20 @@ class QuarkConfig(QuantizationConfig):
             return QuarkKVCacheMethod(self)
 
         if isinstance(layer, RoutedExperts):
+            # Quark enumerates excluded (bf16) experts per leaf
+            # (e.g. "model.layers.N.mlp.experts.<i>.<proj>"), but the fused
+            # experts module is queried by the coarse prefix
+            # "model.layers.N.mlp.experts", which those leaf names never match
+            # via should_ignore_layer(). When the whole fused experts module is
+            # excluded (e.g. a GLM-5.2 / DeepSeek-family nextn layer kept in
+            # bf16), build it unquantized instead of forcing the checkpoint's
+            # target scheme (which would pack the bf16 weights to half width and
+            # crash at load). Mirrors sgl-project/sglang#30265, applied at
+            # vLLM's MoE dispatch point rather than by mutating the exclude list.
+            if any(
+                e.startswith(prefix + ".") for e in exclude_layers if "experts" in e
+            ):
+                return UnquantizedFusedMoEMethod(layer.moe_config)
             return QuarkMoEMethod.get_moe_method(self, module=layer, layer_name=prefix)
         return None
 

@@ -10,6 +10,7 @@ See also `tests/kernels/moe/test_ocp_mx_moe.py`.
 import importlib.metadata
 from dataclasses import dataclass
 from importlib.util import find_spec
+from unittest.mock import patch
 
 import huggingface_hub
 import lm_eval
@@ -17,7 +18,9 @@ import pytest
 import torch
 from packaging import version
 
+from vllm.model_executor.layers.quantization.quark import quark as quark_mod
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
+    QuarkConfig,
     QuarkLinearMethod,
     QuarkW8A8Fp8,
     QuarkW8A8Int8,
@@ -533,3 +536,81 @@ def test_substr_match_on_fused_name():
         fused_mapping=FUSED_MAPPING,
         skip_with_substr=True,
     )
+
+
+class _FakeRoutedExperts:
+    """Minimal stand-in for a fused MoE (RoutedExperts) module."""
+
+    def __init__(self):
+        self.moe_config = object()
+
+
+def _make_quark_config(exclude):
+    qc = QuarkConfig(quant_config={"exclude": list(exclude)})
+    qc.packed_modules_mapping = {}
+    return qc
+
+
+def test_fully_excluded_fused_moe_is_unquantized():
+    # A nextn/MTP layer kept in bf16 has its experts excluded per leaf
+    # (model.layers.N.mlp.experts.<i>.<proj>). The fused module is queried by
+    # the coarse prefix model.layers.N.mlp.experts, so it must be detected as
+    # excluded and built unquantized rather than with the MXFP4 scheme.
+    exclude = [
+        f"model.layers.92.mlp.experts.{i}.{proj}"
+        for i in range(3)
+        for proj in ("gate_proj", "up_proj", "down_proj")
+    ]
+    qc = _make_quark_config(exclude)
+    layer = _FakeRoutedExperts()
+    sentinel = object()
+
+    with (
+        patch.object(quark_mod, "RoutedExperts", _FakeRoutedExperts),
+        patch.object(
+            quark_mod, "UnquantizedFusedMoEMethod", return_value=sentinel
+        ) as unq,
+        patch.object(quark_mod.QuarkMoEMethod, "get_moe_method") as get_moe,
+    ):
+        method = qc.get_quant_method(layer, prefix="model.layers.92.mlp.experts")
+
+    assert method is sentinel
+    unq.assert_called_once_with(layer.moe_config)
+    get_moe.assert_not_called()
+    # The exclude list must not be mutated in place.
+    assert qc.quant_config["exclude"] == exclude
+
+
+def test_non_excluded_fused_moe_stays_quantized():
+    qc = _make_quark_config(exclude=["model.layers.0.self_attn.q_proj"])
+    layer = _FakeRoutedExperts()
+    sentinel = object()
+
+    with (
+        patch.object(quark_mod, "RoutedExperts", _FakeRoutedExperts),
+        patch.object(
+            quark_mod.QuarkMoEMethod, "get_moe_method", return_value=sentinel
+        ) as get_moe,
+    ):
+        method = qc.get_quant_method(layer, prefix="model.layers.0.mlp.experts")
+
+    assert method is sentinel
+    get_moe.assert_called_once()
+
+
+def test_missing_exclude_key_does_not_crash():
+    qc = QuarkConfig(quant_config={})
+    qc.packed_modules_mapping = {}
+    layer = _FakeRoutedExperts()
+    sentinel = object()
+
+    with (
+        patch.object(quark_mod, "RoutedExperts", _FakeRoutedExperts),
+        patch.object(
+            quark_mod.QuarkMoEMethod, "get_moe_method", return_value=sentinel
+        ) as get_moe,
+    ):
+        method = qc.get_quant_method(layer, prefix="model.layers.0.mlp.experts")
+
+    assert method is sentinel
+    get_moe.assert_called_once()
