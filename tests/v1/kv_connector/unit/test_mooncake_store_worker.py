@@ -2415,7 +2415,7 @@ def test_store_recving_thread_load_failure_different_block_sizes():
     assert failed_blocks == {1, 11}
 
 
-def test_store_recving_thread_singel_group_load_failure():
+def test_store_recving_thread_single_group_load_failure():
     """Test when all blocks fail - all block IDs and their peers are recorded."""
     from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
