@@ -940,10 +940,11 @@ tqdm==4.67.3
     #   pqdm
     #   sentence-transformers
     #   transformers
-transformers==5.5.3
+transformers==5.10.4
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
+    #   -r requirements/test/xpu.in
     #   compressed-tensors
     #   sentence-transformers
     #   xgrammar

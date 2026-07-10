@@ -19,6 +19,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.utils.platform_utils import get_device_name_as_file_name
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 if current_platform.is_xpu():
@@ -53,7 +54,7 @@ def get_ssm_config_file_name(
 
 
 def get_ssm_device_name() -> str:
-    return current_platform.get_device_name().replace(" ", "_")
+    return get_device_name_as_file_name()
 
 
 def _canonical_cache_dtype(cache_dtype: str) -> str:

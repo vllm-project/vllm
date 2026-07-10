@@ -271,6 +271,16 @@ class Platform:
                 f"{cls.device_name}."
             ) from e
 
+    # GPU device IDs can refer to three distinct namespaces:
+    # - logical: vLLM-local IDs such as local ranks. These index
+    #   assigned_physical_gpu_ids when it is set.
+    # - visible: torch/CUDA ordinals in the current process after applying
+    #   the device-control env var, e.g. CUDA_VISIBLE_DEVICES.
+    # - physical: global GPU IDs used by topology and management APIs such as
+    #   NVML, which are not remapped by CUDA_VISIBLE_DEVICES.
+    # Keep conversions explicit. In particular, torch device indices are
+    # visible IDs, not vLLM logical IDs.
+
     @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):
         """Map a vLLM-local logical device ID to a physical device ID.
@@ -411,7 +421,12 @@ class Platform:
         cls,
         device_id: int = 0,
     ) -> DeviceCapability | None:
-        """Stateless version of [torch.cuda.get_device_capability][]."""
+        """Stateless version of [torch.cuda.get_device_capability][].
+
+        Args:
+            device_id: Device index in the visible device namespace, matching
+                the argument accepted by torch.cuda.
+        """
         return None
 
     @classmethod

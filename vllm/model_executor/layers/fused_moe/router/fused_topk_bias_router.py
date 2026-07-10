@@ -43,6 +43,7 @@ def vllm_topk_sigmoid(
     gating_output: torch.Tensor,
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
+    routed_scaling_factor: float = 1.0,
 ) -> tuple[torch.Tensor, ...]:
     ops.topk_sigmoid(
         topk_weights,
@@ -51,6 +52,7 @@ def vllm_topk_sigmoid(
         gating_output,
         renormalize,
         e_score_correction_bias,
+        routed_scaling_factor,
     )
 
     return topk_weights, topk_indices
@@ -216,9 +218,8 @@ def fused_topk_bias(
                 gating_output,
                 renormalize,
                 e_score_correction_bias,
+                routed_scaling_factor,
             )
-            if routed_scaling_factor != 1.0:
-                topk_weights *= routed_scaling_factor
             return topk_weights, topk_ids
         elif scoring_func == "sqrtsoftplus":
             return vllm_topk_softplus_sqrt(

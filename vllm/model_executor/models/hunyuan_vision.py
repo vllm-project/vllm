@@ -31,7 +31,11 @@ from typing import Annotated, Any, Literal, TypeAlias
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import BatchFeature
+from transformers import BatchFeature, HunYuanVLProcessor
+from transformers.models.hunyuan_vl.image_processing_hunyuan_vl import (
+    HunYuanVLImageProcessor,
+    smart_resize,
+)
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -74,11 +78,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.hunyuan_vl import (
     HunYuanVLConfig,
     HunYuanVLVisionConfig,
-)
-from vllm.transformers_utils.processors.hunyuan_vl import HunYuanVLProcessor
-from vllm.transformers_utils.processors.hunyuan_vl_image import (
-    HunYuanVLImageProcessor,
-    smart_resize,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -574,9 +573,12 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
         self,
         **kwargs: object,
     ) -> HunYuanVLProcessor:
+        # transformers>=5.13 replaced `use_fast` with `backend`; pin the
+        # PIL backend to match the released HunyuanOCR checkpoint packing.
+        kwargs.pop("use_fast", None)
+        kwargs.setdefault("backend", "pil")
         return self.ctx.get_hf_processor(
             HunYuanVLProcessor,
-            use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
 
@@ -724,8 +726,18 @@ class HunYuanVLMultiModalProcessor(BaseMultiModalProcessor[HunYuanVLProcessingIn
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        # HunYuanVLProcessor requires image placeholders wrapped with start/end tokens.
+        if mm_data.get("images") is not None and prompt:
+            img_tok = hf_processor.image_token
+            wrapped = (
+                f"{hf_processor.image_start_token}{img_tok}"
+                f"{hf_processor.image_end_token}"
+            )
+            if img_tok in prompt and wrapped not in prompt:
+                prompt = prompt.replace(img_tok, wrapped)
         return self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**mm_kwargs),
+            hf_processor,
             dict(text=prompt, **mm_data),
             dict(**mm_kwargs, **tok_kwargs),
         )

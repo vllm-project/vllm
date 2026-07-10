@@ -39,7 +39,8 @@ function cpu_tests() {
     pytest -x -v -s tests/kernels/core/test_cpu_activation.py
     pytest -x -v -s tests/kernels/moe/test_cpu_fused_moe.py
     pytest -x -v -s tests/kernels/mamba/cpu/test_cpu_gdn_ops.py
-    pytest -x -v -s tests/kernels/moe/test_cpu_int4_moe.py"
+    pytest -x -v -s tests/kernels/moe/test_cpu_int4_moe.py
+    pytest -x -v -s tests/kernels/mamba/test_cpu_short_conv.py"
 
   # skip tests requiring model downloads if HF_TOKEN is not set
   # due to rate-limits
@@ -62,7 +63,6 @@ function cpu_tests() {
   docker exec cpu-test bash -c "
     set -e
     pytest -x -v -s tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs"
-
 
   # basic online serving
   docker exec cpu-test bash -c '

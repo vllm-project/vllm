@@ -426,6 +426,10 @@ def dcp_a2a_lse_reduce(
     if H % world_size != 0:
         raise ValueError(f"H={H} must be divisible by DCP world size {world_size}.")
     H_per_rank = H // world_size
+    # The pack kernel bit-casts the LSE as fp32; some MLA backends return it in
+    # the activation dtype (bf16/fp16), so enforce the documented fp32 contract.
+    if cp_attn_lse.dtype != torch.float32:
+        cp_attn_lse = cp_attn_lse.to(torch.float32)
     lse_pack_dim = _dcp_a2a_lse_pack_dim(cp_attn_out.dtype)
 
     send_buffer, recv_buffer = _dcp_a2a_send_recv_buffers(

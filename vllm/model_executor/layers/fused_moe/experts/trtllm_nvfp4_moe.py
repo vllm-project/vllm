@@ -16,7 +16,10 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import trtllm_moe_pack_topk_ids_weights
+from vllm.model_executor.layers.fused_moe.utils import (
+    fi_moe_largest_bucket,
+    trtllm_moe_pack_topk_ids_weights,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
 )
@@ -319,6 +322,9 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             do_finalize=True,
             activation_type=activation_to_flashinfer_int(activation),
             output=output,
+            tune_max_num_tokens=min(
+                fi_moe_largest_bucket(self.moe_config), self._get_chunk_size()
+            ),
         )
 
     def apply(
@@ -479,4 +485,5 @@ class TrtLlmNvFp4ExpertsMonolithic(
             routing_method_type=self.routing_method_type,
             do_finalize=True,
             activation_type=activation_to_flashinfer_int(activation),
+            tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
         )[0]
