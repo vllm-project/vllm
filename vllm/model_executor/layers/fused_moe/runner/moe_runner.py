@@ -594,11 +594,6 @@ class MoERunner(MoERunnerInterface):
         if shared_launched:
             assert self._shared_experts is not None
             self._shared_experts.join_overlapped()
-        else:
-            self._maybe_apply_shared_experts(
-                shared_experts_input,
-                SharedExpertsOrder.MULTI_STREAM_OVERLAPPED,
-            )
 
         return (
             self._shared_experts.output if self._shared_experts is not None else None,
@@ -619,18 +614,6 @@ class MoERunner(MoERunnerInterface):
             if ctx.dp_metadata
             else nullcontext()
         )
-
-    def _maybe_sync_shared_experts_stream(
-        self,
-        shared_experts_input: torch.Tensor | None,
-    ):
-        # If router/gate provided, then apply it here.
-        # (Note: This code runs only when "overlapped mode" is on to allow
-        #        parallel execution of shared experts with the FusedMoE via
-        #        separate cuda stream)
-        if self._shared_experts is not None:
-            assert shared_experts_input is not None
-            self._shared_experts.maybe_sync_shared_experts_stream(shared_experts_input)
 
     def _maybe_add_zero_expert_output(
         self,
@@ -822,9 +805,6 @@ class MoERunner(MoERunnerInterface):
         """
         # TODO(bnell): this can be removed after MK migration is complete.
         self.routed_experts._ensure_moe_quant_config_init()
-
-        # Sync aux and main stream for shared expert multi-stream overlap.
-        self._maybe_sync_shared_experts_stream(shared_experts_input)
 
         # Launch shared experts on the aux stream BEFORE dispatch + the routed
         # kernel so they overlap the DP all-gather, gate, and fused MoE. The

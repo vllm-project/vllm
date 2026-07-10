@@ -119,41 +119,6 @@ class SharedExperts(torch.nn.Module):
         else:
             return SharedExpertsOrder.NO_OVERLAP
 
-    def maybe_sync_shared_experts_stream(
-        self,
-        shared_experts_input: torch.Tensor,
-    ):
-        experts_order = self._determine_shared_experts_order(shared_experts_input)
-
-        if experts_order == SharedExpertsOrder.MULTI_STREAM_OVERLAPPED:
-            assert self._stream is not None
-
-            # Fork point: record on the main stream now, so the aux stream can
-            # wait for `shared_experts_input` to be ready before it runs. Uses
-            # an event (capture-safe) rather than stream.wait_stream(). No
-            # record_stream() is needed: the join event ordering in
-            # join_overlapped keeps `shared_experts_input` alive until the aux
-            # stream is done, and the main stream is event-ordered after the aux
-            # output before consuming it.
-            self._fork_event[self._output_idx].record(current_stream())
-
-    def _run_in_aux_stream(
-        self,
-        shared_experts_input: torch.Tensor,
-    ) -> torch.Tensor:
-        # TODO: assert that maybe_sync_shared_experts_stream has been called.
-
-        # Run shared experts in parallel on a separate stream, ordered via
-        # events (capture-safe) instead of wait_stream.
-        idx = self._output_idx
-        with torch.cuda.stream(self._stream):
-            self._fork_event[idx].wait(self._stream)
-            output = self._layer(shared_experts_input)
-            self._join_event[idx].record(self._stream)
-        self._join_event[idx].wait(current_stream())
-
-        return output
-
     def launch_overlapped(self, shared_experts_input: torch.Tensor) -> bool:
         """Enqueue shared experts on the aux stream WITHOUT joining back.
 
@@ -164,9 +129,14 @@ class SharedExperts(torch.nn.Module):
 
         Submits shared-expert work to the aux stream *before* the routed
         kernel/collective so it overlaps the DP all-gather + fused MoE.
-        :meth:`maybe_sync_shared_experts_stream` must have recorded the fork
-        event earlier. Ordering is via CUDA events (capture-safe), so this works
-        under cudagraph capture; wait_stream/record_stream would not.
+        Ordering is via CUDA events (capture-safe), so this works under
+        cudagraph capture; wait_stream/record_stream would not.
+
+        The fork event is recorded on the main stream first, so the aux stream
+        waits for `shared_experts_input` to be ready before it runs. No
+        record_stream() is needed: the join event ordering in join_overlapped
+        keeps `shared_experts_input` alive until the aux stream is done, and the
+        main stream is event-ordered after the aux output before consuming it.
         """
         if (
             self._determine_shared_experts_order(shared_experts_input)
@@ -176,6 +146,7 @@ class SharedExperts(torch.nn.Module):
         assert self._stream is not None
         idx = self._output_idx
         assert self._output[idx] is None
+        self._fork_event[idx].record(current_stream())
         with torch.cuda.stream(self._stream):
             self._fork_event[idx].wait(self._stream)
             self._output[idx] = self._layer(shared_experts_input)
@@ -214,11 +185,6 @@ class SharedExperts(torch.nn.Module):
 
         assert self._output[self._output_idx] is None
 
-        if order == SharedExpertsOrder.MULTI_STREAM_OVERLAPPED:
-            self._output[self._output_idx] = self._run_in_aux_stream(
-                shared_experts_input
-            )
-        else:
-            self._output[self._output_idx] = self._layer(shared_experts_input)
+        self._output[self._output_idx] = self._layer(shared_experts_input)
 
         assert self._output[self._output_idx] is not None
