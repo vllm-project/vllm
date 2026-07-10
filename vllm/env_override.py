@@ -483,6 +483,39 @@ def _patch_get_raw_stream_if_needed():
 
 _patch_get_raw_stream_if_needed()
 
+
+def _patch_user_stream_raw_stream_autotune_if_needed():
+    """Workaround for TorchInductor autotune in user CUDA stream contexts."""
+    if not is_torch_equal_or_newer("2.12.0") or is_torch_equal_or_newer("2.13.0.dev"):
+        return
+
+    try:
+        import torch._inductor.config as inductor_config
+        from torch._inductor.codegen.wrapper import PythonWrapperCodegen
+    except Exception:
+        return
+
+    original = PythonWrapperCodegen.write_get_raw_stream_header
+    if getattr(original, "_vllm_user_stream_raw_stream_patch", False):
+        return
+
+    def patched_write_get_raw_stream_header(self):
+        original(self)
+        if not inductor_config.triton.autotune_at_compile_time:
+            return
+
+        raw_stream_line = "raw_stream = get_raw_stream(torch.cuda.current_device())"
+        if not self.kernel_autotune_calls.contains(raw_stream_line):
+            self.kernel_autotune_calls.writeline(raw_stream_line)
+
+    patched_write_get_raw_stream_header._vllm_user_stream_raw_stream_patch = True  # type: ignore[attr-defined]
+    PythonWrapperCodegen.write_get_raw_stream_header = (
+        patched_write_get_raw_stream_header
+    )
+
+
+_patch_user_stream_raw_stream_autotune_if_needed()
+
 if is_torch_equal("2.9.0"):
     from torch._inductor.codegen.wrapper import PythonWrapperCodegen
     from torch._inductor.graph import GraphLowering
