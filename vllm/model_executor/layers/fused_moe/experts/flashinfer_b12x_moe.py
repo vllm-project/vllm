@@ -24,6 +24,7 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_convert_sf_to_mma_layout,
     has_flashinfer_b12x_moe,
+    has_flashinfer_b12x_moe_activation,
 )
 
 
@@ -46,6 +47,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
     _ACTIVATION_MAP: dict[MoEActivation, str] = {
         MoEActivation.SILU: "silu",
         MoEActivation.RELU2_NO_MUL: "relu2",
+        MoEActivation.SWIGLUOAI_UNINTERLEAVE: "swigluoai_uninterleave",
     }
 
     def __init__(
@@ -84,6 +86,28 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
                 f"Supported: {list(self._ACTIVATION_MAP.keys())}"
             )
         self._activation_str = self._ACTIVATION_MAP[activation]
+
+        # ModelOpt NVFP4 checkpoints carry swiglu params on moe_config,
+        # not quant_config.
+        def _resolve(quant_val: float | None, moe_val: float | None) -> float | None:
+            return quant_val if quant_val is not None else moe_val
+
+        self.swiglu_alpha = _resolve(quant_config.gemm1_alpha, moe_config.swiglu_alpha)
+        self.swiglu_beta = _resolve(quant_config.gemm1_beta, moe_config.swiglu_beta)
+        self.swiglu_limit = _resolve(
+            quant_config.gemm1_clamp_limit, moe_config.swiglu_limit
+        )
+        if activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+            if self.swiglu_limit is None:
+                raise ValueError(
+                    "swigluoai_uninterleave requires swiglu_limit "
+                    "(gemm1_clamp_limit), but none was provided."
+                )
+        elif self.swiglu_limit is not None:
+            raise ValueError(
+                "FlashInferB12xExperts only applies swiglu_limit with the "
+                f"swigluoai_uninterleave activation, got {activation}."
+            )
 
         # Lazily created on first apply() call.
         self._wrapper: Any | None = None
@@ -188,7 +212,12 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in (MoEActivation.SILU, MoEActivation.RELU2_NO_MUL)
+        if activation in (MoEActivation.SILU, MoEActivation.RELU2_NO_MUL):
+            return True
+        return (
+            activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
+            and has_flashinfer_b12x_moe_activation()
+        )
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -234,6 +263,17 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
 
         from flashinfer.fused_moe import B12xMoEWrapper
 
+        swiglu_kwargs: dict[str, float] = {}
+        if self.swiglu_limit is not None:
+            # Unset alpha/beta mean silu-with-clamp in vLLM
+            # (apply_moe_activation); the kernel defaults are
+            # gpt-oss-oriented (1.702/1.0), so pass explicitly.
+            swiglu_kwargs = {
+                "swiglu_limit": self.swiglu_limit,
+                "swiglu_alpha": 1.0 if self.swiglu_alpha is None else self.swiglu_alpha,
+                "swiglu_beta": 0.0 if self.swiglu_beta is None else self.swiglu_beta,
+            }
+
         self._wrapper = B12xMoEWrapper(
             num_experts=self.global_num_experts,
             top_k=self.topk,
@@ -243,6 +283,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             max_num_tokens=self.max_num_tokens,
             num_local_experts=self.num_local_experts,
             activation=self._activation_str,
+            **swiglu_kwargs,
         )
 
     def apply(
