@@ -35,12 +35,19 @@ PROMPTS = [
 def test_gdn_sleep_wake_no_stale_state():
     sampling_params = SamplingParams(temperature=0.0, max_tokens=32, logprobs=1)
 
+    # Keep the reserved fraction low. On some (notably ROCm/amdgpu) drivers the
+    # VRAM discarded by ``sleep()`` is not returned to the free pool before
+    # ``wake_up()`` re-creates it, so the woken allocation must coexist with the
+    # not-yet-reclaimed one (~2x peak). A high ``gpu_memory_utilization`` then
+    # OOMs in ``cuMemCreate`` on wake. The model is tiny, so a small fraction
+    # still leaves ample KV/state cache while keeping the sleep/wake cycle well
+    # within device memory.
     llm = LLM(
         model=MODEL,
         enable_sleep_mode=True,
         enforce_eager=True,
         max_model_len=1024,
-        gpu_memory_utilization=0.6,
+        gpu_memory_utilization=0.4,
         trust_remote_code=True,
     )
 
