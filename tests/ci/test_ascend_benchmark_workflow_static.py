@@ -181,6 +181,28 @@ def test_main_benchmark_defaults_match_ascend_main_config():
     assert "official-ascend-jan-2026-v0180-random-online-qwen25-14b-910b2.json" in text
 
 
+def test_schedule_runs_registered_multi_scenario_benchmark_publish():
+    text = workflow_text()
+    workflow = workflow_yaml()[True]
+
+    assert workflow["schedule"][0]["cron"] == "0 18 * * 5"
+    assert "github.event_name == 'schedule'" in text
+    assert "VLLM_HUST_SCHEDULE_BENCHMARK_SCENARIOS" in text
+    assert "VLLM_HUST_SCHEDULE_PUBLISH_BENCHMARK != '0'" in text
+    for scenario in (
+        "random-online",
+        "sharegpt-online",
+        "prefix-repetition-online",
+        "random-latency",
+        "sharegpt-throughput",
+        "sonnet-throughput",
+        "instructcoder-online",
+        "agent-research-online",
+        "visionarena-online",
+    ):
+        assert scenario in text
+
+
 def test_benchmark_script_does_not_force_max_model_len():
     script = (
         Path(__file__).resolve().parents[2]
