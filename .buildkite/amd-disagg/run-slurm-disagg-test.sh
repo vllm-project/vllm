@@ -82,7 +82,8 @@ mkdir -p "${LOG_ROOT}"
 DISAGG_SCRIPTS_STAGE="${DISAGG_SCRIPTS_STAGE:-/data/scratch/buildkite-agent}"
 STAGED_DIR="${DISAGG_SCRIPTS_STAGE}/${BUILDKITE_COMMIT:-local}"
 mkdir -p "${STAGED_DIR}"
-cp -a "${SCRIPT_DIR}/." "${STAGED_DIR}/"
+cp -rL --no-preserve=ownership,timestamps "${SCRIPT_DIR}/." "${STAGED_DIR}/"
+chmod -R u+rwX "${STAGED_DIR}" 2>/dev/null || true
 export DISAGG_SCRIPTS_DIR="${STAGED_DIR}"
 echo "[slurm-submit] staged scripts for compute nodes: ${DISAGG_SCRIPTS_DIR}" >&2
 export IMAGE WIDE_EP_MODE xP yD GPUS_PER_NODE RUN_AFTER_HEALTH HEALTH_TIMEOUT_S
