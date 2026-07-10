@@ -235,7 +235,6 @@ def _update_committed_marker_cache_kernel(
 def _thinking_budget_kernel(
     logits_ptr,
     logits_stride,
-    vocab_size,
     expanded_idx_mapping_ptr,
     thinking_token_budget_ptr,
     all_token_ids_ptr,
@@ -250,7 +249,6 @@ def _thinking_budget_kernel(
     reasoning_end_token_ids_ptr,
     START_LEN: tl.constexpr,
     END_LEN: tl.constexpr,
-    LOGITS_BLOCK_SIZE: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
@@ -343,13 +341,6 @@ def _thinking_budget_kernel(
                 end_prefix_len = prefix_len
 
     force_token_id = tl.load(reasoning_end_token_ids_ptr + end_prefix_len)
-    for i in tl.range(0, vocab_size, LOGITS_BLOCK_SIZE):
-        offset = i + tl.arange(0, LOGITS_BLOCK_SIZE)
-        tl.store(
-            logits_ptr + token_idx * logits_stride + offset,
-            -float("inf"),
-            mask=offset < vocab_size,
-        )
     tl.store(logits_ptr + token_idx * logits_stride + force_token_id, 1.0e9)
 
 
@@ -369,7 +360,7 @@ def apply_thinking_budget(
     reasoning_start_token_ids: torch.Tensor,
     reasoning_end_token_ids: torch.Tensor,
 ) -> None:
-    num_tokens, vocab_size = logits.shape
+    num_tokens = logits.shape[0]
     start_len = reasoning_start_token_ids.shape[0]
     end_len = reasoning_end_token_ids.shape[0]
 
@@ -392,7 +383,6 @@ def apply_thinking_budget(
     _thinking_budget_kernel[(num_tokens,)](
         logits,
         logits.stride(0),
-        vocab_size,
         expanded_idx_mapping,
         thinking_token_budget,
         all_token_ids,
@@ -407,5 +397,4 @@ def apply_thinking_budget(
         reasoning_end_token_ids,
         START_LEN=start_len,
         END_LEN=end_len,
-        LOGITS_BLOCK_SIZE=8192,
     )
