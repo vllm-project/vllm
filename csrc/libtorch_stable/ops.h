@@ -554,3 +554,12 @@ void cp_gather_indexer_k_quant_cache(
                                                 // quant_block_size * 4]
     const torch::stable::Tensor& block_table,   // [batch_size, num_blocks]
     const torch::stable::Tensor& cu_seq_lens);  // [batch_size + 1]
+
+// LongCat n-gram embedding index kernel (see ngram_embedding_kernels.cu).
+void ngram_compute_n_gram_ids(
+    int64_t ne_n, int64_t ne_k, torch::stable::Tensor& ne_weights,
+    torch::stable::Tensor& ne_mods,
+    torch::stable::Tensor& exclusive_ne_embedder_size_sums,
+    torch::stable::Tensor& exclusive_req_len_sums,
+    torch::stable::Tensor& ne_token_table, torch::stable::Tensor& row_indices,
+    torch::stable::Tensor& column_starts, torch::stable::Tensor& n_gram_ids);
