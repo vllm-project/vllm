@@ -2,12 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import json
+
 import pytest
 
 from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
+from tests.tool_parsers.utils import run_tool_extraction_streaming
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 
 
@@ -90,3 +93,37 @@ class TestDeepSeekV3ToolParser(ToolParserTests):
                 ),
             },
         )
+
+    def test_single_tool_call_in_one_delta(
+        self, tool_parser, test_config: ToolParserTestConfig
+    ):
+        """A whole tool call arriving in one delta must still be emitted."""
+        reconstructor = run_tool_extraction_streaming(
+            tool_parser,
+            [test_config.single_tool_call_output],
+            assert_one_tool_per_delta=False,
+        )
+        assert len(reconstructor.tool_calls) == 1
+        tool_call = reconstructor.tool_calls[0]
+        assert tool_call.function.name == "get_weather"
+        assert json.loads(tool_call.function.arguments) == {
+            "city": "Tokyo",
+            "unit": "celsius",
+        }
+
+    def test_parallel_tool_calls_in_one_delta(
+        self, tool_parser, test_config: ToolParserTestConfig
+    ):
+        """Parallel tool calls arriving in one delta must all be emitted."""
+        reconstructor = run_tool_extraction_streaming(
+            tool_parser,
+            [test_config.parallel_tool_calls_output],
+            assert_one_tool_per_delta=False,
+        )
+        names = [tc.function.name for tc in reconstructor.tool_calls]
+        assert names == ["get_weather", "search_hotels"]
+        args = [json.loads(tc.function.arguments) for tc in reconstructor.tool_calls]
+        assert args == [
+            {"city": "Tokyo", "unit": "celsius"},
+            {"location": "Tokyo", "check_in": "2025-01-15"},
+        ]

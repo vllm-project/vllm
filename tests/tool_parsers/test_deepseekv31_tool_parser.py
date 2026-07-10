@@ -3,6 +3,7 @@
 
 import pytest
 
+from tests.tool_parsers.utils import run_tool_extraction_streaming
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.deepseekv31_tool_parser import (
     DeepSeekV31ToolParser,
@@ -59,3 +60,36 @@ def test_extract_tool_calls_with_multiple_tools(parser):
 
     # prefix is content
     assert result.content == "some prefix text"
+
+
+def test_streaming_single_tool_call_in_one_delta(parser):
+    """A whole tool call arriving in one delta must still be emitted."""
+    model_output = (
+        "<｜tool▁calls▁begin｜>"
+        '<｜tool▁call▁begin｜>foo<｜tool▁sep｜>{"x":1}<｜tool▁call▁end｜>'
+        "<｜tool▁calls▁end｜>"
+    )
+    reconstructor = run_tool_extraction_streaming(
+        parser, [model_output], assert_one_tool_per_delta=False
+    )
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function.name == "foo"
+    assert reconstructor.tool_calls[0].function.arguments == '{"x":1}'
+
+
+def test_streaming_parallel_tool_calls_in_one_delta(parser):
+    """Parallel tool calls arriving in one delta must all be emitted."""
+    model_output = (
+        "<｜tool▁calls▁begin｜>"
+        '<｜tool▁call▁begin｜>foo<｜tool▁sep｜>{"x":1}<｜tool▁call▁end｜>'
+        '<｜tool▁call▁begin｜>bar<｜tool▁sep｜>{"y":2}<｜tool▁call▁end｜>'
+        "<｜tool▁calls▁end｜>"
+    )
+    reconstructor = run_tool_extraction_streaming(
+        parser, [model_output], assert_one_tool_per_delta=False
+    )
+    assert len(reconstructor.tool_calls) == 2
+    assert reconstructor.tool_calls[0].function.name == "foo"
+    assert reconstructor.tool_calls[0].function.arguments == '{"x":1}'
+    assert reconstructor.tool_calls[1].function.name == "bar"
+    assert reconstructor.tool_calls[1].function.arguments == '{"y":2}'
