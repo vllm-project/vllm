@@ -46,8 +46,28 @@ GET_META_MSG = b"get_meta_msg"
 #      this, a pooled member belonging to a different kv group than the region's
 #      representative is never transferred (its blocks are dropped), corrupting
 #      KV under PP+HMA disaggregation.
+#   7: Add fa_members_registered (#46407). Under PP>1 + HMA the producer dedups
+#      the FullAttention layer aliased onto a Mamba-represented pooled tensor out
+#      of registered_layer_names; with this fix the producer RE-ADVERTISES it as
+#      its own FA-typed region (same base addr, FA page stride) and sets this
+#      flag True so the consumer knows real FA regions now exist. False ⇒ legacy
+#      behavior (no extra FA regions). The flag is read defensively via getattr
+#      so a v6 consumer ignores it; a v7 consumer paired with a v6 producer sees
+#      False (both safe).
+#   8: Add ssm_members_registered (#46407 generalization). The HMA general-case
+#      allocator pools ONE layer from EVERY kv_cache_group into a shared tensor;
+#      for a multi-Mamba-group hybrid (e.g. Nemotron-3-Ultra: 4 Mamba groups + 1
+#      FullAttention) each tensor holds N>1 Mamba layers + 1 FA. Fix v7 recovered
+#      only the dedup'd FA member; the (N-1) dedup'd Mamba members stayed dropped,
+#      so mamba_region_group_ids collapsed to [0]*N and only the group-0 Mamba
+#      layers transferred -> the rest ran on stale SSM state -> coherent-but-wrong
+#      decode. v8 producer ALSO re-advertises every dedup'd Mamba member as its
+#      own region (same base, Mamba page stride) and sets this flag. Consumer
+#      applies the SSM-only filter when (fa_members_registered or
+#      ssm_members_registered). Read via getattr so a v7 consumer ignores it; a
+#      v8 consumer paired with a v7 producer sees False (both safe).
 #
-NIXL_CONNECTOR_VERSION: int = 6
+NIXL_CONNECTOR_VERSION: int = 8
 
 
 @dataclass
@@ -82,6 +102,27 @@ class NixlAgentMetadata:
     # producer shard and the full-model consumer. Defaults to empty for backward
     # construction; populated in register_kv_caches.
     region_members: list[list[str]] = field(default_factory=list)
+    # True iff the producer re-advertised at least one dedup'd FullAttention
+    # member (aliased onto a Mamba-represented pooled tensor under PP>1 + HMA) as
+    # its own FA-typed NIXL region. The consumer's gated FA-recovery
+    # (worker._region_fa_recovery_for_members) reads this via
+    # getattr(meta, "fa_members_registered", False) and only emits recovery
+    # descriptors when True. Defaults False: PP1 (FA already a representative),
+    # all-attention, and MLA producers never set it; a v6 producer omits the
+    # field entirely and the getattr default keeps the consumer safe.
+    fa_members_registered: bool = False
+    # True iff the producer re-advertised at least one dedup'd SSM/Mamba member
+    # (a non-representative Mamba layer from group 1..N pooled behind the group-0
+    # Mamba representative at the same base under PP>1 + HMA) as its own region.
+    # Without this, only the group-0 Mamba rep transfers and
+    # (num_mamba_groups-1)/num_mamba_groups of the Mamba layers run on stale SSM
+    # state -> coherent-but-wrong decode. The consumer uses
+    # (fa_members_registered or ssm_members_registered) to decide whether to
+    # apply the SSM-only filter before the mamba descriptor builder. Defaults
+    # False: PP1, single-Mamba-group, all-attention, and MLA producers never set
+    # it; a v6/v7 producer omits the field and the getattr default keeps
+    # consumers safe.
+    ssm_members_registered: bool = False
 
 
 @dataclass

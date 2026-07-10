@@ -94,6 +94,9 @@ _ShardDescLayout: TypeAlias = tuple[
     int,  # physical_blocks_per_logical
     int,  # mamba_region_count
     tuple[int, ...],  # mamba_region_group_ids
+    tuple[int, ...],  # fa_recovered_region_indices  (#46407)
+    tuple[int, ...],  # fa_recovered_region_group_ids  (#46407)
+    bool,  # producer_registered_fa_members (honesty gate, #46407)
 ]
 
 
@@ -104,6 +107,9 @@ def _make_shard_desc_layout(
     physical_blocks_per_logical: int = 1,
     mamba_region_count: int = 0,
     mamba_region_group_ids: tuple[int, ...] = (),
+    fa_recovered_region_indices: tuple[int, ...] = (),
+    fa_recovered_region_group_ids: tuple[int, ...] = (),
+    producer_registered_fa_members: bool = False,
 ) -> _ShardDescLayout:
     return (
         num_blocks,
@@ -111,6 +117,9 @@ def _make_shard_desc_layout(
         physical_blocks_per_logical,
         mamba_region_count,
         mamba_region_group_ids,
+        fa_recovered_region_indices,
+        fa_recovered_region_group_ids,
+        producer_registered_fa_members,
     )
 
 
@@ -584,6 +593,83 @@ class NixlConnectorWorker:
             return tuple(g for g in group_ids for _ in range(2))
         return group_ids
 
+    # -------------------------------------------------------------------- #
+    # #46407 — region-MEMBER based FA recovery under PP + HMA               #
+    # -------------------------------------------------------------------- #
+    # Under PP>1 + the hybrid-memory-allocator (HMA), the producer pools one
+    # layer from EACH kv_cache_group into a single KVCacheTensor. In
+    # register_kv_caches the producer dedups by base address: the first layer
+    # seen for a pooled tensor becomes the region representative in
+    # seen_layer_names; every other group's layer for that tensor (including the
+    # FullAttention layer) is dropped from seen_layer_names and recorded ONLY in
+    # region_members[region_idx]. The Mamba (group 0) layer sorts first per
+    # pooled tensor, so on a hybrid model every representative in
+    # registered_layer_names is a Mamba layer, and any resolver keyed on
+    # registered_layer_names faithfully reports all-SSM — the FA layer names are
+    # ABSENT from the resolver input, not mis-classified. The collapse is at the
+    # SOURCE (producer dedup), not in the consumer resolver; the FA layer names
+    # survive only in region_members. Recovery therefore classifies each producer
+    # region by inspecting ALL of its advertised members (region_members[r]) and
+    # recovers the FA member that was dedup'd out.
+    def _region_fa_recovery_for_members(
+        self, nixl_agent_meta: "NixlAgentMetadata"
+    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        """Per producer region, recover any dedup'd FullAttention member.
+
+        Returns ``(fa_region_indices, fa_region_group_ids)`` where, in producer
+        region order (already x2-expanded for blocks-first K/V to match
+        ``region_group_ids``):
+
+        - ``fa_region_indices[k]``: the producer region index whose pooled
+          tensor harbors a FullAttention member that the producer dedup'd out of
+          ``registered_layer_names``.
+        - ``fa_region_group_ids[k]``: the consumer-side kv-group id of that FA
+          member (its FullAttention group), resolved by layer name against the
+          consumer's own ``_layer_name_to_kv_group_index`` — PP-stable, never a
+          collapsed group index.
+
+        Empty tuples when there is nothing to recover (no mamba, no
+        ``region_members``, or no FA member is hidden behind a non-FA
+        representative — e.g. the all-attention or PP1 case, where the FA layers
+        are already their own representatives and the legacy path is correct).
+        """
+        members = getattr(nixl_agent_meta, "region_members", None)
+        registered = nixl_agent_meta.registered_layer_names
+        if not self._has_mamba or not members:
+            return (), ()
+        assert self.transfer_topo is not None
+        dup = 2 if self.transfer_topo.is_kv_layout_blocks_first else 1
+        name_to_group = self._layer_name_to_kv_group_index
+        fa_region_indices: list[int] = []
+        fa_region_group_ids: list[int] = []
+        for region_idx, region in enumerate(members):
+            # The representative (advertised) name for this region is the one
+            # that ALSO appears in registered_layer_names. Everything else in
+            # `region` was dedup'd out by the producer's HMA pooling.
+            rep_is_attn = any(
+                name in registered
+                and name in name_to_group
+                and _is_attention_spec(self._group_spec_types[name_to_group[name]])
+                for name in region
+            )
+            if rep_is_attn:
+                # FA layer is already its own representative -> the legacy FA
+                # loop already emits it. Nothing hidden to recover.
+                continue
+            # Find a dedup'd FA member hiding behind a non-FA representative.
+            for name in region:
+                if name in registered:
+                    continue  # the representative itself
+                if name not in name_to_group:
+                    continue
+                gid = name_to_group[name]
+                if _is_attention_spec(self._group_spec_types[gid]):
+                    for _ in range(dup):
+                        fa_region_indices.append(region_idx)
+                        fa_region_group_ids.append(gid)
+                    break  # one FA member per pooled tensor (one layer/group)
+        return tuple(fa_region_indices), tuple(fa_region_group_ids)
+
     def _use_member_identity(self, nixl_agent_meta: NixlAgentMetadata) -> bool:
         # Member-identity routing (B6): resolve each producer member to the
         # consumer region that holds it, robust to HMA pool-representative
@@ -633,10 +719,29 @@ class NixlConnectorWorker:
         )
         return member_local_regions, tuple(member_groups), member_meta
 
+    def _ssm_layer_names(self, registered_layer_names: list[str]) -> list[str]:
+        # Filter producer-advertised layer names to SSM/Mamba layers only.
+        # For hybrid (Mamba + attention) models, registered_layer_names carries
+        # BOTH layer types once the producer re-advertises the dedup'd members
+        # (#46407); the Mamba descriptor bookkeeping (region count + group ids)
+        # must cover ONLY the SSM layers, else attention layers inflate the count
+        # and shift every real SSM region's descriptor offset (num_fa_descs +
+        # region_id * logical_blocks), so the consumer reads stale/zero Mamba
+        # state -> degenerate output under PP+HMA disagg.
+        mapping = self._layer_name_to_kv_group_index
+        return [
+            name
+            for name in registered_layer_names
+            if name in mapping and _is_ssm_spec(self._group_spec_types[mapping[name]])
+        ]
+
     def _mamba_region_group_ids_for_layer_names(
         self, registered_layer_names: list[str]
     ) -> tuple[int, ...]:
-        group_ids = self._kv_group_indices_for_layer_names(registered_layer_names)
+        # SSM-only: see _ssm_layer_names. Each SSM layer expands to 4 regions
+        # (conv proj0/1/2 + ssm temporal state).
+        ssm_names = self._ssm_layer_names(registered_layer_names)
+        group_ids = self._kv_group_indices_for_layer_names(ssm_names)
         return tuple(g for g in group_ids for _ in range(4))
 
     def _kv_group_indices_for_layer_names(
@@ -1112,6 +1217,14 @@ class NixlConnectorWorker:
         # HMA cross-group pooled members dedup'd out of seen_layer_names. Drives
         # per-member (all-group) transfer coverage.
         region_members: list[list[str]] = []
+        # #46407: set True iff at least one dedup'd FullAttention / SSM member
+        # was re-advertised as its own NIXL region (the producer half of the
+        # fix). Advertised in NixlAgentMetadata so the consumer's gated recovery
+        # knows real FA regions / de-collapsed SSM regions now exist. Stay False
+        # on PP1 (each layer is already a representative) and on all-attention /
+        # MLA / single-Mamba-group models.
+        fa_members_registered = False
+        ssm_members_registered = False
         for layer_name, cache_or_caches in xfer_buffers.items():
             # NOTE (NickLucche) Hybrid SSM models assume a layout that is similar to
             # that of FI, with block laid out as in `get_backend_aware_kv_block_len`.
@@ -1163,10 +1276,135 @@ class NixlConnectorWorker:
                     # pointed to by group0. Also, generally we will have more blocks
                     # per tensor but fewer regions.
                     logger.debug("Skipping %s because it's already seen", layer_name)
-                    self._local_layer_name_to_region_indices[layer_name].append(
-                        existing_region_idx
-                    )
+                    # region_members keeps EVERY pooled member (incl. this one)
+                    # for the consumer's member-identity / overlap bookkeeping,
+                    # regardless of whether we also re-advertise a region below.
                     region_members[existing_region_idx].append(layer_name)
+                    # ---- #46407 producer half ---------------------------------
+                    # Under PP>1 + HMA, the HMA allocator pools ONE layer from
+                    # EACH kv_cache_group into a single tensor (shared_by =
+                    # [groups[j].layer_names[i] for j in range(num_groups)]). The
+                    # Mamba (group 0) layer sorts first and becomes the region
+                    # representative; every OTHER group's layer aliased onto the
+                    # SAME storage is dedup'd here and (pre-fix) DROPPED from the
+                    # advertised region set (seen_layer_names). For a multi-Mamba
+                    # -group hybrid (e.g. Nemotron-3-Ultra: 3 Mamba + 1 FA per
+                    # tensor) that drops both the FullAttention member AND the
+                    # (N-1) non-representative Mamba members. The consumer then
+                    # sees an all-SSM, single-group region set -> region_group_ids
+                    # collapses (FA loop emits nothing; mamba_region_group_ids
+                    # collapses to [0]*N) -> only the group-0 Mamba layers and no
+                    # FA transfer -> coherent-but-wrong decode. At PP1 each layer
+                    # is already its own representative, so this branch does not
+                    # fire and PP1 is unaffected.
+                    #
+                    # The dedup'd member is a FULL ALIAS of the representative:
+                    # OFFSET 0, SAME base_addr, SAME page stride. So RE-ADVERTISE
+                    # it as its OWN region (same base, member-typed block_len) so
+                    # registered_layer_names carries every layer and the consumer's
+                    # _ssm_layer_names / _mamba_region_group_ids de-collapse to
+                    # [0,1,2,...]. The K/V split is done virtually at descriptor
+                    # time (blocks-first), so no offset math and no new memory
+                    # registration is needed: the bytes are already registered
+                    # under the representative region's MR.
+                    existing_rep = seen_layer_names[existing_region_idx]
+                    existing_rep_spec = self._layer_specs[existing_rep]
+                    if isinstance(existing_rep_spec, UniformTypeKVCacheSpecs):
+                        existing_rep_spec = existing_rep_spec.kv_cache_specs[
+                            existing_rep
+                        ]
+                    # _is_attention_spec/_is_ssm_spec take a spec CLASS (they call
+                    # issubclass), so pass type(spec), matching every other call
+                    # site that passes self._group_spec_types[...] (a type).
+                    fa_on_mamba_region = _is_attention_spec(
+                        type(layer_spec)
+                    ) and _is_ssm_spec(type(existing_rep_spec))
+                    # Two SSM layers never share a tensor for a true duplicate: the
+                    # allocator pools one layer PER group per tensor, so a dedup'd
+                    # -SSM-behind-SSM-rep is ALWAYS a distinct group's layer needing
+                    # its own transfer (its own block table), never a real dup.
+                    ssm_on_mamba_region = _is_ssm_spec(
+                        type(layer_spec)
+                    ) and _is_ssm_spec(type(existing_rep_spec))
+                    if fa_on_mamba_region or ssm_on_mamba_region:
+                        # By-construction guard: the re-advertise is correct ONLY
+                        # because the dedup'd member is a FULL ALIAS of the
+                        # representative — same base addr, offset 0, equal
+                        # page_size_bytes (HMA invariant; symmetric P/D). Enforce
+                        # the alias here so a future HMA layout change fails LOUD at
+                        # registration instead of silently degenerate-decoding.
+                        _member_is_ssm = ssm_on_mamba_region
+                        existing_base = seen_base_addresses[existing_region_idx]
+                        assert base_addr == existing_base, (
+                            "#46407 alias-invariant violated: dedup'd member "
+                            f"{layer_name!r} base 0x{base_addr:x} != rep region "
+                            f"base 0x{existing_base:x} — HMA no longer full-aliases "
+                            "the member onto the representative; the same-base "
+                            "re-advertise is unsound."
+                        )
+                        assert (
+                            layer_spec.page_size_bytes
+                            == existing_rep_spec.page_size_bytes
+                        ), (
+                            "#46407 alias-invariant violated: member page_size_bytes "
+                            f"{layer_spec.page_size_bytes} != rep "
+                            f"{existing_rep_spec.page_size_bytes} — HMA equal-page "
+                            "invariant broken; member stride would mis-index the "
+                            "shared tensor."
+                        )
+                        new_region_idx = len(seen_base_addresses)
+                        # SAME base addr (OFFSET 0 — full alias).
+                        seen_base_addresses.append(base_addr)
+                        # Per-member block_len, MIRRORING the non-dedup branch
+                        # below: a Mamba member records physical_page_size //
+                        # _physical_blocks_per_logical_kv_block (the SSM page is
+                        # logical); an FA member records the full physical_page_size
+                        # (no //ratio — that divisor is Mamba-only).
+                        if _member_is_ssm:
+                            self.block_len_per_layer.append(
+                                physical_page_size
+                                // self._physical_blocks_per_logical_kv_block
+                            )
+                        else:
+                            self.block_len_per_layer.append(physical_page_size)
+                        # Keep seen_layer_indices parallel to seen_base_addresses /
+                        # seen_layer_names (asserted equal-length + index-consistent
+                        # in _validate_remote_agent_handshake).
+                        seen_layer_indices.append(layer_index)
+                        seen_layer_names.append(layer_name)
+                        # The member's AUTHORITATIVE descriptor home is the new
+                        # region (NOT the rep it aliases).
+                        self._local_layer_name_to_region_indices[layer_name].append(
+                            new_region_idx
+                        )
+                        # region_members for the NEW region is just itself.
+                        region_members.append([layer_name])
+                        # Do NOT rebind base_addr_to_region_idx: leave it pointing
+                        # at the representative so any further pooled member of the
+                        # SAME tensor still dedups onto the rep and reaches THIS
+                        # branch (each gets its own re-advertised region). This is
+                        # what lets all N-1 dedup'd members be recovered.
+                        if _member_is_ssm:
+                            ssm_members_registered = True
+                        else:
+                            fa_members_registered = True
+                        logger.debug(
+                            "#46407: re-advertised %s member %s as region %d "
+                            "(alias of rep region %d, base=0x%x, block_len=%d)",
+                            "SSM" if _member_is_ssm else "FA",
+                            layer_name,
+                            new_region_idx,
+                            existing_region_idx,
+                            base_addr,
+                            self.block_len_per_layer[-1],
+                        )
+                    else:
+                        # Unchanged upstream behavior: a dedup'd member that is NOT
+                        # an FA/SSM-on-Mamba alias maps to the existing region and
+                        # is carried only in region_members.
+                        self._local_layer_name_to_region_indices[layer_name].append(
+                            existing_region_idx
+                        )
                     continue
                 logger.debug(
                     "Registering layer %s with cache shape: %s", layer_name, cache.shape
@@ -1240,7 +1478,16 @@ class NixlConnectorWorker:
         self.kv_caches_base_addr[self.engine_id][self._local_kv_cache_key] = (
             seen_base_addresses
         )
-        self.num_regions = len(caches_data)
+        # #46407: num_regions counts LOGICAL NIXL regions (the descriptor-id
+        # space is keyed on logical regions, not physical MRs). Pre-fix,
+        # len(caches_data) == len(seen_base_addresses) always (both appended
+        # together in the non-dedup branch). The re-advertise adds a LOGICAL
+        # region that shares an already-registered MR, so it grows
+        # seen_base_addresses / block_len_per_layer but NOT caches_data. Basing
+        # num_regions on seen_base_addresses keeps it consistent with
+        # block_len_per_layer and the FA descriptor count in both the legacy and
+        # re-advertise cases.
+        self.num_regions = len(seen_base_addresses)
 
         if self.transfer_topo.virtually_split_kv_in_blocks:
             # NOTE (NickLucche) When FlashInfer is used, memory is registered
@@ -1315,6 +1562,8 @@ class NixlConnectorWorker:
             registered_layer_indices=seen_layer_indices,
             registered_layer_names=seen_layer_names,
             region_members=region_members,
+            fa_members_registered=fa_members_registered,
+            ssm_members_registered=ssm_members_registered,
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
@@ -1562,9 +1811,38 @@ class NixlConnectorWorker:
             # remote has been seen.  Currently we always register 4 regions
             # because local descs are created before knowing the remote TP.
             logger.debug("Registering local Mamba descriptors (4 regions/layer)")
+            # ---- #46407 consumer companion (index-safety) --------------------
+            # The SSM descriptor-id math addresses exactly mamba_region_count =
+            # len(_ssm_layer_names(registered)) * 4 desc-groups, starting at the
+            # num_fa_descs boundary. So _build_mamba_local must be fed ONLY the
+            # SSM regions — feeding it the re-advertised FA regions (now present
+            # in registered_layer_names) would build 4 garbage mamba desc-groups
+            # per FA region, inflate the mamba section, and shift every real SSM
+            # region's offset -> stale Mamba state -> degenerate decode.
+            # Pre-recovery, registered was all-SSM on a hybrid PP>1 producer so
+            # this filter is a no-op; it becomes load-bearing once any member is
+            # re-advertised. Filter by the producer-advertised name's spec, in the
+            # SAME order _build_fa_local used, so FA/SSM dlist sections stay
+            # aligned with region_group_ids / mamba_region_group_ids.
+            mamba_region_indices = local_region_indices
+            mamba_base_addresses = local_base_addresses
+            if registered_layer_names is not None:
+                name_to_group = self._layer_name_to_kv_group_index
+                paired = [
+                    (ridx, addr)
+                    for name, ridx, addr in zip(
+                        registered_layer_names,
+                        local_region_indices,
+                        local_base_addresses,
+                    )
+                    if name in name_to_group
+                    and _is_ssm_spec(self._group_spec_types[name_to_group[name]])
+                ]
+                mamba_region_indices = [p[0] for p in paired]
+                mamba_base_addresses = [p[1] for p in paired]
             blocks_data.extend(
                 self._build_mamba_local(
-                    local_base_addresses, block_size_ratio, local_region_indices
+                    mamba_base_addresses, block_size_ratio, mamba_region_indices
                 )
             )
 
@@ -1740,6 +2018,14 @@ class NixlConnectorWorker:
             )
             self.src_xfer_handles_by_remote[local_handle_key] = handle
             self.src_blocks_data_by_remote[local_handle_key] = blocks_data
+            # #46407: recover FA regions dedup'd out of registered_layer_names by
+            # the producer's HMA pooling.
+            _fa_local_idx, _fa_local_gid = (
+                self._region_fa_recovery_for_members(nixl_agent_meta)
+                if not member_identity
+                else ((), ())
+            )
+            _prod_fa = bool(getattr(nixl_agent_meta, "fa_members_registered", False))
             self._xfer_desc_layouts[(engine_id, remote_pp_rank, "local")] = (
                 _make_shard_desc_layout(
                     self.num_blocks * block_size_ratio,
@@ -1751,7 +2037,10 @@ class NixlConnectorWorker:
                     physical_blocks_per_logical=(
                         self._physical_blocks_per_logical_kv_block
                     ),
-                    mamba_region_count=len(nixl_agent_meta.registered_layer_names) * 4
+                    mamba_region_count=len(
+                        self._ssm_layer_names(nixl_agent_meta.registered_layer_names)
+                    )
+                    * 4
                     if self._has_mamba
                     else 0,
                     mamba_region_group_ids=(
@@ -1761,12 +2050,15 @@ class NixlConnectorWorker:
                         if self._has_mamba
                         else ()
                     ),
+                    fa_recovered_region_indices=_fa_local_idx,
+                    fa_recovered_region_group_ids=_fa_local_gid,
+                    producer_registered_fa_members=_prod_fa,
                 )
             )
         src_blocks_data = self.src_blocks_data_by_remote[local_handle_key]
-        local_num_blocks, local_region_group_ids, _, _, _ = self._xfer_desc_layouts[
-            (engine_id, remote_pp_rank, "local")
-        ]
+        local_num_blocks, local_region_group_ids, _, _, _, _, _, _ = (
+            self._xfer_desc_layouts[(engine_id, remote_pp_rank, "local")]
+        )
         local_region_indices = (
             member_local_regions
             if member_identity
@@ -1826,9 +2118,44 @@ class NixlConnectorWorker:
                 engine_id,
                 remote_tp_rank,
             )
+            # ---- #46407 consumer companion (remote index-safety) -------------
+            # Symmetric to the local side: _build_mamba_remote iterates ALL of
+            # nixl_agent_meta.kv_caches_base_addr, which the producer grows to
+            # include the re-advertised FA/SSM regions. The remote SSM desc-id
+            # math only addresses the SSM regions (mamba_region_group_ids), so
+            # the FA regions must be filtered OUT of the meta the mamba builder
+            # sees, or the remote mamba section inflates + misaligns exactly like
+            # the local side. Build an SSM-only view of (kv_caches_base_addr,
+            # block_lens) in registered order. The filter fires whenever the
+            # producer re-advertised ANY member (FA or extra SSM); gating on
+            # either flag covers a no-FA / pure multi-group-SSM producer too, and
+            # the filter itself is type-driven (keep only SSM-group regions) so it
+            # is correct regardless of which member types were recovered. No-op
+            # pre-recovery (registered was all-SSM); load-bearing once any region
+            # is re-advertised.
+            mamba_meta = nixl_agent_meta
+            if not member_identity and (
+                getattr(nixl_agent_meta, "fa_members_registered", False)
+                or getattr(nixl_agent_meta, "ssm_members_registered", False)
+            ):
+                name_to_group = self._layer_name_to_kv_group_index
+                reg = nixl_agent_meta.registered_layer_names
+                keep = [
+                    j
+                    for j, name in enumerate(reg)
+                    if name in name_to_group
+                    and _is_ssm_spec(self._group_spec_types[name_to_group[name]])
+                ]
+                mamba_meta = replace(
+                    nixl_agent_meta,
+                    kv_caches_base_addr=[
+                        nixl_agent_meta.kv_caches_base_addr[j] for j in keep
+                    ],
+                    block_lens=[nixl_agent_meta.block_lens[j] for j in keep],
+                )
             blocks_data.extend(
                 self._build_mamba_remote(
-                    nixl_agent_meta,
+                    mamba_meta,
                     tp_ratio,
                     transfer_info,
                 )
@@ -1840,6 +2167,16 @@ class NixlConnectorWorker:
             self.nixl_wrapper.prep_xfer_dlist(remote_agent_name, descs)
         )
 
+        # #46407: recover FA regions dedup'd out of registered_layer_names by the
+        # producer's HMA pooling (remote side).
+        _fa_remote_idx, _fa_remote_gid = (
+            self._region_fa_recovery_for_members(nixl_agent_meta)
+            if not member_identity
+            else ((), ())
+        )
+        _prod_fa_remote = bool(
+            getattr(nixl_agent_meta, "fa_members_registered", False)
+        )
         self._xfer_desc_layouts[(engine_id, remote_pp_rank, "remote")] = (
             _make_shard_desc_layout(
                 nixl_agent_meta.num_blocks,
@@ -1849,7 +2186,10 @@ class NixlConnectorWorker:
                     nixl_agent_meta.registered_layer_names
                 ),
                 physical_blocks_per_logical=physical_blocks_per_logical,
-                mamba_region_count=len(nixl_agent_meta.kv_caches_base_addr) * 4
+                mamba_region_count=len(
+                    self._ssm_layer_names(nixl_agent_meta.registered_layer_names)
+                )
+                * 4
                 if self._has_mamba
                 else 0,
                 mamba_region_group_ids=(
@@ -1859,6 +2199,9 @@ class NixlConnectorWorker:
                     if self._has_mamba
                     else ()
                 ),
+                fa_recovered_region_indices=_fa_remote_idx,
+                fa_recovered_region_group_ids=_fa_remote_gid,
+                producer_registered_fa_members=_prod_fa_remote,
             )
         )
         self._remote_agents[engine_id][shard_key] = remote_agent_name
@@ -2778,6 +3121,9 @@ class NixlConnectorWorker:
             physical_blocks_per_logical,
             mamba_region_count,
             mamba_region_group_ids,
+            fa_recovered_region_indices,
+            fa_recovered_region_group_ids,
+            producer_registered_fa_members,
         ) = self._xfer_desc_layouts[(engine_id, remote_pp_rank, side)]
 
         desc_ids = []
@@ -2787,6 +3133,31 @@ class NixlConnectorWorker:
             group_arr = np.asarray(block_ids[group_id], dtype=np.int64)
             if group_arr.size > 0:
                 desc_ids.append(region_id * num_blocks + group_arr)
+
+        # #46407: emit FA descriptors for regions whose FA member was dedup'd out
+        # of region_group_ids by the producer's HMA pooling. GUARD (honesty gate):
+        # this is ONLY sound when the producer registered a distinct
+        # FA-granularity NIXL region for the dedup'd member, growing its dlist
+        # (and the descriptor-id space) accordingly — advertised via
+        # producer_registered_fa_members. A bounds check alone is INSUFFICIENT:
+        # the recovered region indices are in range even for a v6 producer, yet
+        # its block_lens for those regions are Mamba-sized, so _ridx * num_blocks
+        # would index a Mamba region's bytes with the wrong layout. When the
+        # producer re-advertises (v7/v8), each dedup'd FA member becomes its own
+        # representative in region_group_ids, so the FA loop above already emits
+        # it and _region_fa_recovery_for_members returns empty — this block is the
+        # gated fallback that never moves bytes to a wrong offset.
+        if (
+            self._has_mamba
+            and fa_recovered_region_indices
+            and producer_registered_fa_members
+        ):
+            for _ridx, _gid in zip(
+                fa_recovered_region_indices, fa_recovered_region_group_ids
+            ):
+                group_arr = np.asarray(block_ids[_gid], dtype=np.int64)
+                if group_arr.size > 0:
+                    desc_ids.append(_ridx * num_blocks + group_arr)
 
         if self._has_mamba:
             assert physical_blocks_per_logical > 0
