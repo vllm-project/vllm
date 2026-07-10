@@ -1121,14 +1121,14 @@ def test_is_chunked_prefill_supported(
         (
             "Qwen/Qwen3-Next-80B-A3B-Instruct",
             "hybrid",
-            False,
-            "Hybrid models do not support prefix caching since the feature is still experimental.",  # noqa: E501
+            True,
+            "Generative hybrid models support prefix caching.",  # noqa: E501
         ),
         (
             "ibm-granite/granite-4.0-h-small",
             "hybrid",
-            False,
-            "Hybrid models do not support prefix caching since the feature is still experimental.",  # noqa: E501
+            True,
+            "Generative hybrid models support prefix caching.",  # noqa: E501
         ),
         (
             "state-spaces/mamba-130m-hf",
