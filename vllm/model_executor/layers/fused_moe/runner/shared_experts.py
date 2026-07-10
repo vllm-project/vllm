@@ -71,9 +71,8 @@ class SharedExperts(torch.nn.Module):
             if self._stream is not None:
                 logger.debug_once("Enabled separate cuda stream for MoE shared_experts")
 
-        # Cross-stream sync via CUDA events, which are safe under cudagraph
-        # capture. One pair per DBO ubatch id.
         if self._stream is not None:
+            # One pair per DBO ubatch id.
             self._input_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
             self._output_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
 
