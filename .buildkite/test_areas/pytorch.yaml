@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: PyTorch Compilation Unit Tests
+  device: h200_35gb
   key: pytorch-compilation-unit-tests
   timeout_in_minutes: 10
   source_file_dependencies:
@@ -106,6 +107,12 @@ steps:
     - tests/compile/passes
   commands:
   - pytest -s -v compile/passes --ignore compile/passes/distributed
+  mirror:
+    amd:
+      device: mi300_1
+      timeout_in_minutes: 180
+      depends_on:
+      - image-build-amd
 
 - label: PyTorch Fullgraph Smoke Test
   key: pytorch-fullgraph-smoke-test
@@ -188,3 +195,11 @@ steps:
   - requirements/test/nightly-torch.txt
   commands:
   - bash standalone_tests/pytorch_nightly_dependency.sh
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - requirements/test/nightly-torch.txt
+      - vllm/platforms/rocm.py

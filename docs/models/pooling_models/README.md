@@ -2,8 +2,7 @@
 
 !!! note
     We currently support pooling models primarily for convenience. This is not guaranteed to provide any performance
-improvements over using Hugging Face Transformers or Sentence Transformers directly.
-
+    improvements over using Hugging Face Transformers or Sentence Transformers directly.
     We plan to optimize pooling models in vLLM. Please comment on <https://github.com/vllm-project/vllm/issues/21796> if you have any suggestions!
 
 ## What are pooling models?
@@ -33,6 +32,12 @@ from large language models, allowing them to benefit from the continuous improve
 similarity enables them to reuse much of vLLM’s infrastructure. If compatible, we would be happy to help them leverage
 the latest features of vLLM as well.
 
+### Cheat Sheet
+
+As illustrated in the figure below, we have summarized the relationships among the key elements of pooling models as a takeaway.
+
+![Cheat Sheet](../../assets/models/pooling_models/cheat_sheet.svg)
+
 ### Sequence-wise Task and Token-wise Task
 
 The key distinction between sequence-wise task and token-wise task lies in their output granularity: sequence-wise task
@@ -57,9 +62,11 @@ please refer to [IO Processor Plugins](../../design/io_processor_plugins.md).
 
 !!! note
     Within classification tasks, there is a specialized subcategory: Cross-encoder (aka reranker) models. These models
-are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
+    are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
 
 ### Pooling Types
+
+![Pooling Types](../../assets/models/pooling_models/pooling_types.svg)
 
 | Pooling Tasks  | Granularity   | Description                                                                                                                                                                                       |
 |----------------|---------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -70,6 +77,8 @@ are a subset of classification models that accept two prompts as input and outpu
 | `STEP` pooling | Token-wise    | Filters and outputs the last_hidden_states corresponding to the token IDs returned by returned_token_ids.                                                                                         |
 
 ### Score Types
+
+![Score Types](../../assets/models/pooling_models/score_types.svg)
 
 The scoring models is designed to compute similarity scores between two input prompts. It supports three model types
 (aka `score_type`): `cross-encoder`, `late-interaction`, and `bi-encoder`.
@@ -133,7 +142,7 @@ enabling the corresponding APIs.
 
 The [classify][vllm.LLM.classify] method outputs a probability vector for each prompt.
 It is primarily designed for [classification models](classify.md).
-For more information about `LLM.embed`, see [this page](classify.md#offline-inference).
+For more information about `LLM.classify`, see [this page](classify.md#offline-inference).
 
 ### `LLM.embed`
 
@@ -170,12 +179,12 @@ Our online Server provides endpoints that correspond to the offline APIs:
 
 - Corresponding to `LLM.embed`:
     - [Cohere Embed API](embed.md#cohere-embed-api) (`/v2/embed`)
-    - [Openai-compatible Embeddings API](embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
+    - [OpenAI-compatible Embeddings API](embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
 - Corresponding to `LLM.classify`:
     - [Classification API](classify.md#online-serving)(`/classify`)
 - Corresponding to `LLM.score`:
-    - [Score API](scoring.md#score-api)(`/score`)
-    - [Rerank API](scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+    - [Score API](scoring.md#score-api) (`/score`, `/v1/score`)
+    - [Cohere Rerank API](scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
 - Pooling API (`/pooling`) is similar to `LLM.encode`, being applicable to all types of pooling models.
 
 The following introduces the Pooling API. For other APIs, please refer to the link above.
@@ -292,7 +301,7 @@ Pooling models now support token-wise task.
 
 ### Score task
 
-`score` task have has been removed in v0.21, use `classify` instead. Only when a classification model outputs num_labels
+`score` task has been removed in v0.21, use `classify` instead. Only when a classification model outputs num_labels
 equal to 1 can it be used as a scoring model and have its scoring API enabled.
 
 ### Pooling multitask support

@@ -7,6 +7,7 @@ import time
 import torch
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -35,24 +36,26 @@ class SharedOffloadRegion:
     File path: /dev/shm/vllm_offload_{instance_id}.mmap
     """
 
+    BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
+
     def __init__(
         self,
         instance_id: str,
-        total_size_bytes: int,
         num_blocks: int,
         rank: int | None,
-        num_workers: int,
+        kv_bytes_per_block: int,
         cpu_page_size: int,
     ) -> None:
         self.page_size = mmap.PAGESIZE
+        assert kv_bytes_per_block % self.page_size == 0
 
-        self.total_size_bytes = total_size_bytes
+        self.num_blocks = num_blocks
+        self._row_stride = kv_bytes_per_block
+        self.total_size_bytes = self.num_blocks * self._row_stride
+
         self.mmap_path = f"/dev/shm/vllm_offload_{instance_id}.mmap"
         self._creator = False  # set True only if this worker creates the file
-        self.num_blocks = num_blocks
         self.rank = rank
-        # interleaved-layout stride: one row = all workers' data for one block
-        self._row_stride = cpu_page_size * num_workers
         if rank is not None:
             # byte offset to this worker's first slot within each block row
             self._worker_offset = rank * cpu_page_size
@@ -153,14 +156,31 @@ class SharedOffloadRegion:
         self._views.append(worker_layer_view)
         return worker_layer_view
 
+    def create_kv_memoryview(self) -> memoryview:
+        """Return a zero-copy memoryview over the entire KV buffer.
+
+        Shape: (num_blocks, row_stride_bytes). Secondary tiers address
+        block *b* as ``view[b]``.
+        """
+        kv_tensor = self._base.view(self.num_blocks, self._row_stride)
+        np_arr = kv_tensor.numpy()
+        assert np_arr.ctypes.data == self._base.data_ptr(), (
+            "view()/numpy() created a copy instead of sharing the mmap buffer; "
+            "secondary tiers require zero-copy access to primary KV data"
+        )
+        return memoryview(np_arr)
+
     def cleanup(self) -> None:
         if self.is_pinned and self._base is not None:
-            base_ptr = self._base.data_ptr()
-            result = torch.cuda.cudart().cudaHostUnregister(base_ptr)
-            if result.value != 0:
-                logger.warning(
-                    "cudaHostUnregister failed for rank=%d (code=%d)", self.rank, result
-                )
+            if current_platform.is_cuda_alike():
+                base_ptr = self._base.data_ptr()
+                result = torch.cuda.cudart().cudaHostUnregister(base_ptr)
+                if result.value != 0:
+                    logger.warning(
+                        "cudaHostUnregister failed for rank=%d (code=%d)",
+                        self.rank,
+                        result,
+                    )
             self.is_pinned = False
         # Release views before _base: each view holds a _base reference and a
         # direct StorageImpl reference.  Freeing views first lets both refcounts

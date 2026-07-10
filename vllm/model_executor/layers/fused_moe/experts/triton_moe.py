@@ -30,6 +30,10 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     moe_kernel_quantize_input,
+    swiglu_limit_func,
+)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    is_deep_gemm_e8m0_used,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -44,6 +48,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl
+from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 
 
 class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
@@ -59,9 +64,28 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         self.quantization_emulation = False
         super().__init__(moe_config, quant_config)
 
+        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
+        # Gated-activation params: silu == swigluoai with alpha=1, beta=0.
+        self.gemm1_alpha = (
+            quant_config.gemm1_alpha if quant_config.gemm1_alpha is not None else 1.0
+        )
+        self.gemm1_beta = (
+            quant_config.gemm1_beta if quant_config.gemm1_beta is not None else 0.0
+        )
+
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
+
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        # Defer activation quantization to apply() only when LoRA is active AND
+        # tokens are dispatched across ranks (DP+EP all2all).
+        return (
+            self._lora_context is not None
+            and self.quant_dtype is not None
+            and self.moe_config.moe_parallel_config.use_all2all_kernels
+        )
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -102,6 +126,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             MoEActivation.GELU,
             MoEActivation.GELU_TANH,
             MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
             MoEActivation.SWIGLUSTEP,
             MoEActivation.SILU_NO_MUL,
             MoEActivation.GELU_NO_MUL,
@@ -120,11 +145,38 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
     def _supports_batch_invariance():
         return True
 
-    def supports_expert_map(self) -> bool:
-        return True
-
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
+
+    def activation(
+        self,
+        activation: MoEActivation,
+        output: torch.Tensor,
+        input: torch.Tensor,
+        **kwargs,
+    ) -> None:
+        gemm1_clamp_limit = self.quant_config.gemm1_clamp_limit
+        if activation == MoEActivation.SILU and gemm1_clamp_limit is not None:
+            swiglu_limit_func(output, input, float(gemm1_clamp_limit))
+            return
+
+        # SWIGLUOAI_UNINTERLEAVE routes to the silu_and_mul_with_clamp kernel and
+        # needs the clamped-SwiGLU params (gemm1_clamp_limit/alpha/beta read from
+        # the quant config in __init__) forwarded; without a clamp_limit it
+        # asserts. Other activations ignore alpha/beta/clamp_limit.
+        if activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+            assert gemm1_clamp_limit is not None, (
+                "SWIGLUOAI_UNINTERLEAVE requires gemm1_clamp_limit"
+            )
+
+        super().activation(
+            activation,
+            output,
+            input,
+            clamp_limit=gemm1_clamp_limit,
+            alpha=self.gemm1_alpha,
+            beta=self.gemm1_beta,
+        )
 
     def workspace_shapes(
         self,
@@ -181,6 +233,25 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             torch.float8_e4m3fnuz,
         ]
 
+        # We declared expects_unquantized_inputs (LoRA + DP/EP all2all), so the
+        # prepare step deferred activation quantization to this kernel:
+        # `hidden_states` arrives unquantized. Keep the unquantized tensor for
+        # the LoRA shrink input and quantize a copy here for the base GEMM
+        # (mirrors what the prepare step would have done, but after the
+        # all-gather so the layout matches the gathered topk_ids / token map).
+        lora_unquantized_hidden_states: torch.Tensor | None = None
+        if self.expects_unquantized_inputs:
+            assert a1q_scale is None
+            lora_unquantized_hidden_states = hidden_states
+            hidden_states, a1q_scale = moe_kernel_quantize_input(
+                hidden_states,
+                self.a1_scale,
+                self.quant_dtype,
+                self.per_act_token_quant,
+                self.block_shape,
+                quantization_emulation=self.quantization_emulation,
+            )
+
         E, num_tokens, N, K, top_k_num = self.moe_problem_size(
             hidden_states, w1, w2, topk_ids
         )
@@ -233,112 +304,233 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             )
         )
 
-        invoke_fused_moe_triton_kernel(
-            hidden_states,
-            w1,
-            intermediate_cache1,
-            a1q_scale,
-            self.w1_scale,
-            None,  # topk_weights
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            False,  # mul_routed_weights
-            top_k_num,
-            config,
-            compute_type=compute_type,
-            use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
-            use_int8_w8a8=self.quant_config.use_int8_w8a8,
-            use_int8_w8a16=self.quant_config.use_int8_w8a16,
-            use_int4_w4a16=self.quant_config.use_int4_w4a16,
-            per_channel_quant=self.per_act_token_quant,
-            block_shape=self.block_shape,
-            B_bias=self.w1_bias,
-        )
-
-        # LoRA w13: applied to intermediate_cache1 before activation, using
-        # hidden_states as the lora_a input.  moe_lora_align_block_size is
-        # called once here and results reused for the w2 LoRA below.
+        # LoRA w13: applied to intermediate_cache1 before activation. When
+        # the LoRA layer requested a dual-stream schedule, we run base w13
+        # GEMM on the default stream and the LoRA fast-path on aux_stream;
+        # the LoRA writes its delta into a fresh zero buffer (add_inputs=
+        # False) and we sum it into intermediate_cache1 after both finish.
+        #
+        # The LoRA shrink kernel needs unquantized, gathered-layout
+        # activations. When activation quant was deferred to this kernel
+        # (expects_unquantized_inputs), the input we quantized above is exactly
+        # that, so use it directly. Otherwise fall back to the context stash
+        # (e.g. weight-only quant), guarding on a row-count match so a
+        # DP-gathered layout never indexes a local stash out of bounds.
         sorted_token_ids_lora = None
         expert_ids_lora = None
         num_tokens_post_padded_lora = None
         token_lora_mapping = None
         lora_context = self._lora_context
-        if lora_context is not None:
+        if lora_unquantized_hidden_states is not None:
+            lora_x = lora_unquantized_hidden_states
+        elif (
+            lora_context is not None
+            and lora_context.original_hidden_states is not None
+            and lora_context.original_hidden_states.shape[0] == hidden_states.shape[0]
+        ):
+            lora_x = lora_context.original_hidden_states
+        else:
+            lora_x = hidden_states
+
+        # TODO: The fallback to self.a1_scale was added for deferred static
+        # activation quantization in https://github.com/vllm-project/vllm/pull/40857.
+        # Activation emulation relies solely on `a1q_scale` output of
+        # `moe_kernel_quantize_input` - this should be adapted to
+        # always solely rely on `a1q_scale`.
+        input_scale = (
+            a1q_scale
+            if self.quantization_emulation
+            else (a1q_scale if a1q_scale is not None else self.a1_scale)
+        )
+
+        def _base_w13_fn():
+            invoke_fused_moe_triton_kernel(
+                hidden_states,
+                w1,
+                intermediate_cache1,
+                input_scale,
+                self.w1_scale,
+                None,  # topk_weights
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                False,  # mul_routed_weights
+                top_k_num,
+                config,
+                compute_type=compute_type,
+                use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
+                use_int8_w8a8=self.quant_config.use_int8_w8a8,
+                use_int8_w8a16=self.quant_config.use_int8_w8a16,
+                use_int4_w4a16=self.quant_config.use_int4_w4a16,
+                per_channel_quant=self.per_act_token_quant,
+                block_shape=self.block_shape,
+                B_bias=self.w1_bias,
+            )
+
+        if lora_context is not None and lora_context.aux_stream is not None:
+            # add_inputs=False: kernel overwrites lora_delta_w13. zeros (not
+            # empty) so untouched rows -- e.g. blocks where every program
+            # early-exits because lora_id<0 -- stay at zero and the trailing
+            # add_() is a no-op there.
+            lora_delta_w13 = torch.zeros_like(intermediate_cache1)
+
+            def _lora_w13_fn():
+                return self.apply_w13_lora(
+                    lora_context,
+                    y=lora_delta_w13,
+                    x=lora_x,
+                    topk_ids=topk_ids,
+                    topk_weights=topk_weights,
+                    expert_map=expert_map,
+                    w1=w1,
+                    w2=w2,
+                    num_tokens=num_tokens,
+                    top_k_num=top_k_num,
+                    add_inputs=False,
+                )
+
+            assert lora_context.events is not None
+            _, lora_meta = maybe_execute_in_parallel(
+                _base_w13_fn,
+                _lora_w13_fn,
+                lora_context.events[0],
+                lora_context.events[1],
+                lora_context.aux_stream,
+            )
             (
                 sorted_token_ids_lora,
                 expert_ids_lora,
                 num_tokens_post_padded_lora,
                 token_lora_mapping,
-            ) = self.apply_w13_lora(
-                lora_context,
-                y=intermediate_cache1,
-                x=hidden_states,
-                topk_ids=topk_ids,
-                topk_weights=topk_weights,
-                expert_map=expert_map,
-                w1=w1,
-                w2=w2,
-                num_tokens=num_tokens,
-                top_k_num=top_k_num,
-            )
-
-        self.activation(
-            activation, intermediate_cache2, intermediate_cache1.view(-1, N)
-        )
+            ) = lora_meta
+            intermediate_cache1.add_(lora_delta_w13)
+        else:
+            _base_w13_fn()
+            if lora_context is not None:
+                (
+                    sorted_token_ids_lora,
+                    expert_ids_lora,
+                    num_tokens_post_padded_lora,
+                    token_lora_mapping,
+                ) = self.apply_w13_lora(
+                    lora_context,
+                    y=intermediate_cache1,
+                    x=lora_x,
+                    topk_ids=topk_ids,
+                    topk_weights=topk_weights,
+                    expert_map=expert_map,
+                    w1=w1,
+                    w2=w2,
+                    num_tokens=num_tokens,
+                    top_k_num=top_k_num,
+                )
 
         a2q_scale: torch.Tensor | None = None
 
-        qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
-            intermediate_cache2,
-            a2_scale,
-            self.quant_dtype,
-            self.per_act_token_quant,
-            self.block_shape,
-            quantization_emulation=self.quantization_emulation,
-        )
+        # Fuse SiLU+Mul + FP8 block quantize into a single kernel
+        # when conditions permit (gated SiLU, fp8 block quant with
+        # group_size=128, no LoRA requiring the BF16 intermediate).
+        if (
+            activation == MoEActivation.SILU
+            and self.quant_config.use_fp8_w8a8
+            and self.block_shape == [128, 128]
+            and lora_context is None
+            and not is_deep_gemm_e8m0_used()
+        ):
+            qintermediate_cache2, a2q_scale = ops.silu_and_mul_per_block_quant(
+                intermediate_cache1.view(-1, N),
+                group_size=128,
+                quant_dtype=current_platform.fp8_dtype(),
+            )
+        else:
+            self.activation(
+                activation, intermediate_cache2, intermediate_cache1.view(-1, N)
+            )
 
-        invoke_fused_moe_triton_kernel(
-            qintermediate_cache2,
-            w2,
-            intermediate_cache3,
-            a2q_scale,
-            self.w2_scale,
-            topk_weights,
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            not apply_router_weight_on_input,
-            1,
-            config,
-            compute_type=compute_type,
-            use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
-            use_int8_w8a8=self.quant_config.use_int8_w8a8,
-            use_int8_w8a16=self.quant_config.use_int8_w8a16,
-            use_int4_w4a16=self.quant_config.use_int4_w4a16,
-            per_channel_quant=self.per_act_token_quant,
-            block_shape=self.block_shape,
-            B_bias=self.w2_bias,
-        )
+            qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
+                intermediate_cache2,
+                a2_scale,
+                self.quant_dtype,
+                self.per_act_token_quant,
+                self.block_shape,
+                quantization_emulation=self.quantization_emulation,
+            )
 
         # LoRA w2: applied to intermediate_cache3 before moe_sum, using the
         # unquantized intermediate_cache2 as the lora_a input.  Reuses the
-        # sorted_token_ids_lora computed above.
-        if lora_context is not None:
-            self.apply_w2_lora(
-                lora_context,
-                y=intermediate_cache3,
-                x=intermediate_cache2,
-                topk_weights=topk_weights,
-                sorted_token_ids_lora=sorted_token_ids_lora,
-                expert_ids_lora=expert_ids_lora,
-                num_tokens_post_padded_lora=num_tokens_post_padded_lora,
-                token_lora_mapping=token_lora_mapping,
-                num_tokens=num_tokens,
-                w1=w1,
-                w2=w2,
-                top_k_num=top_k_num,
+        # sorted_token_ids_lora computed above. Same dual-stream pattern as
+        # the w13 pair: base GEMM on default stream, LoRA delta on aux,
+        # join via .add_() into intermediate_cache3.
+        def _base_w2_fn():
+            invoke_fused_moe_triton_kernel(
+                qintermediate_cache2,
+                w2,
+                intermediate_cache3,
+                a2q_scale,
+                self.w2_scale,
+                topk_weights,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                not apply_router_weight_on_input,
+                1,
+                config,
+                compute_type=compute_type,
+                use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
+                use_int8_w8a8=self.quant_config.use_int8_w8a8,
+                use_int8_w8a16=self.quant_config.use_int8_w8a16,
+                use_int4_w4a16=self.quant_config.use_int4_w4a16,
+                per_channel_quant=self.per_act_token_quant,
+                block_shape=self.block_shape,
+                B_bias=self.w2_bias,
             )
+
+        if lora_context is not None and lora_context.aux_stream is not None:
+            lora_delta_w2 = torch.zeros_like(intermediate_cache3)
+
+            def _lora_w2_fn():
+                self.apply_w2_lora(
+                    lora_context,
+                    y=lora_delta_w2,
+                    x=intermediate_cache2,
+                    topk_weights=topk_weights,
+                    sorted_token_ids_lora=sorted_token_ids_lora,
+                    expert_ids_lora=expert_ids_lora,
+                    num_tokens_post_padded_lora=num_tokens_post_padded_lora,
+                    token_lora_mapping=token_lora_mapping,
+                    num_tokens=num_tokens,
+                    w1=w1,
+                    w2=w2,
+                    top_k_num=top_k_num,
+                    add_inputs=False,
+                )
+
+            assert lora_context.events is not None
+            maybe_execute_in_parallel(
+                _base_w2_fn,
+                _lora_w2_fn,
+                lora_context.events[2],
+                lora_context.events[3],
+                lora_context.aux_stream,
+            )
+            intermediate_cache3.add_(lora_delta_w2)
+        else:
+            _base_w2_fn()
+            if lora_context is not None:
+                self.apply_w2_lora(
+                    lora_context,
+                    y=intermediate_cache3,
+                    x=intermediate_cache2,
+                    topk_weights=topk_weights,
+                    sorted_token_ids_lora=sorted_token_ids_lora,
+                    expert_ids_lora=expert_ids_lora,
+                    num_tokens_post_padded_lora=num_tokens_post_padded_lora,
+                    token_lora_mapping=token_lora_mapping,
+                    num_tokens=num_tokens,
+                    w1=w1,
+                    w2=w2,
+                    top_k_num=top_k_num,
+                )
 
         # separate function is required for MoE + LoRA
         self.moe_sum(intermediate_cache3, output)

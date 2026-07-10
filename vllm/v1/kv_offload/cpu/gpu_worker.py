@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -9,22 +10,52 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import cdiv
-from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.kv_offload.base import (
     BlockIDsLoadStoreSpec,
     CanonicalKVCacheRef,
     CanonicalKVCaches,
     GPULoadStoreSpec,
+    LoadStoreSpec,
+    OffloadingWorker,
+    TransferResult,
 )
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
-from vllm.v1.kv_offload.worker.worker import (
-    OffloadingHandler,
-    TransferResult,
-    TransferSpec,
+from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
+    THRESHOLD_BYTES,
+    swap_blocks_batch,
 )
 
 logger = init_logger(__name__)
+
+
+def _select_swap_blocks_fn(
+    kv_cache_groups_data_refs: list[list[CanonicalKVCacheRef]],
+    gpu_to_cpu: bool,
+):
+    """Resolve the swap_blocks function for a handler at init time."""
+    # GPU->CPU is bandwidth-bound; the dedicated copy engine beats Triton.
+    if gpu_to_cpu:
+        return ops.swap_blocks_batch
+    # Fall back to the C++ DMA path on platforms where Triton isn't usable
+    # (e.g. ROCm builds without Triton) or where GPU kernels cannot directly
+    # dereference CPU pointers (XPU lacks CUDA's unified virtual address space,
+    # so the Triton kernel's tl.load(cpu_ptr) is invalid on XPU).
+    if not HAS_TRITON or current_platform.is_xpu():
+        return ops.swap_blocks_batch
+    page_sizes = [r.page_size_bytes for g in kv_cache_groups_data_refs for r in g]
+    # Triton wins only on small, 8-byte-aligned payloads.
+    if (
+        not page_sizes
+        or max(page_sizes) >= THRESHOLD_BYTES
+        or any(s % 8 for s in page_sizes)
+    ):
+        return ops.swap_blocks_batch
+    chunk = min(triton.next_power_of_2(max(page_sizes)), 8192)
+    return functools.partial(swap_blocks_batch, bytes_per_chunk=chunk)
 
 
 @dataclass
@@ -34,6 +65,9 @@ class Transfer:
     start_event: torch.Event
     end_event: torch.Event
     num_bytes: int
+    batch_src: torch.Tensor
+    batch_dst: torch.Tensor
+    batch_sizes: torch.Tensor
 
 
 def compute_sub_block_ptrs(
@@ -58,7 +92,7 @@ def compute_sub_block_ptrs(
     Args:
         block_ids: array of block IDs at the tensor's native granularity.
         block_size_factor: number of sub-blocks per block.
-        output: pre-allocated int64 array to write pointers into.
+        output: pre-allocated pointer array to write pointers into.
         tensor: the source or destination tensor.
         skip_count: sub-blocks to skip in the first block.
     """
@@ -70,16 +104,16 @@ def compute_sub_block_ptrs(
 
     if block_size_factor == 1:
         # Fast path: 1:1 mapping, no sub-block expansion needed.
-        output[:] = base_ptr + block_ids[:num_sub_blocks] * row_stride
+        output[:] = base_ptr + block_ids.astype(np.uint64)[:num_sub_blocks] * row_stride
         return
 
     # Vectorized expansion for block_size_factor > 1.
     assert tensor.shape[1] % block_size_factor == 0
     sub_block_size = tensor.shape[1] // block_size_factor
-    sub_offsets = np.arange(block_size_factor, dtype=np.int64) * sub_block_size
+    sub_offsets = np.arange(block_size_factor, dtype=np.uint64) * sub_block_size
     # (num_blocks, 1) + (1, block_size_factor) -> (num_blocks, block_size_factor)
     all_ptrs = (
-        base_ptr + block_ids.astype(np.int64)[:, np.newaxis] * row_stride
+        base_ptr + block_ids.astype(np.uint64)[:, np.newaxis] * row_stride
     ) + sub_offsets[np.newaxis, :]
     # Flatten and apply skip_count / truncation
     flat = all_ptrs.ravel()
@@ -88,6 +122,14 @@ def compute_sub_block_ptrs(
 
 def pin_mmap_region(region: SharedOffloadRegion) -> None:
     """Register the entire mmap as CUDA pinned memory via cudaHostRegister."""
+    if not current_platform.is_cuda_alike():
+        logger.info(
+            "Skipping mmap host registration on %s; cudaHostRegister is only "
+            "available on CUDA/ROCm.",
+            current_platform.device_name,
+        )
+        return
+
     rank = region.rank
 
     base_ptr = region._base.data_ptr()
@@ -108,10 +150,22 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
         region.is_pinned = True
 
 
-class SingleDirectionOffloadingHandler(OffloadingHandler):
+def _new_descriptor_buffers(
+    num_copy_ops: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    pin = PIN_MEMORY
+    # CUDA cache_kernels.cu requires int64; XPU DMA engine requires uint64.
+    ptr_dtype = torch.uint64 if current_platform.is_xpu() else torch.int64
+    return (
+        torch.empty(num_copy_ops, dtype=ptr_dtype, pin_memory=pin),
+        torch.empty(num_copy_ops, dtype=ptr_dtype, pin_memory=pin),
+        torch.empty(num_copy_ops, dtype=ptr_dtype, pin_memory=pin),
+    )
+
+
+class SingleDirectionOffloadingHandler:
     """
-    SingleDirectionOffloadingHandler handles transfers for a single direction,
-    either CPU->GPU or GPU->CPU.
+    Handles transfers for a single direction, either CPU->GPU or GPU->CPU.
     Transfers are guaranteed to be executed in order of their submission.
     Each transfer uses a unique CUDA stream, and its stream will start
     executing only after the streams of previous transfers have finished.
@@ -124,6 +178,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         block_size_factor: int,
         kv_cache_groups_data_refs: list[list[CanonicalKVCacheRef]],
         gpu_to_cpu: bool,
+        mmap_region: SharedOffloadRegion | None = None,
     ):
         """
         Initialize a SingleDirectionOffloadingHandler.
@@ -144,7 +199,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         for gpu_tensor, cpu_tensor in zip(gpu_tensors, cpu_tensors):
             assert gpu_tensor.dtype == torch.int8
             assert gpu_tensor.ndim == 2
-            assert gpu_tensor.is_cuda
+            assert gpu_tensor.is_cuda or gpu_tensor.is_xpu
             assert cpu_tensor.dtype == torch.int8
             assert cpu_tensor.ndim == 2
             assert cpu_tensor.device.type == "cpu"
@@ -160,13 +215,17 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         )
         self.gpu_to_cpu: bool = gpu_to_cpu
         self.kv_cache_groups_data_refs = kv_cache_groups_data_refs
+        self._swap_blocks_batch = _select_swap_blocks_fn(
+            kv_cache_groups_data_refs, gpu_to_cpu
+        )
 
         # GPU blocks may be smaller
         # cpu_page_size = gpu_page_size * block_size_factor.
         self.src_block_size_factor = 1 if self.gpu_to_cpu else block_size_factor
         self.dst_block_size_factor = block_size_factor if self.gpu_to_cpu else 1
 
-        self.transfer_type = ("GPU", "CPU") if self.gpu_to_cpu else ("CPU", "GPU")
+        # mmap_region to clean up on shutdown (gpu_to_cpu handler owns it)
+        self._mmap_region = mmap_region
         # job_id -> event
         self._transfer_events: dict[int, torch.Event] = {}
         # queue of transfers (job_id, stream, event)
@@ -175,9 +234,12 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         self._stream_pool: list[torch.cuda.Stream] = []
         # list of CUDA events available for re-use
         self._event_pool: list[torch.Event] = []
+        # list of pinned descriptor buffer sets available for re-use
+        self._buffer_pool: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
 
-    def transfer_async(self, job_id: int, transfer_spec: TransferSpec) -> bool:
-        src_spec, dst_spec = transfer_spec
+    def transfer_async(
+        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
+    ) -> bool:
         assert isinstance(src_spec, BlockIDsLoadStoreSpec)
         assert isinstance(dst_spec, BlockIDsLoadStoreSpec)
 
@@ -224,9 +286,21 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         ):
             num_copy_ops += group_size * len(group_data_refs)
 
-        all_src = np.empty(num_copy_ops, dtype=np.int64)
-        all_dst = np.empty(num_copy_ops, dtype=np.int64)
-        all_sizes = np.empty(num_copy_ops, dtype=np.int64)
+        # reuse a pooled buffer set, growing it if this transfer needs more room
+        batch_src, batch_dst, batch_sizes = (
+            self._buffer_pool.pop()
+            if self._buffer_pool
+            else _new_descriptor_buffers(num_copy_ops)
+        )
+        if batch_src.numel() < num_copy_ops:
+            batch_src, batch_dst, batch_sizes = _new_descriptor_buffers(num_copy_ops)
+
+        src = batch_src[:num_copy_ops]
+        dst = batch_dst[:num_copy_ops]
+        sizes = batch_sizes[:num_copy_ops]
+        all_src = src.numpy()
+        all_dst = dst.numpy()
+        all_sizes = sizes.numpy()
 
         src_offset = 0
         dst_offset = 0
@@ -289,11 +363,9 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         assert dst_offset == num_dst_blocks
         assert op_idx == num_copy_ops
 
-        batch_src = torch.from_numpy(all_src)
-        batch_dst = torch.from_numpy(all_dst)
-        batch_sizes = torch.from_numpy(all_sizes)
-
-        stream = self._stream_pool.pop() if self._stream_pool else torch.cuda.Stream()
+        stream = (
+            self._stream_pool.pop() if self._stream_pool else current_platform.Stream()
+        )
         start_event = (
             self._event_pool.pop()
             if self._event_pool
@@ -307,7 +379,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
 
         if self.gpu_to_cpu:
             # wait for model computation to finish before offloading
-            stream.wait_stream(torch.cuda.current_stream())
+            stream.wait_stream(current_platform.current_stream())
         if self._transfers:
             last_transfer: Transfer = self._transfers[-1]
             last_event = last_transfer.end_event
@@ -320,13 +392,13 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         # writing; we must keep STREAM ordering so source reads are gated
         # by the transfer stream's wait_stream(compute) barrier.
         is_src_access_order_any = not self.gpu_to_cpu
-        with torch.cuda.stream(stream):
+        with current_platform.stream(stream):
             start_event.record(stream)
             if num_copy_ops > 0:
-                ops.swap_blocks_batch(
-                    batch_src,
-                    batch_dst,
-                    batch_sizes,
+                self._swap_blocks_batch(
+                    src,
+                    dst,
+                    sizes,
                     is_src_access_order_any=is_src_access_order_any,
                 )
             end_event.record(stream)
@@ -339,6 +411,9 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
                 start_event=start_event,
                 end_event=end_event,
                 num_bytes=num_transfer_bytes,
+                batch_src=batch_src,
+                batch_dst=batch_dst,
+                batch_sizes=batch_sizes,
             )
         )
 
@@ -357,13 +432,15 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
                 success=True,
                 transfer_size=transfer.num_bytes,
                 transfer_time=transfer_time,
-                transfer_type=self.transfer_type,
             )
 
             results.append(result)
             self._stream_pool.append(transfer.stream)
             self._event_pool.append(transfer.end_event)
             self._event_pool.append(transfer.start_event)
+            self._buffer_pool.append(
+                (transfer.batch_src, transfer.batch_dst, transfer.batch_sizes)
+            )
             del self._transfer_events[transfer.job_id]
         return results
 
@@ -380,11 +457,22 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         self._transfer_events.clear()
         self._stream_pool.clear()
         self._event_pool.clear()
+        self._buffer_pool.clear()
         self.src_tensors.clear()
         self.dst_tensors.clear()
+        if self._mmap_region is not None:
+            self._mmap_region.cleanup()
+            self._mmap_region = None
 
 
-class CpuGpuOffloadingHandlers:
+class CPUOffloadingWorker(OffloadingWorker):
+    """OffloadingWorker for CPU offloading.
+
+    Composes two SingleDirectionOffloadingHandler instances (one for each
+    direction) and exposes them through the explicit submit_store /
+    submit_load API.
+    """
+
     def __init__(
         self,
         kv_caches: CanonicalKVCaches,
@@ -392,9 +480,8 @@ class CpuGpuOffloadingHandlers:
         num_cpu_blocks: int,
         mmap_region: SharedOffloadRegion | None = None,
     ):
-        pin_memory = is_pin_memory_available()
+        pin_memory = PIN_MEMORY
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
-        self._mmap_region = mmap_region
         if mmap_region is not None and pin_memory:
             pin_mmap_region(mmap_region)
 
@@ -428,18 +515,42 @@ class CpuGpuOffloadingHandlers:
             gpu_tensors.append(gpu_tensor)
             cpu_tensors.append(cpu_tensor)
 
-        self.gpu_to_cpu_handler = SingleDirectionOffloadingHandler(
+        self._store_handler = SingleDirectionOffloadingHandler(
             gpu_tensors=gpu_tensors,
             cpu_tensors=cpu_tensors,
             block_size_factor=block_size_factor,
             kv_cache_groups_data_refs=kv_caches.group_data_refs,
             gpu_to_cpu=True,
+            mmap_region=mmap_region,
         )
 
-        self.cpu_to_gpu_handler = SingleDirectionOffloadingHandler(
+        self._load_handler = SingleDirectionOffloadingHandler(
             gpu_tensors=gpu_tensors,
             cpu_tensors=cpu_tensors,
             block_size_factor=block_size_factor,
             kv_cache_groups_data_refs=kv_caches.group_data_refs,
             gpu_to_cpu=False,
         )
+
+    def submit_store(
+        self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
+    ) -> bool:
+        """Async GPU -> CPU."""
+        return self._store_handler.transfer_async(job_id, src_spec, dst_spec)
+
+    def submit_load(
+        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: GPULoadStoreSpec
+    ) -> bool:
+        """Async CPU -> GPU."""
+        return self._load_handler.transfer_async(job_id, src_spec, dst_spec)
+
+    def get_finished(self) -> list[TransferResult]:
+        return self._store_handler.get_finished() + self._load_handler.get_finished()
+
+    def wait(self, job_ids: set[int]) -> None:
+        self._store_handler.wait(job_ids)
+        self._load_handler.wait(job_ids)
+
+    def shutdown(self) -> None:
+        self._store_handler.shutdown()
+        self._load_handler.shutdown()

@@ -139,8 +139,20 @@ class Request:
 
         # Used in async scheduling.
         self.num_output_placeholders = 0
-        # Used in forced preemption (reset_prefix_cache) with async scheduling.
-        self.discard_latest_async_tokens = False
+        self.async_tokens_to_discard = 0
+
+        # Tokens of steps whose output is not yet processed (async scheduling
+        # and PP run ahead of the GPU); `num_computed_tokens` counts them
+        # optimistically.
+        self.num_in_flight_tokens = 0
+
+        # V2+PP+async: Enforces `pp_size` cadence between same-request decode steps
+        # so the worker's broadcast slot ring stays consistent.
+        self.next_decode_eligible_step = 0
+
+        # Seq of the most recent step this request was scheduled in; fences
+        # deferred block freeing (see Scheduler._free_request_blocks).
+        self.last_sched_seq = 0
 
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
