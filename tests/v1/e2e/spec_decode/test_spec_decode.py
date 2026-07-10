@@ -10,12 +10,7 @@ import pytest
 import torch
 from tqdm import tqdm
 
-from tests.evals.gsm8k.gsm8k_eval import (
-    _build_gsm8k_prompts,
-    evaluate_gsm8k_offline,
-    get_answer_value,
-    load_gsm8k_data,
-)
+from tests.evals.gsm8k.gsm8k_eval import _build_gsm8k_prompts, evaluate_gsm8k_offline
 from tests.utils import (
     get_attn_backend_list_based_on_platform,
     large_gpu_mark,
@@ -306,12 +301,13 @@ def test_gemma4_dspark_correctness_and_acceptance_rate(
     DSparkMarkovHead, the fused context-KV precompute, the Markov head, and
     rejection sampling), so it fails if any base class drifts out of sync.
 
-    gemma-4-12B is instruct-tuned, so GSM8K is run in chat format (raw few-shot
-    completion collapses to a few percent). Reference: measured over 8 runs of
-    200 GSM8K questions at temperature=1.0 (prefix caching disabled):
-      accuracy:        min=0.900 max=0.925 mean=0.916
-      acceptance_rate: min=0.706 max=0.734 mean=0.719
-      acceptance_len:  min=5.943 max=6.135 mean=6.035
+    gemma-4-12B is instruct-tuned, so GSM8K is run through the chat template
+    (use_chat_completions=True; raw few-shot completion collapses to a few
+    percent). Reference: measured over 5 runs of 200 GSM8K questions at
+    temperature=1.0 (prefix caching disabled):
+      accuracy:        min=0.900 max=0.955 mean=0.937
+      acceptance_rate: min=0.578 max=0.595 mean=0.588
+      acceptance_len:  min=5.044 max=5.167 mean=5.116
     Thresholds set conservatively to 10% to avoid flaking due to unlucky sampling
     """
     monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
@@ -333,23 +329,10 @@ def test_gemma4_dspark_correctness_and_acceptance_rate(
         disable_log_stats=False,
     )
     try:
-        _, test_data = load_gsm8k_data()
-        num_questions = 200
-        instruction = (
-            "\n\nThink step by step and give the final numeric answer after '#### '."
+        results = evaluate_gsm8k_offline(
+            spec_llm, num_questions=200, temperature=1.0, use_chat_completions=True
         )
-        chats = [
-            [{"role": "user", "content": test_data[i]["question"] + instruction}]
-            for i in range(num_questions)
-        ]
-        labels = [
-            get_answer_value(test_data[i]["answer"]) for i in range(num_questions)
-        ]
-
-        outputs = spec_llm.chat(chats, SamplingParams(temperature=1.0, max_tokens=512))
-        preds = [get_answer_value(o.outputs[0].text) for o in outputs]
-        n_correct = sum(p == gold for p, gold in zip(preds, labels))
-        gsm8k_accuracy = n_correct / num_questions
+        gsm8k_accuracy = results["accuracy"]
 
         metrics = spec_llm.get_metrics()
         acceptance_rate = compute_acceptance_rate(metrics)
@@ -360,9 +343,9 @@ def test_gemma4_dspark_correctness_and_acceptance_rate(
             f"gsm8k_accuracy={gsm8k_accuracy:.3f}"
         )
 
-        assert acceptance_rate >= 0.719 * 0.9
-        assert acceptance_len >= 6.035 * 0.9
-        assert gsm8k_accuracy >= 0.916 * 0.9
+        assert acceptance_rate >= 0.588 * 0.9
+        assert acceptance_len >= 5.116 * 0.9
+        assert gsm8k_accuracy >= 0.937 * 0.9
     finally:
         del spec_llm
         torch.accelerator.empty_cache()
