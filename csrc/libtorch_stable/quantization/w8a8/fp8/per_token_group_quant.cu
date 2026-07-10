@@ -108,6 +108,8 @@ template <typename T, int VEC_SIZE>
 __device__ __forceinline__ float LoadRegisterGroupAndComputeAbsmax(
     const T* __restrict__ group_input, const bool is_valid_group,
     T (&regs)[VEC_SIZE], const float eps) {
+  static_assert(VEC_SIZE * sizeof(T) == 32,
+                "LoadRegisterGroupAndComputeAbsmax assumes two uint4 loads.");
   float local_absmax = eps;
   if (!is_valid_group) {
     return local_absmax;
