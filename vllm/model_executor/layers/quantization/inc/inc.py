@@ -212,6 +212,7 @@ class INCConfig(QuantizationConfig):
     def get_quant_method(self, layer: torch.nn.Module, prefix: str):
         from .schemes.factory import resolve_scheme
 
+        # Match original: check model.-prefixed names for unquantized layers
         if prefix and self.extra_config:
             for layer_name in self.extra_config:
                 if (
