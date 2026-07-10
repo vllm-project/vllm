@@ -47,6 +47,7 @@ from vllm.model_executor.models.gemma4_mm import (
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
 
 from .utils import (
     AutoWeightsLoader,
@@ -84,17 +85,28 @@ class Gemma4UnifiedVisionEmbedder(nn.Module):
         super().__init__()
         patch_dim = config.model_patch_size**2 * 3
         mm_embed_dim = config.mm_embed_dim
+        config_dtype = getattr(config, "dtype", None)
+        self._use_fp32_vision_projection = (
+            config_dtype is not None
+            and config_dtype not in current_platform.supported_dtypes
+        )
+        projection_dtype = (
+            torch.float32
+            if self._use_fp32_vision_projection
+            else torch.get_default_dtype()
+        )
 
         self.patch_ln1 = nn.LayerNorm(patch_dim)
         self.patch_dense = ColumnParallelLinear(
             patch_dim,
             mm_embed_dim,
             bias=True,
+            params_dtype=projection_dtype,
             quant_config=quant_config,
             prefix=f"{prefix}.patch_dense",
             gather_output=True,
         )
-        self.patch_ln2 = nn.LayerNorm(mm_embed_dim)
+        self.patch_ln2 = nn.LayerNorm(mm_embed_dim, dtype=projection_dtype)
 
         self.pos_embedding = nn.Parameter(
             torch.zeros(config.mm_posemb_size, 2, mm_embed_dim)
@@ -123,8 +135,12 @@ class Gemma4UnifiedVisionEmbedder(nn.Module):
         pixel_position_ids: torch.Tensor,
     ) -> torch.Tensor:
         hidden_states = self.patch_ln1(pixel_values.to(self.pos_embedding.dtype))
+        if self._use_fp32_vision_projection:
+            hidden_states = hidden_states.float()
         hidden_states, _ = self.patch_dense(hidden_states)
         hidden_states = self.patch_ln2(hidden_states)
+        if self._use_fp32_vision_projection:
+            hidden_states = hidden_states.to(self.pos_embedding.dtype)
 
         pos_embs = self._factorized_posemb(pixel_position_ids)
         hidden_states = hidden_states + pos_embs
