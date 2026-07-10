@@ -510,6 +510,9 @@ class GPUModelRunner(
             logprobs_mode=self.model_config.logprobs_mode,
             use_fp64_gumbel=self.model_config.use_fp64_gumbel,
         )
+        # Lazily detected in _hetero_tp_active(): TP ranks on differing GPU
+        # models (--rank-gpu-id) need sampled/draft ids broadcast from rank 0.
+        self._hetero_tp: bool | None = None
 
         self.eplb_state: EplbState | None = None
         self._moe_model: MixtureOfExperts | None = None
@@ -3570,6 +3573,42 @@ class GPUModelRunner(
             ec_connector_output,
         )
 
+    def _hetero_tp_active(self) -> bool:
+        """True if TP ranks run on different GPU models (only possible with
+        --rank-gpu-id). vLLM samples redundantly on every TP rank and relies
+        on bitwise-identical logits across ranks; different architectures
+        (kernel selection, reduction order) break that, so near-tie sampling
+        decisions can diverge between ranks and silently corrupt generation.
+        Detected once via an all-gather of device names over the TP CPU
+        group; all ranks call this at the same point in _sample."""
+        if self._hetero_tp is None:
+            tp = get_tp_group()
+            if (
+                tp.world_size == 1
+                or self.parallel_config.assigned_physical_gpu_ids is None
+            ):
+                self._hetero_tp = False
+            else:
+                names: list[str | None] = [None] * tp.world_size
+                torch.distributed.all_gather_object(
+                    names, torch.cuda.get_device_name(), group=tp.cpu_group
+                )
+                self._hetero_tp = len(set(names)) > 1
+                if self._hetero_tp and tp.rank_in_group == 0:
+                    logger.info(
+                        "Heterogeneous TP detected (%s): broadcasting "
+                        "sampled/draft token ids from rank 0 to keep "
+                        "rank states identical.",
+                        ", ".join(sorted(set(str(n) for n in names))),
+                    )
+        return self._hetero_tp
+
+    def _sync_token_ids_across_tp(self, token_ids: torch.Tensor) -> None:
+        """Broadcast token ids from TP rank 0 so all ranks continue with
+        identical sequences (heterogeneous TP only; a few KiB per step)."""
+        if self._hetero_tp_active():
+            get_tp_group().broadcast(token_ids, src=0)
+
     def _sample(
         self,
         logits: torch.Tensor | None,
@@ -3581,10 +3620,12 @@ class GPUModelRunner(
         # if async scheduling and required by current sampling params.
         self.input_batch.update_async_output_token_ids()
         if spec_decode_metadata is None:
-            return self.sampler(
+            sampler_output = self.sampler(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
             )
+            self._sync_token_ids_across_tp(sampler_output.sampled_token_ids)
+            return sampler_output
 
         # Update spec_token_ids with real draft tokens from pre step only when
         # output_token_ids is needed (penalties or bad_words are in use).
@@ -3599,6 +3640,7 @@ class GPUModelRunner(
             logits,
             sampling_metadata,
         )
+        self._sync_token_ids_across_tp(sampler_output.sampled_token_ids)
         return sampler_output
 
     def _bookkeeping_sync(
@@ -4495,6 +4537,10 @@ class GPUModelRunner(
                     spec_decode_common_attn_metadata,
                     slot_mappings,
                 )
+                # Heterogeneous TP: draft proposals are sampled per rank
+                # and must stay identical across ranks like sampled ids.
+                if isinstance(self._draft_token_ids, torch.Tensor):
+                    self._sync_token_ids_across_tp(self._draft_token_ids)
                 self._copy_draft_token_ids_to_cpu(scheduler_output)
 
         spec_config = self.speculative_config
