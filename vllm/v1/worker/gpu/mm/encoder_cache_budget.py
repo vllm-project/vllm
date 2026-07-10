@@ -101,9 +101,7 @@ def _compute_encoder_cache_budget(
     supported_mm_limits = processor.info.supported_mm_limits
     mm_limits = processor.info.allowed_mm_limits
     tower_modalities = {
-        modality
-        for modality in supported_mm_limits
-        if mm_limits.get(modality, 0) > 0
+        modality for modality in supported_mm_limits if mm_limits.get(modality, 0) > 0
     }
     embed_only_modalities = {
         modality
@@ -156,7 +154,7 @@ def _compute_encoder_cache_budget(
 
 
 class EncoderCacheProfilerInputs:
-    """Processor cache and dummy inputs for encoder-cache profiling."""
+    """Budget data and dummy inputs for encoder-cache profiling."""
 
     def __init__(
         self,
@@ -167,14 +165,11 @@ class EncoderCacheProfilerInputs:
         self.mm_registry = mm_registry
 
         with set_default_torch_num_threads():
-            self.cache = mm_registry.processor_only_cache_from_config(vllm_config)
-            processor = mm_registry.create_processor(
-                self.model_config, cache=self.cache
-            )
+            processor = mm_registry.create_processor(self.model_config)
             self.budget = _compute_encoder_cache_budget(
                 vllm_config,
                 mm_registry,
-                processor,
+                processor=processor,
             )
 
     def get_dummy_batch(
@@ -186,7 +181,6 @@ class EncoderCacheProfilerInputs:
         dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
             self.model_config,
             mm_counts={modality: 1},
-            cache=self.cache,
         )
         dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
         assert dummy_mm_item is not None, "Item should not already be cached"
@@ -199,7 +193,3 @@ class EncoderCacheProfilerInputs:
                 pin_memory=PIN_MEMORY,
             )
         )
-
-    def reset_cache(self) -> None:
-        if self.cache is not None:
-            self.cache.clear_cache()

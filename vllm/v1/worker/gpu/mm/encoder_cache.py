@@ -25,11 +25,6 @@ class EncoderCache:
     def remove_request(self, req_id: str) -> None:
         self.mm_features.pop(req_id, None)
 
-    def reset_mm_cache(self) -> None:
-        """Clear the profiling-only multimodal processor cache."""
-        if self.profile_inputs is not None:
-            self.profile_inputs.reset_cache()
-
     def reset_encoder_cache(self) -> None:
         """Clear the GPU-side encoder cache storing vision embeddings.
 
