@@ -5,7 +5,7 @@ use clap::Parser;
 use futures::StreamExt as _;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
-use vllm_engine_core_client::protocol::EngineCoreSamplingParams;
+use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, TransportMode};
 use vllm_llm::{FinishReason, GenerateOutputStream, GenerateRequest, Llm};
 
