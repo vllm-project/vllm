@@ -1139,9 +1139,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 "attention is available."
             )
             prefill_use_trtllm = True
-        decode_with_flashinfer_trtllm_api = (
-            causal and self.use_trtllm_decode_attention
-        )
+        decode_with_flashinfer_trtllm_api = causal and self.use_trtllm_decode_attention
 
         if not causal and self.use_dcp:
             raise NotImplementedError(
@@ -1242,10 +1240,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # Compute paged_kv_indices if necessary
         # paged_kv_indices is only needed for FlashInfer native paths;
         # XQA/trtllm-gen paths use block_tables directly on GPU.
-        needs_native_paged_prefill = (
-            num_prefills > 0
-            and not prefill_use_trtllm
-        )
+        needs_native_paged_prefill = num_prefills > 0 and not prefill_use_trtllm
         needs_native_paged_decode = (
             num_decodes > 0 and not decode_with_flashinfer_trtllm_api
         )
