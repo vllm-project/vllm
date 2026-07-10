@@ -488,6 +488,7 @@ def _mhc_fused_post_pre_tilelang_impl(
     norm_weight: torch.Tensor | None = None,
     norm_eps: float = 1e-6,
     reuse_residual_buffer: bool = False,
+    reuse_input_buffer: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Run one MHC post block followed by the next MHC pre block.
@@ -600,11 +601,15 @@ def _mhc_fused_post_pre_tilelang_impl(
         dtype=torch.float32,
         device=residual.device,
     )
-    layer_input_cur = torch.empty(
-        num_tokens,
-        hidden_size,
-        dtype=torch.bfloat16,
-        device=residual.device,
+    layer_input_cur = (
+        x_flat
+        if reuse_input_buffer
+        else torch.empty(
+            num_tokens,
+            hidden_size,
+            dtype=torch.bfloat16,
+            device=residual.device,
+        )
     )
 
     if use_small_fma:
@@ -740,6 +745,7 @@ def mhc_fused_post_pre_tilelang(
         norm_weight=norm_weight,
         norm_eps=norm_eps,
         reuse_residual_buffer=False,
+        reuse_input_buffer=False,
     )
 
 
@@ -761,6 +767,7 @@ def mhc_fused_post_pre_tilelang_reuse_residual(
     norm_weight: torch.Tensor | None = None,
     norm_eps: float = 1e-6,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Reuse dead residual and input storage for the next MHC transition."""
     return _mhc_fused_post_pre_tilelang_impl(
         x,
         residual,
@@ -779,6 +786,7 @@ def mhc_fused_post_pre_tilelang_reuse_residual(
         norm_weight=norm_weight,
         norm_eps=norm_eps,
         reuse_residual_buffer=True,
+        reuse_input_buffer=True,
     )
 
 

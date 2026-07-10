@@ -305,11 +305,11 @@ def test_mhc_fused_post_pre(num_tokens, hidden_size, hc_mult):
     not HAS_TILELANG_MHC,
     reason="TileLang MHC support required",
 )
-def test_mhc_fused_post_pre_reuses_residual_buffer():
+@pytest.mark.parametrize("num_tokens", [8, 128])
+def test_mhc_fused_post_pre_reuses_dead_buffers(num_tokens):
     torch.set_default_device(DEVICE)
     set_random_seed(0)
 
-    num_tokens = 128
     hidden_size = 4096
     hc_mult = 4
     x = torch.randn((num_tokens, hidden_size), dtype=torch.bfloat16)
@@ -363,7 +363,11 @@ def test_mhc_fused_post_pre_reuses_residual_buffer():
         norm_eps=norm_eps,
     )
 
-    assert actual[0].data_ptr() == residual_reuse.data_ptr()
+    if num_tokens > 16:
+        assert actual[0].data_ptr() == residual_reuse.data_ptr()
+    else:
+        assert actual[0].data_ptr() != residual_reuse.data_ptr()
+    assert actual[3].data_ptr() == x.data_ptr()
     for actual_tensor, expected_tensor in zip(actual, expected):
         torch.testing.assert_close(
             actual_tensor, expected_tensor, atol=1e-2, rtol=1e-2
