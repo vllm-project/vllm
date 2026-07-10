@@ -17,9 +17,9 @@ if not current_platform.has_device_capability(100):
     raise RuntimeError("NVFP4 requires compute capability of 10.0 (Blackwell)")
 
 import sys
-# TODO(Liron): I will need to replace this path
-sys.path.insert(0, '/home/redhat-et/src/lkesem/helion/examples')
-from nvfp4_gemv import nvfp4_gemv_fp4in
+from vllm.kernels.helion.ops.nvfp4_gemv import (
+    nvfp4_gemv_fp4in,
+)
 
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
@@ -121,7 +121,6 @@ def build_nvfp4_runner(cfg, a, b, dtype, device):
                     scale_b_fp4,
                     scale_a_fp4,
                     alpha=alpha_float,
-                    backend="cute",
                 ).unsqueeze(0)
 
             return run
@@ -135,12 +134,11 @@ def build_nvfp4_runner(cfg, a, b, dtype, device):
     # Quantize activation on-the-fly
     if cfg.get("helion"):
         k_bytes = b_fp4.shape[1]
-        backend = "cute" if k_bytes % 2048 == 0 else "triton"
         alpha_float = float(alpha)
         def run():
             a_fp4, scale_a_fp4 = ops.scaled_fp4_quant(a, a_global_scale)
             return nvfp4_gemv_fp4in(
-                b_fp4, a_fp4, scale_b_fp4, scale_a_fp4, alpha_float, backend=backend,
+                b_fp4, a_fp4, scale_b_fp4, scale_a_fp4, alpha_float,
             ).unsqueeze(0)
         return run
 

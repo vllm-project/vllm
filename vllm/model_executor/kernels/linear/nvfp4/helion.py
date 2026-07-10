@@ -15,10 +15,9 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
 )
 
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
-# TODO: for now i am importing it like any other external repo(flash-infer), the todo is to port it to helion repo!
-#      -- but we will need to decided /or if to avoid the customop
-sys.path.insert(0, '/home/redhat-et/src/lkesem/helion/examples')
-from nvfp4_gemv import nvfp4_gemv_fp4in
+from vllm.kernels.helion.ops.nvfp4_gemv import (
+    nvfp4_gemv_fp4in,
+)
 from vllm._custom_ops import scaled_fp4_quant
 
 class HelionNvFp4LinearKernel(NvFp4LinearKernel):
@@ -77,13 +76,10 @@ class HelionNvFp4LinearKernel(NvFp4LinearKernel):
             )
         else:
             # use gemv_helion
-            k_bytes = layer.weight.shape[1]
-            backend = "cute" if k_bytes % 2048 == 0 else "triton"
-            #print(f" gemv_helion path: M={x_fp4.shape[0]},N={layer.weight.shape[0]},K={ x_fp4.shape[1]} with backend {backend}")
-
+            #print(f"GEMV path: M={x_fp4.shape[0]},N={layer.weight.shape[0]},K={ x_fp4.shape[1]}") # working with eager mode!
             alpha_float = float(layer.alpha)
             out = nvfp4_gemv_fp4in(layer.weight, x_fp4.flatten(), layer.weight_scale,
-                                   x_blockscale, alpha=alpha_float, backend=backend).unsqueeze(0)
+                                x_blockscale, alpha=alpha_float).unsqueeze(0)
 
         out = slice_nvfp4_output(out, output_size)
 

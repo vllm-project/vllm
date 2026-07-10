@@ -99,28 +99,22 @@ def test_nvfp4_gemm(
     )
     
     torch.testing.assert_close(out, expected_out.to(dtype=dtype), atol=1e-1, rtol=1e-1)
-    ## TODO(Liron): this is only to make sure the tests are matching
-    #       after i have the benchmarking prove it is fast then 
-    #       continue to integration to a model level(e2e)   
-    #       add it to helion Ops -> and see how much it costs.
-    sys.path.insert(0, '/home/redhat-et/src/lkesem/helion/examples')
-    from nvfp4_gemv import nvfp4_gemv_fp4in
+    from vllm.kernels.helion.ops.nvfp4_gemv import (
+        nvfp4_gemv_fp4in,
+    )
 
     # Helion FP4×FP4 GEMV
     k_bytes = b_fp4.shape[1]
-    backend = "cute" if k_bytes % 2048 == 0 else "triton"
     alpha_helion = float(1.0 / (a_global_scale * b_global_scale))
-
     helion_out = nvfp4_gemv_fp4in(
         b_fp4,
         a_fp4,
         b_scale_interleaved,
         a_scale_interleaved,
         alpha=alpha_helion,
-        backend=backend,
     ).unsqueeze(0)
 
     # Compare to CUTLASS 
     torch.testing.assert_close(helion_out, out, atol=1e-1, rtol=1e-1)
-    print(f"Helion FP4×FP4 GEMV M={m}, N={n}, K={k}, backend={backend}")
+    print(f"Helion FP4×FP4 GEMV M={m}, N={n}, K={k}")
 
