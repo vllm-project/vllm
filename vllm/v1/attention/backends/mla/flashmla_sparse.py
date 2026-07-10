@@ -254,7 +254,9 @@ class FlashMLASparseMetadataBuilder(
 
         num_q_heads = self.model_config.get_num_attention_heads(parallel_config)
         if current_platform.is_device_capability_family(100):
-            threshold = {16: 64, 32: 128, 64: 256, 128: 1024}.get(num_q_heads, 1024)
+            threshold = {8: 128, 16: 128, 32: 128, 64: 256, 128: 1024}.get(
+                num_q_heads, 1024
+            )
         else:
             threshold = {16: 128, 32: 128, 64: 256, 128: 256}.get(num_q_heads, 256)
         self._init_reorder_batch_threshold(

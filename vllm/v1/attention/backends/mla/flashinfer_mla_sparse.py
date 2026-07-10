@@ -283,7 +283,9 @@ class FlashInferMLASparseMetadataBuilder(
         num_q_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config
         )
-        threshold = {16: 128, 128: 1024}.get(num_q_heads, 1024)
+        threshold = {8: 128, 16: 128, 32: 128, 64: 256, 128: 1024}.get(
+            num_q_heads, 1024
+        )
         self._init_reorder_batch_threshold(
             threshold,
             supports_spec_as_decode=True,
