@@ -185,9 +185,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.encoder_cache = None
         if self.supports_mm_inputs and self.is_first_pp_rank:
             self.encoder_cache = EncoderCache()
-            self.encoder_cache.profile_inputs = EncoderCacheProfilerInputs(
-                self.vllm_config, self.mm_registry
-            )
+            mm_config = self.model_config.multimodal_config
+            if mm_config is None or not mm_config.skip_mm_profiling:
+                self.encoder_cache.profile_inputs = EncoderCacheProfilerInputs(
+                    self.vllm_config, self.mm_registry
+                )
 
         # Speculative decoding.
         self.speculator = None
@@ -674,6 +676,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.block_tables.init_block_table_layout_tensors()
 
     def reset_mm_cache(self) -> None:
+        # This runner does not keep a profiling processor cache. The method
+        # remains for the worker/executor reset_mm_cache API.
         pass
 
     def reset_encoder_cache(self) -> None:

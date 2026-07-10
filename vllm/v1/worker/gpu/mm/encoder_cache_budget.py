@@ -183,7 +183,7 @@ class EncoderCacheProfilerInputs:
             mm_counts={modality: 1},
         )
         dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
-        assert dummy_mm_item is not None, "Item should not already be cached"
+        assert dummy_mm_item is not None, "Dummy item should be generated"
 
         return next(
             mm_kwargs_batch
