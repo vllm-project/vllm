@@ -25,6 +25,14 @@ def _should_share(eagle: nn.Module, flag: str, draft, target) -> bool:
     return torch.equal(w, target.weight)
 
 
+def get_target_lm_head(target_model: nn.Module, target_language_model: nn.Module):
+    """The target's lm_head — from get_language_model() for
+    *ForConditionalGeneration targets, else the top-level module."""
+    return getattr(target_language_model, "lm_head", None) or getattr(
+        target_model, "lm_head", None
+    )
+
+
 def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
     from vllm.compilation.backends import set_model_tag
 
@@ -64,7 +72,7 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
                 del draft_inner.embed_tokens
             draft_inner.embed_tokens = target_embed
 
-    target_lm_head = getattr(target_model, "lm_head", None)
+    target_lm_head = get_target_lm_head(target_model, target_language_model)
     draft_lm_head = getattr(eagle_model, "lm_head", None)
     if target_lm_head is not None and _should_share(
         eagle_model, "has_own_lm_head", draft_lm_head, target_lm_head

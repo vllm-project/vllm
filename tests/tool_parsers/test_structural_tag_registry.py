@@ -16,9 +16,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.deepseekv3_tool_parser import DeepSeekV3ToolParser
-from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
+from vllm.tool_parsers.deepseekv4_engine_tool_parser import DeepSeekV4EngineToolParser
 from vllm.tool_parsers.deepseekv31_tool_parser import DeepSeekV31ToolParser
-from vllm.tool_parsers.deepseekv32_tool_parser import DeepSeekV32ToolParser
+from vllm.tool_parsers.deepseekv32_engine_tool_parser import (
+    DeepSeekV32EngineToolParser,
+)
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 from vllm.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
@@ -185,8 +187,8 @@ def test_get_model_structural_tag_supports_named_tool_choice(
     [
         (DeepSeekV3ToolParser, "deepseek_r1"),
         (DeepSeekV31ToolParser, "deepseek_v3_1"),
-        (DeepSeekV32ToolParser, "deepseek_v3_2"),
-        (DeepSeekV4ToolParser, "deepseek_v4"),
+        (DeepSeekV32EngineToolParser, "deepseek_v3_2"),
+        (DeepSeekV4EngineToolParser, "deepseek_v4"),
         (Glm47MoeModelToolParser, "glm_4_7"),
         (Hermes2ProToolParser, "hermes"),
         (KimiK2ToolParser, "kimi"),

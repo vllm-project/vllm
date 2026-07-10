@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: Plugin Tests (2 GPUs)
   key: plugin-tests-2-gpus
-  timeout_in_minutes: 60
+  timeout_in_minutes: 35
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
   source_file_dependencies:
@@ -37,6 +37,11 @@ steps:
   - pytest -v -s plugins_tests/test_stats_logger_plugins.py
   - pip uninstall dummy_stat_logger -y
   # end stat_logger plugins test
+  # begin endpoint plugins test
+  - pip install -e ./plugins/vllm_add_dummy_endpoint_plugin
+  - pytest -v -s plugins_tests/test_endpoint_plugins.py
+  - pip uninstall vllm_add_dummy_endpoint_plugin -y
+  # end endpoint plugins test
   # other tests continue here:
   - pytest -v -s plugins_tests/test_scheduler_plugins.py
   - pip install -e ./plugins/vllm_add_dummy_model

@@ -31,12 +31,12 @@ _TOOL_PARSERS_TO_REGISTER = {
         "DeepSeekV31ToolParser",
     ),
     "deepseek_v32": (
-        "deepseekv32_tool_parser",
-        "DeepSeekV32ToolParser",
+        "deepseekv32_engine_tool_parser",
+        "DeepSeekV32EngineToolParser",
     ),
     "deepseek_v4": (
-        "deepseekv4_tool_parser",
-        "DeepSeekV4ToolParser",
+        "deepseekv4_engine_tool_parser",
+        "DeepSeekV4EngineToolParser",
     ),
     "cohere_command3": (
         "cohere_command_tool_parser",

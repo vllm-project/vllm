@@ -49,9 +49,10 @@ class RejectionSampler:
     ):
         self.sampler = sampler
         self.num_speculative_steps = spec_config.num_speculative_tokens
-        self.rejection_sample_method = spec_config.rejection_sample_method
+        rejection_sample_method = spec_config.rejection_sample_method
+        self.use_block_verification: bool = False
         self.synthetic_conditional_rates: torch.Tensor | None = None
-        if self.rejection_sample_method == "synthetic":
+        if rejection_sample_method == "synthetic":
             assert spec_config.synthetic_acceptance_rates is not None
             self.synthetic_conditional_rates = torch.tensor(
                 unconditional_to_conditional_rates(
@@ -60,6 +61,8 @@ class RejectionSampler:
                 dtype=torch.float32,
                 device=device,
             )
+        elif rejection_sample_method == "block":
+            self.use_block_verification = True
 
     def _get_logprobs_tensors(
         self,
@@ -129,6 +132,7 @@ class RejectionSampler:
             self.num_speculative_steps,
             self.synthetic_conditional_rates,
             use_fp64=self.sampler.use_fp64_gumbel,
+            use_block_verification=self.use_block_verification,
         )
         logprobs_tensors = self._get_logprobs_tensors(
             input_batch,

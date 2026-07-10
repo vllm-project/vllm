@@ -8,6 +8,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+DROP_TERMINAL = "__DROP__"
+
 
 @dataclass(slots=True)
 class TextChunk:
@@ -42,12 +44,10 @@ class TokenIDScanner:
         self,
         token_id_to_terminal: dict[int, str],
         tokenizer,
-        drop_token_ids: set[int] | None = None,
     ) -> None:
         self.token_id_to_terminal = token_id_to_terminal
         self.tokenizer = tokenizer
         self._token_text_cache: dict[int, str] = {}
-        self._drop_token_ids = drop_token_ids or set()
         self._deferred_terminals: list[PreLexedTerminal] = []
         self._deferred_post_text: str = ""
 
@@ -74,22 +74,19 @@ class TokenIDScanner:
         if self._deferred_terminals:
             prefix_items, effective_text = self._resolve_deferred(delta_text)
 
-        if not self.token_id_to_terminal and not self._drop_token_ids:
+        if not self.token_id_to_terminal:
             if effective_text:
                 prefix_items.append(TextChunk(effective_text))
             return prefix_items
 
         has_special = False
-        has_drop = False
         token_id_to_terminal = self.token_id_to_terminal
-        drop_token_ids = self._drop_token_ids
         for tid in delta_token_ids:
             if tid in token_id_to_terminal:
                 has_special = True
-            if tid in drop_token_ids:
-                has_drop = True
+                break
 
-        if not has_special and not has_drop:
+        if not has_special:
             if effective_text:
                 if not prefix_items:
                     return [TextChunk(effective_text)]
@@ -102,8 +99,6 @@ class TokenIDScanner:
         text_accum: list[str] = []
 
         for idx, tid in enumerate(delta_token_ids):
-            if tid in self._drop_token_ids:
-                continue
             terminal = self.token_id_to_terminal.get(tid)
             if terminal is not None:
                 if text_accum:
@@ -121,23 +116,7 @@ class TokenIDScanner:
                 results.append(TextChunk(joined))
 
         if effective_text:
-            if has_drop:
-                clean_delta = effective_text
-                for idx, tid in enumerate(delta_token_ids):
-                    if tid in self._drop_token_ids:
-                        dropped = token_texts[idx]
-                        pos = clean_delta.find(dropped)
-                        if pos >= 0:
-                            clean_delta = (
-                                clean_delta[:pos] + clean_delta[pos + len(dropped) :]
-                            )
-                if clean_delta:
-                    if results:
-                        results = self._recover_holdback_text(clean_delta, results)
-                    else:
-                        results = [TextChunk(clean_delta)]
-            else:
-                results = self._recover_holdback_text(effective_text, results)
+            results = self._recover_holdback_text(effective_text, results)
         else:
             # No detokenizer text to validate against — individually-decoded
             # TextChunks are unreliable (context-dependent decoding).
@@ -300,7 +279,15 @@ class TokenIDScanner:
                 consumed = pos + len(anchor.text)
             else:
                 has_later_valid = any(p >= 0 for p in positions[i + 1 :])
-                if not has_later_valid and consumed < len(delta_text):
+                # DROP anchors (EOS, etc.) may have text that never
+                # arrives in delta_text (stripped by detokenizer).
+                # Don't defer remaining content waiting for text
+                # that will never come.
+                if (
+                    not has_later_valid
+                    and consumed < len(delta_text)
+                    and anchor.terminal != DROP_TERMINAL
+                ):
                     self._deferred_post_text += delta_text[consumed:]
                     consumed = len(delta_text)
                 self._deferred_terminals.append(anchor)

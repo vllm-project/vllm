@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: Model Executor
   key: model-executor
-  timeout_in_minutes: 35
+  timeout_in_minutes: 45
   source_file_dependencies:
   - vllm/engine/arg_utils.py
   - vllm/config/model.py

@@ -14,7 +14,7 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 
-from ..base.serving import OpenAISpeechToText
+from ..base.serving import SpeechToTextBaseServing
 from .protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
@@ -26,7 +26,7 @@ from .protocol import (
 logger = init_logger(__name__)
 
 
-class OpenAIServingTranscription(OpenAISpeechToText):
+class OpenAIServingTranscription(SpeechToTextBaseServing):
     """Handles transcription requests."""
 
     def __init__(

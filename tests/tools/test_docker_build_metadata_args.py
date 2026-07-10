@@ -150,3 +150,31 @@ def test_vllm_openai_image_embeds_metadata_contract() -> None:
         'ai.vllm.image.tag="${VLLM_IMAGE_TAG}"',
     ):
         assert expected in dockerfile
+
+
+def test_rocm_ci_base_bake_embeds_content_hash_label() -> None:
+    bake_file = (REPO_ROOT / "docker" / "docker-bake-rocm.hcl").read_text()
+
+    for expected in (
+        'variable "CI_BASE_CONTENT_HASH"',
+        'target "ci-base-rocm"',
+        'target   = "ci_base"',
+        '"vllm.ci_base.content_hash" = CI_BASE_CONTENT_HASH',
+    ):
+        assert expected in bake_file
+
+
+def test_rocm_ci_base_metadata_inputs_cover_ci_base_files() -> None:
+    ci_bake = (REPO_ROOT / ".buildkite" / "scripts" / "ci-bake-rocm.sh").read_text()
+
+    for expected in (
+        "requirements/common.txt",
+        "requirements/rocm.txt",
+        "requirements/test/rocm.txt",
+        "docker/Dockerfile.rocm_base",
+        "docker/Dockerfile.rocm",
+        "docker/ci-rocm.hcl",
+        "docker/docker-bake-rocm.hcl",
+        ".buildkite/scripts/ci-bake-rocm.sh",
+    ):
+        assert expected in ci_bake

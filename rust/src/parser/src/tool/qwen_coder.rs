@@ -685,7 +685,8 @@ mod tests {
         let mut parser = Qwen3CoderToolParser::new(&test_tools());
         let error = parser.parse_chunk("<tool_call>\n<bad>\n</tool_call>").unwrap_err();
 
-        expect!["tool parser parsing failed: "].assert_eq(&error.to_report_string());
+        expect![[r#"tool parser parsing failed: near "\n<bad>\n</tool_call>": "#]]
+            .assert_eq(&error.to_report_string());
     }
 
     #[test]
@@ -697,7 +698,7 @@ mod tests {
             )
             .unwrap_err();
 
-        expect!["tool parser parsing failed: "].assert_eq(&error.to_report_string());
+        expect![[r#"tool parser parsing failed: near "\n<function=get_weather>\n<parameter=location>SF</function>\n</tool_call>": "#]].assert_eq(&error.to_report_string());
     }
 
     #[test]

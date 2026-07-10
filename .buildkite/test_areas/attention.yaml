@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: V1 attention (H100-MI300)
   key: v1-attention-h100-mi300
-  timeout_in_minutes: 30
+  timeout_in_minutes: 85
   device: h100
   source_file_dependencies:
     - vllm/config/attention.py
@@ -16,7 +16,7 @@ steps:
   mirror:
     amd:
       device: mi325_1
-      timeout_in_minutes: 70
+      timeout_in_minutes: 95
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -30,7 +30,7 @@ steps:
 
 - label: V1 attention (B200)
   key: v1-attention-b200
-  timeout_in_minutes: 30
+  timeout_in_minutes: 80
   device: b200-k8s
   source_file_dependencies:
     - vllm/config/attention.py

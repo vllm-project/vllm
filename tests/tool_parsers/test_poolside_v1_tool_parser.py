@@ -77,7 +77,9 @@ def _build_chat_request(*, tool_choice: str | dict[str, Any]) -> ChatCompletionR
     )
 
 
-def _build_responses_request(*, tool_choice: str | dict[str, Any]) -> ResponsesRequest:
+def _build_responses_request(
+    *, tool_choice: str | dict[str, Any], include: list[str] | None = None
+) -> ResponsesRequest:
     return ResponsesRequest(
         model="poolside-test",
         input=[{"role": "user", "content": "write the file"}],
@@ -85,6 +87,7 @@ def _build_responses_request(*, tool_choice: str | dict[str, Any]) -> ResponsesR
         tool_choice=tool_choice,
         stream=True,
         max_output_tokens=200,
+        include=include,
     )
 
 
@@ -215,3 +218,133 @@ def test_responses_extract_tool_calls_with_flat_tools() -> None:
     assert result.tools_called
     args = json.loads(result.tool_calls[0].function.arguments)
     assert args["content"] == content
+
+
+def _weather_tool() -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the weather for a city",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    }
+
+
+def _build_weather_request(*, tool_choice: str) -> ChatCompletionRequest:
+    return ChatCompletionRequest.model_validate(
+        {
+            "model": "poolside-test",
+            "messages": [{"role": "user", "content": "weather in Paris?"}],
+            "tools": [_weather_tool()],
+            "tool_choice": tool_choice,
+        }
+    )
+
+
+def test_no_newline_after_name_non_streaming() -> None:
+    request = _build_weather_request(tool_choice="auto")
+    parser = _make_parser(request)
+
+    model_output = (
+        "<tool_call>get_weather"
+        "<arg_key>city</arg_key><arg_value>Paris</arg_value>"
+        "</tool_call>"
+    )
+
+    result = parser.extract_tool_calls(model_output, request)
+
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "get_weather"
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args == {"city": "Paris"}
+
+
+def test_newline_after_name_still_parses_non_streaming() -> None:
+    request = _build_weather_request(tool_choice="auto")
+    parser = _make_parser(request)
+
+    model_output = (
+        "<tool_call>get_weather\n"
+        "<arg_key>city</arg_key>\n<arg_value>Paris</arg_value>\n"
+        "</tool_call>"
+    )
+
+    result = parser.extract_tool_calls(model_output, request)
+
+    assert result.tools_called
+    assert result.tool_calls[0].function.name == "get_weather"
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args == {"city": "Paris"}
+
+
+def test_no_newline_after_name_streaming() -> None:
+    request = _build_weather_request(tool_choice="auto")
+    parser = _make_parser(request)
+
+    model_output = (
+        "<tool_call>get_weather"
+        "<arg_key>city</arg_key><arg_value>Paris</arg_value>"
+        "</tool_call>"
+    )
+
+    name = ""
+    args = ""
+    prev = ""
+    for ch in model_output:
+        cur = prev + ch
+        delta = parser.extract_tool_calls_streaming(
+            previous_text=prev,
+            current_text=cur,
+            delta_text=ch,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=request,
+        )
+        prev = cur
+        if delta is None:
+            continue
+        for tc in delta.tool_calls or []:
+            if tc.function is None:
+                continue
+            if tc.function.name:
+                name += tc.function.name
+            if tc.function.arguments:
+                args += tc.function.arguments
+
+    assert name == "get_weather"
+    assert json.loads(args) == {"city": "Paris"}
+
+
+def _stream_partial_start_token(request: ResponsesRequest):
+    parser = _make_parser(request)
+    delta = parser.tool_call_start_token[0]
+    return parser.extract_tool_calls_streaming(
+        previous_text="",
+        current_text=delta,
+        delta_text=delta,
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+        request=request,
+    )
+
+
+def test_streaming_responses_request_without_logprobs() -> None:
+    request = _build_responses_request(tool_choice="auto")
+    assert _stream_partial_start_token(request) is None
+
+
+def test_streaming_responses_request_with_logprobs_emits_empty_delta() -> None:
+    request = _build_responses_request(
+        tool_choice="auto", include=["message.output_text.logprobs"]
+    )
+    result = _stream_partial_start_token(request)
+    assert result is not None
+    assert result.content == ""

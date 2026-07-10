@@ -83,8 +83,9 @@ charset-normalizer==3.4.6
     # via requests
 chz==0.4.0
     # via gpt-oss
-click==8.3.1
+click==8.4.2
     # via
+    #   huggingface-hub
     #   jiwer
     #   nltk
     #   rich-toolkit
@@ -206,7 +207,7 @@ h11==0.16.0
     #   uvicorn
 harfile==0.4.0
     # via schemathesis
-hf-xet==1.4.3
+hf-xet==1.5.1
     # via huggingface-hub
 html2text==2025.4.15
     # via gpt-oss
@@ -227,7 +228,7 @@ httpx==0.28.1
     #   schemathesis
 httpx-sse==0.4.3
     # via mcp
-huggingface-hub==1.10.2
+huggingface-hub==1.22.0
     # via
     #   accelerate
     #   datasets
@@ -939,10 +940,11 @@ tqdm==4.67.3
     #   pqdm
     #   sentence-transformers
     #   transformers
-transformers==5.5.3
+transformers==5.10.4
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
+    #   -r requirements/test/xpu.in
     #   compressed-tensors
     #   sentence-transformers
     #   xgrammar
@@ -959,7 +961,6 @@ typer==0.24.1
     # via
     #   fastapi-cli
     #   fastapi-cloud-cli
-    #   huggingface-hub
     #   transformers
 typing-extensions==4.15.0
     # via

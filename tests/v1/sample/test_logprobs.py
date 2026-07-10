@@ -85,6 +85,7 @@ def _model_config(vocab_size: int = 10):
     return SimpleNamespace(
         max_logprobs=20,
         logits_processors=None,
+        is_diffusion=False,
         get_vocab_size=lambda: vocab_size,
     )
 

@@ -53,13 +53,11 @@ class RobertaEmbedding(nn.Module):
             config.vocab_size, config.hidden_size
         )
         self.padding_idx = config.pad_token_id
-        self.position_embeddings = nn.Embedding(
-            config.max_position_embeddings,
-            config.hidden_size,
-            padding_idx=self.padding_idx,
+        self.position_embeddings = VocabParallelEmbedding(
+            config.max_position_embeddings, config.hidden_size
         )
 
-        self.token_type_embeddings = nn.Embedding(
+        self.token_type_embeddings = VocabParallelEmbedding(
             config.type_vocab_size, config.hidden_size
         )
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)

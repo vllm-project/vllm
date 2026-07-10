@@ -50,7 +50,8 @@ mod request;
 mod stream;
 
 use vllm_engine_core_client::EngineCoreClient;
-use vllm_engine_core_client::protocol::{ModelDtype, ReasoningParserKwargs};
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
+use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_llm::Llm;
 use vllm_text::{Prompt, TextLlm, TextRequest};
 
@@ -171,6 +172,9 @@ impl ChatLlm {
     pub async fn chat(&self, mut request: ChatRequest) -> Result<ChatEventStream> {
         request.validate()?;
 
+        // Stamp before rendering so render and tokenize count toward TTFT/e2e.
+        let arrival_time = vllm_llm::current_unix_timestamp_secs();
+
         let output_processor = self.backend.new_chat_output_processor(
             &mut request,
             NewChatOutputProcessorOptions {
@@ -209,6 +213,7 @@ impl ChatLlm {
             data_parallel_rank: request.data_parallel_rank,
             reasoning_parser_kwargs,
             lora_request: request.lora_request,
+            arrival_time: Some(arrival_time),
         };
         let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from).boxed();
 

@@ -100,3 +100,54 @@ class TestCleanLocForParam:
         dot-join rather than returning an empty string."""
         loc = ("function-wrap[__log_extra_fields__()]",)
         assert clean_loc_for_param(loc) == "function-wrap[__log_extra_fields__()]"
+
+
+class TestValidationErrorDoesNotLeakServerPaths:
+    """FastAPI sets endpoint_file/line/function/path on the exception
+    during routing, not in the constructor - so we set them manually
+    here to reproduce the real leak. See #31683."""
+
+    @pytest.mark.asyncio
+    async def test_handler_strips_endpoint_file_context(self):
+        errors = [
+            {
+                "type": "list_type",
+                "loc": ("body", "messages"),
+                "msg": "Input should be a valid list",
+                "input": "not-a-list",
+            }
+        ]
+        exc = RequestValidationError(errors)
+        exc.endpoint_file = (
+            "/usr/local/lib/python3.12/dist-packages/vllm/"
+            "entrypoints/serve/utils/api_utils.py"
+        )
+        exc.endpoint_line = 40
+        exc.endpoint_function = "create_chat_completion"
+        exc.endpoint_path = "POST /v1/chat/completions"
+
+        response = await validation_exception_handler(_fake_request(), exc)
+        body = json.loads(response.body)
+        message = body["error"]["message"]
+
+        assert "/usr/local/" not in message
+        assert "api_utils.py" not in message
+        assert "create_chat_completion" not in message
+        assert "list_type" in message
+        assert "Input should be a valid list" in message
+
+    @pytest.mark.asyncio
+    async def test_handler_strips_endpoint_path_only_variant(self):
+        """Covers the branch where only endpoint_path is set."""
+        errors = [
+            {"type": "missing", "loc": ("body", "messages"), "msg": "Field required"}
+        ]
+        exc = RequestValidationError(errors)
+        exc.endpoint_path = "POST /v1/chat/completions"
+
+        response = await validation_exception_handler(_fake_request(), exc)
+        body = json.loads(response.body)
+        message = body["error"]["message"]
+
+        assert "missing" in message
+        assert "Field required" in message

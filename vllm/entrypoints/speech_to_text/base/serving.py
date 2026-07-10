@@ -16,13 +16,13 @@ from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.generate.base.serving import GenerateBaseServing
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
     RequestResponseMetadata,
     UsageInfo,
 )
-from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.typing import SpeechToTextRequest
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
@@ -87,7 +87,7 @@ def asr_inter_chunk_separator(
     return "" if language and language.lower() in no_space_languages else " "
 
 
-class OpenAISpeechToText(OpenAIServing):
+class SpeechToTextBaseServing(GenerateBaseServing):
     """Base class for speech-to-text operations like transcription and
     translation."""
 
@@ -113,6 +113,9 @@ class OpenAISpeechToText(OpenAIServing):
 
         self.asr_config = self.model_cls.get_speech_to_text_config(
             self.model_config, task_type
+        )
+        self.streaming_post_processor_cls = (
+            self.model_cls.get_streaming_post_processor_cls()
         )
 
         self.enable_force_include_usage = enable_force_include_usage
@@ -475,7 +478,7 @@ class OpenAISpeechToText(OpenAIServing):
         list_result_generator: list[AsyncGenerator[RequestOutput, None]] | None = None
 
         input_len = (
-            OpenAISpeechToText._get_decoder_prompt_len(engine_inputs)
+            SpeechToTextBaseServing._get_decoder_prompt_len(engine_inputs)
             if request.use_beam_search
             else 0
         )
@@ -692,6 +695,7 @@ class OpenAISpeechToText(OpenAIServing):
         try:
             for result_generator in list_result_generator:
                 beginning_of_chunk = True
+                post_processor = self.streaming_post_processor_cls()
                 async for res in result_generator:
                     # On first result.
                     if res.prompt_token_ids is not None:
@@ -709,19 +713,24 @@ class OpenAISpeechToText(OpenAIServing):
                     assert len(res.outputs) == 1
                     output = res.outputs[0]
 
+                    output_text = post_processor.process_delta(
+                        output.text, output.finish_reason is not None
+                    )
+
                     # dont add separator to the first chunk
                     if (
                         result_generator is not list_result_generator[0]
                         and beginning_of_chunk
+                        and output_text
                     ):
-                        output.text = separator + output.text
+                        output_text = separator + output_text
                         beginning_of_chunk = False
 
-                    # TODO: For models that output structured formats (e.g.,
-                    # Qwen3-ASR with "language X<asr_text>" prefix), streaming
-                    # would need buffering to strip the prefix properly since
-                    # deltas may split the tag across chunks.
-                    delta_message = DeltaMessage(content=output.text)
+                    if output.finish_reason is None and not output_text:
+                        completion_tokens += len(output.token_ids)
+                        continue
+
+                    delta_message = DeltaMessage(content=output_text)
                     completion_tokens += len(output.token_ids)
 
                     if output.finish_reason is None:

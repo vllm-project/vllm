@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from vllm.v1.kv_offload.base import LookupResult, ReqContext
+from vllm.v1.kv_offload.base import LookupResult, ReqContext, ScheduleEndContext
 from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult
 from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
 from vllm.v1.kv_offload.tiering.p2p.manager import (
@@ -1279,7 +1279,12 @@ class TestOnScheduleEnd:
         mgr = _make_manager()
         before_sessions = dict(mgr._sessions)
         before_jobs = list(mgr._finished_jobs)
-        assert mgr.on_schedule_end() is None
+        assert (
+            mgr.on_schedule_end(
+                ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
+            )
+            is None
+        )
         assert mgr._sessions == before_sessions
         assert mgr._finished_jobs == before_jobs
 

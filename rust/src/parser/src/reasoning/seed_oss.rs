@@ -49,11 +49,12 @@ mod tests {
     use std::sync::Arc;
 
     use super::SeedOssReasoningParser;
-    use crate::reasoning::{ReasoningParser, tests::FakeTokenizer};
+    use crate::reasoning::ReasoningParser;
+    use crate::reasoning::tests::{SEED_THINK_END_ID, SEED_THINK_START_ID, fake_tokenizer};
 
     #[test]
     fn without_prompt_markers_expects_start_token() {
-        let tokenizer = Arc::new(FakeTokenizer);
+        let tokenizer = Arc::new(fake_tokenizer());
         let mut parser = SeedOssReasoningParser::new(tokenizer).unwrap();
 
         let delta = parser.push("implicit reasoning</seed:think>answer").unwrap();
@@ -66,10 +67,10 @@ mod tests {
 
     #[test]
     fn picks_up_prompt_start_boundary() {
-        let tokenizer = Arc::new(FakeTokenizer);
+        let tokenizer = Arc::new(fake_tokenizer());
         let mut parser = SeedOssReasoningParser::new(tokenizer).unwrap();
-        // Prompt prefills `<seed:think>` (id 10), opening reasoning before the stream.
-        parser.initialize(&[10]).unwrap();
+        // Prompt prefills `<seed:think>`, opening reasoning before the stream.
+        parser.initialize(&[SEED_THINK_START_ID]).unwrap();
 
         let delta = parser.push("reason</seed:think>answer").unwrap();
         assert_eq!(delta.reasoning.as_deref(), Some("reason"));
@@ -78,10 +79,10 @@ mod tests {
 
     #[test]
     fn respects_prompt_end_boundary() {
-        let tokenizer = Arc::new(FakeTokenizer);
+        let tokenizer = Arc::new(fake_tokenizer());
         let mut parser = SeedOssReasoningParser::new(tokenizer).unwrap();
-        // Prompt already closed reasoning with `</seed:think>` (id 11).
-        parser.initialize(&[11]).unwrap();
+        // Prompt already closed reasoning with `</seed:think>`.
+        parser.initialize(&[SEED_THINK_END_ID]).unwrap();
 
         let delta = parser.push("answer").unwrap();
         assert_eq!(delta.reasoning, None);
@@ -91,7 +92,7 @@ mod tests {
     #[test]
     fn handles_explicit_start_token() {
         // An explicit start delimiter must not leak into reasoning text.
-        let tokenizer = Arc::new(FakeTokenizer);
+        let tokenizer = Arc::new(fake_tokenizer());
         let mut parser = SeedOssReasoningParser::new(tokenizer).unwrap();
 
         let delta = parser.push("<seed:think>reason</seed:think>answer").unwrap();
@@ -103,7 +104,7 @@ mod tests {
     fn streams_explicit_start_token_across_pushes() {
         // Start token, reasoning body, end token, and content arrive in separate
         // streaming deltas.
-        let tokenizer = Arc::new(FakeTokenizer);
+        let tokenizer = Arc::new(fake_tokenizer());
         let mut parser = SeedOssReasoningParser::new(tokenizer).unwrap();
 
         let mut reasoning = String::new();
@@ -131,9 +132,9 @@ mod tests {
 
     #[test]
     fn handles_partial_delimiters_across_pushes() {
-        let tokenizer = Arc::new(FakeTokenizer);
+        let tokenizer = Arc::new(fake_tokenizer());
         let mut parser = SeedOssReasoningParser::new(tokenizer).unwrap();
-        parser.initialize(&[10]).unwrap();
+        parser.initialize(&[SEED_THINK_START_ID]).unwrap();
 
         // Closing delimiter `</seed:think>` arrives in two halves.
         let first = parser.push("reason</seed:").unwrap();

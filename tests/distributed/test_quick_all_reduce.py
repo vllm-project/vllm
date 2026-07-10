@@ -234,10 +234,9 @@ def test_rocm_aiter_fused_rmsnorm_uses_aiter_qr_rmsnorm_for_prefill(
     monkeypatch: pytest.MonkeyPatch,
 ):
     class FakeAiterAllReduce:
-        world_size = 2
-        fully_connected = True
+        aiter_ca = SimpleNamespace(world_size=2, fully_connected=True)
 
-        def fused_ar_rms(self, *args, **kwargs):
+        def custom_fused_ar_rms(self, *args, **kwargs):
             raise AssertionError("expected fused QR+RMSNorm dispatch")
 
     class FakeQuickReduce:
@@ -345,22 +344,26 @@ def test_rocm_aiter_fused_rmsnorm_keeps_1stage_decode_path(
 ):
     calls = []
 
-    class FakeAiterAllReduce:
+    class FakeAiterCA:
         world_size = 2
         fully_connected = True
 
-        def fused_ar_rms(self, inp, residual, *, w, eps, registered, use_1stage):
+        def custom_fused_ar_rms(
+            self, inp, residual, weight, epsilon, *, use_1stage
+        ):
             calls.append(
                 {
                     "inp": inp,
                     "residual": residual,
-                    "weight": w,
-                    "eps": eps,
-                    "registered": registered,
+                    "weight": weight,
+                    "eps": epsilon,
                     "use_1stage": use_1stage,
                 }
             )
             return inp + 1, residual + 1
+
+    class FakeAiterAllReduce:
+        aiter_ca = FakeAiterCA()
 
     monkeypatch.setattr(
         aiter_ops.rocm_aiter_ops,

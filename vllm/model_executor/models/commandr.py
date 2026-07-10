@@ -348,7 +348,11 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
             ".v_proj": (".qkv_proj", "v"),
             ".gate_proj": (".gate_up_proj", 0),
             ".up_proj": (".gate_up_proj", 1),
-        }
+        },
+        # ModelOpt NVFP4 checkpoints carry raw quantizer-module state
+        # (e.g. "*.weight_quantizer._double_scale"); drop them before loading.
+        # See #41925.
+        orig_to_new_substr={"_quantizer.": None},
     )
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -356,9 +360,6 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
     }
     # LoRA specific attributes
     embedding_modules = {"embed_tokens": "input_embeddings"}
-    # ModelOpt NVFP4 checkpoints carry raw quantizer-module state
-    # (e.g. "*.weight_quantizer._double_scale"); drop them before loading. See #41925.
-    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={"_quantizer.": None})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

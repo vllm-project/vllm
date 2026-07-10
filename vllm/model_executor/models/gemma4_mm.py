@@ -978,6 +978,13 @@ class Gemma4ForConditionalGeneration(
     SupportsLoRA,
     SupportsEagle3,
 ):
+    # Gemma4 clamps mm_prefix bidirectional ranges to the sliding window
+    # in-kernel (HF's (causal OR blockwise) AND sliding_window). The model
+    # runner reads this to keep image bidirectional ranges that exceed the
+    # window instead of dropping them (which would make image attention
+    # causal-only for images larger than the sliding window).
+    mm_prefix_clamp_sliding_window: bool = True
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

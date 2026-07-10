@@ -141,7 +141,7 @@ pub struct PerfStats {
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/compilation/cuda_graph.py#L28-L33>
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct CudagraphStat {
+pub struct CudagraphStats {
     /// Number of real tokens in the captured batch before padding.
     pub num_unpadded_tokens: u64,
     /// Number of padded tokens in the captured batch.
@@ -182,7 +182,7 @@ pub struct SchedulerStats {
     /// Connector-specific KV transfer stats, kept opaque for now.
     pub kv_connector_stats: Option<BTreeMap<String, OpaqueValue>>,
     /// CUDA graph runtime stats when graph metrics are enabled.
-    pub cudagraph_stats: Option<CudagraphStat>,
+    pub cudagraph_stats: Option<CudagraphStats>,
     /// Estimated MFU/performance stats, when enabled.
     pub perf_stats: Option<PerfStats>,
 }

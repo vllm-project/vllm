@@ -21,15 +21,11 @@ backbone architecture, FlexAttention for R-SWA, vision encoder backend, and
 Attention backend: the reference applies Reference Sliding Window Attention
 (R-SWA) -- the prompt/image tokens form a globally-visible prefix while the
 *generated* tokens additionally attend only a fixed sliding window (128) of
-recent tokens. We reproduce this (Level 1: full KV cache + custom mask) by
-forcing the language model onto the FlexAttention backend and installing an
-R-SWA ``mask_mod``. FlexAttention is the only backend able to express the
-"global prefix + sliding window" mask; FlashAttention-3 / Triton only support a
-uniform window (and additionally crash or compute incorrectly on this decoder's
-10-head,
-head_dim-128 shape), and FlashInfer's paged decode exposes no custom mask. The
-window size is published via ``model_config.rswa_window``, which the model
-runner reads to plumb per-request prefix lengths into the FlexAttention mask.
+recent tokens. We reproduce this with backend-specific custom masks: FA4 uses a
+``mask_mod``, FlexAttention uses a Triton block mask, and TritonAttention uses a
+unified-attention decode mask. FlashInfer's paged decode exposes no custom mask.
+The window size is published via ``model_config.rswa_window``, which the model
+runner reads to plumb per-request prefix lengths into the attention metadata.
 
 The *vision encoder* (DeepEncoder's CLIP stage, head_dim 64) is unaffected and
 does not use R-SWA: it runs a single full-attention prefill pass. FlashAttention,

@@ -15,7 +15,7 @@ set -euo pipefail
 
 DEFAULT_REPO_SLUG="vllm-project/vllm"
 DEFAULT_CI_HCL_SOURCE="docker/ci-rocm.hcl"
-DEFAULT_CI_BASE_CONTENT_FILES="requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt docker/Dockerfile.rocm_base docker/ci-rocm.hcl docker/docker-bake-rocm.hcl tools/install_torchcodec_rocm.sh tests/vllm_test_utils .buildkite/scripts/ci-bake-rocm.sh"
+DEFAULT_CI_BASE_CONTENT_FILES="requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt docker/Dockerfile.rocm_base docker/ci-rocm.hcl docker/docker-bake-rocm.hcl tools/install_torchcodec_rocm.sh tests/vllm_test_utils .buildkite/scripts/ci-bake-rocm.sh .buildkite/scripts/rocm/build-ci-base.sh"
 DEFAULT_CI_BASE_DOCKERFILE="docker/Dockerfile.rocm"
 DEFAULT_CI_BASE_DOCKERFILE_STAGES="base build_rixl build_rocshmem build_deepep mori_base ci_base"
 DEFAULT_CI_BASE_METADATA_VERSION="1"
@@ -393,6 +393,16 @@ should_upload_wheel_artifacts() {
         || "${TARGET}" == *"artifact"* ]]
 }
 
+set_buildkite_metadata() {
+    local key="$1"
+    local value="$2"
+
+    [[ -n "${value}" ]] || return 0
+    if command -v buildkite-agent >/dev/null 2>&1; then
+        buildkite-agent meta-data set "${key}" "${value}" || true
+    fi
+}
+
 get_remote_image_label() {
     local image_ref="$1"
     local label_key="$2"
@@ -733,6 +743,8 @@ configure_ci_base_image_refs() {
 
     if is_ci_base_target; then
         IMAGE_TAG="${primary_tag}"
+        CI_BASE_IMAGE="${primary_tag}"
+        export CI_BASE_IMAGE
         export IMAGE_TAG
 
         echo "ci_base primary image tag: ${CI_BASE_IMAGE_TAG}"
@@ -750,6 +762,10 @@ configure_ci_base_image_refs() {
             echo "ci_base stable alias will not be pushed for this build"
             echo "Set NIGHTLY=1 on ${CI_BASE_STABLE_BRANCH:-main} to refresh ${stable_tag}"
         fi
+        set_buildkite_metadata "rocm-ci-base-image" "${CI_BASE_IMAGE_TAG}"
+        set_buildkite_metadata "rocm-ci-base-image-content" "${content_tag}"
+        set_buildkite_metadata "rocm-ci-base-image-commit" "${CI_BASE_IMAGE_TAG_COMMIT:-}"
+        set_buildkite_metadata "rocm-ci-base-image-stable" "${CI_BASE_IMAGE_TAG_STABLE:-}"
         return 0
     fi
 
@@ -1779,7 +1795,10 @@ seed_dependency_caches_if_needed() {
 
         echo "--- :docker: Seeding ${target}"
         echo "Expected cache ref: ${cache_ref}"
-        docker buildx bake "${BAKE_FILES[@]}" --progress plain "${target}"
+        docker buildx bake \
+            "${BAKE_FILES[@]}" \
+            --progress "${BUILDKIT_PROGRESS:-plain}" \
+            "${target}"
         verify_dependency_cache_ref "${cache_ref}"
     done
 }
@@ -1807,7 +1826,10 @@ run_bake() {
     local build_rc=0
 
     echo "--- :docker: Building ${TARGET}"
-    docker buildx bake "${BAKE_FILES[@]}" --progress plain "${BAKE_TARGETS[@]}" || build_rc=$?
+    docker buildx bake \
+        "${BAKE_FILES[@]}" \
+        --progress "${BUILDKIT_PROGRESS:-plain}" \
+        "${BAKE_TARGETS[@]}" || build_rc=$?
 
     if [[ ${build_rc} -eq 0 ]]; then
         echo "--- :white_check_mark: Build complete"

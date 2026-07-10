@@ -25,6 +25,8 @@ pub enum Error {
     ValueDecode(#[from] rmpv::decode::Error),
     #[error("messagepack ext value decode failed: {message}")]
     ExtValueDecode { message: String },
+    #[error("invalid structured outputs params: {message}")]
+    InvalidStructuredOutputsParams { message: String },
     #[error("io error")]
     Io(#[from] std::io::Error),
     #[error("transport error")]

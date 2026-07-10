@@ -103,6 +103,12 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     )
     NO_ATTENTION = "vllm.v1.attention.backends.no_attention.NoAttentionBackend"
     FLEX_ATTENTION = "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
+    # HPC Attention Backend:
+    # powered by operators from https://github.com/Tencent/hpc-ops.
+    # Only supported on NVIDIA Hopper GPUs (e.g. H20, H200),
+    # currently limited to the Hy3 model,
+    # and requires a block size of 64.
+    HPC_ATTN = "vllm.v1.attention.backends.hpc_attn.HpcAttentionBackend"
     ROCM_AITER_UNIFIED_ATTN = (
         "vllm.v1.attention.backends.rocm_aiter_unified_attn."
         "RocmAiterUnifiedAttentionBackend"

@@ -4,7 +4,7 @@
 
 #include "scaled_mm.cuh"
 #include "cutlass_gemm_caller.cuh"
-#include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
+#include "libtorch_stable/cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 
 /**
  * This file defines Gemm kernel configurations for SM90 (fp8) based on the Gemm

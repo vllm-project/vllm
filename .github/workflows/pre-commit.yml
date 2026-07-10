@@ -28,7 +28,8 @@ jobs:
             pull_number: context.payload.pull_request.number,
           });
 
-          const hasReadyLabel = pr.labels.some(l => l.name === 'ready');
+          const readyLabels = ['ready', 'ready-run-all-tests'];
+          const hasReadyLabel = pr.labels.some(l => readyLabels.includes(l.name));
           const hasVerifiedLabel = pr.labels.some(l => l.name === 'verified');
 
           const { data: mergedPRs } = await github.rest.search.issuesAndPullRequests({
@@ -40,7 +41,7 @@ jobs:
           if (hasReadyLabel || hasVerifiedLabel || mergedCount >= 4) {
             core.info(`Check passed: verified label=${hasVerifiedLabel}, ready label=${hasReadyLabel}, 4+ merged PRs=${mergedCount >= 4}`);
           } else {
-            core.setFailed(`PR must have the 'verified' or 'ready' (which also triggers tests) label or the author must have at least 4 merged PRs (found ${mergedCount}).`);
+            core.setFailed(`PR must have the 'verified', 'ready', or 'ready-run-all-tests' label (the ready labels also trigger tests) or the author must have at least 4 merged PRs (found ${mergedCount}).`);
           }
 
   pre-commit:
@@ -48,7 +49,7 @@ jobs:
     if: always() && (needs.pre-run-check.result == 'success' || needs.pre-run-check.result == 'skipped')
     runs-on: [self-hosted, linux, x64, vllm-runners]
     steps:
-    - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
     - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
       with:
         python-version: "3.12"

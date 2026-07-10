@@ -8,7 +8,7 @@ use futures::stream::FusedStream;
 use futures::{Stream, StreamExt as _, pin_mut};
 use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::protocol::logprobs::Logprobs;
-use vllm_engine_core_client::protocol::{EngineCoreFinishReason, StopReason};
+use vllm_engine_core_client::protocol::output::{EngineCoreFinishReason, StopReason};
 use vllm_engine_core_client::{AbortCause, EngineCoreOutputStream};
 
 use crate::error::Result;
@@ -69,7 +69,7 @@ pub enum FinishReason {
     /// A retryable request-level internal error occurred.
     Error,
     /// A repetitive token pattern was detected.
-    Repetition,
+    Repetition(Option<StopReason>),
 }
 
 impl FinishReason {
@@ -87,7 +87,7 @@ impl FinishReason {
             Self::Length => "length",
             Self::Abort => "abort",
             Self::Error => "error",
-            Self::Repetition => "repetition",
+            Self::Repetition(_) => "repetition",
         }
     }
 
@@ -96,6 +96,7 @@ impl FinishReason {
     pub fn as_stop_reason(&self) -> Option<&StopReason> {
         match self {
             Self::Stop(stop_reason) => stop_reason.as_ref(),
+            Self::Repetition(stop_reason) => stop_reason.as_ref(),
             _ => None,
         }
     }
@@ -105,6 +106,7 @@ impl FinishReason {
     pub fn into_stop_reason(self) -> Option<StopReason> {
         match self {
             Self::Stop(stop_reason) => stop_reason,
+            Self::Repetition(stop_reason) => stop_reason,
             _ => None,
         }
     }
@@ -119,7 +121,7 @@ fn finish_reason_from_engine(
         EngineCoreFinishReason::Length => FinishReason::Length,
         EngineCoreFinishReason::Abort => FinishReason::Abort,
         EngineCoreFinishReason::Error => FinishReason::Error,
-        EngineCoreFinishReason::Repetition => FinishReason::Repetition,
+        EngineCoreFinishReason::Repetition => FinishReason::Repetition(stop_reason),
     })
 }
 
@@ -246,12 +248,7 @@ impl Stream for GenerateOutputStream {
         };
 
         let received_at = current_unix_timestamp_secs();
-        self.request_metrics.observe_output(
-            raw.engine_index,
-            raw.timestamp,
-            received_at,
-            &raw.output,
-        );
+        self.request_metrics.observe_output(raw.timestamp, received_at, &raw.output);
 
         let raw = raw.output;
 

@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: Sequence Parallel Correctness Tests (2 GPUs)
   key: sequence-parallel-correctness-tests-2-gpus
-  timeout_in_minutes: 50
+  timeout_in_minutes: 80
   working_dir: "/vllm-workspace/"
   num_devices: 2
   source_file_dependencies:
@@ -19,7 +19,7 @@ steps:
 
 - label: Sequence Parallel Correctness Tests (2xH100)
   key: sequence-parallel-correctness-tests-2xh100
-  timeout_in_minutes: 50
+  timeout_in_minutes: 75
   working_dir: "/vllm-workspace/"
   device: h100
   optional: true
@@ -30,7 +30,7 @@ steps:
 
 - label: AsyncTP Correctness Tests (2xH100)
   key: asynctp-correctness-tests-2xh100
-  timeout_in_minutes: 50
+  timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   device: h100
   optional: true
@@ -41,7 +41,7 @@ steps:
 
 - label: AsyncTP Correctness Tests (B200)
   key: asynctp-correctness-tests-b200
-  timeout_in_minutes: 50
+  timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   device: b200-k8s
   optional: true
@@ -52,7 +52,7 @@ steps:
 
 - label: Distributed Compile Unit Tests (2xH100)
   key: distributed-compile-unit-tests-2xh100
-  timeout_in_minutes: 20
+  timeout_in_minutes: 45
   working_dir: "/vllm-workspace/"
   device: h100
   num_devices: 2
@@ -66,7 +66,7 @@ steps:
 
 - label: Fusion and Compile Unit Tests (2xB200)
   key: fusion-and-compile-unit-tests-2xb200
-  timeout_in_minutes: 20
+  timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   device: b200-k8s
   source_file_dependencies:
@@ -96,7 +96,7 @@ steps:
 
 - label: Fusion E2E Quick (H100)
   key: fusion-e2e-quick-h100
-  timeout_in_minutes: 15
+  timeout_in_minutes: 25
   working_dir: "/vllm-workspace/"
   device: h100
   num_devices: 1
@@ -115,7 +115,7 @@ steps:
 
 - label: Fusion E2E Config Sweep (H100)
   key: fusion-e2e-config-sweep-h100
-  timeout_in_minutes: 30
+  timeout_in_minutes: 25
   working_dir: "/vllm-workspace/"
   device: h100
   num_devices: 1
@@ -149,7 +149,7 @@ steps:
 
 - label: Fusion E2E TP2 Quick (H100)
   key: fusion-e2e-tp2-quick-h100
-  timeout_in_minutes: 20
+  timeout_in_minutes: 35
   working_dir: "/vllm-workspace/"
   device: h100
   num_devices: 2
@@ -167,7 +167,7 @@ steps:
 
 - label: Fusion E2E TP2 AR-RMS Config Sweep (H100)
   key: fusion-e2e-tp2-ar-rms-config-sweep-h100
-  timeout_in_minutes: 40
+  timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   device: h100
   num_devices: 2
@@ -207,7 +207,7 @@ steps:
 
 - label: Fusion E2E TP2 (B200)
   key: fusion-e2e-tp2-b200
-  timeout_in_minutes: 20
+  timeout_in_minutes: 45
   working_dir: "/vllm-workspace/"
   device: b200-k8s
   num_devices: 2

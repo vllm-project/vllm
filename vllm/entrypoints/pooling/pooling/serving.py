@@ -9,7 +9,7 @@ from vllm.tasks import SupportedTask
 from vllm.utils.serial_utils import EmbedDType, Endianness
 
 from ..base.io_processor import PoolingIOProcessor
-from ..base.serving import PoolingServingBase
+from ..base.serving import PoolingBaseServing
 from ..factories import init_pooling_io_processors
 from ..typing import AnyPoolingRequest, PoolingServeContext
 from ..utils import (
@@ -30,7 +30,7 @@ from .protocol import (
 logger = init_logger(__name__)
 
 
-class ServingPooling(PoolingServingBase):
+class ServingPooling(PoolingBaseServing):
     request_id_prefix = "pooling"
 
     def __init__(
