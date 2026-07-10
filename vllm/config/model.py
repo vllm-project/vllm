@@ -21,7 +21,7 @@ from vllm.config.multimodal import (
     MultiModalConfig,
 )
 from vllm.config.pooler import PoolerConfig
-from vllm.config.quantization import OnlineQuantizationConfigArgs
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
@@ -41,12 +41,6 @@ from vllm.transformers_utils.config import (
     try_get_tokenizer_config,
     uses_mrope,
     uses_xdrope_dim,
-)
-from vllm.transformers_utils.gguf_utils import (
-    is_gguf,
-    is_remote_gguf,
-    maybe_patch_hf_config_from_gguf,
-    split_remote_gguf,
 )
 from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
@@ -75,10 +69,16 @@ else:
     me_models = LazyLoader("model_executor", globals(), "vllm.model_executor.models")
     LoadConfig = Any
     ParallelConfig = Any
-    QuantizationMethods = Any
+    QuantizationMethods = str
     LogitsProcessor = Any
 
 logger = init_logger(__name__)
+
+# Process-local record of which (arch, target) model-class overrides have been
+# registered in *this* process. Must not live on ModelConfig: that instance is
+# pickled to each worker, so an instance flag would arrive already "registered"
+# while the worker's own global ModelRegistry is still untouched.
+_REGISTERED_MODEL_CLASS_OVERRIDES: set[tuple[str, str]] = set()
 
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify"]
@@ -135,8 +135,12 @@ class ModelConfig:
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
-    - "qwen_vl" will always use the tokenizer from `qwen_vl`.
-    - Other custom values can be supported via plugins."""
+    - Other custom values can be supported via plugins.
+
+    To swap the Rust BPE backend that powers HF fast tokenizers for the
+    [fastokens](https://github.com/crusoecloud/fastokens) implementation, set
+    `VLLM_USE_FASTOKENS=1` instead — that override applies to any mode that
+    loads an HF fast tokenizer (`hf`, `deepseek_v32`, `deepseek_v4`, …)."""
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model
     and tokenizer."""
@@ -201,10 +205,11 @@ class ModelConfig:
     `quantization_config` attribute in the model config file. If that is
     `None`, we assume the model weights are not quantized and use `dtype` to
     determine the data type of the weights."""
-    quantization_config: dict[str, Any] | OnlineQuantizationConfigArgs | None = None
-    """Arguments for online quantization.
-    Auto-created when `quantization` equals to one of the string values of
-    the `OnlineQuantScheme` enum."""
+    quantization_config: dict[str, Any] | QuantizationConfigArgs | None = None
+    """User-facing quantization configuration. Carries per-layer-kind specs
+    (linear, moe) and ignore patterns; see :class:`QuantizationConfigArgs`.
+    Auto-populated from the matching online shorthand when `quantization` is
+    one of the values in `ONLINE_QUANT_SHORTHAND_NAMES`."""
     allow_deprecated_quantization: bool = False
     """Whether to allow deprecated quantization methods."""
     enforce_eager: bool = False
@@ -214,7 +219,7 @@ class ModelConfig:
     flexibility."""
     enable_return_routed_experts: bool = False
     """Whether to return routed experts."""
-    max_logprobs: int = 20
+    max_logprobs: int = Field(default=20, ge=-1)
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
     OpenAI Chat Completions API. -1 means no cap, i.e. all (output_length *
@@ -227,6 +232,11 @@ class ModelConfig:
     Processed means the values after applying all processors, including
     temperature and top_k/top_p.
     """
+    use_fp64_gumbel: bool = False
+    """Whether to use FP64 (instead of FP32) random noise for Gumbel-max and
+    equivalent exponential-race sampling. FP64 preserves lower-tail sampling
+    events that fp32 uniform/exponential draws can truncate, at the cost of
+    significantly lower throughput on most GPUs."""
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
@@ -270,6 +280,13 @@ class ModelConfig:
     hf_overrides: HfOverrides = field(default_factory=dict)
     """If a dictionary, contains arguments to be forwarded to the Hugging Face
     config. If a callable, it is called to update the HuggingFace config."""
+    model_class_overrides: dict[str, str] = field(default_factory=dict)
+    """Override the model class used for one or more architectures, mapping the
+    architecture name to a `"module:class"` target (the same format accepted by
+    `ModelRegistry.register_model`). This registers the target class at runtime,
+    e.g. `{"GlmMoeDsaForCausalLM":
+    "vllm.models.deepseek_v32.nvidia.model:DeepseekV32ForCausalLM"}`. This
+    argument is for development and debugging purposes only."""
     generation_config: str = "auto"
     """The folder path to the generation config. Defaults to `"auto"`, the
     generation config will be loaded from model path. If set to `"vllm"`, no
@@ -285,6 +302,18 @@ class ModelConfig:
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda and
     hip platforms are supported)."""
+    sleep_mode_backend: str = "cumem"
+    """Mechanism used to free and restore GPU state for sleep mode. ``"cumem"``
+    (default) uses the built-in ``CuMemAllocator`` and is behavior-compatible
+    with prior releases. Additional backends (CUDA checkpoint, CRIU, durable
+    snapshot) may be registered in-tree or by plugins (RFC #34303)."""
+    enable_cumem_allocator: bool = False
+    """Enable the custom cumem allocator to leverage advanced GPU memory
+    allocation features such as multi-node NVLink support.
+
+    Sleep mode automatically enables this allocator. Only cuda and hip
+    platforms are supported.
+    """
     model_impl: str | ModelImpl = "auto"
     """Which implementation of the model to use:
 
@@ -302,9 +331,15 @@ class ModelConfig:
     io_processor_plugin: str | None = None
     """IOProcessor plugin name to load at model startup"""
     renderer_num_workers: int = 1
-    """Number of worker threads in the renderer thread pool. This pool
-    handles async tokenization, chat template rendering, and multimodal
-    preprocessing."""
+    """Number of worker threads in the renderer thread pool. The pool is
+    consumed by the async renderer path (e.g. the OpenAI-compatible API
+    server started by `vllm serve`) to parallelize tokenization, chat
+    template rendering, and multimodal preprocessing across concurrent
+    requests.
+
+    The offline `LLM` entrypoint uses the synchronous renderer path and
+    processes prompts (including multimodal preprocessing) serially, so
+    this setting has no effect there."""
 
     # Pooler config
     pooler_config: PoolerConfig | None = None
@@ -334,6 +369,7 @@ class ModelConfig:
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
     mm_tensor_ipc: InitVar[MMTensorIPC] = None
+    mm_ipc_gpu_memory_gb: InitVar[float | None] = None
 
     def compute_hash(self) -> str:
         """
@@ -359,6 +395,7 @@ class ModelConfig:
             "spec_target_max_model_len",
             "enforce_eager",
             "logprobs_mode",
+            "use_fp64_gumbel",
             "disable_cascade_attn",
             "skip_tokenizer_init",
             "served_model_name",
@@ -379,6 +416,7 @@ class ModelConfig:
             "mm_encoder_tp_mode",
             "interleave_mm_strings",
             "skip_mm_profiling",
+            "mm_ipc_gpu_memory_gb",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
@@ -459,6 +497,7 @@ class ModelConfig:
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
         mm_tensor_ipc: MMTensorIPC,
+        mm_ipc_gpu_memory_gb: float | None,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(
@@ -499,8 +538,19 @@ class ModelConfig:
                 stacklevel=2,
             )
 
-        if self.enable_sleep_mode and not current_platform.is_sleep_mode_available():
-            raise ValueError("Sleep mode is not supported on current platform.")
+        if self.enable_sleep_mode:
+            if not current_platform.is_sleep_mode_available():
+                raise ValueError("Sleep mode is not supported on current platform.")
+            if current_platform.is_cuda_alike() and not self.enable_cumem_allocator:
+                logger.info_once(
+                    "Enabling cumem allocator because sleep mode requires it."
+                )
+                self.enable_cumem_allocator = True
+        if (
+            self.enable_cumem_allocator
+            and not current_platform.is_cumem_allocator_available()
+        ):
+            raise ValueError("cumem allocator is not supported on current platform.")
 
         hf_config = get_config(
             self.hf_config_path or self.model,
@@ -512,11 +562,6 @@ class ModelConfig:
             hf_overrides_fn=hf_overrides_fn,
             token=self.hf_token,
         )
-        hf_config = maybe_patch_hf_config_from_gguf(
-            self.model,
-            hf_config,
-        )
-
         self.hf_config = hf_config
         if dict_overrides:
             self._apply_dict_overrides(hf_config, dict_overrides)
@@ -535,11 +580,22 @@ class ModelConfig:
         is_generative_model = registry.is_text_generation_model(architectures, self)
         is_pooling_model = registry.is_pooling_model(architectures, self)
 
-        self.runner_type = self._get_runner_type(architectures, self.runner)
+        self.runner_type = self._get_runner_type(
+            architectures, self.runner, self.convert
+        )
         self.convert_type = self._get_convert_type(
             architectures, self.runner_type, self.convert
         )
 
+        if (
+            is_pooling_model
+            and not is_generative_model
+            and self.runner_type in ("draft", "generate")
+        ):
+            raise ValueError(
+                f"Embedding models do not support `--runner {self.runner_type}`. "
+                "Use `--runner pooling` or `--runner auto` for embedding models."
+            )
         if self.runner_type == "generate" and not is_generative_model:
             generate_converts = _RUNNER_CONVERTS["generate"]
             if self.convert_type not in generate_converts:
@@ -566,12 +622,8 @@ class ModelConfig:
         if self.tokenizer_mode == "auto":
             if self.model_impl == "terratorch":
                 self.tokenizer_mode = "terratorch"
-            elif arch == "Grok1ForCausalLM":
-                self.tokenizer_mode = "grok2"
             elif arch == "MoonshotKimiaForCausalLM":
                 self.tokenizer_mode = "kimi_audio"
-            elif arch == "QwenVLForConditionalGeneration":
-                self.tokenizer_mode = "qwen_vl"
             elif arch == "DeepseekV32ForCausalLM":
                 self.tokenizer_mode = "deepseek_v32"
             elif arch == "DeepseekV4ForCausalLM":
@@ -659,6 +711,7 @@ class ModelConfig:
                 skip_mm_profiling=skip_mm_profiling,
                 video_pruning_rate=video_pruning_rate,
                 mm_tensor_ipc=mm_tensor_ipc,
+                mm_ipc_gpu_memory_gb=mm_ipc_gpu_memory_gb,
             )
 
             mm_config_kwargs = {
@@ -679,14 +732,6 @@ class ModelConfig:
                     "--renderer-num-workers 1 (the default), or "
                     "disable the cache with --mm-processor-cache-gb 0."
                 )
-
-        # Multimodal GGUF models must use original repo for mm processing
-        if is_gguf(self.tokenizer) and self.is_multimodal_model:
-            raise ValueError(
-                "Loading a multimodal GGUF model needs to use original "
-                "tokenizer. Please specify the unquantized hf model's "
-                "repo name or path using the --tokenizer argument."
-            )
 
         if self.disable_sliding_window:
             # Set after get_and_verify_max_len to ensure that max_model_len
@@ -737,7 +782,7 @@ class ModelConfig:
                 f"{type(self.tokenizer).__name__}: {self.tokenizer!r}. "
                 "Please provide a valid tokenizer path or HuggingFace model ID."
             )
-        if not isinstance(self.max_model_len, int):
+        if not isinstance(self.max_model_len, int) or self.max_model_len < 1:
             raise ValueError(
                 f"max_model_len must be a positive integer, "
                 f"got {type(self.max_model_len).__name__}: {self.max_model_len!r}. "
@@ -780,7 +825,33 @@ class ModelConfig:
 
     @property
     def registry(self):
+        self._maybe_register_model_class_overrides()
         return me_models.ModelRegistry
+
+    def _maybe_register_model_class_overrides(self) -> None:
+        # Apply ``model_class_overrides`` here because this property is the
+        # single chokepoint through which every model-class inspect/resolve
+        # passes, in both the engine front-end and every worker process. The
+        # guard is process-local (see ``_REGISTERED_MODEL_CLASS_OVERRIDES``), so
+        # each worker re-registers into its own ModelRegistry exactly once
+        # rather than trusting a pickled-in instance flag.
+        if not self.model_class_overrides:
+            return
+        pending = [
+            (arch, target)
+            for arch, target in self.model_class_overrides.items()
+            if (arch, target) not in _REGISTERED_MODEL_CLASS_OVERRIDES
+        ]
+        if not pending:
+            return
+        logger.warning_once(
+            "Applying model_class_overrides %s. This is intended for "
+            "development/debugging.",
+            str(self.model_class_overrides),
+        )
+        for arch, target in pending:
+            me_models.ModelRegistry.register_model(arch, target)
+            _REGISTERED_MODEL_CLASS_OVERRIDES.add((arch, target))
 
     @property
     def architectures(self) -> list[str]:
@@ -834,16 +905,13 @@ class ModelConfig:
         if is_runai_obj_uri(tokenizer):
             object_storage_tokenizer = ObjectStorageModel(url=tokenizer)
             object_storage_tokenizer.pull_files(
-                model,
+                tokenizer,
                 ignore_pattern=["*.pt", "*.safetensors", "*.bin", "*.tensors", "*.pth"],
             )
             self.tokenizer = object_storage_tokenizer.dir
 
     def _get_encoder_config(self) -> dict[str, Any] | None:
-        model = self.model
-        if is_remote_gguf(model):
-            model, _ = split_remote_gguf(model)
-        return get_sentence_transformer_tokenizer_config(model, self.revision)
+        return get_sentence_transformer_tokenizer_config(self.model, self.revision)
 
     def _get_default_runner_type(
         self,
@@ -873,11 +941,15 @@ class ModelConfig:
         self,
         architectures: list[str],
         runner: RunnerOption,
+        convert: ConvertOption,
     ) -> RunnerType:
         if runner != "auto":
             return runner
 
-        runner_type = self._get_default_runner_type(architectures)
+        if convert in {"auto", "none"}:
+            runner_type = self._get_default_runner_type(architectures)
+        else:
+            runner_type = "pooling"
 
         # Don't log the most common case
         if runner_type != "generate":
@@ -955,22 +1027,25 @@ class ModelConfig:
             # `override_quantization_method` method) must be checked in order
             # of preference (this is particularly important for GPTQ).
             overrides = [
+                "auto_gptq",
+                "gptq",
                 "gptq_marlin",
+                "auto_awq",
+                "awq",
                 "awq_marlin",
                 "inc",
                 "moe_wna16",
                 "modelopt",
                 "modelopt_fp4",
                 "modelopt_mxfp8",
+                "mxfp8",
                 "modelopt_mixed",
                 # Ensure heavy backends are probed last to avoid unnecessary
                 # imports during override detection (e.g., MXFP4 imports Triton)
                 "mxfp4",
                 "gpt_oss_mxfp4",
                 "deepseek_v4_fp8",
-                "cpu_awq",
                 "humming",
-                "gguf",
             ]
             # if the user specifies humming, we should always use humming
             if self.quantization == "humming":
@@ -1217,9 +1292,13 @@ class ModelConfig:
     def is_deepseek_mla(self) -> bool:
         return self.model_arch_config.is_deepseek_mla
 
-    @property
+    @cached_property
     def is_mm_prefix_lm(self) -> bool:
         return self.model_arch_config.is_mm_prefix_lm
+
+    @property
+    def rswa_window(self) -> int | None:
+        return self.model_arch_config.rswa_window
 
     def get_head_size(self) -> int:
         return self.model_arch_config.head_size
@@ -1340,7 +1419,7 @@ class ModelConfig:
                 )
             raise AssertionError(f"Unsupported block type: {block_type}")
 
-    def get_mamba_chunk_size(self) -> int | None:
+    def get_mamba_chunk_size(self) -> int:
         """
         Returns the mamba chunk size if it exists
         """
@@ -1351,7 +1430,7 @@ class ModelConfig:
             chunk_size = getattr(self.hf_text_config, "chunk_size", None)
 
         # Since Mamba1 does not have a chunk notion
-        # we use a default chunk size of 1024.
+        # we use a default chunk size of 2048.
         if chunk_size is None:
             chunk_size = 2048
 
@@ -1496,6 +1575,11 @@ class ModelConfig:
     def is_encoder_decoder(self) -> bool:
         """Extract the HF encoder/decoder model flag."""
         return is_encoder_decoder(self.hf_config)
+
+    @cached_property
+    def is_diffusion(self) -> bool:
+        """Detect discrete diffusion (dLLM) models from HF config."""
+        return getattr(self.hf_config, "canvas_length", None) is not None
 
     @property
     def uses_alibi(self) -> bool:

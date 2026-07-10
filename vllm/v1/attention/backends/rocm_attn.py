@@ -29,6 +29,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode,
+    has_native_kv_cache_layout,
 )
 from vllm.v1.attention.ops.paged_attn import PagedAttention
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
@@ -207,6 +208,12 @@ class RocmAttentionBackend(AttentionBackend):
     def supports_non_causal(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_kv_connector(cls) -> bool:
+        # ROCM_ATTN uses (2, num_blocks, ...) KV cache layout which is
+        # incompatible with KV connectors that require blocks-first layout.
+        return False
+
     forward_includes_kv_cache_update: bool = False
 
     @staticmethod
@@ -281,6 +288,8 @@ class RocmAttentionImpl(AttentionImpl):
         self.alibi_slopes = alibi_slopes
         if sliding_window is None:
             self.sliding_window = (-1, -1)
+        elif attn_type in (AttentionType.ENCODER, AttentionType.ENCODER_ONLY):
+            self.sliding_window = (sliding_window - 1, sliding_window - 1)
         else:
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
@@ -347,6 +356,7 @@ class RocmAttentionImpl(AttentionImpl):
             softmax_scale=self.scale,
             sliding_window_q=self.sliding_window[0],
             sliding_window_k=self.sliding_window[1],
+            sinks=self.sinks,
         )
         return output
 
@@ -414,9 +424,13 @@ class RocmAttentionImpl(AttentionImpl):
         if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
-            assert layer._q_scale_float == 1.0, (
-                "A non 1.0 q_scale is not currently supported."
-            )
+            # q_scale only applies to an fp8 query; this path keeps the query
+            # in full precision, so a non-1.0 q_scale is not applicable here.
+            if query.dtype == self.fp8_dtype and layer._q_scale_float != 1.0:
+                raise NotImplementedError(
+                    "A non 1.0 q_scale with an fp8 query is not currently "
+                    "supported by RocmAttentionImpl."
+                )
 
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
@@ -468,9 +482,10 @@ class RocmAttentionImpl(AttentionImpl):
         # Get the actual block_size from value_cache
         # value_cache shape: [num_blocks, num_heads, head_size, block_size]
         block_size = value_cache.shape[3]
+        has_native_layout = has_native_kv_cache_layout(key_cache, value_cache)
 
-        if block_size in (16, 32):
-            # Normal 16, 32, use vLLM native HIP C++ logic
+        if block_size in (16, 32) and has_native_layout:
+            # Normal 16, 32 with contiguous blocks: use vLLM native HIP C++ logic.
             PagedAttention.write_to_paged_cache(
                 key,
                 value,
@@ -482,8 +497,10 @@ class RocmAttentionImpl(AttentionImpl):
                 layer._v_scale,
             )
         else:
-            # Case B: Non-standard blocks (e.g., 64, 128, 544 in Qwen3Next or Qwen3.5 ),
-            # force using our modified Triton logic
+            # Non-standard blocks and hybrid attention/Mamba layouts need the
+            # stride-aware Triton writer. The native reshape_and_cache kernel
+            # assumes contiguous block storage and writes to the wrong hybrid
+            # cache blocks.
             triton_reshape_and_cache_flash(
                 key,
                 value,
