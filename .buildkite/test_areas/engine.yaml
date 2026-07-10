@@ -158,3 +158,23 @@ steps:
     - tests/v1/e2e/test_hybrid_chunked_prefill.py
   commands:
     - pytest -v -s v1/e2e/test_hybrid_chunked_prefill.py
+
+- label: Hybrid Mamba prefix cache correctness (4xH200)
+  key: v1-e2e-hybrid-mamba-prefix-cache-4xh200
+  # Two e2e tests x two engine boots each, incl. a 120B BF16 TP4 model
+  # (~240 GB weights: needs 141 GB/GPU H200-class capacity; validated on
+  # GB200 — 4x80GB H100 would leave no headroom at gpu_mem_util=0.8).
+  # --runxfail: both tests are xfail(raises=CorruptionDetected) while
+  # #43559 is unfixed; this optional (non-gating) step surfaces the live
+  # corruption as a red dashboard instead of hiding it in XFAIL counts.
+  # Drop --runxfail together with the markers once a fix merges.
+  timeout_in_minutes: 240
+  device: h200
+  num_devices: 4
+  optional: true
+  source_file_dependencies:
+    - vllm/v1/core/
+    - vllm/v1/worker/gpu_model_runner.py
+    - tests/v1/e2e/test_hybrid_mamba_prefix_cache_correctness.py
+  commands:
+    - pytest -v -s --runxfail -rA v1/e2e/test_hybrid_mamba_prefix_cache_correctness.py
