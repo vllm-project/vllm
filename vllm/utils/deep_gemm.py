@@ -603,6 +603,13 @@ def fp8_fp4_paged_mqa_logits(
     _lazy_init()
     if _fp8_fp4_paged_mqa_logits_impl is None:
         return _missing()
+    # DeepGEMM asserts block_tables.stride(-1)==1. A trailing size-1 dim
+    # (e.g. block_table shape [B,1] for short seqs under a large block_size)
+    # can be a transposed view where .contiguous() is a no-op (torch treats the
+    # size-1 dim's stride as irrelevant) yet stride(-1)!=1, failing the kernel.
+    # clone to contiguous format to force stride(-1)==1.
+    if block_tables.dim() >= 2 and block_tables.stride(-1) != 1:
+        block_tables = block_tables.clone(memory_format=torch.contiguous_format)
     return _fp8_fp4_paged_mqa_logits_impl(
         q,
         kv_cache,
