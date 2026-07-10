@@ -1881,11 +1881,8 @@ class ModelConfig:
         else:
             # for generative models
             if attn_type == "hybrid":
-                logger.debug(
-                    "Hybrid models do not support prefix caching since the feature "
-                    "is still experimental."
-                )
-                return False
+                logger.debug("Generative hybrid models support prefix caching.")
+                return True
             elif attn_type == "attention_free":
                 logger.debug(
                     "Attention free models do not support prefix caching since the "

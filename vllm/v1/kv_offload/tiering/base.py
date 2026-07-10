@@ -13,6 +13,7 @@ import numpy as np
 
 from vllm.v1.kv_offload.base import (
     LookupResult,
+    OffloadingEvent,
     OffloadingMetricMetadata,
     OffloadKey,
     ReqContext,
@@ -207,6 +208,10 @@ class SecondaryTierManager(ABC):
         to be called even when no requests are scheduled.
         """
         return False
+
+    def take_events(self) -> Iterable[OffloadingEvent]:
+        """Take KV events for storage state owned by this tier."""
+        return ()
 
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """
