@@ -2121,7 +2121,7 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
         worker.shutdown()
         worker.shutdown()
 
-        mock_exec.shutdown.assert_called_with(wait=False)
+        mock_exec.shutdown.assert_called_with(wait=False, cancel_futures=True)
 
         # Same sequence on scheduler.shutdown()
         scheduler.shutdown()
@@ -2636,6 +2636,172 @@ def test_transfer_setup_failure_returns_finished(default_vllm_config, dist_init)
     # ensure request appears in get_finished
     _, done_recving = connector.get_finished(finished_req_ids=set())
     assert request_id in done_recving
+
+
+class _ScriptedXferWrapper(FakeNixlWrapper):
+    """Scripts per-handle xfer states; forbids releasing in-flight handles."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # handle -> successive states; the last one repeats.
+        self.xfer_states: dict[int, list[str]] = {}
+        self.released: list[int] = []
+
+    def check_xfer_state(self, handle: int) -> str:
+        states = self.xfer_states[handle]
+        return states.pop(0) if len(states) > 1 else states[0]
+
+    def release_xfer_handle(self, handle: int) -> None:
+        # A posted-but-unfinished transfer cannot be aborted: releasing it
+        # leaves the RDMA READ armed. Production code must never do this.
+        assert self.xfer_states.get(handle, ["DONE"])[0] != "PROC", (
+            f"released in-flight handle {handle}"
+        )
+        self.released.append(handle)
+
+
+def _make_split_read_worker(worker, request_id, states):
+    """Seed a request with scripted in-flight xfer handles + recv metadata."""
+    wrapper = _ScriptedXferWrapper("agent")
+    worker.nixl_wrapper = wrapper
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id=request_id,
+        local_block_ids=([7, 8, 9],),
+        kv_transfer_params={
+            "remote_block_ids": ([10, 11, 12],),
+            "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            "remote_request_id": f"prefill-{request_id}",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "remote_tp_size": 1,
+        },
+    )
+    worker._recving_metadata[request_id] = metadata.reqs_to_recv[request_id]
+    wrapper.xfer_states = dict(states)
+    worker._recving_transfers[request_id] = list(states)
+    return wrapper
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_split_read_failure_defers_report_until_last_handle(
+    default_vllm_config, dist_init
+):
+    """One half of a split (mixed DRAM/VRAM) read failing must not report the
+    request — nor invalidate its blocks — while the sibling xfer is still in
+    flight: a posted READ cannot be aborted and would DMA into blocks the
+    scheduler could free and reuse. The report happens exactly once, when the
+    last handle is terminal."""
+    vllm_config = create_vllm_config()
+    connector = NixlConnector(
+        vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
+    connector.connector_worker = FakeNixlConnectorWorker(
+        vllm_config, connector.engine_id, hand_shake_latency=0
+    )
+    worker = connector.connector_worker
+    request_id = "split_read_partial_failure"
+    err_handle, live_handle = 11, 22
+    wrapper = _make_split_read_worker(
+        worker,
+        request_id,
+        {err_handle: ["ERR"], live_handle: ["PROC", "PROC", "DONE"]},
+    )
+
+    # Poll 1: one half fails; the sibling is in flight -> nothing reported.
+    _, done_recving = connector.get_finished(finished_req_ids=set())
+    assert done_recving == set()
+    assert connector.get_block_ids_with_load_errors() == set()
+    assert request_id in worker._recving_metadata
+    assert wrapper.released == [err_handle]
+
+    # Poll 2: sibling still in flight.
+    _, done_recving = connector.get_finished(finished_req_ids=set())
+    assert done_recving == set()
+
+    # Poll 3: sibling terminal -> reported exactly once, blocks invalidated.
+    _, done_recving = connector.get_finished(finished_req_ids=set())
+    assert done_recving == {request_id}
+    assert connector.get_block_ids_with_load_errors() == {7, 8, 9}
+    assert request_id not in worker._recving_metadata
+    assert wrapper.released == [err_handle, live_handle]
+
+    # Poll 4: nothing left; no double report.
+    _, done_recving = connector.get_finished(finished_req_ids=set())
+    assert done_recving == set()
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_split_read_halves_fail_in_different_polls(default_vllm_config, dist_init):
+    """Both halves of a split read failing in different poll cycles must
+    produce exactly one failure report."""
+    vllm_config = create_vllm_config()
+    connector = NixlConnector(
+        vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
+    connector.connector_worker = FakeNixlConnectorWorker(
+        vllm_config, connector.engine_id, hand_shake_latency=0
+    )
+    worker = connector.connector_worker
+    request_id = "split_read_both_fail"
+    _make_split_read_worker(
+        worker,
+        request_id,
+        {31: ["ERR"], 32: ["PROC", "ERR"]},
+    )
+
+    _, done_recving = connector.get_finished(finished_req_ids=set())
+    assert done_recving == set()
+
+    _, done_recving = connector.get_finished(finished_req_ids=set())
+    assert done_recving == {request_id}
+    assert connector.get_block_ids_with_load_errors() == {7, 8, 9}
+
+    _, done_recving = connector.get_finished(finished_req_ids=set())
+    assert done_recving == set()
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_setup_failure_with_inflight_sibling_defers_report(
+    default_vllm_config, dist_init
+):
+    """A setup failure (second half never posted) while the first half is in
+    flight defers the report until the in-flight half is terminal; repeated
+    failure events for the same request report it only once."""
+    vllm_config = create_vllm_config()
+    connector = NixlConnector(
+        vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
+    connector.connector_worker = FakeNixlConnectorWorker(
+        vllm_config, connector.engine_id, hand_shake_latency=0
+    )
+    worker = connector.connector_worker
+    request_id = "split_read_setup_failure"
+    _make_split_read_worker(worker, request_id, {41: ["PROC", "DONE"]})
+
+    # The mixed-read setup path fails after the first half started.
+    worker._handle_failed_transfer(request_id, None)
+    worker._handle_failed_transfer(request_id, None)  # duplicate event
+
+    _, done_recving = connector.get_finished(finished_req_ids=set())
+    assert done_recving == set()
+    assert connector.get_block_ids_with_load_errors() == set()
+
+    _, done_recving = connector.get_finished(finished_req_ids=set())
+    assert done_recving == {request_id}
+    assert connector.get_block_ids_with_load_errors() == {7, 8, 9}
+
+    _, done_recving = connector.get_finished(finished_req_ids=set())
+    assert done_recving == set()
 
 
 @patch(

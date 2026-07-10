@@ -452,6 +452,16 @@ __device__ void large_topk(const float* __restrict__ row_input,
   if (rank != 0) {  // only rank 0 does tie refinement
     return;
   }
+  // Ties beyond the per-block collect cap (kMaxTies) are dropped at scatter,
+  // so the written candidate total can fall short of TopK even though the
+  // threshold bin guarantees enough true candidates. Pad the unwritten tail
+  // with -1 ("no token"): consumers read all TopK slots, and a slot left
+  // holding the previous step's index page-translates to a garbage KV row
+  // (wrong-row gather or illegal memory access downstream).
+  for (uint32_t i = s_total_above + s_total_equal + tx; i < TopK;
+       i += hist4096::kBlockSize) {
+    row_output[i] = -1u;
+  }
   if (s_total_above + s_total_equal <= TopK) {  // no ties to refine
     return;
   }

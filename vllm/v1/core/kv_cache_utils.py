@@ -1337,6 +1337,64 @@ def _get_kv_cache_config_packed(
     return num_blocks, kv_cache_tensors
 
 
+def _is_hisparse_host_layer(layer_name: str) -> bool:
+    """Whether a layer's KV tensor moves to pinned host memory."""
+    return ".indexer" not in layer_name
+
+
+def _hisparse_host_pool_bytes(vllm_config: VllmConfig) -> int | None:
+    """Per-rank pinned host budget for HiSparse host-resident KV.
+
+    ``host_pool_gib`` is parsed and validated by
+    ``HiSparseConfig.from_vllm_config`` -- the single source of truth shared
+    with the per-layer coordinator -- so sizing here cannot drift from the
+    decode path.
+    """
+    from vllm.v1.attention.backends.mla.hisparse import HiSparseConfig
+
+    if vllm_config.attention_config.hisparse_config is None:
+        return None
+    config = HiSparseConfig.from_vllm_config(
+        vllm_config, vllm_config.model_config.hf_config.index_topk
+    )
+    assert config is not None
+    return int(config.host_pool_gib * 2**30)
+
+
+def _hisparse_gpu_host_usage_split(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> tuple[int, int] | None:
+    """(gpu_bytes, host_bytes) for one max_model_len request when HiSparse
+    host residency applies to this group layout, else None.
+
+    Host-resident MLA layers are budgeted against the pinned host pool (see
+    ``get_kv_cache_config_from_groups``), so admission and auto-fit must not
+    count their bytes against GPU memory.
+    """
+    if vllm_config.attention_config.hisparse_config is None:
+        return None
+    if not (
+        len(kv_cache_groups) == 1
+        and isinstance(kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs)
+    ):
+        return None
+    per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
+    host_bytes = sum(
+        spec.max_memory_usage_bytes(vllm_config)
+        for name, spec in per_layer_specs.items()
+        if _is_hisparse_host_layer(name)
+    )
+    if host_bytes == 0:
+        return None
+    gpu_bytes = sum(
+        spec.max_memory_usage_bytes(vllm_config)
+        for name, spec in per_layer_specs.items()
+        if not _is_hisparse_host_layer(name)
+    )
+    return gpu_bytes, host_bytes
+
+
 def get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
@@ -1369,10 +1427,66 @@ def get_kv_cache_config_from_groups(
         # Special case: all layers have the same type of KV cache but with
         # different hidden sizes. Allocate different amount of memory for each
         # layer based on its hidden size.
-        num_blocks = (
-            available_memory // kv_cache_groups[0].kv_cache_spec.page_size_bytes
-        )
-        num_blocks = may_override_num_blocks(vllm_config, num_blocks)
+        hisparse_host_budget = _hisparse_host_pool_bytes(vllm_config)
+        if hisparse_host_budget is not None:
+            specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
+            host_page = sum(
+                spec.page_size_bytes
+                for name, spec in specs.items()
+                if _is_hisparse_host_layer(name)
+            )
+            gpu_page = sum(
+                spec.page_size_bytes
+                for name, spec in specs.items()
+                if not _is_hisparse_host_layer(name)
+            )
+            assert host_page > 0, "HiSparse host-resident mode requires MLA KV layers."
+            num_blocks = hisparse_host_budget // host_page
+            if gpu_page > 0:
+                num_blocks = min(num_blocks, available_memory // gpu_page)
+            num_blocks = may_override_num_blocks(vllm_config, num_blocks)
+            if num_blocks <= 0:
+                raise ValueError(
+                    "HiSparse host-resident KV has no allocatable blocks. "
+                    f"host_budget={hisparse_host_budget / 2**30:.2f} GiB, "
+                    f"host_page={host_page / 2**20:.2f} MiB, "
+                    f"gpu_page={gpu_page / 2**20:.2f} MiB."
+                )
+            # Derive the requirement from the spec so rounding and context-
+            # parallel sharding cannot disagree with the fits()/admission
+            # checks (max_memory_usage_bytes divides by dcp*pcp per rank).
+            # Skip when num_blocks was forced (num_gpu_blocks_override): the
+            # CUDA-graph profiling path builds a deliberately minimal config,
+            # and an explicit operator override owns its own sizing.
+            group_spec = kv_cache_groups[0].kv_cache_spec
+            max_len_blocks = cdiv(
+                group_spec.max_memory_usage_bytes(vllm_config),
+                group_spec.page_size_bytes,
+            )
+            override = vllm_config.cache_config.num_gpu_blocks_override
+            if override is None and max_len_blocks > num_blocks:
+                raise ValueError(
+                    "HiSparse host-resident KV cannot hold one max_model_len "
+                    f"({vllm_config.model_config.max_model_len}) request: it "
+                    f"needs {max_len_blocks} blocks but only {num_blocks} fit "
+                    f"(host budget {hisparse_host_budget / 2**30:.1f} GiB, "
+                    f"GPU indexer budget {available_memory / 2**30:.1f} "
+                    "GiB). Raise hisparse_config.host_pool_gib / GPU "
+                    "memory, or lower max_model_len."
+                )
+            logger.info(
+                "HiSparse host-resident KV: %.1f GiB pinned host per rank for "
+                "MLA layers, %.1f GiB GPU for indexer layers (%d logical "
+                "blocks).",
+                num_blocks * host_page / 2**30,
+                num_blocks * gpu_page / 2**30,
+                num_blocks,
+            )
+        else:
+            num_blocks = (
+                available_memory // kv_cache_groups[0].kv_cache_spec.page_size_bytes
+            )
+            num_blocks = may_override_num_blocks(vllm_config, num_blocks)
         per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
         kv_cache_tensors = [
             KVCacheTensor(
@@ -1829,6 +1943,12 @@ def _max_memory_usage_bytes_from_groups(
         kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
     ):
         # UniformTypeKVCacheSpecs special case (single group, per-layer specs)
+        split = _hisparse_gpu_host_usage_split(vllm_config, kv_cache_groups)
+        if split is not None:
+            # Only GPU-resident (indexer) layers count against GPU memory;
+            # the host part is validated against the pinned host budget in
+            # get_kv_cache_config_from_groups and _estimate_max_model_len.
+            return split[0]
         per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
         return sum(
             spec.max_memory_usage_bytes(vllm_config)
@@ -1884,9 +2004,19 @@ def _estimate_max_model_len_from_groups(
     Returns 0 if even 1 token doesn't fit.
     """
     original_max = vllm_config.model_config.max_model_len
+    hisparse_host_budget = (
+        _hisparse_host_pool_bytes(vllm_config)
+        if _hisparse_gpu_host_usage_split(vllm_config, kv_cache_groups) is not None
+        else None
+    )
 
     def fits(model_len: int) -> bool:
         vllm_config.model_config.max_model_len = model_len
+        if hisparse_host_budget is not None:
+            split = _hisparse_gpu_host_usage_split(vllm_config, kv_cache_groups)
+            assert split is not None
+            gpu_bytes, host_bytes = split
+            return gpu_bytes <= available_memory and host_bytes <= hisparse_host_budget
         return (
             _max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
             <= available_memory

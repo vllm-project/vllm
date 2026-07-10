@@ -433,6 +433,31 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
+    # Raw PTX (ld.global.nc / st.global.cg) in the row copy: CUDA-only.
+    # The op declarations and registrations are guarded by USE_ROCM.
+    list(APPEND VLLM_STABLE_EXT_SRC
+      "csrc/libtorch_stable/hisparse_kernels.cu")
+  endif()
+
+  if(VLLM_GPU_LANG STREQUAL "CUDA" AND
+     DEFINED CMAKE_CUDA_COMPILER_VERSION AND
+     CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.0)
+
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+      cuda_archs_loose_intersection(COOPERATIVE_TOPK_ARCHS
+        "9.0a;10.0f;10.1f;10.3f;11.0f;12.0f;12.1f" "${CUDA_ARCHS}")
+    else()
+      cuda_archs_loose_intersection(COOPERATIVE_TOPK_ARCHS
+        "9.0a;10.0a;10.1a;10.3a;12.0a;12.1a" "${CUDA_ARCHS}")
+    endif()
+
+    if(COOPERATIVE_TOPK_ARCHS)
+      list(APPEND VLLM_GPU_FLAGS "-DVLLM_ENABLE_COOPERATIVE_TOPK=1")
+
+    endif()
+  endif()
+
+  if(VLLM_GPU_LANG STREQUAL "CUDA")
     SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
     # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.

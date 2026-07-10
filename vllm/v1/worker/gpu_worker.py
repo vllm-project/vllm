@@ -1300,8 +1300,18 @@ class Worker(WorkerBase):
         gc.unfreeze()
 
         # has_kv_transfer_group can be None during interpreter shutdown.
+        # Ordering invariant: KV-transfer shutdown (NIXL MR deregister,
+        # mooncake store close) must run before model_runner.shutdown()
+        # unpins the HiSparse host pool those registrations cover. A failure
+        # here (e.g. releasing an in-progress transfer handle against a dead
+        # peer) must not skip the unpin, so tolerate and log it.
         if ensure_kv_transfer_shutdown is not None:
-            ensure_kv_transfer_shutdown()
+            try:
+                ensure_kv_transfer_shutdown()
+            except Exception:
+                logger.exception(
+                    "KV-transfer shutdown failed; continuing worker teardown."
+                )
         if ensure_ec_transfer_shutdown is not None:
             ensure_ec_transfer_shutdown()
         if self.profiler is not None:

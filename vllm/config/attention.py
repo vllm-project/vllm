@@ -68,6 +68,13 @@ class AttentionConfig:
     """Data type for the sparse-attention indexer K cache. Quantized formats
     (fp8, mxfp4, nvfp4) require indexer kernel support in the backend."""
 
+    hisparse_config: dict[str, Any] | None = None
+    """Setting this enables experimental HiSparse sparse-MLA decode
+    hot-buffering (host-resident KV). host_pool_gib (required) sets the
+    per-rank pinned host pool size in GiB; device_buffer_size (optional,
+    default 2x the model's index_topk) sets the per-request GPU hot-buffer
+    rows."""
+
     use_non_causal: bool = False
     """Whether to use non-causal (bidirectional) attention."""
 

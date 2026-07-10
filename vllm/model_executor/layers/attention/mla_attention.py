@@ -343,6 +343,13 @@ def _canonicalize_sparse_mla_kv_cache_dtype(
     return kv_cache_dtype
 
 
+def _prepare_hisparse_for_batch(impl, attn_metadata) -> None:
+    """Let a HiSparse-capable impl classify the batch before the KV update."""
+    prepare = getattr(impl, "prepare_hisparse_for_batch", None)
+    if prepare is not None:
+        prepare(attn_metadata)
+
+
 class MLAAttention(nn.Module, AttentionLayerBase):
     """Multi-Head Latent Attention layer.
 
@@ -622,6 +629,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             assert isinstance(slot_mapping, dict), (
                 f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
             )
+            _prepare_hisparse_for_batch(self.impl, attn_metadata)
             layer_slot_mapping = slot_mapping.get(self.layer_name)
             kv_for_cache, kpe_for_cache, layer_slot_mapping = (
                 maybe_gather_mla_latent_cache_inputs(
@@ -1164,6 +1172,7 @@ def unified_mla_kv_cache_update(
         layer_name
     )
     if layer_slot_mapping is not None:
+        _prepare_hisparse_for_batch(attn_layer.impl, attn_metadata)
         kv_c_normed, k_pe, layer_slot_mapping = maybe_gather_mla_latent_cache_inputs(
             kv_c_normed,
             k_pe,
