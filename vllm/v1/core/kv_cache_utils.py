@@ -736,6 +736,31 @@ def get_request_block_hasher(
             request.block_hashes[-1] if request.block_hashes else None
         )
         new_block_hashes: list[BlockHash] = []
+
+        if (
+            not request.mm_features
+            and request.lora_request is None
+            and not request.cache_salt
+            and request.prompt_embeds is None
+        ):
+            token_ids = request.all_token_ids
+            while True:
+                end_token_idx = start_token_idx + hash_block_size
+                if end_token_idx > num_tokens:
+                    break
+
+                block_hash = hash_block_tokens(
+                    caching_hash_fn,
+                    prev_block_hash_value,
+                    token_ids[start_token_idx:end_token_idx],
+                    extra_keys=None,
+                )
+                new_block_hashes.append(block_hash)
+                start_token_idx = end_token_idx
+                prev_block_hash_value = block_hash
+
+            return new_block_hashes
+
         while True:
             end_token_idx = start_token_idx + hash_block_size
             if end_token_idx > num_tokens:
