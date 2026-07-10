@@ -488,6 +488,7 @@ def _run_eagle_correctness(
 
 
 @single_gpu_only
+@large_gpu_mark(min_gb=24)
 @pytest.mark.skipif(
     current_platform.is_device_capability_family(100),
     reason="DeepSeek head_dim=192 not supported on SM100/SM110 (Blackwell)",
