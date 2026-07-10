@@ -39,11 +39,9 @@ class SimulatedCPUModelRunner(CPUModelRunner):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._simulated_token_ids_by_req: dict[str, list[int] | None] = {}
-        self._total_len_by_req: dict[str, int] = {}
 
     def _remove_request(self, req_id: str) -> bool:
         self._simulated_token_ids_by_req.pop(req_id, None)
-        self._total_len_by_req.pop(req_id, None)
         return super()._remove_request(req_id)
 
     def add_requests(self, scheduler_output: "SchedulerOutput") -> None:
@@ -56,7 +54,6 @@ class SimulatedCPUModelRunner(CPUModelRunner):
         assert new_req_data.prefill_token_ids is not None
         req_id = new_req_data.req_id
         sampling_params = new_req_data.sampling_params
-        self._total_len_by_req[req_id] = len(new_req_data.prefill_token_ids)
         extra_args = sampling_params.extra_args if sampling_params else None
         token_ids = (
             None if extra_args is None else extra_args.get("simulated_output_token_ids")
@@ -142,7 +139,7 @@ class SimulatedCPUModelRunner(CPUModelRunner):
         if not sampled_ids:
             return
 
-        start_idx = self._total_len_by_req[req_id]
+        start_idx = int(self.req_states.total_len.gpu[req_index])
         end_idx = start_idx + len(sampled_ids)
         if end_idx > self.max_model_len:
             raise ValueError(
@@ -151,14 +148,15 @@ class SimulatedCPUModelRunner(CPUModelRunner):
                 f"{self.max_model_len}"
             )
 
-        self._total_len_by_req[req_id] = end_idx
+        self.req_states.total_len.gpu[req_index] = end_idx
         self.req_states.last_sampled_tokens[req_index, 0] = sampled_ids[-1]
 
     def _next_simulated_token_id(self, req_id: str) -> int:
         req_index = self.req_states.req_id_to_index[req_id]
         token_ids = self._simulated_token_ids_by_req[req_id]
         output_idx = int(
-            self._total_len_by_req[req_id] - self.req_states.prompt_len.np[req_index]
+            self.req_states.total_len.gpu[req_index]
+            - self.req_states.prompt_len.np[req_index]
         )
         if isinstance(token_ids, list) and output_idx < len(token_ids):
             return int(token_ids[output_idx])
