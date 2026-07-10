@@ -70,6 +70,42 @@ Same image, but with the full serving setup (froggeric chat template,
 (First request after container start pays ~34 s JIT warmup instead of
 0.09 s TTFT when the Triton/compile cache volumes are cold.)
 
+## GGUF Q6_K — TP=2 on 2× RTX 3080 only (19000 MiB/rank, 5090 removed)
+
+Same image and serving config (froggeric template, MTP, fp8 KV), but the
+5090 was detached from the host driver — pure dual-3080 setup, one rank per
+card, no MPS/co-location involved.
+
+- max_model_len: **184000** (auto-fit: 184000)
+- KV cache: 3.39 GiB/rank, capacity 184,000 tokens
+- MTP acceptance over the whole suite: **52.4 %** (mean acceptance
+  length 2.57, 4,464 drafted)
+
+| Test | Prompt | Gen | TTFT | Prefill t/s | Decode t/s |
+|---|---|---|---|---|---|
+| Prose 800 | 48 | 800 | 0.18 s | 273 | 32.0 |
+| Code 800 | 50 | 800 | 0.22 s | 225 | 59.4 |
+| Prefill 5k | 6412 | 60 | 5.46 s | 1175 | 45.2 |
+| Prefill 15k | 19700 | 60 | 17.15 s | 1148 | 46.4 |
+| Prefill 50k | 66000 | 60 | 67.65 s | 976 | 36.4 |
+| Prefill 100k | 134236 | 60 | 169.18 s | 793 | 39.8 |
+
+| Multiturn | Context | TTFT | New-prefill t/s | Decode t/s |
+|---|---|---|---|---|
+| Turn 1 | 16820 | 15.49 s | 1086 | 35.3 |
+| Turn 2 | 33634 | 19.88 s | 846 | 37.5 |
+| Turn 3 | 50451 | 20.55 s | 819 | 37.9 |
+| Turn 4 | 67270 | 23.11 s | 728 | 37.3 |
+| Turn 5 | 84091 | 24.40 s | 689 | 38.8 |
+
+> **8× parallel: OOM.** 19000 MiB/rank leaves no headroom for the
+> activation buffers of 8 concurrent requests on 20 GB cards — the server
+> crashed with CUDA OOM at the start of the parallel group. For concurrent
+> serving on this setup use a lower per-rank budget (≤ ~18000 MiB) or fewer
+> concurrent slots. Compared to the mixed TP=4 setup with the 5090, this
+> config reaches roughly 55–70 % of the decode speed and 184k instead of
+> 262k context.
+
 ## GGUF Q4_K_M (heretic-v2)
 
 - max_model_len: **262144** (auto-fit: no limit, full 262144)
