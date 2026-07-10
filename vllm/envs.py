@@ -176,6 +176,7 @@ if TYPE_CHECKING:
     VLLM_TPU_MOST_MODEL_LEN: int | None = None
     VLLM_TPU_USING_PATHWAYS: bool = False
     VLLM_QKV_FP8_REQUANT: bool = False
+    VLLM_OPROJ_FP8_W8A16: bool = False
     VLLM_USE_DEEP_GEMM: bool = True
     VLLM_MOE_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
@@ -581,6 +582,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # weight + per-token dynamic activation quant); off by default.
     "VLLM_QKV_FP8_REQUANT": lambda: bool(
         int(os.getenv("VLLM_QKV_FP8_REQUANT", "0"))
+    ),
+    # Requant an otherwise-bf16 dense attention output projection
+    # (self_attn.o_proj) to FP8 e4m3 at load time and dispatch through the
+    # weight-only FP8-Marlin GEMM (W8A16: bf16 activations, FP8 weight),
+    # halving the O-proj weight bytes streamed from HBM on the decode-bound
+    # matmul. Only affects layers that would otherwise be bf16-unquantized
+    # (ignore-listed) and whose prefix ends with ``self_attn.o_proj``. Lossy
+    # (per-output-channel FP8 weight); off by default. Stacks on
+    # VLLM_QKV_FP8_REQUANT without double-counting (different component).
+    "VLLM_OPROJ_FP8_W8A16": lambda: bool(
+        int(os.getenv("VLLM_OPROJ_FP8_W8A16", "0"))
     ),
     # Use tensor descriptors for Q/K/V loads and output stores in the
     # Triton unified-attention kernel.  Enables HW 2D block reads on

@@ -204,6 +204,24 @@ class ModelOptQuantConfigBase(QuantizationConfig):
                     )
 
                     return QkvFp8RequantLinearMethod()
+                # Opt-in: requant an otherwise-bf16 dense attention output
+                # projection to FP8 (W8A16) at load time and dispatch through
+                # the weight-only FP8-Marlin GEMM (bf16 activations). Halves the
+                # O-proj weight bytes streamed from HBM on the decode-bound
+                # matmul. Scoped to *.self_attn.o_proj only; stacks on the
+                # shipped fp8-qkv without double-counting.
+                if (
+                    envs.VLLM_OPROJ_FP8_W8A16
+                    and isinstance(layer, LinearBase)
+                    and prefix.endswith("self_attn.o_proj")
+                ):
+                    from vllm.model_executor.layers.quantization.oproj_fp8_w8a16 import (  # noqa: E501
+                        OprojFp8W8A16LinearMethod,
+                        is_oproj_fp8_w8a16_supported,
+                    )
+
+                    if is_oproj_fp8_w8a16_supported():
+                        return OprojFp8W8A16LinearMethod()
                 return UnquantizedLinearMethod()
             return None
 
