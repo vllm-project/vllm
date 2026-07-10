@@ -451,3 +451,59 @@ def test_preempt_marks_all_inflight_async_output_stale():
     assert req.status == RequestStatus.PREEMPTED
     # Each stale output delivered its sampled token (lossless).
     assert len(req.output_token_ids) == outputs_before + 2
+
+
+def test_reset_preempt_drops_inflight_async_output():
+    """reset_prefix_cache preempts and resumes in the same step, so a kept token
+    would arrive out of order. ``_preempt_request(drop_stale_output=True)`` marks
+    the in-flight output stale-and-dropped: it drains the stale count without
+    delivering a token or touching the reset counters.
+    """
+    num_spec = 4
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        num_speculative_tokens=num_spec,
+        speculative_method="ngram_gpu",
+    )
+    req = create_requests(num_requests=1, max_tokens=20)[0]
+    req.num_computed_tokens = req.num_tokens
+    scheduler.requests[req.request_id] = req
+    scheduler.running.append(req)
+    req.status = RequestStatus.RUNNING
+    scheduled_tokens = scheduler.num_sampled_tokens_per_step + num_spec
+    req.num_output_placeholders = scheduled_tokens
+    req.num_in_flight_tokens = scheduled_tokens
+
+    scheduler.running.remove(req)
+    scheduler._preempt_request(req, timestamp=0.0, drop_stale_output=True)
+
+    assert req.drop_stale_output is True
+    assert req.num_stale_output_tokens == scheduled_tokens
+    outputs_before = len(req.output_token_ids)
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: scheduled_tokens},
+        total_num_scheduled_tokens=scheduled_tokens,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={req.request_id: [10] * num_spec},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[req.request_id],
+        req_id_to_index={req.request_id: 0},
+        sampled_token_ids=[[999]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    # The stale output is dropped: no token delivered, count drained, no underflow.
+    assert req.num_stale_output_tokens == 0
+    assert req.num_output_placeholders == 0
+    assert len(req.output_token_ids) == outputs_before
+    assert req.status == RequestStatus.PREEMPTED

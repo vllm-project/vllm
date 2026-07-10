@@ -1142,11 +1142,17 @@ class Scheduler(SchedulerInterface):
     ) -> KVConnectorMetadata:
         return connector.build_connector_meta(scheduler_output)
 
-    def _preempt_request(self, request: Request, timestamp: float) -> None:
+    def _preempt_request(
+        self, request: Request, timestamp: float, drop_stale_output: bool = False
+    ) -> None:
         """Preempt a request and put it back to the waiting queue.
 
         NOTE: The request should be popped from the running queue outside of this
         method.
+
+        drop_stale_output: drop (rather than deliver) any in-flight output. Used
+        by reset_prefix_cache, which resumes the request in the same step, so a
+        kept token would arrive out of order.
         """
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
@@ -1165,6 +1171,7 @@ class Scheduler(SchedulerInterface):
         # is its total token count -- any number of steps may be in flight (async
         # depth, PP, spec); each drains its own share in update_from_output.
         request.num_stale_output_tokens += request.num_in_flight_tokens
+        request.drop_stale_output = drop_stale_output
         request.num_output_placeholders = 0
         request.num_preemptions += 1
         if self.log_stats:
@@ -1593,10 +1600,12 @@ class Scheduler(SchedulerInterface):
 
             # Stale in-flight output (see _preempt_request) still delivers its
             # token but must not touch the request's reset counters; drain the
-            # count as it returns.
+            # count as it returns. In drop mode it is discarded instead.
             output_is_stale = request.num_stale_output_tokens > 0
             if output_is_stale:
                 request.num_stale_output_tokens -= num_tokens_scheduled
+                if request.drop_stale_output:
+                    continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = (
@@ -2232,8 +2241,9 @@ class Scheduler(SchedulerInterface):
             # running queue in FIFO order.
             while self.running:
                 request = self.running.pop()
-                # _preempt_request marks any in-flight async output stale.
-                self._preempt_request(request, timestamp)
+                # Preemption + resumption happen in the same step here, so any
+                # in-flight async output is dropped rather than delivered.
+                self._preempt_request(request, timestamp, drop_stale_output=True)
 
             # Clear scheduled request ids cache. Since we are forcing preemption
             # + resumption in the same step, we must act as if these requests were

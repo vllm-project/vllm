@@ -143,6 +143,9 @@ class Request:
         # a preemption rollback: still delivered when it returns, but must not
         # mutate the reset counters.
         self.num_stale_output_tokens = 0
+        # If True, drop that stale output instead of delivering it. Set when the
+        # request is resumed in the same step it is preempted (reset_prefix_cache).
+        self.drop_stale_output = False
 
         # Tokens of steps whose output is not yet processed (async scheduling
         # and PP run ahead of the GPU); `num_computed_tokens` counts them
