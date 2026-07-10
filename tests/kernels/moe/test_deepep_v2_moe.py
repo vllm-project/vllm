@@ -124,7 +124,6 @@ def make_modular_kernel(
     mk = FusedMoEKernel(
         prepare_finalize=a2a,
         fused_experts=fused_experts,
-        inplace=False,
     )
     return mk
 
@@ -480,7 +479,6 @@ def _deep_ep_v2_moe_cudagraph(
         mk_kernel = FusedMoEKernel(
             prepare_finalize=a2a,
             fused_experts=fused_experts,
-            inplace=False,
         )
 
         for _ in range(3):
