@@ -422,9 +422,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Ministral3ForCausalLM": _HfExamplesInfo("mistralai/Ministral-3-3B-Instruct-2512"),
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
     "MistralLarge3ForCausalLM": _HfExamplesInfo(
-        "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",
-        # Lower utilization so the KV cache fits on one GPU; OOMs at default 0.8.
-        gpu_memory_utilization=0.2,
+        "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4"
     ),
     "MixtralForCausalLM": _HfExamplesInfo(
         "mistralai/Mixtral-8x7B-Instruct-v0.1",
