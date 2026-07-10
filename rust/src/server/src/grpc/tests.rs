@@ -1031,3 +1031,61 @@ async fn grpc_without_keepalive_keeps_unresponsive_connection_open() {
 
     server_task.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn extension_methods_are_unimplemented() {
+    let (mut client, server_task, _engine_task) =
+        grpc_test_server(b"engine-grpc-stubs", default_stream_output_specs()).await;
+
+    assert_eq!(
+        client.get_engine_info(pb::GetEngineInfoRequest {}).await.unwrap_err().code(),
+        tonic::Code::Unimplemented
+    );
+    assert_eq!(
+        client.get_model_info(pb::GetModelInfoRequest {}).await.unwrap_err().code(),
+        tonic::Code::Unimplemented
+    );
+    assert_eq!(
+        client.health(pb::HealthRequest::default()).await.unwrap_err().code(),
+        tonic::Code::Unimplemented
+    );
+    assert_eq!(
+        client.abort(pb::AbortRequest::default()).await.unwrap_err().code(),
+        tonic::Code::Unimplemented
+    );
+    assert_eq!(
+        client.drain(pb::DrainRequest {}).await.unwrap_err().code(),
+        tonic::Code::Unimplemented
+    );
+    assert_eq!(
+        client.load_lora(pb::LoadLoraRequest::default()).await.unwrap_err().code(),
+        tonic::Code::Unimplemented
+    );
+    assert_eq!(
+        client.unload_lora(pb::UnloadLoraRequest::default()).await.unwrap_err().code(),
+        tonic::Code::Unimplemented
+    );
+    assert_eq!(
+        client.list_loras(pb::ListLorasRequest {}).await.unwrap_err().code(),
+        tonic::Code::Unimplemented
+    );
+    assert_eq!(
+        client
+            .get_kv_connector_info(pb::GetKvConnectorInfoRequest {})
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::Unimplemented
+    );
+    assert_eq!(
+        client
+            .get_kv_event_sources(pb::GetKvEventSourcesRequest {})
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::Unimplemented
+    );
+
+    server_task.abort();
+}

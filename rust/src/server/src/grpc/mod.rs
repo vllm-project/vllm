@@ -151,6 +151,76 @@ impl pb::generate_server::Generate for GenerateServiceImpl {
         let response_stream = ReceiverStream::new(rx);
         Ok(Response::new(Box::pin(response_stream)))
     }
+
+    async fn get_engine_info(
+        &self,
+        _request: Request<pb::GetEngineInfoRequest>,
+    ) -> Result<Response<pb::EngineInfo>, Status> {
+        Err(Status::unimplemented("GetEngineInfo"))
+    }
+
+    async fn get_model_info(
+        &self,
+        _request: Request<pb::GetModelInfoRequest>,
+    ) -> Result<Response<pb::ModelInfo>, Status> {
+        Err(Status::unimplemented("GetModelInfo"))
+    }
+
+    async fn health(
+        &self,
+        _request: Request<pb::HealthRequest>,
+    ) -> Result<Response<pb::HealthResponse>, Status> {
+        Err(Status::unimplemented("Health"))
+    }
+
+    async fn abort(
+        &self,
+        _request: Request<pb::AbortRequest>,
+    ) -> Result<Response<pb::AbortResponse>, Status> {
+        Err(Status::unimplemented("Abort"))
+    }
+
+    async fn drain(
+        &self,
+        _request: Request<pb::DrainRequest>,
+    ) -> Result<Response<pb::DrainResponse>, Status> {
+        Err(Status::unimplemented("Drain"))
+    }
+
+    async fn load_lora(
+        &self,
+        _request: Request<pb::LoadLoraRequest>,
+    ) -> Result<Response<pb::LoadLoraResponse>, Status> {
+        Err(Status::unimplemented("LoadLora"))
+    }
+
+    async fn unload_lora(
+        &self,
+        _request: Request<pb::UnloadLoraRequest>,
+    ) -> Result<Response<pb::UnloadLoraResponse>, Status> {
+        Err(Status::unimplemented("UnloadLora"))
+    }
+
+    async fn list_loras(
+        &self,
+        _request: Request<pb::ListLorasRequest>,
+    ) -> Result<Response<pb::ListLorasResponse>, Status> {
+        Err(Status::unimplemented("ListLoras"))
+    }
+
+    async fn get_kv_connector_info(
+        &self,
+        _request: Request<pb::GetKvConnectorInfoRequest>,
+    ) -> Result<Response<pb::KvConnectorInfo>, Status> {
+        Err(Status::unimplemented("GetKvConnectorInfo"))
+    }
+
+    async fn get_kv_event_sources(
+        &self,
+        _request: Request<pb::GetKvEventSourcesRequest>,
+    ) -> Result<Response<pb::GetKvEventSourcesResponse>, Status> {
+        Err(Status::unimplemented("GetKvEventSources"))
+    }
 }
 
 fn text_error_to_status(error: vllm_text::Error) -> Status {
