@@ -11,7 +11,7 @@ import torch.distributed
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
-from tests.kernels.moe.utils import make_dummy_moe_config
+from tests.kernels.moe.utils import check_accuracy, make_dummy_moe_config
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -227,39 +227,44 @@ def deep_ep_moe_impl(
     out_hidden_states = torch.empty_like(test_tensors.rank_tokens)
     total_num_tokens = test_tensors.rank_tokens.size(0)
 
+    quant_config = FusedMoEQuantConfig.make(
+        q_dtype,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        per_act_token_quant=per_act_token_quant,
+        a1_scale=test_tensors.rank_token_scales,
+    )
+
+    # Build the kernel (and its DeepEP buffer) once and reuse it across chunks.
+    # Re-creating it per chunk re-inits rocSHMEM, which only allows one
+    # allocation per process on ROCm. The buffer is sized by max_tokens_per_rank
+    # so it is valid for every chunk (mirrors production's cached all2all handle).
+    mk: FusedMoEKernel = make_modular_kernel(
+        pg,
+        pgi,
+        low_latency_mode,
+        hidden_size,
+        dp_size,
+        num_experts,
+        num_local_experts,
+        q_dtype,
+        use_fp8_dispatch,
+        quant_config,
+    )
+
     def process_chunk(chunk_start, chunk_end, skip_result_store=False):
         rank_tokens_chunk = test_tensors.rank_tokens[chunk_start:chunk_end]
         topk_weights_chunk = test_tensors.topk_weights[chunk_start:chunk_end]
         topk_chunk = test_tensors.topk[chunk_start:chunk_end]
-        rank_token_scales_chunk = test_tensors.rank_token_scales
-        if (
-            rank_token_scales_chunk is not None
-            and rank_token_scales_chunk.size(0) == total_num_tokens
-        ):
-            # per act token
-            rank_token_scales_chunk = rank_token_scales_chunk[chunk_start:chunk_end]
 
-        quant_config = FusedMoEQuantConfig.make(
-            q_dtype,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            per_act_token_quant=per_act_token_quant,
-            a1_scale=rank_token_scales_chunk,
-        )
-
-        # Make modular kernel
-        mk: FusedMoEKernel = make_modular_kernel(
-            pg,
-            pgi,
-            low_latency_mode,
-            hidden_size,
-            dp_size,
-            num_experts,
-            num_local_experts,
-            q_dtype,
-            use_fp8_dispatch,
-            quant_config,
-        )
+        if low_latency_mode:
+            # Reusing one buffer leaves it dirty; the low-latency kernels need
+            # the zero-initialized regions reset before each dispatch.
+            mk.prepare_finalize.buffer.clean_low_latency_buffer(
+                MAX_TOKENS_PER_RANK,
+                hidden_size,
+                num_experts,
+            )
 
         out = mk.apply(
             hidden_states=rank_tokens_chunk,
@@ -350,6 +355,28 @@ def torch_moe_impl(
     return out
 
 
+def assert_deepep_close(
+    expected: torch.Tensor,
+    actual: torch.Tensor,
+    k: int,
+    use_fp8_dispatch: bool,
+) -> None:
+    if use_fp8_dispatch and current_platform.is_fp8_fnuz():
+        # ROCm e4m3fnuz rounds differently than the reference quant,
+        # so DeepEP's fp8 dispatch can yield a few outliers even with
+        # a correct kernel; allow a small fraction of mismatches here.
+        atol = rtol = 1.5e-1
+        check_accuracy(expected, actual, atol=atol, rtol=rtol, percent=0.95)
+        return
+
+    torch.testing.assert_close(
+        expected,
+        actual,
+        atol=6e-2,
+        rtol=6e-2,
+    )
+
+
 def _deep_ep_moe(
     pgi: ProcessGroupInfo,
     low_latency_mode: bool,
@@ -362,6 +389,9 @@ def _deep_ep_moe(
     use_fp8_dispatch: bool,
     per_act_token_quant: bool,
 ):
+    # Set seed in worker process for deterministic tensor generation.
+    set_random_seed(7)
+
     device = torch.device(f"cuda:{pgi.local_rank}")
     init_workspace_manager(device)
 
@@ -426,12 +456,7 @@ def _deep_ep_moe(
             per_act_token_quant,
         )
 
-    torch.testing.assert_close(
-        torch_combined,
-        deepep_combined,
-        atol=6e-2,
-        rtol=6e-2,
-    )
+    assert_deepep_close(torch_combined, deepep_combined, config.k, use_fp8_dispatch)
 
 
 MNKs = [
