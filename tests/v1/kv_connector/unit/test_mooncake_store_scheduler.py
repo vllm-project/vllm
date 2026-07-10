@@ -10,6 +10,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (
     MooncakeStoreScheduler,
+    _session_id_from_request,
 )
 
 
@@ -176,11 +177,13 @@ def _make_pending_load_unfinished_request(
     num_tokens: int,
     block_hashes: list[bytes],
     block_ids: tuple[list[int], ...] = ([0, 1, 2],),
+    session_id: str | None = None,
 ) -> None:
     request = SimpleNamespace(
         num_tokens=num_tokens,
         block_hashes=block_hashes,
         num_output_placeholders=0,
+        session_id=session_id,
     )
     scheduler._unfinished_requests["req-0"] = (request, block_ids)
 
@@ -236,6 +239,27 @@ def test_pending_load_does_not_co_queue_save():
     # waiting for a finished_sending that will never come.
     tracker = scheduler._request_trackers["req-0"]
     assert tracker.num_saved_tokens == 0
+
+
+def test_pending_load_metadata_preserves_request_session_id():
+    scheduler = _make_bare_scheduler()
+    _make_pending_load_unfinished_request(
+        scheduler,
+        num_tokens=48,
+        block_hashes=[b"h0", b"h1", b"h2"],
+        session_id="session-1",
+    )
+    scheduler.load_specs["req-0"] = LoadSpec(
+        vllm_cached_tokens=0,
+        kvpool_cached_tokens=48,
+        can_load=True,
+    )
+
+    meta = scheduler.build_connector_meta(_make_pending_load_scheduler_output())
+
+    assert len(meta.requests) == 1
+    assert meta.requests[0].session_id == "session-1"
+    assert scheduler._request_trackers["req-0"].session_id == "session-1"
 
 
 def _make_resumed_unfinished_request(
@@ -468,6 +492,66 @@ def test_from_request_tracker_no_load_saves_normally():
     assert req_meta.can_save is True
     assert req_meta.load_spec is None
     assert tracker.num_saved_tokens == 48
+
+
+def _request_with_session(
+    *,
+    session_id: str | None = None,
+    extra_args: dict[str, object] | None = None,
+):
+    return SimpleNamespace(
+        session_id=session_id,
+        sampling_params=SimpleNamespace(extra_args=extra_args),
+    )
+
+
+def test_session_id_from_request_prefers_typed_field():
+    request = _request_with_session(
+        session_id="typed-session",
+        extra_args={"session_id": "legacy-session"},
+    )
+
+    assert _session_id_from_request(request) == "typed-session"
+
+
+def test_session_id_from_request_uses_legacy_extra_args_fallback():
+    request = _request_with_session(extra_args={"session_id": "legacy-session"})
+
+    assert _session_id_from_request(request) == "legacy-session"
+
+
+def test_session_id_from_request_ignores_missing_empty_and_non_string_values():
+    assert _session_id_from_request(SimpleNamespace()) is None
+    assert _session_id_from_request(_request_with_session(session_id="")) is None
+    assert (
+        _session_id_from_request(_request_with_session(extra_args={"session_id": ""}))
+        is None
+    )
+    assert (
+        _session_id_from_request(_request_with_session(extra_args={"session_id": 7}))
+        is None
+    )
+
+
+def test_from_request_tracker_propagates_session_id():
+    tracker = RequestTracker(
+        req_id="req-0",
+        token_len=48,
+        allocated_block_ids=([0, 1, 2],),
+        num_saved_tokens=0,
+        session_id="session-1",
+    )
+
+    req_meta = ReqMeta.from_request_tracker(
+        tracker,
+        block_size=16,
+        load_spec=None,
+        skip_save=False,
+        block_hashes=[b"h0", b"h1", b"h2"],
+    )
+
+    assert req_meta is not None
+    assert req_meta.session_id == "session-1"
 
 
 class _StubLookupClient:
