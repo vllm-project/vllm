@@ -103,6 +103,7 @@ class OffloadingEvent:
     medium: str
     # True if blocks are removed, False if stored
     removed: bool
+    locality: str | None = None
 
 
 """

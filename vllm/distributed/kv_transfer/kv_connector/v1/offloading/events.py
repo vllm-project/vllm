@@ -198,7 +198,12 @@ class OffloadingEventsTracker:
             kv_cache_spec=group_config.kv_event_group_spec,
         )
 
-    def _placeholder_stored(self, key: OffloadKey, medium: str) -> BlockStored:
+    def _placeholder_stored(
+        self,
+        key: OffloadKey,
+        medium: str,
+        locality: str | None,
+    ) -> BlockStored:
         return BlockStored(
             block_hashes=[
                 maybe_convert_block_hash(BlockHash(get_offload_block_hash(key)))
@@ -210,6 +215,7 @@ class OffloadingEventsTracker:
             medium=medium,
             lora_name=None,
             group_idx=get_offload_group_idx(key),
+            locality=locality,
         )
 
     def _take_stored_event(self, event: OffloadingEvent) -> Iterable[KVCacheEvent]:
@@ -227,7 +233,7 @@ class OffloadingEventsTracker:
                         "placeholder payload. Expected for non-full-attention "
                         "groups; otherwise indicates a missing populate path."
                     )
-                yield self._placeholder_stored(key, event.medium)
+                yield self._placeholder_stored(key, event.medium, event.locality)
                 continue
 
             yield BlockStored(
@@ -252,6 +258,7 @@ class OffloadingEventsTracker:
                 kv_cache_spec_sliding_window=(
                     meta.kv_cache_spec.kv_cache_spec_sliding_window
                 ),
+                locality=event.locality,
             )
 
     def _take_removed_event(self, event: OffloadingEvent) -> Iterable[KVCacheEvent]:
@@ -283,4 +290,5 @@ class OffloadingEventsTracker:
                 block_hashes=hashes,
                 medium=event.medium,
                 group_idx=group_idx,
+                locality=event.locality,
             )
