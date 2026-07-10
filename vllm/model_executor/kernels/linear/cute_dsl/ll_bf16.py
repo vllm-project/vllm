@@ -7,7 +7,7 @@ import logging
 import math
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 
@@ -45,7 +45,6 @@ _TUNED_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int]]] = {
 }
 
 
-
 _cute_ctx = None
 
 
@@ -55,14 +54,15 @@ def _cute():
         return _cute_ctx
     import cutlass.cute as cute
     from cuda.bindings.driver import CUstream
-    from torch.cuda import current_stream
 
-    _cute_ctx = (cute, CUstream, current_stream)
+    _cute_ctx = (cute, CUstream)
     return _cute_ctx
 
 
 def _stream():
-    _, CUstream, current_stream = _cute()
+    _, CUstream = _cute()
+    from vllm.utils.torch_utils import current_stream
+
     return CUstream(current_stream().cuda_stream)
 
 
@@ -78,25 +78,19 @@ class LLBf16Gemm:
 
     def __init__(self) -> None:
         # Dot-prod: keyed on (M, K, bs), because M and K are Constexpr.
-        self._compiled_cache: dict[tuple[int, int, int], object] = {}
+        self._compiled_cache: dict[tuple[int, int, int], Any] = {}
         # Split-K: keyed on (split_k, num_stages), fully shape-dynamic.
-        self._splitk_cache: dict[tuple[int, int], object] = {}
+        self._splitk_cache: dict[tuple[int, int], Any] = {}
 
     def dispatch(self, *, M: int, K: int, N: int) -> CompileKey:
-        dotprod_max_m = _TUNED_DOTPROD_MAX_M.get(
-            (K, N), _DEFAULT_DOTPROD_MAX_M
-        )
+        dotprod_max_m = _TUNED_DOTPROD_MAX_M.get((K, N), _DEFAULT_DOTPROD_MAX_M)
         if dotprod_max_m >= M or K < 2048:
-            return self.CompileKey(
-                backend="dotprod", M=M, K=K, bs=_DEFAULT_DOTPROD_BS
-            )
+            return self.CompileKey(backend="dotprod", M=M, K=K, bs=_DEFAULT_DOTPROD_BS)
 
         split_k, num_stages = _TUNED_CONFIGS.get((K, N), {}).get(
             M, _DEFAULT_SPLITK_CONFIG
         )
-        return self.CompileKey(
-            backend="splitk", split_k=split_k, num_stages=num_stages
-        )
+        return self.CompileKey(backend="splitk", split_k=split_k, num_stages=num_stages)
 
     def get_warmup_keys(
         self,
@@ -123,7 +117,7 @@ class LLBf16Gemm:
         return hidden_states, router_weight, output
 
     def _compile_splitk(self, compile_key: CompileKey) -> None:
-        cute, _, _ = _cute()
+        cute, _ = _cute()
         from ._ll_bf16_splitk import LLBf16SplitK
 
         hidden_states, router_weight, output = self._fake_gemm_tensors(
@@ -155,7 +149,7 @@ class LLBf16Gemm:
         )
 
     def _compile_dotprod(self, compile_key: CompileKey) -> None:
-        cute, _, _ = _cute()
+        cute, _ = _cute()
         from ._ll_bf16_dotprod import LLBf16Dotprod
 
         N = cute.sym_int()
@@ -188,13 +182,13 @@ class LLBf16Gemm:
 
     def compile(self, compile_key: CompileKey) -> None:
         if compile_key.backend == "splitk":
-            cache_key = (compile_key.split_k, compile_key.num_stages)
-            if cache_key not in self._splitk_cache:
+            splitk_cache_key = (compile_key.split_k, compile_key.num_stages)
+            if splitk_cache_key not in self._splitk_cache:
                 self._compile_splitk(compile_key)
             return
 
-        cache_key = (compile_key.M, compile_key.K, compile_key.bs)
-        if cache_key not in self._compiled_cache:
+        dotprod_cache_key = (compile_key.M, compile_key.K, compile_key.bs)
+        if dotprod_cache_key not in self._compiled_cache:
             self._compile_dotprod(compile_key)
 
     def warmup(
@@ -256,15 +250,15 @@ class LLBf16Gemm:
         N = router_weight.shape[0]
         compile_key = self.dispatch(M=M, K=K, N=N)
         if compile_key.backend == "splitk":
-            cache_key = (compile_key.split_k, compile_key.num_stages)
-            if cache_key not in self._splitk_cache:
+            splitk_cache_key = (compile_key.split_k, compile_key.num_stages)
+            if splitk_cache_key not in self._splitk_cache:
                 self.compile(compile_key)
-            kernel = self._splitk_cache[cache_key]
+            kernel = self._splitk_cache[splitk_cache_key]
         else:
-            cache_key = (compile_key.M, compile_key.K, compile_key.bs)
-            if cache_key not in self._compiled_cache:
+            dotprod_cache_key = (compile_key.M, compile_key.K, compile_key.bs)
+            if dotprod_cache_key not in self._compiled_cache:
                 self.compile(compile_key)
-            kernel = self._compiled_cache[cache_key]
+            kernel = self._compiled_cache[dotprod_cache_key]
 
         stream = _stream()
         output = torch.empty(M, N, dtype=output_dtype, device=hidden_states.device)
@@ -276,6 +270,7 @@ class LLBf16Gemm:
 
 
 ll_bf16_gemm_kernel = LLBf16Gemm()
+
 
 def ll_bf16_gemm(
     hidden_states: torch.Tensor,

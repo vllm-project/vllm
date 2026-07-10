@@ -33,8 +33,8 @@ class LLBf16Dotprod:
         self.k_main_elems = (k // (main_vec_width * bs)) * main_vec_width * bs
         self.k_after_main = k - self.k_main_elems
         self.k_tail_elems = (
-            self.k_after_main // (tail_vec_width * bs)
-        ) * tail_vec_width * bs
+            (self.k_after_main // (tail_vec_width * bs)) * tail_vec_width * bs
+        )
         self.k_done_all = self.k_main_elems + self.k_tail_elems
         self.scalar_rem = k - self.k_done_all
         self.ks_full = self.scalar_rem // bs

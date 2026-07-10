@@ -75,17 +75,13 @@ class LLBf16SplitK:
         self.num_mma_threads = self.num_mma_warps * cute.arch.WARP_SIZE
         self.num_threads = self.num_dma_threads + self.num_mma_threads
         self.num_epilogue_elems = self.tile_m * self.tile_n
-        self.epilogue_elems_per_thread = (
-            self.num_epilogue_elems // self.num_mma_threads
-        )
+        self.epilogue_elems_per_thread = self.num_epilogue_elems // self.num_mma_threads
 
     def _make_smem_layout_AB(self, dtype, copy_bits, smem_tiler):
         major_size = min(smem_tiler[1], 64)
         # Use the largest safe swizzle for vectorized copies.
         swizzle_bits = int(math.log2(major_size * dtype.width // copy_bits))
-        swizzle_bits = min(
-            swizzle_bits, 3
-        )  # cap at 3 swizzle bits
+        swizzle_bits = min(swizzle_bits, 3)  # cap at 3 swizzle bits
         # Tile the swizzled atom across (M_or_N, K, stages).
         layout_atom_outer = cute.make_layout((8, major_size), stride=(major_size, 1))
         layout_atom = cute.make_composed_layout(
@@ -162,9 +158,7 @@ class LLBf16SplitK:
         op = cute.nvgpu.warp.MmaF16BF16Op(self.ab_dtype, self.acc_dtype, self.mma_shape)
         perm_mnk = (
             self.atom_layout[0] * self.mma_shape[0],
-            self.atom_layout[1]
-            * self.mma_shape[1]
-            * (self.tile_n // 8),
+            self.atom_layout[1] * self.mma_shape[1] * (self.tile_n // 8),
             self.atom_layout[2] * self.mma_shape[2],
         )
         tiled_mma = cute.make_tiled_mma(
@@ -299,12 +293,8 @@ class LLBf16SplitK:
             tBcB = thr_B.partition_S(cB)
 
             # Build M/K and N/K predicates, broadcast across K-tile copies.
-            tApA_flat, tApA = self._make_pred(
-                tAcA, k_start, mA.shape[0], K_total
-            )
-            tBpB_flat, tBpB = self._make_pred(
-                tBcB, k_start, mB.shape[0], K_total
-            )
+            tApA_flat, tApA = self._make_pred(tAcA, k_start, mA.shape[0], K_total)
+            tBpB_flat, tBpB = self._make_pred(tBcB, k_start, mB.shape[0], K_total)
             self._fill_pred(tApA_flat, tAcA, k_start, mA.shape[0], K_total)
             self._fill_pred(tBpB_flat, tBcB, k_start, mB.shape[0], K_total)
 
@@ -363,7 +353,7 @@ class LLBf16SplitK:
             tCsA = thr_mma.partition_A(sA)
             tCsB = thr_mma.partition_B(sB)
             tCgC = thr_mma.partition_C(gC)
-            
+
             tCrA = tiled_mma.make_fragment_A(tCsA[None, None, None, 0])
             tCrB = tiled_mma.make_fragment_B(tCsB[None, None, None, 0])
             tCrC = tiled_mma.make_fragment_C(tCgC)
@@ -387,12 +377,8 @@ class LLBf16SplitK:
             tCsB_v = thr_s2r_B.partition_S(sB)
             tCrB_v = thr_s2r_B.retile(tCrB)
             # Split the MMA K-fragments across the MMA warps.
-            tCsA_warp_v = cute.logical_divide(
-                tCsA_v, (None, None, num_mma_warps, None)
-            )
-            tCsB_warp_v = cute.logical_divide(
-                tCsB_v, (None, None, num_mma_warps, None)
-            )
+            tCsA_warp_v = cute.logical_divide(tCsA_v, (None, None, num_mma_warps, None))
+            tCsB_warp_v = cute.logical_divide(tCsB_v, (None, None, num_mma_warps, None))
 
             num_k_blocks = cute.size(tCrA, mode=[2])
             k_blocks_per_warp: cutlass.Constexpr = num_k_blocks // num_mma_warps
@@ -464,10 +450,14 @@ class LLBf16SplitK:
                 local_coord = cute.select(epilogue_slot_coords[elem_idx], mode=[1, 0])
                 total = cutlass.Float32(0.0)
                 if cute.elem_less(local_coord, gC.shape):
-                    total = smem_red[None, elem_idx].load().reduce(
-                        cute.ReductionOp.ADD,
-                        init_val=cutlass.Float32(0.0),
-                        reduction_profile=0,
+                    total = (
+                        smem_red[None, elem_idx]
+                        .load()
+                        .reduce(
+                            cute.ReductionOp.ADD,
+                            init_val=cutlass.Float32(0.0),
+                            reduction_profile=0,
+                        )
                     )
                     total = cutlass.Float32(total) * scale
                 partials[cta_rank, elem_idx] = total
@@ -496,10 +486,14 @@ class LLBf16SplitK:
                 local_coord = cute.select(epilogue_slot_coords[elem_idx], mode=[1, 0])
                 global_coord = cC[local_coord]
                 if cute.elem_less(global_coord, mC.shape):
-                    acc = partials[None, elem_idx].load().reduce(
-                        cute.ReductionOp.ADD,
-                        init_val=cutlass.Float32(0.0),
-                        reduction_profile=0,
+                    acc = (
+                        partials[None, elem_idx]
+                        .load()
+                        .reduce(
+                            cute.ReductionOp.ADD,
+                            init_val=cutlass.Float32(0.0),
+                            reduction_profile=0,
+                        )
                     )
                     gC[local_coord] = cutlass.Float32(acc)
 
