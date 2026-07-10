@@ -74,6 +74,30 @@ class DSparkSpeculator(DFlashSpeculator):
         self._d2t_scatter_index: torch.Tensor | None = None
         self._draft_scatter_buf: torch.Tensor | None = None
 
+        # Confidence-based per-request proposal truncation (off by default).
+        # Fixed-shape persistent buffers so the whole draft step stays
+        # CUDA-graph capturable; lengths are read back outside capture.
+        self.confidence_threshold = self.speculative_config.confidence_threshold
+        self.proposal_lengths: torch.Tensor | None = None
+        self._conf_logits: torch.Tensor | None = None
+        self._conf_logit_threshold: float = 0.0
+        if self.confidence_threshold > 0.0:
+            self._conf_logit_threshold = float(
+                torch.logit(torch.tensor(self.confidence_threshold)).item()
+            )
+            self._conf_logits = torch.zeros(
+                self.max_num_reqs,
+                self.num_speculative_steps,
+                dtype=torch.float32,
+                device=device,
+            )
+            self.proposal_lengths = torch.full(
+                (self.max_num_reqs,),
+                self.num_speculative_steps,
+                dtype=torch.int32,
+                device=device,
+            )
+
     def load_draft_model(
         self,
         target_model: torch.nn.Module,
@@ -112,6 +136,12 @@ class DSparkSpeculator(DFlashSpeculator):
         idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
         sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
 
+        compute_confidence = (
+            self._conf_logits is not None and self.model.has_confidence_head
+        )
+        if compute_confidence:
+            hidden_3d = sample_hidden.view(num_reqs, n_spec, -1)
+
         # Anchor (bonus) token per request = the input id at query offset 0,
         # read via the precomputed persistent index (fixed buffer for capture).
         prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
@@ -120,6 +150,13 @@ class DSparkSpeculator(DFlashSpeculator):
             # Sequential stage: Markov bias from the previously sampled token.
             markov_embed = self.model.markov_embed(prev)
             bias = self.model.markov_bias(markov_embed)
+            if compute_confidence:
+                # Acceptance confidence for the token drafted at position i,
+                # conditioned on the backbone hidden and the previous token's
+                # Markov embedding (already computed for the bias above).
+                self._conf_logits[:num_reqs, i] = self.model.compute_confidence(
+                    hidden_3d[:, i], markov_embed
+                )
             logits_i = base_logits[:, i] + bias
             if self.draft_logits is not None:
                 # Probabilistic: sample in target vocab (a reduced draft vocab is
@@ -148,6 +185,19 @@ class DSparkSpeculator(DFlashSpeculator):
                 )
             self.draft_tokens[:num_reqs, i] = draft_sampled_i
             prev = draft_sampled_i
+
+        if compute_confidence:
+            # Effective proposal length per request: the prefix before the
+            # first position whose confidence falls below the threshold.
+            # Fixed-shape tensor ops only, so this stays graph-capturable.
+            below = self._conf_logits[:num_reqs] < self._conf_logit_threshold
+            first_below = below.to(torch.int32).argmax(dim=1)
+            any_below = below.any(dim=1)
+            self.proposal_lengths[:num_reqs] = torch.where(
+                any_below,
+                first_below,
+                torch.full_like(first_below, n_spec),
+            )
 
     def _generate_draft(
         self,
