@@ -409,6 +409,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
             # Convert negative dim to positive.
             dim += input_.dim()
 
+        # 'sizes' is not needed if all ranks have the same shape. Collapsing to
+        # None here (mirrors all_gatherv) lets the uniform-decode fast paths
+        # (aiter custom RS, NCCL symm-mem) engage instead of the ragged *v path.
+        if sizes is not None and all(s == sizes[0] for s in sizes):
+            sizes = None
+
         # Note: This will produce an incorrect answer if we don't make
         # the input_tensor contiguous. Possible bug in reduce_scatter_tensor?
         input_tensor = input_.movedim(0, dim).contiguous()
