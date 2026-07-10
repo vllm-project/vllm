@@ -147,7 +147,7 @@ class LLBf16Dotprod:
             block=[bs, 1, 1],
             smem=M * 4 * self.num_warps,
             stream=stream,
-            use_pdl=False,
+            use_pdl=True,
             min_blocks_per_mp=1,
         )
 
@@ -182,7 +182,7 @@ class LLBf16Dotprod:
         acc = cute.make_rmem_tensor((M,), cutlass.Float32)
         acc.fill(0.0)
 
-        #cute.arch.griddepcontrol_wait()  # PDL wait
+        cute.arch.griddepcontrol_wait()  # PDL wait
 
         # 128-bit vectorized main loop
         if cutlass.const_expr(k_main_elems > 0):
@@ -246,7 +246,7 @@ class LLBf16Dotprod:
                     init_val=cutlass.Float32(0.0),
                     reduction_profile=0,
                 )
-        #cute.arch.griddepcontrol_launch_dependents()  # PDL signal
+        cute.arch.griddepcontrol_launch_dependents()  # PDL signal
 
 
 def make_host_bf16(k_val: int, bs: int = 128):

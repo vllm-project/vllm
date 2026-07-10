@@ -195,7 +195,7 @@ class LLBf16SplitK:
                 self.split_k,
             ],  # split-K CTAs form one cluster
             stream=stream,
-            use_pdl=False,
+            use_pdl=True,
         )
 
     @cute.kernel
@@ -317,7 +317,7 @@ class LLBf16SplitK:
                 tBsB[None, None, None, producer_state.index],
                 pred=tBpB,
             )
-            #cute.arch.griddepcontrol_wait()  # PDL-wait
+            cute.arch.griddepcontrol_wait()  # PDL-wait
             cute.copy(
                 tiled_copy_A,
                 tAgA[None, None, None, k_start],
@@ -398,7 +398,7 @@ class LLBf16SplitK:
                 pipeline.PipelineUserType.Consumer, num_stages
             )
 
-            for _ in range(num_k_tiles):
+            for _ in cutlass.range(num_k_tiles, unroll_full=True):
                 mainloop_pipeline.consumer_wait(consumer_state)
                 for ki in cutlass.range_constexpr(k_blocks_per_warp):
                     cute.copy(
@@ -481,8 +481,8 @@ class LLBf16SplitK:
             cute.arch.cluster_arrive()
             cute.arch.cluster_wait()  # peer DSMEM stores are now visible
 
-            #if mma_tidx == 0:
-            #    cute.arch.griddepcontrol_launch_dependents()
+            if mma_tidx == 0:
+                cute.arch.griddepcontrol_launch_dependents()
             cute.arch.sync_threads()
 
             # Reduce split-K partials and write global output.
