@@ -338,6 +338,70 @@ re_quote_pytest_markers() {
 # Main
 ###############################################################################
 
+# ---- Command source selection ----
+# Resolve commands first so SLURM disagg jobs can bypass Docker setup.
+# Prefer VLLM_TEST_COMMANDS (preserves all inner quoting intact).
+# Fall back to $* for backward compatibility, but warn that inner
+# double-quotes will have been stripped by the calling shell.
+if [[ -n "${VLLM_TEST_COMMANDS:-}" ]]; then
+  commands="${VLLM_TEST_COMMANDS}"
+  commands_source="env"
+  echo "Commands sourced from VLLM_TEST_COMMANDS (quoting preserved)"
+else
+  commands="$*"
+  commands_source="argv"
+  if [[ -z "$commands" ]]; then
+    echo "Error: No test commands provided." >&2
+    echo "Usage:" >&2
+    echo "  Preferred:  VLLM_TEST_COMMANDS='...' bash $0" >&2
+    echo "  Legacy:     bash $0 \"commands here\"" >&2
+    exit 1
+  fi
+  echo "Commands sourced from positional args (legacy mode)"
+  echo "WARNING: Inner double-quotes in the command string may have been"
+  echo "  stripped by the calling shell. If you see syntax errors, switch to:"
+  echo "  export VLLM_TEST_COMMANDS='your commands here'"
+  echo "  bash $0"
+fi
+
+echo "Raw commands: $commands"
+
+# Only try to repair stripped pytest -m/-k quoting in legacy argv mode.
+# VLLM_TEST_COMMANDS preserves inner quoting already, and re-quoting that path
+# can corrupt embedded echo strings or otherwise well-formed shell fragments.
+if [[ "$commands_source" == "argv" ]]; then
+  commands=$(re_quote_pytest_markers "$commands")
+  echo "After re-quoting: $commands"
+else
+  echo "Skipping re-quoting for VLLM_TEST_COMMANDS input"
+fi
+
+echo "Final commands: $commands"
+
+# SLURM disagg P/D: run on the login-node agent (sbatch), not inside Docker.
+# ci-infra test-template-amd.j2 wraps commands with rocm-smi and
+# `cd /vllm-workspace/tests` (a container-only path). Strip the wrapper and run
+# the disagg command from the Buildkite checkout (from IMAGE= or NODES= onward).
+if [[ "$commands" == *run-slurm-disagg-test.sh* ]]; then
+  echo "--- SLURM disagg P/D (host execution, no container)"
+  checkout="${BUILDKITE_BUILD_CHECKOUT_PATH:-.}"
+  if [[ ! -d "${checkout}" ]]; then
+    echo "Error: BUILDKITE checkout not found: ${checkout}" >&2
+    exit 1
+  fi
+  if [[ "$commands" == *IMAGE=* ]]; then
+    disagg_cmd="IMAGE=${commands#*IMAGE=}"
+  elif [[ "$commands" == *NODES=* ]]; then
+    disagg_cmd="NODES=${commands#*NODES=}"
+  else
+    disagg_cmd="bash .buildkite/amd-disagg/run-slurm-disagg-test.sh"
+  fi
+  echo "Checkout: ${checkout}"
+  echo "Disagg command: ${disagg_cmd}"
+  bash -c "cd '${checkout}' && ${disagg_cmd}"
+  exit $?
+fi
+
 # --- GPU initialization ---
 echo "--- ROCm info"
 rocminfo
@@ -400,45 +464,6 @@ HF_MOUNT="/root/.cache/huggingface"
 # Keep the CI default explicit and overridable from the Buildkite environment.
 : "${HF_HUB_DOWNLOAD_TIMEOUT:=300}"
 : "${HF_HUB_ETAG_TIMEOUT:=60}"
-
-# ---- Command source selection ----
-# Prefer VLLM_TEST_COMMANDS (preserves all inner quoting intact).
-# Fall back to $* for backward compatibility, but warn that inner
-# double-quotes will have been stripped by the calling shell.
-if [[ -n "${VLLM_TEST_COMMANDS:-}" ]]; then
-  commands="${VLLM_TEST_COMMANDS}"
-  commands_source="env"
-  echo "Commands sourced from VLLM_TEST_COMMANDS (quoting preserved)"
-else
-  commands="$*"
-  commands_source="argv"
-  if [[ -z "$commands" ]]; then
-    echo "Error: No test commands provided." >&2
-    echo "Usage:" >&2
-    echo "  Preferred:  VLLM_TEST_COMMANDS='...' bash $0" >&2
-    echo "  Legacy:     bash $0 \"commands here\"" >&2
-    exit 1
-  fi
-  echo "Commands sourced from positional args (legacy mode)"
-  echo "WARNING: Inner double-quotes in the command string may have been"
-  echo "  stripped by the calling shell. If you see syntax errors, switch to:"
-  echo "  export VLLM_TEST_COMMANDS='your commands here'"
-  echo "  bash $0"
-fi
-
-echo "Raw commands: $commands"
-
-# Only try to repair stripped pytest -m/-k quoting in legacy argv mode.
-# VLLM_TEST_COMMANDS preserves inner quoting already, and re-quoting that path
-# can corrupt embedded echo strings or otherwise well-formed shell fragments.
-if [[ "$commands_source" == "argv" ]]; then
-  commands=$(re_quote_pytest_markers "$commands")
-  echo "After re-quoting: $commands"
-else
-  echo "Skipping re-quoting for VLLM_TEST_COMMANDS input"
-fi
-
-echo "Final commands: $commands"
 
 # The ROCm test image often ships /vllm-workspace without .git (artifact tarball unpack).
 # tests/standalone_tests/python_only_compile.sh uses merge-base(HEAD, origin/main) for
