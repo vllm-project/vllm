@@ -58,9 +58,7 @@ class PagedShmServer:
             {
                 "uuid": a.uuid,
                 "size": a.size,
-                "use_cache": a.use_cache,
                 "blocks": a.blocks,
-                "ref_count": a.ref_count,
             }
             for a in allocated
         ]

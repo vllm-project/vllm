@@ -557,11 +557,16 @@ async def init_render_app_state(
 
     init_render_state(state, request_logger)
 
-    from vllm.entrypoints.scale_out.object_storage.serving import ServingObjectStorage
+    if vllm_config.model_config.multimodal_config is not None:
+        multimodal_config = vllm_config.model_config.multimodal_config
 
-    state.serving_object_storage = ServingObjectStorage(
-        shm_server_address=vllm_config.model_config.multimodal_config.shm_server_address
-    )
+        from vllm.entrypoints.scale_out.object_storage.serving import (
+            ServingObjectStorage,
+        )
+
+        state.serving_object_storage = ServingObjectStorage(
+            shm_server_address=multimodal_config.shm_server_address
+        )
 
     state.vllm_config = vllm_config
     # Disable stats logging — there is no engine to poll.

@@ -64,12 +64,6 @@ class TestBasicWriteLifecycle:
         # Available blocks remain unchanged (still 4 - 1 = 3)
         assert manager._total_available_blocks == 3
 
-    def test_close_write_on_non_writing_item_raises(self, manager, item_small):
-        [alloc] = manager.open_write([item_small])
-        manager.close_write("small")
-        with pytest.raises(ValueError, match="not being written"):
-            manager.close_write("small")
-
     def test_double_close_write(self, manager, item_small):
         [alloc] = manager.open_write([item_small])
         manager.close_write("small")
@@ -132,7 +126,6 @@ class TestReadLifecycle:
     def test_double_close_read(self, manager, item_small):
         [alloc] = manager.open_write([item_small])
         manager.close_write("small")
-
         manager.open_read("small")
         manager.close_read("small")
 
