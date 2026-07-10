@@ -529,5 +529,17 @@ def test_invalid_output_dtype():
         ll_bf16_gemm(a, b, output_dtype=torch.bfloat16)
 
 
+def test_cache_miss_compiles_dotprod():
+    from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import LLBf16Gemm
+
+    torch.manual_seed(42)
+    a = torch.randn(3, 64, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(17, 64, dtype=torch.bfloat16, device="cuda")
+    kernel = LLBf16Gemm()
+    out = kernel(a, b)
+    assert out.shape == (3, 17)
+    _assert_close(out, _ref(a, b), context="cache miss dotprod")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

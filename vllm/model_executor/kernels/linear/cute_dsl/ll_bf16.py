@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal
@@ -139,7 +140,7 @@ class LLBf16Gemm:
             split_k=compile_key.split_k,
         )
         compiled = cute.compile(
-            gemm.call_splitk,
+            gemm,
             hidden_states,
             router_weight,
             output,
@@ -155,18 +156,19 @@ class LLBf16Gemm:
 
     def _compile_dotprod(self, compile_key: CompileKey) -> None:
         cute, _, _ = _cute()
-        from ._ll_bf16_dotprod import make_host_bf16
+        from ._ll_bf16_dotprod import LLBf16Dotprod
 
         N = cute.sym_int()
+        stride_divisibility = math.gcd(8, compile_key.K)
         hidden_states, router_weight, output = self._fake_gemm_tensors(
             M=compile_key.M,
             K=compile_key.K,
             N=N,
-            divisibility=16,
+            divisibility=stride_divisibility,
         )
-        host_fn = make_host_bf16(compile_key.K, bs=compile_key.bs)
+        gemm = LLBf16Dotprod(k=compile_key.K, bs=compile_key.bs)
         compiled = cute.compile(
-            host_fn,
+            gemm,
             hidden_states,
             router_weight,
             output,
@@ -251,11 +253,15 @@ class LLBf16Gemm:
         N = router_weight.shape[0]
         compile_key = self.dispatch(M=M, K=K, N=N)
         if compile_key.backend == "splitk":
-            kernel = self._splitk_cache[(compile_key.split_k, compile_key.num_stages)]
+            cache_key = (compile_key.split_k, compile_key.num_stages)
+            if cache_key not in self._splitk_cache:
+                self.compile(compile_key)
+            kernel = self._splitk_cache[cache_key]
         else:
-            kernel = self._compiled_cache[
-                (compile_key.M, compile_key.K, compile_key.bs)
-            ]
+            cache_key = (compile_key.M, compile_key.K, compile_key.bs)
+            if cache_key not in self._compiled_cache:
+                self.compile(compile_key)
+            kernel = self._compiled_cache[cache_key]
 
         stream = _stream()
         output = torch.empty(M, N, dtype=output_dtype, device=hidden_states.device)

@@ -120,7 +120,7 @@ def kernel_warmup(worker: "Worker"):
     elif has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
 
-    if current_platform.has_device_capability(100):
+    if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm(worker.vllm_config)
 
     # FlashInfer attention warmup
