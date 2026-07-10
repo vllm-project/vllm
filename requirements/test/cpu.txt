@@ -672,7 +672,7 @@ pathvalidate==3.2.1
     # via pytablewriter
 patsy==1.0.1
     # via statsmodels
-peft==0.18.1
+peft==0.19.1
     # via -r requirements/test/cuda.in
 perceptron==0.1.4
     # via -r requirements/test/cuda.in
@@ -1159,7 +1159,7 @@ tqdm==4.67.3
     #   segmentation-models-pytorch
     #   sentence-transformers
     #   transformers
-transformers==5.5.3
+transformers==5.10.4
     # via
     #   -r requirements/test/../common.txt
     #   -r requirements/test/cuda.in
