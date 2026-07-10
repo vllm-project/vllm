@@ -8,14 +8,26 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
+    get_ep_group,
     get_pp_group,
+    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
+from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    GateLinear,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
@@ -29,6 +41,7 @@ from vllm.model_executor.layers.mhc import (
     hc_contract,
     hc_expand,
 )
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     scaled_dequantize,
@@ -41,8 +54,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLP as Glm5NextMLP
-from vllm.model_executor.models.deepseek_v2 import DeepseekV2MoE as Glm5NextMoE
+from vllm.model_executor.models.deepseek_v2 import _get_moe_router_dtype
 from vllm.model_executor.models.glm4_1v import (
     Glm4vDummyInputsBuilder,
     Glm4vForConditionalGeneration,
@@ -61,6 +73,7 @@ from vllm.model_executor.models.utils import (
     is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
+    sequence_parallel_chunk,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
@@ -68,10 +81,195 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 
 from .attention import Glm5NextLinearAttention, Glm5NextMLAAttention
-from .fused_ops import fused_allreduce_rms_norm
 from .multimodal import Glm5NextProcessingInfo, Glm5NextVisionTransformer
 
 logger = init_logger(__name__)
+
+
+class Glm5NextMLP(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: QuantizationConfig | None = None,
+        reduce_results: bool = True,
+        is_sequence_parallel=False,
+        prefix: str = "",
+        swiglu_limit: float | None = None,
+    ) -> None:
+        super().__init__()
+
+        # If is_sequence_parallel, the input and output tensors are sharded
+        # across the ranks within the tp_group. In this case the weights are
+        # replicated and no collective ops are needed.
+        # Otherwise we use standard TP with an allreduce at the end.
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size,
+            [intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+            disable_tp=is_sequence_parallel,
+            prefix=f"{prefix}.gate_up_proj",
+        )
+        self.down_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            reduce_results=reduce_results,
+            disable_tp=is_sequence_parallel,
+            prefix=f"{prefix}.down_proj",
+        )
+        if hidden_act != "silu":
+            raise ValueError(
+                f"Unsupported activation: {hidden_act}. Only silu is supported for now."
+            )
+
+        self.swiglu_limit = swiglu_limit
+        if self.swiglu_limit is not None:
+            self.act_fn = SiluAndMulWithClamp(swiglu_limit=self.swiglu_limit)
+        else:
+            self.act_fn = SiluAndMul()
+
+    def forward(self, x):
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
+        return x
+
+
+class Glm5NextMoE(nn.Module):
+    def __init__(
+        self,
+        config: Glm5NextConfig,
+        parallel_config: ParallelConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+        apply_routed_scale_to_output: bool = False,
+    ):
+        super().__init__()
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
+
+        self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
+
+        self.ep_group = get_ep_group().device_group
+        self.ep_rank = get_ep_group().rank_in_group
+        self.ep_size = self.ep_group.size()
+        self.n_routed_experts: int = config.n_routed_experts
+        self.n_shared_experts: int = config.n_shared_experts
+
+        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+
+        if config.hidden_act != "silu":
+            raise ValueError(
+                f"Unsupported activation: {config.hidden_act}. "
+                "Only silu is supported for now."
+            )
+
+        self.router_dtype = _get_moe_router_dtype(config)
+        self.gate = GateLinear(
+            config.hidden_size,
+            config.n_routed_experts,
+            params_dtype=self.router_dtype,
+            out_dtype=self.router_dtype,
+            force_fp32_compute=self.router_dtype == torch.float32,
+            prefix=f"{prefix}.gate",
+        )
+        if getattr(config, "topk_method", None) == "noaux_tc":
+            self.gate.e_score_correction_bias = nn.Parameter(
+                torch.empty(config.n_routed_experts, dtype=torch.float32)
+            )
+        else:
+            self.gate.e_score_correction_bias = None
+
+        # Load balancing settings.
+        eplb_config = parallel_config.eplb_config
+        self.enable_eplb = parallel_config.enable_eplb
+
+        self.n_redundant_experts = eplb_config.num_redundant_experts
+        self.n_logical_experts = self.n_routed_experts
+        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
+        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
+
+        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
+        self.physical_expert_end = (
+            self.physical_expert_start + self.n_local_physical_experts
+        )
+
+        swiglu_limit = getattr(config, "swiglu_limit", None)
+        if config.n_shared_experts is None:
+            self.shared_experts = None
+        else:
+            intermediate_size = config.moe_intermediate_size * config.n_shared_experts
+
+            self.shared_experts = Glm5NextMLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=intermediate_size,
+                hidden_act=config.hidden_act,
+                quant_config=quant_config,
+                is_sequence_parallel=self.is_sequence_parallel,
+                reduce_results=False,
+                prefix=f"{prefix}.shared_experts",
+                swiglu_limit=swiglu_limit,
+            )
+
+        self.experts = FusedMoE(
+            shared_experts=self.shared_experts,
+            gate=self.gate,
+            num_experts=config.n_routed_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            renormalize=getattr(config, "norm_topk_prob", True),
+            quant_config=quant_config,
+            use_grouped_topk=True,
+            num_expert_group=getattr(config, "n_group", 1),
+            topk_group=getattr(config, "topk_group", 1),
+            prefix=f"{prefix}.experts",
+            scoring_func=getattr(config, "scoring_func", "softmax"),
+            routed_scaling_factor=self.routed_scaling_factor,
+            apply_routed_scale_to_output=apply_routed_scale_to_output,
+            e_score_correction_bias=self.gate.e_score_correction_bias,
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.n_redundant_experts,
+            is_sequence_parallel=self.is_sequence_parallel,
+            n_shared_experts=None,
+            router_logits_dtype=self.gate.out_dtype,
+            swiglu_limit=swiglu_limit,
+        )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        already_sequence_parallel: bool = False,
+    ) -> torch.Tensor:
+        num_tokens, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_dim)
+
+        # Chunk the hidden states so they aren't replicated across TP ranks.
+        # This avoids duplicate computation in self.experts.
+        if self.is_sequence_parallel and not already_sequence_parallel:
+            hidden_states = sequence_parallel_chunk(hidden_states)
+
+        if self.experts.is_internal_router:
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states, router_logits=hidden_states
+            )
+        else:
+            router_logits, _ = self.gate(hidden_states)
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states, router_logits=router_logits
+            )
+
+        if self.is_sequence_parallel and not already_sequence_parallel:
+            final_hidden_states = tensor_model_parallel_all_gather(
+                final_hidden_states, 0
+            )
+            final_hidden_states = final_hidden_states[:num_tokens]
+
+        return final_hidden_states.view(num_tokens, hidden_dim)
 
 
 class Glm5NextDecoderLayer(nn.Module):
@@ -99,13 +297,6 @@ class Glm5NextDecoderLayer(nn.Module):
         self.num_experts = config.n_routed_experts
         self.is_mtp_layer = is_mtp_layer
         self.mhc = config.mhc
-        # Fuse the cross-rank all-reduce of this layer's row-parallel outputs
-        # (attention o_proj + MLP) into the following RMSNorm via
-        # fused_allreduce_rms_norm. Applies to the simple-residual path: the
-        # 70B / non-mHC layers, and always to MTP layers (whose recycle hidden
-        # is reduced explicitly in the MTP module). The mHC path keeps reduced
-        # projections and its own hc_pre/hc_post residual flow.
-        self._fuse_allreduce_norm = (not config.mhc) or is_mtp_layer
         self.layer_kind = "kda" if config.is_kda_layer(layer_idx) else "mla"
 
         if config.is_kda_layer(layer_idx):
@@ -162,16 +353,6 @@ class Glm5NextDecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
 
-        if self._fuse_allreduce_norm:
-            # Run the attention o_proj and the MLP un-reduced; their cross-rank
-            # all-reduce is deferred and fused into the next RMSNorm by
-            # fused_allreduce_rms_norm in forward. Mirrors deepseek_v32/nvidia.
-            self.self_attn.o_proj.reduce_results = False
-            if isinstance(self.mlp, Glm5NextMoE):
-                self.mlp.experts.moe_config.skip_final_all_reduce = True
-            else:
-                self.mlp.down_proj.reduce_results = False
-
         if self.mhc and not is_mtp_layer:
             # mhc config
             self.mhc_num_residual_streams = config.mhc_num_residual_streams
@@ -210,19 +391,10 @@ class Glm5NextDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        # 70B or MTP layers: KDA + MoE without HC. o_proj and MLP run un-reduced
-        # (reduce_results=False / skip_final_all_reduce set in __init__); fold
-        # their cross-rank all-reduce into the following RMSNorm. Returns the
-        # un-reduced MLP output plus the threaded residual so the next layer (or
-        # the final norm) can fuse the reduce.
+        # 70B or MTP layers: KDA + MoE without HC.
         if not self.mhc or self.is_mtp_layer:
-            if residual is None:
-                residual = hidden_states
-                hidden_states = self.input_layernorm(hidden_states)
-            else:
-                hidden_states, residual = fused_allreduce_rms_norm(
-                    hidden_states, residual, self.input_layernorm
-                )
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
 
             attn_output = torch.empty_like(hidden_states)
             self.self_attn(
@@ -230,10 +402,11 @@ class Glm5NextDecoderLayer(nn.Module):
                 positions=positions,
                 output=attn_output,
             )
-            hidden_states, residual = fused_allreduce_rms_norm(
-                attn_output, residual, self.post_attention_layernorm
-            )
+            hidden_states = residual + attn_output
+            residual = hidden_states
+            hidden_states = self.post_attention_layernorm(hidden_states)
             hidden_states = self.mlp(hidden_states)
+            hidden_states = residual + hidden_states
             return hidden_states, residual
 
         # mHC start
@@ -430,14 +603,7 @@ class Glm5NextModel(nn.Module):
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
-        if not self.config.mhc:
-            # Last layer's MLP/MoE output is un-reduced; fuse its all-reduce
-            # into the final norm.
-            hidden_states, _ = fused_allreduce_rms_norm(
-                hidden_states, residual, self.norm
-            )
-        else:
-            hidden_states = self.norm(hidden_states)
+        hidden_states = self.norm(hidden_states)
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

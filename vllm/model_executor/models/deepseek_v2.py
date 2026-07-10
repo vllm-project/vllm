@@ -24,9 +24,9 @@
 # limitations under the License.
 """Inference-only DeepseekV2/DeepseekV3 model."""
 
+import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
-from typing import cast
 
 import torch
 from torch import nn
@@ -46,8 +46,8 @@ from vllm.distributed import (
     tensor_model_parallel_reduce_scatter,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
-from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention, RSWAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
@@ -239,7 +239,6 @@ class DeepseekV2MLP(nn.Module):
         reduce_results: bool = True,
         is_sequence_parallel=False,
         prefix: str = "",
-        swiglu_limit: float | None = None,
     ) -> None:
         super().__init__()
 
@@ -269,11 +268,7 @@ class DeepseekV2MLP(nn.Module):
                 f"Unsupported activation: {hidden_act}. Only silu is supported for now."
             )
 
-        self.swiglu_limit = swiglu_limit
-        if self.swiglu_limit is not None:
-            self.act_fn = SiluAndMulWithClamp(swiglu_limit=self.swiglu_limit)
-        else:
-            self.act_fn = SiluAndMul()
+        self.act_fn = SiluAndMul()
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
@@ -356,7 +351,6 @@ class DeepseekV2MoE(nn.Module):
             self.shared_experts = None
         else:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
-            swiglu_limit = getattr(config, "swiglu_limit", None)
 
             self.shared_experts = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
@@ -366,7 +360,6 @@ class DeepseekV2MoE(nn.Module):
                 is_sequence_parallel=self.is_sequence_parallel,
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
-                swiglu_limit=swiglu_limit,
             )
 
         self.experts = FusedMoEFactory(
@@ -376,7 +369,7 @@ class DeepseekV2MoE(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            renormalize=getattr(config, "norm_topk_prob", True),
+            renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             use_grouped_topk=True,
             num_expert_group=getattr(config, "n_group", 1),
@@ -394,7 +387,6 @@ class DeepseekV2MoE(nn.Module):
             if self.is_fusion_moe_shared_experts_enabled
             else None,
             router_logits_dtype=self.gate.out_dtype,
-            swiglu_limit=swiglu_limit,
         )
 
         if (
@@ -1075,34 +1067,30 @@ class DeepseekV2MLAAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        if not skip_rope:
-            if config.rope_parameters["rope_type"] != "default":
-                config.rope_parameters["rope_type"] = (
-                    "deepseek_yarn"
-                    if config.rope_parameters.get("apply_yarn_scaling", True)
-                    else "deepseek_llama_scaling"
-                )
-
-            self.rotary_emb = get_rope(
-                qk_rope_head_dim,
-                max_position=max_position_embeddings,
-                rope_parameters=config.rope_parameters,
-                is_neox_style=False,
+        if config.rope_parameters["rope_type"] != "default":
+            config.rope_parameters["rope_type"] = (
+                "deepseek_yarn"
+                if config.rope_parameters.get("apply_yarn_scaling", True)
+                else "deepseek_llama_scaling"
             )
 
-            if (
-                config.rope_parameters["rope_type"] != "default"
-                and config.rope_parameters["rope_type"] == "deepseek_yarn"
-            ):
-                mscale_all_dim = config.rope_parameters.get("mscale_all_dim", False)
-                scaling_factor = config.rope_parameters["factor"]
-                mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
-                self.scaling = self.scaling * mscale * mscale
-        else:
-            self.rotary_emb = None
+        self.rotary_emb = get_rope(
+            qk_rope_head_dim,
+            max_position=max_position_embeddings,
+            rope_parameters=config.rope_parameters,
+            is_neox_style=False,
+        )
+
+        if (
+            config.rope_parameters["rope_type"] != "default"
+            and config.rope_parameters["rope_type"] == "deepseek_yarn"
+        ):
+            mscale_all_dim = config.rope_parameters.get("mscale_all_dim", False)
+            scaling_factor = config.rope_parameters["factor"]
+            mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
+            self.scaling = self.scaling * mscale * mscale
 
         self.is_v32 = hasattr(config, "index_topk")
-        # self.is_v32 = False
 
         # IndexCache config
         # Refer: https://arxiv.org/abs/2603.12201 for more details.
@@ -1722,7 +1710,9 @@ class DeepseekV2Model(nn.Module):
                         # We should ask the weight loader to return success or
                         # not here since otherwise we may skip experts with
                         # other available replicas.
-                        weight_loader = cast(Callable[..., bool], param.weight_loader)
+                        weight_loader = typing.cast(
+                            Callable[..., bool], param.weight_loader
+                        )
                         success = weight_loader(
                             param,
                             weight_to_load,
