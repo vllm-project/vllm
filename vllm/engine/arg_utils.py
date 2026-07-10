@@ -2424,17 +2424,9 @@ class EngineArgs:
                 _raise_unsupported_error(
                     feature_name="simulated forward with KV transfer"
                 )
-            if self.ec_transfer_config is not None:
-                _raise_unsupported_error(
-                    feature_name="simulated forward with EC transfer"
-                )
             if self.weight_transfer_config is not None:
                 _raise_unsupported_error(
                     feature_name="simulated forward with weight transfer"
-                )
-            if self.enable_return_routed_experts:
-                _raise_unsupported_error(
-                    feature_name="simulated forward with routed experts capture"
                 )
             if self.async_scheduling:
                 _raise_unsupported_error(
