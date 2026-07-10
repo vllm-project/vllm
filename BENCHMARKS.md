@@ -52,7 +52,22 @@ contain no SpecDecoding metrics. Two post-fix logs survived:
 | Model | Acceptance | Mean acceptance length | Drafted tokens | Workload |
 |---|---|---|---|---|
 | AWQ BF16-INT4 | 58.0 % | 2.74 | 29,829 | full benchmark suite (prose/code/prefill/multiturn) |
+| FP8 AEON | 41.5 % | 2.24 | 3,162 | 2× prose (t=0.8) + 2× code (t=0.6), 800 tok each |
 | GGUF Q6_K | 98.1 % | 3.94 | 3,999 | short interactive session (small sample, not comparable) |
+
+### FP8 AEON — serving config quick check (2026-07-10)
+
+Same image, but with the full serving setup (froggeric chat template,
+`enable_thinking: false`, reasoning/tool parsers, sampling defaults
+0.6/0.95/20). Streaming measurement, 800 tokens each:
+
+| Test | TTFT | Decode t/s |
+|---|---|---|
+| Prose (t=0.8) | 0.09 s | 60.6–61.9 |
+| Code (t=0.6) | 0.09 s | 92.3–101.9 |
+
+(First request after container start pays ~34 s JIT warmup instead of
+0.09 s TTFT when the Triton/compile cache volumes are cold.)
 
 ## GGUF Q4_K_M (heretic-v2)
 
