@@ -133,6 +133,12 @@ async def start_weight_update(raw_request: Request):
     return JSONResponse(content={"message": "Weight update started"})
 
 
+@router.post("/start_draft_weight_update")
+async def start_draft_weight_update(raw_request: Request):
+    await engine_client(raw_request).start_draft_weight_update()
+    return JSONResponse(content={"message": "Draft weight update started"})
+
+
 @router.post("/update_weights")
 async def update_weights(raw_request: Request):
     try:
