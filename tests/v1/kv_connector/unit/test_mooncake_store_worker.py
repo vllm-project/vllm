@@ -2342,3 +2342,125 @@ def test_blob_block_hashes_empty():
     view = BlobBlockHashes(memoryview(b""), 0)
     assert len(view) == 0
     assert list(view) == []
+
+
+# =============================================================================
+# Tests for KV load failure handling with peer block linkage
+# These tests verify the behavior when blocks fail to load and peer blocks
+# (blocks in other groups covering the same token span) should also be marked.
+# =============================================================================
+
+def test_store_recving_thread_load_failure_different_block_sizes():
+    """Test peer block collection with different block sizes per group.
+
+    When groups have different block_size, the peer calculation uses token_start
+    to find the correct peer block in each group.
+    """
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
+
+    # Group 0: block_size=16 (3 blocks for 48 tokens)
+    db0 = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=0), block_size=16
+    )
+    db0.set_kv_caches_base_addr([0x1000])
+    db0.set_block_len([256])
+
+    # Group 1: block_size=8 (6 blocks for 48 tokens)
+    db1 = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=1), block_size=8
+    )
+    db1.set_kv_caches_base_addr([0x2000])
+    db1.set_block_len([128])
+
+    spec_full_0 = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    spec_full_1 = FullAttentionSpec(block_size=8, num_kv_heads=8, head_size=64, dtype=None)
+    coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        [KVCacheGroupSpec(["layer0"], spec_full_0), KVCacheGroupSpec(["layer1"], spec_full_1)],
+        scheduler_block_size=16,
+        hash_block_size=8,
+    )
+
+    store = MagicMock()
+    store.batch_get_into_multi_buffers.return_value = [256, 256, 256, 256, -5, 256, 256, 256, 256]
+
+    thread = mooncake_store_worker.KVCacheStoreRecvingThread(
+        store=store,
+        token_databases=[db0, db1],
+        block_size=16,
+        tp_rank=0,
+        ready_event=MagicMock(),
+        coord=coord,
+        disk_offload_buffer_budget_bytes=None,
+    )
+    thread.request_queue.task_done = MagicMock()
+
+    req_meta = ReqMeta(
+        req_id="req-diff-sizes",
+        token_len_chunk=48,
+        block_ids=([1, 2, 3], [10, 11, 12, 13, 14, 15]),
+        block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4", b"h5", b"h6", b"h7", b"h8"],
+        load_spec=LoadSpec(
+            vllm_cached_tokens=0,
+            kvpool_cached_tokens=48,
+            can_load=True,
+            token_len=48,
+        ),
+    )
+
+    thread._handle_request(req_meta)
+
+    failed_blocks = thread.get_and_clear_block_ids_with_load_errors()
+    # Block 1 (group0) fails at token_start = 16
+    # Peer in group1: token_start 16 // 8 = 2 -> block_ids[1][2] = 12
+    assert failed_blocks == {1, 11}
+
+
+def test_store_recving_thread_singel_group_load_failure():
+    """Test when all blocks fail - all block IDs and their peers are recorded."""
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
+
+    # Setup with 2 groups
+    db0 = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=0), block_size=16
+    )
+    db0.set_kv_caches_base_addr([0x1000])
+    db0.set_block_len([256])
+
+    spec = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        [KVCacheGroupSpec(["layer0"], spec), KVCacheGroupSpec(["layer1"], spec)],
+        scheduler_block_size=16,
+        hash_block_size=16,
+    )
+
+    store = MagicMock()
+    store.batch_get_into_multi_buffers.return_value = [256, -5, 256]
+
+    thread = mooncake_store_worker.KVCacheStoreRecvingThread(
+        store=store,
+        token_databases=[db0],
+        block_size=16,
+        tp_rank=0,
+        ready_event=MagicMock(),
+        coord=coord,
+        disk_offload_buffer_budget_bytes=None,
+    )
+    thread.request_queue.task_done = MagicMock()
+
+    req_meta = ReqMeta(
+        req_id="req-all-fail",
+        token_len_chunk=48,
+        block_ids=([1, 2, 3],),
+        block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4", b"h5"],
+        load_spec=LoadSpec(
+            vllm_cached_tokens=0,
+            kvpool_cached_tokens=48,
+            can_load=True,
+            token_len=48,
+        ),
+    )
+
+    thread._handle_request(req_meta)
+
+    failed_blocks = thread.get_and_clear_block_ids_with_load_errors()
+    assert failed_blocks == {2}
