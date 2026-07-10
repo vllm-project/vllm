@@ -22,8 +22,8 @@ async def upload_auto(*args, **kwargs):
     print("=" * 80)
     print("upload_auto")
     print(args, kwargs)
-    #storage = get_object_storage(raw_request)
-    #return await storage.upload(file=file)
+    # storage = get_object_storage(raw_request)
+    # return await storage.upload(file=file)
 
 
 @router.put("/object_storage/{uuid}")

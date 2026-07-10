@@ -21,6 +21,7 @@ from vllm.utils import random_uuid
 @pytest.fixture(scope="module")
 def server_address():
     server = PagedShmServerProc(size=1024 * 1024, block_size=4096)
+    server.start()
     yield server.address
     server.close()
 

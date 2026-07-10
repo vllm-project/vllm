@@ -136,7 +136,7 @@ class TestReadLifecycle:
         manager.open_read("small")
         manager.close_read("small")
 
-        with pytest.raises(ValueError, match="not being written"):
+        with pytest.raises(ValueError, match="not being read"):
             manager.close_read("small")
 
 
