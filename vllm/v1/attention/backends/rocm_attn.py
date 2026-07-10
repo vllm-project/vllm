@@ -574,17 +574,16 @@ class RocmAttentionImpl(AttentionImpl):
             1k    ~25 us                           ~38 us   -> native
             8k    ~81 us  (Qwen) / ~32 us (Llama)  ~41/23us -> unified
 
-        So gate native to short context only. Keep it narrow otherwise so
-        feature-bearing paths continue through the stride-aware Triton kernel.
+        So gate native to short context only; longer decode uses the Triton
+        unified kernel. Sinks, sliding window and softcap are served natively.
         """
-        # Native paged kernel for short-context decode (sinks, sliding_window
-        # and softcap are handled natively). Everything it can't serve falls
-        # through to the Triton unified kernel below.
+        # Native paged kernel for short-context decode; sinks, sliding_window
+        # and softcap are handled natively.
         if (
             attn_metadata.max_query_len != 1
             or output_scale is not None
             or self.kv_cache_dtype != "auto"
-            or self.num_queries_per_kv > 16
+            or self.num_queries_per_kv > 16  # kernel dispatch tops out at 16
             or attn_metadata.rswa_prefix_lens is not None
             or attn_metadata.causal is not True
         ):
@@ -644,8 +643,6 @@ class RocmAttentionImpl(AttentionImpl):
         )
         max_logits = torch.empty_like(exp_sums)
 
-        # sliding_window[0] is the flash-attn left window W-1; +1 gives the raw
-        # window W the kernel masks against (and -1 -> 0 disabled).
         if self.sinks is not None and self._sinks_fp32 is None:
             self._sinks_fp32 = self.sinks.to(torch.float32)
 

@@ -3,7 +3,7 @@
 # gpt-oss-20b on ROCm using the native ROCM_ATTN paged-attention backend
 # (attention sinks + sliding window handled natively in csrc/rocm/attention.cu).
 model_name: openai/gpt-oss-20b
-metric_threshold: 0.55
+metric_threshold: 0.568
 reasoning_effort: low
 server_args: "--attention-backend ROCM_ATTN --tensor-parallel-size 2 --max-model-len 16384"
 startup_max_wait_seconds: 2400

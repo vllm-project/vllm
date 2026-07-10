@@ -1263,7 +1263,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
       d_out[h] *= scale2;
     }
 
-    // Logit softcap (see mfma16 kernel).
+    // Logit softcap (see GFX9 mfma16 kernel).
     if (logits_soft_cap > 0.0f) {
       for (int h = 0; h < QHLOOP; h++) {
         for (int i = 0; i < 4; i++) {
@@ -1567,7 +1567,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
       max_logit = fmaxf(max_logit, __shfl_xor(max_logit, mask));
     }
 
-    // Fold the per-head attention sink into the running max (it has no value).
+    // Fold the per-head attention sink into the running max (no value vector).
     if (sinks != nullptr) {
       max_logit = fmaxf(max_logit, sinks[head_idx]);
     }
@@ -2366,7 +2366,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
       max_logit = fmaxf(max_logit, __shfl_xor(max_logit, mask));
     }
 
-    // Fold the per-head attention sink into the running max (it has no value).
+    // Fold the per-head attention sink into the running max (no value vector).
     if (sinks != nullptr) {
       max_logit = fmaxf(max_logit, sinks[head_idx]);
     }
@@ -3131,7 +3131,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
       max_logit = fmaxf(max_logit, __shfl_xor(max_logit, mask));
     }
 
-    // Fold the per-head attention sink into the running max (it has no value).
+    // Fold the per-head attention sink into the running max (no value vector).
     if (sinks != nullptr) {
       max_logit = fmaxf(max_logit, sinks[head_idx]);
     }
