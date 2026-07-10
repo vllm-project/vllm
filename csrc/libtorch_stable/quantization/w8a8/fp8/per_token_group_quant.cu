@@ -6,6 +6,7 @@
 #include "libtorch_stable/quantization/w8a8/per_token_group_quant_8bit.h"
 
 #include <cmath>
+#include <cstdint>
 
 #ifdef USE_ROCM
   #include <hip/hip_fp8.h>
@@ -17,6 +18,14 @@
 #include "libtorch_stable/quantization/vectorization_utils.cuh"
 #include "libtorch_stable/dispatch_utils.h"
 #include "libtorch_stable/torch_utils.h"
+
+namespace {
+
+inline bool Is16ByteAligned(const void* ptr) {
+  return (reinterpret_cast<std::uintptr_t>(ptr) & 0xFu) == 0;
+}
+
+}  // namespace
 
 __device__ __forceinline__ float GroupReduceMax(float val) {
 #ifdef USE_ROCM
@@ -366,8 +375,10 @@ void per_token_group_quant_8bit(const torch::stable::Tensor& input,
   const bool is_column_major = output_s.stride(0) < output_s.stride(1);
   const int scale_num_rows = output_s.size(1);
   const int scale_stride = output_s.stride(1);
+  const bool register_fast_path_is_aligned =
+      Is16ByteAligned(input.data_ptr()) && Is16ByteAligned(output_q.data_ptr());
   const bool use_register_fast_path =
-      group_size == 128 &&
+      register_fast_path_is_aligned && group_size == 128 &&
       (input.scalar_type() == torch::headeronly::ScalarType::Half ||
        input.scalar_type() == torch::headeronly::ScalarType::BFloat16);
 
@@ -659,6 +670,14 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
 
   STD_TORCH_CHECK(input.is_contiguous());
   STD_TORCH_CHECK(output_q.is_contiguous());
+  STD_TORCH_CHECK(
+      Is16ByteAligned(input.data_ptr()),
+      "per_token_group_quant_8bit_packed requires 16-byte aligned input "
+      "data_ptr for uint4 vectorized loads.");
+  STD_TORCH_CHECK(
+      Is16ByteAligned(output_q.data_ptr()),
+      "per_token_group_quant_8bit_packed requires 16-byte aligned output_q "
+      "data_ptr for uint4 vectorized stores.");
 
   const int64_t k = input.size(-1);
   STD_TORCH_CHECK(k % group_size == 0, "input last dim k=", k,
