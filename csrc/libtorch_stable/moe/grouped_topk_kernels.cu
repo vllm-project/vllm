@@ -1040,6 +1040,9 @@ std::tuple<torch::stable::Tensor, torch::stable::Tensor> grouped_topk(
   auto topk_indices = torch::stable::new_empty(
       scores, {num_tokens, topk}, torch::headeronly::ScalarType::Int);
   const bool pdl_flag = num_tokens <= vllm::moe::PDLEnableTokens;
+
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      scores.get_device_index());
   const cudaStream_t stream =
       get_current_cuda_stream(scores.get_device_index());
   auto const sf = static_cast<vllm::moe::ScoringFunc>(scoring_func);

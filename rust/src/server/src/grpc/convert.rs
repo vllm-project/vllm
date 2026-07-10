@@ -94,6 +94,7 @@ pub fn to_text_request(
         data_parallel_rank: None,
         reasoning_parser_kwargs: None,
         lora_request: None,
+        arrival_time: None,
     })
 }
 
@@ -332,7 +333,7 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> pb::FinishInfo {
             (PbFinishReason::Stop as i32, sr)
         }
         FinishReason::Length => (PbFinishReason::Length as i32, None),
-        FinishReason::Abort | FinishReason::Error | FinishReason::Repetition => {
+        FinishReason::Abort | FinishReason::Error | FinishReason::Repetition(_) => {
             (PbFinishReason::Aborted as i32, None)
         }
     };
