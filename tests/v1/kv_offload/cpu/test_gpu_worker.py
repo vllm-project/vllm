@@ -17,7 +17,7 @@ from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
-from vllm.v1.kv_offload.cpu.gpu_worker import CpuGpuOffloadingHandlers
+from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 NUM_GPU_BLOCKS = [64]
@@ -103,7 +103,7 @@ def test_transfer(
             cpu_page_size=cpu_page_size,
         )
 
-    handlers = CpuGpuOffloadingHandlers(
+    worker = CPUOffloadingWorker(
         kv_caches=kv_caches,
         block_size_factor=block_size_factor,
         num_cpu_blocks=num_cpu_blocks,
@@ -130,7 +130,7 @@ def test_transfer(
 
     # set transfer direction
     if gpu_to_cpu:
-        handler = handlers.gpu_to_cpu_handler
+        handler = worker._store_handler
         src_spec = GPULoadStoreSpec(
             gpu_blocks, group_sizes=(len(gpu_blocks),), block_indices=(blocks_to_skip,)
         )
@@ -138,7 +138,7 @@ def test_transfer(
         dst_to_src = dict(zip(cpu_blocks_expanded, gpu_blocks))
         num_dst_sub_blocks = num_gpu_blocks
     else:
-        handler = handlers.cpu_to_gpu_handler
+        handler = worker._load_handler
         src_spec = CPULoadStoreSpec(cpu_blocks)
         dst_spec = GPULoadStoreSpec(
             gpu_blocks, group_sizes=(len(gpu_blocks),), block_indices=(blocks_to_skip,)
@@ -156,23 +156,21 @@ def test_transfer(
     orig_src_tensors = [x.clone() for x in handler.src_tensors]
     orig_dst_tensors = [x.clone() for x in handler.dst_tensors]
 
-    # call transfer function
+    # call transfer function via public API
     start_time = time.time()
-    assert handler.transfer_async(1, (src_spec, dst_spec))
+    if gpu_to_cpu:
+        assert worker.submit_store(1, src_spec, dst_spec)
+    else:
+        assert worker.submit_load(1, src_spec, dst_spec)
     assert {x.job_id for x in handler._transfers} == {1}
 
     # wait for transfer to complete
     end_time = time.time() + 10
     while time.time() < end_time:
-        finished = handler.get_finished()
+        finished = worker.get_finished()
         if finished:
             assert finished[0].job_id == 1
             assert finished[0].success
-            assert (
-                finished[0].transfer_type == ("GPU", "CPU")
-                if gpu_to_cpu
-                else ("CPU", "GPU")
-            )
             assert finished[0].transfer_size == (
                 len(gpu_blocks)
                 * sum([x.page_size_bytes for x in handler.kv_cache_groups_data_refs[0]])
@@ -208,8 +206,7 @@ def test_transfer(
     del orig_tensor, tensor, src_tensor, dst_tensor, orig_dst_tensor
     del src_view, dst_view, orig_dst_view, expected
 
-    handlers.cpu_to_gpu_handler.shutdown()
-    handlers.gpu_to_cpu_handler.shutdown()
+    worker.shutdown()
     if mmap_region:
         mmap_region.cleanup()
 
@@ -276,7 +273,7 @@ def test_transfer_multi_group(
         tensors=kv_cache_tensors, group_data_refs=kv_cache_groups_data_refs
     )
 
-    handlers = CpuGpuOffloadingHandlers(
+    worker = CPUOffloadingWorker(
         kv_caches=canonical_kv_caches,
         block_size_factor=block_size_factor,
         num_cpu_blocks=num_cpu_blocks,
@@ -338,7 +335,7 @@ def test_transfer_multi_group(
     block_indices: list[int] = [0, 0, sub_blocks_to_skip]
 
     if gpu_to_cpu:
-        handler = handlers.gpu_to_cpu_handler
+        handler = worker._store_handler
         src_spec = GPULoadStoreSpec(
             gpu_blocks, group_sizes=group_sizes, block_indices=block_indices
         )
@@ -352,7 +349,7 @@ def test_transfer_multi_group(
         ]
         num_dst_sub_blocks = num_cpu_blocks * block_size_factor
     else:
-        handler = handlers.cpu_to_gpu_handler
+        handler = worker._load_handler
         src_spec = CPULoadStoreSpec(cpu_blocks)
         dst_spec = GPULoadStoreSpec(
             gpu_blocks, group_sizes=group_sizes, block_indices=block_indices
@@ -375,12 +372,15 @@ def test_transfer_multi_group(
     orig_src_tensors = [x.clone() for x in handler.src_tensors]
     orig_dst_tensors = [x.clone() for x in handler.dst_tensors]
 
-    assert handler.transfer_async(1, (src_spec, dst_spec))
+    if gpu_to_cpu:
+        assert worker.submit_store(1, src_spec, dst_spec)
+    else:
+        assert worker.submit_load(1, src_spec, dst_spec)
     assert {x.job_id for x in handler._transfers} == {1}
 
     end_time = time.time() + 10
     while time.time() < end_time:
-        finished = handler.get_finished()
+        finished = worker.get_finished()
         if finished:
             assert finished[0].job_id == 1
             assert finished[0].success
@@ -418,5 +418,4 @@ def test_transfer_multi_group(
                     dst_view[dst_sub_block].cpu(), expected.cpu()
                 )
 
-    handlers.cpu_to_gpu_handler.shutdown()
-    handlers.gpu_to_cpu_handler.shutdown()
+    worker.shutdown()

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use validator::Validate;
+use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use vllm_text::Prompt;
 
 use crate::routes::openai::utils::types::{
@@ -100,6 +101,9 @@ pub struct CompletionRequest {
     /// Repetition penalty for reducing repetitive text
     pub repetition_penalty: Option<f32>,
 
+    /// Parameters for detecting repetitive N-gram patterns in output tokens
+    pub repetition_detection: Option<RepetitionDetectionParams>,
+
     /// Length penalty for beam search
     pub length_penalty: Option<f32>,
 
@@ -146,6 +150,11 @@ pub struct CompletionRequest {
     /// Additional kwargs for structured outputs
     pub structured_outputs: Option<Value>,
 
+    /// Token budget for reasoning/thinking. Accepts a non-negative integer, or
+    /// `-1` for unlimited (mirroring the Python frontend, which normalizes `-1`
+    /// to "no budget").
+    pub thinking_token_budget: Option<i64>,
+
     /// Request scheduling priority (lower means earlier; default 0)
     pub priority: Option<i32>,
 
@@ -174,10 +183,22 @@ pub struct CompletionRequest {
     pub other: Map<String, Value>,
 }
 
-impl Normalizable for CompletionRequest {}
+impl Normalizable for CompletionRequest {
+    /// Normalize the request by applying defaults.
+    fn normalize(&mut self) {
+        // An explicit `"max_tokens": null` deserializes to `None`, bypassing the
+        // serde field default. Coerce it back to the default so it behaves like
+        // an absent field, matching Python vLLM's `normalize_null_max_tokens`.
+        if self.max_tokens.is_none() {
+            self.max_tokens = default_completion_max_tokens();
+        }
+    }
+}
 
 /// Mirrors the Python vLLM `CompletionResponse` class.
-#[serde_with::skip_serializing_none]
+///
+/// Do not skip serializing `None` fields here: non-streaming response types
+/// should serialize `None` as explicit `null`.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct CompletionResponse {
     pub id: String,
@@ -191,7 +212,6 @@ pub(super) struct CompletionResponse {
 }
 
 /// Mirrors the Python vLLM `CompletionResponseChoice` class.
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct CompletionChoice {
     pub index: u32,

@@ -4,6 +4,11 @@
 
 set -euo pipefail
 
+if python3 -c "import torch; raise SystemExit(0 if torch.version.hip is not None else 1)"; then
+    uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+    exit 0
+fi
+
 REQUIREMENTS_FILE="${KV_CONNECTORS_REQUIREMENTS:-/vllm-workspace/requirements/kv_connectors.txt}"
 
 uv pip install --system -r "${REQUIREMENTS_FILE}"

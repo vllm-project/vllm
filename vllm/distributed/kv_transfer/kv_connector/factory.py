@@ -180,6 +180,18 @@ KVConnectorFactory.register_connector(
 )
 
 KVConnectorFactory.register_connector(
+    "NixlPullConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl",
+    "NixlPullConnector",
+)
+
+KVConnectorFactory.register_connector(
+    "NixlPushConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl",
+    "NixlPushConnector",
+)
+
+KVConnectorFactory.register_connector(
     "MultiConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.multi_connector",
     "MultiConnector",

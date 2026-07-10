@@ -31,7 +31,11 @@ from typing import Annotated, Any, Literal, TypeAlias
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import BatchFeature
+from transformers import BatchFeature, HunYuanVLProcessor
+from transformers.models.hunyuan_vl.image_processing_hunyuan_vl import (
+    HunYuanVLImageProcessor,
+    smart_resize,
+)
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -48,7 +52,6 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -75,11 +78,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.hunyuan_vl import (
     HunYuanVLConfig,
     HunYuanVLVisionConfig,
-)
-from vllm.transformers_utils.processors.hunyuan_vl import HunYuanVLProcessor
-from vllm.transformers_utils.processors.hunyuan_vl_image import (
-    HunYuanVLImageProcessor,
-    smart_resize,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -431,6 +429,14 @@ class HunYuanVisionPatchMerger(nn.Module):
 
 
 class HunYuanVisionTransformer(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".q_proj": (".qkv", "q"),
+            ".k_proj": (".qkv", "k"),
+            ".v_proj": (".qkv", "v"),
+        }
+    )
+
     def __init__(
         self,
         vision_config: HunYuanVLVisionConfig,
@@ -529,31 +535,8 @@ class HunYuanVisionTransformer(nn.Module):
         return image_embeds_list
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".qkv", ".q_proj", "q"),
-            (".qkv", ".k_proj", "k"),
-            (".qkv", ".v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 def _hunyuan_vl_field_config(hf_inputs: Mapping[str, torch.Tensor]):
@@ -590,9 +573,12 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
         self,
         **kwargs: object,
     ) -> HunYuanVLProcessor:
+        # transformers>=5.13 replaced `use_fast` with `backend`; pin the
+        # PIL backend to match the released HunyuanOCR checkpoint packing.
+        kwargs.pop("use_fast", None)
+        kwargs.setdefault("backend", "pil")
         return self.ctx.get_hf_processor(
             HunYuanVLProcessor,
-            use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
 
@@ -740,8 +726,18 @@ class HunYuanVLMultiModalProcessor(BaseMultiModalProcessor[HunYuanVLProcessingIn
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        # HunYuanVLProcessor requires image placeholders wrapped with start/end tokens.
+        if mm_data.get("images") is not None and prompt:
+            img_tok = hf_processor.image_token
+            wrapped = (
+                f"{hf_processor.image_start_token}{img_tok}"
+                f"{hf_processor.image_end_token}"
+            )
+            if img_tok in prompt and wrapped not in prompt:
+                prompt = prompt.replace(img_tok, wrapped)
         return self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**mm_kwargs),
+            hf_processor,
             dict(text=prompt, **mm_data),
             dict(**mm_kwargs, **tok_kwargs),
         )

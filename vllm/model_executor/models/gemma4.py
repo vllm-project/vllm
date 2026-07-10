@@ -499,6 +499,13 @@ class Gemma4Attention(nn.Module):
             logits_soft_cap=attn_logits_soft_cap,
             per_layer_sliding_window=sliding_window,
             kv_sharing_target_layer_name=kv_sharing_target_layer_name,
+            # Gemma4 vision bidi: on sliding layers the bidirectional image
+            # block must stay within the sliding window, matching HF's
+            # (causal OR blockwise) AND sliding_window. Without this the image
+            # span (~1100 soft tokens at max_soft_tokens=1120) exceeds the 1024
+            # window; the runner keeps the full range and the kernel bounds it
+            # per-query here.
+            mm_prefix_clamp_sliding_window=self.is_sliding,
             prefix=f"{prefix}.attn",
         )
 
@@ -725,10 +732,8 @@ class Gemma4DecoderLayer(nn.Module):
         if self.enable_moe_block:
             hidden_states_1 = self.post_feedforward_layernorm_1(hidden_states)
 
-            # Router and MoE experts see the residual (pre-MLP state),
-            # matching the HF transformers forward path
-            router_logits = self.router(residual)
             hidden_states_2 = self.pre_feedforward_layernorm_2(residual)
+            router_logits = self.router(residual)
             hidden_states_2 = self.moe(hidden_states_2, router_logits)
             hidden_states_2 = self.post_feedforward_layernorm_2(hidden_states_2)
 
@@ -1564,7 +1569,6 @@ class Gemma4ForCausalLM(
         )
 
         # --- MixtureOfExperts protocol ---
-        self.expert_weights: list[list[torch.Tensor]] = []
         self.moe_layers: list[nn.Module] = []
         example_moe: Gemma4MoE | None = None
 

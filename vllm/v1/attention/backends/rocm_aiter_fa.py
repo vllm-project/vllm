@@ -602,7 +602,11 @@ class AiterFlashAttentionMetadataBuilder(
             torch.cumsum(
                 chunk_seq_lens, dim=1, out=cu_seq_lens_cpu[:, 1:], dtype=torch.int32
             )
-            max_cum_tokens = cu_seq_lens_cpu[:, -1].max().item()
+            # Avoid .max() on an empty tensor when there is no context
+            # (num_chunks == 0, e.g. Whisper encoder's first pass).
+            max_cum_tokens = (
+                cu_seq_lens_cpu[:, -1].max().item() if num_chunks > 0 else 0
+            )
 
             range_idx = torch.arange(max_cum_tokens, dtype=torch.int32)[None, None, :]
             idx_to_batch_tensor = range_idx == cu_seq_lens_cpu[:, 1:][:, :, None]
@@ -1408,8 +1412,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
             assert k_scale is not None and v_scale is not None, (
                 "k_scale and v_scale are required for shuffled update"
             )
-            # TODO: Add correct KV cache handling for hybrid model. KV cache
-            # may not be contiguous if mamba state exists.
             reshape_and_cache_shuffle_triton(
                 key,
                 value,

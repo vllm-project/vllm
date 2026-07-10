@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterator
+from typing import Any
 
 from typing_extensions import override
 
@@ -10,19 +10,54 @@ from vllm.utils.math_utils import round_up
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
-    GPULoadStoreSpec,
-    LoadStoreSpec,
+    OffloadingCounterMetadata,
+    OffloadingGaugeMetadata,
+    OffloadingHistogramMetadata,
     OffloadingManager,
+    OffloadingMetricMetadata,
     OffloadingSpec,
+    OffloadingWorker,
 )
-from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
-from vllm.v1.kv_offload.cpu.gpu_worker import CpuGpuOffloadingHandlers
+from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
+from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
-from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 
 class CPUOffloadingSpec(OffloadingSpec):
     BLOCK_SIZE_ALIGNMENT = 1
+
+    @classmethod
+    def build_metric_definitions(
+        cls, extra_config: dict[str, Any]
+    ) -> dict[str, OffloadingMetricMetadata]:
+        definitions: dict[str, OffloadingMetricMetadata] = {
+            CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC: OffloadingGaugeMetadata(
+                documentation=(
+                    "Fraction of CPU KV-cache space currently pinned by active "
+                    "transfers (0.0 = idle, 1.0 = saturated). Sustained high "
+                    "values indicate transfers (stores or promotions) may be "
+                    "dropped due to insufficient capacity."
+                ),
+            ),
+            CPUOffloadingMetrics.CPU_ALLOCATION_SIZE: OffloadingHistogramMetadata(
+                documentation=(
+                    "Histogram of the number of CPU blocks requested by each "
+                    "KV offload prepare_store call."
+                ),
+                buckets=(1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144),
+            ),
+        }
+        store_threshold = int(extra_config.get("store_threshold", 0))
+        if store_threshold >= 2:
+            definitions[CPUOffloadingMetrics.STORES_SKIPPED] = (
+                OffloadingCounterMetadata(
+                    documentation=(
+                        "Number of KV offload stores skipped because the reuse "
+                        "threshold was not reached."
+                    ),
+                )
+            )
+        return definitions
 
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
         super().__init__(vllm_config, kv_cache_config)
@@ -39,7 +74,15 @@ class CPUOffloadingSpec(OffloadingSpec):
         self.cpu_page_size_per_worker = 0
         assert kv_cache_config is not None
         if kv_cache_config.num_blocks > 0 and world_size > 0:
-            total_gpu_kv_bytes = sum(t.size for t in kv_cache_config.kv_cache_tensors)
+            is_packed = any(t.block_stride for t in kv_cache_config.kv_cache_tensors)
+            assert not is_packed or all(
+                t.block_stride for t in kv_cache_config.kv_cache_tensors
+            )
+            total_gpu_kv_bytes = (
+                kv_cache_config.kv_cache_tensors[0].size
+                if is_packed
+                else sum(t.size for t in kv_cache_config.kv_cache_tensors)
+            )
             kv_bytes_per_block = (
                 total_gpu_kv_bytes // kv_cache_config.num_blocks
             ) * world_size
@@ -66,18 +109,13 @@ class CPUOffloadingSpec(OffloadingSpec):
         self._manager: OffloadingManager | None = None
 
         # worker-side
-        self._handlers: CpuGpuOffloadingHandlers | None = None
+        self._worker: CPUOffloadingWorker | None = None
 
         self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
 
     @override
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
-            kv_events_config = self.vllm_config.kv_events_config
-            enable_events = (
-                kv_events_config is not None and kv_events_config.enable_kv_cache_events
-            )
-
             # store_threshold: how many times a block must appear in lookup()
             # before it is eligible for CPU offloading.  Values < 2 disable
             # filtering (a threshold of 1 equals no filter; 0 is the default).
@@ -89,31 +127,28 @@ class CPUOffloadingSpec(OffloadingSpec):
             self._manager = CPUOffloadingManager(
                 num_blocks=self.num_blocks,
                 cache_policy=self.eviction_policy,  # type: ignore[arg-type]
-                enable_events=enable_events,
+                enable_events=self.kv_events_config.enable_kv_cache_events,
                 store_threshold=store_threshold,
                 max_tracker_size=max_tracker_size,
             )
         return self._manager
 
-    def create_handlers(self, kv_caches: CanonicalKVCaches) -> CpuGpuOffloadingHandlers:
-        return CpuGpuOffloadingHandlers(
+    def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
+        return CPUOffloadingWorker(
             kv_caches=kv_caches,
             block_size_factor=self.block_size_factor,
             num_cpu_blocks=self.num_blocks,
         )
 
     @override
-    def get_handlers(
-        self, kv_caches: CanonicalKVCaches
-    ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
-        if not self._handlers:
+    def get_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
+        if not self._worker:
             if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
                 raise Exception(
                     "CPU Offloading is currently only supported on CUDA-alike "
                     "and XPU GPUs"
                 )
-            self._handlers = self.create_handlers(kv_caches)
+            self._worker = self.create_worker(kv_caches)
 
-        assert self._handlers is not None
-        yield GPULoadStoreSpec, CPULoadStoreSpec, self._handlers.gpu_to_cpu_handler
-        yield CPULoadStoreSpec, GPULoadStoreSpec, self._handlers.cpu_to_gpu_handler
+        assert self._worker is not None
+        return self._worker
