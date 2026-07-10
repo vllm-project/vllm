@@ -12,9 +12,8 @@ from typing import Any
 import cbor2
 
 try:
-    # It is important that this remains an optional dependency.
-    # It would not be allowed in environments with strict security controls,
-    # so it's best not to have it installed when not in use.
+    # HUST installs xxhash by default because CacheConfig defaults prefix
+    # caching to xxhash for lower CPU overhead in long-prefix workloads.
     import xxhash as _xxhash
 
     if not hasattr(_xxhash, "xxh3_128_digest"):
@@ -62,7 +61,7 @@ def _xxhash_digest(input_bytes: bytes) -> bytes:
     if _xxhash is None:
         raise ModuleNotFoundError(
             "xxhash is required for the 'xxhash' prefix caching hash algorithms. "
-            "Install it via `pip install xxhash`."
+            "Install vLLM-HUST requirements or run `pip install xxhash`."
         )
     return _xxhash.xxh3_128_digest(input_bytes)
 

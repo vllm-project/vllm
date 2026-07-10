@@ -33,8 +33,8 @@ def test_prefix_caching_from_cli():
     vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
     assert vllm_config.cache_config.enable_prefix_caching
 
-    # default hash algorithm is "builtin"
-    assert vllm_config.cache_config.prefix_caching_hash_algo == "sha256"
+    # HUST defaults to xxhash for lower prefix-cache block hashing overhead.
+    assert vllm_config.cache_config.prefix_caching_hash_algo == "xxhash"
 
     # set hash algorithm to sha256_cbor
     args = parser.parse_args(["--prefix-caching-hash-algo", "sha256_cbor"])
