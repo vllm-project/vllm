@@ -83,8 +83,8 @@ class MockEmbeddingModelConfig:
     embedding_size: int = 32
 
 
-def test_embed_dimensions_matryoshka_without_list_upper_bound():
-    task = "embed"
+@pytest.mark.parametrize("task", ["embed", "token_embed"])
+def test_embed_dimensions_matryoshka_without_list_upper_bound(task: str):
     model_config = MockEmbeddingModelConfig(
         pooler_config=PoolerConfig(seq_pooling_type="CLS"),
         matryoshka_dimensions=None,
@@ -98,8 +98,8 @@ def test_embed_dimensions_matryoshka_without_list_upper_bound():
         PoolingParams(task=task, dimensions=64).verify(model_config)
 
 
-def test_embed_dimensions_validation_errors():
-    task = "embed"
+@pytest.mark.parametrize("task", ["embed", "token_embed"])
+def test_embed_dimensions_validation_errors(task: str):
     model_config = MockEmbeddingModelConfig(
         pooler_config=PoolerConfig(seq_pooling_type="CLS"),
         matryoshka_dimensions=None,
