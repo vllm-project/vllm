@@ -1,6 +1,12 @@
 # shvllm-qwen35-gguf — vLLM fork (rank-gpu-id + qwen35 GGUF) + vllm-gguf-plugin
 #
-# Build:  docker build -f Dockerfile.shvllm -t shvllm-qwen35-gguf:cu129 .
+# Build (no build context needed — sources are cloned inside the build;
+# use an empty directory as context and ALWAYS pass the commit cache
+# busters, otherwise BuildKit may silently reuse stale clones):
+#   mkdir -p /tmp/empty && docker buildx build -f Dockerfile.shvllm \
+#     --build-arg VLLM_COMMIT=$(git ls-remote https://github.com/efschu/shvllm.git qwen35-gguf-rankgpu | cut -f1) \
+#     --build-arg PLUGIN_COMMIT=$(git ls-remote https://github.com/efschu/vllm-gguf-plugin.git qwen35-support | cut -f1) \
+#     -t shvllm-qwen35-gguf:cu129 --load /tmp/empty
 # Archs:  sm75–sm120 (Turing through Blackwell); reducible via --build-arg.
 # NCCL:   >= 2.30 required (multi-rank-per-GPU, NCCL_MULTI_RANK_GPU_ENABLE);
 #         torch wheels pin 2.29.x, hence the explicit upgrade + build assert.
@@ -73,8 +79,12 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     pip wheel . --no-build-isolation --no-deps -w /wheels -v 2>&1 | tail -50
 
 # ---- build the GGUF plugin (minutes) ----
+# PLUGIN_COMMIT: same cache-buster mechanism as VLLM_COMMIT above.
+ARG PLUGIN_COMMIT=unpinned
 WORKDIR /src
-RUN git clone --depth 1 -b ${PLUGIN_BRANCH} ${PLUGIN_REPO} plugin
+RUN echo "plugin ref: ${PLUGIN_COMMIT}" && \
+    git clone --depth 1 -b ${PLUGIN_BRANCH} ${PLUGIN_REPO} plugin && \
+    cd plugin && git log -1 --oneline
 WORKDIR /src/plugin
 RUN --mount=type=cache,target=/root/.cache/ccache \
     pip wheel . --no-build-isolation --no-deps -w /wheels
@@ -167,4 +177,7 @@ EOF
 
 ENV VLLM_USAGE_SOURCE=docker-shvllm
 EXPOSE 8000
+# Model loading can take minutes; generous start period.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10m --retries=3 \
+    CMD curl -sf http://localhost:8000/health || exit 1
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server", "--host", "0.0.0.0"]
