@@ -1,16 +1,16 @@
-# shvllm-qwen35-gguf — vLLM-Fork (rank-gpu-id + qwen35-GGUF) + vllm-gguf-plugin
+# shvllm-qwen35-gguf — vLLM fork (rank-gpu-id + qwen35 GGUF) + vllm-gguf-plugin
 #
 # Build:  docker build -f Dockerfile.shvllm -t shvllm-qwen35-gguf:cu129 .
-# Archs:  sm75–sm120 (Turing bis Blackwell); via --build-arg reduzierbar.
-# NCCL:   >= 2.30 zwingend (Multi-Rank-per-GPU, NCCL_MULTI_RANK_GPU_ENABLE);
-#         torch-Wheels pinnen 2.29.x, deshalb explizites Upgrade + Build-Assert.
-# MPS:    Für co-located Ranks (--rank-gpu-id mit Duplikaten) muss CUDA MPS
-#         auf dem HOST laufen und /tmp/nvidia-mps in den Container gemountet
-#         werden:  -v /tmp/nvidia-mps:/tmp/nvidia-mps
+# Archs:  sm75–sm120 (Turing through Blackwell); reducible via --build-arg.
+# NCCL:   >= 2.30 required (multi-rank-per-GPU, NCCL_MULTI_RANK_GPU_ENABLE);
+#         torch wheels pin 2.29.x, hence the explicit upgrade + build assert.
+# MPS:    For co-located ranks (--rank-gpu-id with duplicates) CUDA MPS must
+#         run on the HOST and /tmp/nvidia-mps must be mounted into the
+#         container:  -v /tmp/nvidia-mps:/tmp/nvidia-mps
 #
-# Beispiel-Run:
+# Example run:
 #   docker run --gpus all --ipc=host -p 8000:8000 \
-#     -v /modelle:/models -v /tmp/nvidia-mps:/tmp/nvidia-mps \
+#     -v /models:/models -v /tmp/nvidia-mps:/tmp/nvidia-mps \
 #     shvllm-qwen35-gguf:cu129 \
 #     --model /models/foo-Q6_K.gguf --tensor-parallel-size 4 \
 #     --rank-gpu-id 0,0,1,2 --rank-gpu-memory-mib 14500 \
@@ -21,7 +21,7 @@
 ARG CUDA_VERSION=12.9.1
 
 # --------------------------------------------------------------------------
-# Stage 1: Builder — kompiliert vLLM-Fork + GGUF-Plugin für sm75–sm120
+# Stage 1: builder — compiles the vLLM fork + GGUF plugin for sm75–sm120
 # --------------------------------------------------------------------------
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS builder
 
@@ -40,23 +40,23 @@ RUN apt-get update -q && apt-get install -y -q --no-install-recommends \
         build-essential && \
     rm -rf /var/lib/apt/lists/*
 
-# Rust für den vLLM-Tool-Parser (_rust_tool_parser)
+# Rust for the vLLM tool parser (_rust_tool_parser)
 RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 ENV PATH="/root/.cargo/bin:/opt/venv/bin:${PATH}"
 
 RUN python3 -m venv /opt/venv && pip install -U pip wheel
 
-# torch-Trio als eigener Layer (0.9 GB Download, cached gut).
-# Offizielle cu129-Wheels sind für {75,80,86,90,100,120} gebaut.
-# (Builder-Stage: torchaudio hier unkritisch, Zeile bleibt cache-stabil.)
+# torch trio as its own layer (0.9 GB download, caches well).
+# Official cu129 wheels are built for {75,80,86,90,100,120}.
+# (Builder stage: torchaudio is harmless here; line stays cache-stable.)
 RUN pip install torch==${TORCH_VERSION} torchvision torchaudio \
         --index-url https://download.pytorch.org/whl/cu129
 
-# ---- vLLM-Fork bauen (der teure Schritt) ----
-# VLLM_COMMIT dient als Cache-Buster: BuildKit cached RUN-Layer nach
-# Instruktionstext, nicht nach Remote-Inhalt. Beim Bauen immer
-# --build-arg VLLM_COMMIT=$(git rev-parse origin/<branch>) mitgeben,
-# sonst wird ein veralteter Clone aus dem Layer-Cache verwendet.
+# ---- build the vLLM fork (the expensive step) ----
+# VLLM_COMMIT acts as a cache buster: BuildKit caches RUN layers by
+# instruction text, not by remote content. Always pass
+# --build-arg VLLM_COMMIT=$(git rev-parse origin/<branch>) when building,
+# otherwise a stale clone is reused from the layer cache.
 ARG VLLM_COMMIT=unpinned
 WORKDIR /src
 RUN echo "vllm ref: ${VLLM_COMMIT}" && \
@@ -72,7 +72,7 @@ ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
 RUN --mount=type=cache,target=/root/.cache/ccache \
     pip wheel . --no-build-isolation --no-deps -w /wheels -v 2>&1 | tail -50
 
-# ---- GGUF-Plugin bauen (Minuten) ----
+# ---- build the GGUF plugin (minutes) ----
 WORKDIR /src
 RUN git clone --depth 1 -b ${PLUGIN_BRANCH} ${PLUGIN_REPO} plugin
 WORKDIR /src/plugin
@@ -80,27 +80,27 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     pip wheel . --no-build-isolation --no-deps -w /wheels
 
 # --------------------------------------------------------------------------
-# Hilfs-Stage: nur die gebauten Wheels exportieren, z. B.
+# Helper stage: export only the built wheels, e.g.
 #   docker buildx build --target wheels-export --output type=local,dest=./wheels .
-# Sichert das Compile-Ergebnis unabhängig vom BuildKit-Cache.
+# Preserves the compile result independent of the BuildKit cache.
 # --------------------------------------------------------------------------
 FROM scratch AS wheels-export
 COPY --from=builder /wheels /
 
 # --------------------------------------------------------------------------
-# Stage 2: Runtime
+# Stage 2: runtime
 # --------------------------------------------------------------------------
 FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu24.04
 
 ARG TORCH_VERSION=2.13.0
 
 ENV DEBIAN_FRONTEND=noninteractive
-# Laufzeit-JIT-Werkzeuge (beide Fallen im Host-Test gefunden):
-# - gcc + python3-dev: Triton kompiliert Kernel (GDN, Vision-PosEmbed)
-#   zur LAUFZEIT mit dem System-C-Compiler.
-# - cuda-nvcc + cudart-dev/cublas-dev: FlashInfer JIT-kompiliert
-#   Sampling-Ops zur Laufzeit mit nvcc (flashinfer-cubin deckt nicht
-#   jede Arch-Kombination ab, z. B. 86_120f).
+# Runtime JIT toolchain (both traps were found during host testing):
+# - gcc + python3-dev: Triton compiles kernels (GDN, vision pos-embed)
+#   at RUNTIME using the system C compiler.
+# - cuda-nvcc + cudart/curand headers: FlashInfer JIT-compiles sampling
+#   ops at runtime with nvcc (flashinfer-cubin does not cover every arch
+#   combination, e.g. 86_120f).
 RUN apt-get update -q && apt-get install -y -q --no-install-recommends \
         python3 python3-venv python3-dev gcc g++ curl \
         cuda-nvcc-12-9 cuda-cudart-dev-12-9 libcurand-dev-12-9 && \
@@ -109,17 +109,17 @@ ENV CUDA_HOME=/usr/local/cuda
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 
-# torch + torchvision (eigener Layer, identisch zum Builder)
+# torch + torchvision (own layer, identical to the builder)
 RUN pip install -U pip && \
     pip install "torch==${TORCH_VERSION}" "torchvision==0.28.0" \
         --index-url https://download.pytorch.org/whl/cu129
 
-# vLLM-Wheel + Abhängigkeiten (eigener Layer)
+# vLLM wheel + dependencies (own layer)
 COPY --from=builder /wheels/vllm-*.whl /tmp/wheels/
 RUN pip install /tmp/wheels/vllm-*.whl --no-cache-dir
 
-# Reparatur: Abhängigkeitsauflösung von PyPI kann torch/torchvision durch
-# cu13-Defaults ersetzen — cu129-Builds erzwungen wiederherstellen.
+# Repair step: PyPI dependency resolution can replace torch/torchvision
+# with cu13 defaults — force-restore the cu129 builds.
 RUN pip install --force-reinstall --no-deps --no-cache-dir \
         "torch==${TORCH_VERSION}+cu129" "torchvision==0.28.0+cu129" \
         --index-url https://download.pytorch.org/whl/cu129 && \
@@ -127,16 +127,16 @@ RUN pip install --force-reinstall --no-deps --no-cache-dir \
 assert torch.version.cuda.startswith('12.9'), torch.version.cuda; \
 print('torch', torch.__version__, '| torchvision', torchvision.__version__, '| CUDA', torch.version.cuda)"
 
-# GGUF-Plugin + gguf-py
+# GGUF plugin + gguf-py
 COPY --from=builder /wheels/vllm_gguf_plugin-*.whl /tmp/wheels/
 RUN pip install /tmp/wheels/vllm_gguf_plugin-*.whl "gguf>=0.19" --no-cache-dir && \
     rm -rf /tmp/wheels
 
-# --- NCCL >= 2.30: Kernstück für Multi-Rank-per-GPU ---
-# torch pinnt nvidia-nccl-cu12==2.29.x; libnccl.so.2 ist ABI-stabil, daher
-# bewusstes Upgrade. Geprüft wird die tatsächlich geladene Bibliothek per
-# ncclGetVersion() — torch.cuda.nccl.version() meldet nur die
-# Compile-Zeit-Headerversion des torch-Builds und wäre hier irreführend.
+# --- NCCL >= 2.30: the centerpiece for multi-rank-per-GPU ---
+# torch pins nvidia-nccl-cu12==2.29.x; libnccl.so.2 is ABI-stable, so we
+# deliberately upgrade. The actually loaded library is verified via
+# ncclGetVersion() — torch.cuda.nccl.version() only reports the
+# compile-time header version of the torch build and would be misleading.
 RUN pip install --no-cache-dir "nvidia-nccl-cu12==2.30.7" && \
     python3 - <<'EOF'
 import ctypes
@@ -144,25 +144,25 @@ import glob
 import sys
 
 paths = glob.glob(sys.prefix + "/lib/python*/site-packages/nvidia/nccl/lib/libnccl.so.2")
-assert paths, "libnccl.so.2 aus nvidia-nccl-cu12 nicht gefunden"
+assert paths, "libnccl.so.2 from nvidia-nccl-cu12 not found"
 lib = ctypes.CDLL(paths[0])
 v = ctypes.c_int()
 lib.ncclGetVersion(ctypes.byref(v))
 code = v.value
 major, rest = divmod(code, 10000)
 minor, patch = divmod(rest, 100)
-assert (major, minor) >= (2, 30), f"NCCL zu alt: {major}.{minor}.{patch} ({code})"
-print(f"NCCL Laufzeit-Version ok: {major}.{minor}.{patch}")
+assert (major, minor) >= (2, 30), f"NCCL too old: {major}.{minor}.{patch} ({code})"
+print(f"NCCL runtime version ok: {major}.{minor}.{patch}")
 EOF
 
-# Registrierung des Plugins + Kern-Importe verifizieren (ohne GPU möglich)
+# Verify plugin registration + core imports (works without a GPU)
 RUN python3 - <<'EOF'
 from importlib.metadata import entry_points
 eps = [e.name for e in entry_points(group="vllm.general_plugins")]
-assert "gguf" in eps, f"GGUF-Plugin nicht registriert: {eps}"
+assert "gguf" in eps, f"GGUF plugin not registered: {eps}"
 import vllm_gguf_plugin.weights_adapter as wa
 assert any("Qwen35" in c.__name__ for c in wa._ADAPTER_REGISTRY)
-print("Plugin ok, Adapter registriert")
+print("Plugin ok, adapter registered")
 EOF
 
 ENV VLLM_USAGE_SOURCE=docker-shvllm
