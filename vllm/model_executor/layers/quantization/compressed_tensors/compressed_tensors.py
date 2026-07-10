@@ -779,7 +779,6 @@ class CompressedTensorsConfig(QuantizationConfig):
                 strategy=weight_quant.strategy,
                 group_size=weight_quant.group_size,
                 input_quant=input_quant,
-                output_quant=output_quant,
                 layer_name=layer_name,
                 quant_format=format,
             )
@@ -792,7 +791,6 @@ class CompressedTensorsConfig(QuantizationConfig):
                 strategy=weight_quant.strategy,
                 group_size=weight_quant.group_size,
                 input_quant=input_quant,
-                output_quant=output_quant,
                 layer_name=layer_name,
                 quant_format=format,
             )

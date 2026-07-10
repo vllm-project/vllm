@@ -38,6 +38,7 @@ from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     PackedvLLMParameter,
 )
+from vllm.utils.humming import CompressedTensorsInputSchema
 
 logger = init_logger(__name__)
 
@@ -53,7 +54,6 @@ class CompressedTensorsWNA4Int(CompressedTensorsScheme):
         strategy: str,
         group_size: int | None = None,
         input_quant: QuantizationArgs | None = None,
-        output_quant: QuantizationArgs | None = None,
         layer_name: str | None = None,
         quant_format: str = "pack-quantized",
     ):
@@ -62,7 +62,6 @@ class CompressedTensorsWNA4Int(CompressedTensorsScheme):
         self.strategy = strategy
         self.group_size = -1 if group_size is None else group_size
         self.input_quant = input_quant
-        self.output_quant = output_quant
         self.layer_name = layer_name
         self.quant_format = quant_format
 
@@ -162,6 +161,7 @@ class CompressedTensorsWNA4Int(CompressedTensorsScheme):
 
         input_quant_config = self._build_input_quant_config()
         if input_quant_config is not None:
+            assert isinstance(input_quant_config, CompressedTensorsInputSchema)
             layer._humming_input_quant_config = input_quant_config
 
         # --- weight parameters ---
