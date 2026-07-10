@@ -550,7 +550,7 @@ class MoERunner(MoERunnerInterface):
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
-        shared_experts_running_async: bool = False,
+        shared_experts_overlapping: bool = False,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
         """Run expert routing and the fused MoE kernel via the quant method.
 
@@ -558,7 +558,7 @@ class MoERunner(MoERunnerInterface):
         via the router, and the actual fused MoE computation. Returns
         (shared_expert_output, fused_expert_output).
 
-        `shared_experts_running_async` should be True only if using multi-stream
+        `shared_experts_overlapping` should be True only if using multi-stream
         overlap. Then the shared expert was already launched in a separate
         stream, so the results only have to be awaited here.
         """
@@ -590,7 +590,7 @@ class MoERunner(MoERunnerInterface):
                 shared_experts_input=shared_experts_input,
             )
 
-        if shared_experts_running_async:
+        if shared_experts_overlapping:
             assert self._shared_experts is not None
             self._shared_experts.wait()
 
@@ -805,9 +805,9 @@ class MoERunner(MoERunnerInterface):
 
         # If using multi-stream overlap for shared experts, we must launch it
         # before routed expert dispatch.
-        shared_experts_running_async = False
+        shared_experts_overlapping = False
         if self._shared_experts is not None:
-            shared_experts_running_async = self._shared_experts.maybe_forward_async(
+            shared_experts_overlapping = self._shared_experts.maybe_forward_async(
                 shared_experts_input
             )
 
@@ -835,7 +835,7 @@ class MoERunner(MoERunnerInterface):
                 router_logits=router_logits,
                 shared_experts_input=shared_experts_input,
                 input_ids=input_ids,
-                shared_experts_running_async=shared_experts_running_async,
+                shared_experts_overlapping=shared_experts_overlapping,
             )
 
             return self._maybe_combine(
