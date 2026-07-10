@@ -466,7 +466,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "bharatgenai/Param2-17B-A2.4B-Thinking",
         trust_remote_code=True,
     ),
-    "PersimmonForCausalLM": _HfExamplesInfo("adept/persimmon-8b-chat"),
     "PhiForCausalLM": _HfExamplesInfo("microsoft/phi-2"),
     "Phi3ForCausalLM": _HfExamplesInfo("microsoft/Phi-3-mini-4k-instruct"),
     "PhiMoEForCausalLM": _HfExamplesInfo(
@@ -547,9 +546,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Step3TextForCausalLM": _HfExamplesInfo("stepfun-ai/step3", trust_remote_code=True),
     "SolarForCausalLM": _HfExamplesInfo(
         "upstage/solar-pro-preview-instruct", trust_remote_code=True
-    ),
-    "TeleChatForCausalLM": _HfExamplesInfo(
-        "chuhac/TeleChat2-35B", trust_remote_code=True
     ),
     "TeleChat2ForCausalLM": _HfExamplesInfo(
         "Tele-AI/TeleChat2-3B", trust_remote_code=True
@@ -803,9 +799,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Cosmos3ForConditionalGeneration": _HfExamplesInfo(
         "nvidia/Cosmos3-Nano",
+        extras={"super": "nvidia/Cosmos3-Super"},
         max_model_len=4096,
         min_transformers_version="4.57",
-        is_available_online=False,
     ),
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/deepseek-vl2-tiny",
@@ -869,7 +865,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "FunAudioChatForConditionalGeneration": _HfExamplesInfo(
         "funaudiochat", is_available_online=False
     ),
-    "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
     "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it"),
     "DiffusionGemmaForBlockDiffusion": _HfExamplesInfo(
         "google/diffusiongemma-26B-A4B-it",
