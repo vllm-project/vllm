@@ -71,6 +71,19 @@ class KVTransferConfig:
     'recompute': reschedule the request to recompute failed blocks
     'fail': immediately fail the request with an error finish reason (default)"""
 
+    kv_connector_supports_expandable_segments: bool = False
+    """Operator assertion that the configured KV connector never pins or
+    registers KV cache device memory (no RDMA memory regions, no GDS/cuFile
+    registration, no CUDA IPC handles held across steps) and instead moves KV
+    with CUDA kernels or cudaMemcpy at transfer time. Such copy-based
+    connectors dereference virtual addresses on every transfer, so they are
+    unaffected when PyTorch's expandable_segments allocator remaps physical
+    pages, and the conservative expandable_segments incompatibility check can
+    be skipped. Leave False (default) unless you have verified this for your
+    connector: enabling it with a connector that does register KV memory (e.g.
+    NixlConnector, MooncakeConnector) leads to silent KV corruption or RDMA
+    failures after a remap."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
