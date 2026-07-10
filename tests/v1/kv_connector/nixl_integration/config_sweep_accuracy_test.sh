@@ -40,7 +40,6 @@ sw_attn_configs=(
   # Gemma4: SW + cross-layer KV sharing
   "GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=google/gemma-4-E2B-it VLLM_SERVE_EXTRA_ARGS=--max-model-len,8192"
 )
-
 # Select config array based on DP_EP env var
 if [[ -n "${DP_EP:-}" ]]; then
   configs=("${dp_ep_configs[@]}")
