@@ -316,7 +316,11 @@ class Glm5NextConfig(PretrainedConfig):
         unmirrored = type(self)._UNMIRRORED_KEYS
         if "text_config" in super().__getattribute__("__dict__") and key not in unmirrored:
             text_config = super().__getattribute__("text_config")
-            if key in text_config.__dict__:
+            # Forward both instance attributes AND class-defined properties/
+            # methods of the text config, so a flat text-only checkpoint
+            # (model_type "glm5_next", no nested text_config) sees is_moe /
+            # is_kda_layer / layers_block_type like a Glm5NextTextConfig.
+            if key in text_config.__dict__ or key in type(text_config).__dict__:
                 return getattr(text_config, key)
 
         return super().__getattribute__(key)
