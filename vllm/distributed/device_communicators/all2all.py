@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 import torch
@@ -330,6 +331,9 @@ class _NixlEPBufferState:
     buffer: Any
     connected_ep_size: int
     active_ep_size: int
+    # Cached init args so the buffer can be rebuilt after destroy without a
+    # live forward pass to supply them (used by flash_epscale sleep/wake).
+    init_args: dict[str, int] | None = None
 
 
 class NixlEPAll2AllManager(All2AllManagerBase):
@@ -340,6 +344,11 @@ class NixlEPAll2AllManager(All2AllManagerBase):
 
     _buffer: _NixlEPBufferState | None = None
     _lock = threading.RLock()
+    # Cached init args (survives destroy_buffer so ensure_buffer can rebuild).
+    _last_init_args: dict[str, int] | None = None
+    # Monotonic counter incremented on every collective ensure_buffer call so
+    # each barrier round uses a fresh TCP-store key namespace.
+    _ensure_generation: int = 0
 
     def __init__(self, cpu_group, tcp_store_group=None):
         assert tcp_store_group is not None
@@ -362,13 +371,27 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             num_ranks=self.max_num_ep_ranks,
             num_experts=max_num_global_experts,
         )
+        logger.info(
+            "NIXL EP RDMA buffer: %.3f GiB (max_num_ranks=%d, "
+            "experts_per_rank=%d, max_tokens=%d, hidden=%d). This is "
+            "non-torch memory sized for the max EP world (elastic EP), not "
+            "the current world_size=%d.",
+            num_rdma_bytes / (1024**3),
+            self.max_num_ep_ranks,
+            num_experts_per_rank,
+            max_num_tokens_per_dp_rank,
+            token_hidden_size,
+            self.world_size,
+        )
         assert NixlEPAll2AllManager._buffer is None, (
             "NIXL EP buffer already initialized"
         )
         buffer = Buffer(
             rank=self.rank,
             tcp_store_group=self.tcp_store_group.store,
+            explicitly_destroy=True,
         )
+        free_before, _ = torch.cuda.mem_get_info()
         buffer.update_memory_buffers(
             num_ranks=self.max_num_ep_ranks,
             num_experts_per_rank=num_experts_per_rank,
@@ -376,11 +399,403 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         )
         ranks_to_connect = list(range(self.world_size))
         buffer.connect_ranks(ranks_to_connect)
+        free_after, _ = torch.cuda.mem_get_info()
+        logger.info(
+            "NIXL EP buffer non-torch memory (measured): %.1f MiB allocated "
+            "(get_rdma_size_hint=%.1f MiB)",
+            (free_before - free_after) / (1024**2),
+            num_rdma_bytes / (1024**2),
+        )
+        init_args = {
+            "max_num_tokens_per_dp_rank": max_num_tokens_per_dp_rank,
+            "token_hidden_size": token_hidden_size,
+            "num_experts_per_rank": num_experts_per_rank,
+        }
         NixlEPAll2AllManager._buffer = _NixlEPBufferState(
             buffer=buffer,
             connected_ep_size=self.world_size,
             active_ep_size=self.world_size,
+            init_args=init_args,
         )
+        NixlEPAll2AllManager._last_init_args = init_args
+
+    def disconnect_from_sleeping(self, sleeping_ep_ranks: list[int]) -> int:
+        """On a LIVE rank, drop the connection to each rank that is about
+        to be destroyed. This calls nixl's ``invalidateRemoteMD`` so that
+        the live rank's nixl agent forgets the sleeping rank's UCX
+        endpoint. Without this, a later ``connect_ranks`` on the sleeping
+        rank hangs on the two-way handshake (the live side never picks up
+        the new endpoint). Returns the number of peers dropped.
+        """
+        peers = [r for r in sleeping_ep_ranks if r != self.rank]
+        if not peers:
+            return 0
+        with NixlEPAll2AllManager._lock:
+            state = NixlEPAll2AllManager._buffer
+            if state is None:
+                return 0
+            # disconnect_ranks removes them from remote_ranks and invalidates
+            # both directions of the nixl agent view.
+            state.buffer.disconnect_ranks(peers)
+            state.connected_ep_size = max(
+                0, state.connected_ep_size - len(peers)
+            )
+        logger.info(
+            "NIXL EP live rank %d disconnected sleeping peers %s",
+            self.rank,
+            peers,
+        )
+        return len(peers)
+
+    def destroy_buffer(self) -> int:
+        """Release the RDMA buffer and drop all NIXL connections.
+
+        Used by flash_epscale to reclaim the ~2 GiB NIXL non-torch memory on
+        sleeping ranks. Must be called from a stop-the-world (paused) window;
+        all in-flight dispatch/combine must have completed. Returns the number
+        of MiB actually freed. Idempotent -- returns 0 if already destroyed.
+        """
+        with NixlEPAll2AllManager._lock:
+            state = NixlEPAll2AllManager._buffer
+            if state is None:
+                return 0
+            free_before, _ = torch.cuda.mem_get_info()
+            # Buffer.destroy() releases the C++ runtime, which internally
+            # tears down every connection. Calling disconnect_ranks first is
+            # unnecessary and fragile (its assertion is sensitive to whether
+            # self-rank was ever registered as "remote").
+            state.buffer.destroy()
+            NixlEPAll2AllManager._buffer = None
+            free_after, _ = torch.cuda.mem_get_info()
+            freed_mib = (free_after - free_before) / (1024**2)
+            logger.info("NIXL EP buffer destroyed (freed %.1f MiB)", freed_mib)
+            return int(freed_mib)
+
+    def ensure_buffer(self, waking_ep_ranks: list[int] | None = None) -> str:
+        """Restore all2all state so waking ranks can rejoin the EP group.
+
+        This is a collective operation: every rank in the EP group must call
+        it, because ``connect_ranks`` under the hood does a TCP-store
+        rendezvous that requires both endpoints. Behavior per rank:
+
+        * Rank in ``waking_ep_ranks`` with ``_buffer is None``: rebuilds
+          the buffer from cached init args, then handshakes back to every
+          peer. Returns "rebuilt".
+        * Rank in ``waking_ep_ranks`` with a live buffer (nixl teardown
+          was skipped during scale-down): the alive peers already dropped
+          us from their remote_ranks via disconnect_from_sleeping, so a
+          symmetric ``connect_ranks`` is still required to re-establish
+          the two-way handshake. Returns "reconnected-waking".
+        * Rank not in ``waking_ep_ranks`` (alive side) with waking peers:
+          waits for each waking peer to publish its ready flag, then
+          reconnects to those peers. Returns "reconnected".
+        * Otherwise: no-op.
+
+        The self-vs-waking membership -- not the local buffer state -- is
+        what decides which side of the barrier we sit on. This matters
+        when nixl teardown is skipped: buffer is still alive but the
+        rank must still act as the waking side because alive peers have
+        already ``disconnect_ranks``'d it.
+
+        Synchronization: rebuild/rejoin (waking) side and alive side must
+        enter ``connect_ranks`` in the same TCP-store rendezvous window,
+        otherwise the alive side arrives first and hangs on the two-way
+        handshake while the waking side is still allocating. The waking
+        side publishes a readiness flag via the shared TCP store after
+        its local setup is complete; the alive side waits on those flags
+        before calling ``connect_ranks``. A generation counter guards
+        against key reuse across successive waves.
+        """
+        waking = list(waking_ep_ranks or [])
+        is_waking_side = self.rank in waking
+        with NixlEPAll2AllManager._lock:
+            gen = NixlEPAll2AllManager._ensure_generation
+            NixlEPAll2AllManager._ensure_generation += 1
+            state = NixlEPAll2AllManager._buffer
+            need_rebuild = is_waking_side and state is None
+        # Key namespace shared by waking-side publishers and alive-side
+        # waiters. Generation guards against reuse across successive waves.
+        ready_key = lambda r: f"vllm_nixl_ep_ensure_gen{gen}_rebuilt_{r}"
+        store = self.tcp_store_group.store
+        barrier_timeout = timedelta(seconds=60)
+
+        peers_excluding_self = [
+            r for r in range(self.world_size) if r != self.rank
+        ]
+
+        if need_rebuild:
+            args = NixlEPAll2AllManager._last_init_args
+            if args is None:
+                raise RuntimeError(
+                    "NIXL EP buffer has never been initialized; cannot "
+                    "ensure (call get_handle from a MoE forward first)"
+                )
+            from nixl_ep import Buffer  # type: ignore[import-not-found]
+
+            num_experts_per_rank = args["num_experts_per_rank"]
+            max_num_global_experts = (
+                self.max_num_ep_ranks * num_experts_per_rank
+            )
+            num_rdma_bytes = Buffer.get_rdma_size_hint(
+                num_max_dispatch_tokens_per_rank=args[
+                    "max_num_tokens_per_dp_rank"
+                ],
+                hidden=args["token_hidden_size"],
+                num_ranks=self.max_num_ep_ranks,
+                num_experts=max_num_global_experts,
+            )
+            buffer = Buffer(
+                rank=self.rank,
+                tcp_store_group=store,
+                explicitly_destroy=True,
+            )
+            free_before, _ = torch.cuda.mem_get_info()
+            buffer.update_memory_buffers(
+                num_ranks=self.max_num_ep_ranks,
+                num_experts_per_rank=num_experts_per_rank,
+                num_rdma_bytes=num_rdma_bytes,
+            )
+            free_after, _ = torch.cuda.mem_get_info()
+            logger.info(
+                "NIXL EP buffer rebuilt: %.1f MiB allocated (about to "
+                "connect_ranks)",
+                (free_before - free_after) / (1024**2),
+            )
+            # Announce readiness so alive peers can enter connect_ranks in
+            # the same rendezvous window as us. Must happen after the local
+            # buffer is fully constructed -- alive-side connect_ranks will
+            # publish/fetch metadata via the same TCP store and only
+            # completes once our side is ready to fetch theirs.
+            store.set(ready_key(self.rank), "1")
+            # Symmetric handshake: connect to every peer in the current
+            # world (excluding self -- nixl's connect_ranks rejects
+            # self-connection). Alive peers are simultaneously connecting
+            # back to us via their reconnect branch below.
+            buffer.connect_ranks(peers_excluding_self)
+            with NixlEPAll2AllManager._lock:
+                NixlEPAll2AllManager._buffer = _NixlEPBufferState(
+                    buffer=buffer,
+                    connected_ep_size=self.world_size,
+                    active_ep_size=self.world_size,
+                    init_args=args,
+                )
+            logger.info("NIXL EP buffer rebuild finished (connect_ranks OK)")
+            with NixlEPAll2AllManager._lock:
+                cur = NixlEPAll2AllManager._buffer
+                if cur is not None:
+                    cur.active_ep_size = self.world_size
+            self._dump_mask_state(tag="after-rebuilt-connect")
+            return "rebuilt"
+
+        if is_waking_side:
+            # Buffer is still live because nixl teardown was skipped this
+            # wave (e.g. CuMem-only sleep). Alive peers already ran
+            # disconnect_from_sleeping on us during scale-down, so their
+            # remote_ranks no longer contain us -- but on our side, every
+            # alive peer is still registered as remote (we did nothing).
+            # nixl's connect_ranks is idempotent w.r.t. already-known
+            # peers: if rank X is already in remote_ranks it returns
+            # without publishing new metadata to the TCP store, and the
+            # alive side's connect_ranks(us) then hangs waiting for
+            # metadata that will never arrive. To force a real symmetric
+            # handshake we first disconnect our known alive peers, then
+            # reconnect. This mirrors the destroy/rebuild path (where a
+            # brand-new buffer starts with an empty remote_ranks) without
+            # actually reallocating the RDMA buffer.
+            assert state is not None
+            key = ready_key(self.rank)
+            logger.info(
+                "NIXL EP waking rank %d clearing stale remote_ranks %s "
+                "before symmetric reconnect (gen=%d)",
+                self.rank, peers_excluding_self, gen,
+            )
+            try:
+                state.buffer.disconnect_ranks(peers_excluding_self)
+            except Exception:
+                logger.warning(
+                    "NIXL EP waking rank %d: disconnect_ranks(%s) raised; "
+                    "continuing anyway",
+                    self.rank, peers_excluding_self, exc_info=True,
+                )
+            logger.info(
+                "NIXL EP waking rank %d publishing ready key %r (gen=%d)",
+                self.rank, key, gen,
+            )
+            store.set(key, "1")
+            logger.info(
+                "NIXL EP waking rank %d ready key set; calling connect_ranks(%s)",
+                self.rank, peers_excluding_self,
+            )
+            state.buffer.connect_ranks(peers_excluding_self)
+            with NixlEPAll2AllManager._lock:
+                cur = NixlEPAll2AllManager._buffer
+                if cur is not None:
+                    cur.connected_ep_size = self.world_size
+                    cur.active_ep_size = self.world_size
+            logger.info(
+                "NIXL EP waking rank %d re-handshaked (buffer was kept "
+                "across sleep)",
+                self.rank,
+            )
+            # See rebuilt branch: connect_ranks(activate=True) already
+            # took care of unmasking and active_rank_bound refresh.
+            return "reconnected-waking"
+
+        # Alive side. Because scale-down invoked disconnect_from_sleeping
+        # on us, the waking peers are no longer in our remote_ranks --
+        # nixl's connect_ranks will genuinely handshake with them instead
+        # of skipping. Run the symmetric rendezvous in parallel with the
+        # waking side so the TCP-store windows overlap.
+        if not waking:
+            return "noop"
+        peers_to_reconnect = [r for r in waking if r != self.rank]
+        if not peers_to_reconnect:
+            return "noop"
+        # Wait for every waking peer to publish its ready flag. Without
+        # this we would enter connect_ranks first and hang inside nixl's
+        # two-way handshake while the waking side is still allocating.
+        wait_keys = [ready_key(r) for r in peers_to_reconnect]
+        logger.info(
+            "NIXL EP live rank %d waiting for waking peers %s to finish "
+            "buffer rebuild (gen=%d, keys=%s)",
+            self.rank,
+            peers_to_reconnect,
+            gen,
+            wait_keys,
+        )
+        store.wait(wait_keys, barrier_timeout)
+        logger.info(
+            "NIXL EP live rank %d ready keys received; calling connect_ranks(%s)",
+            self.rank, peers_to_reconnect,
+        )
+        with NixlEPAll2AllManager._lock:
+            state = NixlEPAll2AllManager._buffer
+            assert state is not None
+            buffer = state.buffer
+        buffer.connect_ranks(peers_to_reconnect)
+        logger.info(
+            "NIXL EP live rank %d connect_ranks returned",
+            self.rank,
+        )
+        with NixlEPAll2AllManager._lock:
+            state = NixlEPAll2AllManager._buffer
+            if state is not None:
+                state.connected_ep_size = self.world_size
+                state.active_ep_size = self.world_size
+        logger.info(
+            "NIXL EP live rank %d reconnected to waking peers %s",
+            self.rank,
+            peers_to_reconnect,
+        )
+        # See rebuilt branch: connect_ranks(activate=True) already
+        # took care of unmasking and active_rank_bound refresh.
+        self._dump_mask_state(tag="after-reconnected")
+        return "reconnected"
+
+    def _dump_mask_state(self, *, tag: str) -> None:
+        """Query the current nixl mask buffer and log which ranks are masked
+        vs. unmasked. Also derive active_rank_bound the same way nixl
+        does (largest-active-rank + 1) so we can tell if dispatch- and
+        combine-time bounds agree.
+        """
+        with NixlEPAll2AllManager._lock:
+            state = NixlEPAll2AllManager._buffer
+            if state is None:
+                logger.info(
+                    "NIXL EP rank %d mask-dump[%s]: buffer=None",
+                    self.rank, tag,
+                )
+                return
+            try:
+                mask_status = torch.zeros(
+                    self.max_num_ep_ranks,
+                    dtype=torch.int32,
+                    device="cuda",
+                )
+                state.buffer.query_mask_buffer(mask_status)
+                torch.cuda.current_stream().synchronize()
+                m = mask_status.tolist()
+                # active_rank_bound = max_id_where_unmasked + 1
+                bound = 0
+                for r_id in range(self.max_num_ep_ranks - 1, -1, -1):
+                    if m[r_id] == 0:  # 0 = unmasked = active
+                        bound = r_id + 1
+                        break
+            except Exception:
+                logger.warning(
+                    "NIXL EP rank %d mask-dump[%s]: query FAILED",
+                    self.rank, tag, exc_info=True,
+                )
+                return
+        logger.info(
+            "NIXL EP rank %d mask-dump[%s]: mask=%s => active_rank_bound=%d",
+            self.rank, tag, m, bound,
+        )
+
+    def _clear_all_peer_masks(self, *, reason: str) -> None:
+        """Force every peer's mask bit to False after a wake-time
+        reconnect. During scale-down alive ranks set the mask for
+        sleeping peers via set_masked_ranks; on wake the mask must be
+        cleared for the wake path to actually let dispatch/combine
+        talk to those peers again. Without this, connect_ranks
+        succeeds but the kernel still skips the peer, showing up as
+        NIXL-EP dispatch-receive timeouts on every local expert.
+
+        This is a defensive belt-and-suspenders: the API-router path
+        also calls resize_sleep_ep_ranks([]) after wake which reaches
+        set_masked_ranks and would clear the mask too, but doing it
+        here ties the mask reset to the same collective that just
+        rebuilt the connection so the two states cannot diverge.
+        """
+        with NixlEPAll2AllManager._lock:
+            state = NixlEPAll2AllManager._buffer
+            if state is None:
+                return
+            cleared = []
+            for rank in range(self.world_size):
+                if rank == self.rank:
+                    continue
+                try:
+                    state.buffer.update_mask_buffer(rank, False)
+                    cleared.append(rank)
+                except Exception:
+                    logger.warning(
+                        "NIXL EP rank %d: update_mask_buffer(%d, False) "
+                        "raised while clearing masks after %s",
+                        self.rank, rank, reason, exc_info=True,
+                    )
+            state.active_ep_size = self.world_size
+            torch.cuda.current_stream().synchronize()
+        logger.info(
+            "NIXL EP rank %d cleared peer masks %s after %s",
+            self.rank, cleared, reason,
+        )
+        # Barrier across all active ranks to verify RDMA control-plane is
+        # actually functional after the reconnect. This is a nixl-level
+        # collective that requires every peer to reach it -- if the wake
+        # path only re-established the metadata but not the underlying
+        # QPs / registered-memory bindings, this call will hang or fail
+        # before dispatch/combine ever gets used, giving us a clear
+        # signal instead of "64 experts all timeout on first inference".
+        try:
+            with NixlEPAll2AllManager._lock:
+                state = NixlEPAll2AllManager._buffer
+            if state is not None:
+                logger.info(
+                    "NIXL EP rank %d entering post-reconnect barrier (reason=%s)",
+                    self.rank, reason,
+                )
+                state.buffer.barrier()
+                logger.info(
+                    "NIXL EP rank %d post-reconnect barrier OK (reason=%s)",
+                    self.rank, reason,
+                )
+        except Exception:
+            logger.warning(
+                "NIXL EP rank %d post-reconnect barrier FAILED (reason=%s); "
+                "dispatch will likely timeout",
+                self.rank, reason, exc_info=True,
+            )
 
     def set_masked_ranks(self, masked_ranks: list[int]) -> None:
         """Update the shared NIXL shrink mask without changing process groups.
@@ -401,13 +816,32 @@ class NixlEPAll2AllManager(All2AllManagerBase):
                     f"masked_ranks must be in [0, {world_size}), got {invalid}"
                 )
 
+            logger.info(
+                "NIXL EP rank %d set_masked_ranks ENTER: masked=%s",
+                self.rank, sorted(masked),
+            )
             for rank in range(world_size):
-                state.buffer.update_mask_buffer(rank, rank in masked)
+                should_mask = rank in masked
+                # nixl asserts (rank_to_mask != self or !mask): a rank cannot
+                # mask itself. This is a collective call with the same masked
+                # list on every rank, so ranks that appear in the mask are
+                # the ones being put to sleep -- they will next call
+                # destroy_buffer and stop participating anyway. Skip the
+                # self-mask entry on those ranks; alive ranks still mask
+                # them, which is what dispatch/combine actually reads.
+                if should_mask and rank == self.rank:
+                    continue
+                state.buffer.update_mask_buffer(rank, should_mask)
             state.active_ep_size = world_size - len(masked)
 
             # Control-plane operation: make the updated peer mask visible before
             # the sleep / wake API returns and new requests enter the model path.
             torch.cuda.current_stream().synchronize()
+            logger.info(
+                "NIXL EP rank %d set_masked_ranks EXIT: masked=%s",
+                self.rank, sorted(masked),
+            )
+        self._dump_mask_state(tag=f"after-set_masked({sorted(masked)})")
 
     def _connect_to_ep_size(self, ep_size: int, *, make_active: bool) -> None:
         assert NixlEPAll2AllManager._buffer is not None

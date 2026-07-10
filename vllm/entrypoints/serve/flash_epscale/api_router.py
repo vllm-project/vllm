@@ -118,6 +118,14 @@ async def _paused(client: EngineClient, timing: dict[str, float]):
     async with _timed(timing, "pause"):
         await client.pause_generation(mode="wait", clear_cache=False)
     logger.info("flash_epscale: pause_generation done")
+    # Free cached-but-unused activation blocks so wake-up / weight transfer
+    # has headroom. Best-effort: it refills lazily on resume, so never fail
+    # the transition over it.
+    try:
+        async with _timed(timing, "empty_cache"):
+            await client.collective_rpc("empty_cache")
+    except Exception:
+        logger.warning("flash_epscale: empty_cache failed (ignored)", exc_info=True)
     try:
         yield
     finally:
@@ -287,6 +295,11 @@ async def _scale_down(
             try:
                 if current_sleeping:
                     logger.info("flash_epscale: wake_up_ep_ranks(%s)", current_sleeping)
+                    async with _timed(timing, "nixl_ensure"):
+                        await client.collective_rpc(
+                            "ensure_nixl_buffer",
+                            kwargs={"sleeping_ep_ranks": current_sleeping},
+                        )
                     async with _timed(timing, "wake"):
                         await client.collective_rpc(
                             "wake_up_ep_ranks",
@@ -320,6 +333,51 @@ async def _scale_down(
                         },
                     )
                 logger.info("flash_epscale: sleep_ep_ranks_by_tags done")
+                # NIXL scale-down teardown.
+                #
+                # disconnect_nixl_from_sleeping (alive-only) invalidates
+                # the sleeping peers' UCX endpoints in each alive rank's
+                # nixl agent. This is REQUIRED for a later wake -- without
+                # it, connect_ranks on the waking side sees stale remote
+                # metadata and hangs on the two-way handshake. Do it even
+                # when full teardown is skipped, because CuMem-only sleep
+                # still requires that the alive side has forgotten the
+                # sleeping peers (see NixlEPAll2AllManager.ensure_buffer
+                # branch B).
+                #
+                # destroy_nixl_buffer (sleeping-only) releases the ~2 GiB
+                # RDMA buffer. Optional -- CuMem-only sleep skips it via
+                # the env override, in which case ensure_buffer's branch B
+                # rebinds the surviving buffer at wake time.
+                try:
+                    async with _timed(timing, "nixl_disconnect"):
+                        await client.collective_rpc(
+                            "disconnect_nixl_from_sleeping",
+                            kwargs={"sleeping_ep_ranks": target_sleeping},
+                        )
+                except Exception:
+                    logger.warning(
+                        "flash_epscale: nixl disconnect failed (ignored)",
+                        exc_info=True,
+                    )
+                import os as _os
+                if _os.environ.get("VLLM_FLASH_EPSCALE_SKIP_NIXL_TEARDOWN") == "1":
+                    logger.info(
+                        "flash_epscale: SKIP nixl buffer destroy "
+                        "(env override); disconnect still applied"
+                    )
+                else:
+                    try:
+                        async with _timed(timing, "nixl_destroy"):
+                            await client.collective_rpc(
+                                "destroy_nixl_buffer",
+                                kwargs={"sleeping_ep_ranks": target_sleeping},
+                            )
+                    except Exception:
+                        logger.warning(
+                            "flash_epscale: nixl destroy failed (ignored)",
+                            exc_info=True,
+                        )
                 transition_completed = True
             except Exception:
                 await _restore_scale_down_sleep_state(
@@ -408,6 +466,15 @@ async def _scale_up(
             sleep_started = False
             try:
                 if current_sleeping:
+                    # Rebuild NIXL RDMA buffer on waking ranks before wake,
+                    # so the first post-wake all2all can succeed. Failure
+                    # here IS fatal -- without the buffer the rank cannot
+                    # participate in dispatch/combine.
+                    async with _timed(timing, "nixl_ensure"):
+                        await client.collective_rpc(
+                            "ensure_nixl_buffer",
+                            kwargs={"sleeping_ep_ranks": current_sleeping},
+                        )
                     async with _timed(timing, "wake"):
                         await client.collective_rpc(
                             "wake_up_ep_ranks",

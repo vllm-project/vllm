@@ -135,9 +135,11 @@ class PyNcclCommunicator:
         self.device = device
         # nccl communicator and stream will use this device
         with torch.accelerator.device_index(device.index):
+            free_before, _ = torch.cuda.mem_get_info(device.index)
             self.comm: ncclComm_t = self.nccl.ncclCommInitRank(
                 self.world_size, self.unique_id, self.rank
             )
+            free_after_init, _ = torch.cuda.mem_get_info(device.index)
 
             stream = current_stream()
             # A small all_reduce for warmup.
@@ -145,6 +147,16 @@ class PyNcclCommunicator:
             self.all_reduce(data)
             stream.synchronize()
             del data
+            free_after_warmup, _ = torch.cuda.mem_get_info(device.index)
+            logger.info(
+                "NCCL comm (world_size=%d) non-torch memory: commInitRank=%.1f "
+                "MiB, channel buffers (first all_reduce)=%.1f MiB, total=%.1f "
+                "MiB",
+                self.world_size,
+                (free_before - free_after_init) / (1024**2),
+                (free_after_init - free_after_warmup) / (1024**2),
+                (free_before - free_after_warmup) / (1024**2),
+            )
 
     @classmethod
     def _from_existing_comm(

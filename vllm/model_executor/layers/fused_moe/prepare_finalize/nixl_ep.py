@@ -85,7 +85,15 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     ):
         super().__init__()
 
-        self.buffer = buffer
+        # flash_epscale sleep/wake destroys and rebuilds the underlying nixl
+        # Buffer object on ranks that go to sleep (destroy_nixl_buffer nulls the
+        # C++ runtime; ensure_nixl_buffer allocates a brand-new Buffer). Caching
+        # the construction-time handle would leave this P/F pointing at the dead
+        # object (runtime=None) after a wake, so the first post-wake dispatch
+        # would raise "'NoneType' object has no attribute 'dispatch'". Keep the
+        # handle only as a fallback and resolve the live buffer from the
+        # (singleton) all2all manager on each use -- see the ``buffer`` property.
+        self._init_buffer = buffer
         self.max_tokens_per_rank = max_tokens_per_rank
         self.use_fp8_dispatch = use_fp8_dispatch
         # The dispatch function returns a handle that the combine function
@@ -130,6 +138,26 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
 
+    @property
+    def buffer(self) -> nixl_ep.Buffer:
+        """The live nixl EP buffer.
+
+        Resolved from the (singleton) all2all manager rather than cached, so a
+        flash_epscale sleep/wake -- which destroys the buffer on the sleeping
+        rank and rebuilds a new Buffer object on wake -- is transparent to every
+        MoE layer holding this P/F. Falls back to the construction-time handle
+        when the NIXL manager is unavailable (should not happen on this path).
+        """
+        device_communicator = get_ep_group().device_communicator
+        if device_communicator is not None:
+            all2all_manager = device_communicator.all2all_manager
+            if (
+                isinstance(all2all_manager, NixlEPAll2AllManager)
+                and NixlEPAll2AllManager._buffer is not None
+            ):
+                return NixlEPAll2AllManager._buffer.buffer
+        return self._init_buffer
+
     def output_is_reduced(self) -> bool:
         return True
 
@@ -152,7 +180,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         all2all_manager.commit_staged_state()
 
     def topk_indices_dtype(self) -> torch.dtype | None:
-        return torch.int64
+        return nixl_ep.topk_idx_t
 
     def _map_global_to_physical_ids(self, topk_ids: torch.Tensor) -> torch.Tensor:
         if self.global_to_physical is None:

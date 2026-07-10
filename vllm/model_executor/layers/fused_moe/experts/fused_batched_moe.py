@@ -576,7 +576,10 @@ class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
         num_experts = local_num_experts
         workspace13 = (num_experts, self.max_num_tokens * num_dp, K)
         workspace2 = (self.max_num_tokens * num_dp, N)
-        output = workspace13
+        # Output feeds the combine kernel; track M so its token dim matches the
+        # dispatch output's active_rank_bound * max_tokens (see
+        # BatchedTritonExperts.workspace_shapes for the elastic-EP rationale).
+        output = (num_experts, M, K)
         return (workspace13, workspace2, output)
 
     def dequant(self, t: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
@@ -829,7 +832,13 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
         activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace13 = (num_experts, max_num_tokens * num_dp, max(K, N))
         workspace2 = (num_experts, max_num_tokens * num_dp, activation_out_dim)
-        output = (num_experts, max_num_tokens * num_dp, K)
+        # The output feeds the combine kernel, which for elastic-EP backends
+        # (NIXL) strictly asserts its token dim equals the dispatch output's
+        # active_rank_bound * max_tokens. M already carries that value
+        # (a1.size(1) from the dispatch output), so track M rather than the
+        # static max_num_tokens * num_dispatchers, which only holds when the
+        # whole EP world is active and over-sizes the tensor after scale-down.
+        output = (num_experts, M, K)
         return (workspace13, workspace2, output)
 
     def apply(
