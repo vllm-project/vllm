@@ -114,6 +114,9 @@ class WhisperEncoderAttention(MMEncoderAttention):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
+        sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Input shape: batch_size x seq_len x hidden_size
@@ -126,7 +129,14 @@ class WhisperEncoderAttention(MMEncoderAttention):
             value = value.unsqueeze(0)
 
         # Call the parent forward method
-        out = super().forward(query, key, value)
+        out = super().forward(
+            query,
+            key,
+            value,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
+        )
 
         if is_2d:
             out = out.squeeze(0)
@@ -240,11 +250,21 @@ class WhisperAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
+        sequence_lengths: torch.Tensor | None = None,
     ):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        attn_output = self.attn(q, k, v)
+        attn_output = self.attn(
+            q,
+            k,
+            v,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
+        )
 
         output, _ = self.out_proj(attn_output)
 
@@ -381,10 +401,18 @@ class WhisperEncoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
+        sequence_lengths: torch.Tensor | None = None,
     ):
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
-        hidden_states = self.self_attn(hidden_states=hidden_states)
+        hidden_states = self.self_attn(
+            hidden_states=hidden_states,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
+        )
         hidden_states = residual + hidden_states
         residual = hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
@@ -506,7 +534,11 @@ class WhisperEncoder(nn.Module):
             )
 
     def forward(
-        self, input_features: torch.Tensor | list[torch.Tensor]
+        self,
+        input_features: torch.Tensor | list[torch.Tensor],
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
+        sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_states = []
         input_is_batched = False
@@ -529,7 +561,12 @@ class WhisperEncoder(nn.Module):
             hidden_states = torch.stack(hidden_states, dim=0)
 
         for encoder_layer in self.layers:
-            hidden_states = encoder_layer(hidden_states)
+            hidden_states = encoder_layer(
+                hidden_states,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+                sequence_lengths=sequence_lengths,
+            )
 
         hidden_states = self.layer_norm(hidden_states)
         return hidden_states
