@@ -102,12 +102,13 @@ class LLBf16SplitK:
         value_layout = cute.make_layout((1, copy_elems))
         return cute.make_tiled_copy_tv(atom_copy, thread_layout, value_layout)
 
+    @cute.jit
     def _fill_pred(self, pred_flat, coord_tensor, k_tile, dim_limit, K_total):
         coord_ktile = coord_tensor[None, None, 0, k_tile]
         num_vec = pred_flat.shape[0]
         num_mn = pred_flat.shape[1]
-        for v in range(num_vec):
-            for j in range(num_mn):
+        for v in cutlass.range(num_vec, unroll_full=True):
+            for j in cutlass.range(num_mn, unroll_full=True):
                 pred_flat[v, j] = cute.elem_less(
                     coord_ktile[(0, v), j], (dim_limit, K_total)
                 )
@@ -119,7 +120,6 @@ class LLBf16SplitK:
             cute.make_layout((num_vec, num_mn), stride=(num_mn, 1)),
             cutlass.Boolean,
         )
-        self._fill_pred(pred_flat, tXcX, k_tile, dim_limit, K_total)
         pred = cute.make_tensor(
             pred_flat.iterator,
             cute.make_layout(
@@ -305,6 +305,8 @@ class LLBf16SplitK:
             tBpB_flat, tBpB = self._make_pred(
                 tBcB, k_start, mB.shape[0], K_total
             )
+            self._fill_pred(tApA_flat, tAcA, k_start, mA.shape[0], K_total)
+            self._fill_pred(tBpB_flat, tBcB, k_start, mB.shape[0], K_total)
 
             producer_state = pipeline.make_pipeline_state(
                 pipeline.PipelineUserType.Producer, num_stages
@@ -431,6 +433,8 @@ class LLBf16SplitK:
                 (elems_per_thread, self.num_mma_threads),
                 stride=(self.num_mma_threads, 1),
             )
+            epilogue_slots = cute.make_tensor(0, epilogue_thread_layout)
+            epilogue_slot_coords = cute.make_identity_tensor((bN, bM))
             # Layout: (mma_warp, linear MN element).
             smem_red = cute.make_tensor(
                 cute.arch.alloc_smem(
@@ -456,10 +460,10 @@ class LLBf16SplitK:
             cta_rank = cute.arch.block_idx_in_cluster()
 
             for ei in cutlass.range_constexpr(elems_per_thread):
-                elem_idx = cute.crd2idx((ei, mma_tidx), epilogue_thread_layout)
-                local_n, local_m = cute.idx2crd(elem_idx, (bN, bM))
+                elem_idx = epilogue_slots[ei, mma_tidx]
+                local_coord = cute.select(epilogue_slot_coords[elem_idx], mode=[1, 0])
                 total = cutlass.Float32(0.0)
-                if cute.elem_less((local_m, local_n), gC.shape):
+                if cute.elem_less(local_coord, gC.shape):
                     total = smem_red[None, elem_idx].load().reduce(
                         cute.ReductionOp.ADD,
                         init_val=cutlass.Float32(0.0),
@@ -472,7 +476,7 @@ class LLBf16SplitK:
 
             # Broadcast this CTA's partials to peer DSMEM.
             for ei in cutlass.range_constexpr(elems_per_thread):
-                elem_idx = cute.crd2idx((ei, mma_tidx), epilogue_thread_layout)
+                elem_idx = epilogue_slots[ei, mma_tidx]
                 my_slot = cute.domain_offset((cta_rank, elem_idx), partials).iterator
                 my_val = partials[cta_rank, elem_idx]
                 for peer in cutlass.range_constexpr(self.split_k):
@@ -488,15 +492,15 @@ class LLBf16SplitK:
 
             # Reduce split-K partials and write global output.
             for ei in cutlass.range_constexpr(elems_per_thread):
-                elem_idx = cute.crd2idx((ei, mma_tidx), epilogue_thread_layout)
-                local_n, local_m = cute.idx2crd(elem_idx, (bN, bM))
-                global_coord = cC[local_m, local_n]
+                elem_idx = epilogue_slots[ei, mma_tidx]
+                local_coord = cute.select(epilogue_slot_coords[elem_idx], mode=[1, 0])
+                global_coord = cC[local_coord]
                 if cute.elem_less(global_coord, mC.shape):
                     acc = partials[None, elem_idx].load().reduce(
                         cute.ReductionOp.ADD,
                         init_val=cutlass.Float32(0.0),
                         reduction_profile=0,
                     )
-                    gC[local_m, local_n] = cutlass.Float32(acc)
+                    gC[local_coord] = cutlass.Float32(acc)
 
         cute.arch.sync_threads()

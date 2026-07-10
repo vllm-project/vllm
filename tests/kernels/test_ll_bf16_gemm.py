@@ -76,7 +76,7 @@ SHAPES = [
     (256, 14400, "DSV4-Flash"),
     (128, 5120, "DeepSeek-V2"),
     (8, 4096, "Mixtral-8x7B"),
-    (64, 2880, "non-aligned-K"),
+    (64, 2880, "non-tile-aligned-K"),
     (256, 2048, "split-K-boundary"),
 ]
 
@@ -509,6 +509,14 @@ def test_mismatched_K():
     a = torch.randn(4, 2048, dtype=torch.bfloat16, device="cuda")
     b = torch.randn(64, 1024, dtype=torch.bfloat16, device="cuda")
     with pytest.raises(ValueError, match="matching K dimensions"):
+        _gemm(a, b)
+
+
+def test_invalid_K_divisibility():
+    a = torch.randn(4, 2049, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(64, 2049, dtype=torch.bfloat16, device="cuda")
+
+    with pytest.raises(ValueError, match="K to be divisible by 8"):
         _gemm(a, b)
 
 

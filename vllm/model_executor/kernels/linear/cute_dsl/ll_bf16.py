@@ -236,6 +236,9 @@ class LLBf16Gemm:
             raise ValueError(
                 "hidden_states and router_weight must have matching K dimensions"
             )
+        # Kernels use vectorized bf16 loads and require 16-byte row alignment.
+        if hidden_states.shape[1] % 8 != 0:
+            raise ValueError("ll_bf16_gemm requires K to be divisible by 8")
         if not hidden_states.is_contiguous() or not router_weight.is_contiguous():
             raise ValueError(
                 "hidden_states and router_weight must be contiguous row-major inputs"

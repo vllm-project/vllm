@@ -44,6 +44,7 @@ class LLBf16Dotprod:
         self.main_tiles = self.k_main_elems // (main_vec_width * bs)
         self.tail_tiles = self.k_tail_elems // (tail_vec_width * bs)
 
+    @cute.jit
     def _vector_dotprod(
         self,
         acc: cute.Tensor,
@@ -53,20 +54,20 @@ class LLBf16Dotprod:
         num_tiles: cutlass.Constexpr,
         align_bytes: cutlass.Constexpr,
     ):
-        for tile in range(num_tiles):
+        for tile in cutlass.range(num_tiles, unroll_full=True):
             bt = tB[None, tile]
             bt_a = cute.make_tensor(bt.iterator.align(align_bytes), bt.layout)
             br = cute.make_rmem_tensor_like(bt_a)
             cute.autovec_copy(bt_a, br)
             br_f32 = br.load().to(cutlass.Float32)
 
-            for m in range(M):
+            for m in cutlass.range(M, unroll_full=True):
                 at = tA[m, None, tile]
                 at_a = cute.make_tensor(at.iterator.align(align_bytes), at.layout)
                 ar = cute.make_rmem_tensor_like(at_a)
                 cute.autovec_copy(at_a, ar)
                 vec_width: cutlass.Constexpr = cute.size(ar)
-                for v in range(vec_width):
+                for v in cutlass.range(vec_width, unroll_full=True):
                     acc[m] = acc[m] + ar[v].to(cutlass.Float32) * br_f32[v]
 
     def _make_thread_vector_slice(
@@ -172,8 +173,6 @@ class LLBf16Dotprod:
         main_tiles: cutlass.Constexpr,
         tail_tiles: cutlass.Constexpr,
     ):
-        cute.arch.setmaxregister_increase(128)
-
         tidx, _, _ = cute.arch.thread_idx()
         n_idx, _, _ = cute.arch.block_idx()
         wid = cute.arch.warp_idx()
