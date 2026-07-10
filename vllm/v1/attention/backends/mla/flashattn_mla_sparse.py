@@ -152,7 +152,11 @@ class FlashAttnMLASparseMetadataBuilder(
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
-        self._init_reorder_batch_threshold(1024, supports_spec_as_decode=True)
+        num_q_heads = self.model_config.get_num_attention_heads(
+            vllm_config.parallel_config
+        )
+        threshold = {16: 128, 32: 128, 64: 256, 128: 256}.get(num_q_heads, 256)
+        self._init_reorder_batch_threshold(threshold, supports_spec_as_decode=True)
 
 
 class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
