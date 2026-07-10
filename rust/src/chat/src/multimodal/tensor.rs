@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use half::{bf16, f16};
-use llm_multimodal::{ModelSpecificValue, PreprocessedEncoderInputs as PreprocessedImages};
+use llm_multimodal::{ModelSpecificValue, PreprocessedEncoderInputs};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::MmKwargValue as ProtocolKwargValue;
 use vllm_engine_core_client::protocol::tensor::{ShapeExt as _, WireTensor};
@@ -25,25 +25,31 @@ pub(super) enum KwargValue {
     Passthrough(ProtocolKwargValue),
 }
 
-/// Collect `pixel_values` and model-specific outputs into one tensor map.
+/// Collect the primary encoder input and model-specific outputs into one
+/// tensor map.
+///
+/// `primary_key` names the encoder-input tensor as the model's forward kwargs
+/// expect it (e.g. `pixel_values` for images, `pixel_values_videos` for
+/// videos).
 pub(super) fn collect_tensors(
-    preprocessed: PreprocessedImages,
+    preprocessed: PreprocessedEncoderInputs,
+    primary_key: &str,
     float_dtype: ModelDtype,
 ) -> Result<HashMap<String, KwargValue>> {
-    let PreprocessedImages {
+    let PreprocessedEncoderInputs {
         encoder_input,
         model_specific,
         ..
     } = preprocessed;
 
-    let pixel_values = {
+    let primary_value = {
         let shape = encoder_input.shape().to_vec();
         let data = encoder_input.into_iter().collect();
         KwargValue::from_f32_tensor(data, shape, float_dtype)?
     };
 
     let mut tensors = HashMap::new();
-    tensors.insert("pixel_values".to_string(), pixel_values);
+    tensors.insert(primary_key.to_string(), primary_value);
     for (key, value) in model_specific {
         tensors.insert(key, KwargValue::from_model_specific(value, float_dtype)?);
     }
@@ -124,10 +130,22 @@ impl TryFrom<KwargValue> for ProtocolKwargValue {
 }
 
 impl KwargValue {
-    /// Extract one image from a batched tensor field.
+    /// First-axis length for tensor values; `None` for passthrough kwargs.
+    pub(super) fn first_dim(&self) -> Option<usize> {
+        match self {
+            Self::F32Tensor { shape, .. }
+            | Self::F16Tensor { shape, .. }
+            | Self::Bf16Tensor { shape, .. }
+            | Self::I64Tensor { shape, .. }
+            | Self::U32Tensor { shape, .. } => shape.first().copied(),
+            Self::Passthrough(_) => None,
+        }
+    }
+
+    /// Extract one media item from a batched tensor field.
     ///
-    /// Batched fields use their first axis as image index and drop that axis in
-    /// the per-feature value, matching vLLM's batched-field semantics.
+    /// Batched fields use their first axis as media-item index and drop that
+    /// axis in the per-feature value, matching vLLM's batched-field semantics.
     pub(super) fn batched_value_at(&self, index: usize) -> Result<Self> {
         match self {
             Self::F32Tensor { data, shape } => {
@@ -154,9 +172,9 @@ impl KwargValue {
         }
     }
 
-    /// Extract one image's variable-length range from a flat tensor field.
+    /// Extract one media item's variable-length range from a flat tensor field.
     ///
-    /// Flat fields keep the first axis as the sliced length for this image.
+    /// Flat fields keep the first axis as the sliced length for this item.
     pub(super) fn flat_value_range(&self, start: usize, end: usize) -> Result<Self> {
         match self {
             Self::F32Tensor { data, shape } => {
@@ -184,10 +202,10 @@ impl KwargValue {
     }
 }
 
-/// Compute the first-axis range for one image in a flat tensor.
+/// Compute the first-axis range for one media item in a flat tensor.
 ///
 /// `sizes_key` names a companion tensor whose entries are cumulative slice
-/// sizes per image.
+/// sizes per media item.
 pub(super) fn flat_range_for_index(
     sizes: &KwargValue,
     sizes_key: &str,
@@ -195,7 +213,7 @@ pub(super) fn flat_range_for_index(
 ) -> Result<(usize, usize)> {
     let sizes = tensor_as_usize_vec(sizes)?;
     let size = *sizes.get(index).ok_or_else(|| {
-        multimodal!("flat tensor sizes key `{sizes_key}` has no entry for image {index}")
+        multimodal!("flat tensor sizes key `{sizes_key}` has no entry for media item {index}")
     })?;
     let start = sizes[..index].iter().sum::<usize>();
     Ok((start, start + size))

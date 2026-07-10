@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from math import prod
 from typing import Any, cast
@@ -540,7 +540,15 @@ def init_kv_cache(
         shared_kv_cache_layers=shared_kv_cache_layers,
         kv_cache_config=kv_cache_config,
     )
-    bind_kv_cache(kv_caches, forward_context, runner_kv_caches)
+    # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
+    # decoder layer, so a layer name carries two integers (layer + module index).
+    num_attn_module = (
+        2
+        if vllm_config.model_config.hf_config.model_type
+        in ("longcat_flash", "longcat_flash_ngram")
+        else 1
+    )
+    bind_kv_cache(kv_caches, forward_context, runner_kv_caches, num_attn_module)
     return kv_caches
 
 
@@ -573,7 +581,7 @@ def build_attn_metadata(
     mm_req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None,
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
-    causal: bool = True,
+    causal: bool | torch.Tensor | Mapping[int, bool] = True,
     rswa_prefix_lens: torch.Tensor | None = None,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
@@ -587,6 +595,10 @@ def build_attn_metadata(
     for i in range(num_kv_cache_groups):
         block_table = block_tables[i]
         slot_mapping = slot_mappings[i]
+        # Per-group causal for hybrid drafters (mixed SWA/full attention).
+        group_causal = (
+            causal if isinstance(causal, (bool, torch.Tensor)) else causal.get(i, True)
+        )
 
         common_attn_metadata_extra_kwargs = (
             model_specific_attn_metadata.get_extra_common_attn_kwargs(i, num_reqs)
@@ -604,7 +616,7 @@ def build_attn_metadata(
             max_query_len=max_query_len,
             block_table_tensor=block_table,
             slot_mapping=slot_mapping,
-            causal=causal,
+            causal=group_causal,
             dcp_local_seq_lens=dcp_local_seq_lens,
             positions=positions,
             mm_req_doc_ranges=mm_req_doc_ranges,

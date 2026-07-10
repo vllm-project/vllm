@@ -407,6 +407,20 @@ class FreeKVCacheBlockQueue:
             curr_block = curr_block.next_free_block
         return ret
 
+    def iter_blocks_after(
+        self,
+        cursor: KVCacheBlock | None,
+    ) -> Iterator[KVCacheBlock]:
+        """Iterate free blocks in eviction order after the cursor."""
+        if cursor is None:
+            curr_block = self.fake_free_list_head.next_free_block
+        else:
+            curr_block = cursor.next_free_block
+
+        while curr_block is not None and curr_block is not self.fake_free_list_tail:
+            yield curr_block
+            curr_block = curr_block.next_free_block
+
 
 def need_extra_keys(request: Request) -> bool:
     """Check whether the blocks allocated to this request need extra hash keys.
@@ -613,7 +627,8 @@ def resolve_kv_cache_block_sizes(
     - ``scheduler_block_size`` is the token-alignment invariant used by the
       scheduler (e.g. for ``num_computed_tokens`` rounding). Single group:
       ``cache_config.block_size * dcp * pcp``. Multiple groups: LCM of every
-      group's block size — context parallelism is not supported here.
+      group's effective block size. Attention groups are scaled by DCP/PCP;
+      Mamba groups keep their full per-rank state and are not scaled.
     - ``hash_block_size`` is the granularity at which ``Request.block_hashes``
       is computed. Single group: equals scheduler block size. Multiple groups:
       ``cache_config.hash_block_size`` override if set, else the GCD of group
@@ -631,13 +646,12 @@ def resolve_kv_cache_block_sizes(
         bs = cache_config.block_size * dcp * pcp
         return bs, bs
 
-    if dcp != 1 or pcp != 1:
-        raise ValueError(
-            "Hybrid KV cache groups with multiple block sizes do not "
-            "support context parallelism (dcp_world_size/pcp_world_size > 1)."
-        )
-
-    group_block_sizes = [g.kv_cache_spec.block_size for g in groups]
+    group_block_sizes = [
+        g.kv_cache_spec.block_size * dcp * pcp
+        if isinstance(g.kv_cache_spec, AttentionSpec)
+        else g.kv_cache_spec.block_size
+        for g in groups
+    ]
     scheduler_block_size = math.lcm(*group_block_sizes)
 
     # Block hashes are only consumed by prefix caching and KV connectors
@@ -1321,9 +1335,6 @@ def _get_kv_cache_config_packed(
             byte_offset += ps
 
     return num_blocks, kv_cache_tensors
-
-
-_get_kv_cache_config_deepseek_v4 = _get_kv_cache_config_packed
 
 
 def get_kv_cache_config_from_groups(
@@ -2238,3 +2249,22 @@ class BlockHashListWithBlockSize:
 
 
 BlockHashList = list[BlockHash] | BlockHashListWithBlockSize
+
+
+def resolve_block_hashes(
+    request: Request,
+    hash_block_size: int,
+    block_size: int,
+) -> BlockHashList:
+    """Resolve the block-hash view for ``request`` at ``block_size``.
+
+    When ``block_size`` equals ``hash_block_size``, reuse the request's
+    precomputed ``block_hashes`` directly; otherwise recalculate at
+    ``block_size`` granularity (``block_size`` must be a multiple of
+    ``hash_block_size``, which happens when KV cache groups differ in
+    block size).
+    """
+    if block_size == hash_block_size:
+        return request.block_hashes
+    assert block_size % hash_block_size == 0
+    return BlockHashListWithBlockSize(request.block_hashes, hash_block_size, block_size)
