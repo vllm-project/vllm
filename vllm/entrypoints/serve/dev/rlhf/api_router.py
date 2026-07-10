@@ -144,7 +144,7 @@ async def update_weights(raw_request: Request):
     try:
         body = await raw_request.json()
     except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e
+        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
     update_info = body.get("update_info")
     if update_info is None:
         raise HTTPException(

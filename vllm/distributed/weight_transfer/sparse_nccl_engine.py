@@ -99,6 +99,7 @@ class SparseNCCLWeightTransferEngine(
 
     init_info_cls = NCCLWeightTransferInitInfo
     update_info_cls = SparseNCCLWeightTransferUpdateInfo
+    supports_draft_weight_update = False
 
     def __init__(
         self,
@@ -122,17 +123,6 @@ class SparseNCCLWeightTransferEngine(
             raise NotImplementedError(
                 "Sparse weight updates currently require TP=1 and PP=1"
             )
-
-    def set_weight_update_target(
-        self,
-        model: torch.nn.Module,
-        model_config: Any,
-    ) -> None:
-        if model is not self._default_model:
-            raise ValueError(
-                "Sparse weight updates for the draft model are not supported."
-            )
-        super().set_weight_update_target(model, model_config)
 
     def finish_weight_update(self) -> None:
         """No-op: sparse patches are applied in place, no layerwise reload."""

@@ -73,6 +73,8 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
     init_info_cls: type[TInitInfo]
     update_info_cls: type[TUpdateInfo]
 
+    supports_draft_weight_update: bool = True
+
     def __init__(
         self,
         config: WeightTransferConfig,

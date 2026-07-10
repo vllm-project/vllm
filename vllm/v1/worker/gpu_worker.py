@@ -1246,6 +1246,12 @@ class Worker(WorkerBase):
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
 
+        if is_draft and not self.weight_transfer_engine.supports_draft_weight_update:
+            raise RuntimeError(
+                f"{type(self.weight_transfer_engine).__name__} does not support "
+                "draft model weight updates."
+            )
+
         if self._weight_update_active:
             raise RuntimeError(
                 "start_weight_update called while a weight update is already "
