@@ -1,6 +1,8 @@
 <!-- markdownlint-disable MD001 MD041 -->
 
-# shvllm — vLLM fork: heterogeneous rank-to-GPU mapping + Qwen3.5/3.6 GGUF
+# shvllm — vLLM fork: split heterogeneous rank-to-GPU mapping + Qwen3.5/3.6 GGUF
+
+**shvllm** = **s**plit **h**eterogeneous **vllm**
 
 This fork (branch **`qwen35-gguf-rankgpu`**) adds two features on top of upstream vLLM:
 
