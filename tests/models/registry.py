@@ -1461,6 +1461,8 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         trust_remote_code=True,
         speculative_model="AQ-MedAI/Kimi-K25-eagle3",
         tokenizer="moonshotai/Kimi-K2.5",
+        use_original_num_layers=True,
+        max_model_len=8192,  # Reduce KV cache so full-layer Kimi fits in CI VRAM
     ),
     "Eagle3DeepseekV3ForCausalLM": _HfExamplesInfo(
         "moonshotai/Kimi-K2.5",
