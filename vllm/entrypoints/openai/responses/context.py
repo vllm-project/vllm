@@ -310,7 +310,9 @@ class ParsableContext(ConversationContext):
         self.finish_reason: str | None = None
         self.enable_auto_tools = enable_auto_tools
 
-        self.response_parser = response_parser
+        self.response_parser = response_parser or (
+            parser_cls(tokenizer, request.tools) if parser_cls is not None else None
+        )
         self.parser_cls = parser_cls
         self.request = request
 
@@ -344,6 +346,8 @@ class ParsableContext(ConversationContext):
                 enable_auto_tools=self.enable_auto_tools,
                 model_output_token_ids=completion.token_ids,
             )
+            if not self.request.include_reasoning:
+                reasoning = None
             self.response_messages.extend(
                 build_response_output_items(
                     reasoning=reasoning,
