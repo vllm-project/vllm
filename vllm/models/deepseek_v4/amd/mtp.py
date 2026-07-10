@@ -341,6 +341,9 @@ class DeepSeekV4MTP(nn.Module):
                 inv = name.removesuffix(".weight_scale") + ".weight_scale_inv"
                 if inv in params_dict:
                     return inv
+            # Otherwise leave the name unchanged: either it already matches a
+            # param, or it is genuinely unknown and should surface the normal
+            # KeyError downstream rather than be silently rewritten.
             return name
 
         # TP for attention

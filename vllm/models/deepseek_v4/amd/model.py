@@ -107,17 +107,27 @@ class DeepseekV4MLP(nn.Module):
         return x
 
 
-def _mtp_shared_experts_are_fp4(config, layer_idx: int) -> bool:
-    """Check if the MTP layer's shared experts are MXFP4 (fusable)."""
+def _shared_experts_are_fp4(config, layer_idx: int | None = None) -> bool:
+    """Whether the shared experts are MXFP4 and thus fusable.
+
+    ``layer_idx=None`` resolves the model-wide default (global scheme), used by
+    the main-model weight loader / mapper callers that operate per-model.
+    """
     quant_cfg = getattr(config, "quantization_config", None) or {}
-    mtp_idx = layer_idx - config.num_hidden_layers
-    entry = (quant_cfg.get("layer_quant_config") or {}).get(
-        f"mtp.{mtp_idx}.ffn.shared_experts.w1"
+    if layer_idx is None:
+        base = None
+    elif layer_idx >= config.num_hidden_layers:
+        base = f"mtp.{layer_idx - config.num_hidden_layers}.ffn.shared_experts"
+    else:
+        base = f"layers.{layer_idx}.ffn.shared_experts"
+    if base and any(e.startswith(base) for e in (quant_cfg.get("exclude") or [])):
+        return False
+    entry = (
+        (quant_cfg.get("layer_quant_config") or {}).get(f"{base}.w1") if base else None
     )
     if entry is None:
         entry = quant_cfg.get("global_quant_config")
-    weight = (entry or {}).get("weight") or {}
-    return weight.get("dtype") == "fp4"
+    return ((entry or {}).get("weight") or {}).get("dtype") == "fp4"
 
 
 def _fuse_shared_experts_enabled(config, prefix: str = "") -> bool:
@@ -125,9 +135,8 @@ def _fuse_shared_experts_enabled(config, prefix: str = "") -> bool:
 
     Fusion fuses the shared expert into the routed experts' MXFP4 grouped GEMM,
     so it only applies where the shared expert is the same precision as the
-    routed experts. MTP layers (index >= num_hidden_layers) may carry a
-    shared expert in a different quantization than the routed experts; when so,
-    it runs as its own linear and must not be fused.
+    routed experts. Some layers may carry a shared expert in a different quantization
+    than the routed experts; when so, it runs as its own linear and must not be fused.
     """
     if not (
         current_platform.is_rocm()
@@ -136,9 +145,9 @@ def _fuse_shared_experts_enabled(config, prefix: str = "") -> bool:
         and not get_current_vllm_config().parallel_config.enable_expert_parallel
     ):
         return False
-    if prefix and extract_layer_index(prefix) >= config.num_hidden_layers:
-        return _mtp_shared_experts_are_fp4(config, extract_layer_index(prefix))
-    return True
+    return _shared_experts_are_fp4(
+        config, extract_layer_index(prefix) if prefix else None
+    )
 
 
 class DeepseekV4MoE(nn.Module):
@@ -671,12 +680,19 @@ class DeepseekV4Model(nn.Module):
 
         fuse_shared = _fuse_shared_experts_enabled(self.config)
         n_routed = self.config.n_routed_experts
+        # The redirect below maps the single shared-expert tensor group to one
+        # appended slot; multiple shared experts would need per-expert slicing
+        # (see deepseek_v2.py). DeepSeek-V4 has n_shared_experts == 1.
+        assert not fuse_shared or self.config.n_shared_experts == 1, (
+            "deepseek-v4 fused shared-expert loading supports only "
+            f"n_shared_experts == 1, got {self.config.n_shared_experts}"
+        )
 
         for name, loaded_weight in weights:
             # Shared-expert fusion: redirect ``.ffn.shared_experts.w{1,2,3}``
-            # into appended routed-expert slot(s) ``.ffn.experts.{n_routed+j}``
+            # into appended routed-expert slot ``.ffn.experts.{n_routed}``
             # so the MXFP4-quantized shared expert loads through the routed
-            # expert loader (grouped GEMM).
+            # expert loader (grouped GEMM). Single shared expert only.
             if fuse_shared and ".ffn.shared_experts.w" in name:
                 name = name.replace(
                     ".ffn.shared_experts.w",
