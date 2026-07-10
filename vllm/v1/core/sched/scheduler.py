@@ -713,9 +713,23 @@ class Scheduler(SchedulerInterface):
                         # the last block) is transferred unconditionally by
                         # _apply_prefix_caching in nixl/worker.py.
                         # NOTE: FA group is always first (sorted in
-                        # coordinator L593-594). Use FA hit to prevent OOB
-                        # when Mamba state blocks survive longer (#46453).
-                        num_new_local_computed_tokens = per_group_hits[0]
+                        # coordinator L593-594). For offloading connectors,
+                        # DRAM may contain no live cache, so we must use the
+                        # FA hit as the safe boundary (#46453). For NIXL/PD,
+                        # max() is correct: Mamba state is transferred
+                        # unconditionally by _apply_prefix_caching.
+                        use_fa_boundary = (
+                            self.vllm_config.kv_transfer_config is not None
+                            and self.vllm_config.kv_transfer_config.kv_connector
+                            is not None
+                            and "Offloading" in type(
+                                self.vllm_config.kv_transfer_config.kv_connector
+                            ).__name__
+                        )
+                        if use_fa_boundary:
+                            num_new_local_computed_tokens = per_group_hits[0]
+                        else:
+                            num_new_local_computed_tokens = max(per_group_hits)
                         if self.kv_cache_manager.log_stats:
                             assert self.kv_cache_manager.prefix_cache_stats is not None
                             self.kv_cache_manager.prefix_cache_stats.record(
