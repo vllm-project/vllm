@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
 from transformers import AutoTokenizer
 
+from tests.tool_parsers.utils import run_tool_extraction_streaming
 from vllm.entrypoints.openai.engine.protocol import ExtractedToolCallInformation
 from vllm.tool_parsers.llama_tool_parser import Llama3JsonToolParser
 
@@ -267,3 +269,82 @@ def test_regex_timeout_handling(parser):
         assert result.tools_called is False
         assert len(result.tool_calls) == 0
         mock_regex.finditer.assert_called_once()
+
+
+class StubTokenizer:
+    """Minimal tokenizer stub for streaming tests.
+
+    The streaming parser operates on text only, so the tokenizer just needs
+    to expose the bot token in its vocab. Using a stub avoids downloading
+    the gated Llama tokenizer.
+    """
+
+    def get_vocab(self) -> dict[str, int]:
+        return {"<|python_tag|>": 128010}
+
+    def tokenize(self, text: str) -> list[str]:
+        return []
+
+
+def test_streaming_complete_tool_call_single_delta():
+    """A tool call arriving whole in the first delta must not be dropped."""
+    parser = Llama3JsonToolParser(StubTokenizer())
+    model_output = '{"name": "get_weather", "arguments": {"city": "Tokyo"}}'
+
+    reconstructor = run_tool_extraction_streaming(parser, [model_output])
+
+    assert len(reconstructor.tool_calls) == 1
+    call = reconstructor.tool_calls[0]
+    assert call.function.name == "get_weather"
+    assert json.loads(call.function.arguments) == {"city": "Tokyo"}
+
+
+def test_streaming_complete_tool_call_single_delta_with_bot_token():
+    parser = Llama3JsonToolParser(StubTokenizer())
+    model_output = (
+        '<|python_tag|>{"name": "get_weather", "arguments": {"city": "Tokyo"}}'
+    )
+
+    reconstructor = run_tool_extraction_streaming(parser, [model_output])
+
+    assert len(reconstructor.tool_calls) == 1
+    call = reconstructor.tool_calls[0]
+    assert call.function.name == "get_weather"
+    assert json.loads(call.function.arguments) == {"city": "Tokyo"}
+
+
+def test_streaming_complete_tool_call_single_delta_parameters_key():
+    """Llama may emit "parameters" instead of "arguments"; both must work."""
+    parser = Llama3JsonToolParser(StubTokenizer())
+    model_output = '{"name": "get_weather", "parameters": {"city": "Tokyo"}}'
+
+    reconstructor = run_tool_extraction_streaming(parser, [model_output])
+
+    assert len(reconstructor.tool_calls) == 1
+    call = reconstructor.tool_calls[0]
+    assert call.function.name == "get_weather"
+    assert json.loads(call.function.arguments) == {"city": "Tokyo"}
+
+
+def test_streaming_parallel_tool_calls_single_delta():
+    """Multiple complete tool calls in one delta must all be emitted."""
+    parser = Llama3JsonToolParser(StubTokenizer())
+    model_output = (
+        '{"name": "get_weather", "arguments": {"city": "Tokyo"}}; '
+        '{"name": "get_time", "arguments": {"timezone": "Asia/Tokyo"}}'
+    )
+
+    reconstructor = run_tool_extraction_streaming(
+        parser, [model_output], assert_one_tool_per_delta=False
+    )
+
+    assert [call.function.name for call in reconstructor.tool_calls] == [
+        "get_weather",
+        "get_time",
+    ]
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "city": "Tokyo"
+    }
+    assert json.loads(reconstructor.tool_calls[1].function.arguments) == {
+        "timezone": "Asia/Tokyo"
+    }
