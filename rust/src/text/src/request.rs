@@ -187,6 +187,12 @@ pub struct TextRequest {
     /// LoRA adapter selected for this request.
     #[serde(default)]
     pub lora_request: Option<LoraRequest>,
+    /// Wall-clock unix timestamp (seconds) when this request arrived at the
+    /// frontend, stamped before render/tokenize to match Python's
+    /// renderer-entry arrival_time. When unset, it is stamped before
+    /// tokenization.
+    #[serde(default)]
+    pub arrival_time: Option<f64>,
 }
 
 impl TextRequest {
@@ -205,6 +211,7 @@ impl TextRequest {
             data_parallel_rank: None,
             reasoning_parser_kwargs: None,
             lora_request: None,
+            arrival_time: None,
         }
     }
 
