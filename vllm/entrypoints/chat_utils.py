@@ -1854,8 +1854,19 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
                 # if arguments is None or empty string, set to {}
                 if content := function.get("arguments"):
                     if not isinstance(content, (dict, list)):
-                        parsed = json.loads(content)
-                        function["arguments"] = parsed if parsed is not None else {}
+                        try:
+                            parsed = json.loads(content)
+                        except json.JSONDecodeError as e:
+                            raise VLLMValidationError(
+                                "assistant tool_calls function arguments must "
+                                "be a JSON object string.",
+                                parameter="tool_calls",
+                            ) from e
+                        # coerce scalars (null, str, numbers, bools) to {} so
+                        # templates that call arguments.items() don't crash
+                        function["arguments"] = (
+                            parsed if isinstance(parsed, (dict, list)) else {}
+                        )
                 else:
                     function["arguments"] = {}
 
