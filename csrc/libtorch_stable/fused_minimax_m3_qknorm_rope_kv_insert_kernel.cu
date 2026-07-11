@@ -288,16 +288,15 @@ __global__ void fusedMiniMaxM3QNormRopeKVInsertKernel(
     int64_t const* __restrict__ positions,       // [N] i64
     int64_t const* __restrict__ slot_mapping,    // main K/V slots or nullptr
     int64_t const* __restrict__ index_slot_mapping,  // index K slots/nullptr
-    cache_t* __restrict__ kv_cache,       // [nb,2,bs,nkv,128] or nullptr
+    cache_t* __restrict__ kv_cache,       // [nb,nkv,bs,2*128] or nullptr
     out_idx_t* __restrict__ index_cache,  // [nb*bs, 128]; scalar_t or e4m3 byte
     float const eps, int const rotary_dim, int const num_tokens, int const nq,
     int const nkv, int const niq, int const block_size,
-    // kv_cache strides (in elements) for logical shape [nb, 2, bs, nkv, 128].
-    // The head_dim (last) dim is always innermost-contiguous (stride 1), so the
-    // NHD/HND layout choice is fully captured by these four strides: NHD keeps
-    // s_token < s_head, HND swaps them. dim_base addresses head_dim directly.
-    int64_t const kv_s_block, int64_t const kv_s_kv, int64_t const kv_s_token,
-    int64_t const kv_s_head) {
+    // kv_cache strides (in elements) for logical shape [nb, nkv, bs, 2*128].
+    // The content (last) dim is always innermost-contiguous (stride 1), so the
+    // NHD/HND layout choice is captured by the head/token strides.
+    int64_t const kv_s_block, int64_t const kv_s_head, int64_t const kv_s_token,
+    int64_t const kv_s_dim) {
 #if (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800) && !defined(USE_ROCM)
   // _typeConvert<BFloat16> is unavailable on pre-Ampere; the M3 kernel only
   // runs with bf16/fp16 inputs in practice.  Discard the bf16 body there.
@@ -438,16 +437,16 @@ __global__ void fusedMiniMaxM3QNormRopeKVInsertKernel(
             storeElems<scalar_t>(index_cache + sm * kHeadDim + dim_base, elems);
           }
         } else if (isK || isV) {
-          // kv_cache logical shape [num_blocks, 2, block_size, nkv, head_dim].
+          // kv_cache logical shape [num_blocks, nkv, block_size, 2*head_dim].
           // Paging is logical (block = sm/block_size, token = sm%block_size);
           // the physical NHD/HND layout is honoured via the passed strides.
           int64_t const b = sm / block_size;
           int64_t const t = sm % block_size;
           int const kv = isK ? 0 : 1;
-          int64_t const off =
-              b * kv_s_block + kv * kv_s_kv + t * kv_s_token + head * kv_s_head;
-          storeCacheElems<scalar_t, cache_t, kv_dt>(kv_cache + off + dim_base,
-                                                    elems);
+          int64_t const off = b * kv_s_block + head * kv_s_head +
+                              t * kv_s_token +
+                              (kv * kHeadDim + dim_base) * kv_s_dim;
+          storeCacheElems<scalar_t, cache_t, kv_dt>(kv_cache + off, elems);
         }
       }
     }
@@ -474,8 +473,8 @@ void launchFusedMiniMaxM3(
     int64_t const* index_slot_mapping, cache_t* kv_cache, void* index_cache,
     float const eps, int const rotary_dim, int const num_tokens, int const nq,
     int const nkv, int const niq, int const block_size,
-    int64_t const kv_s_block, int64_t const kv_s_kv, int64_t const kv_s_token,
-    int64_t const kv_s_head, bool const has_index, bool const insert_kv,
+    int64_t const kv_s_block, int64_t const kv_s_head, int64_t const kv_s_token,
+    int64_t const kv_s_dim, bool const has_index, bool const insert_kv,
     bool const fp8_idx, cudaStream_t stream) {
   // Index outputs are scalar_t (bf16) or e4m3 bytes (uint8_t); reinterpret the
   // void* pointers per instantiation in the LAUNCH macro.
@@ -517,20 +516,20 @@ void launchFusedMiniMaxM3(
         iq_norm_w, ik_norm_w, cos_sin_cache, positions, slot_mapping,          \
         index_slot_mapping, kv_cache, reinterpret_cast<OUT_T*>(index_cache),   \
         eps, rotary_dim, num_tokens, nq, nkv, niq, block_size, kv_s_block,     \
-        kv_s_kv, kv_s_token, kv_s_head)
+        kv_s_head, kv_s_token, kv_s_dim)
 #else
   // ROCm: standard kernel launch syntax (no PDL/stream serialization).
   // clang-format off
   #define LAUNCH(IS_SPARSE, INSERT, FP8, OUT_T)                              \
-    fusedMiniMaxM3QNormRopeKVInsertKernel<scalar_t, cache_t, kv_dt, OUT_T,   \
+        fusedMiniMaxM3QNormRopeKVInsertKernel<scalar_t, cache_t, kv_dt, OUT_T,   \
                                           IS_SPARSE, INSERT, FP8>            \
         <<<grid, kBlockSize, 0, stream>>>(                                   \
             qkv, q_out, reinterpret_cast<OUT_T*>(index_q_out), q_norm_w,     \
             k_norm_w, iq_norm_w, ik_norm_w, cos_sin_cache, positions,        \
             slot_mapping, index_slot_mapping, kv_cache,                      \
             reinterpret_cast<OUT_T*>(index_cache), eps, rotary_dim,          \
-            num_tokens, nq, nkv, niq, block_size, kv_s_block, kv_s_kv,       \
-            kv_s_token, kv_s_head)
+            num_tokens, nq, nkv, niq, block_size, kv_s_block, kv_s_head,     \
+            kv_s_token, kv_s_dim)
   // clang-format on
 #endif
 
@@ -584,8 +583,8 @@ void launchFusedMiniMaxM3(
           ? reinterpret_cast<void*>(index_cache->data_ptr())                   \
           : nullptr,                                                           \
       static_cast<float>(eps), static_cast<int>(rotary_dim), num_tokens, nq,   \
-      nkv, niq, static_cast<int>(block_size), kv_s_block, kv_s_kv, kv_s_token, \
-      kv_s_head, has_index, insert_kv, fp8_idx, stream)
+      nkv, niq, static_cast<int>(block_size), kv_s_block, kv_s_head,           \
+      kv_s_token, kv_s_dim, has_index, insert_kv, fp8_idx, stream)
 
 // ────────────────────────────────────────────────────────────────────────────
 // Torch op wrapper
@@ -602,7 +601,7 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
     int64_t num_index_heads,                                  // niq; 0 => dense
     std::optional<torch::stable::Tensor> slot_mapping,        // [N] i64
     std::optional<torch::stable::Tensor> index_slot_mapping,  // [N] i64
-    std::optional<torch::stable::Tensor> kv_cache,     // [nb,2,bs,nkv,128]
+    std::optional<torch::stable::Tensor> kv_cache,     // [nb,nkv,bs,2*128]
     std::optional<torch::stable::Tensor> index_cache,  // [nb,bs,128]
     int64_t block_size,
     std::optional<torch::stable::Tensor> q_out,  // [N, nq*128] contiguous
@@ -673,11 +672,11 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
                         index_k_norm_weight->numel() == kHeadDim,
                     "index norm weights must have 128 elements");
   }
-  // kv_cache strides (logical shape [nb, 2, bs, nkv, head_dim]). Read straight
+  // kv_cache strides (logical shape [nb, nkv, bs, 2*head_dim]). Read straight
   // off the tensor so the kernel honours whatever physical layout the attention
-  // backend allocated (NHD: stride order (0,1,2,3,4); HND: (0,1,3,2,4)). No new
+  // backend allocated (NHD: stride order (0,2,1,3); HND: (0,1,2,3)). No new
   // op argument is needed -- the strides ride along with the tensor itself.
-  int64_t kv_s_block = 0, kv_s_kv = 0, kv_s_token = 0, kv_s_head = 0;
+  int64_t kv_s_block = 0, kv_s_head = 0, kv_s_token = 0, kv_s_dim = 0;
   torch::stable::Tensor const* effective_index_slot_mapping = nullptr;
   if (insert_kv) {
     STD_TORCH_CHECK(
@@ -707,13 +706,13 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
              index_cache->scalar_type() ==
                  torch::headeronly::ScalarType::Float8_e4m3fn),
         "insert mode requires index_cache matching qkv dtype or fp8 e4m3");
-    STD_TORCH_CHECK(kv_cache->dim() == 5 && kv_cache->stride(4) == 1,
-                    "kv_cache must be [nb,2,bs,nkv,head_dim] with contiguous "
-                    "head_dim (stride(4)==1)");
+    STD_TORCH_CHECK(kv_cache->dim() == 4 && kv_cache->stride(3) == 1,
+                    "kv_cache must be [nb,nkv,bs,2*head_dim] with contiguous "
+                    "content dim (stride(3)==1)");
     kv_s_block = kv_cache->stride(0);
-    kv_s_kv = kv_cache->stride(1);
+    kv_s_head = kv_cache->stride(1);
     kv_s_token = kv_cache->stride(2);
-    kv_s_head = kv_cache->stride(3);
+    kv_s_dim = kv_cache->stride(3);
     effective_index_slot_mapping = index_slot_mapping.has_value()
                                        ? &index_slot_mapping.value()
                                        : &slot_mapping.value();
