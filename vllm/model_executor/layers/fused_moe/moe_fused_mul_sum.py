@@ -40,8 +40,13 @@ def moe_fused_mul_sum_kernel(
     for n in tl.static_range(top_k):
         b_val = tl.load(b_base + n, mask=m_mask, other=0.0).to(tl.float32)
         if has_expert_map:
-            id_val = tl.load(top_ids_ptr + offs_m * top_k + n, mask=m_mask, other=0)
-            expert_mask = tl.load(expert_map_ptr + id_val) >= 0
+            # topk_ids may contain -1 for invalid token/expert pairs
+            # (e.g. tokens routed to other EP ranks); mask them before
+            # indexing expert_map to avoid out-of-bounds reads.
+            id_val = tl.load(top_ids_ptr + offs_m * top_k + n, mask=m_mask, other=-1)
+            expert_mask = (
+                tl.load(expert_map_ptr + id_val, mask=id_val >= 0, other=-1) >= 0
+            )
             a_vec = tl.load(
                 a_base + n * size,
                 mask=mask & expert_mask[:, None],
@@ -151,7 +156,9 @@ def moe_fused_mul_sum(
         outputs: Optional pre-allocated output tensor.
             Shape: (num_tokens, hidden_size).
         topk_ids: Optional indices of the top-k experts. Used when
-            `expert_map` is provided. Shape: (num_tokens, top_k).
+            `expert_map` is provided. May contain -1 for invalid
+            token/expert pairs, which are skipped.
+            Shape: (num_tokens, top_k).
         expert_map: Optional mapping for Expert Parallelism. A value < 0
             indicates an invalid token/expert pair that will be skipped.
 
