@@ -1232,6 +1232,7 @@ class ModelConfig:
         if decode_context_parallel_size > 1 and not self.use_mla:
             total_num_kv_heads = self.get_total_num_kv_heads()
             supports_sequence_sharded_gqa_dcp = self.model_arch_config.model_type in {
+                "qwen3_5",
                 "qwen3_5_text",
                 "qwen3_next",
             }
@@ -1251,12 +1252,13 @@ class ModelConfig:
                 )
 
             num_q_per_kv = total_num_attention_heads // total_num_kv_heads
-            assert num_q_per_kv % decode_context_parallel_size == 0, (
-                f"Total number of q per kv attn heads ({num_q_per_kv})"
-                " must be divisible by dcp world size when enable "
-                "decode context parallel for GQA "
-                f"({parallel_config.decode_context_parallel_size})."
-            )
+            if not supports_sequence_sharded_gqa_dcp:
+                assert num_q_per_kv % decode_context_parallel_size == 0, (
+                    f"Total number of q per kv attn heads ({num_q_per_kv})"
+                    " must be divisible by dcp world size when enable "
+                    "decode context parallel for GQA "
+                    f"({parallel_config.decode_context_parallel_size})."
+                )
             if (
                 supports_sequence_sharded_gqa_dcp
                 and tensor_parallel_size <= total_num_kv_heads

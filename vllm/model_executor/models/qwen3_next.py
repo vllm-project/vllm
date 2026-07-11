@@ -10,7 +10,12 @@ from torch import nn
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    ModelConfig,
+    VllmConfig,
+    get_current_vllm_config_or_none,
+)
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -250,7 +255,22 @@ class Qwen3NextAttention(nn.Module):
             self.total_num_kv_heads % tp_size != 0
             and tp_size % self.total_num_kv_heads != 0
         )
-        if use_overlapping_gqa:
+        vllm_config = get_current_vllm_config_or_none()
+        dcp_size = (
+            vllm_config.parallel_config.decode_context_parallel_size
+            if vllm_config is not None
+            else 1
+        )
+        self.dcp_full_kv_attention_heads = use_overlapping_gqa and dcp_size > 1
+        if self.dcp_full_kv_attention_heads:
+            self.attn_head_partition = make_attention_head_partition(
+                total_num_heads=self.total_num_heads,
+                total_num_kv_heads=self.total_num_kv_heads,
+                tp_size=tp_size,
+                tp_rank=tp_rank,
+            )
+            self.num_kv_heads = self.total_num_kv_heads
+        elif use_overlapping_gqa:
             self.attn_head_partition = make_attention_head_partition(
                 total_num_heads=self.total_num_heads,
                 total_num_kv_heads=self.total_num_kv_heads,
@@ -268,6 +288,17 @@ class Qwen3NextAttention(nn.Module):
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
             self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        logger.info_once(
+            "Qwen full-attention layout: tp=%d dcp=%d q_heads=%d "
+            "kv_heads=%d overlapping_gqa=%s full_kv=%s local_kv_heads=%d",
+            tp_size,
+            dcp_size,
+            self.total_num_heads,
+            self.total_num_kv_heads,
+            use_overlapping_gqa,
+            self.dcp_full_kv_attention_heads,
+            self.num_kv_heads,
+        )
         self.head_dim = config.head_dim or (self.hidden_size // self.num_heads)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
@@ -279,11 +310,13 @@ class Qwen3NextAttention(nn.Module):
 
         qkv_proj_cls = (
             QKVParallelLinearOverlappingGQA
-            if use_overlapping_gqa
+            if use_overlapping_gqa or self.dcp_full_kv_attention_heads
             else QKVParallelLinear
         )
         qkv_kwargs = {}
-        if self.attn_head_partition is not None:
+        if self.dcp_full_kv_attention_heads:
+            qkv_kwargs["kv_head_indices"] = tuple(range(self.total_num_kv_heads))
+        elif self.attn_head_partition is not None:
             qkv_kwargs["kv_head_indices"] = self.attn_head_partition.kv_head_indices
         self.qkv_proj = qkv_proj_cls(
             config.hidden_size,
@@ -336,6 +369,12 @@ class Qwen3NextAttention(nn.Module):
             if self.dual_chunk_attention_config
             else {},
         )
+        self.attn.dcp_full_kv_attention_heads = self.dcp_full_kv_attention_heads
+        if self.dcp_full_kv_attention_heads:
+            assert self.attn_head_partition is not None
+            self.attn.dcp_local_kv_head_indices = (
+                self.attn_head_partition.kv_head_indices
+            )
 
         self.q_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)

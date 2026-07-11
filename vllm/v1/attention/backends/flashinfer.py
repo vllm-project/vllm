@@ -353,6 +353,26 @@ class BatchDCPPrefillWrapper:
         )
         lse_context = lse_context.transpose(0, 1).contiguous()
 
+        if getattr(layer, "dcp_full_kv_attention_heads", False):
+            local_kv_head_indices = getattr(
+                layer, "dcp_local_kv_head_indices", None
+            )
+            if local_kv_head_indices is None:
+                raise ValueError(
+                    "DCP full-KV attention requires local KV head indices."
+                )
+            local_kv_head_indices_tensor = torch.tensor(
+                local_kv_head_indices,
+                device=key.device,
+                dtype=torch.long,
+            )
+            key = torch.index_select(
+                key, dim=1, index=local_kv_head_indices_tensor
+            )
+            value = torch.index_select(
+                value, dim=1, index=local_kv_head_indices_tensor
+            )
+
         output_query, lse_query = self._new_tokens.run(
             prefill_query,
             key,
