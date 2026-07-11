@@ -186,7 +186,7 @@ def device_loading_context(module: torch.nn.Module, target_device: torch.device)
             if name in uva_offloaded_parameters and not getattr(
                 p, "_vllm_is_uva_offloaded", False
             ):
-                cpu_data = p.data.to(device="cpu")
+                cpu_data = p.data.to(device="cpu").contiguous()
                 if use_pin_memory:
                     cpu_data = cpu_data.pin_memory()
                 p.data = get_accelerator_view_from_cpu_tensor(cpu_data)

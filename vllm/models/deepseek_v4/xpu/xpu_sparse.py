@@ -93,6 +93,50 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
             fused_inv_rope_fp8_quant,
         )
 
+        wo_a_raw_weight = cast(torch.Tensor, self.wo_a.weight)
+
+        # BF16 fallback path: wo_a has been dequantized from MXFP4/8 to BF16.
+        # Do inverse RoPE + group concat in BF16, then matmul with BF16 weight.
+        if wo_a_raw_weight.dtype == torch.bfloat16:
+            num_tokens, num_heads, head_dim = o.shape
+            nope_dim = self.nope_head_dim
+            rope_dim = self.rope_head_dim
+            heads_per_group = num_heads // self.n_local_groups
+
+            # Inverse RoPE on the rope portion
+            cos_sin = self.rotary_emb.cos_sin_cache[positions]  # [T, rope_dim]
+            cos = cos_sin[:, : rope_dim // 2]
+            sin = cos_sin[:, rope_dim // 2 :]
+            o_nope = o[..., :nope_dim]  # [T, H, nope_dim]
+            o_rope = o[..., nope_dim:]  # [T, H, rope_dim]
+            # Inverse rotate: rotate by -theta => cos same, sin negated
+            o_rope_r = o_rope.reshape(num_tokens, num_heads, rope_dim // 2, 2)
+            x0 = o_rope_r[..., 0]  # [T, H, rope_dim//2]
+            x1 = o_rope_r[..., 1]
+            cos_u = cos.unsqueeze(1)  # [T, 1, rope_dim//2]
+            sin_u = sin.unsqueeze(1)
+            # Inverse of (x0*cos - x1*sin, x0*sin + x1*cos) is
+            # (x0*cos + x1*sin, -x0*sin + x1*cos)
+            y0 = x0 * cos_u + x1 * sin_u
+            y1 = -x0 * sin_u + x1 * cos_u
+            o_rope_inv = torch.stack([y0, y1], dim=-1).reshape(
+                num_tokens, num_heads, rope_dim
+            )
+            o_full = torch.cat([o_nope, o_rope_inv], dim=-1)  # [T, H, D]
+
+            # Group concat: [T, H, D] → [T, G, heads_per_group*D]
+            D = heads_per_group * head_dim
+            o_grouped = o_full.reshape(num_tokens, self.n_local_groups, D)  # [T, G, D]
+
+            wo_a_weight = torch.reshape(
+                wo_a_raw_weight, (self.n_local_groups, self.o_lora_rank, D)
+            ).transpose(1, 2)  # [G, D, R]
+
+            # Batched matmul: [G, T, D] x [G, D, R] -> [G, T, R]
+            z = torch.bmm(o_grouped.transpose(0, 1), wo_a_weight)  # [G, T, R]
+            return self.wo_b(z.transpose(0, 1).flatten(1))
+
+        # FP8 path (original block-FP8 or e8m0 scales)
         o_fp8, o_scale = fused_inv_rope_fp8_quant(
             o,
             positions,
@@ -366,3 +410,87 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
                 block_dpe=0,
             )
             output[query_start:query_end] = out
+
+
+# The following is a one-time materialization pass to dequantize the MXFP4 / MXFP8
+# weights of ``wo_a`` consumed via raw ``torch.mm`` / 3D einsum paths to bf16
+# in-place.
+# TODO: remove after the relevant kernels support MXFP4 / MXFP8 directly.
+def _materialize_mxfp_wo_a_bf16(model: torch.nn.Module) -> None:
+    """Dequantize MX-quantized weights of wo_a consumed via raw ``torch.mm`` /
+    3D einsum paths to bf16 in-place.
+
+    DeepSeek V4's attention path bypasses the CT linear method for two
+    weights:
+
+    * ``mla_attn.wo_a`` -- a per-group projection that the FP8 path
+      evaluates as a 3D einsum (``tgd,grd->tgr``); the reference
+      fallback views ``wo_a.weight`` directly.
+
+    Neither path understands MX-quantized layouts (MXFP4 packed
+    ``weight_packed`` + ``weight_scale`` uint8 E8M0; MXFP8 group=32
+    ``weight`` fp8_e4m3fn + ``weight_scale`` uint8 E8M0). For
+    correctness we materialize a bf16 ``weight`` once after loading
+    and swap the quant method to ``UnquantizedLinearMethod`` so the
+    model loader's ``process_weights_after_loading`` doesn't try to
+    repack the already-removed packed buffers.
+    """
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+    from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+        dequant_mxfp4_to_bf16,
+    )
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        dequant_mxfp8_to_bf16,
+    )
+
+    def _dequant_to_bf16(layer: torch.nn.Module) -> torch.Tensor | None:
+        # MXFP4 packed: weight_packed (M, K/2) uint8 + weight_scale
+        #   (M, K/group) uint8 E8M0 -> bf16 (M, K).
+        if hasattr(layer, "weight_packed"):
+            return dequant_mxfp4_to_bf16(
+                layer.weight_packed.data, layer.weight_scale.data
+            )
+
+        # MXFP8 group=32: weight (M, K) fp8_e4m3fn + weight_scale
+        #   (M, K/32) uint8 E8M0 -> bf16 (M, K). Detect via fp8 dtype on
+        #   ``weight`` plus a uint8 ``weight_scale`` companion.
+        weight = getattr(layer, "weight", None)
+        weight_scale = getattr(layer, "weight_scale", None)
+        if (
+            weight is not None
+            and weight_scale is not None
+            and weight.dtype == torch.float8_e4m3fn
+            and weight_scale.dtype == torch.uint8
+        ):
+            return dequant_mxfp8_to_bf16(weight.data, weight_scale.data).contiguous()
+
+        return None
+
+    # Only materialize `wo_a` modules -- keep other paths untouched.
+    for module in model.modules():
+        wo_a = getattr(module, "wo_a", None)
+        if wo_a is None:
+            continue
+
+        layer = wo_a
+        # Preserve block-FP8 / special einsum paths and skip already-processed.
+        if hasattr(layer, "weight_scale_inv") or getattr(
+            layer, "_mxfp4_dequantized", False
+        ):
+            continue
+
+        bf16 = _dequant_to_bf16(layer)
+        if bf16 is None:
+            continue
+
+        new_weight = torch.nn.Parameter(bf16, requires_grad=False)
+        layer.register_parameter("weight", new_weight)
+        for attr in ("weight_packed", "weight_scale"):
+            if hasattr(layer, attr):
+                delattr(layer, attr)
+        layer.quant_method = UnquantizedLinearMethod()
+        import contextlib
+
+        with contextlib.suppress(AttributeError):
+            delattr(layer, "scheme")
+        layer._mxfp4_dequantized = True
