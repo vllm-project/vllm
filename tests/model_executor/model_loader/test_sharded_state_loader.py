@@ -50,6 +50,27 @@ def test_filter_subtensors():
         assert tensor is state_dict[key]
 
 
+def test_filter_subtensors_handles_transposed_tensor():
+    base = torch.arange(24).reshape(2, 3, 4)
+    state_dict = {
+        "base": base,
+        "transpose": base.transpose(0, 2),
+    }
+
+    filtered_state_dict = ShardedStateLoader._filter_subtensors(state_dict)
+
+    assert tuple(filtered_state_dict) == ("base",)
+
+
+def test_filter_subtensors_copies_uncovered_noncontiguous_tensor():
+    tensor = torch.arange(24).reshape(2, 3, 4).transpose(0, 2)
+
+    filtered_state_dict = ShardedStateLoader._filter_subtensors({"tensor": tensor})
+
+    assert filtered_state_dict["tensor"].is_contiguous()
+    torch.testing.assert_close(filtered_state_dict["tensor"], tensor)
+
+
 @pytest.fixture(scope="module")
 def llama_3p2_1b_files():
     input_dir = snapshot_download(

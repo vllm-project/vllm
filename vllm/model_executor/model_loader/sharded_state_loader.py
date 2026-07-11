@@ -70,7 +70,14 @@ class ShardedStateLoader(BaseModelLoader):
                 same_storage_groups[tensor.device, ptr].append((key, tensor))
 
         def get_end_ptr(tensor: torch.Tensor) -> int:
-            return tensor.view(-1)[-1].data_ptr() + tensor.element_size()
+            max_offset = tensor.storage_offset() + sum(
+                max(0, (size - 1) * stride)
+                for size, stride in zip(tensor.shape, tensor.stride())
+            )
+            return (
+                tensor.untyped_storage().data_ptr()
+                + (max_offset + 1) * tensor.element_size()
+            )
 
         result: dict[str, torch.Tensor] = {}
         for group in same_storage_groups.values():
@@ -88,7 +95,7 @@ class ShardedStateLoader(BaseModelLoader):
                         # Same tensors, keep the one with the smaller key.
                         break
                 else:
-                    result[k] = t
+                    result[k] = t if t.is_contiguous() else t.contiguous()
         return result
 
     def _prepare_weights(self, model_name_or_path: str, revision: str | None):
