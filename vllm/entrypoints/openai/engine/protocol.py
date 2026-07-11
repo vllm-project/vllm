@@ -375,3 +375,44 @@ class GenerationError(Exception):
     def __init__(self, message: str = "Internal server error"):
         super().__init__(message)
         self.status_code = HTTPStatus.INTERNAL_SERVER_ERROR
+
+
+def normalize_kv_transfer_params(
+    kv_transfer_params: dict[str, Any] | None,
+    n: int,
+) -> dict[str, Any] | None:
+    if kv_transfer_params is None:
+        return kv_transfer_params
+
+    per_child_params = kv_transfer_params.get("parallel_kv_transfer_params")
+    if per_child_params is None:
+        return kv_transfer_params
+
+    if not isinstance(per_child_params, list):
+        raise VLLMValidationError(
+            "`kv_transfer_params.parallel_kv_transfer_params` must be a list.",
+            parameter="kv_transfer_params.parallel_kv_transfer_params",
+            value=per_child_params,
+        )
+
+    if len(per_child_params) != n:
+        raise VLLMValidationError(
+            "`kv_transfer_params.parallel_kv_transfer_params` length must match `n`.",
+            parameter="kv_transfer_params.parallel_kv_transfer_params",
+            value=per_child_params,
+        )
+
+    if not all(
+        params is None or isinstance(params, dict) for params in per_child_params
+    ):
+        raise VLLMValidationError(
+            "`kv_transfer_params.parallel_kv_transfer_params` entries "
+            "must be objects or null.",
+            parameter="kv_transfer_params.parallel_kv_transfer_params",
+            value=per_child_params,
+        )
+
+    if n == 1:
+        return per_child_params[0]
+
+    return kv_transfer_params

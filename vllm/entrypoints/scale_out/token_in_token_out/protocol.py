@@ -16,7 +16,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
-from vllm.entrypoints.openai.engine.protocol import StreamOptions, UsageInfo
+from vllm.entrypoints.openai.engine.protocol import (
+    StreamOptions,
+    UsageInfo,
+    normalize_kv_transfer_params,
+)
 from vllm.logprobs import Logprob
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import SamplingParams
@@ -153,6 +157,19 @@ class GenerateRequest(BaseModel):
         instance = handler(data)
         instance._sampling_params_provided_keys = provided
         return instance
+
+    @model_validator(mode="after")
+    def _validate_kv_transfer_params(self) -> "GenerateRequest":
+        self.kv_transfer_params = normalize_kv_transfer_params(
+            self.kv_transfer_params, self.sampling_params.n
+        )
+        if self.kv_transfer_params:
+            extra_args = self.sampling_params.extra_args or {}
+            self.sampling_params.extra_args = {
+                **extra_args,
+                "kv_transfer_params": self.kv_transfer_params,
+            }
+        return self
 
     def is_sampling_param_provided(self, name: str) -> bool:
         """Whether the caller explicitly set ``sampling_params.<name>``.

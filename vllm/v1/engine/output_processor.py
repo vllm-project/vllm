@@ -316,7 +316,9 @@ class RequestState:
                 finished,
             )
 
-        output = self._new_completion_output(new_token_ids, finish_reason, stop_reason)
+        output = self._new_completion_output(
+            new_token_ids, finish_reason, stop_reason, kv_transfer_params
+        )
 
         if self.parent_req is None:
             outputs = [output]
@@ -326,16 +328,13 @@ class RequestState:
                 return None
             external_req_id = self.parent_req.external_req_id
 
-        return self._new_request_output(
-            external_req_id, outputs, finished, kv_transfer_params
-        )
+        return self._new_request_output(external_req_id, outputs, finished)
 
     def _new_request_output(
         self,
         external_req_id: str,
         outputs: list[CompletionOutput] | list[PoolingOutput],
         finished: bool,
-        kv_transfer_params: dict[str, Any] | None = None,
     ) -> RequestOutput | PoolingRequestOutput:
         # If prompt embeds were used, put placeholder prompt token ids
         prompt_token_ids = self.prompt_token_ids
@@ -368,7 +367,6 @@ class RequestState:
             prompt_logprobs=prompt_logprobs,
             outputs=cast(list[CompletionOutput], outputs),
             finished=finished,
-            kv_transfer_params=kv_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
             metrics=self.stats,
         )
@@ -378,6 +376,7 @@ class RequestState:
         token_ids: list[int],
         finish_reason: FinishReason | None,
         stop_reason: int | str | None,
+        kv_transfer_params: dict[str, Any] | None = None,
     ) -> CompletionOutput:
         assert self.detokenizer is not None
         assert self.logprobs_processor is not None
@@ -408,6 +407,7 @@ class RequestState:
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None,
+            kv_transfer_params=kv_transfer_params,
         )
 
     def _new_pooling_output(self, pooling_output: torch.Tensor) -> PoolingOutput:

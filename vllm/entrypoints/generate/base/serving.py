@@ -5,7 +5,7 @@ import time
 from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import ClassVar, Generic, TypeVar
+from typing import Any, ClassVar, Generic, TypeVar
 
 from fastapi import Request
 from pydantic import ConfigDict
@@ -215,6 +215,28 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         except ValueError:
             return None
 
+    @staticmethod
+    def _get_remote_prefill_kv_transfer_params(
+        request_id: str,
+        kv_transfer_params: dict[str, Any] | None,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        if not kv_transfer_params:
+            return []
+
+        per_child_params = kv_transfer_params.get("parallel_kv_transfer_params")
+        if isinstance(per_child_params, list):
+            return [
+                # Match ParentRequest child request ids for n > 1.
+                (f"{index}_{request_id}", params)
+                for index, params in enumerate(per_child_params)
+                if params is not None and params.get("do_remote_prefill")
+            ]
+
+        if kv_transfer_params.get("do_remote_prefill"):
+            return [(request_id, kv_transfer_params)]
+
+        return []
+
     async def _with_kv_transfer_rejection_cleanup(
         self,
         awaitable: Awaitable[_T],
@@ -224,8 +246,13 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         """Wrap a `create_*` coroutine so that, if it raises or returns an
         ErrorResponse (i.e. the request never reached the engine), the KV
         connector is notified to free any pinned remote-prefill blocks."""
-        kv_transfer_params = self.has_kv_connector and request.kv_transfer_params
-        if not kv_transfer_params or not kv_transfer_params.get("do_remote_prefill"):
+        kv_transfer_params = (
+            request.kv_transfer_params if self.has_kv_connector else None
+        )
+        remote_prefill_params = self._get_remote_prefill_kv_transfer_params(
+            request.request_id, kv_transfer_params
+        )
+        if not remote_prefill_params:
             return await awaitable
 
         notify = True
@@ -236,18 +263,20 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
             return result
         finally:
             if notify:
-                try:
-                    await self.engine_client.notify_kv_transfer_request_rejected(
-                        request.request_id,
-                        kv_transfer_params,
-                        data_parallel_rank=self._get_data_parallel_rank(raw_request),
-                    )
-                except Exception:
-                    logger.warning(
-                        "Failed to notify KV connector about rejected request %s",
-                        request.request_id,
-                        exc_info=True,
-                    )
+                data_parallel_rank = self._get_data_parallel_rank(raw_request)
+                for rejected_request_id, rejected_params in remote_prefill_params:
+                    try:
+                        await self.engine_client.notify_kv_transfer_request_rejected(
+                            rejected_request_id,
+                            rejected_params,
+                            data_parallel_rank=data_parallel_rank,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to notify KV connector about rejected request %s",
+                            rejected_request_id,
+                            exc_info=True,
+                        )
 
     @staticmethod
     def _get_decoded_token(
