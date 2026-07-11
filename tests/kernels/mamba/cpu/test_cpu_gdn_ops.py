@@ -25,6 +25,8 @@ HEAD_DIMS = [
     (64, 32),
 ]
 CHUNK_SIZE = 64
+CONV_DIM = 128
+CONV_KERNEL = 4
 PREFILL_SEQ_LENS = [
     [1],
     [1, 2, 3],
@@ -312,3 +314,225 @@ def test_chunk_gated_delta_rule_cpu(
         atol=1e-2,
         rtol=1e-2,
     )
+
+
+# (total_tokens, split) pairs mimicking where chunked prefill breaks a sequence
+# across two scheduler steps: chunk-aligned and non-aligned splits.
+TWO_CALL_SPLITS = [
+    (2 * CHUNK_SIZE, CHUNK_SIZE),
+    (2 * CHUNK_SIZE + 17, CHUNK_SIZE),
+    (2 * CHUNK_SIZE + 17, CHUNK_SIZE + 9),
+    (4 * CHUNK_SIZE + 17, 2 * CHUNK_SIZE),
+    (3 * CHUNK_SIZE, CHUNK_SIZE + 1),
+]
+
+
+@pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_dims", HEAD_DIMS)
+@torch.inference_mode()
+def test_chunk_gated_delta_rule_cpu_two_call_split(
+    total_tokens: int,
+    split: int,
+    num_heads: tuple[int, int],
+    head_dims: tuple[int, int],
+) -> None:
+    """A prefill split into two calls (the second seeded with the first's
+    ``final_state`` and a rebased ``cu_seqlens``) must match the single-call
+    result, mimicking the cross-scheduler-step handoff in
+    ``cpu_gdn_attention_core``.
+    """
+    q, k, v, a, b, A_log, dt_bias = gdn_inputs(
+        num_tokens=total_tokens,
+        num_heads=num_heads,
+        head_dims=head_dims,
+    )
+    _, num_v_heads = num_heads
+    head_dim, v_head_dim = head_dims
+
+    g, beta = ref_gdn_gating(A_log, a, b, dt_bias)
+    g = g.unsqueeze(0)  # [1, T, HV]
+    beta = beta.unsqueeze(0)
+
+    zero_state = torch.zeros(1, num_v_heads, head_dim, v_head_dim, dtype=torch.float32)
+
+    # Reference: whole sequence in one call, no initial state.
+    out_full, final_full = ops.chunk_gated_delta_rule_cpu(
+        query=q,
+        key=k,
+        value=v,
+        g=g,
+        beta=beta,
+        initial_state=zero_state,
+        output_final_state=True,
+        cu_seqlens=torch.tensor([0, total_tokens], dtype=torch.int32),
+        head_first=False,
+        use_qk_l2norm_in_kernel=True,
+    )
+
+    # Call 1: tokens [0:split], no initial state, capture final state.
+    out1, state1 = ops.chunk_gated_delta_rule_cpu(
+        query=q[:, :split],
+        key=k[:, :split],
+        value=v[:, :split],
+        g=g[:, :split],
+        beta=beta[:, :split],
+        initial_state=zero_state,
+        output_final_state=True,
+        cu_seqlens=torch.tensor([0, split], dtype=torch.int32),
+        head_first=False,
+        use_qk_l2norm_in_kernel=True,
+    )
+    # Call 2: tokens [split:T] seeded with call 1's final state and a cu_seqlens
+    # rebased to start at 0, as cpu_gdn_attention_core continues a prefill chunk.
+    tail = total_tokens - split
+    out2, state2 = ops.chunk_gated_delta_rule_cpu(
+        query=q[:, split:],
+        key=k[:, split:],
+        value=v[:, split:],
+        g=g[:, split:],
+        beta=beta[:, split:],
+        initial_state=state1.to(torch.float32),
+        output_final_state=True,
+        cu_seqlens=torch.tensor([0, tail], dtype=torch.int32),
+        head_first=False,
+        use_qk_l2norm_in_kernel=True,
+    )
+
+    out_split = torch.cat([out1, out2], dim=1)
+
+    # State must be near-exact; output allows a looser bound for the bf16 round-trip.
+    torch.testing.assert_close(state2, final_full, atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(out_split, out_full, atol=2e-2, rtol=2e-2)
+
+
+def _conv_inputs(total_tokens: int):
+    x = tensor_cache(total_tokens * CONV_DIM, torch.bfloat16).view(
+        total_tokens, CONV_DIM
+    )
+    weight = tensor_cache(CONV_DIM * CONV_KERNEL, torch.bfloat16).view(
+        CONV_DIM, CONV_KERNEL
+    )
+    bias = tensor_cache(CONV_DIM, torch.bfloat16)
+    return x, weight, bias
+
+
+@pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)
+@torch.inference_mode()
+def test_causal_conv1d_torch_two_call_split(total_tokens: int, split: int) -> None:
+    """Non-AMX conv-state handoff: a two-call split (the second seeded via
+    ``has_initial_state=True`` from the conv_states the first wrote back) must
+    match the single-call result.
+    """
+    from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
+        causal_conv1d_torch,
+    )
+
+    x, weight, bias = _conv_inputs(total_tokens)
+    state_len = CONV_KERNEL - 1
+    # [num_slots, conv_dim, state_len]; slot 0 used here.
+    conv_states_full = torch.zeros(1, CONV_DIM, state_len, dtype=x.dtype)
+    conv_states_split = torch.zeros(1, CONV_DIM, state_len, dtype=x.dtype)
+
+    # x is [conv_dim, T] for causal_conv1d_torch.
+    xt = x.transpose(0, 1).contiguous()
+
+    out_full = causal_conv1d_torch(
+        x=xt,
+        weight=weight,
+        bias=bias,
+        conv_states=conv_states_full,
+        query_start_loc=torch.tensor([0, total_tokens], dtype=torch.int32),
+        cache_indices=torch.tensor([0], dtype=torch.int32),
+        has_initial_state=torch.tensor([False]),
+        activation="silu",
+    )
+
+    out1 = causal_conv1d_torch(
+        x=xt[:, :split],
+        weight=weight,
+        bias=bias,
+        conv_states=conv_states_split,
+        query_start_loc=torch.tensor([0, split], dtype=torch.int32),
+        cache_indices=torch.tensor([0], dtype=torch.int32),
+        has_initial_state=torch.tensor([False]),
+        activation="silu",
+    )
+    out2 = causal_conv1d_torch(
+        x=xt[:, split:],
+        weight=weight,
+        bias=bias,
+        conv_states=conv_states_split,
+        query_start_loc=torch.tensor([0, total_tokens - split], dtype=torch.int32),
+        cache_indices=torch.tensor([0], dtype=torch.int32),
+        has_initial_state=torch.tensor([True]),
+        activation="silu",
+    )
+    out_split = torch.cat([out1, out2], dim=1)
+
+    torch.testing.assert_close(out_split, out_full, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not torch.cpu._is_amx_tile_supported(),
+    reason="causal_conv1d_fwd_cpu requires AMX/AVX512",
+)
+@pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)
+@torch.inference_mode()
+def test_causal_conv1d_fwd_cpu_two_call_split(total_tokens: int, split: int) -> None:
+    """AMX prefill conv op must honor ``has_initial_state`` so a two-call split
+    matches the single-call result.
+
+    Regression test for ``causal_conv1d_fwd_varlen_kernel_impl`` (``conv.cpp``)
+    ignoring the carried conv state on continued chunks.
+    """
+    state_len = CONV_KERNEL - 1
+    x, weight, bias = _conv_inputs(total_tokens)
+
+    def amx(x_seg, conv_states, has_init):
+        seq = x_seg.shape[0]
+        return ops.causal_conv1d_fwd_cpu(
+            x=x_seg.transpose(0, 1),  # [dim, seq]; stride(-2)==1 (view of [seq,dim])
+            weight=weight,
+            bias=bias,
+            conv_states=conv_states,
+            query_start_loc=torch.tensor([0, seq], dtype=torch.int32),
+            cache_indices=torch.tensor([0], dtype=torch.int32),
+            has_initial_state=torch.tensor([has_init]),
+            silu_activation=True,
+            is_vnni=False,
+        ).contiguous()
+
+    # conv_state layout passed by the AMX branch: [num_slots, dim, state_len].
+    cs_full = torch.zeros(1, CONV_DIM, state_len, dtype=x.dtype)
+    out_full = amx(x, cs_full, False)
+
+    cs_split = torch.zeros(1, CONV_DIM, state_len, dtype=x.dtype)
+    out1 = amx(x[:split], cs_split, False)
+    out2 = amx(x[split:], cs_split, True)
+    out_split = torch.cat([out1, out2], dim=1)
+
+    torch.testing.assert_close(out_split, out_full, atol=1e-2, rtol=1e-2)
+
+
+@torch.inference_mode()
+def test_batch_memcpy_cpu_fallback() -> None:
+    """The ctypes batch_memcpy fallback (used when triton-cpu is absent) must
+    copy each src into its dst, validating the (src_ptrs, dst_ptrs, sizes)
+    argument order against ctypes.memmove(dst, src, size).
+    """
+    from vllm.utils.cpu_triton_utils import batch_memcpy_kernel
+
+    # Varied byte sizes, including a non-power-of-two run.
+    sizes_bytes = [256, 1024, 17 * 4, 4096]
+    srcs = [torch.rand(n // 4, dtype=torch.float32) for n in sizes_bytes]
+    dsts = [torch.zeros_like(s) for s in srcs]
+
+    src_ptrs = torch.tensor([s.data_ptr() for s in srcs], dtype=torch.uint64)
+    dst_ptrs = torch.tensor([d.data_ptr() for d in dsts], dtype=torch.uint64)
+    sizes = torch.tensor(sizes_bytes, dtype=torch.int32)
+
+    batch_memcpy_kernel[(len(srcs),)](src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=1024)
+
+    for src, dst in zip(srcs, dsts):
+        torch.testing.assert_close(dst, src)

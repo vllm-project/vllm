@@ -39,6 +39,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self._ep_check()
 
         routed_experts = self.base_layer.routed_experts
+        routed_experts.lora_base_layer_prefix = "base_layer."
         assert not routed_experts.quant_method.is_monolithic, (
             "Monolithic kernels are not supported for Fused MoE LoRA."
         )

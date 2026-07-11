@@ -24,12 +24,21 @@ from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.models.minimax_m3.common.ops.sparse_attn import (
-    SPARSE_BLOCK_SIZE,
-    minimax_m3_sparse_attn,
-    minimax_m3_sparse_attn_decode,
-)
+from vllm.models.minimax_m3.common.ops.sparse_attn import SPARSE_BLOCK_SIZE
 from vllm.platforms import current_platform
+
+# AMD/ROCm uses the gfx942/gfx950-optimized block-sparse kernels in amd.ops;
+# every other platform uses the generic common.ops implementation.
+if current_platform.is_rocm():
+    from vllm.models.minimax_m3.amd.ops.sparse_attn import (
+        minimax_m3_sparse_attn,
+        minimax_m3_sparse_attn_decode,
+    )
+else:
+    from vllm.models.minimax_m3.common.ops.sparse_attn import (
+        minimax_m3_sparse_attn,
+        minimax_m3_sparse_attn_decode,
+    )
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -95,20 +104,25 @@ class MiniMaxM3SparseBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        return (num_blocks, 2, block_size, num_kv_heads, head_size)
+        # K and V are packed into the content dim: logical (B, H, N, 2*hs).
+        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
 
     @staticmethod
     def get_kv_cache_stride_order(
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
-        # Permutation from get_kv_cache_shape to the actual memory layout.
+        # `stride_order` indicates the permutation that gets us from
+        # `get_kv_cache_shape` (logical (B, H, N, 2*hs)) to the actual memory
+        # layout we want.
         if include_num_layers_dimension:
             raise NotImplementedError  # no cross-layer KV blocks in M3
         cache_layout = get_kv_cache_layout()
         if cache_layout == "NHD":
-            stride_order = (0, 1, 2, 3, 4)
+            # (num_blocks, block_size, num_kv_heads, 2*head_size)
+            stride_order = (0, 2, 1, 3)
         elif cache_layout == "HND":
-            stride_order = (0, 1, 3, 2, 4)
+            # (num_blocks, num_kv_heads, block_size, 2*head_size)
+            stride_order = (0, 1, 2, 3)
         else:
             raise ValueError(f"Unknown cache layout format {cache_layout}.")
         return stride_order
