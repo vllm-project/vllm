@@ -955,9 +955,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Maximum number of audio chunks queued per realtime WebSocket
     # connection before further input_audio_buffer.append events are
-    # rejected with a buffer_full error. Default is 256.
-    "VLLM_MAX_REALTIME_AUDIO_QUEUE_SIZE": lambda: int(
-        os.getenv("VLLM_MAX_REALTIME_AUDIO_QUEUE_SIZE", "256")
+    # rejected with a buffer_full error. Default is 256. Clamped to a
+    # minimum of 1, since asyncio.Queue treats maxsize <= 0 as unbounded.
+    "VLLM_MAX_REALTIME_AUDIO_QUEUE_SIZE": lambda: max(
+        1, int(os.getenv("VLLM_MAX_REALTIME_AUDIO_QUEUE_SIZE", "256"))
     ),
     # Maximum decoded audio duration in seconds.  Compressed audio files
     # (e.g. OPUS at very low bitrate) can expand into gigabytes of float32
