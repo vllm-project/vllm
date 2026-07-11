@@ -96,6 +96,10 @@ class MiniMaxM3SparseBackend(AttentionBackend):
     def is_sparse(cls) -> bool:
         return True
 
+    @classmethod
+    def get_required_kv_cache_layout(cls) -> str | None:
+        return "NHD"
+
     @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,
@@ -114,12 +118,11 @@ class MiniMaxM3SparseBackend(AttentionBackend):
         if include_num_layers_dimension:
             raise NotImplementedError  # no cross-layer KV blocks in M3
         cache_layout = get_kv_cache_layout()
-        if cache_layout == "NHD":
-            stride_order = (0, 1, 2, 3, 4)
-        elif cache_layout == "HND":
-            stride_order = (0, 1, 3, 2, 4)
-        else:
-            raise ValueError(f"Unknown cache layout format {cache_layout}.")
+        assert cache_layout == "NHD", (
+            f"MiniMax-M3 MSA backend requires NHD KV cache layout, "
+            f"got {cache_layout}."
+        )
+        stride_order = (0, 1, 2, 3, 4)
         return stride_order
 
 
