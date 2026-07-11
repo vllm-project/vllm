@@ -306,7 +306,7 @@ class DeepseekV4FlashInferSM120DecodeAttention(DeepseekV4FlashMLAAttention):
     ) -> None:
         import vllm.envs as envs
 
-        # Packed prefill is an independent opt-in on top of the decode port; when
+        # Packed prefill is a default-on lever on top of the decode port; when
         # off, defer to the FlashMLA indexed-D512 prefill path byte-for-byte.
         if not envs.VLLM_DEEPSEEK_V4_FLASHINFER_SM120_PREFILL:
             super()._forward_prefill(
