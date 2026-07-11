@@ -1061,13 +1061,11 @@ class MambaManager(SingleTypeKVCacheManager):
         assert isinstance(kv_cache_spec, MambaSpec), (
             "MambaManager can only be used for mamba groups"
         )
-        assert dcp_world_size == 1, "DCP not support mamba now."
-        assert pcp_world_size == 1, "PCP not support mamba now."
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids))
         )
 
-        block_size = kv_cache_spec.block_size
+        block_size = kv_cache_spec.block_size * dcp_world_size * pcp_world_size
         max_num_blocks = max_length // block_size
         # Search from right to left and early stop when a match is found.
         for i in range(max_num_blocks - 1, -1, -1):

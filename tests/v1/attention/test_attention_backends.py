@@ -67,6 +67,37 @@ def _convert_dtype_to_torch(dtype):
         raise ValueError(f"Unknown dtype: {dtype}")
 
 
+def test_flashinfer_dcp_paged_metadata_uses_local_context_lengths():
+    from vllm.v1.attention.backends.flashinfer import (
+        _flashinfer_seq_lens_and_blocks_for_paged_kv,
+    )
+
+    # Long chunked prefill shape from the TP3/DCP experiment:
+    # 96K cached context plus a 16K scheduled chunk. FlashInfer's paged
+    # context run must see only the DCP-local portion of the cached context;
+    # the scheduled query chunk is handled by the ragged new-token run.
+    seq_lens_cpu = torch.tensor([96_672 + 16_112], dtype=torch.int32)
+    qo_indptr_cpu = torch.tensor([0, 16_112], dtype=torch.int32)
+
+    local_seq_lens, seq_lens_np, num_blocks_np = (
+        _flashinfer_seq_lens_and_blocks_for_paged_kv(
+            seq_lens_cpu,
+            qo_indptr_cpu,
+            num_decodes=0,
+            num_prefills=1,
+            page_size=16,
+            use_dcp=True,
+            dcp_world_size=3,
+            dcp_rank=2,
+            dcp_kv_cache_interleave_size=1,
+        )
+    )
+
+    assert local_seq_lens.tolist() == [32_224]
+    assert seq_lens_np.tolist() == [32_224]
+    assert num_blocks_np.tolist() == [2_014]
+
+
 # Define common batch configurations
 BATCH_SPECS = {
     "small_decode": BatchSpec(seq_lens=[32, 40], query_lens=[1, 1]),

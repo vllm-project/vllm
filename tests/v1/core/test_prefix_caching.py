@@ -1029,6 +1029,63 @@ def test_prefill_hybrid_model_mamba_align():
     manager.free(req0)
 
 
+def test_prefill_hybrid_model_mamba_align_dcp_replay():
+    """DCP hybrid cache insertion and lookup must use the same block geometry."""
+    block_size = 16
+    dcp_world_size = 3
+    effective_block_size = block_size * dcp_world_size
+    kv_cache_config = _make_hybrid_kv_cache_config(
+        block_size, 40, ["full", "mamba_align"]
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        scheduler_block_size=effective_block_size,
+        dcp_world_size=dcp_world_size,
+    )
+
+    common_token_ids = list(range(3 * effective_block_size))
+    req0 = make_request("dcp-fill", common_token_ids, block_size, sha256)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert num_computed_tokens == 0
+    blocks = manager.allocate_slots(
+        req0, req0.num_tokens, num_computed_tokens, computed_blocks
+    )
+    assert blocks is not None
+    manager.new_step_starts()
+
+    coarse_hashes = kv_cache_utils.BlockHashListWithBlockSize(
+        req0.block_hashes, block_size, effective_block_size
+    )
+    cached_by_group = [
+        [
+            manager.block_pool.get_cached_block(block_hash, [group_id]) is not None
+            for block_hash in coarse_hashes
+        ]
+        for group_id in range(2)
+    ]
+    assert cached_by_group == [[True] * 3, [False, False, True]]
+
+    req1 = make_request("dcp-replay", common_token_ids + [101] * 5, block_size, sha256)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+
+    assert num_computed_tokens == 3 * effective_block_size
+    assert all(len(group) == 3 for group in computed_blocks.blocks)
+
+    per_group_blocks, per_group_hit_lengths = (
+        manager.coordinator.find_longest_cache_hit_per_group(
+            req1.block_hashes, req1.num_tokens - 1
+        )
+    )
+    assert per_group_hit_lengths == (3 * effective_block_size,) * 2
+    assert all(len(group) == 3 for group in per_group_blocks)
+
+    manager.free(req0)
+    manager.free(req1)
+
+
 def test_hybrid_cache_mamba_align_shared_prefix_detection():
     """Test shared prefix detection heuristic for mamba align cache mode
 

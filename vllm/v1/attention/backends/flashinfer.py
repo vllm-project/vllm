@@ -91,6 +91,50 @@ logger = init_logger(__name__)
 trtllm_workspace_buffer = None
 
 
+def _flashinfer_seq_lens_and_blocks_for_paged_kv(
+    seq_lens_cpu: torch.Tensor,
+    qo_indptr_cpu: torch.Tensor,
+    num_decodes: int,
+    num_prefills: int,
+    page_size: int,
+    *,
+    use_dcp: bool,
+    dcp_world_size: int,
+    dcp_rank: int,
+    dcp_kv_cache_interleave_size: int,
+) -> tuple[torch.Tensor, np.ndarray, np.ndarray]:
+    """Return FlashInfer paged-KV lengths after context/DCP localization.
+
+    ``CommonAttentionMetadata.seq_lens`` includes the scheduled query tokens.
+    Native FlashInfer DCP prefill has two phases: attend over the previously
+    cached context with paged KV, then attend over the new ragged KV tokens.
+    Therefore the paged-KV metadata must be computed from context lengths, and
+    when DCP is enabled those context lengths must be localized before deriving
+    page counts and last-page lengths.
+    """
+    localized_seq_lens_cpu = seq_lens_cpu.clone()
+    if use_dcp:
+        if num_prefills > 0:
+            qo_indptr_prefill_cpu = (
+                qo_indptr_cpu[num_decodes:] - qo_indptr_cpu[num_decodes]
+            )
+            query_lens_prefill_cpu = (
+                qo_indptr_prefill_cpu[1:] - qo_indptr_prefill_cpu[:-1]
+            )
+            localized_seq_lens_cpu[num_decodes:] -= query_lens_prefill_cpu
+
+        localized_seq_lens_cpu = get_dcp_local_seq_lens(
+            localized_seq_lens_cpu,
+            dcp_world_size,
+            dcp_rank,
+            dcp_kv_cache_interleave_size,
+        )
+
+    seq_lens_np = localized_seq_lens_cpu.numpy()
+    num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
+    return localized_seq_lens_cpu, seq_lens_np, num_blocks_np
+
+
 def _get_trtllm_workspace_buffer():
     global trtllm_workspace_buffer
     if trtllm_workspace_buffer is None:
@@ -1014,6 +1058,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         Returns paged_kv_indices, a GPU tensor with shape [num_actual_pages].
         """
+        max_num_blocks = int(num_blocks_np.max(initial=0))
+        if max_num_blocks > block_table_tensor.shape[1]:
+            raise ValueError(
+                "FlashInfer paged-KV metadata requires more pages than the "
+                "block table provides: "
+                f"max_num_blocks={max_num_blocks}, "
+                f"block_table_width={block_table_tensor.shape[1]}, "
+                f"page_size={page_size}, num_reqs={num_reqs}."
+            )
         # write self.paged_kv_indptr_cpu inplace (0-index is always 0)
         np.cumsum(
             num_blocks_np,
@@ -1174,33 +1227,25 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # (block_tables, seq_lens) directly.
         needs_seq_lens_cpu = self.use_dcp or use_cascade or not all_uses_trtllm
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu if needs_seq_lens_cpu else None
-        seq_lens_np = seq_lens_cpu.numpy() if seq_lens_cpu is not None else None
-        num_blocks_np = (
-            (seq_lens_np + (page_size - 1)) // page_size
-            if seq_lens_np is not None
-            else None
-        )
-
-        # Adjust seq_lens_cpu for DCP
-        if self.use_dcp:
-            assert seq_lens_cpu is not None
-            if num_prefills > 0:
-                qo_indptr_prefill_cpu = (
-                    qo_indptr_cpu[num_decodes:] - qo_indptr_cpu[num_decodes]
-                )
-                query_lens_prefill_cpu = (
-                    qo_indptr_prefill_cpu[1:] - qo_indptr_prefill_cpu[:-1]
-                )
-                seq_lens_cpu[num_decodes:] = (
-                    seq_lens_cpu[num_decodes:] - query_lens_prefill_cpu
-                )
-
-            seq_lens_cpu = get_dcp_local_seq_lens(
+        if seq_lens_cpu is not None:
+            (
                 seq_lens_cpu,
-                self.dcp_world_size,
-                self.dcp_rank,
-                self.dcp_kv_cache_interleave_size,
+                seq_lens_np,
+                num_blocks_np,
+            ) = _flashinfer_seq_lens_and_blocks_for_paged_kv(
+                seq_lens_cpu,
+                qo_indptr_cpu,
+                num_decodes,
+                num_prefills,
+                page_size,
+                use_dcp=self.use_dcp,
+                dcp_world_size=self.dcp_world_size,
+                dcp_rank=self.dcp_rank,
+                dcp_kv_cache_interleave_size=self.dcp_kv_cache_interleave_size,
             )
+        else:
+            seq_lens_np = None
+            num_blocks_np = None
 
         # Adjust num_block_np for cascade attention
         if use_cascade:
