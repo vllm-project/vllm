@@ -47,7 +47,6 @@ class WeightTransferUpdateRequest:
     """API-level weight update request."""
 
     update_info: dict[str, Any] = field(default_factory=dict)
-    include_draft: bool = False
 
 
 class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):

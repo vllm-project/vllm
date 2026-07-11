@@ -1098,15 +1098,13 @@ class AsyncLLM(EngineClient):
 
         if isinstance(request, WeightTransferUpdateRequest):
             update_info_dict = request.update_info
-            include_draft = request.include_draft
         else:
             raise TypeError(
                 f"Expected WeightTransferUpdateRequest, got {type(request)}"
             )
 
         await self.collective_rpc(
-            "update_weights",
-            kwargs={"update_info": update_info_dict, "include_draft": include_draft},
+            "update_weights", kwargs={"update_info": update_info_dict}
         )
 
     async def finish_weight_update(self) -> None:
