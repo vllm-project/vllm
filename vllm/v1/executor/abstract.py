@@ -158,9 +158,6 @@ class Executor(ABC):
     def get_kv_cache_specs(self) -> list[dict[str, KVCacheSpec]]:
         return self.collective_rpc("get_kv_cache_spec")
 
-    def supports_extensible_kv_cache(self) -> list[bool]:
-        return self.collective_rpc("supports_extensible_kv_cache")
-
     def extend_kv_cache(self, num_blocks: int) -> None:
         self.collective_rpc("extend_kv_cache", args=(num_blocks,))
 

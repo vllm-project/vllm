@@ -177,7 +177,13 @@ def _round_up(value: int, multiple: int) -> int:
 
 
 class _VirtualBuffer:
-    """Own one device VA reservation and the physical chunks mapped into it."""
+    """Own one device VA reservation and the physical chunks mapped into it.
+
+    Physical memory is committed incrementally, at granularity-sized granules,
+    via `ensure_committed_range`; granules already mapped by an earlier
+    (possibly overlapping) range are skipped, so ranges may abut or overlap
+    freely.
+    """
 
     def __init__(self, max_bytes: int, device_index: int) -> None:
         _ensure_context(device_index)
@@ -201,29 +207,61 @@ class _VirtualBuffer:
         )
         self.base_ptr: int = dptr.value
 
-        self.committed_bytes: int = 0
-        self._handles: list[tuple[int, int]] = []
+        # Granule indices (VA offset // granularity) that have physical
+        # memory mapped.
+        self._mapped_granules: set[int] = set()
+        # Each entry is (handle, va_offset, size) for one mapped physical chunk.
+        self._handles: list[tuple[int, int, int]] = []
         self._freed: bool = False
 
+    @property
+    def committed_bytes(self) -> int:
+        """Total physically mapped bytes (a multiple of the granularity)."""
+        return len(self._mapped_granules) * self.granularity
+
     def ensure_committed(self, nbytes: int) -> None:
-        if nbytes > self.reserved_size:
+        """Map physical pages so that at least the first `nbytes` are backed."""
+        self.ensure_committed_range(0, nbytes)
+
+    def ensure_committed_range(self, start: int, end: int) -> None:
+        """Map physical pages so that the byte range `[start, end)` is backed.
+
+        The range is widened outward to granule boundaries; granules mapped by
+        earlier calls are skipped, so a granule shared by two requested ranges
+        is mapped once.
+        """
+        if not 0 <= start <= end:
+            raise ValueError(f"Invalid range [{start}, {end}).")
+        if end > self.reserved_size:
             raise ValueError(
-                f"Requested {nbytes} bytes exceeds reserved capacity "
+                f"Requested range end {end} exceeds reserved capacity "
                 f"{self.reserved_size}."
             )
-        while self.committed_bytes < nbytes:
-            delta = _round_up(nbytes - self.committed_bytes, self.granularity)
-            chunk = min(delta, self.reserved_size - self.committed_bytes)
-            self._map_chunk(chunk)
+        if start == end:
+            return
+        first = start // self.granularity
+        last = (end + self.granularity - 1) // self.granularity  # exclusive
+        run_start: int | None = None
+        for g in range(first, last + 1):
+            unmapped = g < last and g not in self._mapped_granules
+            if unmapped and run_start is None:
+                run_start = g
+            elif not unmapped and run_start is not None:
+                self._map_chunk_at(
+                    run_start * self.granularity, (g - run_start) * self.granularity
+                )
+                self._mapped_granules.update(range(run_start, g))
+                run_start = None
 
-    def _map_chunk(self, size: int) -> None:
+    def _map_chunk_at(self, offset: int, size: int) -> None:
+        """Create one physical chunk of `size` bytes and map it at `offset`."""
         _ensure_context(self.device_index)
         prop = _make_alloc_prop(self.device_index)
 
         handle = _CUmemHandle()
         _check(_cuda().cuMemCreate(ctypes.byref(handle), size, ctypes.byref(prop), 0))
 
-        addr = self.base_ptr + self.committed_bytes
+        addr = self.base_ptr + offset
         try:
             _check(_cuda().cuMemMap(addr, size, 0, handle, 0))
         except RuntimeError:
@@ -236,8 +274,7 @@ class _VirtualBuffer:
         desc.flags = _CU_MEM_ACCESS_FLAGS_PROT_READWRITE
         _check(_cuda().cuMemSetAccess(addr, size, ctypes.byref(desc), 1))
 
-        self._handles.append((handle.value, size))
-        self.committed_bytes += size
+        self._handles.append((handle.value, offset, size))
 
     def free(self) -> None:
         if self._freed:
@@ -246,15 +283,13 @@ class _VirtualBuffer:
         _ensure_context(self.device_index)
         if self._handles:
             torch.cuda.synchronize(self.device_index)
-        offset = 0
-        for handle, size in self._handles:
+        for handle, offset, size in self._handles:
             _check(_cuda().cuMemUnmap(self.base_ptr + offset, size))
             _check(_cuda().cuMemRelease(handle))
-            offset += size
         if self.base_ptr:
             _check(_cuda().cuMemAddressFree(self.base_ptr, self.reserved_size))
         self._handles = []
-        self.committed_bytes = 0
+        self._mapped_granules = set()
         self.base_ptr = 0
 
     def __del__(self) -> None:
@@ -335,15 +370,33 @@ def _uint8_tensor_from_ptr(ptr: int, num_bytes: int, device_index: int) -> torch
 
 
 class ExtensibleTensor:
-    """A 1-D CUDA byte buffer that can grow without moving its base pointer."""
+    """A 1-D CUDA byte buffer that can grow without moving its base pointer.
+
+    With `num_segments > 1` the reservation is divided into that many equal
+    segments that grow in lockstep via `resize_per_segment_`: the committed
+    bytes form a prefix of each segment (segment `i` spans
+    `[i * segment_capacity_bytes, (i + 1) * segment_capacity_bytes)` of
+    `full_view()`). This backs layouts whose block dimension is not outermost,
+    e.g. a K/V-split KV cache (`num_segments=2`). `resize_` / `tensor` /
+    `append` assume a single contiguous prefix and are only valid when
+    `num_segments == 1`.
+    """
 
     def __init__(
         self,
         max_num_bytes: int,
         device: torch.device | str | int | None = None,
+        num_segments: int = 1,
     ) -> None:
         if max_num_bytes < 0:
             raise ValueError("max_num_bytes must be non-negative.")
+        if num_segments < 1:
+            raise ValueError(f"num_segments must be positive, got {num_segments}.")
+        if max_num_bytes % num_segments != 0:
+            raise ValueError(
+                f"max_num_bytes ({max_num_bytes}) must be divisible by "
+                f"num_segments ({num_segments})."
+            )
 
         if device is None:
             device = torch.cuda.current_device()
@@ -357,14 +410,21 @@ class ExtensibleTensor:
         torch.cuda.init()
 
         self._max_num_bytes: int = max_num_bytes
+        self._num_segments: int = num_segments
+        self._segment_capacity_bytes: int = max_num_bytes // num_segments
         self._buffer: _VirtualBuffer = _VirtualBuffer(max_num_bytes, self._device_index)
-        self._num_bytes: int = 0
+        self._bytes_per_segment: int = 0
 
     @property
     def tensor(self) -> torch.Tensor:
         """Return a uint8 tensor view of the currently committed prefix."""
+        if self._num_segments != 1:
+            raise ValueError(
+                "tensor (a single committed prefix) is only valid for "
+                "num_segments=1; use full_view() and index segments explicitly."
+            )
         return _uint8_tensor_from_ptr(
-            self._buffer.base_ptr, self._num_bytes, self._device_index
+            self._buffer.base_ptr, self._bytes_per_segment, self._device_index
         )
 
     def full_view(self) -> torch.Tensor:
@@ -375,29 +435,73 @@ class ExtensibleTensor:
 
     def resize_(self, num_bytes: int) -> torch.Tensor:
         """Grow the buffer to `num_bytes` and return the committed-prefix view."""
-        if num_bytes > self._max_num_bytes:
+        if self._num_segments != 1:
             raise ValueError(
-                f"Requested {num_bytes} bytes exceeds maximum size "
-                f"{self._max_num_bytes}."
+                "resize_ (a single committed prefix) is only valid for "
+                "num_segments=1; use resize_per_segment_."
             )
-        if num_bytes < self._num_bytes:
-            raise ValueError(
-                f"ExtensibleTensor is grow-only: cannot resize from "
-                f"{self._num_bytes} to {num_bytes} bytes."
-            )
-        self._buffer.ensure_committed(num_bytes)
-        self._num_bytes = num_bytes
+        self.resize_per_segment_(num_bytes)
         return self.tensor
+
+    def resize_per_segment_(
+        self, bytes_per_segment: int, zero_new: bool = False
+    ) -> None:
+        """Grow every segment's committed prefix to `bytes_per_segment` bytes.
+
+        Existing bytes are preserved and the base pointer is unchanged. With
+        `zero_new=True` the newly committed byte range of each segment is
+        zeroed (bytes committed earlier are left intact). Raises if
+        `bytes_per_segment` is smaller than the current per-segment size
+        (shrink is unsupported) or larger than `segment_capacity_bytes`.
+        """
+        old = self._bytes_per_segment
+        if bytes_per_segment < old:
+            raise ValueError(
+                f"ExtensibleTensor is grow-only: cannot resize from {old} "
+                f"to {bytes_per_segment} bytes per segment."
+            )
+        if bytes_per_segment > self._segment_capacity_bytes:
+            raise ValueError(
+                f"Requested {bytes_per_segment} bytes per segment exceeds the "
+                f"segment capacity {self._segment_capacity_bytes}."
+            )
+        if bytes_per_segment == old:
+            return
+        for i in range(self._num_segments):
+            start = i * self._segment_capacity_bytes
+            self._buffer.ensure_committed_range(start + old, start + bytes_per_segment)
+        self._bytes_per_segment = bytes_per_segment
+        if zero_new:
+            full = self.full_view()
+            for i in range(self._num_segments):
+                start = i * self._segment_capacity_bytes
+                full[start + old : start + bytes_per_segment].zero_()
 
     def append(self, num_bytes: int) -> torch.Tensor:
         """Grow by `num_bytes` additional bytes and return the new view."""
         if num_bytes < 0:
             raise ValueError("num_bytes to append must be non-negative.")
-        return self.resize_(self._num_bytes + num_bytes)
+        return self.resize_(self._bytes_per_segment + num_bytes)
 
     @property
     def num_bytes(self) -> int:
-        return self._num_bytes
+        """Current committed size in bytes, summed over all segments."""
+        return self._bytes_per_segment * self._num_segments
+
+    @property
+    def bytes_per_segment(self) -> int:
+        """Current committed prefix size of each segment in bytes."""
+        return self._bytes_per_segment
+
+    @property
+    def num_segments(self) -> int:
+        """Number of equal segments the reservation is divided into."""
+        return self._num_segments
+
+    @property
+    def segment_capacity_bytes(self) -> int:
+        """Maximum size of each segment (`max_num_bytes / num_segments`)."""
+        return self._segment_capacity_bytes
 
     @property
     def capacity_bytes(self) -> int:
@@ -413,4 +517,4 @@ class ExtensibleTensor:
 
     def free(self) -> None:
         self._buffer.free()
-        self._num_bytes = 0
+        self._bytes_per_segment = 0

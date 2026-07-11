@@ -4,6 +4,7 @@
 import functools
 import gc
 import itertools
+import math
 import threading
 import time
 from collections import defaultdict
@@ -7049,7 +7050,12 @@ class GPUModelRunner(
         to be reshaped to the desired shape before being used by the models.
 
         Args:
-            kv_cache_config: The KV cache config
+            kv_cache_config: The KV cache config; its `num_blocks` is the
+                declared capacity.
+            extensible: When True, reserve virtual address space for
+                `num_blocks` but commit only one block (per layout segment)
+                for CUDA graph capture; `extend_kv_cache` commits the rest
+                afterwards. When False, commit the full size up front.
         Returns:
             dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
@@ -7066,6 +7072,11 @@ class GPUModelRunner(
                     "enable_extensible_kv_cache=True requires at least one KV block."
                 )
 
+            # One CUDA virtual-memory byte buffer per KV cache tensor. Each
+            # buffer keeps its layers' physical layout and is committed as one
+            # prefix per layout segment (e.g. the K and V halves of a
+            # K/V-split layout) -- see `ExtensibleTensor`.
+            num_segments_by_layer = self._kv_cache_num_segments_by_layer()
             self._extensible_kv_cache_buffers: list[tuple[ExtensibleTensor, int]] = []
             self._extensible_kv_cache_committed_blocks = 1
             self._extensible_kv_cache_enabled = True
@@ -7074,12 +7085,27 @@ class GPUModelRunner(
                 assert bytes_per_block * kv_cache_config.num_blocks == (
                     kv_cache_tensor.size
                 )
+                segment_counts = {
+                    num_segments_by_layer[layer_name]
+                    for layer_name in kv_cache_tensor.shared_by
+                    if layer_name in num_segments_by_layer
+                }
+                assert len(segment_counts) == 1, (
+                    "Layers sharing one KV cache tensor disagree on the buffer "
+                    f"segmentation ({segment_counts}): {kv_cache_tensor.shared_by}"
+                )
+                num_segments = segment_counts.pop()
+                assert bytes_per_block % num_segments == 0
+                bytes_per_block_per_segment = bytes_per_block // num_segments
                 buffer = ExtensibleTensor(
                     max_num_bytes=kv_cache_tensor.size,
                     device=self.device,
+                    num_segments=num_segments,
                 )
-                self._extensible_kv_cache_buffers.append((buffer, bytes_per_block))
-                buffer.resize_(bytes_per_block).zero_()
+                self._extensible_kv_cache_buffers.append(
+                    (buffer, bytes_per_block_per_segment)
+                )
+                buffer.resize_per_segment_(bytes_per_block_per_segment, zero_new=True)
                 tensor = buffer.full_view()
                 for layer_name in kv_cache_tensor.shared_by:
                     kv_cache_raw_tensors[layer_name] = tensor
@@ -7124,6 +7150,49 @@ class GPUModelRunner(
             "Some layers are not correctly initialized"
         )
         return kv_cache_raw_tensors
+
+    def _kv_cache_num_segments_by_layer(self) -> dict[str, int]:
+        """Number of equal contiguous segments of each layer's KV cache buffer
+        under its physical layout -- i.e. the product of the physical dims
+        preceding the block dim. Within each segment, block `b` occupies bytes
+        `[b * S, (b + 1) * S)` where `S = bytes_per_block / num_segments`, so
+        the extensible KV cache can commit a per-segment prefix of blocks.
+        """
+        has_mamba = self.kv_cache_config.has_mamba_layers
+        num_segments_by_layer: dict[str, int] = {}
+        for group in self._kv_cache_spec_attn_group_iterator():
+            kv_cache_spec = group.kv_cache_spec
+            if isinstance(kv_cache_spec, AttentionSpec) and not has_mamba:
+                attn_backend = group.backend
+                block_dim = attn_backend.get_kv_cache_block_dim(
+                    kv_cache_spec.block_size,
+                    kv_cache_spec.num_kv_heads,
+                    kv_cache_spec.head_size,
+                    cache_dtype_str=self.cache_config.cache_dtype,
+                )
+                kv_cache_shape = attn_backend.get_kv_cache_shape(
+                    1,
+                    kv_cache_spec.block_size,
+                    kv_cache_spec.num_kv_heads,
+                    kv_cache_spec.head_size,
+                    cache_dtype_str=self.cache_config.cache_dtype,
+                )
+                try:
+                    stride_order = attn_backend.get_kv_cache_stride_order()
+                except (AttributeError, NotImplementedError):
+                    stride_order = tuple(range(len(kv_cache_shape)))
+                num_segments = math.prod(
+                    kv_cache_shape[dim]
+                    for dim in stride_order[: stride_order.index(block_dim)]
+                )
+            else:
+                # Mamba states are packed per block (block-major), and
+                # `_update_hybrid_attention_mamba_layout` re-strides attention
+                # caches of hybrid models to a block-major interleaved layout.
+                num_segments = 1
+            for layer_name in group.layer_names:
+                num_segments_by_layer[layer_name] = num_segments
+        return num_segments_by_layer
 
     def _attn_group_iterator(self) -> Iterator[AttentionGroup]:
         return itertools.chain.from_iterable(self.attn_groups)
@@ -7279,39 +7348,26 @@ class GPUModelRunner(
                     stride=(hidden_size, 2 * hidden_size, *kv_cache.stride()[2:]),
                 )
 
-    def supports_extensible_kv_cache(self) -> bool:
-        if not current_platform.is_cuda():
-            return False
-
-        has_kv_cache = False
-        layer_type = cast(type[Any], AttentionLayerBase)
-        attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type)
-        for attn_module in attn_layers.values():
-            if getattr(attn_module, "kv_sharing_target_layer_name", None):
-                continue
-            kv_cache_spec = attn_module.get_kv_cache_spec(self.vllm_config)
-            if kv_cache_spec is None:
-                continue
-            if not isinstance(kv_cache_spec, AttentionSpec):
-                return False
-            attn_backend = attn_module.get_attn_backend()
-            with set_current_vllm_config(self.vllm_config):
-                if not attn_backend.indexes_kv_by_block_stride():
-                    return False
-            has_kv_cache = True
-        return has_kv_cache
-
     def extend_kv_cache(self, num_blocks: int) -> None:
+        """Commit physical pages so the KV cache holds `num_blocks` blocks.
+
+        Grows the KV cache after CUDA graph capture, once the available memory
+        is known. No re-view is needed: the layers already view the full
+        capacity and each block stays at a fixed offset within its layout
+        segment, so captured graphs stay valid as more pages are mapped under
+        the stable base pointer. Newly committed blocks are zeroed.
+        """
         if not getattr(self, "_extensible_kv_cache_enabled", False):
             raise RuntimeError("extend_kv_cache requires an extensible KV cache.")
         if num_blocks <= self._extensible_kv_cache_committed_blocks:
             return
 
-        for buffer, bytes_per_block in self._extensible_kv_cache_buffers:
-            old_num_bytes = buffer.num_bytes
-            new_num_bytes = num_blocks * bytes_per_block
-            committed_view = buffer.resize_(new_num_bytes)
-            committed_view[old_num_bytes:new_num_bytes].zero_()
+        for buffer, bytes_per_block_per_segment in self._extensible_kv_cache_buffers:
+            # Zero only the freshly committed blocks; existing ones are left
+            # intact.
+            buffer.resize_per_segment_(
+                num_blocks * bytes_per_block_per_segment, zero_new=True
+            )
 
         self._extensible_kv_cache_committed_blocks = num_blocks
         logger.info("Extended KV cache to %d blocks.", num_blocks)

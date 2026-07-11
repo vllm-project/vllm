@@ -712,10 +712,12 @@ class Worker(WorkerBase):
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
         with self._maybe_get_memory_pool_context(tag="kv_cache"):
-            self.model_runner.initialize_kv_cache(
-                kv_cache_config,
-                extensible=extensible,
-            )
+            if extensible:
+                # Only the V1 GPU model runner implements the extensible flow;
+                # keep the default call signature untouched otherwise.
+                self.model_runner.initialize_kv_cache(kv_cache_config, extensible=True)
+            else:
+                self.model_runner.initialize_kv_cache(kv_cache_config)
 
         if self.model_config.enable_return_routed_experts:
             self.model_runner.init_routed_experts_capturer()
@@ -727,10 +729,6 @@ class Worker(WorkerBase):
             self.model_runner, "_init_kv_zero_meta"
         ):
             self.model_runner._init_kv_zero_meta()
-
-    def supports_extensible_kv_cache(self) -> bool:
-        supports_fn = getattr(self.model_runner, "supports_extensible_kv_cache", None)
-        return bool(supports_fn is not None and supports_fn())
 
     def extend_kv_cache(self, num_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_blocks

@@ -293,17 +293,17 @@ class EngineCore:
             has_kv_cache and vllm_config.cache_config.enable_extensible_kv_cache
         )
         if use_extensible_kv_cache:
+            from vllm.platforms import current_platform
+
             if vllm_config.cache_config.kv_cache_memory_bytes is not None:
                 raise ValueError(
                     "enable_extensible_kv_cache=True is not supported with "
                     "kv_cache_memory_bytes. The extensible path requires "
                     "automatic KV cache sizing."
                 )
-            if not all(self.model_executor.supports_extensible_kv_cache()):
+            if not current_platform.is_cuda():
                 raise ValueError(
-                    "enable_extensible_kv_cache=True is only supported for "
-                    "CUDA V1 attention backends with block-major KV cache "
-                    "indexing."
+                    "enable_extensible_kv_cache=True is only supported on CUDA."
                 )
 
         # Track max_model_len before KV cache config to detect auto-fit changes

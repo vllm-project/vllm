@@ -121,8 +121,9 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             gpu_memory_utilization
         enable_extensible_kv_cache: Use CUDA virtual memory to reserve the KV
             cache address range before CUDA graph capture and commit the final
-            cache size after capture. Only supported by V1 CUDA workers with
-            block-major attention backends.
+            cache size after capture. Supported by V1 CUDA workers for all
+            attention backends (block-major and K/V-split KV cache layouts)
+            and for Mamba / linear-attention models.
         cpu_offload_gb: The size (GiB) of CPU memory to use for offloading
             the model weights. This virtually increases the GPU memory space
             you can use to hold the model weights, at the cost of CPU-GPU data

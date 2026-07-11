@@ -178,8 +178,9 @@ class CacheConfig:
     """Use CUDA virtual memory to reserve the KV cache address range before
     CUDA graph capture and commit the final size after capture.
 
-    This makes automatic KV sizing account for the actual CUDA graph pool. It
-    is only supported for CUDA, V1, and block-major attention backends.
+    This makes automatic KV sizing account for the actual CUDA graph pool.
+    Supported for all V1 CUDA attention backends (block-major and K/V-split
+    KV cache layouts) and for Mamba / linear-attention models.
     """
 
     kv_offloading_size: float | None = None

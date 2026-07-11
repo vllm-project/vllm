@@ -100,9 +100,6 @@ class WorkerBase:
         """Get specifications for KV cache implementation."""
         raise NotImplementedError
 
-    def supports_extensible_kv_cache(self) -> bool:
-        return False
-
     def extend_kv_cache(self, num_blocks: int) -> None:
         raise RuntimeError(
             f"{self.__class__.__name__} does not support extensible KV cache."
