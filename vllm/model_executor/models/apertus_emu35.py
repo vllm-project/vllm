@@ -6,13 +6,12 @@
 
 import os.path as osp
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import yaml
 from einops import reduce
 from torch import einsum
-import numpy as np
 
 
 def nonlinearity(x: torch.Tensor) -> torch.Tensor:
@@ -403,13 +402,15 @@ def compute_entropy_loss(
     sample_entropy = -torch.sum(probs * log_probs, -1)
     sample_entropy = torch.mean(sample_entropy)
 
-    loss = sample_minimization_weight * sample_entropy - batch_maximization_weight * avg_entropy
+    loss = (
+        sample_minimization_weight * sample_entropy
+        - batch_maximization_weight * avg_entropy
+    )
 
     return sample_entropy, avg_entropy, loss
 
 
 class IndexPropagationQuantize(nn.Module):
-
     def __init__(
         self,
         n_e,
@@ -436,12 +437,10 @@ class IndexPropagationQuantize(nn.Module):
         if self.remap is not None:
             self.register_buffer("used", torch.tensor(np.load(self.remap)))
             self.re_embed = self.used.shape[0]
-            self.unknown_index = unknown_index # "random" or "extra" or integer
+            self.unknown_index = unknown_index  # "random" or "extra" or integer
             if self.unknown_index == "extra":
                 self.unknown_index = self.re_embed
-                self.re_embed = self.re_embed+1
-            print(f"Remapping {self.n_embed} indices to {self.re_embed} indices. "
-                  f"Using {self.unknown_index} for unknown indices.")
+                self.re_embed = self.re_embed + 1
         else:
             self.re_embed = n_e
 
@@ -452,7 +451,6 @@ class IndexPropagationQuantize(nn.Module):
 
         self.l2_normalize = l2_normalize
         if self.l2_normalize:
-            print("using l2 norm!!!!")
             self.init_embedding()
 
     def init_embedding(self):
@@ -462,26 +460,28 @@ class IndexPropagationQuantize(nn.Module):
 
     def remap_to_used(self, inds):
         ishape = inds.shape
-        assert len(ishape)>1
-        inds = inds.reshape(ishape[0],-1)
+        assert len(ishape) > 1
+        inds = inds.reshape(ishape[0], -1)
         used = self.used.to(inds)
-        match = (inds[:,:,None]==used[None,None,...]).long()
+        match = (inds[:, :, None] == used[None, None, ...]).long()
         new = match.argmax(-1)
-        unknown = match.sum(2)<1
+        unknown = match.sum(2) < 1
         if self.unknown_index == "random":
-            new[unknown]=torch.randint(0,self.re_embed,size=new[unknown].shape).to(device=new.device)
+            new[unknown] = torch.randint(0, self.re_embed, size=new[unknown].shape).to(
+                device=new.device
+            )
         else:
             new[unknown] = self.unknown_index
         return new.reshape(ishape)
 
     def unmap_to_all(self, inds):
         ishape = inds.shape
-        assert len(ishape)>1
-        inds = inds.reshape(ishape[0],-1)
+        assert len(ishape) > 1
+        inds = inds.reshape(ishape[0], -1)
         used = self.used.to(inds)
-        if self.re_embed > self.used.shape[0]: # extra token
-            inds[inds>=self.used.shape[0]] = 0 # simply set to zero
-        back=torch.gather(used[None,:][inds.shape[0]*[0],:], 1, inds)
+        if self.re_embed > self.used.shape[0]:  # extra token
+            inds[inds >= self.used.shape[0]] = 0  # simply set to zero
+        back = torch.gather(used[None, :][inds.shape[0] * [0], :], 1, inds)
         return back.reshape(ishape)
 
     def forward(self, z, temp=None, return_logits=False):
@@ -493,35 +493,39 @@ class IndexPropagationQuantize(nn.Module):
         else:
             embedding = self.embedding.weight
 
-        logits = einsum('b d h w, n d -> b n h w', z, embedding)
+        logits = einsum("b d h w, n d -> b n h w", z, embedding)
         if self.remap is not None:
             # continue only with used logits
             full_zeros = torch.zeros_like(logits)
-            logits = logits[:,self.used,...]
+            logits = logits[:, self.used, ...]
 
         soft_one_hot = F.softmax(logits, dim=1)
         if self.remap is not None:
             # go back to all entries but unused set to zero
-            full_zeros[:,self.used,...] = soft_one_hot
+            full_zeros[:, self.used, ...] = soft_one_hot
             soft_one_hot = full_zeros
 
         dim = 1
         ind = soft_one_hot.max(dim, keepdim=True)[1]
-        hard_one_hot = torch.zeros_like(logits, memory_format=torch.legacy_contiguous_format).scatter_(dim, ind, 1.0)
+        hard_one_hot = torch.zeros_like(
+            logits, memory_format=torch.legacy_contiguous_format
+        ).scatter_(dim, ind, 1.0)
 
         if self.training:
             one_hot = hard_one_hot - soft_one_hot.detach() + soft_one_hot
 
-            z_q = einsum('b n h w, n d -> b d h w', one_hot, embedding)
-            z_q_2 = einsum('b n h w, n d -> b d h w', hard_one_hot, embedding)
+            z_q = einsum("b n h w, n d -> b d h w", one_hot, embedding)
+            z_q_2 = einsum("b n h w, n d -> b d h w", hard_one_hot, embedding)
 
-            quant_loss = torch.mean((z_q - z) ** 2) + \
-                        torch.mean((z_q_2.detach() - z) ** 2) + \
-                        torch.mean((z_q_2 - z.detach()) ** 2) * self.beta
+            quant_loss = (
+                torch.mean((z_q - z) ** 2)
+                + torch.mean((z_q_2.detach() - z) ** 2)
+                + torch.mean((z_q_2 - z.detach()) ** 2) * self.beta
+            )
             diff = quant_loss
         else:
             diff = 0.0
-            z_q = einsum('b n h w, n d -> b d h w', hard_one_hot, embedding)
+            z_q = einsum("b n h w, n d -> b d h w", hard_one_hot, embedding)
 
         if self.use_entropy_loss:
             sample_entropy, avg_entropy, entropy_loss = compute_entropy_loss(
@@ -529,7 +533,7 @@ class IndexPropagationQuantize(nn.Module):
                 temperature=self.entropy_temperature,
                 sample_minimization_weight=self.sample_minimization_weight,
                 batch_maximization_weight=self.batch_maximization_weight,
-            ) # logits [b d h w] -> [b * h * w, n]
+            )  # logits [b d h w] -> [b * h * w, n]
             diff = (quant_loss, sample_entropy, avg_entropy, entropy_loss)
 
         ind = torch.flatten(ind)
@@ -634,12 +638,14 @@ def build_vision_tokenizer(
     if type != "ibq":
         raise NotImplementedError(f"Unsupported vision tokenizer type: {type}")
 
-    assert vision_config is not None, "vision_config must be provided to build_vision_tokenizer"
+    assert vision_config is not None, (
+        "vision_config must be provided to build_vision_tokenizer"
+    )
 
     # Check for safetensors or ckpt file
     safetensors_path = osp.join(model_path, "emu35_vison_tokenizer.safetensors")
     ckpt_path = osp.join(model_path, "model.ckpt")
-    
+
     ddconfig = {
         "double_z": vision_config.get("double_z", False),
         "z_channels": vision_config.get("z_channels", 256),
@@ -652,7 +658,7 @@ def build_vision_tokenizer(
         "attn_resolutions": vision_config.get("attn_resolutions", [16]),
         "dropout": vision_config.get("dropout", 0.0),
     }
-    
+
     cfg = {
         "ddconfig": ddconfig,
         "n_embed": vision_config.get("codebook_size", 131072),
@@ -661,14 +667,19 @@ def build_vision_tokenizer(
         "use_entropy_loss": vision_config.get("use_entropy_loss", False),
         "cosine_similarity": vision_config.get("cosine_similarity", False),
         "entropy_temperature": vision_config.get("entropy_temperature", 0.01),
-        "sample_minimization_weight": vision_config.get("sample_minimization_weight", 1.0),
-        "batch_maximization_weight": vision_config.get("batch_maximization_weight", 1.0),
+        "sample_minimization_weight": vision_config.get(
+            "sample_minimization_weight", 1.0
+        ),
+        "batch_maximization_weight": vision_config.get(
+            "batch_maximization_weight", 1.0
+        ),
     }
-    
+
     tokenizer = IBQ(**cfg)
 
     if osp.exists(safetensors_path):
         from safetensors.torch import load_file
+
         ckpt = load_file(safetensors_path, device="cpu")
         tokenizer.load_state_dict(ckpt)
     elif osp.exists(ckpt_path):
