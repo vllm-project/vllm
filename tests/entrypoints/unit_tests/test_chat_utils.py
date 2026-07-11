@@ -3,7 +3,7 @@
 
 import warnings
 from collections.abc import Mapping
-from typing import Literal
+from typing import Any, Literal, cast
 
 import pytest
 import torch
@@ -15,6 +15,7 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     ConversationMessage,
     _postprocess_messages,
+    _resolve_vision_chunk_items,
     parse_chat_messages,
     parse_chat_messages_async,
 )
@@ -212,6 +213,124 @@ def _assert_mm_uuids(
         assert image_uuids == expected_uuids
     else:
         assert mm_uuids is None
+
+
+@pytest.mark.skip_global_cleanup
+def test_resolve_vision_chunk_video_passes_metadata_to_required_splitter():
+    class RequiredVideoSplitter:
+        requires_video_chunk_splitting = True
+
+        def __init__(self) -> None:
+            self.seen_data: object | None = None
+
+        def split_video_chunks(self, data: object) -> list[dict[str, Any]]:
+            self.seen_data = data
+            return [
+                {"video_chunk": ["frame-0"], "prompt": "prompt-0"},
+                {"video_chunk": ["frame-1"], "prompt": "prompt-1"},
+            ]
+
+    video_data = ("frames", {"fps": 30.0, "frames_indices": [0]})
+    processor = RequiredVideoSplitter()
+
+    chunks, uuids = _resolve_vision_chunk_items(
+        [(video_data, "video-uuid")],
+        cast(Any, processor),
+        ["video"],
+    )
+
+    assert processor.seen_data is video_data
+    assert chunks == [
+        {
+            "type": "video_chunk",
+            "video_chunk": ["frame-0"],
+            "uuid": "video-uuid-0",
+            "video_idx": 0,
+            "prompt": "prompt-0",
+        },
+        {
+            "type": "video_chunk",
+            "video_chunk": ["frame-1"],
+            "uuid": "video-uuid-1",
+            "video_idx": 0,
+            "prompt": "prompt-1",
+        },
+    ]
+    assert uuids == ["video-uuid-0", "video-uuid-1"]
+
+
+@pytest.mark.skip_global_cleanup
+def test_resolve_vision_chunk_video_preserves_optional_splitter_behavior():
+    class OptionalVideoSplitter:
+        def __init__(self) -> None:
+            self.seen_data: object | None = None
+
+        def split_video_chunks(self, data: object) -> list[dict[str, Any]]:
+            self.seen_data = data
+            return [{"video_chunk": ["frame"], "prompt": "prompt"}]
+
+    video_data = ("frames", {"fps": 30.0})
+    processor = OptionalVideoSplitter()
+
+    chunks, uuids = _resolve_vision_chunk_items(
+        [(video_data, None)],
+        cast(Any, processor),
+        ["video"],
+    )
+
+    assert processor.seen_data == "frames"
+    assert chunks == [
+        {
+            "type": "video_chunk",
+            "video_chunk": ["frame"],
+            "uuid": None,
+            "video_idx": 0,
+            "prompt": "prompt",
+        }
+    ]
+    assert uuids == [None]
+
+
+@pytest.mark.skip_global_cleanup
+def test_resolve_vision_chunk_video_preserves_single_chunk_uuid():
+    class RequiredVideoSplitter:
+        requires_video_chunk_splitting = True
+
+        def split_video_chunks(self, data: object) -> list[dict[str, Any]]:
+            return [{"video_chunk": ["frame"], "prompt": "prompt"}]
+
+    chunks, uuids = _resolve_vision_chunk_items(
+        [(("frames", {"fps": 30.0}), "video-uuid")],
+        cast(Any, RequiredVideoSplitter()),
+        ["video"],
+    )
+
+    assert chunks == [
+        {
+            "type": "video_chunk",
+            "video_chunk": ["frame"],
+            "uuid": "video-uuid",
+            "video_idx": 0,
+            "prompt": "prompt",
+        }
+    ]
+    assert uuids == ["video-uuid"]
+
+
+@pytest.mark.skip_global_cleanup
+def test_resolve_vision_chunk_video_required_splitter_fails_closed():
+    class BrokenRequiredVideoSplitter:
+        requires_video_chunk_splitting = True
+
+        def split_video_chunks(self, data: object) -> list[dict[str, Any]]:
+            raise RuntimeError("boom")
+
+    with pytest.raises(ValueError, match="must be split into video_chunk"):
+        _resolve_vision_chunk_items(
+            [(("frames", {"fps": 30.0}), None)],
+            cast(Any, BrokenRequiredVideoSplitter()),
+            ["video"],
+        )
 
 
 ModalityType = Literal["image", "video", "audio"]
