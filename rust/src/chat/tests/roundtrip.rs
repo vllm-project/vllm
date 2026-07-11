@@ -182,6 +182,32 @@ impl RoundtripCase {
         }
     }
 
+    /// Granite 4 JSON tool-call format.
+    fn granite4() -> Self {
+        Self {
+            model_id: "ibm-granite/granite-4.0-h-tiny",
+            assistant_stop_suffix: "<|end_of_text|>\n",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Always { value: false },
+            json_fmt: spaced_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
+
+    /// Hermes 4 JSON tool-call format.
+    fn hermes4() -> Self {
+        Self {
+            model_id: "NousResearch/Hermes-4-14B",
+            assistant_stop_suffix: "<|im_end|>\n",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Toggleable { default: false },
+            json_fmt: spaced_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
+
     /// Gemma4 channel reasoning with custom function-call arguments.
     fn gemma4() -> Self {
         Self {
@@ -291,6 +317,8 @@ roundtrip_tests! {
     deepseek_v32 => [tool_call_mix],
     glm45 => [reasoning_and_content, tool_call_mix],
     glm47 => [reasoning_and_content, tool_call_mix],
+    granite4 => [tool_call_only],
+    hermes4 => [tool_call_only],
     seed_oss => [reasoning_and_content],
     step3p5 => [reasoning_and_content],
     nemotron_v3 => [reasoning_and_content],
@@ -359,51 +387,70 @@ async fn run_roundtrip_tool_call_mix(
     case: &RoundtripCase,
     backends: &vllm_chat::LoadedModelBackends,
 ) -> Result<()> {
+    run_roundtrip_tool_calls(
+        case,
+        backends,
+        Some("Need call the weather and add tools."),
+        Some(true),
+    )
+    .await
+}
+
+/// Run the fixed content+multiple-tools fixture without reasoning.
+async fn run_roundtrip_tool_call_only(
+    case: &RoundtripCase,
+    backends: &vllm_chat::LoadedModelBackends,
+) -> Result<()> {
+    run_roundtrip_tool_calls(case, backends, None, None).await
+}
+
+async fn run_roundtrip_tool_calls(
+    case: &RoundtripCase,
+    backends: &vllm_chat::LoadedModelBackends,
+    expected_reasoning: Option<&str>,
+    thinking: Option<bool>,
+) -> Result<()> {
     let request = roundtrip_request(
-        "roundtrip-reasoning-tools",
+        "roundtrip-tools",
         vec![ChatMessage::text(
             ChatRole::User,
             "Check Shanghai weather and add 1.0 plus 2.",
         )],
         test_tools(),
-        Some(true), // always enable thinking in this fixture
+        thinking,
     );
-    let expected_reasoning = "Need call the weather and add tools.";
     let expected_text = "I will call the tools.";
 
-    let result = run_roundtrip(
-        case,
-        backends,
-        &request,
-        AssistantMessage {
-            content: vec![
-                AssistantContentBlock::Reasoning {
-                    text: expected_reasoning.to_string(),
-                },
-                AssistantContentBlock::Text {
-                    text: expected_text.to_string(),
-                },
-                AssistantContentBlock::ToolCall(AssistantToolCall {
-                    id: "functions.get_weather:0".to_string(),
-                    name: "get_weather".to_string(),
-                    arguments: r#"{"location":"Shanghai"}"#.to_string(),
-                }),
-                AssistantContentBlock::ToolCall(AssistantToolCall {
-                    id: "functions.add:1".to_string(),
-                    name: "add".to_string(),
-                    // Intentionally use a non-lexical order of keys to verify text-level
-                    // fidelity of the roundtrip where JSON formatting remains stable. The
-                    // `items` key also exercises templates that call `arguments.items()`.
-                    arguments: r#"{"y":1.0,"x":2,"items":["left","right"]}"#.to_string(),
-                }),
-            ],
+    let mut content = Vec::new();
+    if let Some(reasoning) = expected_reasoning {
+        content.push(AssistantContentBlock::Reasoning {
+            text: reasoning.to_string(),
+        });
+    }
+    content.extend([
+        AssistantContentBlock::Text {
+            text: expected_text.to_string(),
         },
-    )
-    .await?;
+        AssistantContentBlock::ToolCall(AssistantToolCall {
+            id: "functions.get_weather:0".to_string(),
+            name: "get_weather".to_string(),
+            arguments: r#"{"location":"Shanghai"}"#.to_string(),
+        }),
+        AssistantContentBlock::ToolCall(AssistantToolCall {
+            id: "functions.add:1".to_string(),
+            name: "add".to_string(),
+            // Intentionally use a non-lexical order of keys to verify text-level
+            // fidelity of the roundtrip where JSON formatting remains stable. The
+            // `items` key also exercises templates that call `arguments.items()`.
+            arguments: r#"{"y":1.0,"x":2,"items":["left","right"]}"#.to_string(),
+        }),
+    ]);
+
+    let result = run_roundtrip(case, backends, &request, AssistantMessage { content }).await?;
 
     assert_eq!(
         result.parsed_message.reasoning().as_deref().map(str::trim),
-        Some(expected_reasoning)
+        expected_reasoning
     );
     assert_eq!(result.parsed_message.text().trim(), expected_text);
 
