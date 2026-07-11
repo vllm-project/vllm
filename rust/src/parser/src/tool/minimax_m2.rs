@@ -593,6 +593,7 @@ mod tests {
         let mut parser = MinimaxM2ToolParser::new(&test_tools());
         let error = parser.parse_chunk("<minimax:tool_call><bad></minimax:tool_call>").unwrap_err();
 
-        expect!["tool parser parsing failed: "].assert_eq(&error.to_report_string());
+        expect![[r#"tool parser parsing failed: near "<bad></minimax:tool_call>": "#]]
+            .assert_eq(&error.to_report_string());
     }
 }

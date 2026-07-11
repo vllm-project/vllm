@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests.parser.engine.conftest import make_mock_tokenizer
 from tests.parser.engine.streaming_helpers import (
     collect_content,
     collect_function_name,
@@ -57,6 +58,8 @@ def _make_tokenizer(sequence: list[tuple[int, str]]) -> MagicMock:
         return "".join(parts)
 
     tokenizer.decode.side_effect = decode
+    tokenizer.all_special_tokens = list(SPECIAL_TOKEN_MAP.values())
+    tokenizer.all_special_ids = list(SPECIAL_TOKEN_MAP.keys())
     return tokenizer
 
 
@@ -657,19 +660,15 @@ class TestGemma4ReasoningTruncationWithHoldback:
 @pytest.fixture
 def tool_call_tokenizer():
     """Mock tokenizer with Gemma4 special token vocab."""
-    tokenizer = MagicMock()
-    tokenizer.encode.return_value = [1, 2, 3]
-    tokenizer.get_vocab.return_value = {
-        "<|tool_call>": TOOL_CALL_START_ID,
-        "<tool_call|>": TOOL_CALL_END_ID,
-        "<|channel>": CHANNEL_START_ID,
-        "<channel|>": CHANNEL_END_ID,
-        '<|"|>': QUOTED_ID,
-    }
-    tokenizer.decode.side_effect = lambda ids: "".join(
-        SPECIAL_TOKEN_MAP.get(i, chr(i) if i < 128 else f"<{i}>") for i in ids
+    return make_mock_tokenizer(
+        vocab={
+            "<|tool_call>": TOOL_CALL_START_ID,
+            "<tool_call|>": TOOL_CALL_END_ID,
+            "<|channel>": CHANNEL_START_ID,
+            "<channel|>": CHANNEL_END_ID,
+            '<|"|>': QUOTED_ID,
+        },
     )
-    return tokenizer
 
 
 @pytest.fixture
@@ -1407,3 +1406,133 @@ class TestBareThoughtWithoutChannelOpener:
         assert reasoning == ""
         assert content == ""
         assert len(tool_calls) == 0
+
+
+# ── Regression: commas inside <|"|>-delimited string values ─────────
+#
+# _make_tokenizer sets all_special_tokens, which activates the auto-drop
+# mechanism in _build_drop_info. If <|"|> is not in configured_texts,
+# it gets silently dropped and commas inside string values become field
+# separators, e.g. "San Francisco, CA" → {"location": "San Francisco"}.
+
+
+COMMA_TOKEN_SEQUENCE: list[tuple[int, str]] = [
+    (TOOL_CALL_START_ID, "<|tool_call>"),
+    (4000, "call"),
+    (4001, ":"),
+    (4002, "get_weather"),
+    (4003, "{"),
+    (4004, "location"),
+    (4005, ":"),
+    (QUOTED_ID, '<|"|>'),
+    (4006, "San Francisco"),
+    (4007, ", CA"),
+    (QUOTED_ID, '<|"|>'),
+    (4008, ","),
+    (4009, "unit"),
+    (4010, ":"),
+    (QUOTED_ID, '<|"|>'),
+    (4011, "celsius"),
+    (QUOTED_ID, '<|"|>'),
+    (4012, "}"),
+    (TOOL_CALL_END_ID, "<tool_call|>"),
+]
+
+MULTI_COMMA_TOKEN_SEQUENCE: list[tuple[int, str]] = [
+    (TOOL_CALL_START_ID, "<|tool_call>"),
+    (4000, "call"),
+    (4001, ":"),
+    (4020, "send_message"),
+    (4003, "{"),
+    (4021, "destination"),
+    (4005, ":"),
+    (QUOTED_ID, '<|"|>'),
+    (4022, "456 Oakwood Avenue"),
+    (4023, ", Rivermist"),
+    (4024, ", 83214"),
+    (QUOTED_ID, '<|"|>'),
+    (4012, "}"),
+    (TOOL_CALL_END_ID, "<tool_call|>"),
+]
+
+
+class TestCommaInStringValueRegression:
+    """Regression: <|"|> delimiters must not be auto-dropped.
+
+    When _build_drop_info discovers <|"|> as a special token and it is
+    not in configured_texts, the delimiter is silently removed. Without
+    it, _parse_gemma4_args treats commas inside string values as field
+    separators.
+    """
+
+    @pytest.fixture
+    def comma_tokenizer(self):
+        return _make_tokenizer(COMMA_TOKEN_SEQUENCE)
+
+    @pytest.fixture
+    def comma_parser(self, comma_tokenizer):
+        return Gemma4Parser(comma_tokenizer)
+
+    @pytest.fixture
+    def multi_comma_tokenizer(self):
+        return _make_tokenizer(MULTI_COMMA_TOKEN_SEQUENCE)
+
+    @pytest.fixture
+    def multi_comma_parser(self, multi_comma_tokenizer):
+        return Gemma4Parser(multi_comma_tokenizer)
+
+    def test_batched_streaming_comma_in_value(
+        self, comma_parser, comma_tokenizer, request_obj
+    ):
+        results = _stream_tokens_batched(
+            comma_parser,
+            comma_tokenizer,
+            request_obj,
+            batch_size=1,
+            prompt_token_ids=[],
+        )
+        _, _, tool_calls = _collect_fields(results)
+        assert len(tool_calls) > 0
+        args_text = "".join(
+            tc.function.arguments
+            for tc in tool_calls
+            if tc.function and tc.function.arguments
+        )
+        parsed = json.loads(args_text)
+        assert parsed["location"] == "San Francisco, CA"
+        assert parsed["unit"] == "celsius"
+
+    def test_batched_streaming_multiple_commas(
+        self, multi_comma_parser, multi_comma_tokenizer, request_obj
+    ):
+        results = _stream_tokens_batched(
+            multi_comma_parser,
+            multi_comma_tokenizer,
+            request_obj,
+            batch_size=1,
+            prompt_token_ids=[],
+        )
+        _, _, tool_calls = _collect_fields(results)
+        assert len(tool_calls) > 0
+        args_text = "".join(
+            tc.function.arguments
+            for tc in tool_calls
+            if tc.function and tc.function.arguments
+        )
+        parsed = json.loads(args_text)
+        assert parsed["destination"] == "456 Oakwood Avenue, Rivermist, 83214"
+
+    def test_non_streaming_comma_in_value(self, comma_parser, request_obj):
+        text = "".join(text for _, text in COMMA_TOKEN_SEQUENCE)
+        result = comma_parser.extract_tool_calls(text, request_obj)
+        assert result.tools_called is True
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args["location"] == "San Francisco, CA"
+        assert args["unit"] == "celsius"
+
+    def test_non_streaming_multiple_commas(self, multi_comma_parser, request_obj):
+        text = "".join(text for _, text in MULTI_COMMA_TOKEN_SEQUENCE)
+        result = multi_comma_parser.extract_tool_calls(text, request_obj)
+        assert result.tools_called is True
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args["destination"] == "456 Oakwood Avenue, Rivermist, 83214"
