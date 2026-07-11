@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 from math import prod
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
@@ -31,6 +33,9 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 
 
 @triton.jit
@@ -200,6 +205,16 @@ def _mxfp4_quantize(
     return A, None
 
 
+def _fp8_quantize_dequantize(
+    A: torch.Tensor,
+    A_scale: torch.Tensor,
+):
+    qA, qA_scale = ops.scaled_fp8_quant(A, A_scale, use_per_token_if_dynamic=False)
+    A = per_tensor_dequantize(qA, qA_scale).to(A.dtype)
+
+    return A, None
+
+
 def _mxfp8_e4m3_quantize(
     A: torch.Tensor,
     A_scale: torch.Tensor | None,
@@ -268,23 +283,17 @@ def moe_kernel_quantize_input(
             # purpose, because there is no native kernel for weight in ocp_mx_scheme
             # and activation in FP8. The implementation is based on existing
             # non-emulation ops.
-            qA, qA_scale = ops.scaled_fp8_quant(
-                A, A_scale, use_per_token_if_dynamic=False
-            )
-            A = per_tensor_dequantize(qA, qA_scale).to(A.dtype)
-            # After QDQ, we don't need further quantization
-            return A, None
+            # TODO: Remove this `ocp_mx_scheme is not None` block and rely solely
+            # on `quantization_emulation`.
+            return _fp8_quantize_dequantize(A, A_scale)
         # else: For other schemes (e.g., *_a_mxfp6_e3m2, *_a_mxfp6_e2m3),
         # weights are already dequantized, and we proceed with normal
         # activation quantization below.
-
     if quant_dtype == current_platform.fp8_dtype():
         if quantization_emulation:
-            raise NotImplementedError(
-                f"moe_kernel_quantize_input does not support quant_dtype={quant_dtype}"
-                " MOE quantization emulation. Please open an issue."
-            )
-        return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
+            return _fp8_quantize_dequantize(A, A_scale)
+        else:
+            return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == torch.int8:
         if quantization_emulation:
             raise NotImplementedError(
@@ -296,6 +305,7 @@ def moe_kernel_quantize_input(
         if not quantization_emulation:
             return _nvfp4_quantize(A, A_scale, is_sf_swizzled_layout=is_scale_swizzled)
         else:
+            assert A_scale is not None
             A = ref_nvfp4_quant_dequant(A, A_scale, block_size=16)
             return A, None
     elif quant_dtype == "mxfp4":
@@ -397,6 +407,23 @@ def _pack_topk_ids_weights_kernel(
     tl.store(output_ptr + offsets, packed, mask=mask)
 
 
+def fi_moe_largest_bucket(moe_config: "FusedMoEConfig") -> int:
+    """Estimate FlashInfer's MoE autotuning maximum token count.
+
+    All DP ranks may contribute `max_num_tokens` to one invocation.
+    Keep FlashInfer's default moe `tune_max_num_tokens=8192`
+    floor to avoid over-underestimation.
+    DeepEP, SP, or PCP may make this underestimate, however overestimation
+    may be dangerous, increasing tuning- cost and memory use.
+
+    NOTE: The DP factor applies even when EP is disabled:
+    > Without `--enable-expert-parallel`, MoE layers would use tensor parallelism.
+
+    For a detailed explanation, see: `docs/serving/data_parallel_deployment.md`
+    """
+    return max(moe_config.max_num_tokens * moe_config.dp_size, 8192)
+
+
 def trtllm_moe_pack_topk_ids_weights(
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
@@ -441,3 +468,12 @@ def swiglu_limit_func(
         up = torch.clamp(up, min=-swiglu_limit, max=swiglu_limit)
 
     output.copy_(F.silu(gate) * up)
+
+
+@functools.lru_cache
+def enable_swap_ab(BLOCK_SIZE_M: int, BLOCK_SIZE_N: int) -> bool:
+    return (
+        current_platform.is_device_capability(90)
+        and BLOCK_SIZE_M < 64
+        and BLOCK_SIZE_N >= 64
+    )

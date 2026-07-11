@@ -22,6 +22,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
+    MambaSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
@@ -35,18 +36,18 @@ def _validate_prefix_cache_retention_interval(
     if retention_interval is None:
         return
 
-    # Retention only sparsifies sliding-window checkpoints for now; every other
-    # manager (full attention, Mamba, chunked-local) caches densely and
-    # ignores it to be conservative.
-    # TODO: Support Mamba/linear attention.
+    # Retention sparsifies sliding-window and Mamba (linear-attention)
+    # checkpoints; full-attention and chunked-local groups cache densely and
+    # ignore it (their hit granularity must stay fine).
     if not any(
-        isinstance(g.kv_cache_spec, SlidingWindowSpec)
+        isinstance(g.kv_cache_spec, (SlidingWindowSpec, MambaSpec))
         for g in kv_cache_config.kv_cache_groups
     ):
         raise ValueError(
             "VLLM_PREFIX_CACHE_RETENTION_INTERVAL is set but this model has "
-            "no sliding-window KV cache group, so retention has no effect. "
-            "Unset it (the feature only applies to sliding-window attention)."
+            "no sliding-window or Mamba KV cache group, so retention has no "
+            "effect. Unset it (it only applies to sliding-window and Mamba "
+            "attention)."
         )
 
     if retention_interval < 0 or retention_interval % scheduler_block_size != 0:
@@ -66,7 +67,7 @@ class KVCacheCoordinator(ABC):
         self,
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
-        max_num_batched_tokens: int,
+        max_in_flight_tokens: int,
         use_eagle: bool,
         enable_caching: bool,
         enable_kv_cache_events: bool,
@@ -106,7 +107,7 @@ class KVCacheCoordinator(ABC):
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
                 kv_cache_spec=kv_cache_group.kv_cache_spec,
-                max_num_batched_tokens=max_num_batched_tokens,
+                max_in_flight_tokens=max_in_flight_tokens,
                 max_model_len=max_model_len,
                 block_pool=self.block_pool,
                 enable_caching=enable_caching,
@@ -114,6 +115,7 @@ class KVCacheCoordinator(ABC):
                 dcp_world_size=dcp_world_size,
                 pcp_world_size=pcp_world_size,
                 scheduler_block_size=self.scheduler_block_size,
+                needs_kv_cache_zeroing=self.kv_cache_config.needs_kv_cache_zeroing,
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
@@ -328,7 +330,10 @@ class KVCacheCoordinator(ABC):
         ]
 
     def remove_skipped_blocks(
-        self, request_id: str, total_computed_tokens: int
+        self,
+        request_id: str,
+        processed_computed_tokens: int,
+        num_prompt_tokens: int | None = None,
     ) -> None:
         """
         Remove the blocks that are no longer needed from `blocks` and replace
@@ -336,11 +341,16 @@ class KVCacheCoordinator(ABC):
 
         Args:
             request_id: The request ID.
-            total_computed_tokens: The total number of computed tokens, including
-                local computed tokens and external computed tokens.
+            processed_computed_tokens: Computed-token prefix length covering
+                fully processed and committed tokens only (safe to free).
+            num_prompt_tokens: Optional prompt length. R-SWA managers use this to
+                free gap blocks between the prefill tail and decode window; other
+                manager types ignore it.
         """
         for manager in self.single_type_managers:
-            manager.remove_skipped_blocks(request_id, total_computed_tokens)
+            manager.remove_skipped_blocks(
+                request_id, processed_computed_tokens, num_prompt_tokens
+            )
 
     def get_blocks(self, request_id: str) -> tuple[list[KVCacheBlock], ...]:
         """
@@ -377,7 +387,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         self,
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
-        max_num_batched_tokens: int,
+        max_in_flight_tokens: int,
         use_eagle: bool,
         enable_kv_cache_events: bool,
         dcp_world_size: int,
@@ -389,7 +399,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         super().__init__(
             kv_cache_config,
             max_model_len,
-            max_num_batched_tokens,
+            max_in_flight_tokens,
             use_eagle,
             False,
             enable_kv_cache_events,
@@ -426,7 +436,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         self,
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
-        max_num_batched_tokens: int,
+        max_in_flight_tokens: int,
         use_eagle: bool,
         enable_caching: bool,
         enable_kv_cache_events: bool,
@@ -439,7 +449,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         super().__init__(
             kv_cache_config,
             max_model_len,
-            max_num_batched_tokens,
+            max_in_flight_tokens,
             use_eagle,
             enable_caching,
             enable_kv_cache_events,
@@ -512,7 +522,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self,
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
-        max_num_batched_tokens: int,
+        max_in_flight_tokens: int,
         use_eagle: bool,
         enable_caching: bool,
         enable_kv_cache_events: bool,
@@ -525,7 +535,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         super().__init__(
             kv_cache_config,
             max_model_len,
-            max_num_batched_tokens,
+            max_in_flight_tokens,
             use_eagle,
             enable_caching,
             enable_kv_cache_events,
@@ -540,12 +550,28 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # different KV cache groups have different block sizes, the actual block size
         # can be a multiple of hash_block_size.
         self.hash_block_size = hash_block_size
+        self.dcp_world_size = dcp_world_size
+        group_block_sizes = [
+            manager.block_size for manager in self.single_type_managers
+        ]
         assert all(
-            g.kv_cache_spec.block_size % hash_block_size == 0
-            for g in kv_cache_config.kv_cache_groups
-        ), "block_size must be divisible by hash_block_size"
-        assert dcp_world_size == 1, "DCP not support hybrid attn now."
+            block_size % hash_block_size == 0 for block_size in group_block_sizes
+        ), (
+            "Each KV cache group's real block_size must be divisible by "
+            f"hash_block_size. block_sizes={group_block_sizes}, "
+            f"hash_block_size={hash_block_size}"
+        )
         assert pcp_world_size == 1, "PCP not support hybrid attn now."
+        if dcp_world_size > 1:
+            # DCP shards full-attention KV across ranks and replicates Mamba
+            # state; other spec types (e.g. sliding window) have no DCP-aware
+            # handling yet, so reject them explicitly.
+            for g in kv_cache_config.kv_cache_groups:
+                assert isinstance(g.kv_cache_spec, (FullAttentionSpec, MambaSpec)), (
+                    "DCP with hybrid KV cache layouts only supports "
+                    "full-attention and Mamba groups, got: "
+                    f"{type(g.kv_cache_spec).__name__}."
+                )
         self.verify_and_split_kv_cache_groups()
 
     def verify_and_split_kv_cache_groups(self) -> None:
@@ -641,11 +667,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 - The number of tokens of the longest cache hit.
         """
 
-        def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
-            if kv_cache_spec.block_size == self.hash_block_size:
+        def _get_block_hashes(block_size: int) -> BlockHashList:
+            if block_size == self.hash_block_size:
                 return block_hashes
             return BlockHashListWithBlockSize(
-                block_hashes, self.hash_block_size, kv_cache_spec.block_size
+                block_hashes, self.hash_block_size, block_size
             )
 
         num_groups = len(self.kv_cache_config.kv_cache_groups)
@@ -670,13 +696,14 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             for idx, (spec, group_ids, manager_cls, use_eagle) in enumerate(
                 self.attention_groups
             ):
+                group_block_size = self.single_type_managers[group_ids[0]].block_size
                 cached_blocks = hit_blocks_by_group[group_ids[0]]
                 if isinstance(spec, FullAttentionSpec) and cached_blocks is not None:
                     # Full attention is downward-closed: we only need to look
                     # up cached blocks once; on subsequent iterations just trim
                     # to the (reduced) current hit length.
                     curr_hit_length = (
-                        curr_hit_length // spec.block_size * spec.block_size
+                        curr_hit_length // group_block_size * group_block_size
                     )
                     continue
 
@@ -686,18 +713,23 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 if drop_eagle_block:
                     # Eagle needs to match one more block and then pop the last.
                     _max_length = min(
-                        curr_hit_length + spec.block_size, max_cache_hit_length
+                        curr_hit_length + group_block_size, max_cache_hit_length
                     )
                 hit_blocks = manager_cls.find_longest_cache_hit(
-                    block_hashes=_get_block_hashes(spec),
+                    block_hashes=_get_block_hashes(group_block_size),
                     max_length=_max_length,
                     kv_cache_group_ids=group_ids,
                     block_pool=self.block_pool,
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self.scheduler_block_size,
+                    dcp_world_size=(
+                        self.dcp_world_size
+                        if isinstance(spec, FullAttentionSpec)
+                        else 1
+                    ),
                 )
-                _new_hit_length = len(hit_blocks[0]) * spec.block_size
+                _new_hit_length = len(hit_blocks[0]) * group_block_size
                 if drop_eagle_block:
                     eagle_verified.add(idx)
                 elif _new_hit_length < curr_hit_length:
@@ -718,7 +750,10 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # Truncate full attention blocks to final hit_length (if present)
         first_group = self.attention_groups[0]
         if isinstance(first_group.spec, FullAttentionSpec):
-            num_blocks = hit_length // first_group.spec.block_size
+            group_block_size = self.single_type_managers[
+                first_group.group_ids[0]
+            ].block_size
+            num_blocks = hit_length // group_block_size
             for group_id in first_group.group_ids:
                 if (blks := hit_blocks_by_group[group_id]) is not None:
                     del blks[num_blocks:]
@@ -773,7 +808,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 def get_kv_cache_coordinator(
     kv_cache_config: KVCacheConfig,
     max_model_len: int,
-    max_num_batched_tokens: int,
+    max_in_flight_tokens: int,
     use_eagle: bool,
     enable_caching: bool,
     enable_kv_cache_events: bool,
@@ -787,7 +822,7 @@ def get_kv_cache_coordinator(
         return KVCacheCoordinatorNoPrefixCache(
             kv_cache_config,
             max_model_len,
-            max_num_batched_tokens,
+            max_in_flight_tokens,
             use_eagle,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
@@ -800,7 +835,7 @@ def get_kv_cache_coordinator(
         return UnitaryKVCacheCoordinator(
             kv_cache_config,
             max_model_len,
-            max_num_batched_tokens,
+            max_in_flight_tokens,
             use_eagle,
             enable_caching,
             enable_kv_cache_events,
@@ -813,7 +848,7 @@ def get_kv_cache_coordinator(
     return HybridKVCacheCoordinator(
         kv_cache_config,
         max_model_len,
-        max_num_batched_tokens,
+        max_in_flight_tokens,
         use_eagle,
         enable_caching,
         enable_kv_cache_events,

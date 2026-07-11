@@ -55,7 +55,7 @@ trainer_args = IPCTrainerSendWeightsArgs(
     llm_handle=llm_actor_handle,
 )
 # start
-ray.get(llm_actor_handle.start_weight_update.remote(is_checkpoint_format=True))
+ray.get(llm_actor_handle.start_weight_update.remote())
 # send weights
 IPCWeightTransferEngine.trainer_send_weights(
     iterator=model.named_parameters(),
@@ -80,7 +80,7 @@ trainer_args = IPCTrainerSendWeightsArgs(
 # start
 base_url = "http://localhost:8000"
 url = f"{base_url}/start_weight_update"
-response = requests.post(url, json={"is_checkpoint_format": True}, timeout=60)
+response = requests.post(url, json={}, timeout=60)
 response.raise_for_status()
 # send weights
 IPCWeightTransferEngine.trainer_send_weights(

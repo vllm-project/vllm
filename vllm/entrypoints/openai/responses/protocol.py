@@ -161,6 +161,15 @@ class ResponsesRequest(OpenAIBaseModel):
     previous_response_id: str | None = None
     prompt: ResponsePrompt | None = None
     reasoning: Reasoning | None = None
+    include_reasoning: bool = Field(
+        default=True,
+        description=(
+            "Whether to include reasoning content in the response. "
+            "When false, reasoning tokens are still generated but "
+            "excluded from the output. This reduces network traffic "
+            "without affecting model inference."
+        ),
+    )
     service_tier: Literal["auto", "default", "flex", "scale", "priority"] = "auto"
     store: bool | None = True
     stream: bool | None = False
@@ -525,23 +534,30 @@ class ResponsesRequest(OpenAIBaseModel):
                     processed_input.append(item)
 
             elif item_type == "message" and item.get("role") == "assistant":
+                content = item.get("content")
+                if not isinstance(content, list):
+                    # String content is a valid EasyInputMessageParam,
+                    # do not coerce it to ResponseOutputMessage
+                    processed_input.append(item)
+                    continue
+
+                original_item = item
                 item = dict(item)
                 if "id" not in item:
                     item["id"] = f"msg_{random_uuid()}"
                 if "status" not in item:
                     item["status"] = "completed"
                 # ResponseOutputText requires annotations
-                if isinstance(item.get("content"), list):
-                    new_content = []
-                    for c in item["content"]:
-                        if (
-                            isinstance(c, dict)
-                            and c.get("type") == "output_text"
-                            and "annotations" not in c
-                        ):
-                            c = {**c, "annotations": []}
-                        new_content.append(c)
-                    item["content"] = new_content
+                new_content = []
+                for c in content:
+                    if (
+                        isinstance(c, dict)
+                        and c.get("type") == "output_text"
+                        and "annotations" not in c
+                    ):
+                        c = {**c, "annotations": []}
+                    new_content.append(c)
+                item["content"] = new_content
                 try:
                     processed_input.append(ResponseOutputMessage(**item))
                 except ValidationError:
@@ -549,7 +565,7 @@ class ResponsesRequest(OpenAIBaseModel):
                         "Failed to parse assistant message to ResponseOutputMessage, "
                         "leaving for Pydantic validation"
                     )
-                    processed_input.append(item)
+                    processed_input.append(original_item)
 
             else:
                 processed_input.append(item)
@@ -585,10 +601,19 @@ class ResponsesRequest(OpenAIBaseModel):
                 )
         elif is_named_tool_choice and tools is not None:
             tool_name = tool_choice.get("name")
-            tool_names = {
-                t.get("name") if isinstance(t, dict) else getattr(t, "name", None)
-                for t in tools
-            }
+            tool_names = set()
+            for tool in tools:
+                if isinstance(tool, dict):
+                    if tool.get("type") == "namespace":
+                        namespace = tool.get("name")
+                        for namespaced_tool in tool.get("tools", []):
+                            namespaced_name = namespaced_tool.get("name")
+                            tool_names.add(namespaced_name)
+                            tool_names.add(f"{namespace}__{namespaced_name}")
+                    else:
+                        tool_names.add(tool.get("name"))
+                else:
+                    tool_names.add(getattr(tool, "name", None))
             if not tool_name or tool_name not in tool_names:
                 raise VLLMValidationError(
                     "Tool choice 'function' not found in 'tools' parameter.",

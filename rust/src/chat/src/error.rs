@@ -1,5 +1,5 @@
 use thiserror::Error;
-use thiserror_ext::Macro;
+use thiserror_ext::{AsReport as _, Macro};
 
 type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -18,6 +18,8 @@ pub enum Error {
     UnsupportedMultimodalRenderer,
     #[error("unsupported multimodal content: {0}")]
     UnsupportedMultimodalContent(&'static str),
+    #[error("`{modality}` input is not supported by this model")]
+    UnsupportedModality { modality: String },
     #[error("multimodal preprocessing error: {0}")]
     Multimodal(#[message] String),
     #[error("{kind} parsing is not available for model `{model_id}`")]
@@ -64,6 +66,8 @@ pub enum Error {
     StreamClosedBeforeTerminalOutput { request_id: String },
     #[error("tool call stream state is inconsistent: {message}")]
     ToolCallStreamInvariant { message: String },
+    #[error("failed to build structural tag: {message}")]
+    StructuralTag { message: String },
     #[error(transparent)]
     Text(#[from] vllm_text::Error),
     #[error(transparent)]
@@ -71,6 +75,45 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl Error {
+    /// Whether this error represents invalid user request parameters.
+    pub fn is_request_validation_error(&self) -> bool {
+        match self {
+            Self::PromptTooLong { .. } => true,
+            Self::Text(error) => error.is_request_validation_error(),
+            Self::UnsupportedMultimodalRenderer
+            | Self::UnsupportedMultimodalContent(_)
+            | Self::UnsupportedModality { .. } => true,
+
+            _ => false,
+        }
+    }
+}
+
+impl From<llm_multimodal::MediaConnectorError> for Error {
+    fn from(error: llm_multimodal::MediaConnectorError) -> Self {
+        Self::Multimodal(error.to_report_string())
+    }
+}
+
+impl From<llm_multimodal::MultiModalError> for Error {
+    fn from(error: llm_multimodal::MultiModalError) -> Self {
+        Self::Multimodal(error.to_report_string())
+    }
+}
+
+impl From<llm_multimodal::TransformError> for Error {
+    fn from(error: llm_multimodal::TransformError) -> Self {
+        Self::Multimodal(error.to_report_string())
+    }
+}
+
+impl From<llm_multimodal::registry::ModelRegistryError> for Error {
+    fn from(error: llm_multimodal::registry::ModelRegistryError) -> Self {
+        Self::Multimodal(error.to_report_string())
+    }
+}
 
 /// Format the available-parser suffix used in user-facing error messages.
 fn available_parser_hint(available_names: &[String]) -> String {

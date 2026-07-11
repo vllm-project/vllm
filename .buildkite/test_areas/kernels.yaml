@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: vLLM IR Tests
   key: vllm-ir-tests
-  timeout_in_minutes: 10
+  timeout_in_minutes: 35
   device: h200_18gb
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
@@ -16,7 +16,7 @@ steps:
 
 - label: Kernels Core Operation Test
   key: kernels-core-operation-test
-  timeout_in_minutes: 75
+  timeout_in_minutes: 120
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
@@ -27,7 +27,7 @@ steps:
 
 - label: Kernels MiniMax Reduce RMS Test (2 GPUs)
   key: kernels-minimax-reduce-rms-test-2-gpus
-  timeout_in_minutes: 15
+  timeout_in_minutes: 20
   num_devices: 2
   device: h100
   source_file_dependencies:
@@ -41,18 +41,20 @@ steps:
 
 - label: Deepseek V4 Kernel Test (H100)
   key: deepseek-v4-kernel-test-h100
-  timeout_in_minutes: 15
+  timeout_in_minutes: 30
   device: h100
   source_file_dependencies:
   - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
   - vllm/models/deepseek_v4/common/ops/
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+  - tests/kernels/test_top_k_per_row.py # it runs on Blackwell too - some kernels have arch-specific optimizations
   commands:
     - pytest -v -s kernels/test_fused_deepseek_v4_*.py
+    - pytest -v -s kernels/test_top_k_per_row.py
 
 - label: Deepseek V4 Kernel Test (B200)
   key: deepseek-v4-kernel-test-b200
-  timeout_in_minutes: 15
+  timeout_in_minutes: 20
   device: b200-k8s
   source_file_dependencies:
   - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
@@ -63,7 +65,7 @@ steps:
 
 - label: Kernels Attention Test %N
   key: kernels-attention-test
-  timeout_in_minutes: 35
+  timeout_in_minutes: 65
   source_file_dependencies:
   - csrc/attention/
   - vllm/v1/attention
@@ -74,6 +76,20 @@ steps:
   commands:
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
+  mirror:
+    amd:
+      device: mi325_1
+      timeout_in_minutes: 90
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/attention/
+      - vllm/v1/attention
+      - vllm/model_executor/layers/attention
+      - tests/kernels/attention
+      - vllm/_aiter_ops.py
+      - vllm/envs.py
+      - vllm/platforms/rocm.py
 
 - label: Kernels Attention DiffKV Test (H100)
   key: kernels-attention-diffkv-test-h100
@@ -90,7 +106,7 @@ steps:
 
 - label: Kernels Quantization Test %N
   key: kernels-quantization-test
-  timeout_in_minutes: 90
+  timeout_in_minutes: 60
   source_file_dependencies:
   - csrc/quantization/
   - vllm/model_executor/layers/quantization
@@ -104,6 +120,7 @@ steps:
       source_file_dependencies:
       - csrc/quantization/
       - vllm/model_executor/layers/quantization
+      - vllm/config/
       - tests/kernels/quantization
       - tests/kernels/quantization/test_rocm_skinny_gemms.py
       - vllm/_aiter_ops.py
@@ -114,7 +131,7 @@ steps:
 
 - label: Kernels MoE Test %N
   key: kernels-moe-test
-  timeout_in_minutes: 25
+  timeout_in_minutes: 50
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
   - csrc/moe/
@@ -127,10 +144,26 @@ steps:
     - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
     - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 5
+  mirror:
+    amd:
+      device: mi325_1
+      timeout_in_minutes: 65
+      source_file_dependencies:
+      - csrc/quantization/cutlass_w8a8/moe/
+      - csrc/moe/
+      - tests/kernels/moe
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/distributed/device_communicators/
+      - vllm/envs.py
+      - vllm/config
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      depends_on:
+      - image-build-amd
 
 - label: Kernels Mamba Test
   key: kernels-mamba-test
-  timeout_in_minutes: 45
+  timeout_in_minutes: 40
   source_file_dependencies:
   - csrc/mamba/
   - tests/kernels/mamba
@@ -139,7 +172,7 @@ steps:
     - pytest -v -s kernels/mamba
 
 - label: Kernels KDA Test
-  timeout_in_minutes: 20
+  timeout_in_minutes: 25
   device: h200_18gb
   source_file_dependencies:
   - vllm/model_executor/layers/fla/ops/kda.py
@@ -151,7 +184,7 @@ steps:
 
 - label: Kernels DeepGEMM Test (H100)
   key: kernels-deepgemm-test-h100
-  timeout_in_minutes: 45
+  timeout_in_minutes: 35
   device: h100
   num_devices: 1
   source_file_dependencies:
@@ -178,7 +211,7 @@ steps:
 
 - label: Kernels (B200)
   key: kernels-b200
-  timeout_in_minutes: 30
+  timeout_in_minutes: 80
   working_dir: "/vllm-workspace/"
   device: b200-k8s
   # optional: true
@@ -231,7 +264,7 @@ steps:
 
 - label: Kernels Helion Test
   key: kernels-helion-test
-  timeout_in_minutes: 30
+  timeout_in_minutes: 115
   device: h100
   source_file_dependencies:
   - vllm/utils/import_utils.py
@@ -241,9 +274,9 @@ steps:
     - pytest -v -s kernels/helion/
 
  
-- label: Kernels FP8 MoE Test (1 H100)
-  key: kernels-fp8-moe-test-1-h100
-  timeout_in_minutes: 90
+- label: Kernels FP8 MoE Test (1xH100)
+  key: kernels-fp8-moe-test-1xh100
+  timeout_in_minutes: 40
   device: h100
   num_devices: 1
   optional: true
@@ -258,9 +291,9 @@ steps:
     - pytest -v -s kernels/moe/test_triton_moe_no_act_mul.py
     - pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py
 
-- label: Kernels FP8 MoE Test (2 H100s)
-  key: kernels-fp8-moe-test-2-h100s
-  timeout_in_minutes: 90
+- label: Kernels FP8 MoE Test (2xH100)
+  key: kernels-fp8-moe-test-2xh100
+  timeout_in_minutes: 45
   device: h100
   num_devices: 2
   optional: true
@@ -270,7 +303,7 @@ steps:
 
 - label: Kernels Fp4 MoE Test (B200)
   key: kernels-fp4-moe-test-b200
-  timeout_in_minutes: 60
+  timeout_in_minutes: 25
   device: b200-k8s
   num_devices: 1
   optional: true
@@ -283,7 +316,7 @@ steps:
 
 - label: Kernels FusedMoE Layer Test (2 H100s)
   key: kernels-fusedmoe-layer-test-2-h100s
-  timeout_in_minutes: 90
+  timeout_in_minutes: 30
   device: h100
   num_devices: 2
   source_file_dependencies:

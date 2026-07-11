@@ -14,9 +14,9 @@ from vllm.utils.torch_utils import direct_register_custom_op
 class GateLinear(ReplicatedLinear):
     """MoE gate linear layer with multi-tier GEMM dispatch:
 
-    1. DSV3 specialized kernel (SM90+, fp32 out, M<=16, H=7168, E=256/384)
-    2. fp32 specialized kernel  (SM90+, bf16/fp32 in, fp32 out,
-       M<=32, H=3072, E=256)
+    1. DSV3 specialized kernel (SM90+, M<=16, H=7168 E=256/384, H=6144 E=256)
+    2. fp32 specialized kernel  (SM90+, bf16/fp32 in, fp32 out, M<=32,
+       (H, E) in {(3072, 256), (6144, 128), (6144, 256)})
     3. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 weight + fp32 out_dtype)
     4. F.linear via ReplicatedLinear (ultimate fallback)
 
@@ -25,13 +25,18 @@ class GateLinear(ReplicatedLinear):
     method which is only known later).
     """
 
-    # Dimensions supported by the DSV3 specialized kernel
+    # Dimensions supported by the DSV3 specialized kernel.
+    # Valid (hidden_size, num_experts) combinations:
+    #   (7168, 256) -> DeepSeek-V3,  (7168, 384) -> Kimi-K2,
+    #   (6144, 256) -> GLM-5
     DSV3_SUPPORTED_NUM_EXPERTS = [256, 384]
-    DSV3_SUPPORTED_HIDDEN_SIZES = [7168]
+    DSV3_SUPPORTED_HIDDEN_SIZES = [7168, 6144]
+    # num_experts=384 is only instantiated for hidden_size=7168.
+    DSV3_UNSUPPORTED_SHAPES = {(6144, 384)}
 
     # (hidden_size, num_experts) pairs with an instantiated fp32 kernel:
     #   (3072, 256) -> MiniMax-M2/M2.5,  (6144, 128) -> MiniMax-M3
-    FP32_SUPPORTED_SHAPES = {(3072, 256), (6144, 128)}
+    FP32_SUPPORTED_SHAPES = {(3072, 256), (6144, 128), (6144, 256)}
     FP32_MAX_TOKENS = 32
 
     def __init__(
@@ -69,8 +74,10 @@ class GateLinear(ReplicatedLinear):
         self.allow_specialized_router_gemm = can_use_specialized_kernels
         self.allow_dsv3_router_gemm = (
             self.allow_specialized_router_gemm
+            and self.weight.dtype == torch.bfloat16
             and output_size in self.DSV3_SUPPORTED_NUM_EXPERTS
             and input_size in self.DSV3_SUPPORTED_HIDDEN_SIZES
+            and (input_size, output_size) not in self.DSV3_UNSUPPORTED_SHAPES
         )
         # See https://github.com/vllm-project/vllm/pull/44217
         # for more details.

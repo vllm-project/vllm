@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: Language Models Tests (Standard)
   key: language-models-tests-standard
-  timeout_in_minutes: 25
+  timeout_in_minutes: 30
   device: h200_18gb
   source_file_dependencies:
   - vllm/
@@ -14,11 +14,14 @@ steps:
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language -m 'core_model and (not slow_test)'
   mirror:
-    torch_nightly: {}
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
 
 - label: Language Models Tests (Extra Standard) %N
   key: language-models-tests-extra-standard
-  timeout_in_minutes: 45
+  timeout_in_minutes: 40
   source_file_dependencies:
   - vllm/model_executor/models/
   - tests/models/language/pooling/test_embedding.py
@@ -31,11 +34,25 @@ steps:
     - pytest -v -s models/language -m 'core_model and slow_test' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 2
   mirror:
-    torch_nightly: {}
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/models/
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/layers/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - tests/models/language/pooling/test_embedding.py
+      - tests/models/language/generation/test_common.py
+      - tests/models/language/pooling/test_classification.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
 
 - label: Language Models Tests (Hybrid) %N
   key: language-models-tests-hybrid
-  timeout_in_minutes: 75
+  timeout_in_minutes: 65
   source_file_dependencies:
   - vllm/
   - tests/models/language/generation
@@ -48,10 +65,9 @@ steps:
     - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 2
   mirror:
-    torch_nightly: {}
     amd:
       device: mi325_1
-      timeout_in_minutes: 90
+      timeout_in_minutes: 70
       depends_on:
       - image-build-amd
       commands:
@@ -62,7 +78,7 @@ steps:
 - label: Language Models Test (Extended Generation) # 80min
   device: h200_35gb
   key: language-models-test-extended-generation
-  timeout_in_minutes: 110
+  timeout_in_minutes: 65
   optional: true
   source_file_dependencies:
   - vllm/
@@ -76,7 +92,7 @@ steps:
 
 - label: Language Models Test (PPL)
   key: language-models-test-ppl
-  timeout_in_minutes: 110
+  timeout_in_minutes: 30
   device: h200_18gb
   optional: true
   source_file_dependencies:
@@ -88,7 +104,7 @@ steps:
 - label: Language Models Test (Extended Pooling)  # 36min
   device: h200_35gb
   key: language-models-test-extended-pooling
-  timeout_in_minutes: 50
+  timeout_in_minutes: 70
   optional: true
   source_file_dependencies:
   - vllm/
@@ -104,7 +120,7 @@ steps:
 
 - label: Language Models Test (MTEB)
   key: language-models-test-mteb
-  timeout_in_minutes: 110
+  timeout_in_minutes: 45
   device: h200_18gb
   optional: true
   source_file_dependencies:

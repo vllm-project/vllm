@@ -33,6 +33,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import (
     compute_mm_prefix_range_tensor,
     get_kv_cache_layout,
+    get_num_attention_heads_from_layers,
 )
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
@@ -93,6 +94,8 @@ class TritonAttentionMetadata:
     prefix_scheduler_metadata: torch.Tensor | None = None
     mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
     mm_prefix_range_tensor: torch.Tensor | None = None
+    rswa_prefix_lens: torch.Tensor | None = None
+    rswa_window: int | None = None
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -110,9 +113,10 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         self.block_size = kv_cache_spec.block_size
 
         model_config = vllm_config.model_config
-        self.num_heads_q = model_config.get_num_attention_heads(
-            vllm_config.parallel_config
-        )
+        # Compatible with models with non-uniform per-layer head counts.
+        self.num_heads_q = get_num_attention_heads_from_layers(
+            vllm_config, layer_names
+        ) or model_config.get_num_attention_heads(vllm_config.parallel_config)
         self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
         self.headdim = model_config.get_head_size()
 
@@ -169,6 +173,14 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             dtype=torch.float32,
             device=device,
         )
+        self.rswa_window = model_config.rswa_window
+        self.persistent_rswa_prefix_lens: torch.Tensor | None = None
+        if self.rswa_window is not None:
+            self.persistent_rswa_prefix_lens = torch.empty(
+                vllm_config.scheduler_config.max_num_seqs,
+                dtype=torch.int32,
+                device=device,
+            )
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -242,6 +254,17 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                 mm_ranges, num_reqs, seq_lens.device
             )
 
+        rswa_prefix_lens = common_attn_metadata.rswa_prefix_lens
+        if self.rswa_window is not None and rswa_prefix_lens is not None:
+            assert self.persistent_rswa_prefix_lens is not None
+            rswa_prefix_lens = rswa_prefix_lens.to(
+                device=self.device, dtype=torch.int32, non_blocking=True
+            )
+            persistent_prefix_lens = self.persistent_rswa_prefix_lens[:num_reqs]
+            persistent_prefix_lens.copy_(rswa_prefix_lens[:num_reqs])
+            attn_metadata.rswa_prefix_lens = persistent_prefix_lens
+            attn_metadata.rswa_window = self.rswa_window
+
         return attn_metadata
 
 
@@ -258,6 +281,7 @@ class TritonAttentionBackend(AttentionBackend):
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",
+        "int4_per_token_head",
         "int8_per_token_head",
         "fp8_per_token_head",
     ]
@@ -300,10 +324,13 @@ class TritonAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
+        # K and V are packed into the content dim: logical (B, H, N, 2*hs).
         if kv_cache_uses_per_token_head_scales(cache_dtype_str):
-            # Pad head_size by sizeof(float32)/sizeof(cache_dtype) so
-            # the per-head scale fits inline.  The backend extracts
-            # data[:head_size] and scale[head_size:] via typed views.
+            # Pad the head dim by sizeof(float32)/sizeof(cache_dtype) so the
+            # per-(token, head) scale fits inline after the quantized data;
+            # the backend extracts data[:head_size] and scale[head_size:] via
+            # typed views (see _ensure_scale_caches).  INT4 packs two values
+            # per byte, so the data occupies only head_size // 2 bytes.
             from vllm.utils.torch_utils import (
                 STR_DTYPE_TO_TORCH_DTYPE,
                 get_dtype_size,
@@ -311,26 +338,34 @@ class TritonAttentionBackend(AttentionBackend):
 
             cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype_str]
             scale_pad = get_dtype_size(torch.float32) // get_dtype_size(cache_dtype)
-            return (num_blocks, 2, block_size, num_kv_heads, head_size + scale_pad)
-        return (num_blocks, 2, block_size, num_kv_heads, head_size)
+            if get_kv_quant_mode(cache_dtype_str) == KVQuantMode.INT4_PER_TOKEN_HEAD:
+                data_head_size = head_size // 2
+            else:
+                data_head_size = head_size
+            padded_hs = data_head_size + scale_pad
+            return (num_blocks, num_kv_heads, block_size, 2 * padded_hs)
+        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
 
     @staticmethod
     def get_kv_cache_stride_order(
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
-        # `stride_order` indicates the permutation that gets
-        # us from `get_kv_cache_shape` to the actual memory layout we want.
+        # `stride_order` indicates the permutation that gets us from
+        # `get_kv_cache_shape` (logical (B, H, N, 2*hs)) to the actual memory
+        # layout we want.
         cache_layout = get_kv_cache_layout()
         if cache_layout == "NHD" and include_num_layers_dimension:
-            # (num_blocks, num_layers, 2, block_size, num_kv_heads, head_size)
-            return (1, 0, 2, 3, 4, 5)
+            # (num_blocks, num_layers, block_size, num_kv_heads, 2*head_size)
+            return (1, 0, 3, 2, 4)
         elif cache_layout == "NHD":
-            stride_order = (0, 1, 2, 3, 4)
+            # (num_blocks, block_size, num_kv_heads, 2*head_size)
+            stride_order = (0, 2, 1, 3)
         elif cache_layout == "HND" and include_num_layers_dimension:
-            # (num_blocks, num_kv_heads, num_layers, 2, block_size, head_size)
-            return (1, 4, 0, 2, 3, 5)
+            # (num_blocks, num_kv_heads, num_layers, block_size, 2*head_size)
+            return (1, 2, 0, 3, 4)
         elif cache_layout == "HND":
-            stride_order = (0, 1, 3, 2, 4)
+            # (num_blocks, num_kv_heads, block_size, 2*head_size)
+            stride_order = (0, 1, 2, 3)
         else:
             raise ValueError(f"Unknown cache layout: {cache_layout}")
         return stride_order
@@ -380,12 +415,16 @@ class TritonAttentionImpl(AttentionImpl):
     _v_scale_cache: torch.Tensor | None = None
 
     def _ensure_scale_caches(self, kv_cache: torch.Tensor) -> None:
-        """Extract per-head scale views from the padded head dimension.
+        """Extract per-head scale views from the padded content dimension.
 
-        The KV cache shape is ``(num_blocks, 2, block_size, nkv, hs+pad)``
-        where ``pad = sizeof(float32) / sizeof(cache_dtype)``.  The last
-        ``pad`` elements of each head hold one float32 scale.  We create
-        strided float32 views over those bytes.
+        The KV cache is packed as logical shape
+        ``(num_blocks, nkv, block_size, 2 * (hs + pad))`` where
+        ``pad = sizeof(float32) / sizeof(cache_dtype)``.  The content dim holds
+        ``[K(hs) | K_scale(pad) | V(hs) | V_scale(pad)]`` per (head, slot); the
+        last ``pad`` elements of each half hold one float32 scale.  We create
+        strided float32 views over those bytes.  ``kv_cache`` must be the
+        packed logical tensor (call before any transpose), but may have HND or
+        NHD physical strides.
 
         Scale shape: ``(num_blocks, block_size, num_kv_heads)``
         """
@@ -393,9 +432,10 @@ class TritonAttentionImpl(AttentionImpl):
             return
         from vllm.utils.torch_utils import get_dtype_size
 
-        num_blocks, _, block_size, nkv, padded_hs = kv_cache.shape
+        num_blocks, nkv, block_size, content = kv_cache.shape
         dtype_sz = kv_cache.element_size()
         scale_pad = get_dtype_size(torch.float32) // dtype_sz  # e.g. 4
+        padded_hs = content // 2
         hs = padded_hs - scale_pad
 
         raw = kv_cache.untyped_storage()
@@ -403,31 +443,37 @@ class TritonAttentionImpl(AttentionImpl):
             raw
         )
 
-        # In the raw bytes, each (block, kv_half, slot, head) occupies
-        # padded_hs * dtype_sz bytes.  The scale float32 sits at byte
-        # offset hs * dtype_sz within that region.
-        kv_half_bytes = block_size * nkv * padded_hs * dtype_sz
-        full_block_f32 = 2 * kv_half_bytes // 4  # stride between blocks
-        slot_f32 = nkv * padded_hs * dtype_sz // 4  # stride between slots
-        head_f32 = padded_hs * dtype_sz // 4  # stride between heads
-        scale_off_f32 = hs * dtype_sz // 4  # offset to scale within head
+        def to_f32_units(elements: int) -> int:
+            nbytes = elements * dtype_sz
+            assert nbytes % 4 == 0
+            return nbytes // 4
 
-        # K scales: kv_half=0
+        # Actual strides (in float32 units) from the tensor. The logical cache
+        # may be physically NHD, so do not assume C-contiguous HND layout.
+        strides = kv_cache.stride()
+        block_f32 = to_f32_units(strides[0])
+        head_f32 = to_f32_units(strides[1])
+        slot_f32 = to_f32_units(strides[2])
+        # Scale sits at byte offset hs within each (K, then V) content half.
+        base_off_f32 = to_f32_units(kv_cache.storage_offset())
+        k_scale_off_f32 = base_off_f32 + to_f32_units(hs)
+        v_scale_off_f32 = base_off_f32 + to_f32_units(padded_hs + hs)
+
+        # K scales (first content half)
         self._k_scale_cache = torch.as_strided(
             base_f32,
             size=(num_blocks, block_size, nkv),
-            stride=(full_block_f32, slot_f32, head_f32),
-            storage_offset=scale_off_f32,
+            stride=(block_f32, slot_f32, head_f32),
+            storage_offset=k_scale_off_f32,
         )
         self._k_scale_cache.fill_(1.0)
 
-        # V scales: kv_half=1, offset by kv_half_bytes
-        v_base_f32 = kv_half_bytes // 4
+        # V scales (second content half)
         self._v_scale_cache = torch.as_strided(
             base_f32,
             size=(num_blocks, block_size, nkv),
-            stride=(full_block_f32, slot_f32, head_f32),
-            storage_offset=v_base_f32 + scale_off_f32,
+            stride=(block_f32, slot_f32, head_f32),
+            storage_offset=v_scale_off_f32,
         )
         self._v_scale_cache.fill_(1.0)
 
@@ -546,7 +592,7 @@ class TritonAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [num_blocks, 2, block_size, num_kv_heads, head_size]
+                [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -587,21 +633,20 @@ class TritonAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        # Per-token-head quantized KV cache: use separate scale caches.
+        # KV cache arrives in logical (B, H, N, 2*hs) order.
+        # Per-token-head quantized KV cache: handled by the core unified
+        # kernel, which dequantizes per-(token, head) inline via constexpr
+        # branches (INT8 / FP8) and dispatches to the packed INT4 kernel.
         if self._is_per_token_head_quant:
-            self._ensure_scale_caches(kv_cache)
-            key_cache, value_cache = kv_cache.unbind(1)
-            if key_cache.dtype == torch.uint8:
-                key_cache = key_cache.view(self.fp8_dtype)
-                value_cache = value_cache.view(self.fp8_dtype)
-            q_descale = None
-            k_descale = None
-            v_descale = None
+            key_cache, value_cache = self._pth_key_value_caches(kv_cache)
             k_scale_cache = self._k_scale_cache
             v_scale_cache = self._v_scale_cache
+            q_descale = k_descale = v_descale = None
         # FP8 per-tensor / auto path (original flow).
         else:
-            key_cache, value_cache = kv_cache.unbind(1)
+            kv_cache = kv_cache.transpose(1, 2)
+            hs = self.head_size
+            key_cache, value_cache = kv_cache.split(hs, dim=-1)
             if (
                 is_quantized_kv_cache(self.kv_cache_dtype)
                 and key_cache.dtype != self.fp8_dtype
@@ -666,14 +711,31 @@ class TritonAttentionImpl(AttentionImpl):
             sinks=self.sinks,
             output_scale=output_scale,
             mm_prefix_range=mm_prefix_range_tensor,
+            rswa_prefix_lens=attn_metadata.rswa_prefix_lens,
+            rswa_window=attn_metadata.rswa_window,
             kv_quant_mode=self._kv_quant_mode,
             k_scale_cache=k_scale_cache,
             v_scale_cache=v_scale_cache,
             chunk_lookback=self.chunk_lookback,
             use_td=self.use_td,
+            mm_prefix_clamp_sliding_window=getattr(
+                layer, "mm_prefix_clamp_sliding_window", False
+            ),
         )
 
         return output
+
+    def _pth_key_value_caches(
+        self, kv_cache: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-token-head K/V cache views (ensures scale caches; FP8 retyped)."""
+        self._ensure_scale_caches(kv_cache)
+        padded_hs = kv_cache.shape[-1] // 2
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(padded_hs, dim=-1)
+        if self._kv_quant_mode == KVQuantMode.FP8_PER_TOKEN_HEAD:
+            key_cache = key_cache.view(self.fp8_dtype)
+            value_cache = value_cache.view(self.fp8_dtype)
+        return key_cache, value_cache
 
     def _forward_encoder_attention(
         self,
@@ -718,6 +780,7 @@ class TritonAttentionImpl(AttentionImpl):
             softmax_scale=self.scale,
             sliding_window_q=self.sliding_window[0],
             sliding_window_k=self.sliding_window[1],
+            sinks=self.sinks,
         )
         return output
 
@@ -735,23 +798,23 @@ class TritonAttentionImpl(AttentionImpl):
             return
         # Reshape the input keys and values and store them in the cache.
         if self._is_per_token_head_quant:
-            self._ensure_scale_caches(kv_cache)
-            key_cache, value_cache = kv_cache.unbind(1)
-            if key_cache.dtype == torch.uint8:
-                key_cache = key_cache.view(self.fp8_dtype)
-                value_cache = value_cache.view(self.fp8_dtype)
+            key_cache, value_cache = self._pth_key_value_caches(kv_cache)
+            k_scale_cache = self._k_scale_cache
+            v_scale_cache = self._v_scale_cache
             triton_reshape_and_cache_flash_per_token_head_quant(
                 key,
                 value,
                 key_cache,
                 value_cache,
-                self._k_scale_cache,
-                self._v_scale_cache,
+                k_scale_cache,
+                v_scale_cache,
                 slot_mapping,
+                kv_quant_mode=self._kv_quant_mode,
             )
             return
         # For decoder and cross-attention, use KV cache as before.
-        key_cache, value_cache = kv_cache.unbind(1)
+        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
@@ -783,7 +846,8 @@ class TritonAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
     ):
-        key_cache, value_cache = kv_cache.unbind(1)
+        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         flash_layout = True
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)

@@ -60,16 +60,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         """
         return True
 
-    @property
-    def model_returns_tuple(self) -> bool:
-        """
-        Whether the draft model's forward() returns a tuple.
-
-        True: returns (last_hidden_states, hidden_states) — Eagle, Gemma4 MTP.
-        False: returns a single tensor used for both — standard MTP (DeepSeek).
-        """
-        return True
-
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         # Initialize cudagraph manager for draft prefill (draft position 0).
         self.prefill_cudagraph_manager = PrefillSpeculatorCudaGraphManager(
@@ -223,6 +213,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             need_eager=is_profile,
         )
 
+        self._prepare_eplb_forward(input_batch.num_tokens)
+
         if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Replay the full graph for draft prefill.
             assert self.prefill_cudagraph_manager is not None
@@ -328,7 +320,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             else:
                 # Eager (NONE): call the raw model directly.
                 ret_hidden_states = self.model(**model_inputs)
-        if self.model_returns_tuple:
+        # Some MTP models declare a single-tensor contract but return
+        # (logits_hidden, feedback_hidden) for final-norm correctness.
+        if isinstance(ret_hidden_states, tuple):
             last_hidden_states, hidden_states = ret_hidden_states
         else:
             last_hidden_states = ret_hidden_states
@@ -368,7 +362,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.current_draft_step,
             self.draft_logits,
         )
-        self.hidden_states[:num_reqs] = hidden_states[last_token_indices]
+        if last_hidden_states is hidden_states:
+            self.hidden_states[:num_reqs] = sample_hidden_states
+        else:
+            self.hidden_states[:num_reqs] = hidden_states[last_token_indices]
         self.input_buffers.positions[:num_reqs] = positions
 
     def _multi_step_decode(
@@ -429,6 +426,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> None:
+        self._prepare_eplb_forward(num_reqs)
+
         idx_mapping = self.idx_mapping[:num_reqs]
         positions = self.input_buffers.positions[:num_reqs]
         # Run the draft model forward pass.

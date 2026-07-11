@@ -1,5 +1,3 @@
-use vllm_text::Prompt;
-
 use super::types::CompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
 
@@ -30,13 +28,6 @@ pub(super) fn validate_request_compat(
         bail_invalid_request!(
             param = "max_tokens",
             "max_tokens=0 is only supported when echo=true."
-        );
-    }
-
-    if request.echo && matches!(request.prompt, Prompt::TokenIds(_)) {
-        bail_invalid_request!(
-            param = "echo",
-            "echo is not supported with token-ID prompts."
         );
     }
 
@@ -178,6 +169,21 @@ mod tests {
             max_tokens: Some(0),
             ..base_request()
         };
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_token_id_prompt_echo() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": [104, 101, 108, 108, 111],
+            "stream": true,
+            "echo": true,
+        }))
+        .expect("parse request");
+
         assert!(
             validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
         );
