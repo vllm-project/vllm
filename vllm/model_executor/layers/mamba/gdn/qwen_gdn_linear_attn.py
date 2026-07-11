@@ -844,14 +844,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def forward(
         self,
         hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        return self._forward_method(hidden_states)
+        output: torch.Tensor,
+    ):
+        self._forward_method(hidden_states, output)
 
     def _output_projection(
         self,
         core_attn_out: torch.Tensor,
         z: torch.Tensor,
-    ) -> torch.Tensor:
+        output: torch.Tensor,
+        num_tokens: int,
+    ):
         """Part 3: RMSNormGated + output linear projection.
 
         The RMSNormGated + quant sequence is eligible for fusion
@@ -863,13 +866,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
-        output, _ = self.out_proj(core_attn_out)
-        return output
+        output[:num_tokens], _ = self.out_proj(core_attn_out)
 
     def forward_hip(
         self,
         hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+        output: torch.Tensor,
+    ):
         """ROCm forward using AITER Triton fused projection+attention when
         available, otherwise falling back to the generic CUDA path."""
         if GDN_AITER_TRITON_AVAILABLE:
@@ -898,14 +901,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 use_aiter=True,
             )
 
-            return self._output_projection(core_attn_out, z)
+            self._output_projection(core_attn_out, z, output, num_tokens)
         else:
-            return self.forward_cuda(hidden_states)
+            self.forward_cuda(hidden_states, output)
 
     def forward_cuda(
         self,
         hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+        output: torch.Tensor,
+    ):
         """
         Forward pass with three parts:
         1. Input projection
@@ -960,12 +964,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
-        return self._output_projection(core_attn_out, z)
+        self._output_projection(core_attn_out, z, output, num_tokens)
 
     def forward_xpu(
         self,
         hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+        output: torch.Tensor,
+    ):
         """
         Forward pass with three parts:
         1. Input projection
@@ -1008,13 +1013,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
-        out, _ = self.out_proj(core_attn_out)
-        return out
+        output[:num_tokens], _ = self.out_proj(core_attn_out)
 
     def forward_cpu(
         self,
         hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+        output: torch.Tensor,
+    ):
         assert not hasattr(self, "in_proj_qkv"), "lora isn't supported on CPU."
 
         mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
@@ -1058,8 +1063,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
-        out, _ = self.out_proj(core_attn_out)
-        return out
+        output[:num_tokens], _ = self.out_proj(core_attn_out)
 
     def _warmup_prefill_kernels(self, qkv_or_qkvz: torch.Tensor, v_dim: int) -> None:
         """Warm up GDN prefill kernels during V1 profiling.
