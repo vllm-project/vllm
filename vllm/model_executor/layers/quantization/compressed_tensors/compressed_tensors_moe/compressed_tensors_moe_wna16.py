@@ -83,7 +83,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             torch.empty(
                 num_experts,
                 intermediate_size_per_partition // self.packed_factor,
-                hidden_size,
+                0,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -161,7 +161,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         w2_g_idx = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                intermediate_size_per_partition,
+                0,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -172,7 +172,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         w13_g_idx_sort_indices = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                hidden_size,
+                0,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -183,7 +183,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         w2_g_idx_sort_indices = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                intermediate_size_per_partition,
+                0,
                 dtype=torch.int32,
             ),
             requires_grad=False,

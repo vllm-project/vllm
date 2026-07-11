@@ -366,10 +366,14 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         layer.register_parameter("w13_weight_shape", w13_weight_shape)
         set_weight_attrs(w13_weight_shape, extra_weight_attrs)
 
+        w13_g_idx_size = hidden_size if self.actorder == "group" else 0
+        w2_g_idx_size = (
+            intermediate_size_per_partition if self.actorder == "group" else 0
+        )
         w13_g_idx = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                hidden_size,
+                w13_g_idx_size,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -380,7 +384,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         w2_g_idx = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                intermediate_size_per_partition,
+                w2_g_idx_size,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -391,7 +395,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         w13_g_idx_sort_indices = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                hidden_size,
+                0,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -402,7 +406,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         w2_g_idx_sort_indices = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                intermediate_size_per_partition,
+                0,
                 dtype=torch.int32,
             ),
             requires_grad=False,
