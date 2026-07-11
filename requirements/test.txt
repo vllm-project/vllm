@@ -697,8 +697,9 @@ sentence-transformers==3.2.1
     #   mteb
 sentencepiece==0.2.0
     # via mistral-common
-setuptools==77.0.3
+setuptools==78.1.1
     # via
+    #   -r test.in
     #   mamba-ssm
     #   pytablewriter
     #   torch
