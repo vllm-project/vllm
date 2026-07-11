@@ -58,6 +58,18 @@ You can tune the performance by adjusting `max_num_batched_tokens`:
 - For optimal throughput, we recommend setting `max_num_batched_tokens > 8192` especially for smaller models on large GPUs.
 - If `max_num_batched_tokens` is the same as `max_model_len`, that's almost the equivalent to the V0 default scheduling policy (except that it still prioritizes decodes).
 
+!!! note
+    Raising `max_num_batched_tokens` also enlarges the dummy batch used during startup memory
+    profiling. The reserved activation memory and the KV cache pool are sized from the same
+    budget (`gpu_memory_utilization`), so a larger startup batch leaves a smaller KV cache pool.
+    On GPUs where memory is the binding constraint, this can outweigh the TTFT benefit above,
+    especially for cache-sensitive (e.g. multi-turn) workloads whose working set sits near the
+    pool's capacity: in one measurement (RTX 4090 24GB, Qwen3-8B bf16,
+    `gpu_memory_utilization=0.9`), raising the startup value from 2048 to 8192 shrank the pool by
+    10% (40,464 -> 36,720 tokens) and increased p99 TTFT by 71% (23.9s -> 40.8s) on a multi-turn
+    workload, with no change in total throughput. Check the "GPU KV cache size: ... tokens" line
+    the server logs at startup before and after changing this value.
+
 !!! warning
     When chunked prefill is disabled, `max_num_batched_tokens` must be greater than `max_model_len`.  
     In that case, if `max_num_batched_tokens < max_model_len`, vLLM may crash at server start‑up.
