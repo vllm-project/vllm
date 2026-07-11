@@ -657,11 +657,20 @@ class AnthropicServingMessages(OpenAIServingChat):
             )
 
         for tool_call in choice.message.tool_calls:
+            try:
+                tool_input = json.loads(tool_call.function.arguments)
+            except json.JSONDecodeError:
+                logger.warning(
+                    "Failed to parse tool call arguments for %s: %s",
+                    tool_call.function.name,
+                    tool_call.function.arguments,
+                )
+                tool_input = {}
             anthropic_tool_call = AnthropicContentBlock(
                 type="tool_use",
                 id=tool_call.id,
                 name=tool_call.function.name,
-                input=json.loads(tool_call.function.arguments),
+                input=tool_input,
             )
             content += [anthropic_tool_call]
 
