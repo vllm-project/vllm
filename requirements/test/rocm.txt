@@ -1218,7 +1218,7 @@ tqdm==4.67.3
     #   sentence-transformers
     #   tilelang
     #   transformers
-transformers @ git+https://github.com/huggingface/transformers.git@bef013c4a2180aeef83355bd200a7383ce1ac7e3
+transformers==5.13.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
