@@ -13,7 +13,6 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
     BlockHashWithGroupId,
     KVCacheBlock,
-    KVCacheBlockCopy,
     resolve_block_hashes,
 )
 from vllm.v1.kv_cache_interface import (
@@ -115,10 +114,7 @@ class SingleTypeKVCacheManager(ABC):
         # Partial-hit copy-on-write bookkeeping. Populated only by fine-grained
         # managers (full attention, mamba "align"); harmlessly empty elsewhere.
         self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock]] = {}
-        self._kv_cache_block_copies: list[KVCacheBlockCopy] = []
-        # Both endpoints of each pending copy; retained until the worker copy
-        # has run (released at `new_step_starts`).
-        self._cow_blocks_to_release: list[KVCacheBlock] = []
+        self._pending_cow_copies: list[tuple[KVCacheBlock, KVCacheBlock]] = []
 
     @classmethod
     def _get_num_evictable_blocks(cls, blocks: Sequence[KVCacheBlock]):
@@ -369,11 +365,13 @@ class SingleTypeKVCacheManager(ABC):
         self.new_block_ids = []
         return ids
 
-    def take_kv_cache_block_copies(self) -> list[KVCacheBlockCopy]:
-        """Drain and return pending KV cache block copies."""
-        copies = self._kv_cache_block_copies
-        self._kv_cache_block_copies = []
-        return copies
+    def take_pending_cow_copies(
+        self,
+    ) -> list[tuple[KVCacheBlock, KVCacheBlock]]:
+        """Drain pending CoW source and destination block pairs."""
+        pending_copies = self._pending_cow_copies
+        self._pending_cow_copies = []
+        return pending_copies
 
     def _apply_cow(
         self,
@@ -384,24 +382,18 @@ class SingleTypeKVCacheManager(ABC):
     ) -> None:
         """Redirect a partial prefix-cache hit to a private CoW block.
 
-        Both copy endpoints stay retained until the copy has run on the
-        worker (released at ``new_step_starts``), so a same-step free cannot
-        recycle them: ``source_block`` keeps its hit-ref, ``cow_block`` takes
-        an extra ref beyond the one handed to the request.
+        Both copy endpoints stay retained until the copy has run on the worker,
+        so a same-step free cannot recycle them: ``source_block`` keeps its
+        hit-ref, ``cow_block`` takes an extra ref beyond the one handed to the
+        request.
         """
         req_blocks = self.req_to_blocks[request_id]
         assert block_idx < len(req_blocks)
         assert req_blocks[block_idx] is source_block
         assert not source_block.is_null and source_block.ref_cnt > 0
         req_blocks[block_idx] = cow_block
-        self._kv_cache_block_copies.append(
-            KVCacheBlockCopy(
-                src_block_id=source_block.block_id,
-                dst_block_id=cow_block.block_id,
-            )
-        )
+        self._pending_cow_copies.append((source_block, cow_block))
         cow_block.ref_cnt += 1
-        self._cow_blocks_to_release.extend((source_block, cow_block))
 
     def cache_blocks(
         self,
@@ -642,13 +634,8 @@ class SingleTypeKVCacheManager(ABC):
         # The default behavior is to not skip any tokens.
         return 0
 
-    def new_step_starts(self) -> list[KVCacheBlock]:
-        # Hand the previous step's CoW copy retentions back to the caller;
-        # the scheduler releases them once the step that ran the copies is
-        # no longer in flight.
-        blocks_to_release = self._cow_blocks_to_release
-        self._cow_blocks_to_release = []
-        return blocks_to_release
+    def new_step_starts(self) -> None:
+        return None
 
 
 class FullAttentionManager(SingleTypeKVCacheManager):
@@ -1237,9 +1224,9 @@ class MambaManager(SingleTypeKVCacheManager):
         # recurrent state. Undo the DCP/PCP block_size scaling that the base
         # class applies for attention groups whose KV cache is partitioned.
         self.block_size = kv_cache_spec.block_size
-        self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
         self.mamba_cache_mode = kv_cache_spec.mamba_cache_mode
         self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
+        self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
         if self.mamba_cache_mode == "align":
             # Mapping from request ID to the index of the block
             # allocated in the previous step
@@ -1586,14 +1573,8 @@ class MambaManager(SingleTypeKVCacheManager):
                         # overwrites source_block.
                         assert req_blocks[block_idx] is source_block
                         self.block_pool.move_block_hashes(source_block, cow_block)
-                        self._kv_cache_block_copies.append(
-                            KVCacheBlockCopy(
-                                src_block_id=source_block.block_id,
-                                dst_block_id=cow_block.block_id,
-                            )
-                        )
+                        self._pending_cow_copies.append((source_block, cow_block))
                         source_block.ref_cnt += 1
-                        self._cow_blocks_to_release.extend((source_block, cow_block))
                         if cow_block.block_hash is not None:
                             # The moved entry is only filled by this step's
                             # copy, so defer same-step hits on it.
@@ -1646,10 +1627,8 @@ class MambaManager(SingleTypeKVCacheManager):
                     continue
                 self.cached_blocks_this_step.add(block.block_hash)
 
-    def new_step_starts(self) -> list[KVCacheBlock]:
-        blocks_to_release = super().new_step_starts()
+    def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()
-        return blocks_to_release
 
     def _cache_partial_tail_block(
         self,

@@ -313,12 +313,6 @@ class Scheduler(SchedulerInterface):
         # FIFO of (fence_seq, blocks): blocks become safe to free once
         # processed_step_seq >= fence_seq.
         self.deferred_frees: deque[tuple[int, list[KVCacheBlock]]] = deque()
-        # Seq of the first non-empty step ordered after the most recently
-        # emitted KV block copies; its completion implies the copies have run.
-        # A single scalar suffices: within schedule(), retentions from the
-        # previous step are released (new_step_starts) before this step's
-        # copies update it.
-        self.cow_copy_fence_seq = 0
 
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
@@ -471,13 +465,7 @@ class Scheduler(SchedulerInterface):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
-        cow_retained_blocks = self.kv_cache_manager.new_step_starts()
-        if cow_retained_blocks:
-            # The step that runs the queued copy may still be in flight; a
-            # KV-consumer connector could otherwise reallocate a copy endpoint
-            # as a load destination and overwrite it via a transfer that is
-            # not ordered against the copy.
-            self._free_cow_retained_blocks(cow_retained_blocks)
+        self.kv_cache_manager.new_step_starts()
 
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
         # all prefill compute unless saturated.
@@ -1132,15 +1120,16 @@ class Scheduler(SchedulerInterface):
         new_block_ids_to_zero = (
             (new_attn_block_ids or None) if self.needs_kv_cache_zeroing else None
         )
-        kv_cache_block_copies = (
-            self.kv_cache_manager.take_kv_cache_block_copies() or None
+        kv_cache_block_copies, cow_retained_blocks = (
+            self.kv_cache_manager.take_kv_cache_block_copies()
         )
         if kv_cache_block_copies:
             # The copies run with this step's execution; the first non-empty
             # step at or after it gets seq `sched_step_seq + 1` (0-token steps
             # do not advance the seq), and its completion implies the copies
             # have run.
-            self.cow_copy_fence_seq = self.sched_step_seq + 1
+            self._free_cow_retained_blocks(cow_retained_blocks, self.sched_step_seq + 1)
+        pending_kv_cache_block_copies = kv_cache_block_copies or None
 
         # Dynamic speculative decoding: compute optimal K
         num_spec_tokens_to_schedule = self.num_spec_tokens
@@ -1165,7 +1154,7 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
-            kv_cache_block_copies=kv_cache_block_copies,
+            kv_cache_block_copies=pending_kv_cache_block_copies,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
         )
 
@@ -2206,17 +2195,16 @@ class Scheduler(SchedulerInterface):
         if blocks:
             self.deferred_frees.append((self.sched_step_seq, blocks))
 
-    def _free_cow_retained_blocks(self, blocks: list[KVCacheBlock]):
-        """Release the previous step's CoW copy retentions, deferring the
-        return to the block pool while the step that runs the queued copy may
-        still be in flight on the GPU.
+    def _free_cow_retained_blocks(
+        self, blocks: list[KVCacheBlock], fence_seq: int
+    ) -> None:
+        """Release CoW copy retentions, deferring their return to the block
+        pool while the step that runs the copy may still be in flight.
         """
-        if not self.defer_block_free or (
-            self.cow_copy_fence_seq <= self.processed_step_seq
-        ):
+        if not self.defer_block_free or fence_seq <= self.processed_step_seq:
             self.kv_cache_manager.block_pool.free_blocks(blocks)
             return
-        self.deferred_frees.append((self.cow_copy_fence_seq, blocks[::-1]))
+        self.deferred_frees.append((fence_seq, blocks[::-1]))
 
     def _drain_deferred_frees(self):
         """Return deferred blocks whose fence step has completed.

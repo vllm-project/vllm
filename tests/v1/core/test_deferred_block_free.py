@@ -441,10 +441,9 @@ def test_cow_retentions_deferred_until_copy_step_processed():
     block_copy = KVCacheBlockCopy(
         src_block_id=src_block.block_id, dst_block_id=dst_block.block_id
     )
-    manager._kv_cache_block_copies.append(block_copy)
+    manager._pending_cow_copies.append((src_block, dst_block))
     out0 = scheduler.schedule()
     assert out0.kv_cache_block_copies == [block_copy]
-    manager._cow_blocks_to_release.extend((src_block, dst_block))
 
     # Exhaust the rest of the pool so the copy endpoints are the only blocks
     # a new request could receive, then add one that fits exactly in them.

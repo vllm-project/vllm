@@ -667,14 +667,23 @@ class KVCacheManager:
             ids.extend(mgr.take_new_block_ids())
         return ids
 
-    def take_kv_cache_block_copies(self) -> list[KVCacheBlockCopy]:
-        """Drain and return pending KV cache block copies."""
-        copies: list[KVCacheBlockCopy] = []
+    def take_kv_cache_block_copies(
+        self,
+    ) -> tuple[list[KVCacheBlockCopy], list[KVCacheBlock]]:
+        """Drain pending copies and return their retained endpoints."""
+        pending_copies: list[tuple[KVCacheBlock, KVCacheBlock]] = []
         for mgr in self.coordinator.single_type_managers:
-            copies.extend(mgr.take_kv_cache_block_copies())
-        return copies
+            pending_copies.extend(mgr.take_pending_cow_copies())
+        copies = [
+            KVCacheBlockCopy(
+                src_block_id=source_block.block_id,
+                dst_block_id=cow_block.block_id,
+            )
+            for source_block, cow_block in pending_copies
+        ]
+        retained_blocks = [block for pair in pending_copies for block in pair]
+        return copies, retained_blocks
 
-    def new_step_starts(self) -> list[KVCacheBlock]:
-        """Called when a new step is started. Returns the previous step's CoW
-        copy retentions; the caller owns releasing them."""
-        return self.coordinator.new_step_starts()
+    def new_step_starts(self) -> None:
+        """Notify the coordinator that a new step is starting."""
+        self.coordinator.new_step_starts()

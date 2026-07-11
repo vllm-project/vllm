@@ -139,12 +139,13 @@ def test_hybrid_mamba_align_partial_hash_hit():
     assert get_block_hash(partial_mamba_block[0].block_hash) == partial_mamba_hash
     assert get_group_id(partial_mamba_block[0].block_hash) == 1
     assert partial_mamba_block[0].block_hash_num_tokens == 6
+    copies, _ = manager.take_kv_cache_block_copies()
     assert (
         KVCacheBlockCopy(
             src_block_id=partial_mamba_block[0].block_id,
             dst_block_id=mamba_new_block_ids[0],
         )
-        in manager.take_kv_cache_block_copies()
+        in copies
     )
     assert manager.get_blocks("1").blocks[1][1].block_hash_num_tokens == 8
 
@@ -207,7 +208,7 @@ def test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue():
     # the queued block copy fills before the next forward.
     assert new_blocks.get_block_ids()[1] == []
     assert manager.get_blocks("0").get_block_ids()[1][1] == partial_mamba_block_id
-    copies = manager.take_kv_cache_block_copies()
+    copies, _ = manager.take_kv_cache_block_copies()
     cow_copy = next(c for c in copies if c.src_block_id == partial_mamba_block_id)
     assert cow_copy.dst_block_id != partial_mamba_block_id
     # The source block gave up the hash; the copy target now owns the entry.
@@ -272,7 +273,7 @@ def test_hybrid_mamba_partial_tail_owner_continue_preserves_later_hit():
     req0.append_output_token_ids([3])
     assert manager.allocate_slots(req0, 1) is not None
     # The owner moved the prefix-cache entry to a private copy; capture its id.
-    owner_copies = manager.take_kv_cache_block_copies()
+    owner_copies, _ = manager.take_kv_cache_block_copies()
     cow_copy = next(c for c in owner_copies if c.src_block_id == partial_mamba_block_id)
     moved_block_id = cow_copy.dst_block_id
     manager.new_step_starts()
@@ -289,12 +290,13 @@ def test_hybrid_mamba_partial_tail_owner_continue_preserves_later_hit():
     assert len(mamba_new_block_ids) == 1
     assert mamba_new_block_ids[0] != moved_block_id
     # The hitting request CoWs from the moved entry into its own private block.
+    copies, _ = manager.take_kv_cache_block_copies()
     assert (
         KVCacheBlockCopy(
             src_block_id=moved_block_id,
             dst_block_id=mamba_new_block_ids[0],
         )
-        in manager.take_kv_cache_block_copies()
+        in copies
     )
 
 
@@ -421,15 +423,16 @@ def test_hybrid_full_attention_partial_hash_hit_uses_cow():
     assert get_block_hash(partial_full_block[0].block_hash) == partial_full_hash
     assert get_group_id(partial_full_block[0].block_hash) == 0
     assert partial_full_block[0].block_hash_num_tokens == 6
+    copies, retained = manager.take_kv_cache_block_copies()
     assert (
         KVCacheBlockCopy(
             src_block_id=partial_full_block[0].block_id,
             dst_block_id=full_new_block_ids[0],
         )
-        in manager.take_kv_cache_block_copies()
+        in copies
     )
     assert partial_full_block[0].ref_cnt == 1
-    manager.block_pool.free_blocks(manager.new_step_starts())
+    manager.block_pool.free_blocks(retained)
     assert partial_full_block[0].ref_cnt == 0
 
 
@@ -631,9 +634,7 @@ def test_cow_retained_blocks_returned_for_release():
     req0.num_computed_tokens = 6
     req0.append_output_token_ids([3])
     assert manager.allocate_slots(req0, 1) is not None
-    (cow_copy,) = manager.take_kv_cache_block_copies()
-
-    retained = manager.new_step_starts()
+    (cow_copy,), retained = manager.take_kv_cache_block_copies()
     assert {b.block_id for b in retained} == {
         cow_copy.src_block_id,
         cow_copy.dst_block_id,
@@ -656,19 +657,18 @@ def test_free_cow_retained_blocks_defers_until_copy_step_processed():
         ),
         deferred_frees=deque(),
         defer_block_free=True,
-        cow_copy_fence_seq=3,
         processed_step_seq=2,
     )
     free = Scheduler._free_cow_retained_blocks
 
     # Copy step still in flight: deferred with its fence.
-    free(mock, list(blocks))
+    free(mock, list(blocks), fence_seq=3)
     assert not freed
     assert mock.deferred_frees == deque([(3, blocks[::-1])])
 
     # Copy step processed: freed immediately.
     mock.processed_step_seq = 3
-    free(mock, list(blocks))
+    free(mock, list(blocks), fence_seq=3)
     assert freed == blocks
 
     # Deferral disabled: freed immediately regardless of the fence.
@@ -676,7 +676,7 @@ def test_free_cow_retained_blocks_defers_until_copy_step_processed():
     mock.deferred_frees.clear()
     mock.defer_block_free = False
     mock.processed_step_seq = 0
-    free(mock, list(blocks))
+    free(mock, list(blocks), fence_seq=3)
     assert freed == blocks
 
 
