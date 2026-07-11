@@ -170,21 +170,11 @@ class PoolingParams(
                 valid_range = f"[1, {embedding_size}]"
                 dimensions_in_range = 1 <= dimensions <= embedding_size
                 if not model_config.is_matryoshka:
-                    message = (
+                    raise ValueError(
                         f"Model {model_name!r} does not support Matryoshka "
-                        f"embeddings; dimensions must be unset."
+                        f"embeddings; dimensions must be unset "
+                        f"(received dimensions={dimensions})."
                     )
-                    if not dimensions_in_range:
-                        message += (
-                            f" Received dimensions={dimensions}, outside "
-                            f"valid numeric range {valid_range}."
-                        )
-                    else:
-                        message += (
-                            f" Numeric dimensions are valid only for "
-                            f"Matryoshka models in range {valid_range}."
-                        )
-                    raise ValueError(message)
 
                 if not dimensions_in_range:
                     raise ValueError(
