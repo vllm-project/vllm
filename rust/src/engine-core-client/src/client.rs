@@ -512,6 +512,7 @@ impl EngineCoreClient {
 
         Ok(EngineCoreOutputStream::new(
             request_id,
+            engine_id.engine_index().unwrap_or(0),
             self.abort_tx.clone(),
             rx,
         ))

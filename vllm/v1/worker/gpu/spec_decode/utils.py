@@ -12,7 +12,8 @@ class DraftTokensHandler:
     def __init__(self, device: torch.device | None = None):
         self.device = device
         self.copy_stream = torch.cuda.Stream(device)
-        self.copy_event = torch.Event()
+        # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
+        self.copy_event = torch.cuda.Event(blocking=True)
 
         self.req_ids: list[str] = []
         self.draft_tokens_np: np.ndarray | None = None
