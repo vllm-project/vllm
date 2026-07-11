@@ -310,8 +310,14 @@ def process_lora_modules(
 
 
 def sanitize_message(message: str) -> str:
-    # Avoid leaking memory address from object reprs
-    return re.sub(r" at 0x[0-9a-f]+>", ">", message)
+    """Strip memory addresses, tracebacks, and file paths from error messages."""
+    message = re.sub(r" at 0x[0-9a-f]+>", ">", message)
+    message = re.sub(r'\n?\s*File "[^"]+", line \d+, in \S+(\n\s+.*)?', "", message)
+    message = re.sub(
+        r"/(?:home|usr|opt|var|tmp|root|lib|mnt|srv)(?:/[\w.\-]+)+", "<path>", message
+    )
+    message = re.sub(r"(?:/[\w\-]+)+/[\w\-]+\.\w+", "<path>", message)
+    return message.strip()
 
 
 def log_version_and_model(lgr: Logger, version: str, model_name: str) -> None:

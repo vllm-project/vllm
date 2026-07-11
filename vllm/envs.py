@@ -95,6 +95,10 @@ if TYPE_CHECKING:
     VLLM_USE_PRECOMPILED_RUST: bool = False
     VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX: bool = False
     VLLM_DOCKER_BUILD_CONTEXT: bool = False
+    VLLM_BUILD_COMMIT: str = "unknown"
+    VLLM_BUILD_PIPELINE: str = "local"
+    VLLM_BUILD_URL: str = ""
+    VLLM_IMAGE_TAG: str = ""
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
     CMAKE_BUILD_TYPE: Literal["Debug", "Release", "RelWithDebInfo"] | None = None
     VERBOSE: bool = False
@@ -193,6 +197,7 @@ if TYPE_CHECKING:
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
+    VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS: list[str] | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_XGRAMMAR_CACHE_MB: int = 0
@@ -621,6 +626,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DOCKER_BUILD_CONTEXT": lambda: (
         os.environ.get("VLLM_DOCKER_BUILD_CONTEXT", "").strip().lower() in ("1", "true")
     ),
+    # Build provenance metadata embedded in official vllm-openai images.
+    # Set via Docker ENV at image build time; informational only.
+    "VLLM_BUILD_COMMIT": lambda: os.environ.get("VLLM_BUILD_COMMIT", "unknown"),
+    "VLLM_BUILD_PIPELINE": lambda: os.environ.get("VLLM_BUILD_PIPELINE", "local"),
+    "VLLM_BUILD_URL": lambda: os.environ.get("VLLM_BUILD_URL", ""),
+    "VLLM_IMAGE_TAG": lambda: os.environ.get("VLLM_IMAGE_TAG", ""),
     # CMake build type
     # If not set, defaults to "Debug" or "RelWithDebInfo"
     # Available options: "Debug", "Release", "RelWithDebInfo"
@@ -1584,6 +1595,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": lambda: os.getenv(
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", None
     ),
+    # Comma-separated FlashInfer op names to exclude from autotuning, using
+    # the heuristic fallback tactic instead. Unset: skip "fp4_gemm" when the
+    # CuTe-DSL NVFP4 linear kernel is selected. Empty: skip nothing.
+    "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS": lambda: (
+        None
+        if "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS" not in os.environ
+        else [
+            v.strip()
+            for v in os.environ["VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS"].split(",")
+            if v.strip()
+        ]
+    ),
     # Flashinfer fused allreduce backend.
     "VLLM_FLASHINFER_ALLREDUCE_BACKEND": env_with_choices(
         "VLLM_FLASHINFER_ALLREDUCE_BACKEND",
@@ -2100,6 +2123,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
         "VLLM_TUNED_CONFIG_FOLDER",
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
+        "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS",
         "VLLM_ENGINE_ITERATION_TIMEOUT_S",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
