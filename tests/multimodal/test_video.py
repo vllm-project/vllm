@@ -1027,6 +1027,76 @@ def test_video_loader_frames_sampling(
     assert frames.shape[0] == expected_num_frames
 
 
+def test_dynamic_video_sampling_rejects_missing_time_metadata():
+    source = VideoSourceMetadata(total_frames_num=10, original_fps=0, duration=0)
+    target = VideoTargetMetadata(num_frames=-1, fps=2, max_duration=300)
+
+    with pytest.raises(ValueError, match="positive duration"):
+        DynamicVideoBackend.compute_frames_index_to_sample(source, target)
+
+
+def test_dynamic_video_sampling_rejects_missing_frame_count():
+    source = VideoSourceMetadata(total_frames_num=0, original_fps=30, duration=1)
+    target = VideoTargetMetadata(num_frames=-1, fps=2, max_duration=300)
+
+    with pytest.raises(ValueError, match="positive frame count"):
+        DynamicVideoBackend.compute_frames_index_to_sample(source, target)
+
+
+def test_dynamic_video_sampling_rejects_missing_source_fps():
+    source = VideoSourceMetadata(total_frames_num=10, original_fps=0, duration=1)
+    target = VideoTargetMetadata(num_frames=-1, fps=2, max_duration=300)
+
+    with pytest.raises(ValueError, match="positive source fps"):
+        DynamicVideoBackend.compute_frames_index_to_sample(source, target)
+
+
+def test_dynamic_video_sampling_rejects_non_positive_target_fps():
+    source = VideoSourceMetadata(total_frames_num=10, original_fps=30, duration=1)
+    target = VideoTargetMetadata(num_frames=-1, fps=0, max_duration=300)
+
+    with pytest.raises(ValueError, match="positive target fps"):
+        DynamicVideoBackend.compute_frames_index_to_sample(source, target)
+
+
+def test_dynamic_video_sampling_selects_frame_for_short_valid_video():
+    source = VideoSourceMetadata(total_frames_num=10, original_fps=30, duration=0.1)
+    target = VideoTargetMetadata(num_frames=-1, fps=2, max_duration=300)
+
+    assert DynamicVideoBackend.compute_frames_index_to_sample(source, target) == [0]
+
+
+def test_dynamic_video_load_rejects_missing_time_metadata(
+    dummy_video_path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv_dynamic")
+    monkeypatch.setattr(
+        DynamicVideoBackend,
+        "get_video_metadata",
+        classmethod(
+            lambda cls, cap: VideoSourceMetadata(
+                total_frames_num=10, original_fps=0, duration=0
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        DynamicVideoBackend,
+        "read_frames",
+        classmethod(
+            lambda cls, *args, **kwargs: pytest.fail(
+                "read_frames should not run when dynamic sampling metadata is invalid"
+            )
+        ),
+    )
+    loader = VIDEO_LOADER_REGISTRY.load("opencv_dynamic")
+
+    with open(dummy_video_path, "rb") as f:
+        video_data = f.read()
+
+    with pytest.raises(ValueError, match="positive duration"):
+        loader.load_bytes(video_data, fps=2, max_duration=300, backend="opencv")
+
+
 # ============================================================================
 # GLM-4.6V Dynamic FPS Threshold Tests
 # ============================================================================

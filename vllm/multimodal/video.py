@@ -1351,11 +1351,20 @@ class DynamicVideoBackend(VideoBackend):
         fps = target.fps
         max_frame_idx = source.total_frames_num - 1
 
+        if total_frames_num <= 0:
+            raise ValueError("Dynamic video sampling requires a positive frame count.")
+        if duration <= 0:
+            raise ValueError("Dynamic video sampling requires a positive duration.")
+        if original_fps <= 0:
+            raise ValueError("Dynamic video sampling requires a positive source fps.")
+        if fps <= 0:
+            raise ValueError("Dynamic video sampling requires a positive target fps.")
+
         # Refer to:
         # https://github.com/huggingface/transformers/blob/v4.55.4/src/transformers/models/glm4v/video_processing_glm4v.py#L103-L140
         frame_indices_list: list[int]
         if duration <= max_duration:
-            n = int(math.floor(duration * fps))
+            n = max(1, int(math.floor(duration * fps)))
             frame_indices_list = sorted(
                 {
                     min(max_frame_idx, int(math.ceil(i * original_fps / fps)))
@@ -1374,6 +1383,8 @@ class DynamicVideoBackend(VideoBackend):
                         for t in target_seconds
                     }
                 )
+        if not frame_indices_list:
+            raise ValueError("Dynamic video sampling selected no video frames.")
         return frame_indices_list
 
     @classmethod
