@@ -535,6 +535,10 @@ class OpenAIServingChat(GenerateBaseServing):
                             and conversation[-1].get("role") == role
                         ):
                             last_msg_content = conversation[-1]["content"] or ""
+                        if isinstance(last_msg_content, list):
+                            last_msg_content = "\n".join(
+                                msg["text"] for msg in last_msg_content
+                            )
 
                         if last_msg_content:
                             for i in range(num_choices):

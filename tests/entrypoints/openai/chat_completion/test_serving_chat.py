@@ -2307,3 +2307,70 @@ async def test_streaming_n_gt1_independent_tool_parsers():
             f"Choice {choice_idx}: expected finish_reason='tool_calls', "
             f"got '{reasons[0]}'"
         )
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_echo_with_list_content():
+    """echo=true must not break streaming when the last conversation message
+    content is a list of text parts (the "openai" chat template content
+    format used for multimodal models).
+
+    Regression: the streaming echo path passed the list straight into
+    ``DeltaMessage.content`` (a str-only field), raising a pydantic
+    ValidationError that surfaced as an in-stream error chunk, while the
+    identical non-streaming request succeeded and echoed the flattened text.
+    """
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "What is 1+1?"}],
+        echo=True,
+        stream=True,
+        add_generation_prompt=False,
+    )
+    conversation = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What is"},
+                {"type": "text", "text": "1+1?"},
+            ],
+        }
+    ]
+
+    chunks: list[dict[str, Any]] = []
+    async for line in serving_chat.chat_completion_stream_generator(
+        request,
+        _single_request_output(_make_metrics_request_output(metrics=None)),
+        "chatcmpl-test-id",
+        MODEL_NAME,
+        conversation=conversation,
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+    ):
+        line = line.strip()
+        if not line.startswith("data: "):
+            continue
+        payload = line[len("data: ") :]
+        if payload != "[DONE]":
+            chunks.append(json.loads(payload))
+
+    assert chunks, "Expected streamed chunks"
+    assert all("error" not in chunk for chunk in chunks), (
+        f"Streaming echo produced an error chunk: {chunks}"
+    )
+    streamed_content = "".join(
+        chunk["choices"][0]["delta"].get("content") or ""
+        for chunk in chunks
+        if chunk.get("choices")
+    )
+    # the echoed input must be flattened the same way as in the
+    # non-streaming path
+    assert "What is\n1+1?" in streamed_content
