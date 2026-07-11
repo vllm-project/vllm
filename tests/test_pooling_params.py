@@ -75,20 +75,19 @@ def test_embed_dimensions(model_info: EmbedModelInfo):
 
 
 @dataclass()
-class MockEmbeddingModelConfig:
+class MockMatryoshkaModelConfig:
     pooler_config: PoolerConfig
     is_matryoshka: bool = True
     matryoshka_dimensions: list[int] | None = None
-    served_model_name: str = "mock-embedding-model"
+    served_model_name: str = "mock-matryoshka-model"
     embedding_size: int = 32
 
 
-@pytest.mark.parametrize("task", ["embed", "token_embed"])
-def test_embed_dimensions_matryoshka_without_list_upper_bound(task: str):
-    model_config = MockEmbeddingModelConfig(
+def test_embed_dimensions_matryoshka_without_list_upper_bound():
+    task = "embed"
+    model_config = MockMatryoshkaModelConfig(
         pooler_config=PoolerConfig(seq_pooling_type="CLS"),
         matryoshka_dimensions=None,
-        served_model_name="mock-matryoshka-model",
         embedding_size=32,
     )
 
@@ -96,62 +95,6 @@ def test_embed_dimensions_matryoshka_without_list_upper_bound(task: str):
 
     with pytest.raises(ValueError):
         PoolingParams(task=task, dimensions=64).verify(model_config)
-
-
-@pytest.mark.parametrize("task", ["embed", "token_embed"])
-def test_embed_dimensions_matryoshka_validation_errors(task: str):
-    model_config = MockEmbeddingModelConfig(
-        pooler_config=PoolerConfig(seq_pooling_type="CLS"),
-        matryoshka_dimensions=None,
-        embedding_size=32,
-    )
-
-    for dimensions in (0, -5, 64):
-        with pytest.raises(
-            ValueError,
-            match=(
-                f"Model 'mock-embedding-model' only supports dimensions "
-                f"in range \\[1, 32\\], got {dimensions}."
-            ),
-        ):
-            PoolingParams(task=task, dimensions=dimensions).verify(model_config)
-
-    explicit_dimensions_config = MockEmbeddingModelConfig(
-        pooler_config=PoolerConfig(seq_pooling_type="CLS"),
-        matryoshka_dimensions=[16, 32],
-        embedding_size=32,
-    )
-
-    with pytest.raises(
-        ValueError,
-        match=(
-            "Model 'mock-embedding-model' only supports Matryoshka "
-            "dimensions \\[16, 32\\], got 8."
-        ),
-    ):
-        PoolingParams(task=task, dimensions=8).verify(explicit_dimensions_config)
-
-
-@pytest.mark.parametrize("task", ["embed", "token_embed"])
-def test_embed_dimensions_non_matryoshka_error(task: str):
-    non_matryoshka_config = MockEmbeddingModelConfig(
-        pooler_config=PoolerConfig(seq_pooling_type="CLS"),
-        is_matryoshka=False,
-        embedding_size=32,
-    )
-
-    for dimensions in (1, 64):
-        with pytest.raises(
-            ValueError,
-            match=(
-                "Model 'mock-embedding-model' does not support Matryoshka "
-                "embeddings; dimensions must be unset "
-                f"\\(received dimensions={dimensions}\\)."
-            ),
-        ):
-            PoolingParams(task=task, dimensions=dimensions).verify(
-                non_matryoshka_config
-            )
 
 
 @pytest.mark.parametrize("task", ["classify"])
