@@ -687,9 +687,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.block_tables.init_block_table_layout_tensors()
 
     def reset_mm_cache(self) -> None:
-        # This runner does not keep a profiling processor cache. The method
-        # remains for the worker/executor reset_mm_cache API.
-        pass
+        if self.encoder_cache is not None:
+            self.encoder_cache.reset_mm_cache()
 
     def reset_encoder_cache(self) -> None:
         if self.encoder_cache is not None:

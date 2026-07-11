@@ -23,6 +23,14 @@ class EncoderCache:
     def remove_request(self, req_id: str) -> None:
         self.mm_features.pop(req_id, None)
 
+    def reset_mm_cache(self) -> None:
+        """
+        Clear the multi-modal cache that was used during profiling,
+        but no longer needed during inference.
+        """
+        # NOTE: v2 encoder cache profiling skips the multi-modal cache
+        pass
+
     def reset_encoder_cache(self) -> None:
         """Clear the GPU-side encoder cache storing vision embeddings.
 
