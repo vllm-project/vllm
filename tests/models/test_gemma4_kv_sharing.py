@@ -26,14 +26,19 @@ from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 pytestmark = pytest.mark.cpu_test
 
 
-def _build_model(hf_overrides: dict) -> Gemma4ForCausalLM:
+def _build_model(
+    hf_overrides: dict, kv_sharing_fast_prefill: bool = False
+) -> Gemma4ForCausalLM:
     model_config = ModelConfig(
         "google/gemma-4-E4B-it-assistant",
         hf_overrides={"architectures": ["Gemma4ForCausalLM"], **hf_overrides},
         dtype="bfloat16",
     )
     vllm_config = VllmConfig(
-        model_config=model_config, cache_config=CacheConfig(block_size=16)
+        model_config=model_config,
+        cache_config=CacheConfig(
+            block_size=16, kv_sharing_fast_prefill=kv_sharing_fast_prefill
+        ),
     )
     temp_file = tempfile.mkstemp()[1]
     with set_current_vllm_config(vllm_config=vllm_config):
@@ -79,4 +84,14 @@ def test_gemma4_partial_kv_sharing_still_engages():
     assert layers[3].self_attn.attn.kv_sharing_target_layer_name is None
 
     del model
+    cleanup_dist_env_and_memory()
+
+
+def test_gemma4_fallback_rejects_kv_sharing_fast_prefill():
+    # Fast prefill skips most prompt tokens in cross-decoder layers, so a
+    # fallback layer's private KV cache would never be populated for them.
+    # Such configs must be rejected at init instead of corrupting outputs.
+    with pytest.raises(ValueError, match="kv_sharing_fast_prefill"):
+        _build_model({}, kv_sharing_fast_prefill=True)
+
     cleanup_dist_env_and_memory()

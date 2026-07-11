@@ -1123,6 +1123,21 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         self.fast_prefill_enabled = cache_config.kv_sharing_fast_prefill
 
         if self.fast_prefill_enabled:
+            # Fast prefill runs cross-decoder layers only for logits indices,
+            # relying on every suffix layer reusing a self-decoder layer's KV
+            # cache. A suffix layer that fell back to a regular KV cache (no
+            # same-type sharing target) would never populate it for skipped
+            # prompt tokens, silently corrupting outputs — reject instead.
+            for layer in self.layers[first_kv_shared_layer_idx:]:
+                self_attn = getattr(layer, "self_attn", None)
+                if self_attn is not None and not self_attn.is_kv_shared_layer:
+                    raise ValueError(
+                        "kv_sharing_fast_prefill requires every KV-shared "
+                        "suffix layer to have a same-type sharing target, "
+                        "but at least one layer fell back to a regular KV "
+                        "cache. Disable kv-sharing fast prefill for this "
+                        "checkpoint."
+                    )
             # Allocate static buffers for CUDAGraph
             max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             device = next(self.parameters()).device
