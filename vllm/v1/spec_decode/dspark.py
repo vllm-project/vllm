@@ -39,8 +39,6 @@ class _DSparkForwardCUDAGraph:
         self.model = model
         self.graph: torch.cuda.CUDAGraph | None = None
         self.output: torch.Tensor | None = None
-        self.capture_args: tuple[Any, ...] | None = None
-        self.capture_kwargs: dict[str, Any] | None = None
         self.input_ptrs: tuple[int, ...] | None = None
         self.input_key: tuple[Any, ...] | None = None
         self.disabled = False
@@ -194,8 +192,6 @@ class _DSparkForwardCUDAGraph:
                     output = self.model(**capture_kwargs)
             self.graph = graph
             self.output = output
-            self.capture_args = ()
-            self.capture_kwargs = capture_kwargs
             self.input_key = input_key
             self.input_ptrs = input_ptrs
             logger.info(
@@ -254,7 +250,6 @@ class DSparkProposer(DFlashProposer):
         self._dspark_context_hidden_states: torch.Tensor | None = None
         self._dspark_context_positions: torch.Tensor | None = None
         self._dspark_query_start_loc: torch.Tensor | None = None
-        self._dspark_main_indices: torch.Tensor | None = None
         self._dspark_batch_size: int = 0
         self._dspark_num_rejected_tokens: torch.Tensor | None = None
         self._dspark_tokens_out = torch.empty(
@@ -385,7 +380,6 @@ class DSparkProposer(DFlashProposer):
         if num_rejected_tokens_gpu is not None:
             valid_context_end = valid_context_end - num_rejected_tokens_gpu
         sample_indices = valid_context_end - 1
-        self._dspark_main_indices = sample_indices
         self._dspark_main_hidden = target_hidden_states[sample_indices.long()]
         self._dspark_main_positions = target_positions[sample_indices.long()]
         self._dspark_context_hidden_states = target_hidden_states
@@ -482,13 +476,12 @@ class DSparkProposer(DFlashProposer):
         del mm_embed_inputs
         if self._dspark_main_hidden is None:
             raise RuntimeError("DSpark target hidden states were not initialized")
-        context_main_x = None
         if (
             self._dspark_context_hidden_states is not None
             and self._dspark_context_positions is not None
             and self._dspark_query_start_loc is not None
         ):
-            context_main_x = self.model.precompute_and_store_context_kv(
+            self.model.precompute_and_store_context_kv(
                 self._dspark_context_hidden_states,
                 self._dspark_context_positions,
                 query_start_loc=self._dspark_query_start_loc,
@@ -502,7 +495,6 @@ class DSparkProposer(DFlashProposer):
             inputs_embeds=None,
             main_positions=self._dspark_main_positions,
         )
-        del context_main_x
         if self.use_forward_cudagraph:
             model_kwargs = self._maybe_prepare_forward_cudagraph_inputs(
                 model_kwargs,
