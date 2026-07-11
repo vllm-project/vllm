@@ -114,6 +114,12 @@ class MiniMaxM3SparseBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
+        if rocm_aiter_ops.is_enabled() and rocm_aiter_ops.is_shuffle_kv_cache_enabled():
+            # AITER's assembly paged-attention kernels require independently
+            # contiguous K and V storage. Keep that specialized layout behind
+            # the shuffle flag while every other implementation uses the
+            # packed-content contract introduced by #44455.
+            return (num_blocks, 2, block_size, num_kv_heads, head_size)
         # K and V are packed into the content dim: logical (B, H, N, 2*hs).
         return (num_blocks, num_kv_heads, block_size, 2 * head_size)
 

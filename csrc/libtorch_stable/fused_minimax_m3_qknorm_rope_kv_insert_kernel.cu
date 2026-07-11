@@ -221,9 +221,20 @@ __device__ __forceinline__ void storeCacheElems(
     // model dtype directly. FP8 cache dtypes use the conversion path below.
     storeElems<scalar_t>(reinterpret_cast<scalar_t*>(dst), elems);
   } else {
+    // Match the unfused write path exactly: norm/RoPE is materialized in the
+    // model dtype before reshape_and_cache_flash quantizes it into FP8.
+    // Quantizing the FP32 accumulator directly can differ by one FP8 code at
+    // rounding boundaries.
+    using Converter = vllm::_typeConvert<scalar_t>;
+    using rounded_t = typename Converter::hip_type;
+    rounded_t rounded[kElemsPerLane];
 #pragma unroll
     for (int i = 0; i < kElemsPerLane; i++) {
-      dst[i] = fp8::scaled_convert<cache_t, float, kv_dt>(elems[i], 1.0f);
+      rounded[i] = Converter::convert(elems[i]);
+    }
+#pragma unroll
+    for (int i = 0; i < kElemsPerLane; i++) {
+      dst[i] = fp8::scaled_convert<cache_t, rounded_t, kv_dt>(rounded[i], 1.0f);
     }
   }
 }
@@ -579,6 +590,7 @@ void launchFusedMiniMaxM3(
 }  // namespace minimax_m3_fused_ops
 }  // namespace vllm
 
+// clang-format off
 #define CALL_FUSED_MINIMAX_M3(_RAW_T, CACHE_T, KV_DTYPE)                       \
   vllm::minimax_m3_fused_ops::launchFusedMiniMaxM3<st, CACHE_T, KV_DTYPE>(     \
       reinterpret_cast<st*>(qkv.data_ptr()),                                   \
@@ -610,6 +622,7 @@ void launchFusedMiniMaxM3(
       nkv, niq, static_cast<int>(block_size), kv_s_block, kv_s_head,           \
       kv_s_token, kv_s_dim, has_index, insert_kv, process_index, fp8_idx,       \
       stream)
+// clang-format on
 
 // ────────────────────────────────────────────────────────────────────────────
 // Torch op wrapper

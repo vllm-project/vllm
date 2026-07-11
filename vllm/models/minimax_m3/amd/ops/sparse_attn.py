@@ -72,7 +72,7 @@ def _sparse_attn_prefill_kwargs() -> dict:
 @triton.jit(do_not_specialize_on_alignment=["seq_lens", "prefix_lens"])
 def _gqa_sparse_fwd_kernel(
     q_ptr,  # [total_q, num_heads, head_dim]
-    kv_cache_ptr,  # main cache: [num_blocks, 2, 128, num_kv_heads, head_dim]
+    kv_cache_ptr,  # main cache: [num_blocks, num_kv_heads, 128, 2*head_dim]
     k_scale_ptr,
     v_scale_ptr,
     t_ptr,  # topk_idx: [num_kv_heads, total_q, topk]
@@ -92,9 +92,8 @@ def _gqa_sparse_fwd_kernel(
     stride_qh,
     stride_qd,
     stride_kv_blk,
-    stride_kv_kv,
-    stride_kv_pos,
     stride_kv_h,
+    stride_kv_pos,
     stride_kv_d,
     stride_ks_h,
     stride_ks_t,
@@ -170,7 +169,6 @@ def _gqa_sparse_fwd_kernel(
                 pos_mask_sub = pos_sub < seq_len
                 k_sub = tl.load(
                     kv_base
-                    + 0 * stride_kv_kv
                     + off_sub[None, :] * stride_kv_pos
                     + off_d[:, None] * stride_kv_d,
                     mask=d_mask[:, None] & pos_mask_sub[None, :],
@@ -207,9 +205,8 @@ def _gqa_sparse_fwd_kernel(
                 acc_o = acc_o * tl.exp2(m_i - m_ij)[:, None]
                 v_sub = tl.load(
                     kv_base
-                    + 1 * stride_kv_kv
                     + off_sub[:, None] * stride_kv_pos
-                    + off_d[None, :] * stride_kv_d,
+                    + (head_dim + off_d[None, :]) * stride_kv_d,
                     mask=pos_mask_sub[:, None] & d_mask[None, :],
                     other=0.0,
                 )
@@ -245,7 +242,7 @@ def _gqa_sparse_fwd_kernel(
 @torch.no_grad()
 def minimax_m3_sparse_attn(
     q: torch.Tensor,  # [total_q, num_heads, head_dim]
-    kv_cache: torch.Tensor,  # [num_blocks, 2, 128, num_kv_heads, head_dim]
+    kv_cache: torch.Tensor,  # [num_blocks, num_kv_heads, 128, 2*head_dim]
     topk_idx: torch.Tensor,  # [num_kv_heads, total_q, topk]
     block_table: torch.Tensor,  # [batch, max_blocks]
     cu_seqlens_q: torch.Tensor,  # [batch+1] int32
@@ -311,7 +308,6 @@ def minimax_m3_sparse_attn(
         kv_cache.stride(1),
         kv_cache.stride(2),
         kv_cache.stride(3),
-        kv_cache.stride(4),
         stride_ks_h,
         stride_ks_t,
         stride_vs_h,

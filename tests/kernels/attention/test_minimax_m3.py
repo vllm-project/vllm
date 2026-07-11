@@ -820,6 +820,32 @@ def test_main_backend_layout_contract():
         )
 
 
+def test_aiter_sparse_pa_layout_contract(monkeypatch):
+    """The shuffle-only AITER path retains separately contiguous K/V storage."""
+    import vllm.models.minimax_m3.common.sparse_attention as sparse_attn_mod
+
+    monkeypatch.setattr(sparse_attn_mod.rocm_aiter_ops, "is_enabled", lambda: True)
+    monkeypatch.setattr(
+        sparse_attn_mod.rocm_aiter_ops,
+        "is_shuffle_kv_cache_enabled",
+        lambda: True,
+    )
+
+    nb, bs, h, d = 7, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM
+    logical = MiniMaxM3SparseBackend.get_kv_cache_shape(nb, bs, h, d)
+    order = MiniMaxM3SparseBackend.get_kv_cache_stride_order()
+    assert logical == (nb, 2, bs, h, d)
+    assert order == (1, 0, 2, 3, 4)
+
+    physical_shape = tuple(logical[i] for i in order)
+    inv_order = [order.index(i) for i in range(len(order))]
+    raw = torch.empty(physical_shape, device="cuda", dtype=DTYPE)
+    logical_view = raw.permute(*inv_order)
+    key_cache, value_cache = logical_view.unbind(1)
+    assert key_cache.is_contiguous()
+    assert value_cache.is_contiguous()
+
+
 def test_main_backend_unknown_layout_raises(monkeypatch):
     """An unrecognized layout (injected past env-var validation) is rejected."""
     import vllm.models.minimax_m3.common.sparse_attention as sparse_attn_mod

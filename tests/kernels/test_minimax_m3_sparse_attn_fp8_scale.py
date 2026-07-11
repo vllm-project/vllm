@@ -58,20 +58,12 @@ def _make_kv_cache(num_blocks: int, seed: int):
         device=DEVICE,
     )
     kv_fp8 = torch.empty_like(kv_ref, dtype=fp8_dtype)
-    kv_fp8[..., :HEAD_DIM] = (kv_ref[..., :HEAD_DIM].float() / K_SCALE).to(
-        fp8_dtype
-    )
-    kv_fp8[..., HEAD_DIM:] = (kv_ref[..., HEAD_DIM:].float() / V_SCALE).to(
-        fp8_dtype
-    )
+    kv_fp8[..., :HEAD_DIM] = (kv_ref[..., :HEAD_DIM].float() / K_SCALE).to(fp8_dtype)
+    kv_fp8[..., HEAD_DIM:] = (kv_ref[..., HEAD_DIM:].float() / V_SCALE).to(fp8_dtype)
 
     kv_dequant = torch.empty_like(kv_ref)
-    kv_dequant[..., :HEAD_DIM] = (kv_fp8[..., :HEAD_DIM].float() * K_SCALE).to(
-        DTYPE
-    )
-    kv_dequant[..., HEAD_DIM:] = (kv_fp8[..., HEAD_DIM:].float() * V_SCALE).to(
-        DTYPE
-    )
+    kv_dequant[..., :HEAD_DIM] = (kv_fp8[..., :HEAD_DIM].float() * K_SCALE).to(DTYPE)
+    kv_dequant[..., HEAD_DIM:] = (kv_fp8[..., HEAD_DIM:].float() * V_SCALE).to(DTYPE)
     return kv_fp8, kv_dequant
 
 

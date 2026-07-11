@@ -171,10 +171,9 @@ def test_sparse_full(num_tokens, block_size, kv_cache_dtype):
     kv_cache_storage_dtype = torch.uint8 if kv_cache_dtype == "fp8" else dtype
     kv_cache = torch.zeros(
         num_blocks,
-        2,
-        block_size,
         num_kv_heads,
-        HEAD_DIM,
+        block_size,
+        2 * HEAD_DIM,
         dtype=kv_cache_storage_dtype,
         device=device,
     )
@@ -246,18 +245,21 @@ def test_sparse_full(num_tokens, block_size, kv_cache_dtype):
     torch.testing.assert_close(index_k, ik_ref, rtol=1e-2, atol=1e-2)
 
     # ── Cache inserts. ──
-    # Main cache layout is [num_blocks, 2, block_size, num_kv_heads, head_dim]
-    # (the K/V axis sits *before* block_size); index cache is [nb, bs, head_dim].
+    # Main cache layout is [num_blocks, num_kv_heads, block_size, 2*head_dim];
+    # index cache is [num_blocks, block_size, head_dim].
     k_ref_h = k_ref.view(num_tokens, num_kv_heads, HEAD_DIM)
     v_ref_h = v_in.view(num_tokens, num_kv_heads, HEAD_DIM)  # v is raw (no norm/rope)
     if kv_cache_dtype == "fp8":
         expected_kv_cache = torch.zeros_like(kv_cache)
+        expected_k_cache, expected_v_cache = expected_kv_cache.transpose(1, 2).split(
+            HEAD_DIM, dim=-1
+        )
         scale = torch.ones((), device=device)
         ops.reshape_and_cache_flash(
             k_out.view(num_tokens, num_kv_heads, HEAD_DIM),
             v_out.view(num_tokens, num_kv_heads, HEAD_DIM),
-            expected_kv_cache[:, 0],
-            expected_kv_cache[:, 1],
+            expected_k_cache,
+            expected_v_cache,
             slot_mapping,
             kv_cache_dtype,
             scale,
@@ -269,9 +271,11 @@ def test_sparse_full(num_tokens, block_size, kv_cache_dtype):
             s = slot_mapping[t].item()
             b, pos = s // block_size, s % block_size
             torch.testing.assert_close(
-                kv_cache[b, 0, pos], k_ref_h[t], rtol=1e-2, atol=1e-2
+                kv_cache[b, :, pos, :HEAD_DIM], k_ref_h[t], rtol=1e-2, atol=1e-2
             )
-            torch.testing.assert_close(kv_cache[b, 1, pos], v_ref_h[t], rtol=0, atol=0)
+            torch.testing.assert_close(
+                kv_cache[b, :, pos, HEAD_DIM:], v_ref_h[t], rtol=0, atol=0
+            )
 
     expected_index_cache = torch.zeros_like(index_cache).view(-1, HEAD_DIM)
     expected_index_cache[index_slot_mapping] = index_k
@@ -308,10 +312,9 @@ def test_sparse_skip_index_branch(num_tokens, block_size, kv_cache_dtype):
     kv_cache_storage_dtype = torch.uint8 if kv_cache_dtype == "fp8" else dtype
     kv_cache = torch.zeros(
         num_blocks,
-        2,
-        block_size,
         num_kv_heads,
-        HEAD_DIM,
+        block_size,
+        2 * HEAD_DIM,
         dtype=kv_cache_storage_dtype,
         device=device,
     )
@@ -366,12 +369,15 @@ def test_sparse_skip_index_branch(num_tokens, block_size, kv_cache_dtype):
 
     if kv_cache_dtype == "fp8":
         expected_kv_cache = torch.zeros_like(kv_cache)
+        expected_k_cache, expected_v_cache = expected_kv_cache.transpose(1, 2).split(
+            HEAD_DIM, dim=-1
+        )
         scale = torch.ones((), device=device)
         ops.reshape_and_cache_flash(
             k_out.view(num_tokens, num_kv_heads, HEAD_DIM),
             v_out.view(num_tokens, num_kv_heads, HEAD_DIM),
-            expected_kv_cache[:, 0],
-            expected_kv_cache[:, 1],
+            expected_k_cache,
+            expected_v_cache,
             slot_mapping,
             kv_cache_dtype,
             scale,
@@ -385,9 +391,11 @@ def test_sparse_skip_index_branch(num_tokens, block_size, kv_cache_dtype):
             s = slot_mapping[t].item()
             b, pos = s // block_size, s % block_size
             torch.testing.assert_close(
-                kv_cache[b, 0, pos], k_ref_h[t], rtol=1e-2, atol=1e-2
+                kv_cache[b, :, pos, :HEAD_DIM], k_ref_h[t], rtol=1e-2, atol=1e-2
             )
-            torch.testing.assert_close(kv_cache[b, 1, pos], v_ref_h[t], rtol=0, atol=0)
+            torch.testing.assert_close(
+                kv_cache[b, :, pos, HEAD_DIM:], v_ref_h[t], rtol=0, atol=0
+            )
 
 
 # ── Test 4: fp8 (e4m3) index outputs ─────────────────────────────────────────
@@ -434,10 +442,9 @@ def test_sparse_full_fp8_index(num_tokens, block_size):
         qkv = qkv0.clone()
         kv_cache = torch.zeros(
             num_blocks,
-            2,
-            block_size,
             num_kv_heads,
-            HEAD_DIM,
+            block_size,
+            2 * HEAD_DIM,
             dtype=dtype,
             device=device,
         )
