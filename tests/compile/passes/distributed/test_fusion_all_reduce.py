@@ -13,6 +13,7 @@ from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.compilation.passes.fusion.allreduce_rms_fusion import (
     AllReduceFusionPass,
     RocmAiterAllReduceFusionPass,
+    _select_flashinfer_allreduce_use_oneshot,
 )
 from vllm.compilation.passes.fx_utils import find_op_nodes
 from vllm.compilation.passes.utility.fix_functionalization import (
@@ -30,6 +31,9 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.distributed.device_communicators.aiter_custom_all_reduce import (
+    AiterCustomAllreduce,
+)
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
@@ -43,6 +47,35 @@ from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE_TYPE = current_platform.device_type
+
+
+@pytest.mark.parametrize(
+    ("workspace_backend", "device_capability", "world_size", "tensor_size", "expected"),
+    [
+        ("mnnvl", 103, 8, 2 * 1024 * 1024, None),
+        ("trtllm", 103, 8, 2 * 1024 * 1024, True),
+        ("trtllm", 103, 8, 2 * 1024 * 1024 + 1, False),
+        ("trtllm", 100, 4, 4 * 1024 * 1024, True),
+        ("trtllm", 100, 4, 4 * 1024 * 1024 + 1, False),
+        ("trtllm", None, 8, 128 * 1024 * 1024, True),
+    ],
+)
+def test_select_flashinfer_allreduce_use_oneshot(
+    workspace_backend: str,
+    device_capability: int | None,
+    world_size: int,
+    tensor_size: int,
+    expected: bool | None,
+):
+    assert (
+        _select_flashinfer_allreduce_use_oneshot(
+            workspace_backend,
+            device_capability,
+            world_size,
+            tensor_size,
+        )
+        is expected
+    )
 
 
 class TestAllReduceRMSNormModel(torch.nn.Module):
@@ -504,8 +537,12 @@ def all_reduce_fusion_pass_on_test_model(
             "MASTER_ADDR": "localhost",
             "MASTER_PORT": "12345",
             "VLLM_FLASHINFER_ALLREDUCE_BACKEND": flashinfer_allreduce_backend,
+            "VLLM_ROCM_USE_AITER": str(int(use_aiter)),
+            "VLLM_ROCM_USE_AITER_CUSTOM_AR": str(int(use_aiter)),
         }
     )
+    if use_aiter:
+        rocm_aiter_ops.refresh_env_variables()
 
     init_distributed_environment()
 
@@ -616,7 +653,7 @@ def test_rocm_aiter_all_reduce_rmsnorm_group_quant_fp8_fusion_pass_replace(
         m.setenv("VLLM_ROCM_USE_AITER", "1")
         rocm_aiter_ops.refresh_env_variables()
 
-    if not rocm_aiter_ops.has_fused_allreduce_rmsnorm_quant_per_group():
+    if not AiterCustomAllreduce.build_supports_per_group_quant():
         pytest.skip(
             "aiter build is missing 'fused_ar_rms_per_group_quant' (needs "
             "ROCm/aiter PR #2823); the new patterns aren't registered."
@@ -671,6 +708,7 @@ def rocm_aiter_group_quant_fusion_pass_on_test_model(
             "MASTER_ADDR": "localhost",
             "MASTER_PORT": "12345",
             "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_CUSTOM_AR": "1",
         }
     )
     rocm_aiter_ops.refresh_env_variables()
