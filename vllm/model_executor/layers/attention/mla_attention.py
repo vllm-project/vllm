@@ -277,6 +277,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheSpec,
     MLAAttentionSpec,
+    get_kv_quant_mode,
 )
 
 logger = init_logger(__name__)
@@ -1007,6 +1008,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             head_size=self.head_size,
             dtype=kv_cache_dtype,
             cache_dtype_str=vllm_config.cache_config.cache_dtype,
+            # Without this the spec defaults to KVQuantMode.NONE, which the
+            # KV-cache reshape treats as "layer skipped from quantization" and
+            # sizes the view by head_size instead of the fp8_ds_mla byte
+            # layout (mirrors the DeepseekV4 fix in #47716).
+            kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
