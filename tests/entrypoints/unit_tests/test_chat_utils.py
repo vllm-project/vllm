@@ -2781,4 +2781,3 @@ async def test_resolve_items_does_not_leak_tasks_on_partial_failure():
         f"resolve_items left {len(leaked_tasks)} task(s) running after "
         f"raising: {leaked_tasks}"
     )
-
