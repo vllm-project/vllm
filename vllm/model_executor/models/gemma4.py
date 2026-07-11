@@ -462,14 +462,16 @@ class Gemma4Attention(nn.Module):
         if num_kv_shared_layers > 0:
             first_kv_shared_layer_idx = config.num_hidden_layers - num_kv_shared_layers
             if layer_idx >= first_kv_shared_layer_idx:
-                self.is_kv_shared_layer = True
                 # Find the last non-shared layer of the same attention type
                 prev_layers = config.layer_types[:first_kv_shared_layer_idx]
                 current_layer_type = config.layer_types[layer_idx]
-                kv_shared_layer_index = (
-                    len(prev_layers) - 1 - prev_layers[::-1].index(current_layer_type)
-                )
-                if kv_shared_layer_index >= 0:
+                if current_layer_type in prev_layers:
+                    self.is_kv_shared_layer = True
+                    kv_shared_layer_index = (
+                        len(prev_layers)
+                        - 1
+                        - prev_layers[::-1].index(current_layer_type)
+                    )
                     if ".layers." in prefix:
                         param_name_before_layers = prefix.split(".layers.")[0]
                     else:
@@ -480,6 +482,19 @@ class Gemma4Attention(nn.Module):
                     kv_sharing_target_layer_name = (
                         f"{param_name_before_layers}.layers."
                         f"{kv_shared_layer_index}.self_attn.attn"
+                    )
+                else:
+                    # No earlier layer of this type to share with. Draft
+                    # checkpoints mark every layer KV-shared (the proposer
+                    # wires cross-model sharing after construction); when
+                    # such a config is loaded standalone, fall back to a
+                    # regular KV cache instead of raising from list.index.
+                    logger.warning_once(
+                        "Gemma4 layer %d is marked KV-shared but no earlier "
+                        "%s layer exists to share with; using a regular KV "
+                        "cache for this layer.",
+                        layer_idx,
+                        current_layer_type,
                     )
 
         self.rotary_emb = get_rope(
