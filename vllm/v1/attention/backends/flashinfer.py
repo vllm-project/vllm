@@ -752,7 +752,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._init_reorder_batch_threshold(
             1,
             supports_spec_as_decode=supports_spec_as_decode,
-            supports_dcp_with_varlen=supports_spec_as_decode,
+            # trtllm-gen decode receives no cp_rank/global-seq-len information,
+            # so its end-aligned causal mask is wrong for q_len > 1 over the
+            # DCP-interleaved local KV shard (spec token i misses up to
+            # (dcp_world_size - 1) * (q_len - 1 - i) KV entries, including its
+            # own). Keep the threshold at 1 under DCP so spec queries take the
+            # DCP-aware prefill path, until the kernel is CP-aware (compare
+            # flash_attn_varlen_func's cp_world_size/cp_rank/cp_tot_seqused_k).
+            supports_dcp_with_varlen=False,
         )
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
