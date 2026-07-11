@@ -207,6 +207,7 @@ from vllm.v1.worker.block_table import SlotMappingMode
 from vllm.v1.worker.cp_utils import (
     check_attention_cp_compatibility,
     get_dcp_dummy_context_len,
+    get_total_cp_world_size,
     prepare_dcp_dummy_context_metadata,
 )
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
@@ -4352,6 +4353,7 @@ class GPUModelRunner(
                 ubatch_slices=ubatch_slices_padded,
                 slot_mapping=slot_mappings,
                 skip_compiled=has_encoder_input,
+                num_tokens_unpadded=num_tokens_unpadded,
             ),
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(
@@ -5595,29 +5597,38 @@ class GPUModelRunner(
             # then there is prompt logprob generated for each index.
             req_idx = self.input_batch.req_id_to_index[req_id]
             offset = self.query_start_loc.np[req_idx].item()
-            prompt_hidden_states = hidden_states[offset : offset + num_logits]
-            logits = self.model.compute_logits(prompt_hidden_states)
+            # Logits and FP32 log-softmax are [tokens, vocab]. Bound their peak
+            # memory independently of the scheduler's prefill chunk size.
+            max_logits_per_chunk = 64
+            for local_start in range(0, num_logits, max_logits_per_chunk):
+                local_end = min(local_start + max_logits_per_chunk, num_logits)
+                prompt_hidden_states = hidden_states[
+                    offset + local_start : offset + local_end
+                ]
+                logits = self.model.compute_logits(prompt_hidden_states)
 
-            # Get the "target" tokens for each index. For prompt at index i,
-            # the token at prompt index i+1 is the "sampled" token we want
-            # to gather the logprob for.
-            tgt_token_ids = prompt_token_ids[start_tok : start_tok + num_logits]
+                # For prompt index i, i+1 is the target token whose logprob and
+                # rank are returned.
+                tgt_token_ids = prompt_token_ids[
+                    start_tok + local_start : start_tok + local_end
+                ]
+                logprobs = self.sampler.compute_logprobs(logits)
+                token_ids, logprobs, ranks, _ = self.sampler.gather_logprobs(
+                    logprobs, num_prompt_logprobs, tgt_token_ids
+                )
 
-            # Compute prompt logprobs.
-            logprobs = self.sampler.compute_logprobs(logits)
-            token_ids, logprobs, ranks, _ = self.sampler.gather_logprobs(
-                logprobs, num_prompt_logprobs, tgt_token_ids
-            )
-
-            # Transfer GPU->CPU async.
-            chunk_slice = slice(start_idx, start_idx + num_logits)
-            logprobs_tensors.logprob_token_ids[chunk_slice].copy_(
-                token_ids, non_blocking=True
-            )
-            logprobs_tensors.logprobs[chunk_slice].copy_(logprobs, non_blocking=True)
-            logprobs_tensors.selected_token_ranks[chunk_slice].copy_(
-                ranks, non_blocking=True
-            )
+                chunk_slice = slice(
+                    start_idx + local_start, start_idx + local_end
+                )
+                logprobs_tensors.logprob_token_ids[chunk_slice].copy_(
+                    token_ids, non_blocking=True
+                )
+                logprobs_tensors.logprobs[chunk_slice].copy_(
+                    logprobs, non_blocking=True
+                )
+                logprobs_tensors.selected_token_ranks[chunk_slice].copy_(
+                    ranks, non_blocking=True
+                )
 
         # Remove requests that have completed prefill from the batch
         # num_prompt_logprobs_dict.
@@ -6399,6 +6410,31 @@ class GPUModelRunner(
         self.encoder_cache.clear()
         gc.collect()
 
+    @staticmethod
+    def _get_minimal_kv_cache_blocks_for_cudagraph_profiling(
+        kv_cache_groups: list[KVCacheGroupSpec],
+        max_capture_tokens: int | None,
+        max_num_reqs: int,
+        cp_size: int,
+    ) -> tuple[int, bool]:
+        if max_capture_tokens is None:
+            return 1, False
+
+        block_requirements: list[int] = []
+        has_mamba_cache = False
+        for group in kv_cache_groups:
+            kv_cache_spec = group.kv_cache_spec
+            if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+                continue
+            if isinstance(kv_cache_spec, MambaSpec):
+                has_mamba_cache = True
+                block_requirements.append(max_num_reqs)
+            else:
+                block_requirements.append(
+                    cdiv(max_capture_tokens, kv_cache_spec.block_size * cp_size)
+                )
+        return max(1, *block_requirements), has_mamba_cache
+
     def _init_minimal_kv_cache_for_profiling(self) -> None:
         from vllm.v1.core.kv_cache_utils import (
             get_kv_cache_config_from_groups,
@@ -6408,7 +6444,25 @@ class GPUModelRunner(
         kv_cache_spec = self.get_kv_cache_spec()
         KVCacheSpecRegistry.check_kv_cache_spec_registry(kv_cache_spec)
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
-        min_blocks = self.compilation_config.max_cudagraph_capture_size or 1
+        max_capture_tokens = self.compilation_config.max_cudagraph_capture_size
+        cp_size = get_total_cp_world_size()
+        min_blocks, has_mamba_cache = (
+            self._get_minimal_kv_cache_blocks_for_cudagraph_profiling(
+                kv_cache_groups,
+                max_capture_tokens,
+                self.max_num_reqs,
+                cp_size,
+            )
+        )
+        if max_capture_tokens is not None:
+            logger.info(
+                "Using %d KV blocks for CUDA graph profiling "
+                "(max_capture_tokens=%d, cp_size=%d, has_mamba_cache=%s)",
+                min_blocks,
+                max_capture_tokens,
+                cp_size,
+                has_mamba_cache,
+            )
 
         # Temporarily change num_gpu_blocks_override to allocate a minimal KV cache
         saved_override = self.cache_config.num_gpu_blocks_override

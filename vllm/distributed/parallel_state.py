@@ -25,6 +25,7 @@ If you only need to use the distributed environment without model/pipeline
 
 import contextlib
 import gc
+import os
 import pickle
 import weakref
 from collections import namedtuple
@@ -132,7 +133,45 @@ def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
     group = _groups[group_name]()
     if group is None:
         raise ValueError(f"Group {group_name} is destroyed.")
+    if os.environ.get("VLLM_TP3_CE_REDUCE", "0") == "1":
+        from vllm.forward_context import (
+            get_forward_context,
+            is_forward_context_available,
+        )
+
+        logical_tokens = None
+        if is_forward_context_available():
+            logical_tokens = get_forward_context().num_tokens_unpadded
+        if _should_use_tp3_ce(
+            logical_tokens,
+            get_dcp_group().world_size,
+            tensor.dim(),
+            tensor.shape[-1],
+            group.world_size,
+        ):
+            from .device_communicators.tp3_ce_all_reduce import (
+                tp3_ce_all_reduce as run,
+            )
+
+            return run(tensor, group.device_group)
     return group._all_reduce_out_place(tensor)
+
+
+def _should_use_tp3_ce(
+    logical_tokens: int | None,
+    dcp_world_size: int,
+    tensor_dim: int,
+    hidden_size: int,
+    tp_world_size: int,
+) -> bool:
+    """Return true only for known large TP3 prefill reductions."""
+    return (
+        logical_tokens is not None
+        and logical_tokens * dcp_world_size >= 4096
+        and tensor_dim == 2
+        and hidden_size == 5120
+        and tp_world_size == 3
+    )
 
 
 def all_reduce_fake(tensor: torch.Tensor, group_name: str) -> torch.Tensor:

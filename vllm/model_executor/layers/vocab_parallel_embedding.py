@@ -3,6 +3,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from math import lcm
 
 import torch
 import torch.nn.functional as F
@@ -255,11 +256,13 @@ class VocabParallelEmbedding(PluggableLayer):
         self.padding_size = padding_size
         self.org_vocab_size = org_num_embeddings or num_embeddings
         num_added_embeddings = num_embeddings - self.org_vocab_size
+        tp_aligned_padding_size = lcm(self.padding_size, self.tp_size)
         self.org_vocab_size_padded = pad_vocab_size(
-            self.org_vocab_size, self.padding_size
+            self.org_vocab_size, tp_aligned_padding_size
         )
         self.num_embeddings_padded = pad_vocab_size(
-            self.org_vocab_size_padded + num_added_embeddings, self.padding_size
+            self.org_vocab_size_padded + num_added_embeddings,
+            tp_aligned_padding_size,
         )
         assert self.org_vocab_size_padded <= self.num_embeddings_padded
 
