@@ -22,6 +22,7 @@ import uvicorn
 import uvloop
 from fastapi import FastAPI, Response
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.system_utils import (
     decorate_logs,
@@ -233,12 +234,22 @@ def _build_dp_supervisor_app(supervisor: DPSupervisor) -> FastAPI:
     return app
 
 
+def _run_python_vllm_dp_server(child_args: argparse.Namespace) -> None:
+    from vllm.entrypoints.openai.api_server import run_server
+
+    uvloop.run(run_server(child_args))
+
+
+def _run_rust_vllm_dp_server(child_args: argparse.Namespace) -> None:
+    from vllm.entrypoints.cli.serve import run_multi_api_server
+
+    run_multi_api_server(child_args)
+
+
 def _run_vllm_dp_server(child_args: argparse.Namespace) -> None:
     """
     Entrypoint function for the vLLM DP Server.
     """
-    from vllm.entrypoints.openai.api_server import run_server
-
     # Create a fresh process group for the vLLM DP Server,
     # so that CTRL-C is propagated cleanly.
     os.setpgrp()
@@ -246,7 +257,10 @@ def _run_vllm_dp_server(child_args: argparse.Namespace) -> None:
     name = f"APIServer_DP{child_args.data_parallel_rank}"
     set_process_title(name)
     decorate_logs(name)
-    uvloop.run(run_server(child_args))
+    if envs.VLLM_RUST_FRONTEND_PATH:
+        _run_rust_vllm_dp_server(child_args)
+    else:
+        _run_python_vllm_dp_server(child_args)
 
 
 class DPSupervisor:
@@ -269,14 +283,46 @@ class DPSupervisor:
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
+        decorate_logs("DPSupervisor")
 
         # K8s sends SIGTERM for shutdown - begin graceful termination.
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, partial(self._handle_signal, sig))
 
-        # Launch DPSupervisor Server.
+        supervisor_server: uvicorn.Server | None = None
+        supervisor_server_task: asyncio.Task[None] | None = None
+        try:
+            # Launch vLLM DP Servers and begin monitoring them.
+            self._start_children()
+            monitor_task = asyncio.create_task(
+                self._monitor_children(), name="dp-monitor"
+            )
+
+            # Only start the DPSupervisor server once the vLLM DP Servers are
+            # ready. This avoids the supervisor /health endpoint returning 503
+            # to external load balancer probes while the engines initialize.
+            await self._wait_until_ready(monitor_task)
+            if self.is_ready and not monitor_task.done():
+                supervisor_server, supervisor_server_task = await self._start_server()
+
+            await monitor_task
+        finally:
+            self._is_ready = False
+            await self._shutdown_children()
+
+            # Shutdown the DP Supervisor server.
+            if supervisor_server is not None and supervisor_server_task is not None:
+                supervisor_server.should_exit = True
+                await supervisor_server_task
+
+    async def _start_server(self) -> tuple[uvicorn.Server, asyncio.Task[None]]:
+        """
+        Launch the DPSupervisor HTTP server.
+
+        Called only after the vLLM DP Servers are ready so that /health does
+        not return 503 to external probes while the engines are initializing.
+        """
         app = _build_dp_supervisor_app(self)
-        decorate_logs("DPSupervisor")
         host = self.args.host or "0.0.0.0"
         config = uvicorn.Config(
             app,
@@ -305,18 +351,20 @@ class DPSupervisor:
                 raise RuntimeError("DPSupervisor exited before startup.")
             await asyncio.sleep(0.05)
         logger.info("Started DPSupervisor on %s:%d", host, self.supervisor_port)
+        return supervisor_server, supervisor_server_task
 
-        # Launch and Monitor vLLM Server Processes.
-        try:
-            self._start_children()
-            await self._monitor_children()
-        finally:
-            self._is_ready = False
-            await self._shutdown_children()
+    async def _wait_until_ready(self, monitor_task: asyncio.Task[None]) -> None:
+        """
+        Block until the vLLM DP Servers are ready or shutdown is triggered.
 
-            # Shutdown the DP Supervisor server.
-            supervisor_server.should_exit = True
-            await supervisor_server_task
+        Returns early if monitoring stops (e.g. a DP Server dies during
+        startup), in which case the supervisor server is never started.
+        """
+        logger.info("Waiting for vLLM DP Servers to become ready.")
+        while not self._is_ready and not self._shutdown_event.is_set():
+            if monitor_task.done():
+                return
+            await asyncio.sleep(0.05)
 
     def _handle_signal(self, signum: int) -> None:
         """

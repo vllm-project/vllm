@@ -59,6 +59,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import
     RESP_OK,
 )
 from vllm.logger import init_logger
+from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_socket
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -1154,17 +1155,43 @@ class MooncakeStoreWorker:
         self._init_lookup_key_prefixes()
 
     def _init_lookup_key_prefixes(self) -> None:
-        """Precompute per-group key prefixes expanded across TP/PP ranks."""
-        tp_count = min(self.tp_size, self.num_kv_head)
+        """Prepare per-group key prefixes across parallel rank namespaces."""
+        # (tp_rank, pcp_rank, dcp_rank, pp_rank) namespaces
+        if self.dcp_size > 1:
+            # DCP reuses the TP workers and splits each TP group into
+            # contiguous DCP groups, so dcp_rank == tp_rank % dcp_size.
+            # Store/load paths do not apply KV-head dedup under DCP
+            rank_namespaces = tuple(
+                (tp_rank, pcp_rank, tp_rank % self.dcp_size, pp_rank)
+                for pcp_rank in range(self.pcp_size)
+                for tp_rank in range(self.tp_size)
+                for pp_rank in range(self.pp_size)
+            )
+        else:
+            # Without DCP, TP ranks that share a KV head write identical KV, so
+            # lookup only needs one TP namespace per unique KV head.
+            tp_count = min(self.tp_size, self.num_kv_head)
+            rank_namespaces = tuple(
+                (tp_rank, pcp_rank, 0, pp_rank)
+                for pcp_rank in range(self.pcp_size)
+                for tp_rank in range(tp_count)
+                for pp_rank in range(self.pp_size)
+            )
+
         self._lookup_key_prefixes = tuple(
             tuple(
-                PoolKey.build_prefix(db.metadata, tp_rank=tp, pp_rank=pp)
-                for tp in range(tp_count)
-                for pp in range(self.pp_size)
+                PoolKey.build_prefix(
+                    db.metadata,
+                    tp_rank=tp_rank,
+                    pcp_rank=pcp_rank,
+                    dcp_rank=dcp_rank,
+                    pp_rank=pp_rank,
+                )
+                for tp_rank, pcp_rank, dcp_rank, pp_rank in rank_namespaces
             )
             for db in self.token_dbs
         )
-        self._lookup_expected_per_key = tp_count * self.pp_size
+        self._lookup_expected_per_key = len(rank_namespaces)
 
     def register_cross_layers_kv_caches(self, kv_cache: torch.Tensor) -> None:
         """Register a cross-layers KV cache tensor.
@@ -1430,12 +1457,12 @@ class MooncakeStoreWorker:
     def lookup(self, token_len: int, block_hashes: Sequence[BlockHash]) -> int:
         """Check how many prefix tokens exist in the store.
 
-        Checks across all TP ranks and PP ranks.
+        Checks across all rank-specific key namespaces that may be loaded.
         """
         if not block_hashes or token_len <= 0:
             return 0
 
-        # Build per-(group, hash) candidate keys expanded across TP/PP.
+        # Build per-(group, hash) candidate keys expanded across rank namespaces.
         # candidate_meta stores the (group, hash_bytes) for key slice.
         candidate_keys: list[str] = []
         candidate_meta: list[tuple[int, bytes]] = []
@@ -1447,14 +1474,14 @@ class MooncakeStoreWorker:
             group_hashes = self.coord.block_hashes_for_spec(
                 block_hashes, self._kv_cache_groups[g_idx].kv_cache_spec
             )
-            for chunk_id, h in enumerate(group_hashes):
-                start_idx = chunk_id * spec_block_size
-                if start_idx >= token_len:
-                    break
-                if lookup_mask is not None and (
-                    chunk_id >= len(lookup_mask) or not lookup_mask[chunk_id]
-                ):
+            max_chunks = min(len(group_hashes), cdiv(token_len, spec_block_size))
+            mask_limit = (
+                max_chunks if lookup_mask is None else min(max_chunks, len(lookup_mask))
+            )
+            for chunk_id in range(mask_limit):
+                if lookup_mask is not None and not lookup_mask[chunk_id]:
                     continue
+                h = group_hashes[chunk_id]
                 hash_hex = h.hex()
                 for key_prefix in key_prefixes:
                     candidate_keys.append(

@@ -372,32 +372,26 @@ def process_packed_modules_mapping(
     model: nn.Module, force_2d_moe: bool = False
 ) -> dict[str, list[str]]:
     if is_moe_model(model):
-        if moe_packed_mapping := get_moe_expert_mapping(model):
-            # This method generates and returns a dictionary mapping packed module
-            # names to lists of their corresponding submodule names. It includes
-            # both static mappings and dynamic mappings for expert layers, where
-            # the expert indices are expanded based on the configured number
-            # of routed experts.
-            packed_modules_mapping = get_packed_modules_mapping(model)
-            # The 2D mapping is needed when the model itself is 2D, or when
-            # the engine forces the universal 2D wrapper via
-            # enable_mixed_moe_lora_format (so 3D models can also load 2D
-            # adapters through FusedMoEWithLoRA).
-            if (not model.is_3d_moe_weight) or force_2d_moe:
-                # Filter out malformed entries: non-gated MoE has empty
-                # ckpt_up_proj_name which results in weight_name containing ".."
-                # (e.g., "experts.0.." instead of "experts.0.layer_name.")
-                packed_modules_mapping["experts"] = [
-                    weight_name.rstrip(".")
-                    for _, weight_name, _, _ in moe_packed_mapping
-                    if ".." not in weight_name
-                ]
+        # This method generates and returns a dictionary mapping packed module
+        # names to lists of their corresponding submodule names. It includes
+        # both static mappings and dynamic mappings for expert layers, where
+        # the expert indices are expanded based on the configured number
+        # of routed experts.
+        packed_modules_mapping = get_packed_modules_mapping(model)
+        # The 2D mapping is needed when the model itself is 2D, or when
+        # the engine forces the universal 2D wrapper via
+        # enable_mixed_moe_lora_format (so 3D models can also load 2D
+        # adapters through FusedMoEWithLoRA).
+        if (not model.is_3d_moe_weight) or force_2d_moe:
+            # Filter out malformed entries: non-gated MoE has empty
+            # ckpt_up_proj_name which results in weight_name containing ".."
+            # (e.g., "experts.0.." instead of "experts.0.layer_name.")
+            packed_modules_mapping["experts"] = [
+                weight_name.rstrip(".")
+                for _, weight_name, _, _ in get_moe_expert_mapping(model)
+                if ".." not in weight_name
+            ]
 
-            return packed_modules_mapping
-        else:
-            raise AttributeError(
-                "To support LoRA for MoE model, "
-                "'get_expert_mapping' must be implemented"
-            )
+        return packed_modules_mapping
     else:
         return get_packed_modules_mapping(model)
