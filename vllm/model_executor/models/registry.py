@@ -149,6 +149,11 @@ _TEXT_GENERATION_MODELS = {
         "longcat_flash_ngram",
         "LongcatFlashNgramForCausalLM",
     ),
+    # LongCat-2.0 (LongCat-Flash + n-gram embedding + LongCat Sparse Attention)
+    "LongcatCausalLM": (
+        "longcat_flash_ngram",
+        "LongcatFlashNgramForCausalLM",
+    ),
     "MambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "Mamba2ForCausalLM": ("mamba2", "Mamba2ForCausalLM"),
     "MellumForCausalLM": ("mellum", "MellumForCausalLM"),

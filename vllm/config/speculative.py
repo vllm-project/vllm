@@ -520,7 +520,13 @@ class SpeculativeConfig:
             )
         if hf_config.model_type in ("longcat_flash", "longcat_flash_ngram"):
             hf_config.model_type = "longcat_flash_mtp"
-            n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
+            # LongCat-2.0 ships one MTP module applied for up to
+            # mtp_num_layers draft steps (mtp_replicate_modules).
+            n_predict = (
+                getattr(hf_config, "num_nextn_predict_layers", None)
+                or getattr(hf_config, "mtp_num_layers", None)
+                or 1
+            )
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["LongCatFlashMTPModel"]}
             )

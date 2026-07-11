@@ -64,13 +64,18 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLAAttention
+from vllm.model_executor.models.deepseek_v2 import (
+    DeepseekV2MLAAttention,
+    _try_load_fp8_indexer_wk,
+)
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    get_pp_missing_layer_names,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -348,6 +353,18 @@ class LongcatMoe(nn.Module):
         return final_hidden_states.view(num_tokens, hidden_dim)
 
 
+def maybe_replace_indexer_k_norm(
+    attn: DeepseekV2MLAAttention, config: PretrainedConfig
+) -> None:
+    """LongCat's DSA indexer normalizes K with RMSNorm (index_k_norm_type),
+    where the shared Indexer defaults to DeepSeek-V3.2's LayerNorm."""
+    if (
+        getattr(attn, "indexer", None) is not None
+        and getattr(config, "index_k_norm_type", None) == "rms"
+    ):
+        attn.indexer.k_norm = RMSNorm(config.index_head_dim, eps=1e-6)
+
+
 class FlashDecoderLayer(nn.Module):
     """Flash decoder layer with dual attention and MLP structure."""
 
@@ -359,11 +376,17 @@ class FlashDecoderLayer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
+        topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.layer_idx = int(prefix.split(sep=".")[-1])
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
+
+        # Cross-Layer Indexing: with cli_factor=2 the first attention of each
+        # layer computes DSA top-k indices and the second reuses them via the
+        # shared buffer (attention sublayer id = 2 * layer_idx + i).
+        cli_factor = getattr(config, "cli_factor", 1) or 1
 
         # Dual attention structure
         self.self_attn = nn.ModuleList(
@@ -386,10 +409,14 @@ class FlashDecoderLayer(nn.Module):
                     if "self_attn" in getattr(config, "disable_quant_module", [])
                     else quant_config,
                     prefix=f"{prefix}.self_attn.{i}",
+                    topk_indices_buffer=topk_indices_buffer,
+                    skip_topk=(2 * self.layer_idx + i) % cli_factor != 0,
                 )
                 for i in range(2)
             ]
         )
+        for attn in self.self_attn:
+            maybe_replace_indexer_k_norm(attn, config)
         self.input_layernorm = nn.ModuleList(
             [RMSNorm(config.hidden_size, eps=config.rms_norm_eps) for i in range(2)]
         )
@@ -490,6 +517,17 @@ class FlashModel(nn.Module):
 
         self.vocab_size = config.vocab_size
 
+        self.is_v32 = hasattr(config, "index_topk")
+        if self.is_v32:
+            topk_indices_buffer = torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                config.index_topk,
+                dtype=torch.int32,
+                device=current_platform.device_type,
+            )
+        else:
+            topk_indices_buffer = None
+
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
@@ -506,6 +544,7 @@ class FlashModel(nn.Module):
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=prefix,
+                topk_indices_buffer=topk_indices_buffer,
             ),
             prefix=f"{prefix}.layers",
         )
@@ -572,14 +611,36 @@ class FlashModel(nn.Module):
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
+            # Fused indexer wk + weights_proj (shard 0 = wk, 1 = weights_proj)
+            ("wk_weights_proj", "wk", 0),
+            ("wk_weights_proj", "weights_proj", 1),
         ]
 
         expert_params_mapping = self.get_expert_mapping()
         loaded_params: set[str] = set()
 
+        pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
+        _pending_wk_fp8: dict = {}
+        # Drop checkpoint indexer weights for sublayers without an indexer.
+        indexer_present_prefixes = {
+            n.rsplit(".indexer.", 1)[0] for n in params_dict if ".indexer." in n
+        }
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
+                continue
+            if ".indexer." in name and (
+                name.rsplit(".indexer.", 1)[0] not in indexer_present_prefixes
+            ):
+                continue
+            if _try_load_fp8_indexer_wk(
+                name,
+                loaded_weight,
+                _pending_wk_fp8,
+                params_dict,
+                loaded_params,
+                pp_missing_layer_names,
+            ):
                 continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
@@ -653,6 +714,21 @@ class FlashModel(nn.Module):
                         continue
                     if is_pp_missing_parameter(name, self):
                         continue
+                    # Fold the MLA LoRA scaling at load time: load_weights may
+                    # run incrementally, so a post-load fold can miss weights
+                    # arriving in a later call.
+                    if name.endswith(".q_a_layernorm.weight") and getattr(
+                        self.config, "mla_scale_q_lora", False
+                    ):
+                        loaded_weight = loaded_weight.float() * (
+                            (self.config.hidden_size / self.config.q_lora_rank) ** 0.5
+                        )
+                    elif name.endswith(".kv_a_layernorm.weight") and getattr(
+                        self.config, "mla_scale_kv_lora", False
+                    ):
+                        loaded_weight = loaded_weight.float() * (
+                            (self.config.hidden_size / self.config.kv_lora_rank) ** 0.5
+                        )
                     param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
@@ -687,23 +763,6 @@ class FlashModel(nn.Module):
                 ).split([self_attn.qk_nope_head_dim, self_attn.v_head_dim], dim=1)
                 self_attn.w_kc = w_kc.transpose(1, 2).contiguous().transpose(1, 2)
                 self_attn.w_vc = w_vc.contiguous().transpose(1, 2)
-                # Guard against compounding on incremental load_weights calls:
-                # the in-place ``*=`` would otherwise re-apply the MLA LoRA
-                # scaling to the layernorm weights on each pass.
-                if self.config.mla_scale_q_lora and not getattr(
-                    self_attn, "_mla_q_lora_scaled", False
-                ):
-                    self_attn.q_a_layernorm.weight.data *= (
-                        self.config.hidden_size / self.config.q_lora_rank
-                    ) ** 0.5
-                    self_attn._mla_q_lora_scaled = True
-                if self.config.mla_scale_kv_lora and not getattr(
-                    self_attn, "_mla_kv_lora_scaled", False
-                ):
-                    self_attn.kv_a_layernorm.weight.data *= (
-                        self.config.hidden_size / self.config.kv_lora_rank
-                    ) ** 0.5
-                    self_attn._mla_kv_lora_scaled = True
         return loaded_params
 
 

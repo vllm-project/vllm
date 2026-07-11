@@ -71,6 +71,7 @@ DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
         "Qwen2MoeForCausalLM",
         "GraniteMoeForCausalLM",
         "LongcatFlashNgramForCausalLM",
+        "LongcatCausalLM",
     }
 )
 

@@ -96,6 +96,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     isaac="IsaacConfig",
     kimi_k2="DeepseekV3Config",  # Kimi K2 uses same architecture as DeepSeek V3
     kimi_linear="KimiLinearConfig",
+    longcat_flash_ngram="LongcatFlashNgramConfig",
     kimi_vl="KimiVLConfig",
     kimi_k25="KimiK25Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
@@ -231,6 +232,11 @@ class HFConfigParser(ConfigParserBase):
                 if config_dict.get("speculators_config") is not None
                 else model_type
             )
+        if model_type is None and "LongcatCausalLM" in (
+            config_dict.get("architectures") or []
+        ):
+            # LongCat-2.0 ships model_type: null without remote code.
+            model_type = "longcat_flash_ngram"
         # Allow hf_overrides to override model_type before checking _CONFIG_REGISTRY
         if (hf_overrides := kwargs.pop("hf_overrides", None)) is not None:
             if isinstance(hf_overrides, dict) and "model_type" in hf_overrides:
@@ -274,6 +280,17 @@ class HFConfigParser(ConfigParserBase):
                     config_class.model_type = model_type
                 # Now that it is registered, it is not considered remote code anymore
                 trust_remote_code = False
+                if config_model_type is None:
+                    # The checkpoint has no model_type (e.g. LongCat-2.0), so
+                    # AutoConfig cannot dispatch on it; use the registry class
+                    # directly.
+                    config = config_class.from_pretrained(
+                        model,
+                        revision=revision,
+                        code_revision=code_revision,
+                        **kwargs,
+                    )
+                    return config_dict, _maybe_remap_hf_config_attrs(config)
             try:
                 kwargs = _maybe_update_auto_config_kwargs(kwargs, model_type=model_type)
                 config = AutoConfig.from_pretrained(
