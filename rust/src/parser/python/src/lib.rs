@@ -46,6 +46,14 @@ tool_parser_factory! {
     // Below are the parsers just for testing purposes on Python side.
     DeepSeekV4ToolParser,
     KimiK2ToolParser,
+    Qwen3CoderToolParser,
+    DynamoDeepSeekV4ToolParser,
+    DynamoQwen3CoderToolParser,
+    DynamoGlm47ToolParser,
+    DynamoKimiK2ToolParser,
+    DynamoMiniMaxM2ToolParser,
+    DynamoMiniMaxM3ToolParser,
+    DynamoGemma4ToolParser,
 }
 
 #[pyclass(name = "Tool", module = "vllm._rust_tool_parser", skip_from_py_object)]

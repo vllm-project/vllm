@@ -144,4 +144,22 @@ mod tests {
             json!({})
         );
     }
+    #[test]
+    fn glm47_dynamo_parser_matches_native() {
+        let tools = test_tools();
+        let input = glm47_tool_call("get_weather", &[("city", "Beijing")]);
+
+        let mut native = Glm47MoeToolParser::new(&tools);
+        let native =
+            crate::tool::test_utils::semantic_calls(native.parse_complete(&input).unwrap());
+
+        let mut dynamo =
+            <crate::tool::DynamoGlm47ToolParser as crate::tool::ToolParser>::create(&tools)
+                .unwrap();
+        let dynamo =
+            crate::tool::test_utils::semantic_calls(dynamo.parse_complete(&input).unwrap());
+
+        assert_eq!(native.len(), 1);
+        assert_eq!(native, dynamo);
+    }
 }

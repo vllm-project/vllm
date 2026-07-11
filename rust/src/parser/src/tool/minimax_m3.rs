@@ -931,4 +931,25 @@ mod tests {
             })
         );
     }
+    #[test]
+    fn minimax_m3_dynamo_parser_matches_native() {
+        let tools = m3_test_tools();
+        let input = build_tool_block(&[(
+            "get_weather",
+            format!("{}{}", element("city", "Seattle"), element("days", "5")),
+        )]);
+
+        let mut native = MinimaxM3ToolParser::new(&tools);
+        let native =
+            crate::tool::test_utils::semantic_calls(native.parse_complete(&input).unwrap());
+
+        let mut dynamo =
+            <crate::tool::DynamoMiniMaxM3ToolParser as crate::tool::ToolParser>::create(&tools)
+                .unwrap();
+        let dynamo =
+            crate::tool::test_utils::semantic_calls(dynamo.parse_complete(&input).unwrap());
+
+        assert_eq!(native.len(), 1);
+        assert_eq!(native, dynamo);
+    }
 }

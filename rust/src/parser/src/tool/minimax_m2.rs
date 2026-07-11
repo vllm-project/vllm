@@ -599,4 +599,22 @@ mod tests {
         expect![[r#"tool parser parsing failed: near "<bad></minimax:tool_call>": "#]]
             .assert_eq(&error.to_report_string());
     }
+    #[test]
+    fn minimax_m2_dynamo_parser_matches_native() {
+        let tools = test_tools();
+        let input = build_tool_block(&[("get_weather", vec![("city", "Seattle"), ("days", "5")])]);
+
+        let mut native = MinimaxM2ToolParser::new(&tools);
+        let native =
+            crate::tool::test_utils::semantic_calls(native.parse_complete(&input).unwrap());
+
+        let mut dynamo =
+            <crate::tool::DynamoMiniMaxM2ToolParser as crate::tool::ToolParser>::create(&tools)
+                .unwrap();
+        let dynamo =
+            crate::tool::test_utils::semantic_calls(dynamo.parse_complete(&input).unwrap());
+
+        assert_eq!(native.len(), 1);
+        assert_eq!(native, dynamo);
+    }
 }

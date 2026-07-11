@@ -7,14 +7,19 @@ use std::sync::{Arc, LazyLock};
 
 pub use vllm_parser::tool::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
-    Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser, HermesToolParser, HyV3ToolParser,
-    Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser, MinimaxM2ToolParser,
-    MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser, Qwen3CoderToolParser,
-    Qwen3XmlToolParser, SeedOssToolParser, ToolParser, ToolParserError,
+    DynamoDeepSeekV4ToolParser, DynamoGemma4ToolParser, DynamoGlm47ToolParser,
+    DynamoKimiK2ToolParser, DynamoMiniMaxM2ToolParser, DynamoMiniMaxM3ToolParser,
+    DynamoQwen3CoderToolParser, Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser,
+    HermesToolParser, HyV3ToolParser, Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser,
+    MinimaxM2ToolParser, MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser,
+    Qwen3CoderToolParser, Qwen3XmlToolParser, SeedOssToolParser, ToolParser, ToolParserError,
 };
 
 use crate::parser::ParserFactory;
 use crate::request::ChatTool;
+
+pub const USE_EXPERIMENTAL_DYNAMO_RUST_PARSER_ENV: &str =
+    "VLLM_USE_EXPERIMENTAL_DYNAMO_RUST_PARSER";
 
 /// Canonical public names for registered tool parsers.
 pub mod names {
@@ -62,6 +67,10 @@ impl ToolParserFactory {
     /// Create the default registry with built-in parser names and model
     /// mappings.
     pub fn new() -> Self {
+        Self::new_with_options(use_experimental_dynamo_rust_parser())
+    }
+
+    fn new_with_options(use_dynamo: bool) -> Self {
         let mut factory = Self::default();
 
         factory
@@ -87,6 +96,20 @@ impl ToolParserFactory {
             .register_parser::<Qwen3XmlToolParser>(names::QWEN3_XML)
             .register_parser::<Qwen3CoderToolParser>(names::QWEN3_CODER)
             .register_parser::<SeedOssToolParser>(names::SEED_OSS);
+
+        // Experimental: override every family the Dynamo v2 crate implements so
+        // its parser runs instead of the native one. Registration is by name, so
+        // re-registering overwrites; gemma4's unified-dummy becomes a real parser.
+        if use_dynamo {
+            factory
+                .register_parser::<DynamoDeepSeekV4ToolParser>(names::DEEPSEEK_V4)
+                .register_parser::<DynamoQwen3CoderToolParser>(names::QWEN3_CODER)
+                .register_parser::<DynamoGlm47ToolParser>(names::GLM47)
+                .register_parser::<DynamoKimiK2ToolParser>(names::KIMI_K2)
+                .register_parser::<DynamoMiniMaxM2ToolParser>(names::MINIMAX_M2)
+                .register_parser::<DynamoMiniMaxM3ToolParser>(names::MINIMAX_M3)
+                .register_parser::<DynamoGemma4ToolParser>(names::GEMMA4);
+        }
 
         factory
             .register_pattern("mistral-", names::MISTRAL)
@@ -178,6 +201,11 @@ impl ToolParserFactory {
         })?;
         self.create(name, tools)
     }
+}
+
+fn use_experimental_dynamo_rust_parser() -> bool {
+    std::env::var(USE_EXPERIMENTAL_DYNAMO_RUST_PARSER_ENV)
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "True" | "TRUE"))
 }
 
 #[cfg(test)]

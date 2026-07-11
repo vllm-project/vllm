@@ -602,4 +602,23 @@ mod tests {
         ]]
         .assert_eq(&error.to_report_string());
     }
+    #[test]
+    fn kimi_k2_dynamo_parser_matches_native() {
+        let tools = test_tools();
+        let input =
+            build_tool_section(&[build_tool_call("get_weather", 0, r#"{"location":"NYC"}"#)]);
+
+        let mut native = KimiK2ToolParser::new(&tools);
+        let native =
+            crate::tool::test_utils::semantic_calls(native.parse_complete(&input).unwrap());
+
+        let mut dynamo =
+            <crate::tool::DynamoKimiK2ToolParser as crate::tool::ToolParser>::create(&tools)
+                .unwrap();
+        let dynamo =
+            crate::tool::test_utils::semantic_calls(dynamo.parse_complete(&input).unwrap());
+
+        assert_eq!(native.len(), 1);
+        assert_eq!(native, dynamo);
+    }
 }
