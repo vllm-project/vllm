@@ -96,7 +96,7 @@ from vllm.v1.worker.gpu.lora_utils import (
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_profile import (
     EncoderCacheBudget,
-    EncoderProfileInputs,
+    get_dummy_encoder_profile_inputs,
 )
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
@@ -657,12 +657,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.vllm_config,
                     self.mm_registry,
                 )
-                encoder_profile_inputs = EncoderProfileInputs(
+                get_dummy_inputs = functools.partial(
+                    get_dummy_encoder_profile_inputs,
                     self.model_config,
                     self.mm_registry,
                 )
                 self.model_state.encoder_runner.profile_encoder_cache(
-                    encoder_profile_inputs,
+                    get_dummy_inputs,
                     encoder_cache_budget,
                 )
 

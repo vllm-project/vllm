@@ -10,7 +10,7 @@ from vllm.multimodal.utils import get_mm_features_in_window, group_and_batch_mm_
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_profile import (
     EncoderCacheBudget,
-    EncoderProfileInputs,
+    EncoderProfileInputFactory,
 )
 from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
 
@@ -58,7 +58,7 @@ class EncoderRunner:
     @torch.inference_mode()
     def profile_encoder_cache(
         self,
-        profile_inputs: EncoderProfileInputs,
+        get_dummy_inputs: EncoderProfileInputFactory,
         budget: EncoderCacheBudget,
     ) -> None:
         """Profile multimodal encoder and temporary encoder cache memory."""
@@ -83,12 +83,11 @@ class EncoderRunner:
             dummy_modality,
         )
 
-        batched_dummy_mm_inputs = profile_inputs.get_dummy_batch(
+        dummy_mm_inputs = get_dummy_inputs(
             dummy_modality,
             max_mm_items_per_batch,
-            self.device,
         )
-        dummy_encoder_outputs = self.model.embed_multimodal(**batched_dummy_mm_inputs)
+        dummy_encoder_outputs = self.execute_mm_encoder(dummy_mm_inputs)
 
         sanity_check_mm_encoder_outputs(
             dummy_encoder_outputs,

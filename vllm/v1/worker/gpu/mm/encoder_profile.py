@@ -1,17 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-
-import torch
 
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.multimodal.encoder_budget import get_mm_max_toks_per_item
-from vllm.multimodal.inputs import BatchedTensorInputs
+from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.registry import MultiModalRegistry
-from vllm.multimodal.utils import group_and_batch_mm_kwargs
-from vllm.utils.torch_utils import PIN_MEMORY, set_default_torch_num_threads
+from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 
 
@@ -145,35 +142,22 @@ def _compute_encoder_cache_budget(
     )
 
 
-class EncoderProfileInputs:
-    """Dummy inputs for multimodal encoder profiling."""
+EncoderProfileInputFactory = Callable[
+    [str, int], list[tuple[str, MultiModalKwargsItem]]
+]
 
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        mm_registry: MultiModalRegistry,
-    ) -> None:
-        self.model_config = model_config
-        self.mm_registry = mm_registry
 
-    def get_dummy_batch(
-        self,
-        modality: str,
-        max_items_per_batch: int,
-        device: torch.device,
-    ) -> BatchedTensorInputs:
-        dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
-            self.model_config,
-            mm_counts={modality: 1},
-        )
-        dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
-        assert dummy_mm_item is not None, "Dummy item should be generated"
+def get_dummy_encoder_profile_inputs(
+    model_config: ModelConfig,
+    mm_registry: MultiModalRegistry,
+    modality: str,
+    max_items_per_batch: int,
+) -> list[tuple[str, MultiModalKwargsItem]]:
+    dummy_mm_inputs = mm_registry.get_dummy_mm_inputs(
+        model_config,
+        mm_counts={modality: 1},
+    )
+    dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
+    assert dummy_mm_item is not None, "Dummy item should be generated"
 
-        return next(
-            mm_kwargs_batch
-            for _, _, mm_kwargs_batch in group_and_batch_mm_kwargs(
-                [(modality, dummy_mm_item)] * max_items_per_batch,
-                device=device,
-                pin_memory=PIN_MEMORY,
-            )
-        )
+    return [(modality, dummy_mm_item)] * max_items_per_batch
