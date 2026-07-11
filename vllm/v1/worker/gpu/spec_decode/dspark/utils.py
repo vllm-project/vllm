@@ -20,20 +20,25 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     from vllm.compilation.backends import set_model_tag
     from vllm.model_executor.models.qwen3_dflash import dflash_has_any_non_causal
 
+    # The draft is a dense (non-MLA) transformer, so MLA-only kv-cache layouts
+    # like fp8_ds_mla don't apply to it and no dense attention backend accepts
+    # them. Store the draft KV cache in the model dtype instead. An explicit
+    # speculative kv_cache_dtype override is applied first and still takes
+    # precedence for anything a dense backend can accept.
+    draft_cache_config = vllm_config.cache_config
+    if speculative_config.kv_cache_dtype is not None:
+        draft_cache_config = replace(
+            draft_cache_config, cache_dtype=speculative_config.kv_cache_dtype
+        )
+    if draft_cache_config.cache_dtype == "fp8_ds_mla":
+        draft_cache_config = replace(draft_cache_config, cache_dtype="auto")
     draft_vllm_config = replace(
         vllm_config,
+        cache_config=draft_cache_config,
         attention_config=replace(
             vllm_config.attention_config,
             use_non_causal=dflash_has_any_non_causal(draft_model_config.hf_config),
             backend=speculative_config.attention_backend,
-        ),
-        cache_config=(
-            replace(
-                vllm_config.cache_config,
-                cache_dtype=speculative_config.kv_cache_dtype,
-            )
-            if speculative_config.kv_cache_dtype is not None
-            else vllm_config.cache_config
         ),
     )
 
