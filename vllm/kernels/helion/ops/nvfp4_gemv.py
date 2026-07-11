@@ -250,3 +250,34 @@ def nvfp4_gemv_fp4in(
             acc = acc + (contrib * scale).sum()
         out[row] = (acc * alpha).to(torch.bfloat16)
     return out
+
+# from vllm.utils.torch_utils import direct_register_custom_op
+
+# def _nvfp4_gemv_fp4in_impl(
+#     output: torch.Tensor,
+#     weight: torch.Tensor,
+#     x: torch.Tensor,
+#     weight_scale: torch.Tensor,
+#     x_scale: torch.Tensor,
+#     alpha: float,
+# ) -> None:
+#     logger.debug(f"[HELION] nvfp4_gemv_fp4in called: weight={weight.shape}, x={x.shape}")
+#     result = nvfp4_gemv_fp4in(weight, x, weight_scale, x_scale, alpha=alpha)
+#     output.copy_(result)
+
+# def _nvfp4_gemv_fp4in_fake(
+#     output: torch.Tensor,
+#     weight: torch.Tensor,
+#     x: torch.Tensor,
+#     weight_scale: torch.Tensor,
+#     x_scale: torch.Tensor,
+#     alpha: float,
+# ) -> None:
+#     return
+
+# direct_register_custom_op(
+#     "nvfp4_gemv_fp4in",
+#     _nvfp4_gemv_fp4in_impl,
+#     mutates_args=["output"],
+#     fake_impl=_nvfp4_gemv_fp4in_fake,
+# )
