@@ -746,6 +746,16 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
                                 vec_abs(reg.val[2]), vec_abs(reg.val[3])}));
   }
 
+  FP32Vec16 exp() const {
+    FP32Vec8 lo(f32x4x2_t{reg.val[0], reg.val[1]});
+    FP32Vec8 hi(f32x4x2_t{reg.val[2], reg.val[3]});
+    auto lo_e = lo.exp();
+    auto hi_e = hi.exp();
+    return FP32Vec16(
+        f32x4x4_t{lo_e.reg.val[0], lo_e.reg.val[1], hi_e.reg.val[0],
+                  hi_e.reg.val[1]});
+  }
+
   float reduce_max() {
     __vector float max01 = vec_max(reg.val[0], reg.val[1]);
     __vector float max23 = vec_max(reg.val[2], reg.val[3]);
