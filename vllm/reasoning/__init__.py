@@ -29,8 +29,8 @@ _REASONING_PARSERS_TO_REGISTER = {
         "DeepSeekV3ReasoningParser",
     ),
     "deepseek_v4": (
-        "deepseek_v3_reasoning_parser",
-        "DeepSeekV3ReasoningParser",
+        "deepseek_v4_engine_reasoning_parser",
+        "DeepSeekV4ParserReasoningAdapter",
     ),
     "poolside_v1": (
         "poolside_v1_reasoning_parser",

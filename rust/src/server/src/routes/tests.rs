@@ -29,7 +29,8 @@ use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
 };
 use vllm_engine_core_client::protocol::output::{
-    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, StopReason,
+    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs, StopReason,
+    UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
@@ -232,19 +233,14 @@ fn engine_outputs_for_request(
     request_id: &str,
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
 ) -> EngineCoreOutputs {
-    EngineCoreOutputs {
-        engine_index: 0,
+    RequestBatchOutputs {
         outputs: output_specs
             .into_iter()
             .map(|(token_ids, finish_reason)| request_output(request_id, token_ids, finish_reason))
             .collect(),
-        scheduler_stats: None,
-        timestamp: 0.0,
-        utility_output: None,
-        finished_requests: None,
-        wave_complete: None,
-        start_wave: None,
+        ..Default::default()
     }
+    .into()
 }
 
 fn test_llm(client: EngineCoreClient) -> Llm {
@@ -390,14 +386,15 @@ fn utility_none_result() -> UtilityResultEnvelope {
 }
 
 fn utility_outputs(call_id: u64, result: UtilityResultEnvelope) -> EngineCoreOutputs {
-    EngineCoreOutputs {
-        utility_output: Some(UtilityOutput {
+    UtilityCallOutput {
+        output: UtilityOutput {
             call_id: call_id.into(),
             failure_message: None,
             result: Some(result),
-        }),
+        },
         ..Default::default()
     }
+    .into()
 }
 
 async fn send_outputs(push: &mut PushSocket, outputs: EngineCoreOutputs) {
@@ -562,7 +559,7 @@ fn qwen_multimodal_model_info() -> vllm_chat::multimodal::MultimodalModelInfo {
     ));
     fs::write(
         &config_path,
-        r#"{"model_type":"qwen2_vl","vision_token_id":151655}"#,
+        r#"{"model_type":"qwen2_vl","image_token_id":151655}"#,
     )
     .expect("write qwen test config");
     let info = vllm_chat::multimodal::MultimodalModelInfo::from_paths(
@@ -2194,6 +2191,28 @@ async fn non_stream_chat_returns_json_response() {
     assert_eq!(json["usage"]["prompt_tokens"], 22);
     assert_eq!(json["usage"]["completion_tokens"], 3);
     assert_eq!(json["usage"]["total_tokens"], 25);
+
+    // Unset optional fields are serialized as explicit `null` on
+    // non-streaming responses...
+    let response_object = json.as_object().expect("response object");
+    let choice = json["choices"][0].as_object().expect("choice object");
+    let message = choice["message"].as_object().expect("message object");
+    for (object, key) in [
+        (response_object, "system_fingerprint"),
+        (response_object, "prompt_token_ids"),
+        (response_object, "kv_transfer_params"),
+        (choice, "logprobs"),
+        (choice, "stop_reason"),
+        (choice, "token_ids"),
+        (message, "reasoning"),
+    ] {
+        assert!(
+            object.contains_key(key) && object[key].is_null(),
+            "expected explicit null `{key}`: {json}"
+        );
+    }
+    // ...except `tool_calls`, which Python pops from the payload when empty.
+    assert!(!message.contains_key("tool_calls"), "{json}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2281,8 +2300,7 @@ async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
 
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![request_output_with_logprobs(
                             &request.request_id,
                             bytes_to_token_ids(b"hi"),
@@ -2291,13 +2309,9 @@ async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
                             Some(sample_logprobs_for_tokens(&bytes_to_token_ids(b"hi"))),
                             Some(prompt_logprobs_for_tokens(&prompt_token_ids)),
                         )],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
-                        finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -2964,6 +2978,25 @@ async fn non_stream_completions_return_json_response() {
     assert_eq!(json["choices"][0]["text"], "hi");
     assert_eq!(json["choices"][0]["finish_reason"], "stop");
     assert_eq!(json["usage"]["completion_tokens"], 3);
+
+    // Unset optional fields are serialized as explicit `null` on
+    // non-streaming responses.
+    let response_object = json.as_object().expect("response object");
+    let choice = json["choices"][0].as_object().expect("choice object");
+    for (object, key) in [
+        (response_object, "system_fingerprint"),
+        (response_object, "kv_transfer_params"),
+        (choice, "logprobs"),
+        (choice, "stop_reason"),
+        (choice, "prompt_logprobs"),
+        (choice, "token_ids"),
+        (choice, "prompt_token_ids"),
+    ] {
+        assert!(
+            object.contains_key(key) && object[key].is_null(),
+            "expected explicit null `{key}`: {json}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3121,8 +3154,7 @@ async fn non_stream_completions_include_logprobs() {
                     rmp_serde::from_slice(&add[1]).expect("decode request");
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![
                             request_output_with_logprobs(
                                 &request.request_id,
@@ -3141,13 +3173,10 @@ async fn non_stream_completions_include_logprobs() {
                                 None,
                             ),
                         ],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
                         finished_requests: Some(BTreeSet::from([request.request_id.clone()])),
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -3224,8 +3253,7 @@ async fn non_stream_completions_include_prompt_logprobs() {
                     rmp_serde::from_slice(&add[1]).expect("decode request");
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![request_output_with_logprobs(
                             &request.request_id,
                             vec![b'h' as u32, b'i' as u32, b'!' as u32],
@@ -3246,13 +3274,9 @@ async fn non_stream_completions_include_prompt_logprobs() {
                             }),
                             Some(prompt_logprobs_for_hello()),
                         )],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
-                        finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -3588,8 +3612,7 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
 
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![
                             request_output_with_logprobs(
                                 &request.request_id,
@@ -3609,13 +3632,9 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
                                 Some(json!({"connector": "x"})),
                             ),
                         ],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
-                        finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -3708,8 +3727,7 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
 
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![
                             request_output_with_logprobs(
                                 &request.request_id,
@@ -3728,13 +3746,9 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
                                 None,
                             ),
                         ],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
-                        finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -4398,10 +4412,10 @@ async fn include_reasoning_false_suppresses_reasoning_in_non_stream_chat() {
     let json: serde_json::Value = serde_json::from_str(&text).expect("decode json");
 
     assert_eq!(json["choices"][0]["message"]["content"], "answer");
+    // Suppressed fields are serialized as explicit `null` on non-streaming
+    // responses.
     assert!(
-        json["choices"][0]["message"]
-            .as_object()
-            .is_some_and(|message| !message.contains_key("reasoning")),
+        json["choices"][0]["message"]["reasoning"].is_null(),
         "{text}"
     );
 }
@@ -4426,8 +4440,7 @@ async fn include_reasoning_false_suppresses_non_stream_output_metadata() {
 
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![
                             request_output_with_logprobs(
                                 &request.request_id,
@@ -4446,13 +4459,9 @@ async fn include_reasoning_false_suppresses_non_stream_output_metadata() {
                                 None,
                             ),
                         ],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
-                        finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -4508,14 +4517,14 @@ async fn include_reasoning_false_suppresses_non_stream_output_metadata() {
     let choice = json["choices"][0].as_object().expect("choice object");
 
     assert_eq!(json["choices"][0]["message"]["content"], "answer");
+    // Suppressed fields are serialized as explicit `null` on non-streaming
+    // responses.
     assert!(
-        json["choices"][0]["message"]
-            .as_object()
-            .is_some_and(|message| !message.contains_key("reasoning")),
+        json["choices"][0]["message"]["reasoning"].is_null(),
         "{text}"
     );
-    assert!(!choice.contains_key("logprobs"), "{text}");
-    assert!(!choice.contains_key("token_ids"), "{text}");
+    assert!(choice["logprobs"].is_null(), "{text}");
+    assert!(choice["token_ids"].is_null(), "{text}");
     assert!(json["prompt_token_ids"].is_array(), "{text}");
 }
 
@@ -4601,8 +4610,7 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
 
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![request_output_with_logprobs(
                             &request.request_id,
                             bytes_to_token_ids(b"<think>Need tool.</think>"),
@@ -4613,19 +4621,14 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
                             ))),
                             None,
                         )],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
-                        finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![request_output_with_logprobs(
                             &request.request_id,
                             bytes_to_token_ids(b"<tool_call>\n{\"name\":\"get_weather\", "),
@@ -4636,19 +4639,14 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
                             ))),
                             None,
                         )],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
-                        finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![request_output_with_logprobs(
                             &request.request_id,
                             bytes_to_token_ids(
@@ -4661,13 +4659,10 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
                             ))),
                             None,
                         )],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
                         finished_requests: Some(BTreeSet::from([request.request_id.clone()])),
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -4801,7 +4796,10 @@ async fn reset_prefix_cache_route_sends_expected_utility_call() {
     let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    assert!(body.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("json body"),
+        json!({"success": true})
+    );
     engine_task.await.expect("mock engine task");
 }
 

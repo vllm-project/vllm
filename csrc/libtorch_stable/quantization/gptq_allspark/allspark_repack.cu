@@ -150,6 +150,8 @@ void rearrange_kn_weight_as_n32k16_order(
   void* b_zero_reorder =
       has_zp ? b_zeros_reorder.value().mutable_data_ptr() : nullptr;
 
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      b_qweight.get_device_index());
   cudaStream_t stream = get_current_cuda_stream();
   if (b_scales.scalar_type() == torch::headeronly::ScalarType::Half) {
     allspark::rearrange_kn_weight_as_n32k16_order_ldg16<__half>(
