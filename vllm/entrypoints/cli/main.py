@@ -14,6 +14,7 @@ logger = init_logger(__name__)
 
 
 def main():
+    import vllm.entrypoints.cli.analyze_prefix_cache
     import vllm.entrypoints.cli.benchmark.main
     import vllm.entrypoints.cli.collect_env
     import vllm.entrypoints.cli.openai
@@ -28,6 +29,7 @@ def main():
         vllm.entrypoints.cli.benchmark.main,
         vllm.entrypoints.cli.collect_env,
         vllm.entrypoints.cli.run_batch,
+        vllm.entrypoints.cli.analyze_prefix_cache,
     ]
 
     cli_env_setup()
