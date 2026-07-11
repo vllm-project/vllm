@@ -231,6 +231,7 @@ class DraftModelSpeculator(BaseSpeculator):
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
             causal=causal,
+            fast_build=True,
         )
         return attn_metadata
 

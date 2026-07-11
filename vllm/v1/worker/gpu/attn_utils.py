@@ -583,6 +583,7 @@ def build_attn_metadata(
     for_cudagraph_capture: bool = False,
     causal: bool | torch.Tensor | Mapping[int, bool] = True,
     rswa_prefix_lens: torch.Tensor | None = None,
+    fast_build: bool = False,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
     if dcp_local_seq_lens is not None:
@@ -642,6 +643,7 @@ def build_attn_metadata(
                 metadata = attn_metadata_builder.build(
                     common_prefix_len=0,
                     common_attn_metadata=common_attn_metadata,
+                    fast_build=fast_build,
                     **attn_metadata_extra_kwargs,
                 )
             for layer_name in attn_group.layer_names:
