@@ -207,6 +207,22 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
+    def set_xfer_handshake_metadata(
+        self,
+        metadata: dict[int, KVConnectorHandshakeMetadata],
+    ) -> None:
+        """Set the KV connector handshake metadata for this connector.
+
+        Compatibility wrapper that converts the legacy (tp_rank → metadata)
+        format into the PP-aware (pp_rank, tp_rank) → metadata format.
+        Non-PP callers pass pp_rank=0 implicitly.
+        """
+        pp_aware_metadata = {
+            (0, tp_rank): rank_metadata
+            for tp_rank, rank_metadata in metadata.items()
+        }
+        self.set_xfer_handshake_metadata_pp_aware(pp_aware_metadata)
+
     def set_xfer_handshake_metadata_pp_aware(
         self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
     ) -> None:

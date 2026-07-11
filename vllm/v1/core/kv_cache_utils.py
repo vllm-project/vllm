@@ -2024,6 +2024,55 @@ def _project_kv_cache_groups_to_worker(
     return projected_groups
 
 
+def _get_kv_cache_tensor_slots(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> list[list[str]]:
+    group_size = max(len(group.layer_names) for group in kv_cache_groups)
+    slots: list[list[str]] = []
+    for i in range(group_size):
+        slot = []
+        for group in kv_cache_groups:
+            if i < len(group.layer_names):
+                slot.append(group.layer_names[i])
+        slots.append(slot)
+    return slots
+
+
+def _preserve_global_kv_cache_tensor_slots(
+    kv_cache_config: KVCacheConfig,
+    vllm_config: VllmConfig,
+    projected_groups: list[KVCacheGroupSpec],
+    global_tensor_slots: list[list[str]],
+    worker_spec: dict[str, KVCacheSpec],
+    available_memory: int,
+) -> None:
+    worker_layers = set(worker_spec)
+    projected_slots = [
+        [layer_name for layer_name in slot if layer_name in worker_layers]
+        for slot in global_tensor_slots
+    ]
+    projected_slots = [slot for slot in projected_slots if slot]
+    if not projected_slots:
+        return
+
+    if len(projected_slots) == len(kv_cache_config.kv_cache_tensors):
+        for tensor, slot in zip(kv_cache_config.kv_cache_tensors, projected_slots):
+            tensor.shared_by = slot
+        return
+
+    page_size = get_uniform_page_size(
+        [group.kv_cache_spec for group in projected_groups]
+    )
+    num_blocks = get_num_blocks(
+        vllm_config, len(projected_slots), available_memory, page_size
+    )
+    kv_cache_config.num_blocks = num_blocks
+    kv_cache_config.kv_cache_tensors = [
+        KVCacheTensor(size=page_size * num_blocks, shared_by=slot)
+        for slot in projected_slots
+    ]
+
+
 def get_kv_cache_configs(
     vllm_config: VllmConfig,
     kv_cache_specs: list[dict[str, KVCacheSpec]],
@@ -2080,6 +2129,20 @@ def get_kv_cache_configs(
     # hybrid models when disable_hybrid_kv_cache_manager is enabled.
     # After this call, merged_kv_cache_specs may be modified in-place.
     global_kv_cache_groups = get_kv_cache_groups(vllm_config, merged_kv_cache_specs)
+    preserve_global_tensor_slots = (
+        vllm_config.parallel_config.pipeline_parallel_size > 1
+        and len(global_kv_cache_groups) > 1
+        and not _use_packed_kv_cache_config(vllm_config, global_kv_cache_groups)
+        and all(
+            isinstance(group.kv_cache_spec, AttentionSpec)
+            for group in global_kv_cache_groups
+        )
+    )
+    global_tensor_slots = (
+        _get_kv_cache_tensor_slots(global_kv_cache_groups)
+        if preserve_global_tensor_slots
+        else None
+    )
 
     # If original_max_model_len was -1, automatically
     # determine the maximum model length that fits in available GPU memory.
@@ -2134,11 +2197,19 @@ def get_kv_cache_configs(
         assert sum(len(group.layer_names) for group in projected_groups) == len(
             kv_cache_spec_one_worker
         ), "Some layers are not assigned to any group."
-        kv_cache_configs.append(
-            get_kv_cache_config_from_groups(
-                vllm_config, projected_groups, available_memory_one_worker
-            )
+        kv_cache_config = get_kv_cache_config_from_groups(
+            vllm_config, projected_groups, available_memory_one_worker
         )
+        if global_tensor_slots is not None:
+            _preserve_global_kv_cache_tensor_slots(
+                kv_cache_config,
+                vllm_config,
+                projected_groups,
+                global_tensor_slots,
+                kv_cache_spec_one_worker,
+                available_memory_one_worker,
+            )
+        kv_cache_configs.append(kv_cache_config)
 
     # Change the num_blocks of each rank to the smallest among all ranks.
     # We also need to shrink the tensor size proportionally to avoid

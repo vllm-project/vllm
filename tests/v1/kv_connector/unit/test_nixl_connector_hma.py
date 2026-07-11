@@ -24,6 +24,59 @@ from .utils import (
 )
 
 
+def _make_nixl_region_info(
+    *,
+    region_idx: int,
+    base_addr: int,
+    block_len: int,
+    layer_name: str,
+    layer_index: int,
+    spec_type: str,
+    component: str = "k",
+):
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlRegionInfo,
+    )
+
+    return NixlRegionInfo(
+        region_idx=region_idx,
+        base_addr=base_addr,
+        block_len=block_len,
+        layer_names=[layer_name],
+        layer_indices=[layer_index],
+        kv_group_idx=0,
+        group_slot_idx=0,
+        spec_type=spec_type,
+        component=component,
+        is_replicated=False,
+        emits_v=False,
+        kv_head_num=1,
+        total_kv_head_num=1,
+    )
+
+
+def _make_nixl_agent_metadata(region_infos):
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlAgentMetadata,
+    )
+
+    return NixlAgentMetadata(
+        engine_id="remote-engine",
+        agent_metadata=b"remote-agent",
+        kv_caches_base_addr=[r.base_addr for r in region_infos],
+        device_id=0,
+        num_blocks=8,
+        block_lens=[r.block_len for r in region_infos],
+        kv_cache_layout="HND",
+        block_size=16,
+        ssm_sizes=(0, 0),
+        attn_backend_name="TRITON_ATTN",
+        physical_blocks_per_logical_kv_block=1,
+        kv_cache_layer_names=[r.layer_names for r in region_infos],
+        region_infos=region_infos,
+    )
+
+
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "swa_enabled,expected_sw_sizes",
@@ -92,6 +145,237 @@ def test_logical_to_kernel_block_ids_with_hma():
     assert kernel_block_ids == expected_kernel_block_ids, (
         f"Expected {expected_kernel_block_ids}, got {kernel_block_ids}"
     )
+
+
+@pytest.mark.cpu_test
+def test_pp_hma_region_alignment_uses_semantic_metadata():
+    """PP producer HMA alignment should match by layer/spec/block semantics,
+    not by remote region order.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker.pp_size = 4
+    worker._is_hma_required = True
+    worker.region_infos = [
+        _make_nixl_region_info(
+            region_idx=0,
+            base_addr=100,
+            block_len=65536,
+            layer_name="model.layers.4.self_attn",
+            layer_index=4,
+            spec_type="FullAttentionSpec",
+        ),
+        _make_nixl_region_info(
+            region_idx=1,
+            base_addr=200,
+            block_len=32768,
+            layer_name="model.layers.5.self_attn",
+            layer_index=5,
+            spec_type="SlidingWindowSpec",
+        ),
+    ]
+
+    remote_regions = [
+        _make_nixl_region_info(
+            region_idx=0,
+            base_addr=900,
+            block_len=65536,
+            layer_name="model.layers.0.self_attn",
+            layer_index=0,
+            spec_type="FullAttentionSpec",
+        ),
+        _make_nixl_region_info(
+            region_idx=1,
+            base_addr=500,
+            block_len=32768,
+            layer_name="model.layers.5.self_attn",
+            layer_index=5,
+            spec_type="SlidingWindowSpec",
+        ),
+        _make_nixl_region_info(
+            region_idx=2,
+            base_addr=400,
+            block_len=65536,
+            layer_name="model.layers.4.self_attn",
+            layer_index=4,
+            spec_type="FullAttentionSpec",
+        ),
+    ]
+    meta = _make_nixl_agent_metadata(remote_regions)
+
+    pairs = worker._slice_remote_regions_for_pp(meta, num_local_regions=2)
+
+    assert pairs is not None
+    assert [pair.remote.base_addr for pair in pairs] == [400, 500]
+    assert meta.kv_caches_base_addr == [400, 500]
+    assert meta.block_lens == [65536, 32768]
+    assert [info.region_idx for info in meta.region_infos] == [2, 1]
+
+
+@pytest.mark.cpu_test
+def test_pp_hma_region_alignment_rejects_wrong_spec_or_block_len():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker.pp_size = 4
+    worker._is_hma_required = True
+    worker.region_infos = [
+        _make_nixl_region_info(
+            region_idx=0,
+            base_addr=100,
+            block_len=65536,
+            layer_name="model.layers.4.self_attn",
+            layer_index=4,
+            spec_type="FullAttentionSpec",
+        )
+    ]
+    meta = _make_nixl_agent_metadata(
+        [
+            _make_nixl_region_info(
+                region_idx=0,
+                base_addr=400,
+                block_len=32768,
+                layer_name="model.layers.4.self_attn",
+                layer_index=4,
+                spec_type="SlidingWindowSpec",
+            ),
+            _make_nixl_region_info(
+                region_idx=1,
+                base_addr=500,
+                block_len=65536,
+                layer_name="model.layers.8.self_attn",
+                layer_index=8,
+                spec_type="FullAttentionSpec",
+            ),
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="Unable to align PP/HMA NIXL region"):
+        worker._slice_remote_regions_for_pp(meta, num_local_regions=1)
+
+
+@pytest.mark.cpu_test
+def test_pp_hma_region_alignment_requires_region_infos():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker.pp_size = 4
+    worker._is_hma_required = True
+    worker.region_infos = [
+        _make_nixl_region_info(
+            region_idx=0,
+            base_addr=100,
+            block_len=65536,
+            layer_name="model.layers.4.self_attn",
+            layer_index=4,
+            spec_type="FullAttentionSpec",
+        )
+    ]
+    meta = _make_nixl_agent_metadata(
+        [
+            _make_nixl_region_info(
+                region_idx=0,
+                base_addr=400,
+                block_len=65536,
+                layer_name="model.layers.4.self_attn",
+                layer_index=4,
+                spec_type="FullAttentionSpec",
+            ),
+            _make_nixl_region_info(
+                region_idx=1,
+                base_addr=500,
+                block_len=65536,
+                layer_name="model.layers.8.self_attn",
+                layer_index=8,
+                spec_type="FullAttentionSpec",
+            ),
+        ]
+    )
+    meta.region_infos = None
+
+    with pytest.raises(RuntimeError, match="requires semantic per-region metadata"):
+        worker._slice_remote_regions_for_pp(meta, num_local_regions=1)
+
+
+@pytest.mark.cpu_test
+def test_pp_non_hma_region_alignment_keeps_contiguous_fallback():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker.pp_size = 4
+    worker._is_hma_required = False
+    worker._remote_region_offset = 2
+    worker.kv_cache_layer_names = []
+
+    remote_regions = [
+        _make_nixl_region_info(
+            region_idx=i,
+            base_addr=100 + i,
+            block_len=1024 + i,
+            layer_name=f"model.layers.{i}.self_attn",
+            layer_index=i,
+            spec_type="FullAttentionSpec",
+        )
+        for i in range(6)
+    ]
+    meta = _make_nixl_agent_metadata(remote_regions)
+
+    pairs = worker._slice_remote_regions_for_pp(meta, num_local_regions=2)
+
+    assert pairs is None
+    assert meta.kv_caches_base_addr == [102, 103]
+    assert meta.block_lens == [1026, 1027]
+    assert [info.region_idx for info in meta.region_infos] == [2, 3]
+
+
+@pytest.mark.cpu_test
+def test_hma_attention_desc_ids_preserve_region_group_mapping():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker.num_regions = 2
+    worker._has_mamba = False
+    worker._is_hma_required = True
+    worker.region_infos = [
+        _make_nixl_region_info(
+            region_idx=0,
+            base_addr=100,
+            block_len=65536,
+            layer_name="model.layers.4.self_attn",
+            layer_index=4,
+            spec_type="FullAttentionSpec",
+        ),
+        _make_nixl_region_info(
+            region_idx=1,
+            base_addr=200,
+            block_len=32768,
+            layer_name="model.layers.5.self_attn",
+            layer_index=5,
+            spec_type="SlidingWindowSpec",
+        ),
+    ]
+    worker.region_infos[0].kv_group_idx = 0
+    worker.region_infos[1].kv_group_idx = 1
+
+    desc_ids = worker._compute_desc_ids(
+        block_ids=([1, 2], [3]),
+        dst_num_blocks=10,
+        block_size_ratio=None,
+        physical_blocks_per_logical=1,
+    )
+
+    assert list(desc_ids) == [1, 2, 13]
 
 
 @pytest.mark.cpu_test
