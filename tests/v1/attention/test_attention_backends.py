@@ -732,7 +732,7 @@ def test_flashinfer_sm90_xqa_decode_correctness(default_vllm_config):
         attn_metadata.decode,
         flashinfer_backend.FlashInferTrtllmAPIDecode,
     )
-    assert attn_metadata.decode.kernel == flashinfer_backend.FlashInferDecodeKernel.XQA
+    assert attn_metadata.decode.kernel == flashinfer_backend.TrtllmDecodeAPIKernel.XQA
 
     _test_backend_correctness(
         batch_spec,

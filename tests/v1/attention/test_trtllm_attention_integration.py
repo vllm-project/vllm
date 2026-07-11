@@ -32,10 +32,10 @@ if not current_platform.is_device_capability_family(100):
     )
 
 from vllm.v1.attention.backends.flashinfer import (  # noqa: E402
-    FlashInferDecodeKernel,
     FlashInferImpl,
     FlashInferMetadataBuilder,
     FlashInferTrtllmAPIDecode,
+    TrtllmDecodeAPIKernel,
     TRTLLMPrefill,
 )
 
@@ -440,7 +440,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
                     "Expected FlashInferTrtllmAPIDecode, got "
                     f"{type(attn_metadata.decode)}"
                 )
-                assert attn_metadata.decode.kernel == FlashInferDecodeKernel.TRTLLM_GEN
+                assert attn_metadata.decode.kernel == TrtllmDecodeAPIKernel.TRTLLM_GEN
 
             impl = FlashInferImpl(
                 num_heads=num_q_heads,
