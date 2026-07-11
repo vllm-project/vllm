@@ -6,7 +6,10 @@ import torch.nn as nn
 from vllm.config import VllmConfig, replace
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.model_loader import get_model
-from vllm.v1.worker.gpu.spec_decode.eagle.utils import _should_share
+from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
+    _should_share,
+    get_target_lm_head,
+)
 
 
 def _inner_model(model: nn.Module) -> nn.Module:
@@ -66,7 +69,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             del draft_inner.embed_tokens
         draft_inner.embed_tokens = target_embed
 
-    target_lm_head = getattr(target_model, "lm_head", None)
+    target_lm_head = get_target_lm_head(target_model, target_language_model)
     draft_head_owner, draft_head_name, draft_lm_head = _find_module_attr(
         draft_model, "lm_head", "head"
     )

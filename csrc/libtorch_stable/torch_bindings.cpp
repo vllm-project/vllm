@@ -598,9 +598,22 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor? initial_state_idx,"
       "Tensor? cu_chunk_seqlen,"
       "Tensor? last_chunk_indices) -> ()");
+
+  // LongCat n-gram embedding index kernel. All tensor args are marked mutable
+  // to match the (non-const) stable-Tensor& C++ signature; only ne_token_table
+  // and n_gram_ids are actually written in place.
+  ops.def(
+      "ngram_compute_n_gram_ids(int ne_n, int ne_k, Tensor(a!) ne_weights, "
+      "Tensor(b!) ne_mods, Tensor(c!) exclusive_ne_embedder_size_sums, "
+      "Tensor(d!) exclusive_req_len_sums, Tensor(e!) ne_token_table, "
+      "Tensor(f!) row_indices, Tensor(g!) column_starts, "
+      "Tensor(h!) n_gram_ids) -> ()");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
+  // LongCat n-gram embedding index kernel.
+  ops.impl("ngram_compute_n_gram_ids", TORCH_BOX(&ngram_compute_n_gram_ids));
+
   // Per-token group quantization
   ops.impl("per_token_group_fp8_quant", TORCH_BOX(&per_token_group_quant_fp8));
   ops.impl("per_token_group_fp8_quant_packed",
