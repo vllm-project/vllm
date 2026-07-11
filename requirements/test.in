@@ -21,6 +21,7 @@ ray[cgraph,default]==2.52.0 # Ray Compiled Graph, required by pipeline paralleli
 sentence-transformers # required for embedding tests
 soundfile # required for audio tests
 jiwer # required for audio tests
+msgpack==1.2.1
 timm # required for internvl test
 torch==2.7.0
 torchaudio==2.7.0

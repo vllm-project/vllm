@@ -308,8 +308,9 @@ more-itertools==10.5.0
     # via lm-eval
 mpmath==1.3.0
     # via sympy
-msgpack==1.1.0
+msgpack==1.2.1
     # via
+    #   -r test.in
     #   librosa
     #   ray
 mteb==1.38.11
