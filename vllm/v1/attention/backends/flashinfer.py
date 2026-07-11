@@ -1122,23 +1122,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
         )
-        if (
-            causal
-            and self.use_dcp
-            and not prefill_use_trtllm
-            and self.flashinfer_trtllm_api_decode_kernel
-            == FlashInferDecodeKernel.TRTLLM_GEN
-            and can_use_trtllm_attention(
-                self.num_qo_heads,
-                self.num_kv_heads,
-                is_prefill=True,
-            )
-        ):
-            logger.info_once(
-                "Using TRTLLM prefill attention with DCP because trtllm-gen "
-                "attention is available."
-            )
-            prefill_use_trtllm = True
         decode_with_flashinfer_trtllm_api = causal and self.use_trtllm_decode_attention
 
         if not causal and self.use_dcp:
@@ -1322,6 +1305,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             assert qo_indptr_prefill_cpu.shape[0] == num_prefills + 1
 
             if prefill_use_trtllm:
+                # TRTLLM prefill has no cross-rank combine for DCP-sharded KV;
+                # use_trtllm_attention never selects it when DCP is enabled.
+                assert not self.use_dcp
                 # Create GPU versions
                 qo_indptr_prefill_gpu = (
                     qo_indptr[prefill_start:] - qo_indptr[prefill_start]
@@ -1330,13 +1316,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 # This is the cumulative sum of the number of KV cache
                 # blocks per prefill request.
                 prefill_seq_lens = seq_lens[prefill_start:]
-                if self.use_dcp:
-                    prefill_seq_lens = get_dcp_local_seq_lens(
-                        prefill_seq_lens,
-                        self.dcp_world_size,
-                        self.dcp_rank,
-                        self.dcp_kv_cache_interleave_size,
-                    )
                 num_blocks_per_req = (prefill_seq_lens + page_size - 1) // page_size
                 paged_kv_indptr_prefill_gpu = self.paged_kv_indptr.gpu[
                     prefill_start : num_reqs + 1
