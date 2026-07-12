@@ -15,8 +15,9 @@ logger = init_logger(__name__)
 
 @functools.cache
 def is_torchembed_available() -> bool:
-    """Return `True` if the torchembed package is available."""
-    return find_spec("torchembed") is not None
+    """Return `True` if torchembed and triton are both available."""
+    return (find_spec("torchembed") is not None
+            and find_spec("triton") is not None)
 
 
 __all__ = [

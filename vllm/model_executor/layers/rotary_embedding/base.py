@@ -253,32 +253,27 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         positions = positions.flatten()
         num_tokens = positions.shape[0]
         cos_sin = self.cos_sin_cache.index_select(0, positions)
+        # c, s: (num_tokens, rotary_dim // 2) — passed as-is to the kernel,
+        # which flattens the leading head dims of q/k internally.
         c, s = cos_sin.chunk(2, dim=-1)
 
         q = query.view(num_tokens, -1, self.head_size)
         q_rot = q[..., :self.rotary_dim]
         q_pass = q[..., self.rotary_dim:]
-        num_qh = q.shape[1]
 
-        q_t = q_rot.transpose(0, 1).contiguous()
-        c_q = c.unsqueeze(0).expand(num_qh, -1, -1)
-        s_q = s.unsqueeze(0).expand(num_qh, -1, -1)
+        q_t = q_rot.transpose(0, 1).contiguous()  # (num_qh, num_tokens, rotary_dim)
 
         if key is not None:
             k = key.view(num_tokens, -1, self.head_size)
             k_rot = k[..., :self.rotary_dim]
             k_pass = k[..., self.rotary_dim:]
-            num_kvh = k.shape[1]
+            k_t = k_rot.transpose(0, 1).contiguous()  # (num_kvh, num_tokens, rotary_dim)
 
-            c_k = c.unsqueeze(0).expand(num_kvh, -1, -1)
-            s_k = s.unsqueeze(0).expand(num_kvh, -1, -1)
-            k_t = k_rot.transpose(0, 1).contiguous()
-
-            q_out_t, k_out_t = fused_rope_forward(q_t, k_t, c_q, s_k)
+            q_out_t, k_out_t = fused_rope_forward(q_t, k_t, c, s)
             k_out = k_out_t.transpose(0, 1).contiguous()
             key_out = torch.cat((k_out, k_pass), dim=-1).reshape(key.shape)
         else:
-            q_out_t, _ = fused_rope_forward(q_t, q_t, c_q, s_q)
+            q_out_t, _ = fused_rope_forward(q_t, q_t, c, s)
             key_out = None
 
         q_out = q_out_t.transpose(0, 1).contiguous()
