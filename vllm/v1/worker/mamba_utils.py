@@ -41,8 +41,10 @@ def _copy_mamba_state_block(
     # DS conv row metadata. Zero keeps the single-region copy path.
     state_dim_row_count_ptr,
     state_dim_row_stride_ptr,
+    tile_idx,
     COPY_BLOCK_SIZE: tl.constexpr,
     CONV_STATE_DIM_FIRST: tl.constexpr,
+    TEMPORAL_TILES: tl.constexpr,
 ):
     """Copy one (layer, state-type) mamba state block between block columns.
 
@@ -57,6 +59,13 @@ def _copy_mamba_state_block(
 
     The caller owns the decision logic (which columns, whether to copy); this
     device function only performs the byte copy for the given metadata slot.
+
+    ``tile_idx`` in ``[0, TEMPORAL_TILES)`` partitions the temporal state's
+    u64 range into ``TEMPORAL_TILES`` contiguous, COPY_BLOCK_SIZE-aligned
+    slices, giving more CTAs to fill the SMs at small batch (multi-MiB
+    temporal copies otherwise leave the GPU under-filled). Conv states are
+    small; only ``tile_idx == 0`` copies them. ``TEMPORAL_TILES == 1`` and
+    ``tile_idx == 0`` reproduces the untiled behavior.
     """
     state_base_addr = tl.load(state_base_addrs_ptr + state_idx)
     state_block_stride = tl.load(state_block_strides_ptr + state_idx)
@@ -81,6 +90,10 @@ def _copy_mamba_state_block(
     is_conv_state = conv_width > 0
 
     if CONV_STATE_DIM_FIRST and is_conv_state:
+        # Conv states are small; only tile 0 does the copy. Higher tiles
+        # early-return so they contribute nothing beyond a bounds check.
+        if tile_idx > 0:
+            return
         # DS conv layout: state_len is the slide axis; copy per dim row.
         src_block_id = tl.load(block_table_base + src_col).to(tl.int64)
         dim_rows = tl.load(state_dim_row_count_ptr + state_idx)
@@ -101,6 +114,8 @@ def _copy_mamba_state_block(
         return
 
     if is_conv_state:
+        if tile_idx > 0:
+            return
         # SD conv: copy
         #   state[bt[src_col], token_bias:] ->
         #   state[bt[dst_col], :conv_width - token_bias]
@@ -132,22 +147,40 @@ def _copy_mamba_state_block(
     # which is 8B-aligned for all state dtypes in use. A masked byte tail
     # covers any remaining 0-7 bytes (only reachable for sub-8B slices).
     copy_size_u64 = copy_size // 8
+
+    # Partition the u64 range into TEMPORAL_TILES contiguous, COPY_BLOCK_SIZE-
+    # aligned slices. Rounding per_tile up to COPY_BLOCK_SIZE keeps every
+    # inner-loop iteration full-width vectorized; only the last non-empty
+    # tile can be masked. Late tiles fall off the end (copy_size_u64 does
+    # not divide evenly by TEMPORAL_TILES) and early-return.
+    per_tile_u64_raw = tl.cdiv(copy_size_u64, TEMPORAL_TILES)
+    per_tile_u64 = tl.cdiv(per_tile_u64_raw, COPY_BLOCK_SIZE) * COPY_BLOCK_SIZE
+    tile_start = tile_idx.to(tl.int64) * per_tile_u64
+    tile_end = tl.minimum(tile_start + per_tile_u64, copy_size_u64)
+    if tile_start >= copy_size_u64:
+        return
+
     src_u64 = src_addr.to(tl.pointer_type(tl.uint64))
     dst_u64 = dst_addr.to(tl.pointer_type(tl.uint64))
     offsets = tl.arange(0, COPY_BLOCK_SIZE)
-    for i in range(0, copy_size_u64, COPY_BLOCK_SIZE):
-        mask = (i + offsets) < copy_size_u64
+    for i in range(tile_start, tile_end, COPY_BLOCK_SIZE):
+        mask = (i + offsets) < tile_end
         data = tl.load(src_u64 + i + offsets, mask=mask)
         tl.store(dst_u64 + i + offsets, data, mask=mask)
 
-    tail_start = copy_size_u64 * 8
-    tail_bytes = copy_size - tail_start
-    tail_off = tl.arange(0, 8)
-    tail_src = (src_addr + tail_start).to(tl.pointer_type(tl.uint8))
-    tail_dst = (dst_addr + tail_start).to(tl.pointer_type(tl.uint8))
-    tail_mask = tail_off < tail_bytes
-    tail_data = tl.load(tail_src + tail_off, mask=tail_mask)
-    tl.store(tail_dst + tail_off, tail_data, mask=tail_mask)
+    # 0-7 byte tail after the u64 body. copy_size is 8B-aligned for every
+    # state dtype in use, so this is a masked no-op today; kept for parity
+    # and for future sub-8B slices. Only tile 0 owns it to avoid duplicate
+    # stores when TEMPORAL_TILES > 1.
+    if tile_idx == 0:
+        tail_start = copy_size_u64 * 8
+        tail_bytes = copy_size - tail_start
+        tail_off = tl.arange(0, 8)
+        tail_src = (src_addr + tail_start).to(tl.pointer_type(tl.uint8))
+        tail_dst = (dst_addr + tail_start).to(tl.pointer_type(tl.uint8))
+        tail_mask = tail_off < tail_bytes
+        tail_data = tl.load(tail_src + tail_off, mask=tail_mask)
+        tl.store(tail_dst + tail_off, tail_data, mask=tail_mask)
 
 
 @triton.jit
@@ -194,14 +227,20 @@ def postprocess_mamba_fused_kernel(
     # PRECOMPUTED_NEW_COMPUTED: when True, num_computed_tokens_ptr already holds
     # the post-step new_num_computed value (V2 supplies the advanced count).
     PRECOMPUTED_NEW_COMPUTED: tl.constexpr = False,
+    # TEMPORAL_TILES: when > 1, the temporal copy body is partitioned across
+    # TEMPORAL_TILES CTAs along the u64 inner range. Callers must launch a
+    # 3D grid (num_reqs, total_states, TEMPORAL_TILES). Default 1 preserves
+    # the existing 2D-grid contract.
+    TEMPORAL_TILES: tl.constexpr = 1,
 ):
     """
     Fused GPU kernel for postprocess_mamba that computes decisions AND performs
     mamba state copies without any CPU-GPU synchronization.
 
-    Grid: (num_reqs, num_layers * num_state_types)
+    Grid: (num_reqs, num_layers * num_state_types [, TEMPORAL_TILES])
     - program_id(0) = request/batch index
     - program_id(1) = state_idx (flattened index into layer/state_type metadata)
+    - program_id(2) = temporal-copy tile index (0 when TEMPORAL_TILES == 1)
 
     Note: num_layers and num_state_types are not passed as kernel parameters
     because the kernel indexes directly into pre-flattened metadata arrays
@@ -209,6 +248,7 @@ def postprocess_mamba_fused_kernel(
     """
     batch_idx = tl.program_id(0)
     state_idx = tl.program_id(1)
+    tile_idx = tl.program_id(2)
 
     # Bounds check
     if batch_idx >= num_reqs:
@@ -248,7 +288,9 @@ def postprocess_mamba_fused_kernel(
 
     # Update accepted-token count before early exits (per-request, so only
     # state_idx == 0 writes). V2 updates in place; V1 writes the _out buffer.
-    if src_block_idx == dest_block_idx and state_idx == 0:
+    # Also guard on tile_idx == 0 so tiles > 0 (when TEMPORAL_TILES > 1) do
+    # not duplicate the store.
+    if src_block_idx == dest_block_idx and state_idx == 0 and tile_idx == 0:
         if HAS_IDX_MAPPING:
             tl.store(num_accepted_tokens_ptr + req_idx, 1)
         else:
@@ -275,8 +317,10 @@ def postprocess_mamba_fused_kernel(
         state_group_indices_ptr,
         state_dim_row_count_ptr,
         state_dim_row_stride_ptr,
+        tile_idx,
         COPY_BLOCK_SIZE,
         CONV_STATE_DIM_FIRST,
+        TEMPORAL_TILES,
     )
 
 
@@ -348,6 +392,9 @@ def precopy_mamba_align_fused_kernel(
     num_reqs,
     COPY_BLOCK_SIZE: tl.constexpr,
     CONV_STATE_DIM_FIRST: tl.constexpr,
+    # TEMPORAL_TILES: see postprocess_mamba_fused_kernel. Default 1 preserves
+    # the 2D-grid contract; > 1 requires a 3D grid.
+    TEMPORAL_TILES: tl.constexpr = 1,
 ):
     """Pre-copy mamba "align" state across block boundaries on the V2 runner.
 
@@ -359,11 +406,13 @@ def precopy_mamba_align_fused_kernel(
     copy specs), but driven by the GPU-resident src columns so it needs no
     CPU-GPU sync (async-scheduling safe).
 
-    Grid: (num_reqs, num_layers * num_state_types); block tables are indexed by
-    batch row, per-request state by req_idx via idx_mapping (V2 layout).
+    Grid: (num_reqs, num_layers * num_state_types [, TEMPORAL_TILES]); block
+    tables are indexed by batch row, per-request state by req_idx via
+    idx_mapping (V2 layout).
     """
     batch_idx = tl.program_id(0)
     state_idx = tl.program_id(1)
+    tile_idx = tl.program_id(2)
     if batch_idx >= num_reqs:
         return
     req_idx = tl.load(idx_mapping_ptr + batch_idx)
@@ -395,8 +444,10 @@ def precopy_mamba_align_fused_kernel(
         state_group_indices_ptr,
         state_dim_row_count_ptr,
         state_dim_row_stride_ptr,
+        tile_idx,
         COPY_BLOCK_SIZE,
         CONV_STATE_DIM_FIRST,
+        TEMPORAL_TILES,
     )
 
 
