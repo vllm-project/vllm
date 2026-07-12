@@ -561,12 +561,20 @@ class Base(
             layer_num_kv_heads = num_kv_heads
             for m in self.model.modules():
                 if getattr(m, "layer_idx", None) == i:
-                    h_heads = getattr(m, "num_heads", None) or getattr(m, "num_attention_heads", None)
-                    h_kv = getattr(m, "num_kv_heads", None) or getattr(m, "num_key_value_heads", None)
+                    h_heads = getattr(m, "num_heads", None) or getattr(
+                        m, "num_attention_heads", None
+                    )
+                    h_kv = getattr(m, "num_kv_heads", None) or getattr(
+                        m, "num_key_value_heads", None
+                    )
                     if h_heads is not None:
-                        layer_num_heads = h_heads // self.parallel_config.tensor_parallel_size
+                        layer_num_heads = (
+                            h_heads // self.parallel_config.tensor_parallel_size
+                        )
                     if h_kv is not None:
-                        layer_num_kv_heads = max(1, h_kv // self.parallel_config.tensor_parallel_size)
+                        layer_num_kv_heads = max(
+                            1, h_kv // self.parallel_config.tensor_parallel_size
+                        )
                     break
 
             attn_cls = (

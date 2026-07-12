@@ -272,8 +272,10 @@ def test_pooling(hf_runner, vllm_runner, example_prompts, arch):
 
 def test_heterogeneous_attention():
     from unittest.mock import MagicMock
+
     import torch
     from torch import nn
+
     from vllm.config.vllm import set_current_vllm_config
     from vllm.model_executor.models.transformers.base import Base
 
@@ -291,7 +293,7 @@ def test_heterogeneous_attention():
 
     layers = [
         MockAttentionModule(layer_idx=0, num_heads=16, num_kv_heads=4),
-        MockAttentionModule(layer_idx=1, num_heads=32, num_kv_heads=8)
+        MockAttentionModule(layer_idx=1, num_heads=32, num_kv_heads=8),
     ]
     mock_hf_model = MockModel(layers)
 
@@ -352,4 +354,3 @@ def test_heterogeneous_attention():
     assert layer_0_attn.num_kv_heads == 2
     assert layer_1_attn.num_heads == 16
     assert layer_1_attn.num_kv_heads == 4
-
