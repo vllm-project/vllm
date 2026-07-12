@@ -15,7 +15,6 @@ from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
-    StructuredOutputOptions,
 )
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 
@@ -368,7 +367,9 @@ class StructuredOutputManager:
             return request.structured_output_request.reasoning_ended
         return True
 
-    def should_advance(self, request: "Request") -> bool:
+    def should_advance(
+        self, request: "Request", new_token_ids: Sequence[int] | None = None
+    ) -> bool:
         if not request.use_structured_output:
             return False
 
@@ -391,33 +392,38 @@ class StructuredOutputManager:
         if structured_req.reasoning_ended:
             return True
 
-        # Check if reasoning ends in *this* step
-        delta_from = request.num_computed_tokens - request.num_output_placeholders
+        # Check if reasoning ends in *this* step. Prefer the caller's actual
+        # new_token_ids over reconstructing the step window from scheduler
+        # counters: with speculative decoding, num_computed_tokens is already
+        # advanced past the accepted draft tokens when this runs, so the
+        # counter-derived window can miss the reasoning-end marker.
         all_token_ids = request.all_token_ids
-        start = (
-            delta_from if delta_from >= 0 else max(len(all_token_ids) + delta_from, 0)
-        )
-        if reasoner.is_reasoning_end_streaming(
-            all_token_ids, itertools.islice(all_token_ids, start, None)
-        ):
+        if new_token_ids is not None:
+            start = max(len(all_token_ids) - len(new_token_ids), 0)
+            delta: Iterable[int] = new_token_ids
+        else:
+            delta_from = request.num_computed_tokens - request.num_output_placeholders
+            start = (
+                delta_from
+                if delta_from >= 0
+                else max(len(all_token_ids) + delta_from, 0)
+            )
+            delta = itertools.islice(all_token_ids, start, None)
+        if reasoner.is_reasoning_end_streaming(all_token_ids, delta):
             structured_req.reasoning_ended = True
 
-            # Reasoning just ended this step. Defer FSM advance until the next
-            # pass (see reasoning_ended check above) for JSON/regex/choice/grammar:
-            # advancing on the closing boundary token can accept tokens that still
-            # belong to the reasoning stream. Structural tags are the only safe
-            # same-step exception: they model phased output (e.g. thinking tag ->
-            # answer tag), and speculative decoding must run grammar.validate_tokens
-            # on draft tokens produced immediately after that transition.
-            if (
-                self.vllm_config.speculative_config is not None
-                and structured_req.structured_output_key[0]
-                == StructuredOutputOptions.STRUCTURAL_TAG
-            ):
-                # The scheduler will advance the grammar with this step's
-                # tokens right away, but the step still contains reasoning
-                # content up to and including the end marker. Record where
-                # it ends so trim_reasoning_for_advance() can drop it.
+            # Reasoning just ended this step. Without speculative decoding the
+            # boundary step ends at the marker, so deferring the FSM advance to
+            # the next pass (see reasoning_ended check above) is safe. With
+            # speculative decoding the same step can already contain accepted
+            # post-marker content (e.g. a drafted "{" verified right after the
+            # end marker); deferring would leave the grammar permanently one
+            # token behind the sampled stream, and the next bitmask would then
+            # force a duplicate of a token the model already emitted. Advance
+            # same-step for every structured type: trim_reasoning_for_advance()
+            # drops everything up to and including the marker, so the grammar
+            # never sees reasoning content.
+            if self.vllm_config.speculative_config is not None:
                 structured_req.reasoning_end_token_index = (
                     self._find_reasoning_end_index(reasoner, all_token_ids, start)
                 )

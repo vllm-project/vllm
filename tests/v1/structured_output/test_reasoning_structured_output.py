@@ -241,6 +241,116 @@ class TestReasoningStructuredOutput:
         assert structured_req.reasoning_ended is True
         assert result is True
 
+    def test_should_advance_reasoning_just_ended_with_spec_decode_json(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """When reasoning ends this step under speculative decoding, advance
+        immediately for every structured type, not just structural tags: the
+        step may already contain accepted post-marker content, and deferring
+        leaves the grammar one token behind the sampled stream (#48228)."""
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+        structured_req.structured_output_key = (
+            StructuredOutputOptions.JSON,
+            '{"type": "object"}',
+        )
+        reasoner = MockReasoner(tokenizer=Mock())
+        reasoner.is_reasoning_end_streaming.return_value = True
+        structured_req.reasoner = reasoner
+
+        manager_with_reasoner.vllm_config.speculative_config = Mock()
+
+        result = manager_with_reasoner.should_advance(
+            mock_request_with_structured_output
+        )
+
+        assert structured_req.reasoning_ended is True
+        assert result is True
+        assert isinstance(structured_req.reasoning_end_token_index, int)
+
+    def test_should_advance_detects_end_from_new_token_ids(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """new_token_ids is the authoritative step delta: with speculative
+        decoding, num_computed_tokens is pre-incremented past accepted draft
+        tokens, so the counter-derived window misses the end marker (#34650)."""
+        end_token_id, content_token_id = 42, 99
+        request = mock_request_with_structured_output
+        structured_req = request.structured_output_request
+        structured_req.reasoning_ended = False
+        reasoner = MockReasoner(tokenizer=Mock())
+        reasoner.is_reasoning_end_streaming.side_effect = (
+            lambda input_ids, delta_ids: end_token_id in list(delta_ids)
+        )
+        structured_req.reasoner = reasoner
+
+        request.all_token_ids = request.prompt_token_ids + [
+            7,
+            end_token_id,
+            content_token_id,
+        ]
+        # Spec decode pre-incremented past the accepted tokens: the
+        # counter-derived window all_token_ids[num_computed_tokens:] is empty.
+        request.num_computed_tokens = len(request.all_token_ids)
+        request.num_output_placeholders = 0
+
+        # The counter fallback misses the marker...
+        assert manager_with_reasoner.should_advance(request) is False
+        assert structured_req.reasoning_ended is False
+
+        # ...the explicit step delta does not (no spec config here, so the
+        # advance itself is still deferred to the next step).
+        result = manager_with_reasoner.should_advance(
+            request, [end_token_id, content_token_id]
+        )
+        assert structured_req.reasoning_ended is True
+        assert result is False
+
+    def test_should_advance_straddle_step_trims_and_advances_same_step(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """A speculative step accepting [</think>, "{"] must advance the
+        grammar with exactly the post-marker content in the same step;
+        otherwise the next bitmask is computed from the un-advanced grammar
+        and re-forces the content token, doubling it in the output (#48228)."""
+        end_token_id, content_token_id = 42, 99
+        request = mock_request_with_structured_output
+        structured_req = request.structured_output_request
+        structured_req.reasoning_ended = False
+        structured_req.structured_output_key = (
+            StructuredOutputOptions.JSON,
+            '{"type": "object"}',
+        )
+        reasoner = MockReasoner(tokenizer=Mock())
+        reasoner.is_reasoning_end_streaming.side_effect = (
+            lambda input_ids, delta_ids: end_token_id in list(delta_ids)
+        )
+        structured_req.reasoner = reasoner
+        manager_with_reasoner.vllm_config.speculative_config = Mock()
+
+        new_token_ids = [end_token_id, content_token_id]
+        request.all_token_ids = request.prompt_token_ids + [
+            7,
+            end_token_id,
+            content_token_id,
+        ]
+        request.num_computed_tokens = len(request.all_token_ids)
+        request.num_output_placeholders = 0
+
+        assert manager_with_reasoner.should_advance(request, new_token_ids) is True
+        assert structured_req.reasoning_end_token_index == (
+            len(request.all_token_ids) - 2
+        )
+        assert manager_with_reasoner.trim_reasoning_for_advance(
+            request, new_token_ids
+        ) == [content_token_id]
+
     def test_should_advance_reasoning_already_ended(
         self,
         manager_with_reasoner,
