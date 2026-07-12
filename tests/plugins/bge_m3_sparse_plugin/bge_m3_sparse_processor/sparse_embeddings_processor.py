@@ -3,9 +3,8 @@
 
 from collections.abc import Sequence
 
-from vllm.config import ModelConfig, PoolerConfig, VllmConfig
+from vllm.config import PoolerConfig, VllmConfig
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
-from vllm.entrypoints.pooling.base.protocol import EmbedRequestMixin
 from vllm.inputs import PromptType
 from vllm.outputs import PoolingRequestOutput
 from vllm.plugins.io_processors.interface import IOProcessor
@@ -14,7 +13,6 @@ from vllm.renderers import BaseRenderer
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 
 from .types import (
-    EMBED_TASKS,
     SparseEmbeddingCompletionRequestMixin,
     SparseEmbeddingResponse,
     SparseEmbeddingResponseData,
@@ -38,7 +36,6 @@ class BgeM3SparseEmbeddingsProcessor(
                     continue
                 self.default_pooling_params[param] = getattr(pooler_config, param)
         self.embed_dimensions = vllm_config.model_config.embedding_size
-        self.embed_request_queue: list[EmbedRequestMixin] = []
 
     def __repr__(self) -> str:
         return (
@@ -56,44 +53,9 @@ class BgeM3SparseEmbeddingsProcessor(
         # refer to PoolingCompletionRequest.to_pooling_params
         # set and verify pooling params
         params.skip_reading_prefix_cache = True
-
-        raw_embed_request = self.embed_request_queue.pop(0)
-        if raw_embed_request.embed_task not in EMBED_TASKS:
-            raise ValueError(
-                f"Unsupported task {raw_embed_request}, "
-                f"Supported tasks are {EMBED_TASKS}"
-            )
         params.task = "embed&token_classify"
-        params.use_activation = raw_embed_request.use_activation
-        if params.use_activation is None:
-            params.use_activation = True
-
-        params.dimensions = raw_embed_request.dimensions
-
-        model_config: ModelConfig = self.vllm_config.model_config
-        for param in self.default_pooling_params:
-            if getattr(params, param, None) is None:
-                setattr(params, param, self.default_pooling_params[param])
-
-        if params.dimensions is not None:
-            if not model_config.is_matryoshka:
-                raise ValueError(
-                    f'Model "{model_config.served_model_name}" does not '
-                    f"support matryoshka representation, "
-                    f"changing output dimensions will lead to poor results."
-                )
-
-            mds = model_config.matryoshka_dimensions
-            if mds is not None:
-                if params.dimensions not in mds:
-                    raise ValueError(
-                        f"Model {model_config.served_model_name!r} "
-                        f"only supports {str(mds)} matryoshka dimensions, "
-                        f"use other output dimensions will "
-                        f"lead to poor results."
-                    )
-            elif params.dimensions < 1:
-                raise ValueError("Dimensions must be greater than 0")
+        params.use_activation = True
+        params.dimensions = self.embed_dimensions
         return params
 
     def parse_request(
@@ -113,10 +75,8 @@ class BgeM3SparseEmbeddingsProcessor(
         if request_id is not None:
             assert request_id not in self.online_requests, "request_id duplicated"
             self.online_requests[request_id] = prompt
-            self.embed_request_queue.extend(prompt.to_embed_requests_online())
         else:
             self.offline_requests.append(prompt)
-            self.embed_request_queue.extend(prompt.to_embed_requests_offline())
         return prompt.input
 
     def _get_sparse_embedding_request(self, request_id: str | None = None):
@@ -157,11 +117,7 @@ class BgeM3SparseEmbeddingsProcessor(
         raw_request = self._get_sparse_embedding_request(request_id)
         has_dense_embed = raw_request.embed_task in ["dense", "dense&sparse"]
         has_sparse_embed = raw_request.embed_task in ["sparse", "dense&sparse"]
-        embed_dimensions = (
-            self.embed_dimensions
-            if raw_request.dimensions is None
-            else raw_request.dimensions
-        )
+        embed_dimensions = self.embed_dimensions
         for idx in range(len(model_output)):
             mo = model_output[idx]
             sparse_embedding_dict: dict[int, float] = {}
