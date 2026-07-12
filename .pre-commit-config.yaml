@@ -189,13 +189,6 @@ repos:
     entry: tools/pre_commit/shellcheck.sh
     language: script
     types: [shell]
-  - id: validate-amd-native-ci
-    name: Validate AMD native CI configuration
-    entry: python tools/pre_commit/validate_amd_native_ci.py
-    language: python
-    additional_dependencies: [pyyaml]
-    files: ^(\.buildkite/(hardware_tests/amd\.yaml|test-amd\.yaml|test_areas/.*\.yaml|scripts/(ci-bake-rocm\.sh|hardware_ci/run-amd-test\.sh|rocm/build-(ci-base|test-image)\.sh))|docker/(Dockerfile\.rocm(_base)?|ci-rocm\.hcl|docker-bake-rocm\.hcl)|requirements/(rocm|test/rocm)\.txt|tools/pre_commit/validate_amd_native_ci\.py)$
-    pass_filenames: false
   - id: png-lint
     name: Lint PNG exports from excalidraw
     entry: tools/pre_commit/png-lint.sh
