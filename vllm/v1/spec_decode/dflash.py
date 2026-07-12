@@ -307,3 +307,73 @@ class DFlashProposer(SpecDecodeBaseProposer):
     @property
     def dflash_config(self):
         return getattr(self.draft_model_config.hf_config, "dflash_config", None) or {}
+
+    @override
+    def dry_run_helper_kernels(self) -> None:
+        # Base warms the two padded-batch helper kernels shared with Eagle.
+        super().dry_run_helper_kernels()
+
+        # ``self.block_size`` is set by ``initialize_attn_backend`` which
+        # runs before ``_warmup_spec_decode_helpers``; guard for completeness
+        # in case this is invoked from a code path that skipped backend init.
+        if self.block_size <= 0:
+            return
+
+        device = self.device
+        num_reqs = 1
+        num_query_per_req = 1 + self.num_speculative_tokens
+        # Match the production sizing in ``set_inputs_first_pass`` (line 124):
+        # ``max_ctx_per_req = cad.max_query_len`` is 1 for the first request
+        # after server start (no prior context). Using a larger value here
+        # would pick a different ``next_power_of_2`` bucket for ``BLOCK_SIZE``
+        # and miss the production JIT cache entry.
+        num_context = 1
+        max_tokens_per_req = num_context + num_query_per_req
+        # ``min(256, ...)`` mirrors the cap in production so we land on the
+        # same JIT cache entry as the first real request.
+        block_size_kernel = min(256, next_power_of_2(max_tokens_per_req))
+        num_blocks_grid = (
+            max_tokens_per_req + block_size_kernel - 1
+        ) // block_size_kernel
+        grid = (num_reqs, num_blocks_grid)
+
+        n_blocks_per_req = (self.max_model_len + self.block_size - 1) // self.block_size
+
+        next_token_ids = torch.zeros(num_reqs, dtype=torch.int32, device=device)
+        target_positions = torch.zeros(num_context, dtype=torch.int64, device=device)
+        token_indices = torch.empty(
+            num_reqs * self.num_speculative_tokens, dtype=torch.int32, device=device
+        )
+        block_table = torch.zeros(
+            (num_reqs, n_blocks_per_req), dtype=torch.int32, device=device
+        )
+        query_start_loc = torch.zeros(num_reqs + 1, dtype=torch.int32, device=device)
+        query_start_loc[1] = num_context
+        num_rejected = torch.zeros(num_reqs, dtype=torch.int32, device=device)
+
+        # ``HAS_NUM_REJECTED`` is the second ``tl.constexpr`` arg, so we
+        # JIT both variants here -- the first prefill request typically
+        # uses False (no prior step), but the first decode-after-rejection
+        # would otherwise hit a fresh JIT.
+        for has_rejected in (False, True):
+            copy_and_expand_dflash_inputs_kernel[grid](
+                next_token_ids_ptr=next_token_ids,
+                target_positions_ptr=target_positions,
+                out_input_ids_ptr=self.input_ids,
+                out_context_positions_ptr=self._context_positions_buffer,
+                out_query_positions_ptr=self.positions,
+                out_context_slot_mapping_ptr=self._context_slot_mapping_buffer,
+                out_query_slot_mapping_ptr=self._slot_mapping_buffer,
+                out_token_indices_ptr=token_indices,
+                block_table_ptr=block_table,
+                block_table_stride=block_table.stride(0),
+                query_start_loc_ptr=query_start_loc,
+                num_rejected_tokens_ptr=num_rejected if has_rejected else 0,
+                parallel_drafting_token_id=self.parallel_drafting_token_id,
+                block_size=self.block_size,
+                num_query_per_req=num_query_per_req,
+                num_speculative_tokens=self.num_speculative_tokens,
+                total_input_tokens=num_context,
+                BLOCK_SIZE=block_size_kernel,
+                HAS_NUM_REJECTED=has_rejected,
+            )
