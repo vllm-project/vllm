@@ -5,6 +5,7 @@ from threading import Lock
 import pytest
 import torch
 
+import vllm.lora.ops.torch_ops as torch_ops
 import vllm.lora.ops.triton_ops as triton_ops
 from vllm.lora.ops.triton_ops import LoRAKernelMeta
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
@@ -636,3 +637,43 @@ def test_add_lora_fused_moe_early_exit(device):
     assert torch.equal(y, y_snapshot), (
         "add_lora_fused_moe modified output tensor despite no_lora_flag_cpu=True"
     )
+
+
+def test_torch_ops_bgmv_skips_no_lora_tokens():
+    """The CPU torch bgmv ops must apply no delta to tokens with index -1.
+
+    ``token_lora_indices`` uses -1 to mark "no LoRA" (PunicaWrapperBase); the
+    triton kernels early-exit on ``lora_id == -1``. The torch reference indexed
+    ``lora_weights[-1]`` instead, applying the last stacked adapter to
+    base-model tokens in a mixed batch. Fixing bgmv also fixes sgmv, which
+    delegates to it.
+    """
+    torch.manual_seed(0)
+    num_loras, in_dim, rank, out_dim = 2, 8, 4, 6
+    # token 0 uses LoRA 0; token 1 is a base-model token (no LoRA).
+    lora_indices = torch.tensor([0, -1], dtype=torch.long)
+
+    # shrink: [T, in] x [L, rank, in] -> [T, rank]
+    x = torch.randn(2, in_dim)
+    a = torch.randn(num_loras, rank, in_dim)
+    y = torch.zeros(2, rank)
+    torch_ops.bgmv_shrink(x, a, y, lora_indices, scaling=1.0)
+    assert torch.count_nonzero(y[1]) == 0
+    torch.testing.assert_close(y[0], x[0] @ a[0].T)
+
+    # expand (add): [T, rank] x [L, out, rank] -> [T, out]
+    xe = torch.randn(2, rank)
+    b = torch.randn(num_loras, out_dim, rank)
+    ye = torch.zeros(2, out_dim)
+    torch_ops.bgmv_expand(xe, b, ye, lora_indices, add_inputs=True)
+    assert torch.count_nonzero(ye[1]) == 0
+    torch.testing.assert_close(ye[0], xe[0] @ b[0].T)
+
+    # expand_slice (add into a column slice): [T, rank] x [L, slice, rank]
+    offset = 3
+    ys = torch.zeros(2, out_dim + offset)
+    torch_ops.bgmv_expand_slice(
+        xe, b, ys, lora_indices, offset, out_dim, add_inputs=True
+    )
+    assert torch.count_nonzero(ys[1]) == 0
+    torch.testing.assert_close(ys[0, offset : offset + out_dim], xe[0] @ b[0].T)
