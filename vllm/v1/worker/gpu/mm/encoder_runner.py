@@ -8,7 +8,6 @@ from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_r
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.utils import get_mm_features_in_window, group_and_batch_mm_kwargs
-from vllm.v1.worker.gpu.mm.encoder_budget import EncoderProfileInputFactory
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
 
@@ -56,7 +55,7 @@ class EncoderRunner:
     @torch.inference_mode()
     def profile_encoder_cache(
         self,
-        get_dummy_inputs: EncoderProfileInputFactory,
+        dummy_mm_inputs: list[tuple[str, MultiModalKwargsItem]],
         budget: MultiModalBudget,
     ) -> None:
         """Profile multimodal encoder and temporary encoder cache memory."""
@@ -70,8 +69,9 @@ class EncoderRunner:
             )
             return
 
-        dummy_modality = budget.get_modality_with_max_tokens()
-        max_mm_items_per_batch = budget.mm_max_items_per_batch[dummy_modality]
+        assert dummy_mm_inputs, "Dummy inputs should be generated for encoder profiling"
+        dummy_modality = dummy_mm_inputs[0][0]
+        max_mm_items_per_batch = len(dummy_mm_inputs)
 
         logger.info_once(
             "Encoder cache will be initialized with a budget of %s tokens, "
@@ -81,10 +81,6 @@ class EncoderRunner:
             dummy_modality,
         )
 
-        dummy_mm_inputs = get_dummy_inputs(
-            dummy_modality,
-            max_mm_items_per_batch,
-        )
         dummy_encoder_outputs = self.execute_mm_encoder(dummy_mm_inputs)
 
         sanity_check_mm_encoder_outputs(

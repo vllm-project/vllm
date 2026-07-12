@@ -4,6 +4,7 @@ from collections.abc import Mapping
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.logger import init_logger
+from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.registry import MultiModalRegistry
 from vllm.utils.torch_utils import set_default_torch_num_threads
@@ -197,3 +198,23 @@ class MultiModalBudget:
     def reset_cache(self) -> None:
         if self.cache is not None:
             self.cache.clear_cache()
+
+
+def get_dummy_encoder_profile_inputs(
+    mm_registry: MultiModalRegistry,
+    budget: MultiModalBudget,
+) -> list[tuple[str, MultiModalKwargsItem]]:
+    if budget.get_encoder_budget() <= 0 or not budget.mm_max_toks_per_item:
+        return []
+
+    modality = budget.get_modality_with_max_tokens()
+    max_items_per_batch = budget.mm_max_items_per_batch[modality]
+    dummy_mm_inputs = mm_registry.get_dummy_mm_inputs(
+        budget.model_config,
+        mm_counts={modality: 1},
+        processor=budget.processor,
+    )
+    dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
+    assert dummy_mm_item is not None, "Dummy item should be generated"
+
+    return [(modality, dummy_mm_item)] * max_items_per_batch
