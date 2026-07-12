@@ -397,14 +397,19 @@ def marlin_moe_intermediate_size(w1_packed: torch.Tensor, w2_packed: torch.Tenso
 
 
 def marlin_make_workspace_new(
-    device: torch.device, max_blocks_per_sm: int = 1
+    device: torch.device,
+    max_blocks_per_sm: int = 1,
+    existing: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # In the new marlin kernel, we use the num of threadblocks as workspace
     # size. The num of threadblocks is sms_count * max_blocks_per_sm.
     sms = num_compute_units(device.index)
-    return torch.zeros(
-        sms * max_blocks_per_sm, dtype=torch.int, device=device, requires_grad=False
-    )
+    size = sms * max_blocks_per_sm
+    # On weight reload, reuse compatible storage so the workspace address
+    # captured by CUDA graphs stays valid.
+    if existing is not None and existing.device == device and existing.numel() == size:
+        return existing.zero_()
+    return torch.zeros(size, dtype=torch.int, device=device, requires_grad=False)
 
 
 def marlin_is_k_full(act_order: bool, is_row_parallel: bool) -> bool:

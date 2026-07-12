@@ -146,6 +146,100 @@ def test_materialize_layer_preserves_non_meta_tensors():
     assert torch.equal(layer.bias.data, bias_values)
 
 
+def test_marlin_post_load_preserves_runtime_tensor_addresses(monkeypatch, dist_init):
+    """Marlin workspace and act-order sort indices must be recomputed into
+    the same storage when weights are reloaded (RL weight sync), so device
+    addresses captured by CUDA graphs remain valid."""
+    from vllm import _custom_ops as ops
+    from vllm.model_executor.kernels.linear.mixed_precision.marlin import (
+        MarlinLinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
+        MPLinearLayerConfig,
+    )
+    from vllm.model_executor.layers.quantization.utils import marlin_utils
+    from vllm.model_executor.parameter import (
+        GroupQuantScaleParameter,
+        PackedvLLMParameter,
+        RowvLLMParameter,
+    )
+    from vllm.scalar_type import scalar_types
+
+    size_k, size_n, group_size = 128, 64, 64
+
+    monkeypatch.setattr(marlin_utils, "num_compute_units", lambda _: 4)
+    monkeypatch.setattr(
+        ops,
+        "gptq_marlin_repack",
+        lambda w, perm, size_k, size_n, num_bits, is_a_8bit=False: torch.zeros(
+            size_k // 16, size_n * 2, dtype=torch.int32
+        ),
+    )
+
+    def load_checkpoint_format_weights(layer, g_idx):
+        layer.qweight = PackedvLLMParameter(
+            data=torch.zeros(size_k // 8, size_n, dtype=torch.int32),
+            input_dim=0,
+            output_dim=1,
+            packed_dim=0,
+            packed_factor=8,
+            weight_loader=default_weight_loader,
+        )
+        layer.scales = GroupQuantScaleParameter(
+            data=torch.ones(size_k // group_size, size_n, dtype=torch.float16),
+            input_dim=0,
+            output_dim=1,
+            weight_loader=default_weight_loader,
+        )
+        layer.g_idx = RowvLLMParameter(
+            data=g_idx.clone(),
+            input_dim=0,
+            weight_loader=default_weight_loader,
+        )
+
+    kernel = object.__new__(MarlinLinearKernel)
+    kernel.config = MPLinearLayerConfig(
+        full_weight_shape=(size_k, size_n),
+        partition_weight_shape=(size_k, size_n),
+        weight_type=scalar_types.uint4b8,
+        act_type=torch.float16,
+        group_size=group_size,
+        zero_points=False,
+        has_g_idx=True,
+    )
+    kernel.w_q_name = "qweight"
+    kernel.w_s_name = "scales"
+    kernel.w_zp_name = None
+    kernel.w_gidx_name = "g_idx"
+
+    generator = torch.Generator().manual_seed(0)
+    first_g_idx = torch.randint(
+        0, size_k // group_size, (size_k,), dtype=torch.int32, generator=generator
+    )
+    second_g_idx = torch.randint(
+        0, size_k // group_size, (size_k,), dtype=torch.int32, generator=generator
+    )
+
+    layer = torch.nn.Module()
+    load_checkpoint_format_weights(layer, first_g_idx)
+    kernel.process_weights_after_loading(layer)
+
+    workspace_ptr = kernel.workspace.data_ptr()
+    sort_indices_ptr = layer.g_idx_sort_indices.data_ptr()
+
+    # Reload: fresh checkpoint-format tensors with a different act-order
+    load_checkpoint_format_weights(layer, second_g_idx)
+    kernel.process_weights_after_loading(layer)
+
+    assert kernel.workspace.data_ptr() == workspace_ptr
+    assert torch.all(kernel.workspace == 0)
+    assert layer.g_idx_sort_indices.data_ptr() == sort_indices_ptr
+    expected_sort_indices = marlin_utils.marlin_sort_g_idx(second_g_idx)[1]
+    assert torch.equal(layer.g_idx_sort_indices.data, expected_sort_indices)
+    # registered as a Parameter so layerwise reload copy-back preserves it
+    assert isinstance(layer.g_idx_sort_indices, torch.nn.Parameter)
+
+
 def test_model_cleanup(dist_init, default_vllm_config):
     layer = QKVParallelLinear(2, 3, 4)
     assert layer.weight.weight_loader.__self__ is layer
