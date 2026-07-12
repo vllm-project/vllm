@@ -805,19 +805,24 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         block_id_list: list[int] = []
         for g_idx, db in enumerate(self.token_databases):
             mask = load_mask_per_group[g_idx]
+            chunks: list[tuple[int, int]] = []
             for start, end, block_hash in db.process_tokens(
                 token_len, req_meta.block_hashes, mask_num
             ):
                 chunk_idx = start // db.block_size
                 if chunk_idx >= len(mask) or not mask[chunk_idx]:
                     continue
-                addr, size, block_id = db.prepare_value(
-                    start, end, req_meta.block_ids[g_idx]
-                )
                 key_list.append(db.key_for(block_hash))
-                addr_list.append(addr)
-                size_list.append(size)
-                block_id_list.append(block_id)
+                chunks.append((start, end))
+            # Vectorized: one prepare_values call per group instead of a
+            # Python loop per chunk (~35 ms GIL-held for a 289K-token
+            # request), which serialized the receive-thread pool.
+            g_addrs, g_sizes, g_block_ids = db.prepare_values(
+                chunks, req_meta.block_ids[g_idx]
+            )
+            addr_list.extend(g_addrs)
+            size_list.extend(g_sizes)
+            block_id_list.extend(g_block_ids)
 
         # Rotate aligned lists by tp_rank for load balancing.
         rotation = self.tp_rank % len(key_list)
