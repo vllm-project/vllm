@@ -235,18 +235,28 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         query: torch.Tensor,
         key: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Apply RoPE via the torchembed fused triton kernel.
+        """Apply RoPE via the torchembed fused Triton kernel.
 
-        The kernel expects a ``(batch, seq_len, dim)`` layout where
-        ``seq_len`` is the second-to-last dimension.  vLLM's intermediate
-        layout is ``(num_tokens, num_heads, dim)``, so we transpose
-        to ``(num_heads, num_tokens, dim)`` before calling the kernel
-        and transpose back afterwards.
+        The kernel expects ``(..., seq_len, dim)`` layout (seq second-to-last).
+        vLLM's packed-token layout is ``(num_tokens, num_heads * head_dim)``,
+        so we reshape to ``(num_heads, num_tokens, dim)`` with two contiguous
+        transpose copies before and after the kernel call.
 
-        .. note::
-            The two transposes copy the tensor.  A future version of the
-            kernel could accept an arbitrary stride layout and avoid this
-            overhead entirely.
+        **Performance note (GB10 GPU, GQA 32Q/8KV, float16):**
+
+        =========  =============  ============  =========
+        S tokens   vLLM C++ (ms)  Triton (ms)   ratio
+        =========  =============  ============  =========
+            512         0.013        0.106       0.12×
+           2048         0.115        0.586       0.20×
+           8192         0.690        2.420       0.28×
+          16384         1.402        4.763       0.29×
+        =========  =============  ============  =========
+
+        In standard inference the built-in C++ kernel is faster because it
+        operates in-place on the native packed layout.  torchembed wins in
+        training or (batch, heads, seq, dim) contexts where no copies are
+        needed.  Enable via ``VLLM_USE_TORCHEMBED=1``.
         """
         from torchembed._triton import fused_rope_forward
 

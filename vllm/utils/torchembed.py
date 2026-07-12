@@ -15,7 +15,16 @@ logger = init_logger(__name__)
 
 @functools.cache
 def is_torchembed_available() -> bool:
-    """Return `True` if torchembed and triton are both available."""
+    """Return True if torchembed+triton are installed AND VLLM_USE_TORCHEMBED=1.
+
+    The torchembed Triton kernel is opt-in because in vLLM's packed-token
+    inference layout the built-in CUDA kernel is typically faster (in-place,
+    no format-conversion copies needed).  Set the env variable explicitly to
+    benchmark or to use torchembed when the native C++ ops are unavailable.
+    """
+    from vllm import envs
+    if not envs.VLLM_USE_TORCHEMBED:
+        return False
     return (find_spec("torchembed") is not None
             and find_spec("triton") is not None)
 
