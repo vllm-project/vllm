@@ -9,7 +9,14 @@ offload cache, resets the GPU prefix cache, then repeatedly runs the same
 prompts so subsequent batches should load prompt KV from CPU.
 
 Example:
-    python benchmarks/benchmark_cpu_offload_stress.py +        --model facebook/opt-125m +        --num-requests 8 +        --num-batches 5 +        --prompt-repeats 512 +        --max-num-seqs 2 +        --max-num-batched-tokens 1024 +        --stall-timeout-s 120
+    python benchmarks/benchmark_cpu_offload_stress.py \
+        --model facebook/opt-125m \
+        --num-requests 8 \
+        --num-batches 5 \
+        --prompt-repeats 512 \
+        --max-num-seqs 2 \
+        --max-num-batched-tokens 1024 \
+        --stall-timeout-s 120
 """
 
 from __future__ import annotations
@@ -37,7 +44,7 @@ class GenerateTimeoutError(TimeoutError):
 
 @contextmanager
 def alarm_timeout(seconds: float):
-    if seconds <= 0:
+    if seconds <= 0 or not hasattr(signal, "SIGALRM"):
         yield
         return
 
@@ -93,8 +100,6 @@ def build_prompts(num_requests: int, prompt_repeats: int) -> list[str]:
         prompts.append(f"{prefix} Request {idx}. Please answer with one short token.")
 
     return prompts
-
-
 
 
 def output_texts(outputs: list[Any]) -> list[str]:
@@ -208,7 +213,7 @@ def main() -> int:
         cold_outputs, cold_s = run_timed(
             "cold_populate",
             args.stall_timeout_s,
-            lambda: llm.generate(prompts, sampling_params, use_tqdm=False),
+            lambda llm=llm: llm.generate(prompts, sampling_params, use_tqdm=False),
         )
         expected = output_texts(cold_outputs)
         print(
@@ -236,7 +241,7 @@ def main() -> int:
             outputs, elapsed_s = run_timed(
                 f"cpu_hit_batch_{batch_idx}",
                 args.stall_timeout_s,
-                lambda: llm.generate(prompts, sampling_params, use_tqdm=False),
+                lambda llm=llm: llm.generate(prompts, sampling_params, use_tqdm=False),
             )
             actual = output_texts(outputs)
             if actual != expected:
