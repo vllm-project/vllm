@@ -134,13 +134,21 @@ steps:
   commands:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100.txt
   
-- label: MoE Refactor Integration Test (B200 - TEMPORARY)
-  key: moe-refactor-integration-test-b200-temporary
+- label: MoE Refactor Integration Test (B200 Qwen - TEMPORARY)
+  key: moe-refactor-integration-test-b200-qwen-temporary
   device: b200-k8s
   optional: true
   num_devices: 2
   commands:
-    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-b200.txt
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-b200-qwen.txt
+
+- label: MoE Refactor Integration Test (B200 Other - TEMPORARY)
+  key: moe-refactor-integration-test-b200-other-temporary
+  device: b200-k8s
+  optional: true
+  num_devices: 2
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-b200-other.txt
 
 - label: MoE Refactor Integration Test (B200 DP - TEMPORARY)
   key: moe-refactor-integration-test-b200-dp-temporary
