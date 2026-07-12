@@ -120,6 +120,11 @@ class Request:
                 self.ec_transfer_params = sampling_params.extra_args.get(
                     "ec_transfer_params"
                 )
+                self.kv_cache_report_mode = sampling_params.extra_args.get(
+                    "kv_cache_report_mode", "incremental"
+                )
+            else:
+                self.kv_cache_report_mode = "incremental"
         else:
             raise ValueError("sampling_params and pooling_params can't both be unset")
 
@@ -145,6 +150,11 @@ class Request:
         # Used in async scheduling.
         self.num_output_placeholders = 0
         self.async_tokens_to_discard = 0
+
+        # Tokens of steps whose output is not yet processed (async scheduling
+        # and PP run ahead of the GPU); `num_computed_tokens` counts them
+        # optimistically.
+        self.num_in_flight_tokens = 0
 
         # V2+PP+async: Enforces `pp_size` cadence between same-request decode steps
         # so the worker's broadcast slot ring stays consistent.
