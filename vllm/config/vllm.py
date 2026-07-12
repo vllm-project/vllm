@@ -2301,6 +2301,28 @@ class VllmConfig:
             raise ValueError(
                 "--mamba-block-size can only be set with --enable-prefix-caching"
             )
+
+        # For hybrid (Mamba + attention) models the attention block size is
+        # raised to match the mamba page size and can exceed max_model_len.
+        # Block-hash prefix caching only records complete blocks, so when
+        # block_size > max_model_len no request can ever fill a block and the
+        # prefix cache is silently inert (0 hits). Warn instead of failing
+        # quietly. See https://github.com/vllm-project/vllm/issues/48401
+        if (
+            self.cache_config.enable_prefix_caching
+            and self.cache_config.block_size is not None
+            and self.cache_config.block_size > self.model_config.max_model_len
+        ):
+            logger.warning(
+                "Prefix caching is enabled but the attention block size "
+                "(%d tokens) is larger than max_model_len (%d). No request "
+                "can fill a full block, so the prefix cache will never hit "
+                "and prefix caching will have no effect. Increase "
+                "--max-model-len to at least the block size to benefit from "
+                "prefix caching.",
+                self.cache_config.block_size,
+                self.model_config.max_model_len,
+            )
         return self
 
 
