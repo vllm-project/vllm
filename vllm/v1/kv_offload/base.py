@@ -404,6 +404,18 @@ class CanonicalKVCacheTensor:
     page_size_bytes: int
 
 
+@dataclass(frozen=True)
+class KVHeadRegion:
+    """One region of this worker's page as a run of equally-sized fragments,
+    each holding num_kv_heads heads (the unit of one copy op). Describes this
+    worker's physical page only — in-process use, never serialized."""
+
+    offset: int
+    fragment_size: int
+    num_fragments: int
+    num_kv_heads: int
+
+
 @dataclass
 class CanonicalKVCacheRef:
     """
@@ -415,6 +427,11 @@ class CanonicalKVCacheRef:
     tensor_idx: int
     # The un-padded page size per block in bytes
     page_size_bytes: int
+    # Per-head source decomposition of the page; None = no head slicing
+    head_regions: tuple[KVHeadRegion, ...] | None = None
+    # When head_regions is None: True = page is identical on every TP rank
+    # (MLA latent), False = rank-specific shards (Mamba states, packed)
+    replicated: bool = False
 
 
 @dataclass

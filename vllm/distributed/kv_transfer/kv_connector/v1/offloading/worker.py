@@ -15,6 +15,7 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     MambaSpec,
+    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_offload.base import (
@@ -22,12 +23,41 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
     GPULoadStoreSpec,
+    KVHeadRegion,
     LoadStoreSpec,
     OffloadingSpec,
     OffloadingWorker,
 )
 
 logger = init_logger(__name__)
+
+
+def _attention_head_regions(
+    kv_cache: torch.Tensor, spec: AttentionSpec, num_blocks: int
+) -> tuple[KVHeadRegion, ...] | None:
+    """Derive K/V head regions from a (num_blocks, 2, block_size, num_heads,
+    head_size) attention cache. Returns None when the physical layout cannot
+    be established unambiguously (fail closed)."""
+    bs, heads, head_size = spec.block_size, spec.num_kv_heads, spec.head_size
+    if tuple(kv_cache.shape) != (num_blocks, 2, bs, heads, head_size):
+        return None
+    elem = kv_cache.element_size()
+    if 2 * bs * heads * head_size * elem != spec.real_page_size_bytes:
+        return None
+    s = kv_cache.stride()
+    if s[4] != 1 or s[1] != bs * heads * head_size:
+        return None
+    k_size = bs * heads * head_size * elem
+    if s[2] == heads * head_size and s[3] == head_size:  # NHD
+        fragment_size, num_fragments = heads * head_size * elem, bs
+    elif s[3] == bs * head_size and s[2] == head_size:  # HND
+        fragment_size, num_fragments = k_size, 1
+    else:
+        return None
+    return (
+        KVHeadRegion(0, fragment_size, num_fragments, heads),
+        KVHeadRegion(k_size, fragment_size, num_fragments, heads),
+    )
 
 
 class OffloadingConnectorWorker:
@@ -52,6 +82,13 @@ class OffloadingConnectorWorker:
     ):
         kv_cache_config = self.spec.kv_cache_config
         num_blocks = kv_cache_config.num_blocks
+        parallel_config = self.spec.vllm_config.parallel_config
+        total_num_kv_heads = self.spec.vllm_config.model_config.get_total_num_kv_heads()
+        tp_size = parallel_config.tensor_parallel_size
+        cp_size = (
+            parallel_config.decode_context_parallel_size
+            * parallel_config.prefill_context_parallel_size
+        )
 
         # Packed layouts (e.g. DSv4) set block_stride > 0; their tensors use
         # stride(0) as the manager-block stride (equals total_num_bytes_per_block).
@@ -69,6 +106,8 @@ class OffloadingConnectorWorker:
         unpadded_page_size_bytes: dict[str, int] = {}
         # layer_name -> size of page in bytes
         page_size_bytes: dict[str, int] = {}
+        head_regions: dict[str, tuple[KVHeadRegion, ...]] = {}
+        replicated_layers: set[str] = set()
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             group_layer_names = kv_cache_group.layer_names
             group_kv_cache_spec = kv_cache_group.kv_cache_spec
@@ -108,6 +147,21 @@ class OffloadingConnectorWorker:
                     unpadded_page_size_bytes[layer_name] = (
                         layer_kv_cache_spec.real_page_size_bytes
                     )
+                    if isinstance(layer_kv_cache_spec, MLAAttentionSpec):
+                        # Replicated latent, unless CP shards tokens
+                        if cp_size == 1:
+                            replicated_layers.add(layer_name)
+                    elif (
+                        cp_size == 1
+                        and layer_kv_cache_spec.num_kv_heads * tp_size
+                        == total_num_kv_heads
+                        and not layer_kv_cache_spec.kv_quant_mode.is_per_token_head
+                    ):
+                        regions = _attention_head_regions(
+                            layer_kv_cache, layer_kv_cache_spec, num_blocks
+                        )
+                        if regions is not None:
+                            head_regions[layer_name] = regions
 
                 elif isinstance(layer_kv_cache_spec, MambaSpec):
                     state_tensors = kv_caches[layer_name]
@@ -204,6 +258,8 @@ class OffloadingConnectorWorker:
                         CanonicalKVCacheRef(
                             tensor_idx=curr_tensor_idx,
                             page_size_bytes=(unpadded_page_size_bytes[layer_name]),
+                            head_regions=head_regions.get(layer_name),
+                            replicated=layer_name in replicated_layers,
                         )
                     )
 
