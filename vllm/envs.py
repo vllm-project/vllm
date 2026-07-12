@@ -208,6 +208,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
+    VLLM_EC_MOONCAKE_BOOTSTRAP_PORT: int = 9098
     VLLM_MOONCAKE_STORE_TIER_LOG: bool = False
     VLLM_MOONCAKE_LOAD_RECV_THREADS: int = 1
     VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO: float = 0.9
@@ -1568,6 +1569,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Port used for Mooncake handshake between remote agents.
     "VLLM_MOONCAKE_BOOTSTRAP_PORT": lambda: int(
         os.getenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", "8998")
+    ),
+    # Port used for Mooncake handshake between remote (E-PD) agents.
+    "VLLM_EC_MOONCAKE_BOOTSTRAP_PORT": lambda: int(
+        os.getenv("VLLM_EC_MOONCAKE_BOOTSTRAP_PORT", "9098")
     ),
     # Log per-batch memory/disk tier breakdown on external GETs.
     "VLLM_MOONCAKE_STORE_TIER_LOG": lambda: (

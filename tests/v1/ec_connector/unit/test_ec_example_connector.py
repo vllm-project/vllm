@@ -56,6 +56,7 @@ def mock_vllm_config_producer(temp_storage):
     config.ec_transfer_config = Mock()
     config.ec_transfer_config.get_from_extra_config = Mock(return_value=temp_storage)
     config.ec_transfer_config.is_ec_producer = True
+    config.ec_transfer_config.is_ec_consumer = False
     return config
 
 
@@ -66,6 +67,7 @@ def mock_vllm_config_consumer(temp_storage):
     config.ec_transfer_config = Mock()
     config.ec_transfer_config.get_from_extra_config = Mock(return_value=temp_storage)
     config.ec_transfer_config.is_ec_producer = False
+    config.ec_transfer_config.is_ec_consumer = True
     return config
 
 
@@ -120,6 +122,20 @@ class TestECExampleConnectorBasics:
 
         assert scheduler_connector.role == ECConnectorRole.SCHEDULER
         assert worker_connector.role == ECConnectorRole.WORKER
+
+    def test_request_finished_default_noop(
+        self, mock_vllm_config_producer, mock_request_with_3_mm
+    ):
+        """ECExampleConnector inherits the base request_finished no-op."""
+        connector = ECExampleConnector(
+            vllm_config=mock_vllm_config_producer,
+            role=ECConnectorRole.SCHEDULER,
+        )
+
+        delay_free_blocks, params = connector.request_finished(mock_request_with_3_mm)
+
+        assert not delay_free_blocks
+        assert params is None
 
 
 class TestCacheExistence:
@@ -222,11 +238,11 @@ class TestStateManagement:
     """Test connector state management."""
 
     def test_update_state_after_alloc_3_items(
-        self, mock_vllm_config_producer, mock_request_with_3_mm
+        self, mock_vllm_config_consumer, mock_request_with_3_mm
     ):
-        """Test state update after allocation for 3 MM items."""
+        """Consumer records mm_hashes to load when cache exists on disk."""
         connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_producer,
+            vllm_config=mock_vllm_config_consumer,
             role=ECConnectorRole.SCHEDULER,
         )
 
@@ -248,11 +264,11 @@ class TestStateManagement:
         assert connector._mm_datas_need_loads["img_hash_3"] == 200
 
     def test_build_connector_meta_3_items(
-        self, mock_vllm_config_producer, mock_request_with_3_mm
+        self, mock_vllm_config_consumer, mock_request_with_3_mm
     ):
-        """Test metadata building for 3 MM items."""
+        """Build metadata from pending loads (consumer + on-disk cache)."""
         connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_producer,
+            vllm_config=mock_vllm_config_consumer,
             role=ECConnectorRole.SCHEDULER,
         )
 
@@ -292,11 +308,11 @@ class TestStateManagement:
         assert len(metadata.mm_datas) == 0
 
     def test_state_cleared_after_metadata_build(
-        self, mock_vllm_config_producer, mock_request_with_3_mm
+        self, mock_vllm_config_consumer, mock_request_with_3_mm
     ):
         """Test that state is properly cleared after building metadata."""
         connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_producer,
+            vllm_config=mock_vllm_config_consumer,
             role=ECConnectorRole.SCHEDULER,
         )
 
@@ -316,6 +332,37 @@ class TestStateManagement:
         # Build again should return empty metadata
         metadata2 = connector.build_connector_meta(scheduler_output)
         assert len(metadata2.mm_datas) == 0
+
+    def test_collect_scheduled_mm_hashes_stores_int_tokens(
+        self, mock_vllm_config_producer, mock_request_with_3_mm
+    ):
+        """Producer collects scheduled mm_hashes with integer token counts."""
+        connector = ECExampleConnector(
+            vllm_config=mock_vllm_config_producer,
+            role=ECConnectorRole.SCHEDULER,
+        )
+
+        encoder_cache_manager = Mock()
+        encoder_cache_manager.has_cache.return_value = True
+
+        scheduler_output = Mock(spec=SchedulerOutput)
+        scheduler_output.scheduled_new_reqs = [mock_request_with_3_mm]
+
+        metadata = connector.build_connector_meta(
+            scheduler_output=scheduler_output,
+            encoder_cache_manager=encoder_cache_manager,
+        )
+
+        assert len(metadata.mm_datas) == 3
+        assert metadata.mm_datas[0].mm_hash == "img_hash_1"
+        assert metadata.mm_datas[0].num_token == 100
+        assert isinstance(metadata.mm_datas[0].num_token, int)
+        assert metadata.mm_datas[1].mm_hash == "img_hash_2"
+        assert metadata.mm_datas[1].num_token == 150
+        assert isinstance(metadata.mm_datas[1].num_token, int)
+        assert metadata.mm_datas[2].mm_hash == "img_hash_3"
+        assert metadata.mm_datas[2].num_token == 200
+        assert isinstance(metadata.mm_datas[2].num_token, int)
 
 
 class TestCacheSaving:
@@ -611,8 +658,10 @@ class TestEdgeCases:
         with pytest.raises(FileNotFoundError):
             connector.start_load_caches(encoder_cache=encoder_cache)
 
-    def test_has_cache_item_empty_request(self, mock_vllm_config_producer):
-        """Test has_cache_item with a nonexistent identifier."""
+    def test_has_cache_item_nonexistent_identifier_returns_false(
+        self, mock_vllm_config_producer
+    ):
+        """Disk has no file for this mm hash → has_cache_item is False."""
         connector = ECExampleConnector(
             vllm_config=mock_vllm_config_producer,
             role=ECConnectorRole.SCHEDULER,

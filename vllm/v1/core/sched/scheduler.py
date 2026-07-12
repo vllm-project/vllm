@@ -1122,7 +1122,7 @@ class Scheduler(SchedulerInterface):
         # Build the connector meta for ECConnector
         if self.ec_connector is not None:
             ec_meta: ECConnectorMetadata = self.ec_connector.build_connector_meta(
-                scheduler_output
+                scheduler_output, self.encoder_cache_manager
             )
             scheduler_output.ec_connector_metadata = ec_meta
 
@@ -1399,8 +1399,8 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 if self.encoder_cache_manager.check_and_update_cache(request, i):
-                    # The encoder input is already computed and cached from a
-                    # previous step.
+                    # The encoder input is already computed and cached in
+                    # EncodeCacheManager.
                     continue
 
             # If no encoder input chunking is allowed, we do not want to
@@ -1457,7 +1457,7 @@ class Scheduler(SchedulerInterface):
                 continue
 
             if self.ec_connector is not None and self.ec_connector.has_cache_item(
-                item_identifier
+                item_identifier, request
             ):
                 mm_hashes_to_schedule.add(item_identifier)
                 external_load_encoder_input.append(i)
@@ -1512,6 +1512,7 @@ class Scheduler(SchedulerInterface):
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
+        ec_connector_output = model_runner_output.ec_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is
@@ -1558,6 +1559,13 @@ class Scheduler(SchedulerInterface):
                 routing_offsets[rid] = offset
                 offset += num_scheduled_tokens[rid]
 
+        failed_ec_load_req_ids = None
+        if ec_connector_output and ec_connector_output.failed_recving:
+            failed_ec_load_req_ids = self._handle_failed_ec_loads(
+                ec_connector_output.failed_recving,
+                set(num_scheduled_tokens),
+            )
+
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
@@ -1570,6 +1578,9 @@ class Scheduler(SchedulerInterface):
                 request.num_in_flight_tokens -= num_tokens_scheduled
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
                 # skip failed or rescheduled requests from KV load failure
+                continue
+            if failed_ec_load_req_ids and req_id in failed_ec_load_req_ids:
+                # skip requests rescheduled after EC load failure
                 continue
             if request is None or request.is_finished():
                 # The request is already finished. This can happen if the
@@ -1628,6 +1639,7 @@ class Scheduler(SchedulerInterface):
             new_token_ids = generated_token_ids
             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
+            ec_transfer_params = None
             status_before_stop = request.status
             num_output_tokens_before = len(request._output_token_ids)
 
@@ -1714,7 +1726,7 @@ class Scheduler(SchedulerInterface):
                 finish_reason = request.get_finished_reason()
                 finished = self._handle_stopped_request(request)
                 if finished:
-                    kv_transfer_params = self._free_request(request)
+                    kv_transfer_params, ec_transfer_params = self._free_request(request)
 
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
@@ -1738,6 +1750,7 @@ class Scheduler(SchedulerInterface):
                 new_token_ids
                 or pooler_output is not None
                 or kv_transfer_params
+                or ec_transfer_params
                 or stopped
             ):
                 # Add EngineCoreOutput for this Request.
@@ -1753,6 +1766,7 @@ class Scheduler(SchedulerInterface):
                         events=request.take_events(),
                         prefill_stats=request.take_prefill_stats(),
                         kv_transfer_params=kv_transfer_params,
+                        ec_transfer_params=ec_transfer_params,
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
@@ -2104,11 +2118,13 @@ class Scheduler(SchedulerInterface):
 
     def _free_request(
         self, request: Request, delay_free_blocks: bool = False
-    ) -> dict[str, Any] | None:
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         assert request.is_finished()
 
         self._inflight_prefills.discard(request)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
+        _, ec_xfer_params = self._ec_connector_finished(request)
+
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
         self.finished_req_ids.add(request_id)
@@ -2119,7 +2135,20 @@ class Scheduler(SchedulerInterface):
         if not delay_free_blocks:
             self._free_blocks(request)
 
-        return kv_xfer_params
+        return kv_xfer_params, ec_xfer_params
+
+    def _ec_connector_finished(
+        self, request: Request
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """
+        Invoke the EC connector request_finished() method if applicable.
+        Returns optional ec transfer parameters to be included with the
+        request outputs.
+        """
+        if self.ec_connector is None:
+            return False, None
+
+        return self.ec_connector.request_finished(request)
 
     def _free_blocks(self, request: Request):
         assert request.is_finished()
@@ -2681,3 +2710,60 @@ class Scheduler(SchedulerInterface):
         self.failed_recving_kv_req_ids |= async_failed_req_ids
         # Return sync affected IDs to skip in update_from_output
         return sync_failed_req_ids
+
+    def _handle_failed_ec_loads(
+        self, failed_mm_hashes: set[str], scheduled_req_ids: set[str]
+    ) -> set[str]:
+        """Reschedule requests affected by remote EC load failures.
+
+        EC connector cache hits are optimistic. If the worker reports that a
+        remote encoder cache failed to load, the worker skips the whole forward
+        pass. Reschedule all requests from that batch, and disable remote EC
+        only for the hashes that failed so they compute locally next time.
+        """
+        affected_requests = [
+            request
+            for request in self.running
+            if request.request_id in scheduled_req_ids
+        ]
+        if not affected_requests:
+            logger.warning(
+                "Received EC load failures for mm_hashes with no scheduled "
+                "running request to reschedule: %s",
+                failed_mm_hashes,
+            )
+            return set()
+
+        for request in affected_requests:
+            self._disable_remote_ec_for_failed_hashes(request, failed_mm_hashes)
+
+        affected_req_ids = {request.request_id for request in affected_requests}
+        self.running = remove_all(self.running, affected_requests)
+
+        timestamp = time.monotonic()
+        for request in reversed(affected_requests):
+            self._preempt_request(request, timestamp)
+
+        logger.warning(
+            "Recovered from EC load failure: %d request(s) rescheduled for "
+            "local encoder recompute. Failed mm_hashes: %s.",
+            len(affected_requests),
+            failed_mm_hashes,
+        )
+        return affected_req_ids
+
+    @staticmethod
+    def _disable_remote_ec_for_failed_hashes(
+        request: Request, failed_mm_hashes: set[str]
+    ) -> None:
+        ec_transfer_params = request.ec_transfer_params
+        if not isinstance(ec_transfer_params, dict):
+            return
+
+        for mm_feature in request.mm_features:
+            mm_hash = mm_feature.identifier
+            if mm_hash not in failed_mm_hashes:
+                continue
+            mm_hash_params = ec_transfer_params.get(mm_hash)
+            if isinstance(mm_hash_params, dict):
+                mm_hash_params["do_remote_encode"] = False

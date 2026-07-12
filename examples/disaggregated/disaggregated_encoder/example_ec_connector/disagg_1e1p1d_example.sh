@@ -3,11 +3,14 @@ set -euo pipefail
 
 declare -a PIDS=()
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+EXAMPLE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
 ###############################################################################
 # Configuration -- override via env before running
 ###############################################################################
 MODEL="${MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
-LOG_PATH="${LOG_PATH:-./logs}"
+LOG_PATH="${LOG_PATH:-${SCRIPT_DIR}/logs}"
 mkdir -p "$LOG_PATH"
 
 ENCODE_PORT="${ENCODE_PORT:-19534}"
@@ -15,9 +18,9 @@ PREFILL_PORT="${PREFILL_PORT:-19535}"
 DECODE_PORT="${DECODE_PORT:-19536}"
 PROXY_PORT="${PROXY_PORT:-10001}"
 
-GPU_E="${GPU_E:-2}"
-GPU_P="${GPU_P:-2}"
-GPU_D="${GPU_D:-3}"
+GPU_E="${GPU_E:-0}"
+GPU_P="${GPU_P:-0}"
+GPU_D="${GPU_D:-1}"
 
 # Device platform and affinity env name.
 # DEVICE_PLATFORM supports: cuda, xpu
@@ -32,8 +35,8 @@ fi
 
 EC_SHARED_STORAGE_PATH="${EC_SHARED_STORAGE_PATH:-/tmp/ec_cache}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-12000}"   # wait_for_server timeout
-
-NUM_PROMPTS="${NUM_PROMPTS:-100}"    # number of prompts to send in benchmark
+NUM_PROMPTS="${NUM_PROMPTS:-100}"             # number of prompts to send in benchmark
+NUM_WARMUPS="${NUM_WARMUPS:-0}"               # warmup prompts excluded from metrics
 
 # Serve args
 GPU_MEMORY_UTILIZATION_E="${GPU_MEMORY_UTILIZATION_E:-0.01}"
@@ -50,12 +53,15 @@ export UCX_NET_DEVICES=all
 ###############################################################################
 # Find the git repository root directory
 GIT_ROOT=$(git rev-parse --show-toplevel)
+PYTHON="${PYTHON:-${GIT_ROOT}/.venv/bin/python}"
 
 START_TIME=$(date +"%Y%m%d_%H%M%S")
-ENC_LOG=$LOG_PATH/encoder_${START_TIME}.log
-P_LOG=$LOG_PATH/p_${START_TIME}.log
-D_LOG=$LOG_PATH/d_${START_TIME}.log
-PROXY_LOG=$LOG_PATH/proxy_${START_TIME}.log
+ENC_LOG="${LOG_PATH}/encoder_${START_TIME}.log"
+P_LOG="${LOG_PATH}/p_${START_TIME}.log"
+D_LOG="${LOG_PATH}/d_${START_TIME}.log"
+PROXY_LOG="${LOG_PATH}/proxy_${START_TIME}.log"
+BENCH_LOG="${LOG_PATH}/bench_${START_TIME}.log"
+RESULT_JSON="${LOG_PATH}/single_request_${START_TIME}.json"
 
 wait_for_server() {
     local port=$1
@@ -65,16 +71,47 @@ wait_for_server() {
         done" && return 0 || return 1
 }
 
+terminate_pid_tree() {
+    local pid=$1
+    local child
+
+    while read -r child; do
+        if [[ -n "$child" ]]; then
+            terminate_pid_tree "$child"
+        fi
+    done < <(pgrep -P "$pid" 2>/dev/null || true)
+
+    if kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+    fi
+}
+
+force_terminate_pid_tree() {
+    local pid=$1
+    local child
+
+    while read -r child; do
+        if [[ -n "$child" ]]; then
+            force_terminate_pid_tree "$child"
+        fi
+    done < <(pgrep -P "$pid" 2>/dev/null || true)
+
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -9 "$pid" 2>/dev/null || true
+    fi
+}
+
 # Cleanup function
 cleanup() {
+    local exit_code=$?
     echo "Stopping everything…"
-    trap - INT TERM USR1   # prevent re-entrancy
+    trap - EXIT INT TERM USR1   # prevent re-entrancy
     
     # Kill all tracked PIDs
     for pid in "${PIDS[@]}"; do
         if kill -0 "$pid" 2>/dev/null; then
             echo "Killing process $pid"
-            kill "$pid" 2>/dev/null
+            terminate_pid_tree "$pid"
         fi
     done
     
@@ -85,17 +122,15 @@ cleanup() {
     for pid in "${PIDS[@]}"; do
         if kill -0 "$pid" 2>/dev/null; then
             echo "Force killing process $pid"
-            kill -9 "$pid" 2>/dev/null
+            force_terminate_pid_tree "$pid"
         fi
     done
-    
-    # Kill the entire process group as backup
-    kill -- -$$ 2>/dev/null
-    
+
     echo "All processes stopped."
-    exit 0
+    exit "$exit_code"
 }
 
+trap cleanup EXIT
 trap cleanup INT
 trap cleanup USR1
 trap cleanup TERM
@@ -113,7 +148,7 @@ mkdir -p "$EC_SHARED_STORAGE_PATH"
 env "$DEVICE_AFFINITY_ENV=$GPU_E" vllm serve "$MODEL" \
     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION_E" \
     --port "$ENCODE_PORT" \
-    --enforce-eager \
+    --mm-encoder-only \
     --enable-request-id-headers \
     --no-enable-prefix-caching \
     --max-num-batched-tokens 114688 \
@@ -139,7 +174,6 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=5559 \
 vllm serve "$MODEL" \
     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION_P" \
     --port "$PREFILL_PORT" \
-    --enforce-eager \
     --enable-request-id-headers \
     --max-num-seqs "$MAX_NUM_SEQS" \
     --max-model-len "$MAX_MODEL_LEN" \
@@ -168,7 +202,6 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=6000 \
 vllm serve "$MODEL" \
     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION_D" \
     --port "$DECODE_PORT" \
-    --enforce-eager \
     --enable-request-id-headers \
     --max-num-seqs "$MAX_NUM_SEQS" \
     --max-model-len "$MAX_MODEL_LEN" \
@@ -189,7 +222,7 @@ wait_for_server "$DECODE_PORT"
 ###############################################################################
 # Proxy
 ###############################################################################
-python disagg_epd_proxy.py \
+"${PYTHON}" "${EXAMPLE_ROOT}/disagg_epd_proxy.py" \
     --host "0.0.0.0" \
     --port "$PROXY_PORT" \
     --encode-servers-urls "http://localhost:$ENCODE_PORT" \
@@ -206,26 +239,37 @@ echo "All services are up!"
 # Benchmark
 ###############################################################################
 echo "Running benchmark (stream)..."
-vllm bench serve \
-  --model               "$MODEL" \
-  --backend             openai-chat \
-  --endpoint            /v1/chat/completions \
-  --dataset-name        hf \
-  --dataset-path        lmarena-ai/VisionArena-Chat \
-  --seed                0 \
-  --num-prompts         "$NUM_PROMPTS" \
-  --port                "$PROXY_PORT"
 
-PIDS+=($!)
+vllm bench serve \
+    --model "$MODEL" \
+    --dataset-name random-mm \
+    --num-prompts "$NUM_PROMPTS" \
+    --num-warmups "$NUM_WARMUPS" \
+    --random-input-len 400 \
+    --random-output-len 100 \
+    --random-range-ratio 0.0 \
+    --random-mm-base-items-per-request 1 \
+    --random-mm-num-mm-items-range-ratio 0 \
+    --random-mm-limit-mm-per-prompt '{"image":3,"video":0}' \
+    --random-mm-bucket-config '{(560, 560, 1): 1.0}' \
+    --ignore-eos \
+    --temperature 0 \
+    --backend openai-chat \
+    --endpoint /v1/chat/completions \
+    --port "$PROXY_PORT" \
+    2>&1 | tee "$BENCH_LOG"
+
+echo "  BENCH_LOG=${BENCH_LOG}"
 
 ###############################################################################
 # Single request with local image
 ###############################################################################
 echo "Running single request with local image (non-stream)..."
-curl http://127.0.0.1:"${PROXY_PORT}"/v1/chat/completions \
+curl -fsS http://127.0.0.1:"${PROXY_PORT}"/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
     "model": "'"${MODEL}"'",
+    "temperature": 0,
     "messages": [
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": [
@@ -233,8 +277,10 @@ curl http://127.0.0.1:"${PROXY_PORT}"/v1/chat/completions \
         {"type": "text", "text": "What is in this image?"}
     ]}
     ]
-    }'
+    }' | tee "$RESULT_JSON"
 
+echo
+echo "  RESULT_JSON=${RESULT_JSON}"
 
 # cleanup
 echo "cleanup..."
