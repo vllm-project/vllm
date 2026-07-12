@@ -5,7 +5,6 @@ import asyncio
 from collections.abc import (
     AsyncGenerator,
     Callable,
-    Iterable,
     Mapping,
     MutableSequence,
     Sequence,
@@ -888,7 +887,7 @@ class MixtureOfExperts(Protocol):
     num_redundant_experts: int
     """Number of redundant experts in this model."""
 
-    moe_layers: Iterable["MoERunner"]
+    moe_layers: Sequence["MoERunner"]
     """List of MoE layers in this model."""
 
     def set_eplb_state(
@@ -929,6 +928,37 @@ class MixtureOfExperts(Protocol):
         num_physical_experts: int,
         num_local_physical_experts: int,
     ) -> None: ...
+
+
+def get_mixture_of_experts_model(model: object) -> MixtureOfExperts | None:
+    """Return the MixtureOfExperts contained within an arbitrary model.
+
+    - If the model itself is a MixtureOfExperts, return the model directly.
+    - If the model is a multi-modal model, and its `language_model` is a
+      MixtureOfExperts, return the `language_model`.
+    - If neither, return None.
+
+    Args:
+        model: Model being served.
+
+    Returns:
+        The MixtureOfExperts instance contained within the model, or None.
+    """
+
+    if is_mixture_of_experts(model):
+        return model
+
+    if isinstance(model, SupportsMultiModal):
+        try:
+            mm_language_model = model.get_language_model()
+            return (
+                mm_language_model if is_mixture_of_experts(mm_language_model) else None
+            )
+        except (NotImplementedError, AttributeError):
+            logger.info_once("Cannot fetch language_model from MultiModal model")
+            return None
+
+    return None
 
 
 def is_mixture_of_experts(model: object) -> TypeIs[MixtureOfExperts]:

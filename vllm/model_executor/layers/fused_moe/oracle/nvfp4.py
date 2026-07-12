@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
+    nvfp4_swizzled_scale_to_cutedsl_mma_view,
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
     prepare_nvfp4_moe_layer_for_flashinfer_cutedsl,
 )
@@ -496,6 +497,10 @@ def make_nvfp4_moe_quant_config(
             w2_scale=w2_scale,
             gemm1_clamp_limit=swiglu_limit,
         )
+
+    if backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL:
+        w13_scale = nvfp4_swizzled_scale_to_cutedsl_mma_view(w13_scale)
+        w2_scale = nvfp4_swizzled_scale_to_cutedsl_mma_view(w2_scale)
 
     # Pass w13_scale_2 / w2_scale_2 directly as g1/g2_alphas.
     # The expert's process_weights_after_loading will fuse activation

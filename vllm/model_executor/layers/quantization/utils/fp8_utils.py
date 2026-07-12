@@ -14,6 +14,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    amax_for_moe_activation_quant,
     get_fp8_min_max,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -1441,6 +1442,7 @@ def process_fp8_weight_tensor_strategy_moe(
 def process_fp8_input_tensor_strategy_moe(
     w13_input_scale: torch.Tensor,
     w2_input_scale: torch.Tensor,
+    enable_eplb: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Process moe input scales for tensor-wise quantization strategy."""
 
@@ -1451,4 +1453,7 @@ def process_fp8_input_tensor_strategy_moe(
             "for each layer."
         )
 
-    return w13_input_scale.max(), w2_input_scale.max()
+    return (
+        amax_for_moe_activation_quant(w13_input_scale, enable_eplb),
+        amax_for_moe_activation_quant(w2_input_scale, enable_eplb),
+    )

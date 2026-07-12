@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+    NvFp4MoeBackend,
     convert_to_nvfp4_moe_kernel_format,
     is_global_sf_supported_for_nvfp4_backend,
     make_nvfp4_moe_kernel,
@@ -30,6 +31,15 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+
+# NVFP4 backends that have been verified to support EPLB for this quantization recipe.
+_EPLB_SUPPORTED_NVFP4_BACKENDS = frozenset(
+    {
+        NvFp4MoeBackend.FLASHINFER_CUTEDSL,
+        NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
+        NvFp4MoeBackend.FLASHINFER_TRTLLM,
+    }
+)
 
 logger = init_logger(__name__)
 
@@ -54,6 +64,10 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
         )
+
+    @property
+    def supports_eplb(self) -> bool:
+        return self.nvfp4_backend in _EPLB_SUPPORTED_NVFP4_BACKENDS
 
     def create_weights(
         self,
@@ -224,8 +238,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         replace_parameter(layer, "w13_weight_scale", w13_scale)
         replace_parameter(layer, "w2_weight", w2)
         replace_parameter(layer, "w2_weight_scale", w2_scale)
-        layer.w13_weight_scale_2 = w13_scale_2
-        layer.w2_weight_scale_2 = w2_scale_2
+        replace_parameter(layer, "w13_weight_scale_2", w13_scale_2)
+        replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
         layer.w13_input_scale = a13_scale
         layer.w2_input_scale = a2_scale
 
