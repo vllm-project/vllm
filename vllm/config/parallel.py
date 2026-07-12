@@ -775,6 +775,7 @@ class ParallelConfig:
             "data_parallel_master_ip",
             "data_parallel_master_port",
             "_data_parallel_master_port_list",
+            "_coord_store_port",
             "data_parallel_rpc_port",
             "rank",
             "master_addr",
