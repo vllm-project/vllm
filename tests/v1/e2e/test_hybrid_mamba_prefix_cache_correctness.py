@@ -45,10 +45,12 @@ is strict: the pytest-level red has not been calibrated as
 deterministic across repeated runs (the flip-margin grading sits close
 to the measured corruption gap), and behavior on a tree with the open
 fixes applied has not been measured at all. Measured live-bug status on
-current main is recorded in the PR (GB200, Nemotron-3 Super; the Qwen
-parametrization is unvalidated — a community harness on the issue
-thread could not reproduce the corruption on that checkpoint, so no red
-claim is made for it). Behavior under #45477/#47861-class fixes is
+current main is recorded in the PR (GB200): all three parametrized arms
+— cold-race Nemotron-3 Super, multi-turn Nemotron-3 Super, and
+multi-turn Qwen3.6-27B — fail red with ``CorruptionDetected`` under
+``--runxfail`` (the cold-race Qwen arm is excluded from the
+parametrization itself; see ``COLD_RACE_MODELS``). Behavior under
+#45477/#47861-class fixes is
 EXPECTED to be cured but is not asserted anywhere here; whoever lands a
 fix should remove the markers after one green calibration run. Until
 then the optional CI step runs with ``--runxfail`` so live corruption
@@ -186,7 +188,11 @@ def _mamba_block_size(llm: LLM) -> int:
 
     Requires the in-process engine (``VLLM_ENABLE_V1_MULTIPROCESSING=0``).
     In ``mamba_cache_mode="align"`` the scheduler aligns prefill chunks to
-    ``cache_config.block_size``, which matches the MambaSpec block size.
+    ``cache_config.block_size`` (the engine core's MIN over all kv-cache
+    groups, attention included), so the trigger geometry is only sound if
+    that value equals the MambaSpec block size — verified below, skipping
+    with a coverage-lost signal on mismatch rather than silently
+    mistargeting.
     """
     scheduler = llm.llm_engine.engine_core.engine_core.scheduler
     mamba_block_sizes = {
@@ -196,7 +202,16 @@ def _mamba_block_size(llm: LLM) -> int:
     }
     assert mamba_block_sizes, f"{llm} is not a hybrid-Mamba model"
     assert len(mamba_block_sizes) == 1, mamba_block_sizes
-    return mamba_block_sizes.pop()
+    block_size = mamba_block_sizes.pop()
+    split_block_size = scheduler.cache_config.block_size
+    if split_block_size != block_size:
+        pytest.skip(
+            GEOMETRY_SKIP + f"align-mode chunk splitting uses "
+            f"cache_config.block_size ({split_block_size}), which no "
+            f"longer matches the MambaSpec block size ({block_size}); "
+            f"the trigger geometry would silently mistarget"
+        )
+    return block_size
 
 
 def _counter(llm: LLM, name: str) -> int:
@@ -372,18 +387,26 @@ def test_cold_concurrent_prefill_mamba_prefix_cache(
 
     sampling = SamplingParams(temperature=0.0, max_tokens=24, stop=["\n"])
 
-    with vllm_runner(
-        model_name,
-        enable_prefix_caching=True,
-        **kwargs,
-    ) as runner:
+    try:
+        trigger_runner = vllm_runner(
+            model_name,
+            enable_prefix_caching=True,
+            **kwargs,
+        )
+    except AssertionError as exc:
+        # VllmConfig.validate_block_size rejects align mode at engine boot
+        # whenever the resolved block size exceeds max_num_batched_tokens —
+        # exactly the geometry whose small budget could not fragment a
+        # prefill mid block. Surface it as lost coverage, not a boot error.
+        if "must be <= max_num_batched_tokens" not in str(exc):
+            raise
+        pytest.skip(
+            GEOMETRY_SKIP + f"resolved block size exceeds the fragmenting "
+            f"token budget {RACE_MAX_BATCHED_TOKENS} ({exc})"
+        )
+    with trigger_runner as runner:
         llm = runner.get_llm()
         block_size = _mamba_block_size(llm)
-        if block_size > RACE_MAX_BATCHED_TOKENS:
-            pytest.skip(
-                GEOMETRY_SKIP + f"{block_size=} exceeds the fragmenting "
-                f"token budget {RACE_MAX_BATCHED_TOKENS}"
-            )
         tokenizer = llm.get_tokenizer()
         manual, codes, manual_tokens, num_needles = _build_needle_manual(
             tokenizer, target_tokens=int(block_size * 1.35)
