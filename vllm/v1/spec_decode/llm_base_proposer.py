@@ -1834,6 +1834,25 @@ class SpecDecodeBaseProposer:
             self.is_rejected_token_mask.zero_()
             self.is_masked_token_mask.zero_()
 
+        # ---- mtp_shared_head_rmsnorm ----
+        # DSv4 MTP's SharedHead.norm runs a separate Triton kernel that
+        # ``_dummy_run`` does not exercise (only fires from ``propose()``'s
+        # compute_logits path). HIDDEN is a model constant so only one
+        # specialization exists; warm it with a (1, HIDDEN) dummy.
+        if self.method == "mtp":
+            from vllm.models.deepseek_v4.common.ops.fused_mtp_input_rmsnorm import (
+                mtp_shared_head_rmsnorm,
+            )
+            dummy_hidden = torch.zeros(
+                (1, self.hidden_size), dtype=self.dtype, device=self.device
+            )
+            dummy_weight = torch.ones(
+                (self.hidden_size,), dtype=self.dtype, device=self.device
+            )
+            # eps is a runtime float (not constexpr); any value matches
+            # the production specialization key.
+            mtp_shared_head_rmsnorm(dummy_hidden, dummy_weight, 1e-6)
+
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Validate that all drafting layers belong to the same KVCacheGroup.
