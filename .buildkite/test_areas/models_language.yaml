@@ -68,7 +68,6 @@ steps:
   parallelism: 2
   mirror:
     amd:
-      native_ci: true
       device: mi325_1
       timeout_in_minutes: 70
       depends_on:
@@ -116,7 +115,6 @@ steps:
     - pytest -v -s models/language/pooling -m 'not core_model'
   mirror:
     amd:
-      native_ci: true
       device: mi325_1
       timeout_in_minutes: 100
       depends_on:

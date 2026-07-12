@@ -16,7 +16,6 @@ steps:
   parallelism: 2
   mirror:
     amd:
-      native_ci: true
       device: mi325_1
       timeout_in_minutes: 95
       depends_on:

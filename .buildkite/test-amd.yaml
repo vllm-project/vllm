@@ -14,7 +14,8 @@
 # command(str): the single command to run for tests. incompatible with commands.
 # commands(list): the list of commands to run for the test. incompatible with command.
 # mirror_hardwares(list): the list of hardware to run the test on as well. currently only supports [amdexperimental]
-# native_ci(bool): run directly in the AMD Kubernetes pod instead of Docker-in-Docker.
+# native_ci(bool): run MI300 jobs directly in the AMD Kubernetes pod instead of Docker-in-Docker.
+#     Omit this for MI250, MI325, and MI355 jobs, which still use the legacy Docker path.
 # num_gpus(int): override the number of GPUs for the test. defaults to 1 GPU. currently supports 2,4,8.
 # num_nodes(int): whether to simulate multi-node setup by launching multiple containers on one host,
 #     in this case, commands must be specified. the first command runs on the first host, the second
@@ -117,7 +118,6 @@ steps:
 - label: PyTorch Fullgraph Smoke Test # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  native_ci: true
   agent_pool: mi250_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -137,7 +137,6 @@ steps:
 - label: Pipeline + Context Parallelism (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  native_ci: true
   agent_pool: mi250_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -161,7 +160,6 @@ steps:
 - label: Kernels Helion Test # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  native_ci: true
   agent_pool: mi250_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -176,7 +174,6 @@ steps:
 - label: Kernels Mamba Test # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  native_ci: true
   agent_pool: mi250_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -193,7 +190,6 @@ steps:
 - label: Basic Models Test (Other CPU) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  native_ci: true
   agent_pool: mi250_1
   no_gpu: true
   optional: true
@@ -210,7 +206,6 @@ steps:
 - label: Language Models Test (MTEB) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  native_ci: true
   agent_pool: mi250_1
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -222,7 +217,6 @@ steps:
 - label: Language Models Test (PPL) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  native_ci: true
   agent_pool: mi250_1
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -236,7 +230,6 @@ steps:
 - label: "Multi-Modal Models (Standard) 3: llava + qwen2_vl" # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  native_ci: true
   agent_pool: mi250_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -252,7 +245,6 @@ steps:
 - label: Batch Invariance (H100-MI250) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  native_ci: true
   agent_pool: mi250_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -271,7 +263,6 @@ steps:
 - label: Cudagraph # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  native_ci: true
   agent_pool: mi250_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -288,7 +279,6 @@ steps:
 - label: e2e Core (1 GPU) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  native_ci: true
   agent_pool: mi250_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -302,7 +292,6 @@ steps:
 - label: e2e Scheduling (1 GPU) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  native_ci: true
   agent_pool: mi250_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -316,7 +305,6 @@ steps:
 - label: Engine (1 GPU) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  native_ci: true
   agent_pool: mi250_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -331,7 +319,6 @@ steps:
 - label: Spec Decode Draft Model # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  native_ci: true
   agent_pool: mi250_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -349,7 +336,6 @@ steps:
 - label: Spec Decode Speculators + MTP # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  native_ci: true
   agent_pool: mi250_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -368,7 +354,6 @@ steps:
 - label: V1 attention (H100-MI250) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  native_ci: true
   agent_pool: mi250_1
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -387,7 +372,6 @@ steps:
 - label: Async Engine, Inputs, Utils, Worker, Config (CPU) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  native_ci: true
   agent_pool: mi250_1
   optional: true
   no_gpu: true
@@ -429,7 +413,6 @@ steps:
 - label: Rust Frontend Cargo Style + Clippy # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  native_ci: true
   agent_pool: mi250_1
   no_gpu: true
   working_dir: "/vllm-workspace"
@@ -444,7 +427,6 @@ steps:
 - label: Rust Frontend Cargo Tests # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  native_ci: true
   agent_pool: mi250_1
   no_gpu: true
   working_dir: "/vllm-workspace"
@@ -461,7 +443,6 @@ steps:
 - label: Docker Build Metadata (ROCm) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  native_ci: true
   agent_pool: mi250_1
   no_gpu: true
   working_dir: "/vllm-workspace/tests"
@@ -2267,21 +2248,6 @@ steps:
 
 #------------------------------------------------------------  mi300 · misc  ------------------------------------------------------------#
 
-# Native CI intentionally remains disabled: this test requires the full source
-# tree, while the native wheel artifact contains only the test workspace.
-- label: Python-only Installation # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  agent_pool: mi300_1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - tests/standalone_tests/python_only_compile.sh
-  - setup.py
-  - vllm/platforms/rocm.py
-  commands:
-  - bash standalone_tests/python_only_compile.sh
-
 - label: Regression # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
@@ -2862,7 +2828,6 @@ steps:
 - label: Distributed Compile + RPC Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  native_ci: true
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -2888,7 +2853,6 @@ steps:
 - label: Distributed Torchrun + Shutdown Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  native_ci: true
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -2912,7 +2876,6 @@ steps:
 - label: Distributed Compile + Comm (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  native_ci: true
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -2936,7 +2899,6 @@ steps:
 - label: Engine # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  native_ci: true
   agent_pool: mi325_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -2955,7 +2917,6 @@ steps:
 - label: LM Eval Large Models (4xH100-4xMI325) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  native_ci: true
   agent_pool: mi325_4
   num_gpus: 4
   optional: true
@@ -2978,7 +2939,6 @@ steps:
 - label: Language Models Test (Extended Generation) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  native_ci: true
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -2992,7 +2952,6 @@ steps:
 - label: Language Models Tests (Hybrid) %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  native_ci: true
   agent_pool: mi325_1
   parallelism: 2
   optional: true
@@ -3010,7 +2969,6 @@ steps:
 - label: Multi-Modal Models (Extended Pooling) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  native_ci: true
   agent_pool: mi325_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -3023,7 +2981,6 @@ steps:
 - label: "Multi-Modal Models (Standard) 2: qwen3 + gemma" # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  native_ci: true
   agent_pool: mi325_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -3039,7 +2996,6 @@ steps:
 - label: V1 Spec Decode # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  native_ci: true
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -3047,6 +3003,23 @@ steps:
   - tests/v1/spec_decode
   commands:
   - pytest -v -s -m 'not slow_test' v1/spec_decode
+
+#-----------------------------------------------------------  mi325 · misc  ------------------------------------------------------------#
+
+# This test keeps the legacy Docker path because it requires the full source
+# tree rather than the thin native artifact.
+- label: Python-only Installation # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - tests/standalone_tests/python_only_compile.sh
+  - setup.py
+  - vllm/platforms/rocm.py
+  commands:
+  - bash standalone_tests/python_only_compile.sh
 
 #########################################################################################################################################
 #                                                                                                                                       #
@@ -3059,7 +3032,6 @@ steps:
 - label: Attention Benchmarks Smoke Test (B200-MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_2
   num_gpus: 2
   working_dir: "/vllm-workspace/"
@@ -3076,7 +3048,6 @@ steps:
 - label: Distributed Tests (2xH100-2xMI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_2
   num_gpus: 2
   optional: true
@@ -3121,7 +3092,6 @@ steps:
 - label: Entrypoints Integration (API Server) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   optional: true
   fast_check: true
@@ -3139,7 +3109,6 @@ steps:
 - label: Entrypoints Integration (API Server OpenAI - Part 1) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   fast_check: true
   optional: true
@@ -3155,7 +3124,6 @@ steps:
 - label: Entrypoints Integration (API Server OpenAI - Part 2) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   fast_check: true
   optional: true
@@ -3172,7 +3140,6 @@ steps:
 - label: Entrypoints Integration (API Server Generate) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   fast_check: true
   optional: true
@@ -3193,7 +3160,6 @@ steps:
 - label: Entrypoints Integration (Speech to Text) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -3207,7 +3173,6 @@ steps:
 - label: Entrypoints Integration (Multimodal)
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -3221,7 +3186,6 @@ steps:
 - label: Entrypoints Integration (Pooling) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -3237,7 +3201,6 @@ steps:
 - label: GPQA Eval (GPT-OSS) (2xB200-2xMI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_2
   num_gpus: 2
   optional: true
@@ -3260,7 +3223,6 @@ steps:
 - label: LM Eval Qwen3-5 Models (B200-MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_2
   num_gpus: 2
   optional: true
@@ -3283,7 +3245,6 @@ steps:
 - label: LM Eval Small Models (2xB200-2xMI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_2
   num_gpus: 2
   optional: true
@@ -3303,7 +3264,6 @@ steps:
 - label: Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy (B200-MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_2
   num_gpus: 2
   working_dir: "/vllm-workspace"
@@ -3324,7 +3284,6 @@ steps:
 - label: LM Eval Large Models (4xH100-4xMI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_4
   num_gpus: 4
   optional: true
@@ -3347,7 +3306,6 @@ steps:
 - label: Examples # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   working_dir: "/vllm-workspace/examples"
   source_file_dependencies:
@@ -3383,7 +3341,6 @@ steps:
 - label: Kernels (B200-MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
@@ -3409,7 +3366,6 @@ steps:
 - label: Kernels Attention Test %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
@@ -3427,7 +3383,6 @@ steps:
 - label: Kernels MoE Test %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   parallelism: 5
   working_dir: "/vllm-workspace/tests"
@@ -3448,7 +3403,6 @@ steps:
 - label: Kernels Quantization Test %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
@@ -3466,7 +3420,6 @@ steps:
 - label: Kernels FP8 MoE Test (2xH100-2xMI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -3486,7 +3439,6 @@ steps:
 - label: Language Models Test (Extended Generation) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -3500,7 +3452,6 @@ steps:
 - label: Language Models Test (Extended Pooling) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -3513,7 +3464,6 @@ steps:
 - label: Language Models Test (PPL) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -3541,7 +3491,6 @@ steps:
 - label: Language Models Tests (Standard) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -3556,7 +3505,6 @@ steps:
 - label: Multi-Modal Models (Extended Generation 1) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -3571,7 +3519,6 @@ steps:
 - label: Multi-Modal Models (Extended Generation 3) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -3584,7 +3531,6 @@ steps:
 - label: Multi-Modal Models (Extended Pooling) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -3597,7 +3543,6 @@ steps:
 - label: "Multi-Modal Models (Standard) 1: qwen2" # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -3611,7 +3556,6 @@ steps:
 - label: "Multi-Modal Models (Standard) 4: other + whisper" # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -3628,7 +3572,6 @@ steps:
 - label: Quantized Models Test # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -3645,7 +3588,6 @@ steps:
 - label: Quantization # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -3690,7 +3632,6 @@ steps:
 - label: V1 attention (B200-MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -3707,7 +3648,6 @@ steps:
 - label: V1 Core + KV + Metrics # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -3734,7 +3674,6 @@ steps:
 - label: V1 Sample + Logits # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -3755,7 +3694,6 @@ steps:
 - label: V1 Spec Decode # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -3769,7 +3707,6 @@ steps:
 - label: Weight Loading Multiple GPU # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -3782,7 +3719,6 @@ steps:
 - label: Weight Loading Multiple GPU - Large Models # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_2
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
@@ -3798,7 +3734,6 @@ steps:
 - label: Regression # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  native_ci: true
   agent_pool: mi355_1
   optional: true
   working_dir: "/vllm-workspace/tests"

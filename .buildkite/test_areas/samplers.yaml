@@ -19,7 +19,6 @@ steps:
     - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
   mirror:
     amd:
-      native_ci: true
       device: mi325_1
       depends_on:
       - image-build-amd

@@ -14,7 +14,6 @@ steps:
     - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
   mirror:
     amd:
-      native_ci: true
       device: mi325_1
       depends_on:
       - image-build-amd
@@ -32,7 +31,6 @@ steps:
     - pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model
   mirror:
     amd:
-      native_ci: true
       device: mi325_1
       depends_on:
       - image-build-amd
@@ -49,7 +47,6 @@ steps:
     - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
   mirror:
     amd:
-      native_ci: true
       device: mi325_1
       depends_on:
       - image-build-amd
@@ -68,7 +65,6 @@ steps:
     - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
   mirror:
     amd:
-      native_ci: true
       device: mi325_1
       depends_on:
       - image-build-amd
@@ -134,7 +130,6 @@ steps:
     - pytest -v -s models/multimodal/test_mapping.py
   mirror:
     amd:
-      native_ci: true
       device: mi325_1
       depends_on:
       - image-build-amd
@@ -170,7 +165,6 @@ steps:
     - pytest -v -s models/multimodal/pooling -m 'not core_model'
   mirror:
     amd:
-      native_ci: true
       device: mi325_1
       timeout_in_minutes: 75
       depends_on:

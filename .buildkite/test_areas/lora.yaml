@@ -14,7 +14,6 @@ steps:
   parallelism: 4
   mirror:
     amd:
-      native_ci: true
       device: mi325_1
       working_dir: "/vllm-workspace/tests"
       timeout_in_minutes: 65
