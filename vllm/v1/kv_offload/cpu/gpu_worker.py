@@ -498,12 +498,24 @@ class CPUOffloadingWorker(OffloadingWorker):
                 cpu_tensor = mmap_region.create_next_view(cpu_page_size_bytes)
             else:
                 t0 = time.monotonic()
+                # Allocate non-pinned first, then pin via cudaHostRegister to
+                # bypass PyTorch's CUDACachingHostAllocator which rounds up to
+                # the next power of 2 (e.g. 100 GB -> 128 GB).
                 cpu_tensor = torch.zeros(
                     (num_cpu_blocks, cpu_page_size_bytes),
                     dtype=torch.int8,
                     device="cpu",
-                    pin_memory=pin_memory,
                 )
+                if pin_memory:
+                    result = torch.cuda.cudart().cudaHostRegister(
+                        cpu_tensor.data_ptr(), cpu_tensor.nbytes, 0
+                    )
+                    if result.value != 0:
+                        logger.warning(
+                            "cudaHostRegister failed (code=%d) — transfers "
+                            "will still work but may be slower (unpinned DMA)",
+                            result,
+                        )
                 logger.debug(
                     "torch.zeros pinned tensor %d×%d (%.2f GB): %.3f s",
                     num_cpu_blocks,
