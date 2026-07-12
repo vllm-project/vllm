@@ -193,14 +193,13 @@ class AttentionBackend(ABC):
 
     @classmethod
     def get_preferred_block_size(cls, default_block_size: int) -> int:
-        supported_sizes = cls.get_supported_kernel_block_sizes()
-        if not supported_sizes:
-            return default_block_size
-
         if cls.supports_block_size(default_block_size):
             return default_block_size
 
-        return min(s.base if isinstance(s, MultipleOf) else s for s in supported_sizes)
+        return min(
+            s.base if isinstance(s, MultipleOf) else s
+            for s in cls.get_supported_kernel_block_sizes()
+        )
 
     @classmethod
     def indexes_kv_by_block_stride(cls) -> bool:
