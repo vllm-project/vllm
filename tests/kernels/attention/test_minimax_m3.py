@@ -831,7 +831,7 @@ def test_aiter_sparse_pa_layout_contract(monkeypatch):
         lambda: True,
     )
 
-    nb, bs, h, d = 7, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM
+    nb, bs, h, d = 7, BLOCK_SIZE, 1, HEAD_DIM
     logical = MiniMaxM3SparseBackend.get_kv_cache_shape(nb, bs, h, d)
     order = MiniMaxM3SparseBackend.get_kv_cache_stride_order()
     assert logical == (nb, 2, bs, h, d)
@@ -844,6 +844,21 @@ def test_aiter_sparse_pa_layout_contract(monkeypatch):
     key_cache, value_cache = logical_view.unbind(1)
     assert key_cache.is_contiguous()
     assert value_cache.is_contiguous()
+
+
+def test_aiter_sparse_pa_rejects_multiple_kv_heads(monkeypatch):
+    """Do not pair AITER's separated cache layout with the Triton fallback."""
+    import vllm.models.minimax_m3.common.sparse_attention as sparse_attn_mod
+
+    monkeypatch.setattr(sparse_attn_mod.rocm_aiter_ops, "is_enabled", lambda: True)
+    monkeypatch.setattr(
+        sparse_attn_mod.rocm_aiter_ops,
+        "is_shuffle_kv_cache_enabled",
+        lambda: True,
+    )
+
+    with pytest.raises(ValueError, match="num_kv_heads == 1"):
+        MiniMaxM3SparseBackend.get_kv_cache_shape(7, BLOCK_SIZE, 2, HEAD_DIM)
 
 
 def test_main_backend_unknown_layout_raises(monkeypatch):

@@ -59,13 +59,19 @@ from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
 logger = init_logger(__name__)
 
 
+def _minimax_m3_aiter_sparse_pa_requested() -> bool:
+    return rocm_aiter_ops.is_enabled() and rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+
+
 def minimax_m3_use_aiter_sparse_pa(num_kv_heads: int) -> bool:
     """Whether to use the ROCm AITER page-16 sparse PA prototype."""
-    return (
-        rocm_aiter_ops.is_enabled()
-        and rocm_aiter_ops.is_shuffle_kv_cache_enabled()
-        and num_kv_heads == 1
-    )
+    requested = _minimax_m3_aiter_sparse_pa_requested()
+    if requested and num_kv_heads != 1:
+        raise ValueError(
+            "MiniMax M3 AITER sparse paged attention requires "
+            f"num_kv_heads == 1 per tensor-parallel rank, got {num_kv_heads}."
+        )
+    return requested
 
 
 class MiniMaxM3SparseBackend(AttentionBackend):
@@ -114,7 +120,7 @@ class MiniMaxM3SparseBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        if rocm_aiter_ops.is_enabled() and rocm_aiter_ops.is_shuffle_kv_cache_enabled():
+        if minimax_m3_use_aiter_sparse_pa(num_kv_heads):
             # AITER's assembly paged-attention kernels require independently
             # contiguous K and V storage. Keep that specialized layout behind
             # the shuffle flag while every other implementation uses the
@@ -132,7 +138,7 @@ class MiniMaxM3SparseBackend(AttentionBackend):
         # layout we want.
         if include_num_layers_dimension:
             raise NotImplementedError  # no cross-layer KV blocks in M3
-        if rocm_aiter_ops.is_enabled() and rocm_aiter_ops.is_shuffle_kv_cache_enabled():
+        if _minimax_m3_aiter_sparse_pa_requested():
             # The AITER page-16 sparse PA path reinterprets the K and V slices
             # as separate SHUFFLE caches. Keep K/V physically separated so
             # kv_cache[:, 0] and kv_cache[:, 1] are contiguous byte ranges.
