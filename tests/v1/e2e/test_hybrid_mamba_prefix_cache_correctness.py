@@ -47,16 +47,19 @@ the ``--runxfail`` CI step would let geometry drift green the step
 while the bug is live. Neither marker
 is strict: the pytest-level red has not been calibrated as
 deterministic across repeated runs (the flip-margin grading sits close
-to the measured corruption gap), and behavior on a tree with the open
-fixes applied has not been measured at all. Measured live-bug status on
+to the measured corruption gap), and behavior under the open fix PRs
+was measured only once per arm. Measured live-bug status on
 current main is recorded in the PR (GB200): all three parametrized arms
 — cold-race Nemotron-3 Super, multi-turn Nemotron-3 Super, and
 multi-turn Qwen3.6-27B — fail red with ``CorruptionDetected`` under
 ``--runxfail`` (the cold-race Qwen arm is excluded from the
-parametrization itself; see ``COLD_RACE_MODELS``). Behavior under
-#45477/#47861-class fixes is
-EXPECTED to be cured but is not asserted anywhere here; whoever lands a
-fix should remove the markers after one green calibration run. Until
+parametrization itself; see ``COLD_RACE_MODELS``). Behavior under the
+open fix PRs was measured once per arm (matrix in the PR): #47861,
+#45614, and #46281 each cure the multi-turn lane; none cures the
+cold-race lane — it either still corrupts (#45614) or drops to zero
+prefix-cache hits (#47861/#46281/#45477, tripping the liveness gate).
+Whoever lands a fix should therefore remove each marker only after a
+green calibration run of its own lane, not both at once. Until
 then the optional CI step runs with ``--runxfail`` so live corruption
 shows up red on its non-gating dashboard instead of hiding inside
 XFAIL counts.
