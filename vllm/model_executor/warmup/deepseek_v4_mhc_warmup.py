@@ -93,6 +93,21 @@ def _select_mhc_warmup_token_sizes(
     return _normalize_token_sizes(candidates, max_tokens=max_tokens)
 
 
+def _mhc_split_bucket_sizes(max_tokens: int, hc_hidden_size: int) -> list[int]:
+    from vllm.model_executor.kernels.mhc.tilelang_kernels import compute_num_split
+
+    block_k = 64
+    block_m = 64
+    sizes: list[int] = []
+    seen: set[int] = set()
+    for grid_size in range(1, cdiv(max_tokens, block_m) + 1):
+        n_splits = compute_num_split(block_k, hc_hidden_size, grid_size)
+        if n_splits not in seen:
+            seen.add(n_splits)
+            sizes.append(min(grid_size * block_m, max_tokens))
+    return sizes
+
+
 def _find_first_mhc_layer(model: torch.nn.Module) -> torch.nn.Module | None:
     for module in model.modules():
         if module.__class__.__name__ != "DeepseekV4DecoderLayer":
@@ -311,6 +326,13 @@ def deepseek_v4_mhc_warmup(
     )
     if not token_sizes:
         return
+
+    # Cover every reachable split-k bucket, not only the power-of-two grid.
+    hc_hidden_size = int(layer.hc_mult) * int(layer.hidden_size)
+    token_sizes = _normalize_token_sizes(
+        token_sizes + _mhc_split_bucket_sizes(max(token_sizes), hc_hidden_size),
+        max_tokens=max(token_sizes),
+    )
 
     total = len(token_sizes)
     if deepseek_model is not None:
