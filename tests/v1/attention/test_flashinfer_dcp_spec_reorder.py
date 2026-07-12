@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import create_vllm_config
-from vllm.config import SpeculativeConfig
+from vllm.config import SpeculativeConfig, set_current_vllm_config
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 from vllm.v1.attention.backends.flashinfer import (
@@ -58,12 +58,13 @@ def test_flashinfer_gqa_dcp_spec_decode_clamps_reorder_threshold(monkeypatch):
         head_size=vllm_config.model_config.get_head_size(),
         dtype=vllm_config.model_config.dtype,
     )
-    builder = FlashInferMetadataBuilder(
-        kv_cache_spec,
-        ["layer.0"],
-        vllm_config,
-        torch.device("cpu"),
-    )
+    with set_current_vllm_config(vllm_config):
+        builder = FlashInferMetadataBuilder(
+            kv_cache_spec,
+            ["layer.0"],
+            vllm_config,
+            torch.device("cpu"),
+        )
 
     # Guard against passing vacuously with the kernel disabled.
     assert (
