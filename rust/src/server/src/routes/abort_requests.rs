@@ -20,12 +20,8 @@ pub async fn abort_requests(
     body: Result<Json<AbortRequestsRequest>, JsonRejection>,
 ) -> Result<StatusCode, ApiError> {
     let Json(body) = body.map_err(|error| ApiError::json_parse_error(error.body_text()))?;
-    let request_ids = body.request_ids.ok_or_else(|| {
-        ApiError::invalid_request(
-            "Missing 'request_ids' in request body".to_string(),
-            Some("request_ids"),
-        )
-    })?;
+    // Empty/missing `request_ids` aborts all in-flight requests.
+    let request_ids = body.request_ids.unwrap_or_default();
 
     state
         .chat
