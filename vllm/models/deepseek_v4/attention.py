@@ -85,8 +85,6 @@ def _resolve_dsv4_kv_cache_dtype(
             f"got {kv_cache_dtype}"
         )
         if kv_cache_dtype != "fp8_ds_mla":
-            if cache_config is not None:
-                cache_config.cache_dtype = "fp8_ds_mla"
             kv_cache_dtype = "fp8_ds_mla"
             logger.info_once("Using DeepSeek's fp8_ds_mla KV cache format.")
         return kv_cache_dtype, torch.uint8

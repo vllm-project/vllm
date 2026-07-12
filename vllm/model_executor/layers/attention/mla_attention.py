@@ -414,8 +414,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self.attn_backend, kv_cache_dtype
         )
         if normalized_kv_cache_dtype != kv_cache_dtype:
-            if cache_config is not None:
-                cache_config.cache_dtype = normalized_kv_cache_dtype
             kv_cache_dtype = normalized_kv_cache_dtype
             logger.info_once(
                 "Using %s KV cache format for %s backend.",
