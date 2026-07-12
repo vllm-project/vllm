@@ -216,6 +216,12 @@ kInt4W4A8StaticGroupSym = QuantKey(
     torch.int8, kInt4W4A8StaticGroupScale, symmetric=True
 )
 
+kInt4W4A8StaticChannelSym = QuantKey(
+    torch.int8,
+    ScaleDesc(torch.float32, True, GroupShape.PER_CHANNEL),
+    symmetric=True,
+)
+
 
 def create_fp8_quant_key(
     static: bool,
@@ -401,6 +407,9 @@ def get_and_maybe_dequant_weights(
     """Return layer's unquantized weights in [out, in] layout"""
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
     from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+    from vllm.model_executor.layers.quantization.online.fp8 import (
+        Fp8PerTensorOnlineLinearMethod,
+    )
 
     # LoRA linear wrappers store quantization metadata on `base_layer`.
     # Unwrap here so callers can pass either a raw linear layer or its LoRA
@@ -418,7 +427,9 @@ def get_and_maybe_dequant_weights(
 
     # Simple Fp8 case: rescale with tensor or block weight scales
     if (
-        isinstance(layer.quant_method, Fp8LinearMethod)
+        isinstance(
+            layer.quant_method, (Fp8LinearMethod, Fp8PerTensorOnlineLinearMethod)
+        )
         and not layer.quant_method.use_marlin
         # DeepGEMM transforms the scales using `transform_sf_into_required_layout` into
         # a layout that is not compatible with `scaled_dequantize`.

@@ -150,6 +150,10 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
+    def has_pending_push_work(self) -> bool:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.has_pending_push_work()
+
     def update_connector_output(self, connector_output: KVConnectorOutput):
         assert self.connector_scheduler is not None
         self.connector_scheduler.update_connector_output(connector_output)
@@ -186,11 +190,6 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         if self.connector_scheduler is not None:
             return self.connector_scheduler.get_stats()
-
-        # TODO(orozery): Remove once PR #43877 lands
-        if self.connector_worker is not None:
-            return OffloadingConnectorStats()
-
         return None
 
     @classmethod

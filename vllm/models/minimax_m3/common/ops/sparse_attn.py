@@ -8,7 +8,8 @@ equal the sparse block size (128), so one selected block maps to exactly one
 page.
 
 Main K/V cache layout (vLLM):
-  ``(num_blocks, 2, 128, num_kv_heads, head_dim)``  K=[:,0] V=[:,1]
+  ``(num_blocks, num_kv_heads, 128, 2 * head_dim)``
+  K=[..., :head_dim] V=[..., head_dim:]
 
 Only the paths MiniMax M3 uses are implemented: no attention sink, base-2
 (exp2/log2) softmax. The decode kernels use split-K (flash-decoding) over the
@@ -24,30 +25,12 @@ from vllm.triton_utils import tl, triton
 # One sparse block == one KV page.
 SPARSE_BLOCK_SIZE = 128
 
-
-_SPARSE_ATTN_NUM_STAGES_KWARG: dict | None = None
-
-
-def _sparse_attn_num_stages_kwarg() -> dict:
-    """Triton ``num_stages`` override for the sparse-attn GEMM kernels.
-
-    Forced only where required: CDNA3 (gfx942) caps LDS at
-    64 KB, and the default 2-stage pipeline double-buffers the 128x128 K/V tiles
-    to ~66 KB ("out of resource: shared memory"), so pin gfx942 to a single
-    stage (~32 KB, which fits). Everywhere else (NVIDIA, CDNA4 gfx950) return an
-    empty kwarg and let Triton keep its own default -- don't second-guess it.
-    Cached: the arch is fixed per process.
-    """
-    global _SPARSE_ATTN_NUM_STAGES_KWARG
-    if _SPARSE_ATTN_NUM_STAGES_KWARG is None:
-        kwarg: dict = {}
-        if current_platform.is_rocm():
-            from vllm.platforms.rocm import on_gfx942
-
-            if on_gfx942():
-                kwarg = {"num_stages": 1}
-        _SPARSE_ATTN_NUM_STAGES_KWARG = kwarg
-    return _SPARSE_ATTN_NUM_STAGES_KWARG
+_FP8_DTYPES = (
+    torch.float8_e4m3fn,
+    torch.float8_e4m3fnuz,
+    torch.float8_e5m2,
+    torch.float8_e5m2fnuz,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +44,6 @@ def _sparse_attn_num_stages_kwarg() -> dict:
     {
         "BLOCK_SIZE_D": lambda args: triton.next_power_of_2(args["head_dim"]),
         "BLOCK_SIZE_H": lambda args: triton.next_power_of_2(args["gqa_group_size"]),
-        "BLOCK_SIZE_T": lambda args: triton.next_power_of_2(args["max_topk"]),
         "BLOCK_SIZE_QH": lambda args: args["BLOCK_SIZE_Q"]
         * triton.next_power_of_2(args["gqa_group_size"]),
     }
@@ -69,7 +51,7 @@ def _sparse_attn_num_stages_kwarg() -> dict:
 @triton.jit(do_not_specialize_on_alignment=["seq_lens", "prefix_lens"])
 def _gqa_sparse_fwd_kernel(
     q_ptr,  # [total_q, num_heads, head_dim]
-    kv_cache_ptr,  # main cache: [num_blocks, 2, 128, num_kv_heads, head_dim]
+    kv_cache_ptr,  # main cache: [num_blocks, num_kv_heads, 128, 2*head_dim]
     t_ptr,  # topk_idx: [num_kv_heads, total_q, topk]
     o_ptr,  # [total_q, num_heads, head_dim]
     block_table_ptr,  # [num_reqs, max_blocks]
@@ -87,9 +69,8 @@ def _gqa_sparse_fwd_kernel(
     stride_qh,
     stride_qd,
     stride_kv_blk,
-    stride_kv_kv,
-    stride_kv_pos,
     stride_kv_h,
+    stride_kv_pos,
     stride_kv_d,
     stride_th,
     stride_tn,
@@ -102,7 +83,6 @@ def _gqa_sparse_fwd_kernel(
     BLOCK_SIZE_K: tl.constexpr,  # == SPARSE_BLOCK_SIZE (128)
     BLOCK_SIZE_D: tl.constexpr,
     BLOCK_SIZE_H: tl.constexpr,
-    BLOCK_SIZE_T: tl.constexpr,
     BLOCK_SIZE_QH: tl.constexpr,
     USE_FP8: tl.constexpr,  # fp8 KV cache: dequantize K/V to q.dtype on load
 ):
@@ -127,9 +107,10 @@ def _gqa_sparse_fwd_kernel(
     for j in range(real_q_loop):
         pid_q_j = pid_q * num_q_loop + j
         t_ptr_j = t_ptr + (q_block_start + pid_q_j) * stride_tn + pid_kh * stride_th
-        off_t = tl.arange(0, BLOCK_SIZE_T)
-        topk_idx = tl.load(t_ptr_j + off_t * stride_tk, mask=off_t < max_topk, other=-1)
-        real_topk = tl.sum((topk_idx >= 0).to(tl.int32), axis=0)
+        # Valid block count from seq position (no sentinel): block_size_q == 1.
+        q_abs = prefix_len + pid_q_j * BLOCK_SIZE_Q
+        valid_blocks = (q_abs + BLOCK_SIZE_K) // BLOCK_SIZE_K
+        real_topk = tl.minimum(max_topk, valid_blocks)
         q_ptrs = tl.make_block_ptr(
             base=q_ptr + q_start * stride_qn + pid_h * stride_qh,
             shape=(q_len, gqa_group_size, head_dim),
@@ -159,9 +140,8 @@ def _gqa_sparse_fwd_kernel(
             k = tl.load(
                 kv_cache_ptr
                 + page * stride_kv_blk
-                + 0 * stride_kv_kv
-                + off_n[None, :] * stride_kv_pos
                 + pid_kh * stride_kv_h
+                + off_n[None, :] * stride_kv_pos
                 + off_d[:, None] * stride_kv_d,
                 mask=d_mask[:, None] & pos_mask[None, :],
                 other=0.0,
@@ -181,10 +161,9 @@ def _gqa_sparse_fwd_kernel(
             v = tl.load(
                 kv_cache_ptr
                 + page * stride_kv_blk
-                + 1 * stride_kv_kv
-                + off_n[:, None] * stride_kv_pos
                 + pid_kh * stride_kv_h
-                + off_d[None, :] * stride_kv_d,
+                + off_n[:, None] * stride_kv_pos
+                + (head_dim + off_d[None, :]) * stride_kv_d,
                 mask=pos_mask[:, None] & d_mask[None, :],
                 other=0.0,
             )
@@ -220,13 +199,12 @@ def _gqa_sparse_fwd_kernel(
             16, triton.next_power_of_2(args["gqa_group_size"])
         ),
         "BLOCK_SIZE_D": lambda args: triton.next_power_of_2(args["head_dim"]),
-        "BLOCK_SIZE_T": lambda args: triton.next_power_of_2(args["max_topk"]),
     }
 )
 @triton.jit(do_not_specialize=["decode_query_len"])
 def _gqa_sparse_decode_kernel(
     q_ptr,  # [total_q, num_heads, head_dim]
-    kv_cache_ptr,  # main cache: [num_blocks, 2, 128, num_kv_heads, head_dim]
+    kv_cache_ptr,  # main cache: [num_blocks, num_kv_heads, 128, 2*head_dim]
     t_ptr,  # topk_idx: [num_kv_heads, total_q, topk]
     o_ptr,  # partial out: [NUM_TOPK_CHUNKS, total_q, num_heads, head_dim]
     lse_ptr,  # partial lse (log2): [NUM_TOPK_CHUNKS, total_q, num_heads]
@@ -242,9 +220,8 @@ def _gqa_sparse_decode_kernel(
     stride_qh,
     stride_qd,
     stride_kv_blk,
-    stride_kv_kv,
-    stride_kv_pos,
     stride_kv_h,
+    stride_kv_pos,
     stride_kv_d,
     stride_th,
     stride_tn,
@@ -261,7 +238,6 @@ def _gqa_sparse_decode_kernel(
     NUM_TOPK_CHUNKS: tl.constexpr,
     BLOCK_SIZE_H: tl.constexpr,
     BLOCK_SIZE_D: tl.constexpr,
-    BLOCK_SIZE_T: tl.constexpr,
     USE_FP8: tl.constexpr,  # fp8 KV cache: dequantize K/V to q.dtype on load
     USE_PDL: tl.constexpr,
 ):
@@ -286,11 +262,10 @@ def _gqa_sparse_decode_kernel(
     # attention range instead of letting padded rows produce negative lengths.
     kv_len = tl.maximum(query_pos + 1, 0)
 
-    # number of valid (non-padded) selected blocks for this query token
-    off_t = tl.arange(0, BLOCK_SIZE_T)
+    # Valid block count from seq_len (no sentinel): min(topk, cdiv(kv_len, blk)).
     idx_base = t_ptr + pid_kh * stride_th + pid_b * stride_tn
-    topk_idx = tl.load(idx_base + off_t * stride_tk, mask=off_t < max_topk, other=-1)
-    real_topk = tl.sum((topk_idx >= 0).to(tl.int32), axis=0)
+    num_blocks = (kv_len + BLOCK_SIZE_K - 1) // BLOCK_SIZE_K
+    real_topk = tl.minimum(max_topk, num_blocks)
     chunk_end_topk = tl.minimum(chunk_end_compiletime, real_topk)
 
     off_n = tl.arange(0, BLOCK_SIZE_K)
@@ -322,9 +297,8 @@ def _gqa_sparse_decode_kernel(
         k = tl.load(
             kv_cache_ptr
             + page * stride_kv_blk
-            + 0 * stride_kv_kv
-            + off_n[None, :] * stride_kv_pos
             + pid_kh * stride_kv_h
+            + off_n[None, :] * stride_kv_pos
             + off_d[:, None] * stride_kv_d,
             mask=d_mask[:, None] & pos_mask[None, :],
             other=0.0,
@@ -341,10 +315,9 @@ def _gqa_sparse_decode_kernel(
         v = tl.load(
             kv_cache_ptr
             + page * stride_kv_blk
-            + 1 * stride_kv_kv
-            + off_n[:, None] * stride_kv_pos
             + pid_kh * stride_kv_h
-            + off_d[None, :] * stride_kv_d,
+            + off_n[:, None] * stride_kv_pos
+            + (head_dim + off_d[None, :]) * stride_kv_d,
             mask=pos_mask[:, None] & d_mask[None, :],
             other=0.0,
         )
@@ -440,7 +413,7 @@ def _merge_topk_attn_out_kernel(
 @torch.no_grad()
 def minimax_m3_sparse_attn(
     q: torch.Tensor,  # [total_q, num_heads, head_dim]
-    kv_cache: torch.Tensor,  # [num_blocks, 2, 128, num_kv_heads, head_dim]
+    kv_cache: torch.Tensor,  # [num_blocks, num_kv_heads, 128, 2*head_dim]
     topk_idx: torch.Tensor,  # [num_kv_heads, total_q, topk]
     block_table: torch.Tensor,  # [batch, max_blocks]
     cu_seqlens_q: torch.Tensor,  # [batch+1] int32
@@ -456,7 +429,7 @@ def minimax_m3_sparse_attn(
     batch = cu_seqlens_q.shape[0] - 1
     topk = topk_idx.shape[-1]
     gqa_group_size = num_heads // num_kv_heads
-    use_fp8 = kv_cache.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
+    use_fp8 = kv_cache.dtype in _FP8_DTYPES
     grid = (max_query_len, num_kv_heads, batch)
     _gqa_sparse_fwd_kernel[grid](
         q,
@@ -481,7 +454,6 @@ def minimax_m3_sparse_attn(
         kv_cache.stride(1),
         kv_cache.stride(2),
         kv_cache.stride(3),
-        kv_cache.stride(4),
         topk_idx.stride(0),
         topk_idx.stride(1),
         topk_idx.stride(2),
@@ -492,14 +464,13 @@ def minimax_m3_sparse_attn(
         BLOCK_SIZE_Q=1,
         BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
         USE_FP8=use_fp8,
-        **_sparse_attn_num_stages_kwarg(),
     )
 
 
 @torch.no_grad()
 def minimax_m3_sparse_attn_decode(
     q: torch.Tensor,  # [total_q, num_heads, head_dim]
-    kv_cache: torch.Tensor,  # [num_blocks, 2, 128, num_kv_heads, head_dim]
+    kv_cache: torch.Tensor,  # [num_blocks, num_kv_heads, 128, 2*head_dim]
     topk_idx: torch.Tensor,  # [num_kv_heads, total_q, topk]
     block_table: torch.Tensor,  # [num_reqs, max_blocks]
     seq_lens: torch.Tensor,  # [num_reqs] int32
@@ -513,7 +484,7 @@ def minimax_m3_sparse_attn_decode(
     assert total_q == seq_lens.shape[0] * decode_query_len
     max_topk = topk_idx.shape[-1]
     gqa_group_size = num_heads // num_kv_heads
-    use_fp8 = kv_cache.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
+    use_fp8 = kv_cache.dtype in _FP8_DTYPES
     use_pdl = current_platform.is_arch_support_pdl()
     # `launch_pdl` is a Triton runtime kwarg only some backends accept (CUDA
     # SM9+); this ROCm Triton rejects it even when False ("Keyword argument
@@ -552,7 +523,6 @@ def minimax_m3_sparse_attn_decode(
         kv_cache.stride(1),
         kv_cache.stride(2),
         kv_cache.stride(3),
-        kv_cache.stride(4),
         topk_idx.stride(0),
         topk_idx.stride(1),
         topk_idx.stride(2),
@@ -568,7 +538,6 @@ def minimax_m3_sparse_attn_decode(
         NUM_TOPK_CHUNKS=num_topk_chunks,
         USE_FP8=use_fp8,
         USE_PDL=use_pdl,
-        **_sparse_attn_num_stages_kwarg(),
         **pdl_launch,
     )
     merge_grid = (total_q, num_heads)

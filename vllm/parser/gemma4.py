@@ -35,34 +35,6 @@ if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
     from vllm.tool_parsers.abstract_tool_parser import Tool
 
-# Tokens the model generates that must not leak into response content.
-_GEMMA4_MODEL_DROP_TOKENS: set[str] = {
-    # Turn boundaries
-    "<|turn>",
-    "<turn|>",
-    # Channel / reasoning
-    "<|channel>",
-    "<channel|>",
-    # Tool protocol tokens
-    "<|tool>",
-    "<tool|>",
-    "<|tool_call>",
-    "<tool_call|>",
-    "<|tool_response>",
-    "<tool_response|>",
-    '<|"|>',
-    # Thinking
-    "<|think|>",
-    # Multi-modal (defensive — not expected during text completion)
-    "<|image>",
-    "<|image|>",
-    "<image|>",
-    "<|audio>",
-    "<|audio|>",
-    "<audio|>",
-    "<|video|>",
-}
-
 CHANNEL_START = "<|channel>"
 CHANNEL_END = "<channel|>"
 TOOL_CALL_START = "<|tool_call>"
@@ -322,14 +294,6 @@ def _gemma4_arg_converter(raw_args: str, partial: bool) -> str:
 
 @functools.cache
 def gemma4_config() -> ParserEngineConfig:
-    used_tokens = {
-        CHANNEL_START,
-        CHANNEL_END,
-        TOOL_CALL_START,
-        TOOL_CALL_END,
-        '<|"|>',
-    }
-
     return ParserEngineConfig(
         name="gemma4",
         initial_state=ParserState.CONTENT,
@@ -353,6 +317,14 @@ def gemma4_config() -> ParserEngineConfig:
                 ParserState.REASONING,
                 (EventType.REASONING_START,),
             ),
+            # No-op: if we pre-initialised the engine to REASONING from the
+            # prompt (see ``adjust_initial_state_from_prompt``) but the model
+            # still emits its own ``<|channel>`` opener, swallow it instead
+            # of leaking it as TEXT_CHUNK.
+            (ParserState.REASONING, "THINK_START"): Transition(
+                ParserState.REASONING,
+                (),
+            ),
             (ParserState.REASONING, "THINK_END"): Transition(
                 ParserState.CONTENT,
                 (EventType.REASONING_END,),
@@ -366,6 +338,10 @@ def gemma4_config() -> ParserEngineConfig:
             (ParserState.CONTENT, "TOOL_START"): Transition(
                 ParserState.TOOL_PREAMBLE,
                 (EventType.REASONING_END, EventType.TOOL_CALL_START),
+            ),
+            (ParserState.TOOL_PREAMBLE, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
             ),
             (ParserState.TOOL_PREAMBLE, "CALL_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
@@ -400,7 +376,7 @@ def gemma4_config() -> ParserEngineConfig:
         arg_converter=_gemma4_arg_converter,
         tool_args_json=False,
         arg_structural_chars=frozenset(",:{}[]<"),
-        drop_tokens=frozenset(_GEMMA4_MODEL_DROP_TOKENS - used_tokens),
+        preserve_tokens=frozenset({STRING_DELIM}),
     )
 
 
@@ -423,6 +399,8 @@ class Gemma4Parser(ParserEngine):
         tools: list[Tool] | None = None,
         **kwargs,
     ) -> None:
+        chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
+        self._thinking_enabled = chat_kwargs.get("enable_thinking", True)
         super().__init__(
             tokenizer,
             tools,
@@ -494,12 +472,32 @@ class Gemma4Parser(ParserEngine):
             if tool_call_id is not None and tid == tool_call_id:
                 return True
             if new_turn_id is not None and tid == new_turn_id:
-                return False
+                return not self._thinking_enabled
             if tool_response_id is not None and tid == tool_response_id:
-                return False
+                return not self._thinking_enabled
             if end_id is not None and tid == end_id:
                 return True
-        return self._reasoning_ended
+        return True
+
+    def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
+        """Pre-initialise the engine to ``REASONING`` when the prompt does
+        not already end with reasoning concluded.
+
+        This covers the post-tool-response continuation case where the chat
+        template leaves the prompt ending inside an open ``<|channel>``
+        block (issue #45834). It is also safe in the common new-turn case
+        where the model itself emits ``<|channel>`` first: the no-op
+        ``(REASONING, THINK_START)`` transition swallows it, and the
+        ``thought\n`` prefix in the first reasoning chunk is stripped by
+        ``_events_to_delta`` as it already is in the default flow.
+        """
+        if self.is_reasoning_end(list(prompt_token_ids)):
+            return
+        self._engine.reset(initial_state=ParserState.REASONING)
+        # Prevent a later default ``initialize_streaming()`` (e.g. from
+        # ``ParserEngineReasoningAdapter.extract_reasoning_streaming``) from
+        # clobbering this with ``CONTENT``.
+        self._streaming_initialized = True
 
     def _events_to_delta(
         self,

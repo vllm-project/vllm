@@ -468,6 +468,9 @@ def dummy_hf_overrides(
     # Kimi uses `num_expert_group` instead of `n_group`.
     if n_group is None:
         n_group = getattr(text_config, "num_expert_group", None)
+    # InternS1Pro uses `router_n_groups` instead of `n_group`.
+    if n_group is None:
+        n_group = getattr(text_config, "router_n_groups", None)
     num_experts = n_group * 2 if n_group is not None else 2
 
     # we use three layers for Gemma-3n to check
@@ -486,6 +489,7 @@ def dummy_hf_overrides(
                 "Gemma3nForConditionalGeneration",
                 "Gemma4ForCausalLM",
                 "Gemma4ForConditionalGeneration",
+                "Gemma4MTPModel",
                 "DiffusionGemmaForBlockDiffusion",
             )
             else 1
@@ -507,7 +511,16 @@ def dummy_hf_overrides(
     # Only set MoE related config when the model has MoE layers.
     # Otherwise all models detected as MoE by _get_transformers_backend_cls.
     if model_arch_config.num_experts > 0:
-        num_experts_per_tok = 1 if model_arch == "Llama4ForConditionalGeneration" else 2
+        num_experts_per_tok = 2
+        if model_arch in (
+            "Llama4ForConditionalGeneration",
+            "Llama4ForCausalLM",
+            "EagleLlama4ForCausalLM",
+        ):
+            num_experts_per_tok = 1
+        elif model_arch == "InternS1ProForConditionalGeneration":
+            assert n_group is not None
+            num_experts_per_tok = n_group
         update_dict.update(
             {
                 "num_experts": num_experts,
@@ -522,8 +535,13 @@ def dummy_hf_overrides(
             }
         )
 
-    # Update num_hidden_layers for non-Longcat architectures
-    if model_arch != "LongcatFlashForCausalLM" and model_arch != "LongCatFlashMTPModel":
+    # Update num_hidden_layers for non-Longcat architectures (Longcat derives it
+    # from num_layers for its dual-attention layers).
+    if model_arch not in (
+        "LongcatFlashForCausalLM",
+        "LongCatFlashMTPModel",
+        "LongcatFlashNgramForCausalLM",
+    ):
         update_dict["num_hidden_layers"] = num_hidden_layers
 
     text_config.update(update_dict)

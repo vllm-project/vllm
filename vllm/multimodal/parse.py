@@ -24,6 +24,7 @@ from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
 
 from .audio import AudioResampler, AudioSpec, normalize_audio
+from .image import convert_image_mode, normalize_image
 from .inputs import (
     AudioItem,
     HfAudioItem,
@@ -508,7 +509,7 @@ class MultiModalDataParser:
         *,
         target_sr: float | None = None,
         target_channels: int | None = None,
-        audio_resample_method: Literal["pyav", "scipy"] = "pyav",
+        audio_resample_method: Literal["pyav", "scipy", "soxr"] = "pyav",
         video_needs_metadata: bool = False,
         expected_hidden_size: int | None = None,
     ) -> None:
@@ -620,6 +621,13 @@ class MultiModalDataParser:
             data_items = [elem for elem in data]
         else:
             data_items = data
+
+        data_items = [
+            convert_image_mode(normalize_image(item), "RGB")
+            if isinstance(item, PILImage.Image)
+            else item
+            for item in data_items
+        ]
 
         return ImageProcessorItems(data_items)
 

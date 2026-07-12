@@ -19,18 +19,33 @@ import functools
 import json
 import os
 from collections.abc import Iterable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
+
+try:
+    from vllm.fs_io_C import batch_lookup as batch_lookup_C
+
+    _HAS_BATCH_LOOKUP_C = True
+except ImportError:
+    _HAS_BATCH_LOOKUP_C = False
 
 from typing_extensions import override
 
+from vllm.distributed.kv_events import MEDIUM_FS
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext
+from vllm.v1.kv_offload.base import (
+    LookupResult,
+    OffloadingEvent,
+    OffloadKey,
+    ReqContext,
+)
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
 from vllm.v1.kv_offload.tiering.base import (
+    JobId,
     JobMetadata,
     JobResult,
     RequestOffloadingContext,
+    ScheduleEndContext,
     SecondaryTierManager,
 )
 from vllm.v1.kv_offload.tiering.fs.io import load_block, store_block
@@ -56,7 +71,11 @@ class FsAsyncLookupManager(AsyncLookupManager):
     def batch_lookup(
         self, keys: list[OffloadKey], req_context: ReqContext
     ) -> Iterable[bool]:
-        return (os.path.exists(self._tier.file_mapper.get_file_name(k)) for k in keys)
+        paths = [self._tier.file_mapper.get_file_name(k) for k in keys]
+        if _HAS_BATCH_LOOKUP_C:
+            # C extension: GIL released for the entire faccessat() batch.
+            return batch_lookup_C(paths)
+        return (os.path.exists(p) for p in paths)
 
 
 class FileSystemTierManager(SecondaryTierManager):
@@ -80,6 +99,8 @@ class FileSystemTierManager(SecondaryTierManager):
         content.
     """
 
+    medium: ClassVar[str] = MEDIUM_FS
+
     def __init__(
         self,
         offloading_spec: "OffloadingSpec",
@@ -88,6 +109,7 @@ class FileSystemTierManager(SecondaryTierManager):
         root_dir: str,
         n_read_threads: int = 16,
         n_write_threads: int = 16,
+        enable_kv_events: bool = False,
     ):
         """
         Args:
@@ -98,8 +120,25 @@ class FileSystemTierManager(SecondaryTierManager):
             root_dir: Root directory for block files.
             n_read_threads: Number of read-priority I/O threads.
             n_write_threads: Number of write-priority I/O threads.
+            enable_kv_events: Emit BlockStored KV events for blocks
+                successfully stored to this tier. Effective only when KV
+                cache events are enabled globally (kv_events_config).
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
+
+        self.events: list[OffloadingEvent] | None = None
+        if enable_kv_events:
+            if offloading_spec.kv_events_config.enable_kv_cache_events:
+                self.events = []
+            else:
+                logger.warning(
+                    "enable_kv_events is set on secondary tier '%s' but KV "
+                    "cache events are disabled globally; the tier will not "
+                    "emit events.",
+                    tier_type,
+                )
+        # Keys of in-flight store jobs, tracked only when events are enabled.
+        self._store_job_keys: dict[JobId, list[OffloadKey]] = {}
 
         # Extract block size from primary view
         assert primary_kv_view.strides is not None, (
@@ -137,11 +176,16 @@ class FileSystemTierManager(SecondaryTierManager):
         return RequestOffloadingContext()
 
     @override
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
-        return self._lookup_manager.lookup(key, req_context)
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        result = self._lookup_manager.lookup(key, req_context)
+        if result is None:
+            return LookupResult.RETRY
+        return LookupResult.HIT if result else LookupResult.MISS
 
     @override
     def submit_store(self, job_metadata: JobMetadata) -> None:
+        if self.events is not None:
+            self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
         tasks = (
             functools.partial(
                 store_block,
@@ -173,10 +217,22 @@ class FileSystemTierManager(SecondaryTierManager):
         """
         Collect completed jobs from the finished-jobs queue.
         """
-        return (
-            JobResult(job_id=job_id, success=success)
-            for job_id, success in self._pool.get_finished()
-        )
+        results = []
+        for job_id, success in self._pool.get_finished():
+            if self.events is not None:
+                keys = self._store_job_keys.pop(job_id, None)
+                if success and keys:
+                    self.events.append(
+                        OffloadingEvent(keys=keys, medium=self.medium, removed=False)
+                    )
+            results.append(JobResult(job_id=job_id, success=success))
+        return results
+
+    @override
+    def take_events(self) -> Iterable[OffloadingEvent]:
+        if self.events is not None:
+            yield from self.events
+            self.events.clear()
 
     @override
     def drain_jobs(self) -> None:
@@ -187,7 +243,7 @@ class FileSystemTierManager(SecondaryTierManager):
         self._lookup_manager.cleanup(req_context.req_id)
 
     @override
-    def on_schedule_end(self) -> None:
+    def on_schedule_end(self, context: ScheduleEndContext) -> None:
         self._lookup_manager.flush()
 
     @override
