@@ -135,11 +135,11 @@ def chunk_scaled_dot_kkt_fwd(
     # This kernel is slightly different from fla to support Q/K with different head numbers.
     # In fla, Q/K always have the same head number, so Hg is always equal to H.
     B, T, Hg, K = k.shape
-    H = beta.shape[-1]
+    H = beta.shape[-1]  # type: ignore[union-attr]
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)  # type: ignore[arg-type]
 
     A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
     chunk_scaled_dot_kkt_fwd_kernel[(NT, B * H)](

@@ -182,7 +182,7 @@ def layer_norm_fwd(
     eps: float,
     z: torch.Tensor = None,
     out: torch.Tensor = None,
-    group_size: int = None,
+    group_size: int | None = None,
     norm_before_gate: bool = True,
     is_rms_norm: bool = False,
     activation: str = "swish",

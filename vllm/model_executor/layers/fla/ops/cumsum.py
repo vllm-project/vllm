@@ -176,7 +176,7 @@ def chunk_local_cumsum_scalar(
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     BT = chunk_size
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)  # type: ignore[arg-type]
     g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
     grid = (NT, B * H)
     chunk_local_cumsum_scalar_kernel[grid](
@@ -213,7 +213,7 @@ def chunk_local_cumsum_vector(
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     BT = chunk_size
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)  # type: ignore[arg-type]
 
     g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
 

@@ -189,7 +189,8 @@ def fused_recurrent_gated_delta_rule_fwd(
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    B, T, H, K, V = *k.shape, v.shape[-1]
+    B, T, H, K = k.shape
+    V = v.shape[-1]
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 32)
@@ -519,7 +520,7 @@ def fused_recurrent_gated_delta_rule(
     v: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor = None,
-    scale: float = None,
+    scale: float | None = None,
     initial_state: torch.Tensor = None,
     inplace_final_state: bool = True,
     cu_seqlens: torch.Tensor | None = None,

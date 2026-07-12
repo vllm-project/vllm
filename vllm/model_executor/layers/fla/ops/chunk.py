@@ -69,6 +69,7 @@ def chunk_gated_delta_rule_fwd(
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
     )
+    assert v_new is not None
     o = chunk_fwd_o(
         q=q,
         k=k,
@@ -141,7 +142,7 @@ def chunk_gated_delta_rule(
     v: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor,
-    scale: float = None,
+    scale: float | None = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     cu_seqlens: torch.Tensor | None = None,

@@ -13,7 +13,7 @@ import logging
 import os
 from collections.abc import Callable
 from enum import Enum
-from typing import Any, Literal
+from typing import Any
 
 import torch
 
@@ -47,7 +47,7 @@ def tensor_cache(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]
             A wrapped version of the input function with single-entry caching.
     """
 
-    cache_entries: tuple[tuple | None, dict | None, Any] = []
+    cache_entries: list[tuple[tuple[Any, ...], dict[str, Any], Any]] = []
     cache_size = 8
 
     @functools.wraps(fn)
@@ -126,7 +126,7 @@ def get_available_device() -> str:
 
 
 @functools.cache
-def _check_platform() -> Literal["nvidia", "amd", "intel", "musa"]:
+def _check_platform() -> str:
     device = get_available_device()
     mapping = {
         "cuda": "nvidia",
@@ -165,6 +165,8 @@ is_tma_supported = (
 
 
 def get_all_max_shared_mem():
+    if device_torch_lib is None:
+        return [-1]
     try:
         return [
             triton.runtime.driver.active.utils.get_device_properties(i)[

@@ -188,7 +188,7 @@ def fused_sigmoid_gating_delta_rule_update(
     v: torch.Tensor,
     beta: float = 1.0,
     threshold: float = 20.0,
-    scale: float = None,
+    scale: float | None = None,
     initial_state: torch.Tensor = None,
     inplace_final_state: bool = True,
     cu_seqlens: torch.Tensor | None = None,
@@ -202,7 +202,8 @@ def fused_sigmoid_gating_delta_rule_update(
     This function uses a single fused kernel that combines both sigmoid gating
     computation and the recurrent delta rule update for better performance.
     """
-    B, T, H, K, V = *k.shape, v.shape[-1]
+    B, T, H, K = k.shape
+    V = v.shape[-1]
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 32)

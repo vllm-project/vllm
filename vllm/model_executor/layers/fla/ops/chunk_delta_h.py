@@ -132,7 +132,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     # main recurrence
     for i_t in range(NT):
         p_h1 = tl.make_block_ptr(
-            h + i_t.to(tl.int64) * stride_h,
+            h + i_t.to(tl.int64) * stride_h,  # type: ignore[attr-defined]
             (V, K),
             (K, 1),
             (i_v * BV, 0),
@@ -142,7 +142,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         tl.store(p_h1, b_h1.to(p_h1.dtype.element_ty), boundary_check=(0, 1))
         if K > 64:
             p_h2 = tl.make_block_ptr(
-                h + i_t.to(tl.int64) * stride_h,
+                h + i_t.to(tl.int64) * stride_h,  # type: ignore[attr-defined]
                 (V, K),
                 (K, 1),
                 (i_v * BV, 64),
@@ -152,7 +152,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             tl.store(p_h2, b_h2.to(p_h2.dtype.element_ty), boundary_check=(0, 1))
         if K > 128:
             p_h3 = tl.make_block_ptr(
-                h + i_t.to(tl.int64) * stride_h,
+                h + i_t.to(tl.int64) * stride_h,  # type: ignore[attr-defined]
                 (V, K),
                 (K, 1),
                 (i_v * BV, 128),
@@ -162,7 +162,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             tl.store(p_h3, b_h3.to(p_h3.dtype.element_ty), boundary_check=(0, 1))
         if K > 192:
             p_h4 = tl.make_block_ptr(
-                h + i_t.to(tl.int64) * stride_h,
+                h + i_t.to(tl.int64) * stride_h,  # type: ignore[attr-defined]
                 (V, K),
                 (K, 1),
                 (i_v * BV, 192),
@@ -205,9 +205,9 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             )
             tl.store(p_v, b_v.to(p_v.dtype.element_ty), boundary_check=(0, 1))
 
-        last_idx = min((i_t.to(tl.int64) + 1) * BT, T) - 1
+        last_idx = min((i_t.to(tl.int64) + 1) * BT, T) - 1  # type: ignore[attr-defined]
         if USE_G:
-            m_t = (i_t.to(tl.int64) * BT + tl.arange(0, BT)) < T
+            m_t = (i_t.to(tl.int64) * BT + tl.arange(0, BT)) < T  # type: ignore[attr-defined]
             b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
             p_g = tl.make_block_ptr(
                 g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
@@ -331,10 +331,11 @@ def chunk_gated_delta_rule_fwd_h(
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
     use_exp2: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     # This kernel is slightly different from fla to support Q/K with different head numbers.
     # In fla, Q/K always have the same head number, so Hg is always equal to H.
-    B, T, Hg, K, V = *k.shape, u.shape[-1]
+    B, T, Hg, K = k.shape
+    V = u.shape[-1]
     H = u.shape[-2]
     BT = chunk_size
 
@@ -344,7 +345,7 @@ def chunk_gated_delta_rule_fwd_h(
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N, NT = len(cu_seqlens) - 1, len(chunk_indices)
+        N, NT = len(cu_seqlens) - 1, len(chunk_indices)  # type: ignore[arg-type]
         if chunk_offsets is None:
             chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
     assert K <= 256, "current kernel does not support head dimension larger than 256."
