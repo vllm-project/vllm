@@ -371,6 +371,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def get_model(self) -> nn.Module:
         return self.model
 
+    def get_draft_model(self) -> nn.Module | None:
+        speculator = self.speculator
+        if not isinstance(speculator, DraftModelSpeculator):
+            return None
+        return speculator.model
+
     def reload_weights(self, *args, **kwargs) -> None:
         # TODO(Wentao): Use full version instead of import when fully migrated to v2
         from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
