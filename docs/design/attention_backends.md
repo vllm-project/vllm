@@ -179,8 +179,6 @@ Priority is **1 = highest** (tried first).
 > **†** FlashInfer Native is the regular FlashInfer path. XQA is the SM90 decode path exposed through FlashInfer's TRTLLM decode API. trtllm-gen is used on SM100 and supports sinks. Disable XQA/trtllm-gen via `--attention-config.use_trtllm_attention=0`.
 >
 > **\*** Specify the FlashAttention version via `--attention-config.flash_attn_version=2`, `3`, or `4`. Default is FA4 on SM100+ (Blackwell), FA3 on SM90 (Hopper), FA2 otherwise.
->
-> **ROCM_ATTN KV layout:** ROCM_ATTN uses the content-packed logical KV cache shape `[num_blocks, num_kv_heads, block_size, 2 * head_size]`. Cache update, transfer, and attention paths expose split K/V views over that storage. Feature-bearing paths use the shared Triton unified-attention kernel. Native HIP paged attention can also consume content-backed K/V views for profiled feature-free decode shapes where it is faster.
 
 ## MiniMax M3 Sparse Attention Backends
 

@@ -420,13 +420,12 @@ class TransferTopology:
 
         self._engines: dict[tuple[EngineId, int], EngineTransferInfo] = {}
 
-        # Validate the standardized blocks-first cache layout used by transfer
-        # connectors. Standard attention packs K and V into the content dim.
+        # Figure out whether the first dimension of the cache is K/V
+        # or num_blocks.
         attn_backend = self.attn_backends[0]
-        kv_cache_shape: tuple[int, ...] = ()
         if not self.is_mamba:
             _MOCK_BLOCK_SIZE = 16
-            kv_cache_shape = attn_backend.get_kv_cache_shape(
+            kv_cache_shape: tuple[int, ...] = attn_backend.get_kv_cache_shape(
                 num_blocks=1,
                 block_size=_MOCK_BLOCK_SIZE,
                 num_kv_heads=1,
@@ -449,6 +448,7 @@ class TransferTopology:
             self._cross_layers_blocks = (
                 len(self.tensor_shape) == len(kv_cache_shape) + 1
             )
+
         if self._cross_layers_blocks:
             logger.debug("Using cross-layer KV cache")
             _MOCK_NUM_LAYERS = 80
