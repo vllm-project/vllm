@@ -503,7 +503,7 @@ def _swiglu_limit_pad_aware_kernel(
             should_compute = should_compute & (local_expert_id != -1)
 
         if should_compute:
-            gate_offsets = row * input_row_stride + column_tile
+            gate_offsets = row.to(tl.int64) * input_row_stride + column_tile
             up_offsets = gate_offsets + hidden_size
 
             gate = tl.load(input_ptr + gate_offsets, mask=mask, other=0.0).to(
@@ -520,7 +520,7 @@ def _swiglu_limit_pad_aware_kernel(
             silu_gate = gate / (1.0 + tl.exp(-gate))
             result = silu_gate * up
             tl.store(
-                output_ptr + row * hidden_size + column_tile,
+                output_ptr + row.to(tl.int64) * hidden_size + column_tile,
                 result.to(output_ptr.dtype.element_ty),
                 mask=mask,
             )
