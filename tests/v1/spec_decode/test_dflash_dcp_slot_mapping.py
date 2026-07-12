@@ -169,9 +169,16 @@ def test_dflash_slot_mapping_matches_dcp_layout(cp_size: int, cp_interleave: int
                 last_valid_pos + 1 + NUM_QUERY_PER_REQ,
                 device=DEVICE,
             )
-            ref_q = _ref_slots(
-                query_pos, r.block_table[req], cp_size, cp_rank, cp_interleave
-            )
+            # Under DCP the dense flash path attends the query block against
+            # freshly computed K/V (never the cache), so the query K/V is not
+            # written: every query slot is PAD. Without DCP it is the global
+            # slot.
+            if cp_size == 1:
+                ref_q = _ref_slots(
+                    query_pos, r.block_table[req], cp_size, cp_rank, cp_interleave
+                )
+            else:
+                ref_q = torch.full_like(query_pos, PAD_SLOT_ID)
             qstart = req * NUM_QUERY_PER_REQ
             torch.testing.assert_close(
                 r.query_slot_mapping[qstart : qstart + NUM_QUERY_PER_REQ],
@@ -193,6 +200,27 @@ def test_dflash_slot_mapping_matches_dcp_layout(cp_size: int, cp_interleave: int
                 rtol=0,
                 atol=0,
             )
+
+
+@pytest.mark.parametrize("cp_size,cp_interleave", [(2, 1), (4, 1), (4, 8)])
+def test_dflash_query_slots_all_pad_under_dcp(cp_size: int, cp_interleave: int):
+    """Under DCP every query slot is PAD on every rank.
+
+    The dense flash DCP path attends the query block against freshly computed
+    K/V, so writing the local num_kv_heads query K/V into the DCP-replicated
+    cache would corrupt the head layout; the write must be skipped entirely.
+    """
+    for cp_rank in range(cp_size):
+        r = _run_prepare(cp_size, cp_rank, cp_interleave)
+        num_query_tokens = r.num_reqs * NUM_QUERY_PER_REQ
+        assert (r.query_slot_mapping[:num_query_tokens] == PAD_SLOT_ID).all()
+
+
+def test_dflash_query_slots_written_without_dcp():
+    """Without DCP the query slots are real (global) cache slots, not PAD."""
+    r = _run_prepare(cp_size=1, cp_rank=0, cp_interleave=1)
+    num_query_tokens = r.num_reqs * NUM_QUERY_PER_REQ
+    assert (r.query_slot_mapping[:num_query_tokens] != PAD_SLOT_ID).all()
 
 
 @pytest.mark.parametrize("cp_size,cp_interleave", [(2, 1), (4, 1), (4, 8)])

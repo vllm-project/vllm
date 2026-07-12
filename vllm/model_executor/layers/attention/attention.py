@@ -248,11 +248,20 @@ class Attention(nn.Module, AttentionLayerBase):
         mm_prefix_clamp_sliding_window: bool = False,
         attn_backend: type[AttentionBackend] | None = None,
         head_size_v: int | None = None,
+        cache_num_kv_heads: int | None = None,
         **extra_impl_args,
     ) -> None:
         """
         The KV cache is stored inside this class and is accessed via
         `self.kv_cache`.
+
+        ``cache_num_kv_heads`` decouples the number of KV heads *stored per
+        block* from the ``num_kv_heads`` the impl projects and computes with.
+        It defaults to ``num_kv_heads``. It is only larger for DFlash/DSpark
+        drafts under decode context parallelism, where each DCP rank caches the
+        whole group's KV heads (replicated) so the flash DCP head-gather maps
+        the gathered query heads onto the correct KV heads (see
+        ``vllm/model_executor/models/qwen3_dflash.py``).
         """
         super().__init__()
         sliding_window: int | None
@@ -335,6 +344,15 @@ class Attention(nn.Module, AttentionLayerBase):
         self.head_size = head_size
         self.head_size_v = self.head_size if head_size_v is None else head_size_v
         self.num_kv_heads = num_kv_heads
+        # KV heads stored per block (>= num_kv_heads only for DCP-replicated
+        # draft caches); drives the KV-cache spec/allocation, not the impl.
+        self.cache_num_kv_heads = (
+            num_kv_heads if cache_num_kv_heads is None else cache_num_kv_heads
+        )
+        assert self.cache_num_kv_heads % num_kv_heads == 0, (
+            f"cache_num_kv_heads ({self.cache_num_kv_heads}) must be a multiple "
+            f"of num_kv_heads ({num_kv_heads})"
+        )
         self.sliding_window = sliding_window
         self.has_sink = extra_impl_args.get("sinks") is not None
 
@@ -640,7 +658,7 @@ class Attention(nn.Module, AttentionLayerBase):
             shared_page = vllm_config.cache_config.skip_page_size_padded
             sw_per_token = SlidingWindowSpec(
                 block_size=1,
-                num_kv_heads=self.num_kv_heads,
+                num_kv_heads=self.cache_num_kv_heads,
                 head_size=self.head_size,
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
@@ -652,7 +670,7 @@ class Attention(nn.Module, AttentionLayerBase):
             )
             return SlidingWindowSpec(
                 block_size=sw_block_size,
-                num_kv_heads=self.num_kv_heads,
+                num_kv_heads=self.cache_num_kv_heads,
                 head_size=self.head_size,
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
@@ -671,7 +689,7 @@ class Attention(nn.Module, AttentionLayerBase):
             )
             return TQFullAttentionSpec(
                 block_size=block_size,
-                num_kv_heads=self.num_kv_heads,
+                num_kv_heads=self.cache_num_kv_heads,
                 head_size=self.head_size,
                 head_size_v=self.head_size,
                 dtype=self.kv_cache_torch_dtype,
@@ -680,7 +698,7 @@ class Attention(nn.Module, AttentionLayerBase):
         else:
             return FullAttentionSpec(
                 block_size=block_size,
-                num_kv_heads=self.num_kv_heads,
+                num_kv_heads=self.cache_num_kv_heads,
                 head_size=self.head_size,
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,

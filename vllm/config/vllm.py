@@ -2253,38 +2253,101 @@ class VllmConfig:
                         "window draft KV cache backend is not DCP-aware)."
                     )
                 # The dense-attention DCP scheme (query head-gather + per-rank
-                # KV shard + LSE merge) is only valid when every DCP rank
-                # holds all of a query head's KV heads, i.e. the KV heads are
-                # replicated across the DCP group. Apply to the draft the same
-                # constraints ModelConfig.verify_with_parallel_config applies
-                # to dense targets; with sharded draft KV heads the gathered
-                # query heads attend to the wrong local KV heads and
-                # acceptance silently collapses.
+                # KV shard + LSE merge) needs each DCP rank to cache every KV
+                # head its gathered query heads attend to. Two ways satisfy it:
+                #   * KV heads sharded across the DCP group (draft KV heads >=
+                #     tensor_parallel_size): each rank caches the whole group's
+                #     KV heads, replicated via the precompute all-gather
+                #     (dcp_kv_head_replicas in qwen3_dflash.py). This needs a
+                #     non-quantized draft KV cache, because the per-head descale
+                #     is not wired for the decoupled cache head count.
+                #   * KV heads already replicated across the DCP group (draft KV
+                #     heads < tensor_parallel_size and the same constraints
+                #     ModelConfig.verify_with_parallel_config applies to dense
+                #     targets): each rank's KV heads already cover its gathered
+                #     query heads, no extra replication needed.
+                # Everything else (partial replication) still collapses.
                 if draft_model_config is not None and not draft_model_config.use_mla:
+                    from vllm.v1.kv_cache_interface import (
+                        KVQuantMode,
+                        get_kv_quant_mode,
+                    )
+
                     tp = self.parallel_config.tensor_parallel_size
                     dcp = self.parallel_config.decode_context_parallel_size
                     draft_kv_heads = draft_model_config.get_total_num_kv_heads()
                     draft_q_heads = (
                         draft_model_config.model_arch_config.total_num_attention_heads
                     )
-                    if not (
+                    kv_replicated_across_dcp = (
                         tp > draft_kv_heads
                         and dcp <= tp // draft_kv_heads
                         and (draft_q_heads // draft_kv_heads) % dcp == 0
-                    ):
+                    )
+                    kv_sharded_across_dcp = draft_kv_heads >= tp
+                    # Only the Qwen3-family DFlash/DSpark drafts implement the
+                    # DCP KV-head replication (cache_num_kv_heads + precompute
+                    # all-gather in qwen3_dflash.py). Other dense drafts (e.g.
+                    # Laguna) inherit the precompute but not the replication, so
+                    # keep rejecting their sharded case.
+                    dcp_replication_archs = {
+                        "DFlashDraftModel",
+                        "Qwen3DSparkModel",
+                    }
+                    draft_supports_dcp_replication = bool(
+                        set(draft_model_config.architectures or [])
+                        & dcp_replication_archs
+                    )
+                    # The draft inherits the target's kv-cache-dtype except for
+                    # the MLA-only fp8_ds_mla layout, which falls back to the
+                    # model dtype (see load_dflash/dspark_model).
+                    draft_cache_dtype = (
+                        "auto"
+                        if self.cache_config.cache_dtype == "fp8_ds_mla"
+                        else self.cache_config.cache_dtype
+                    )
+                    draft_cache_quantized = (
+                        get_kv_quant_mode(draft_cache_dtype) != KVQuantMode.NONE
+                    )
+                    if kv_sharded_across_dcp and not draft_supports_dcp_replication:
+                        raise NotImplementedError(
+                            "DFlash/DSpark under decode context parallelism with "
+                            f"sharded draft KV heads (draft KV heads="
+                            f"{draft_kv_heads} >= tensor_parallel_size={tp}) "
+                            "requires a draft that replicates its KV cache "
+                            "across the DCP group; draft architecture "
+                            f"{draft_model_config.architectures} does not. Use "
+                            "decode_context_parallel_size=1 or a different "
+                            "speculative method (e.g. mtp)."
+                        )
+                    if kv_sharded_across_dcp and draft_cache_quantized:
+                        raise NotImplementedError(
+                            "DFlash/DSpark with sharded draft KV heads "
+                            f"(draft KV heads={draft_kv_heads} >= "
+                            f"tensor_parallel_size={tp}) under decode context "
+                            "parallelism replicates the draft KV cache across "
+                            "the DCP group, which is only supported with a "
+                            "non-quantized draft KV cache, but got "
+                            f"kv-cache-dtype={self.cache_config.cache_dtype}. "
+                            "Use a non-quantized kv-cache-dtype or "
+                            "decode_context_parallel_size=1."
+                        )
+                    if not (kv_sharded_across_dcp or kv_replicated_across_dcp):
                         raise NotImplementedError(
                             "DFlash/DSpark under decode context parallelism "
-                            "requires the draft's KV heads to be replicated "
-                            "across the DCP group (tensor_parallel_size > "
-                            "draft KV heads and decode_context_parallel_size "
-                            "<= tensor_parallel_size // draft KV heads), but "
-                            f"got draft KV heads={draft_kv_heads}, "
+                            "requires the draft's KV heads to be either sharded "
+                            "across the DCP group (draft KV heads >= "
+                            "tensor_parallel_size, cached with replication) or "
+                            "replicated across it (tensor_parallel_size > draft "
+                            "KV heads and decode_context_parallel_size <= "
+                            "tensor_parallel_size // draft KV heads), but got "
+                            f"draft KV heads={draft_kv_heads}, "
                             f"tensor_parallel_size={tp}, "
-                            f"decode_context_parallel_size={dcp}. With "
-                            "sharded draft KV heads the dense-attention DCP "
-                            "path reads the wrong KV heads and acceptance "
-                            "collapses; use decode_context_parallel_size=1 "
-                            "or a different speculative method (e.g. mtp)."
+                            f"decode_context_parallel_size={dcp}. This partial "
+                            "replication reads the wrong KV heads and "
+                            "acceptance collapses; use "
+                            "decode_context_parallel_size=1 or a different "
+                            "speculative method (e.g. mtp)."
                         )
 
         # Mamba cache align-mode constraints

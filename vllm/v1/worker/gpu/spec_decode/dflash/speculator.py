@@ -434,17 +434,27 @@ def _pos_to_slot(
     CP_SIZE: tl.constexpr,
     CP_INTERLEAVE: tl.constexpr,
     PAD_SLOT_ID: tl.constexpr,
+    FORCE_PAD_UNDER_CP: tl.constexpr = False,
 ):
     # Under DCP (CP_SIZE > 1), one block-table entry covers block_size *
     # CP_SIZE global positions, interleave-sharded across the DCP ranks;
     # positions owned by other ranks map to PAD_SLOT_ID (KV writes skip them).
     # Same layout as _compute_slot_mappings_kernel in gpu/block_table.py.
+    #
+    # FORCE_PAD_UNDER_CP maps *every* position to PAD when CP_SIZE > 1. The
+    # query tokens use it: the dense flash DCP path (_forward_with_dcp) attends
+    # the query block against the freshly-computed K/V directly, never the
+    # cache, so the query K/V must not be written (and writing the local
+    # num_kv_heads into a DCP-replicated cache would corrupt the head layout).
     block_num = pos // (block_size * CP_SIZE)
     block_off = pos % (block_size * CP_SIZE)
     block_num = tl.minimum(block_num, block_table_stride - 1)
     block_id = tl.load(block_table_row_ptr + block_num, mask=mask, other=0).to(tl.int64)
     if CP_SIZE == 1:
         return block_id * block_size + block_off
+    if FORCE_PAD_UNDER_CP:
+        # int64 tensor of PAD_SLOT_ID matching pos's block shape.
+        return block_id * 0 + PAD_SLOT_ID
     is_local = block_off // CP_INTERLEAVE % CP_SIZE == cp_rank
     local_off = (
         block_off // (CP_INTERLEAVE * CP_SIZE) * CP_INTERLEAVE
@@ -553,6 +563,7 @@ def _prepare_dflash_inputs_kernel(
         CP_SIZE,
         CP_INTERLEAVE,
         PAD_SLOT_ID,
+        FORCE_PAD_UNDER_CP=True,
     )
 
     tl.store(out_input_ids_ptr + query_idx, input_id, mask=is_query)
