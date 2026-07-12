@@ -341,7 +341,12 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
-        """ROCM_ATTN currently supports self-attention style cache ownership."""
+        """ENCODER_DECODER is not supported because context_attention_fwd
+        assumes self-attention semantics: it treats passed K/V as new tokens
+        to mix with cached K/V. For cross-attention layers the encoder K/V
+        are already fully cached, so mixing them again produces incorrect
+        results when max_query_len > 1 (e.g. beam search).
+        """
         return attn_type in (
             AttentionType.DECODER,
             AttentionType.ENCODER,
@@ -566,7 +571,7 @@ class RocmAttentionImpl(AttentionImpl):
 
         Kernel choice depends on both context length and batch size:
 
-        - Short context: the native single-pass paged kernel wins at any batch.
+        - Short context: the native paged kernel wins at any batch.
         - Long context, small batch: the Triton unified split-KV (3D) kernel
           wins -- its split-softmax reduction parallelizes the long KV scan
           while the native kernel serializes it per query-head (rocprof, MI300,
@@ -736,7 +741,7 @@ class RocmAttentionImpl(AttentionImpl):
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Forward pass with FlashAttention.
+        """Forward pass through the ROCm attention dispatch.
 
         Args:
             query: shape = [num_tokens, num_heads, head_size]

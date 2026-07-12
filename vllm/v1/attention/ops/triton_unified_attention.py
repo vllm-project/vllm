@@ -963,9 +963,6 @@ def unified_attention(
     #    = \sum_i[floor(query_len[i] / BLOCK_Q)] + num_seqs
     #   <= floor(\sum_i(query_len[i]) / BLOCK_Q) + num_seqs
     #    = floor(q.shape[0] / BLOCK_Q) + num_seqs
-    # Decode is not special-cased: resolve_seq_and_query_len lays seq i at
-    # q-block (cu_seqlens_q[i] // BLOCK_Q + i), so with BLOCK_Q > 1 a grid of
-    # only num_seqs drops the last sequences. Use the same bound as prefill.
     total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
 
     sliding_window_val = 1 + window_size[0] if window_size[0] >= 0 else 0

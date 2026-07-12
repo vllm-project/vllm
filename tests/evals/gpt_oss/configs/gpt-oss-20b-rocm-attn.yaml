@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# gpt-oss-20b on ROCm using the native ROCM_ATTN paged-attention backend
-# (attention sinks + sliding window handled natively in csrc/rocm/attention.cu).
+# gpt-oss-20b on ROCm using ROCM_ATTN; sinks and sliding-window decode use the
+# native HIP kernel.
 model_name: openai/gpt-oss-20b
 metric_threshold: 0.568
 reasoning_effort: low

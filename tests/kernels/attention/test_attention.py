@@ -371,7 +371,7 @@ def ref_single_query_cached_kv_attention_sinks(
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("use_sinks", [True, False])
 @pytest.mark.parametrize("sliding_window", [0, 128])
-# 0.0 disables softcap; 50.0 exercises the gemma-2 native softcap path.
+# 0.0 disables softcap; 50.0 exercises native-kernel softcap parity.
 @pytest.mark.parametrize("logits_soft_cap", [0.0, 50.0])
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
@@ -389,9 +389,8 @@ def test_paged_attention_sinks_sliding_window(
     seed: int,
     device: str,
 ) -> None:
-    """Native ROCm paged decode must match a golden reference when attention
-    sinks, a sliding window and/or logit softcapping are active (the gpt-oss
-    and gemma-2 configurations)."""
+    """The native ROCm paged kernel must match a golden reference for attention
+    sinks, sliding windows, and logit softcapping."""
     if current_platform.is_navi() and (head_size != 128 or block_size != 16):
         pytest.skip()
     if sliding_window == 0 and not use_sinks and not logits_soft_cap:

@@ -461,9 +461,6 @@ def test_rocm_aiter_unified_stride_order_matches_shape():
 
 def test_rocm_attn_content_packed_split_views():
     from vllm.v1.attention.backends.rocm_attn import RocmAttentionImpl
-    from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
-        has_native_kv_cache_layout,
-    )
 
     impl = RocmAttentionImpl(
         num_heads=2,
@@ -488,8 +485,3 @@ def test_rocm_attn_content_packed_split_views():
     assert value_decode.shape == (3, 4, 2, 16)
     assert key_decode[1, 3, 0, 5] == kv_cache[1, 0, 3, 5]
     assert value_decode[1, 3, 0, 5] == kv_cache[1, 0, 3, 21]
-    assert not has_native_kv_cache_layout(key_decode, value_decode)
-
-    native_key = torch.empty(3, 2, 2, 4, 8)
-    native_value = torch.empty(3, 2, 16, 4)
-    assert has_native_kv_cache_layout(native_key, native_value)
