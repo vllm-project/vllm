@@ -31,6 +31,7 @@ from vllm.multimodal.video import (
     VideoTargetMetadata,
     get_video_loader_backend_for_processor,
 )
+from vllm.multimodal.video_decoders import resolve_video_backend_kwargs
 from vllm.platforms import current_platform
 from vllm.transformers_utils.processor import get_video_processor_cls_name_from_config
 
@@ -73,6 +74,44 @@ def test_video_loader_registry():
 def test_video_loader_type_doesnt_exist():
     with pytest.raises(AssertionError):
         VIDEO_LOADER_REGISTRY.load("non_existing_video_loader")
+
+
+@pytest.mark.parametrize(
+    ("backend", "kwargs", "expected_sampling", "expected_backend"),
+    [
+        (
+            "torchcodec",
+            {"min_frames": 4, "num_ffmpeg_threads": 2, "seek_mode": "approximate"},
+            {"min_frames": 4},
+            {"num_ffmpeg_threads": 2, "seek_mode": "approximate"},
+        ),
+        (
+            "deepstream",
+            {"max_frames": 16, "pool_size": 3, "timeout_sec": 10.0},
+            {"max_frames": 16},
+            {"pool_size": 3, "timeout_sec": 10.0},
+        ),
+    ],
+)
+def test_video_backend_kwargs_are_separated_from_sampling_kwargs(
+    backend: str,
+    kwargs: dict,
+    expected_sampling: dict,
+    expected_backend: dict,
+):
+    original_kwargs = dict(kwargs)
+    sampling_kwargs, backend_kwargs = resolve_video_backend_kwargs(backend, kwargs)
+
+    assert sampling_kwargs == expected_sampling
+    assert backend_kwargs == expected_backend
+    assert kwargs == original_kwargs
+
+
+def test_video_backend_rejects_options_for_another_decoder():
+    with pytest.raises(
+        ValueError, match="num_ffmpeg_threads is not supported by the 'pyav' backend"
+    ):
+        resolve_video_backend_kwargs("pyav", {"num_ffmpeg_threads": 2})
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
