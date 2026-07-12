@@ -29,3 +29,27 @@ def test_triton_swap_copies_source_bytes():
 
     for s, t in zip(src, dst):
         assert torch.equal(t, s)  # kernel copied the source bytes verbatim
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Triton swap fast path requires CUDA"
+)
+@pytest.mark.parametrize("gpu_to_cpu", [False, True])
+def test_triton_swap_host_device(gpu_to_cpu: bool):
+    # Production shape: one side is pinned host memory dereferenced over UVA.
+    # gpu_to_cpu=True is the store direction (kernel writes to host memory).
+    sizes = [4096, 8192, 8200, 16384, 4088] * 8
+
+    def make(device_side: bool, s: int) -> torch.Tensor:
+        t = torch.randint(256, (s,), dtype=torch.uint8, device="cpu").pin_memory()
+        return t.to("cuda") if device_side else t
+
+    src = [make(gpu_to_cpu, s) for s in sizes]
+    dst = [make(not gpu_to_cpu, s).zero_() for s in sizes]
+    sizes_t = torch.tensor(sizes, dtype=torch.int64)
+
+    swap_blocks_batch(_addrs(src), _addrs(dst), sizes_t, bytes_per_chunk=8192)
+    torch.accelerator.synchronize()
+
+    for s, t in zip(src, dst):
+        assert torch.equal(t.cpu(), s.cpu())

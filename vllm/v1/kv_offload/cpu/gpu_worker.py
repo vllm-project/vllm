@@ -120,6 +120,48 @@ def compute_sub_block_ptrs(
     output[:] = flat[skip_count : skip_count + num_sub_blocks]
 
 
+def merge_contiguous_descriptors(
+    src: np.ndarray, dst: np.ndarray, sizes: np.ndarray
+) -> int:
+    """Coalesce descriptor runs that are contiguous in both src and dst.
+
+    cuMemcpyBatchAsync costs ~0.5us of submission CPU per descriptor
+    (measured on H100, CUDA 13 / driver 580), so a store of B blocks over
+    L layers pays B*L*0.5us before any byte moves. Consecutive blocks
+    within a layer are usually adjacent on both sides, letting runs
+    collapse to one descriptor each.
+
+    Merged descriptors are written into the arrays' prefix in place.
+
+    Args:
+        src: source byte pointers, one per descriptor.
+        dst: destination byte pointers, one per descriptor.
+        sizes: descriptor sizes in bytes.
+
+    Returns:
+        The merged descriptor count.
+    """
+    n = len(src)
+    if n <= 1:
+        return n
+    contig = (src[1:] == src[:-1] + sizes[:-1]) & (dst[1:] == dst[:-1] + sizes[:-1])
+    if not contig.any():
+        return n
+    starts = np.empty(n, dtype=bool)
+    starts[0] = True
+    np.logical_not(contig, out=starts[1:])
+    run_starts = np.flatnonzero(starts)
+    bounds = np.zeros(n + 1, dtype=sizes.dtype)
+    np.cumsum(sizes, out=bounds[1:])
+    run_ends = np.append(run_starts[1:], n)
+    merged_sizes = bounds[run_ends] - bounds[run_starts]
+    num_merged = len(run_starts)
+    src[:num_merged] = src[run_starts]
+    dst[:num_merged] = dst[run_starts]
+    sizes[:num_merged] = merged_sizes
+    return num_merged
+
+
 def pin_mmap_region(region: SharedOffloadRegion) -> None:
     """Register the entire mmap as CUDA pinned memory via cudaHostRegister."""
     if not current_platform.is_cuda_alike():
@@ -218,6 +260,10 @@ class SingleDirectionOffloadingHandler:
         self._swap_blocks_batch = _select_swap_blocks_fn(
             kv_cache_groups_data_refs, gpu_to_cpu
         )
+        # Merging only pays on the DMA path, where submission cost scales
+        # with descriptor count. The Triton kernel parallelizes across
+        # descriptors, so merging could shrink its grid below NUM_SMS.
+        self._merge_descriptors = self._swap_blocks_batch is ops.swap_blocks_batch
 
         # GPU blocks may be smaller
         # cpu_page_size = gpu_page_size * block_size_factor.
@@ -362,6 +408,12 @@ class SingleDirectionOffloadingHandler:
         assert src_offset == num_src_blocks
         assert dst_offset == num_dst_blocks
         assert op_idx == num_copy_ops
+
+        if self._merge_descriptors and num_copy_ops > 1:
+            num_copy_ops = merge_contiguous_descriptors(all_src, all_dst, all_sizes)
+            src = src[:num_copy_ops]
+            dst = dst[:num_copy_ops]
+            sizes = sizes[:num_copy_ops]
 
         stream = (
             self._stream_pool.pop() if self._stream_pool else current_platform.Stream()
