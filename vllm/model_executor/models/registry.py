@@ -145,6 +145,10 @@ _TEXT_GENERATION_MODELS = {
     # For decapoda-research/llama-*
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
     "LongcatFlashForCausalLM": ("longcat_flash", "LongcatFlashForCausalLM"),
+    "LongcatFlashNgramForCausalLM": (
+        "longcat_flash_ngram",
+        "LongcatFlashNgramForCausalLM",
+    ),
     "MambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "Mamba2ForCausalLM": ("mamba2", "Mamba2ForCausalLM"),
     "MellumForCausalLM": ("mellum", "MellumForCausalLM"),
@@ -168,9 +172,7 @@ _TEXT_GENERATION_MODELS = {
     "NemotronForCausalLM": ("nemotron", "NemotronForCausalLM"),
     "NemotronHForCausalLM": ("nemotron_h", "NemotronHForCausalLM"),
     "NemotronHPuzzleForCausalLM": ("nemotron_h", "NemotronHForCausalLM"),
-    "OlmoForCausalLM": ("olmo", "OlmoForCausalLM"),
-    "Olmo2ForCausalLM": ("olmo2", "Olmo2ForCausalLM"),
-    "Olmo3ForCausalLM": ("olmo2", "Olmo2ForCausalLM"),
+    "Olmo3ForCausalLM": ("olmo3", "Olmo3ForCausalLM"),
     "OlmoHybridForCausalLM": ("olmo_hybrid", "OlmoHybridForCausalLM"),
     "OlmoeForCausalLM": ("olmoe", "OlmoeForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
@@ -180,7 +182,6 @@ _TEXT_GENERATION_MODELS = {
     "PanguProMoEV2ForCausalLM": ("openpangu", "PanguProMoEV2ForCausalLM"),
     "PanguUltraMoEForCausalLM": ("openpangu", "PanguUltraMoEForCausalLM"),
     "Param2MoEForCausalLM": ("param2moe", "Param2MoEForCausalLM"),
-    "PersimmonForCausalLM": ("persimmon", "PersimmonForCausalLM"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
@@ -377,7 +378,6 @@ _MULTIMODAL_MODELS = {
         "funaudiochat",
         "FunAudioChatForConditionalGeneration",
     ),
-    "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
     "Gemma3ForConditionalGeneration": ("gemma3_mm", "Gemma3ForConditionalGeneration"),
     "Gemma3nForConditionalGeneration": (
         "gemma3n_mm",
@@ -639,6 +639,8 @@ _SPECULATIVE_DECODING_MODELS = {
 _TRANSFORMERS_SUPPORTED_MODELS = {
     # Text generation models
     "GPTBigCodeForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "OlmoForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "Olmo2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "SmolLM3ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Starcoder2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     # Multimodal models
@@ -738,6 +740,8 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "MusicFlamingoForConditionalGeneration": "0.24.0",
     "AyaVisionForConditionalGeneration": "0.24.0",
     "TeleChatForCausalLM": "0.25.0",
+    "PersimmonForCausalLM": "0.25.0",
+    "FuyuForCausalLM": "0.25.0",
 }
 
 _OOT_SUPPORTED_MODELS = {
