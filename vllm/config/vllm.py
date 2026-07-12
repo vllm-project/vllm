@@ -2230,6 +2230,62 @@ class VllmConfig:
                 "than or equal to and divisible by cp_kv_cache_interleave_size "
                 f"({self.parallel_config.cp_kv_cache_interleave_size})."
             )
+            if self.speculative_config is not None and (
+                self.speculative_config.method in ("dflash", "dspark")
+            ):
+                # The v2 GPU worker's draft input-prep kernel localizes KV
+                # slots for DCP; the legacy v1 DFlash proposer computes them
+                # from global positions (dcp-blind), so acceptance silently
+                # collapses to ~0%.
+                if not self.use_v2_model_runner:
+                    raise NotImplementedError(
+                        "DFlash/DSpark speculative decoding supports decode "
+                        "context parallelism only with the v2 GPU model "
+                        "runner (the v1 draft slot mapping is dcp-blind)."
+                    )
+                draft_model_config = self.speculative_config.draft_model_config
+                if draft_model_config is not None and (
+                    "DSparkDraftModel" in (draft_model_config.architectures or [])
+                ):
+                    raise NotImplementedError(
+                        "DeepSeek-V4 DSpark speculative decoding does not "
+                        "support decode context parallelism (the sliding-"
+                        "window draft KV cache backend is not DCP-aware)."
+                    )
+                # The dense-attention DCP scheme (query head-gather + per-rank
+                # KV shard + LSE merge) is only valid when every DCP rank
+                # holds all of a query head's KV heads, i.e. the KV heads are
+                # replicated across the DCP group. Apply to the draft the same
+                # constraints ModelConfig.verify_with_parallel_config applies
+                # to dense targets; with sharded draft KV heads the gathered
+                # query heads attend to the wrong local KV heads and
+                # acceptance silently collapses.
+                if draft_model_config is not None and not draft_model_config.use_mla:
+                    tp = self.parallel_config.tensor_parallel_size
+                    dcp = self.parallel_config.decode_context_parallel_size
+                    draft_kv_heads = draft_model_config.get_total_num_kv_heads()
+                    draft_q_heads = (
+                        draft_model_config.model_arch_config.total_num_attention_heads
+                    )
+                    if not (
+                        tp > draft_kv_heads
+                        and dcp <= tp // draft_kv_heads
+                        and (draft_q_heads // draft_kv_heads) % dcp == 0
+                    ):
+                        raise NotImplementedError(
+                            "DFlash/DSpark under decode context parallelism "
+                            "requires the draft's KV heads to be replicated "
+                            "across the DCP group (tensor_parallel_size > "
+                            "draft KV heads and decode_context_parallel_size "
+                            "<= tensor_parallel_size // draft KV heads), but "
+                            f"got draft KV heads={draft_kv_heads}, "
+                            f"tensor_parallel_size={tp}, "
+                            f"decode_context_parallel_size={dcp}. With "
+                            "sharded draft KV heads the dense-attention DCP "
+                            "path reads the wrong KV heads and acceptance "
+                            "collapses; use decode_context_parallel_size=1 "
+                            "or a different speculative method (e.g. mtp)."
+                        )
 
         # Mamba cache align-mode constraints
         if self.cache_config.mamba_cache_mode == "align":
