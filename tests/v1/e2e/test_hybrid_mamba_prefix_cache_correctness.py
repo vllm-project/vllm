@@ -102,9 +102,10 @@ _NEMOTRON_PARAM = pytest.param(
 )
 HYBRID_MTP_MODELS = [_QWEN_PARAM, _NEMOTRON_PARAM]
 # Qwen is excluded from the cold-race test: under its trigger geometry the
-# concurrent fragmented decodes corrupt even with prefix caching OFF (an
-# APC-independent misbehavior), so the control-quality gate always fails
-# and the test can never grade the prefix cache on that model.
+# APC-off control arm itself loses needle recall (measured wave-1 misses
+# 16/16 with prefix caching disabled — an APC-independent misbehavior), so
+# the control-quality gate fires and the test cannot grade the prefix
+# cache on that model.
 COLD_RACE_MODELS = [_NEMOTRON_PARAM]
 
 NUM_SPEC_TOKENS = 2
@@ -722,7 +723,10 @@ def test_multi_turn_decode_written_mamba_prefix_cache(
     # engaged APC+MTP hard-fails instead of xfailing via a corruption
     # check it had no standing to make. The gate uses the cumulative
     # counters (see above); the wave-2 hit ratio is printed rather than
-    # asserted: its value on a fixed tree has not been calibrated.
+    # asserted (0.431-0.477 across fixed-tree calibration runs: 0.477
+    # under the single-lane cures in this PR's matrix, 0.46/0.43 on
+    # #48361's unified-fix tree — not calibrated as stable across
+    # hardware).
     _assert_cache_and_spec_engaged(
         hits, queries, drafts, "multi-turn", require_hits=True
     )
