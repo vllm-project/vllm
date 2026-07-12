@@ -39,8 +39,12 @@ uncacheable once a fix lands (eagle boundary reservation).
 Both tests carry non-strict ``xfail`` markers referencing this issue,
 restricted with ``raises=CorruptionDetected`` to the corruption checks
 alone: an engagement failure, a control-quality failure, a geometry
-assert, or an environment/boot fault is NOT xfail-eligible and
-hard-fails the test even while the markers are present. Neither marker
+guard, or an environment/boot fault is NOT xfail-eligible and
+hard-fails the test even while the markers are present. Geometry
+guards hard-fail (``GeometryUnsupported``) rather than skip: the
+fork-based per-test runner reports in-body skips as PASS, which on
+the ``--runxfail`` CI step would let geometry drift green the step
+while the bug is live. Neither marker
 is strict: the pytest-level red has not been calibrated as
 deterministic across repeated runs (the flip-margin grading sits close
 to the measured corruption gap), and behavior on a tree with the open
@@ -87,7 +91,10 @@ _QWEN_PARAM = pytest.param(
 _NEMOTRON_PARAM = pytest.param(
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
     4,
-    marks=[large_gpu_mark(min_gb=80)] + multi_gpu_marks(num_gpus=4),
+    # ~240 GB of BF16 weights across TP4 need H200/GB200-class capacity;
+    # min_gb=140 separates H200 (~150 decimal GB) from H100-80GB (~85),
+    # which would OOM at engine boot under gpu_memory_utilization=0.8.
+    marks=[large_gpu_mark(min_gb=140)] + multi_gpu_marks(num_gpus=4),
     id="nemotron-super-120b-bf16",
 )
 HYBRID_MTP_MODELS = [_QWEN_PARAM, _NEMOTRON_PARAM]
@@ -109,10 +116,12 @@ NUM_MULTI_TURN_PROMPTS = 32
 # flips beyond the observed reverse-direction (control-only) flips.
 FLIP_MARGIN = 2
 
-# Emitted in every geometry skip so dashboards can distinguish "coverage
-# silently lost because the resolved Mamba block size changed" from
-# ordinary environment skips.
-GEOMETRY_SKIP = "#43559 geometry unsupported, coverage lost: "
+# Prefix for GeometryUnsupported hard failures. These paths deliberately
+# do NOT use pytest.skip: under the fork-based per-test runner a Skipped
+# raised in the test body is converted to child exit code 0, which the
+# parent reports as PASS — geometry drift would silently green the
+# --runxfail CI step and be indistinguishable from "#43559 fixed".
+GEOMETRY_UNSUPPORTED = "#43559 geometry unsupported, coverage lost: "
 
 XFAIL_REASON = (
     "#43559 live on main: Mamba state cached under a block-boundary hash "
@@ -135,6 +144,29 @@ class CorruptionDetected(AssertionError):
     ROCm/XPU re-wraps failures as ``RuntimeError``, which would hard-fail
     rather than xfail — acceptable, since these parametrizations are
     CUDA-targeted.)
+    """
+
+
+class GeometryUnsupported(Exception):
+    """Raised when the resolved geometry cannot express a trigger.
+
+    A hard failure by design (see ``GEOMETRY_UNSUPPORTED``): the fork
+    runner reports in-body skips as PASS, and a plain ``Exception`` is
+    both fork-wrapper-safe and excluded from the xfail markers
+    (``raises=CorruptionDetected``), so lost coverage shows up red with
+    its full diagnostic instead of greening the CI step.
+    """
+
+
+class ControlQualityFailure(Exception):
+    """Raised when the APC-off control cannot support the probe.
+
+    Not raised via ``pytest.fail``: ``Failed`` derives from
+    ``BaseException`` and escapes the fork wrapper's ``except Exception``
+    child handler, losing the diagnostic and letting the forked pytest
+    session run on. A plain ``Exception`` subclass is cloudpickled and
+    re-raised verbatim in the parent, and — not being
+    ``CorruptionDetected`` — is never xfail-eligible.
     """
 
 
@@ -190,9 +222,9 @@ def _mamba_block_size(llm: LLM) -> int:
     In ``mamba_cache_mode="align"`` the scheduler aligns prefill chunks to
     ``cache_config.block_size`` (the engine core's MIN over all kv-cache
     groups, attention included), so the trigger geometry is only sound if
-    that value equals the MambaSpec block size — verified below, skipping
-    with a coverage-lost signal on mismatch rather than silently
-    mistargeting.
+    that value equals the MambaSpec block size — verified below,
+    hard-failing with a coverage-lost signal on mismatch rather than
+    silently mistargeting.
     """
     scheduler = llm.llm_engine.engine_core.engine_core.scheduler
     mamba_block_sizes = {
@@ -205,8 +237,8 @@ def _mamba_block_size(llm: LLM) -> int:
     block_size = mamba_block_sizes.pop()
     split_block_size = scheduler.cache_config.block_size
     if split_block_size != block_size:
-        pytest.skip(
-            GEOMETRY_SKIP + f"align-mode chunk splitting uses "
+        raise GeometryUnsupported(
+            GEOMETRY_UNSUPPORTED + f"align-mode chunk splitting uses "
             f"cache_config.block_size ({split_block_size}), which no "
             f"longer matches the MambaSpec block size ({block_size}); "
             f"the trigger geometry would silently mistarget"
@@ -400,10 +432,10 @@ def test_cold_concurrent_prefill_mamba_prefix_cache(
         # prefill mid block. Surface it as lost coverage, not a boot error.
         if "must be <= max_num_batched_tokens" not in str(exc):
             raise
-        pytest.skip(
-            GEOMETRY_SKIP + f"resolved block size exceeds the fragmenting "
-            f"token budget {RACE_MAX_BATCHED_TOKENS} ({exc})"
-        )
+        raise GeometryUnsupported(
+            GEOMETRY_UNSUPPORTED + f"resolved block size exceeds the "
+            f"fragmenting token budget {RACE_MAX_BATCHED_TOKENS} ({exc})"
+        ) from exc
     with trigger_runner as runner:
         llm = runner.get_llm()
         block_size = _mamba_block_size(llm)
@@ -412,9 +444,10 @@ def test_cold_concurrent_prefill_mamba_prefix_cache(
             tokenizer, target_tokens=int(block_size * 1.35)
         )
         if not block_size * 1.05 < manual_tokens < block_size * 1.95:
-            pytest.skip(
-                GEOMETRY_SKIP + f"needle manual ({manual_tokens} tokens) "
-                f"not strictly between 1 and 2 Mamba blocks ({block_size=})"
+            raise GeometryUnsupported(
+                GEOMETRY_UNSUPPORTED + f"needle manual ({manual_tokens} "
+                f"tokens) not strictly between 1 and 2 Mamba blocks "
+                f"({block_size=})"
             )
 
         # Wave 1: identical cold prompts, prefilled concurrently, no warmup.
@@ -486,7 +519,7 @@ def test_cold_concurrent_prefill_mamba_prefix_cache(
     ctl1_miss = len(_recall(ctl1_texts, codes, [wave1_vault] * len(ctl1_texts)))
     ctl2_missed = set(_recall(ctl2_texts, codes, wave2_vaults))
     if ctl1_miss == len(ctl1_texts) or len(ctl2_missed) > num_needles // 2:
-        pytest.fail(
+        raise ControlQualityFailure(
             f"control (APC off) recall too weak (wave-1 misses "
             f"{ctl1_miss}/{len(ctl1_texts)}, wave-2 misses "
             f"{sorted(ctl2_missed)}); the model cannot support this probe, "
@@ -597,16 +630,16 @@ def test_multi_turn_decode_written_mamba_prefix_cache(
             tokenizer, target_tokens=2 * block_size - 192
         )
         if not block_size < manual_tokens < 2 * block_size - 48:
-            pytest.skip(
-                GEOMETRY_SKIP + f"needle manual ({manual_tokens} tokens) "
-                f"not just below the second Mamba block boundary "
+            raise GeometryUnsupported(
+                GEOMETRY_UNSUPPORTED + f"needle manual ({manual_tokens} "
+                f"tokens) not just below the second Mamba block boundary "
                 f"({block_size=})"
             )
         min_tokens = 2 * block_size - manual_tokens + 96
         # Wave-2 prompts embed wave-1 prompt + output + a follow-up.
         if manual_tokens + min_tokens + 64 + 128 > kwargs["max_model_len"]:
-            pytest.skip(
-                GEOMETRY_SKIP + f"wave-2 prompts (~"
+            raise GeometryUnsupported(
+                GEOMETRY_UNSUPPORTED + f"wave-2 prompts (~"
                 f"{manual_tokens + min_tokens + 64} tokens at "
                 f"{block_size=}) would exceed "
                 f"max_model_len={kwargs['max_model_len']}"
@@ -676,7 +709,7 @@ def test_multi_turn_decode_written_mamba_prefix_cache(
     # APC-on missing an answer the control got.
     ctl_missed = set(_recall(ctl2_texts, codes, wave2_vaults))
     if len(ctl_missed) > NUM_MULTI_TURN_PROMPTS // 2:
-        pytest.fail(
+        raise ControlQualityFailure(
             f"control (APC off) recall too weak (misses "
             f"{sorted(ctl_missed)}); the model cannot support this probe, "
             f"so the APC arm result is not interpretable"
