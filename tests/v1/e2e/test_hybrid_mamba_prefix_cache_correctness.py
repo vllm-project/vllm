@@ -208,9 +208,7 @@ def _counter(llm: LLM, name: str) -> int:
     )
 
 
-def _settled_delta(
-    llm: LLM, name: str, baseline: int, timeout_s: float = 30.0
-) -> int:
+def _settled_delta(llm: LLM, name: str, baseline: int, timeout_s: float = 30.0) -> int:
     """Counter delta vs ``baseline``, waiting out aggregation lag.
 
     Metric aggregation can lag ``generate()`` returning, so an immediate
@@ -440,9 +438,7 @@ def test_cold_concurrent_prefill_mamba_prefix_cache(
             SamplingParams(temperature=0.0, max_tokens=128),
         )
         if probe_hits is not None:
-            liveness_hits = _settled_delta(
-                llm, "vllm:prefix_cache_hits", probe_hits
-            )
+            liveness_hits = _settled_delta(llm, "vllm:prefix_cache_hits", probe_hits)
         drafts = _counter(llm, "spec_decode_num_drafts")
         print(
             f"METRIC vllm:prefix_cache_queries {queries}\n"
@@ -623,9 +619,7 @@ def test_multi_turn_decode_written_mamba_prefix_cache(
             out.outputs[0].text for out in llm.generate(wave2, wave2_sampling)
         ]
         wave2_hits = _settled_delta(llm, "vllm:prefix_cache_hits", hits_before)
-        wave2_queries = _settled_delta(
-            llm, "vllm:prefix_cache_queries", queries_before
-        )
+        wave2_queries = _settled_delta(llm, "vllm:prefix_cache_queries", queries_before)
         # Engagement is gated on the cumulative (whole-flow) counters:
         # wave-1 shares the manual prefix and wave-2 resumes wave-1
         # prompts, so any zero here means APC/MTP never engaged at all.
