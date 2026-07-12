@@ -1584,25 +1584,54 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.2: Process non-spec-decode part
         if split_non_spec:
-            query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
-                mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
-            )
-            core_attn_out_decode, _ = fused_sigmoid_gating_delta_rule_update(
-                A_log=self.A_log,
-                a=a[:num_decode_tokens],
-                b=b[:num_decode_tokens],
-                dt_bias=self.dt_bias,
-                q=query_decode,
-                k=key_decode,
-                v=value_decode,
-                initial_state=ssm_state,
-                inplace_final_state=True,
-                cu_seqlens=non_spec_query_start_loc[  # type: ignore[index]
-                    : attn_metadata.num_decodes + 1
-                ],
-                ssm_state_indices=non_spec_state_indices_tensor,
-                use_qk_l2norm_in_kernel=True,
-            )
+            if self.use_cache_kernel:
+                out_decode = torch.empty(
+                    num_decode_tokens,
+                    1,
+                    self.num_v_heads // self.tp_size,
+                    self.head_v_dim,
+                    dtype=mixed_qkv_non_spec.dtype,  # type: ignore[union-attr]
+                    device=mixed_qkv_non_spec.device,  # type: ignore[union-attr]
+                )
+                fused_recurrent_gated_delta_rule_replayssm(
+                    mixed_qkv=mixed_qkv_non_spec[:num_decode_tokens].contiguous(),  # type: ignore[index]
+                    a=a[:num_decode_tokens],
+                    b=b[:num_decode_tokens],
+                    A_log=self.A_log,
+                    dt_bias=self.dt_bias,
+                    scale=self.head_k_dim**-0.5,
+                    initial_state=ssm_state,
+                    d_cache=self_kv_cache[2],
+                    k_cache=self_kv_cache[3],
+                    g_cache=self_kv_cache[4],
+                    out=out_decode,
+                    ssm_state_indices=non_spec_state_indices_tensor[  # type: ignore[index]
+                        : attn_metadata.num_decodes
+                    ],
+                    write_pos=attn_metadata.write_pos_d,
+                    use_qk_l2norm_in_kernel=True,
+                )
+                core_attn_out_decode = out_decode.transpose(0, 1)
+            else:
+                query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
+                    mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
+                )
+                core_attn_out_decode, _ = fused_sigmoid_gating_delta_rule_update(
+                    A_log=self.A_log,
+                    a=a[:num_decode_tokens],
+                    b=b[:num_decode_tokens],
+                    dt_bias=self.dt_bias,
+                    q=query_decode,
+                    k=key_decode,
+                    v=value_decode,
+                    initial_state=ssm_state,
+                    inplace_final_state=True,
+                    cu_seqlens=non_spec_query_start_loc[  # type: ignore[index]
+                        : attn_metadata.num_decodes + 1
+                    ],
+                    ssm_state_indices=non_spec_state_indices_tensor,
+                    use_qk_l2norm_in_kernel=True,
+                )
         else:
             core_attn_out_decode = None
 
