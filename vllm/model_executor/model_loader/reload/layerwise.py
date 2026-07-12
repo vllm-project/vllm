@@ -115,6 +115,10 @@ def initialize_layerwise_reload(model: torch.nn.Module):
             direct_layers += 1
             continue
 
+        if _bind_runtime_weight_reload(layer, info):
+            direct_layers += 1
+            continue
+
         # Save current tensors for later copying
         info.kernel_tensors = get_layer_params_buffers(layer)
         # snapshot now: restore_layer_on_meta drops alias buffers from the live set
@@ -165,6 +169,36 @@ def _restore_loading_metadata(layer: torch.nn.Module, info: LayerReloadingInfo) 
             checkpoint_tensor = restore_layer_refs(checkpoint_tensor, layer)
             runtime_tensor.__class__ = checkpoint_tensor.__class__
             runtime_tensor.__dict__.update(checkpoint_tensor.__dict__)
+
+
+def _bind_runtime_weight_reload(
+    layer: torch.nn.Module, info: LayerReloadingInfo
+) -> bool:
+    if isinstance(layer, (Attention, MLAAttention)):
+        return False
+
+    quant_method = getattr(layer, "quant_method", None)
+    if not isinstance(quant_method, QuantizeMethodBase):
+        return False
+    if (
+        quant_method.__class__.bind_runtime_weight_reload
+        is QuantizeMethodBase.bind_runtime_weight_reload
+    ):
+        return False
+
+    _, restore_buffers = info.restore_metadata
+    if restore_buffers:
+        return False
+
+    info.kernel_tensors = get_layer_params_buffers(layer)
+    restore_layer_on_meta(layer, info)
+    if quant_method.bind_runtime_weight_reload(layer, info.kernel_tensors[0]):
+        info.runtime_bound = True
+        return True
+
+    _place_kernel_tensors(layer, info)
+    info.kernel_tensors = None
+    return False
 
 
 def _matching_tensor_layouts(
@@ -310,6 +344,10 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
 
     for layer in model.modules():
         info = get_layerwise_info(layer)
+        if info.runtime_bound:
+            _place_kernel_tensors(layer, info)
+            info.reset()
+            continue
         if not info.can_load():
             info.reset()
             continue
@@ -465,13 +503,17 @@ def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadin
     non_persistent = info.kernel_non_persistent_buffers
     loaded_tensor_names = {name for name, _ in info.loaded_weights}
     for name, param in parameters.items():
-        param.data.copy_(getattr(layer, name))
+        loaded_param = getattr(layer, name)
+        if param.data_ptr() != loaded_param.data_ptr():
+            param.data.copy_(loaded_param)
     for name, buffer in buffers.items():
         if name not in layer._buffers:
             continue
         if name in non_persistent and name not in loaded_tensor_names:
             continue
-        buffer.data.copy_(getattr(layer, name))
+        loaded_buffer = getattr(layer, name)
+        if buffer.data_ptr() != loaded_buffer.data_ptr():
+            buffer.data.copy_(loaded_buffer)
 
     _place_kernel_tensors(layer, info)
 

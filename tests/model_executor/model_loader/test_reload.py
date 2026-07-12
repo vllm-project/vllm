@@ -135,6 +135,31 @@ def _merged_weight_loader(param, loaded_weight):
     param.load_merged_weight(loaded_weight)
 
 
+class _RuntimeViewReloadMethod(_DirectReloadMethod):
+    def __init__(self):
+        super().__init__(supported=False)
+
+    def bind_runtime_weight_reload(self, layer, runtime_params):
+        checkpoint_param = layer.weight
+        bound_param = torch.nn.Parameter(runtime_params["weight"].t())
+        bound_param.__class__ = checkpoint_param.__class__
+        bound_param.__dict__ = checkpoint_param.__dict__.copy()
+        layer.weight = bound_param
+        return True
+
+    def process_weights_after_loading(self, layer):
+        self.process_calls += 1
+        layer.weight = torch.nn.Parameter(layer.weight.t().contiguous())
+
+
+class _RuntimeViewReloadLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.arange(6.0).reshape(2, 3))
+        self.weight.weight_loader = default_weight_loader
+        self.quant_method = _RuntimeViewReloadMethod()
+
+
 def test_move_metatensors():
     tensor = torch.empty((1, 2, 3))
     meta_tensor = to_meta_tensor(tensor)
@@ -226,6 +251,25 @@ def test_direct_weight_reload_restores_parameter_loading_metadata():
 
     assert torch.equal(layer.weight, loaded_weight)
     assert layer.weight.data_ptr() == original_data_ptr
+
+
+def test_runtime_view_reload_uses_existing_kernel_storage():
+    layer = _RuntimeViewReloadLayer()
+    model = torch.nn.Sequential(layer)
+    loaded_weight = torch.full_like(layer.weight, 7.0)
+
+    record_metadata_for_reloading(model)
+    layer.quant_method.process_weights_after_loading(layer)
+    original_data_ptr = layer.weight.data_ptr()
+    initialize_layerwise_reload(model)
+
+    assert not layer.weight.is_meta
+    layer.weight.weight_loader(layer.weight, loaded_weight)
+    finalize_layerwise_reload(model, model_config=None)
+
+    assert torch.equal(layer.weight, loaded_weight.t())
+    assert layer.weight.data_ptr() == original_data_ptr
+    assert layer.quant_method.process_calls == 1
 
 
 def test_materialize_layer_preserves_non_meta_tensors():
