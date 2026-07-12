@@ -28,6 +28,7 @@ def test_dspark_standard_rejection_uses_probabilistic_draft_sampling(monkeypatch
         dtype="auto",
         seed=0,
         tokenizer_revision=None,
+        hf_overrides={},
         max_model_len=4096,
         enforce_eager=False,
         max_logprobs=20,
