@@ -221,21 +221,25 @@ __device__ __forceinline__ void storeCacheElems(
     // model dtype directly. FP8 cache dtypes use the conversion path below.
     storeElems<scalar_t>(reinterpret_cast<scalar_t*>(dst), elems);
   } else {
-    // Match the unfused write path exactly: norm/RoPE is materialized in the
-    // model dtype before reshape_and_cache_flash quantizes it into FP8.
-    // Quantizing the FP32 accumulator directly can differ by one FP8 code at
-    // rounding boundaries.
+#ifdef USE_ROCM
+    // Match ROCm's model-dtype materialization before FP8 cache conversion.
     using Converter = vllm::_typeConvert<scalar_t>;
     using rounded_t = typename Converter::hip_type;
     rounded_t rounded[kElemsPerLane];
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < kElemsPerLane; i++) {
       rounded[i] = Converter::convert(elems[i]);
     }
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < kElemsPerLane; i++) {
       dst[i] = fp8::scaled_convert<cache_t, rounded_t, kv_dt>(rounded[i], 1.0f);
     }
+#else
+  #pragma unroll
+    for (int i = 0; i < kElemsPerLane; i++) {
+      dst[i] = fp8::scaled_convert<cache_t, float, kv_dt>(elems[i], 1.0f);
+    }
+#endif
   }
 }
 
