@@ -653,6 +653,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def profile_run(self) -> None:
+        # Profile the multimodal encoder + encoder cache so their memory is
+        # reserved. Skipping it under-counts non-KV memory, over-allocates the
+        # KV cache, and OOMs once the encoder runs.
+        if self.supports_mm_inputs and self.is_first_pp_rank:
+            mm_config = self.model_config.multimodal_config
+            if mm_config is not None and mm_config.skip_mm_profiling:
+                logger.info(
+                    "Skipping memory profiling for multimodal encoder and "
+                    "encoder cache."
+                )
+            else:
+                self.model_state.profile_encoder()
+
         hidden_states, sample_hidden_states = self._dummy_run(
             self.max_num_tokens, skip_attn=True, is_profile=True
         )
@@ -667,14 +680,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         torch.accelerator.synchronize()
         del hidden_states, sample_hidden_states
+        if self.encoder_cache is not None:
+            self.encoder_cache.reset_encoder_cache()
         gc.collect()
 
     def post_kv_cache_wake_up(self) -> None:
         self.block_tables.init_block_table_layout_tensors()
 
     def reset_mm_cache(self) -> None:
-        if self.encoder_cache is not None:
-            self.encoder_cache.reset_mm_cache()
+        self.model_state.reset_mm_cache()
 
     def reset_encoder_cache(self) -> None:
         if self.encoder_cache is not None:

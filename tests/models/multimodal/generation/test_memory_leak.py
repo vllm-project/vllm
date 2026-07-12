@@ -180,3 +180,33 @@ def test_no_memory_leak(llm, image_urls: list[str]) -> None:
             f"cpu_peak_growth={_format_mib(cpu_peak_growth)}, "
             f"cpu_peak_threshold={CPU_PEAK_GROWTH_THRESHOLD_MIB} MiB"
         )
+
+
+def get_num_gpu_blocks(skip_mm_profiling: bool) -> int:
+    llm = LLM(
+        model=MODEL_NAME,
+        max_model_len=MAX_MODEL_LEN,
+        limit_mm_per_prompt={"image": 4},
+        enforce_eager=True,
+        gpu_memory_utilization=0.9,
+        skip_mm_profiling=skip_mm_profiling,
+        disable_log_stats=True,
+        seed=0,
+    )
+    num_gpu_blocks = llm.llm_engine.vllm_config.cache_config.num_gpu_blocks
+    del llm
+    cleanup_dist_env_and_memory()
+    return num_gpu_blocks
+
+
+@pytest.mark.core_model
+def test_memory_profile_mm_encoder():
+    """Profiling the encoder reserves memory, leaving fewer KV cache blocks.
+
+    Skipping it leaves the encoder and its cache unaccounted for, so they OOM at
+    runtime instead.
+    """
+    profiled = get_num_gpu_blocks(skip_mm_profiling=False)
+    skipped = get_num_gpu_blocks(skip_mm_profiling=True)
+
+    assert profiled < skipped, f"profiled={profiled} skipped={skipped}"

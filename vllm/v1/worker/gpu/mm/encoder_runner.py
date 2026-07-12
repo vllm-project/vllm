@@ -3,7 +3,10 @@
 import numpy as np
 import torch
 
+from vllm.config import VllmConfig
 from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_realtime
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.utils import get_mm_features_in_window, group_and_batch_mm_kwargs
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
@@ -13,6 +16,7 @@ from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
 class EncoderRunner:
     def __init__(
         self,
+        vllm_config: VllmConfig,
         model: SupportsMultiModal,
         max_num_tokens: int,
         hidden_size: int,
@@ -20,6 +24,7 @@ class EncoderRunner:
         dtype: torch.dtype,
         device: torch.device,
     ):
+        self.vllm_config = vllm_config
         self.model = model
         self.max_num_tokens = max_num_tokens
         self.hidden_size = hidden_size
@@ -27,6 +32,7 @@ class EncoderRunner:
         self.dtype = dtype
         self.device = device
         self.is_realtime = supports_realtime(model)
+        self.mm_budget = MultiModalBudget(vllm_config, MULTIMODAL_REGISTRY)
 
         self.inputs_embeds = torch.zeros(
             max_num_tokens, hidden_size, dtype=dtype, device=device
@@ -60,6 +66,36 @@ class EncoderRunner:
             sanity_check_mm_encoder_outputs(batch_outputs, expected_num_items=num_items)
             encoder_outputs.extend(batch_outputs)
         return encoder_outputs
+
+    def profile_encoder(self) -> None:
+        """Run the encoder on a dummy max-size batch and reserve the encoder
+        cache, so memory profiling accounts for both the encoder activation and
+        the encoder-cache footprint.
+        """
+        mm_budget = self.mm_budget
+        if mm_budget.get_encoder_budget() <= 0 or not mm_budget.mm_max_toks_per_item:
+            # No encoder to profile (e.g. embedding-only, all mm limits are 0).
+            return
+
+        # Profile a single modality with the maximum tokens per item;
+        # `mm_max_items_per_batch` bounds items to the budget.
+        modality = mm_budget.get_modality_with_max_tokens()
+        max_items = mm_budget.mm_max_items_per_batch[modality]
+        dummy_mm_inputs = MULTIMODAL_REGISTRY.get_dummy_mm_inputs(
+            self.vllm_config.model_config,
+            mm_counts={modality: 1},
+            cache=mm_budget.cache,
+        )
+        dummy_item = dummy_mm_inputs["mm_kwargs"][modality][0]
+        assert dummy_item is not None, "Dummy item should not already be cached"
+
+        encoder_outputs = self.execute_mm_encoder([(modality, dummy_item)] * max_items)
+        for i, output in enumerate(encoder_outputs):
+            self.encoder_cache.encoder_outputs[f"tmp_{i}"] = output
+
+    def reset_mm_cache(self) -> None:
+        """Clear the processor cache populated while profiling the encoder."""
+        self.mm_budget.reset_cache()
 
     def gather_mm_embeddings(
         self,

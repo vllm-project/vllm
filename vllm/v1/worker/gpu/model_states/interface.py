@@ -60,6 +60,7 @@ class ModelState(ABC):
         if encoder_cache is not None:
             self.encoder_cache = encoder_cache
             self.encoder_runner = EncoderRunner(
+                vllm_config=vllm_config,
                 model=self.model,
                 max_num_tokens=self.max_num_tokens,
                 hidden_size=self.inputs_embeds_size,
@@ -67,6 +68,20 @@ class ModelState(ABC):
                 dtype=self.dtype,
                 device=self.device,
             )
+
+    def profile_encoder(self) -> None:
+        """Profile the multimodal encoder + encoder cache for memory profiling.
+
+        No-op for text-only models (no encoder runner). Shared by all
+        multimodal model states, which encode via ``encoder_runner``.
+        """
+        if self.supports_mm_inputs:
+            self.encoder_runner.profile_encoder()
+
+    def reset_mm_cache(self) -> None:
+        """Clear the multimodal profiling cache; no-op for text-only models."""
+        if self.supports_mm_inputs:
+            self.encoder_runner.reset_mm_cache()
 
     def get_supported_generation_tasks(self) -> tuple[GenerationTask, ...]:
         from vllm.model_executor.models.interfaces import (
