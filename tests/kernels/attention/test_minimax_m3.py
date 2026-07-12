@@ -662,8 +662,9 @@ def _reference_sparse_attn(
         positions = torch.arange(seq_len, device="cuda")
         pages = block_table[req_id, positions // BLOCK_SIZE]
         rows = positions % BLOCK_SIZE
-        k_req = kv_cache[pages, 0, rows]
-        v_req = kv_cache[pages, 1, rows].float()
+        kv_req = kv_cache[pages, :, rows]
+        k_req = kv_req[..., :HEAD_DIM]
+        v_req = kv_req[..., HEAD_DIM:].float()
 
         q_pos = prefix_len + torch.arange(q_len, device="cuda")
         key_blocks = positions // BLOCK_SIZE
@@ -791,15 +792,15 @@ def test_main_backend_layout_contract():
     flash_attn-style stride order for each layout."""
     nb, bs, h, d = 7, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM
     logical = MiniMaxM3SparseBackend.get_kv_cache_shape(nb, bs, h, d)
-    assert logical == (nb, 2, bs, h, d)
-    # The old HND-ordered shape is no longer the logical shape.
-    assert logical != (nb, 2, h, bs, d)
+    assert logical == (nb, h, bs, 2 * d)
+    # The old separate K/V-axis shape is no longer the logical shape.
+    assert logical != (nb, 2, bs, h, d)
 
     try:
         set_kv_cache_layout("HND")
-        assert MiniMaxM3SparseBackend.get_kv_cache_stride_order() == (0, 1, 3, 2, 4)
+        assert MiniMaxM3SparseBackend.get_kv_cache_stride_order() == (0, 1, 2, 3)
         set_kv_cache_layout("NHD")
-        assert MiniMaxM3SparseBackend.get_kv_cache_stride_order() == (0, 1, 2, 3, 4)
+        assert MiniMaxM3SparseBackend.get_kv_cache_stride_order() == (0, 2, 1, 3)
     finally:
         set_kv_cache_layout(None)
 
@@ -829,7 +830,7 @@ def test_main_backend_unknown_layout_raises(monkeypatch):
 
 
 def test_indexer_backend_stride_order_is_identity():
-    """The 3-dim indexer cache must not inherit the parent's 5-element stride
+    """The 3-dim indexer cache must not inherit the parent's 4-element stride
     order; it overrides to the 3-element identity so the allocator keeps the
     contiguous layout."""
     assert MiniMaxM3IndexerBackend.get_kv_cache_stride_order() == (0, 1, 2)
@@ -848,9 +849,9 @@ def test_indexer_backend_stride_order_is_identity():
     assert _stride_order_for(MiniMaxM3IndexerBackend, len(indexer_shape)) == (0, 1, 2)
 
 
-def test_hnd_allocation_is_byte_identical_to_transpose():
-    """Under HND the backend-visible logical view is byte-identical to the
-    pre-change allocate-HND-then-transpose(2, 3) workaround."""
+def test_hnd_allocation_is_packed_head_major():
+    """Under HND the backend-visible logical view is the packed head-major
+    physical allocation."""
     nb, bs, h, d = 4, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM
     logical = MiniMaxM3SparseBackend.get_kv_cache_shape(nb, bs, h, d)
     try:
@@ -860,21 +861,22 @@ def test_hnd_allocation_is_byte_identical_to_transpose():
         set_kv_cache_layout(None)
 
     physical_shape = tuple(logical[i] for i in stride_order)
-    # The physical (permuted) shape equals the old hardcoded HND shape.
-    assert physical_shape == (nb, 2, h, bs, d)
+    assert physical_shape == (nb, h, bs, 2 * d)
 
     inv_order = [stride_order.index(i) for i in range(len(stride_order))]
     raw = torch.empty(physical_shape, device="cuda", dtype=DTYPE)
     view = raw.permute(*inv_order)
-    expected = raw.view((nb, 2, h, bs, d)).transpose(2, 3)
+    expected = raw.view((nb, h, bs, 2 * d))
 
     assert view.shape == expected.shape
     assert view.stride() == expected.stride()
     assert view.storage_offset() == expected.storage_offset()
 
-    # Negative: the identity (wrong) stride order under HND does not reproduce
-    # the transpose view.
-    wrong_view = raw.view(logical)
+    # Negative: the NHD stride order under HND does not reproduce the
+    # head-major view.
+    wrong_order = (0, 2, 1, 3)
+    wrong_inv = [wrong_order.index(i) for i in range(len(wrong_order))]
+    wrong_view = raw.view(tuple(logical[i] for i in wrong_order)).permute(*wrong_inv)
     assert wrong_view.stride() != expected.stride()
 
 
@@ -1037,14 +1039,18 @@ def test_decode_wrong_layout_breaks_parity():
     seq_lens_list = (130, 257)
     q, block_table, seq_lens, topk_idx, num_pages = _build_decode_inputs(seq_lens_list)
 
-    # Physical HND storage [blocks, 2, heads, block, dim].
+    # Physical HND storage [blocks, heads, block, packed_kv_dim].
     phys = torch.randn(
-        (num_pages, 2, NUM_KV_HEADS, BLOCK_SIZE, HEAD_DIM), device="cuda", dtype=DTYPE
+        (num_pages, NUM_KV_HEADS, BLOCK_SIZE, 2 * HEAD_DIM),
+        device="cuda",
+        dtype=DTYPE,
     )
-    # Correct logical-NHD view (strided) vs. the same bytes mislabeled as a
-    # contiguous-NHD cache — same shape, different content mapping.
-    correct = phys.permute(0, 1, 3, 2, 4)
-    wrong = phys.reshape(num_pages, 2, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM)
+    # Correct logical packed-HND view vs. the same bytes mislabeled as NHD
+    # physical storage and then exposed as a logical cache.
+    correct = phys
+    wrong = phys.reshape(num_pages, BLOCK_SIZE, NUM_KV_HEADS, 2 * HEAD_DIM).permute(
+        0, 2, 1, 3
+    )
 
     q_lens_t = torch.ones(len(seq_lens_list), device="cuda", dtype=torch.int32)
     prefix_lens = seq_lens - q_lens_t
@@ -1072,9 +1078,9 @@ def _make_attn_group(backend, spec):
 def test_main_cache_byte_identical_through_production_allocator():
     """AC-2: drive the real allocator (`_reshape_kv_cache`) for the M3 main
     `FullAttentionSpec` under HND and assert the backend-visible view has the
-    same shape, stride, and storage offset as the pre-change
-    allocate-HND-then-transpose path; the indexer `MLAAttentionSpec` allocates
-    through the same path to its 3-dim shape."""
+    same shape, stride, and storage offset as the packed-HND allocation; the
+    indexer `MLAAttentionSpec` allocates through the same path to its 3-dim
+    shape."""
     nb = 4
     spec = FullAttentionSpec(
         block_size=BLOCK_SIZE,
@@ -1092,8 +1098,7 @@ def test_main_cache_byte_identical_through_production_allocator():
         set_kv_cache_layout(None)
     view = kv_caches["main"]
 
-    oracle = raw.view(DTYPE).view((nb, 2, NUM_KV_HEADS, BLOCK_SIZE, HEAD_DIM))
-    oracle = oracle.transpose(2, 3)
+    oracle = raw.view(DTYPE).view((nb, NUM_KV_HEADS, BLOCK_SIZE, 2 * HEAD_DIM))
     assert tuple(view.shape) == tuple(oracle.shape)
     assert view.stride() == oracle.stride()
     assert view.storage_offset() == oracle.storage_offset()
@@ -1119,13 +1124,13 @@ def test_main_cache_byte_identical_through_production_allocator():
 
 
 def test_indexer_inherited_stride_order_trips_allocator_assert():
-    """AC-4 negative: without the indexer override, the inherited 5-element
+    """AC-4 negative: without the indexer override, the inherited 4-element
     stride order trips the allocator's `len(stride_order) == len(shape)` assert
     for the 3-dim indexer shape; the `AssertionError` is NOT swallowed by the
     allocator's `(AttributeError, NotImplementedError)` fallback."""
 
     class _BrokenIndexerBackend(MiniMaxM3IndexerBackend):
-        # Simulate inheriting the parent's 5-element stride order.
+        # Simulate inheriting the parent's 4-element stride order.
         get_kv_cache_stride_order = staticmethod(
             MiniMaxM3SparseBackend.get_kv_cache_stride_order
         )
@@ -1192,10 +1197,8 @@ def test_padded_main_cache_is_flagged():
 @pytest.mark.parametrize("kv_layout", ["NHD", "HND"], indirect=True)
 def test_reshape_and_cache_flash_write_persists(kv_layout: str):
     """AC-5 write path: the `reshape_and_cache_flash` write site now consumes
-    `self.kv_cache.unbind(1)` directly. Writing through those views must persist
-    into the bound storage (read back through an independent logical view) under
-    both layouts — a `.contiguous()` copy of the unbind slice would leave the
-    bound storage unchanged."""
+    packed-content K/V split views. Writing through those views must persist
+    into the bound storage under both layouts."""
     torch.manual_seed(0)
     num_pages = 4
     kv_cache = _allocate_main_kv_via_contract(num_pages)
@@ -1203,7 +1206,7 @@ def test_reshape_and_cache_flash_write_persists(kv_layout: str):
         kv_cache.zero_()
 
     # Exactly the production write-site code under test.
-    key_cache, value_cache = kv_cache.unbind(1)
+    key_cache, value_cache = kv_cache.transpose(1, 2).split(HEAD_DIM, dim=-1)
 
     num_tokens = 12
     slot_mapping = torch.randperm(num_pages * BLOCK_SIZE, device="cuda")[
@@ -1222,5 +1225,5 @@ def test_reshape_and_cache_flash_write_persists(kv_layout: str):
     for t in range(num_tokens):
         slot = int(slot_mapping[t].item())
         blk, intra = divmod(slot, BLOCK_SIZE)
-        torch.testing.assert_close(kv_cache[blk, 0, intra], key[t])
-        torch.testing.assert_close(kv_cache[blk, 1, intra], value[t])
+        torch.testing.assert_close(kv_cache[blk, :, intra, :HEAD_DIM], key[t])
+        torch.testing.assert_close(kv_cache[blk, :, intra, HEAD_DIM:], value[t])
