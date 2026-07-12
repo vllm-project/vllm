@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.sample.logits_processor.interface import (
     BatchUpdate,
     MoveDirectionality,
@@ -22,11 +22,12 @@ def maybe_create_thinking_budget_state_holder(
     max_num_seqs: int,
     num_spec_tokens: int,
     device: torch.device,
+    is_pin_memory: bool,
 ) -> "ThinkingBudgetStateHolder | None":
     if reasoning_config is None:
         return None
     return ThinkingBudgetStateHolder(
-        reasoning_config, max_num_seqs, num_spec_tokens, device, PIN_MEMORY
+        reasoning_config, max_num_seqs, num_spec_tokens, device, is_pin_memory
     )
 
 
@@ -173,19 +174,6 @@ class ThinkingBudgetStateHolder:
                 return i
         return -1
 
-    @staticmethod
-    def _find_last_sequence_index_from(
-        target_list: list[int], token_ids: list[int], search_start: int
-    ) -> int:
-        """Last occurrence of ``token_ids`` at or after ``search_start``."""
-        if not token_ids:
-            return -1
-        lo = max(0, search_start)
-        for i in range(len(target_list) - len(token_ids), lo - 1, -1):
-            if target_list[i : i + len(token_ids)] == token_ids:
-                return i
-        return -1
-
     def _init_state_entry(
         self, prompt_tok_ids: list[int] | None, thinking_token_budget: int
     ) -> dict[str, Any]:
@@ -239,8 +227,6 @@ class ThinkingBudgetStateHolder:
             "force_index": [],
             "start_thinking": start_thinking,
             "end_thinking": -1,
-            "start_search_pos": 0,
-            "end_search_pos": 0,
             "in_spec_mode": False,
             "bonus_token_forced": False,
             "continue_thinking": continue_thinking,
@@ -256,41 +242,40 @@ class ThinkingBudgetStateHolder:
             state["force_index"] = []
             return
 
-        output_tok_ids = state.get("output_tok_ids", [])
         if state["start_thinking"] == -1:
-            seq_len = len(self.think_start_token_ids)
             scan_offset = state.get("scan_offset", 0)
-            start_thinking = self._find_last_sequence_index_from(
-                output_tok_ids,
-                self.think_start_token_ids,
-                max(scan_offset, state["start_search_pos"] - (seq_len - 1)),
+            output_slice = state.get("output_tok_ids", [])[scan_offset:]
+            start_thinking = self._find_last_sequence_index(
+                output_slice, self.think_start_token_ids
             )
-            if start_thinking >= 0 and scan_offset > 0:
-                # Re-entry after a forced end: budget was already exhausted
-                # in a prior block, so immediately force-close this one.
-                # scan_offset > 0 is only set after forced-end completion
-                # (never after natural end), so this won't block legitimate
-                # re-entries where budget remains.
-                state["start_thinking"] = start_thinking
-                state["in_think"] = False
-                state["in_end"] = True
-                state["end_count"] = 0
-                state["force_index"] = [0]
-                return
+            if start_thinking >= 0:
+                start_thinking += scan_offset
             state["start_thinking"] = start_thinking
-            if start_thinking == -1:
-                state["start_search_pos"] = len(output_tok_ids)
         if state["end_thinking"] == -1:
-            seq_len = len(self.think_end_token_ids)
             scan_offset = state.get("scan_offset", 0)
-            end_thinking = self._find_last_sequence_index_from(
-                output_tok_ids,
-                self.think_end_token_ids,
-                max(scan_offset, state["end_search_pos"] - (seq_len - 1)),
+            output_slice = state.get("output_tok_ids", [])[scan_offset:]
+            end_thinking = self._find_last_sequence_index(
+                output_slice, self.think_end_token_ids
             )
+            if end_thinking >= 0:
+                end_thinking += scan_offset
             state["end_thinking"] = end_thinking
-            if end_thinking == -1:
-                state["end_search_pos"] = len(output_tok_ids)
+
+        if (
+            not state.get("in_end", False)
+            and state["start_thinking"] >= 0
+            and state["end_thinking"] >= 0
+            and state["end_thinking"] > state["start_thinking"]
+            and not state.get("continue_thinking", False)
+        ):
+            state["in_think"] = False
+            state["think_count"] = 0
+            state["continue_thinking"] = False
+            state["start_thinking"] = -1
+            state["end_thinking"] = -1
+            state["scan_offset"] = len(state.get("output_tok_ids", []))
+            state["check_count_down"] = state["thinking_token_budget"]
+            return
 
         if state["start_thinking"] == -1:
             return
@@ -314,10 +299,18 @@ class ThinkingBudgetStateHolder:
         predicted_countdown = current_step_countdown - len(state["spec_token_ids"]) - 1
         # We only proceed further if we have counted down the thinking budget
         # to 0 or less and when we are in the "in think" mode.
+        # Exception: when continue_thinking=True and a natural </think> is
+        # detected (end_thinking != -1), fall through to handle the exit —
+        # even if the budget hasn't expired yet. For continue_thinking=False,
+        # the early natural-end detection block above already handles it.
+        natural_end_with_continue = (
+            state.get("continue_thinking", False) and state["end_thinking"] != -1
+        )
         if (
             not state.get("in_end", False)
             and predicted_countdown >= 0
             and state["start_thinking"] > -1
+            and not natural_end_with_continue
         ):
             state["check_count_down"] = current_step_countdown
             state["prev_output_length"] = len(state.get("output_tok_ids", []))
@@ -389,6 +382,10 @@ class ThinkingBudgetStateHolder:
                     # Case: ...<start>...<end>... - exiting think mode
                     state["in_think"] = False
                     state["think_count"] = 0
+                    state["continue_thinking"] = False
+                    state["start_thinking"] = -1
+                    state["end_thinking"] = -1
+                    state["scan_offset"] = len(state.get("output_tok_ids", []))
 
             elif absolute_start_pos >= 0 and not state["continue_thinking"]:
                 # Found think start - entering think mode
@@ -400,6 +397,10 @@ class ThinkingBudgetStateHolder:
                 # Found think end - exiting think mode
                 state["in_think"] = False
                 state["think_count"] = 0
+                state["continue_thinking"] = False
+                state["start_thinking"] = -1
+                state["end_thinking"] = -1
+                state["scan_offset"] = len(state.get("output_tok_ids", []))
 
             elif state["in_think"]:
                 # Continue thinking mode, increment count by new tokens
