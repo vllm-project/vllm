@@ -259,10 +259,11 @@ class Scheduler(SchedulerInterface):
         # Create the KV cache manager.
         if hash_block_size is None:
             hash_block_size = block_size
+        self.hash_block_size = hash_block_size
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
-            max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
+            max_in_flight_tokens=vllm_config.max_in_flight_tokens,
             enable_caching=self.cache_config.enable_prefix_caching,
             use_eagle=self.use_eagle,
             log_stats=self.log_stats,
@@ -296,6 +297,13 @@ class Scheduler(SchedulerInterface):
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
+        )
+        # A finer prefix_match_unit is configured: a mamba partial tail entry
+        # can only be registered by a step ending exactly at the prompt's last
+        # hash boundary, so the split adds that stop.
+        self.mamba_partial_cache_hit = (
+            self.need_mamba_block_aligned_split
+            and self.hash_block_size < self.block_size
         )
 
         # Counts of non-empty steps scheduled / processed. update_from_output
@@ -368,9 +376,23 @@ class Scheduler(SchedulerInterface):
             if self.use_eagle:
                 last_cache_position = max(last_cache_position - block_size, 0)
             num_computed_tokens_after_sched = num_computed_tokens + num_new_tokens
-            if num_computed_tokens_after_sched < last_cache_position:
-                # align to block_size
-                num_new_tokens = num_new_tokens // block_size * block_size
+            next_boundary = (num_computed_tokens // block_size + 1) * block_size
+            if (
+                num_computed_tokens % block_size != 0
+                and next_boundary <= last_cache_position
+                and num_computed_tokens_after_sched > next_boundary
+            ):
+                # Resumed mid-block (partial hash hit): stop the first chunk
+                # at the next block boundary so chunk ends re-align to blocks
+                # and the boundary state is materialized before running past.
+                num_new_tokens = next_boundary - num_computed_tokens
+            elif num_computed_tokens_after_sched < last_cache_position:
+                # Align the chunk END (not its length) to block_size;
+                # identical to flooring the length when the start is
+                # block-aligned. May yield 0 (insufficient budget to reach
+                # the next boundary); the caller then skips the request.
+                aligned_end = num_computed_tokens_after_sched // block_size * block_size
+                num_new_tokens = max(aligned_end - num_computed_tokens, 0)
             elif (
                 num_computed_tokens
                 < last_cache_position
@@ -378,9 +400,23 @@ class Scheduler(SchedulerInterface):
             ):
                 # force to cache the last chunk
                 num_new_tokens = last_cache_position - num_computed_tokens
-            else:
-                # prefill the last few tokens
-                pass
+            elif self.mamba_partial_cache_hit:
+                # Prefill of the final partial block: stop once at the
+                # prompt's last hash boundary so the mamba partial tail entry
+                # can be registered.
+                tail_boundary = (
+                    request.num_prompt_tokens
+                    // self.hash_block_size
+                    * self.hash_block_size
+                )
+                if (
+                    num_computed_tokens
+                    < tail_boundary
+                    < num_computed_tokens_after_sched
+                    and tail_boundary < request.num_prompt_tokens
+                    and tail_boundary > last_cache_position
+                ):
+                    num_new_tokens = tail_boundary - num_computed_tokens
 
             # Marconi cache admission optimization:
             # cache common prefixes by scheduling num_new_tokens = common prefix length
@@ -811,8 +847,10 @@ class Scheduler(SchedulerInterface):
 
                     # Pad new decode requests to uniform spec decoding size to
                     # preserve full cudagraph for this step.
+                    # Not for diffusion where draft tokens can't be padded.
                     if (
                         (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
+                        and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
                         and (scheduled_running_reqs and not prefill_scheduled)
                     ):
@@ -872,12 +910,10 @@ class Scheduler(SchedulerInterface):
                     if num_new_tokens == 0:
                         break
 
-                # Handles an edge case when P/D Disaggregation
-                # is used with Spec Decoding where an
-                # extra block gets allocated which
-                # creates a mismatch between the number
-                # of local and remote blocks.
-                limit_lookahead_tokens = load_kv_async and self.use_eagle
+                # During async KV load, no forward pass is run yet.
+                # Allocate speculative lookahead slots later to avoid
+                # mismatching local and remote block counts.
+                limit_lookahead_tokens = load_kv_async and self.num_lookahead_tokens > 0
                 effective_lookahead_tokens = (
                     0 if limit_lookahead_tokens else self.num_lookahead_tokens
                 )
@@ -1084,6 +1120,16 @@ class Scheduler(SchedulerInterface):
         new_block_ids_to_zero = (
             (new_attn_block_ids or None) if self.needs_kv_cache_zeroing else None
         )
+        kv_cache_block_copies, cow_retained_blocks = (
+            self.kv_cache_manager.take_kv_cache_block_copies()
+        )
+        if kv_cache_block_copies:
+            # The copies run with this step's execution; the first non-empty
+            # step at or after it gets seq `sched_step_seq + 1` (0-token steps
+            # do not advance the seq), and its completion implies the copies
+            # have run.
+            self._free_cow_retained_blocks(cow_retained_blocks, self.sched_step_seq + 1)
+        pending_kv_cache_block_copies = kv_cache_block_copies or None
 
         # Dynamic speculative decoding: compute optimal K
         num_spec_tokens_to_schedule = self.num_spec_tokens
@@ -1108,6 +1154,7 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
+            kv_cache_block_copies=pending_kv_cache_block_copies,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
         )
 
@@ -1178,6 +1225,7 @@ class Scheduler(SchedulerInterface):
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             request = self.requests[req_id]
             request.num_computed_tokens += num_scheduled_token
+            request.num_in_flight_tokens += num_scheduled_token
             if self.defer_block_free:
                 # Record the in-flight step, to fence deferred block freeing.
                 request.last_sched_seq = self.sched_step_seq
@@ -1564,10 +1612,12 @@ class Scheduler(SchedulerInterface):
         stopped_preempted_reqs: set[Request] = set()
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
+            request = self.requests.get(req_id)
+            if request is not None:
+                request.num_in_flight_tokens -= num_tokens_scheduled
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
                 # skip failed or rescheduled requests from KV load failure
                 continue
-            request = self.requests.get(req_id)
             if request is None or request.is_finished():
                 # The request is already finished. This can happen if the
                 # request is aborted while the model is executing it (e.g.,
@@ -2145,11 +2195,23 @@ class Scheduler(SchedulerInterface):
         if blocks:
             self.deferred_frees.append((self.sched_step_seq, blocks))
 
+    def _free_cow_retained_blocks(
+        self, blocks: list[KVCacheBlock], fence_seq: int
+    ) -> None:
+        """Release CoW copy retentions, deferring their return to the block
+        pool while the step that runs the copy may still be in flight.
+        """
+        if not self.defer_block_free or fence_seq <= self.processed_step_seq:
+            self.kv_cache_manager.block_pool.free_blocks(blocks)
+            return
+        self.deferred_frees.append((fence_seq, blocks[::-1]))
+
     def _drain_deferred_frees(self):
         """Return deferred blocks whose fence step has completed.
 
-        Entries are appended with monotonically non-decreasing fences, so
-        stop at the first one that is still pending.
+        Fences are appended in near-monotonic order (a CoW retention fence
+        can lead request-free fences by one step), so stop at the first
+        pending one; any satisfied entry behind it is merely freed later.
         """
         while self.deferred_frees:
             fence, _ = self.deferred_frees[0]
@@ -2365,14 +2427,19 @@ class Scheduler(SchedulerInterface):
             return False, None
 
         # Free any out-of-window prefix blocks before we hand the block table to
-        # the connector.
+        # the connector, on the processed-token basis (see `allocate_slots`).
         self.kv_cache_manager.remove_skipped_blocks(
             request_id=request.request_id,
-            total_computed_tokens=request.num_computed_tokens,
+            processed_computed_tokens=max(
+                0, request.num_computed_tokens - request.num_in_flight_tokens
+            ),
             num_prompt_tokens=request.num_prompt_tokens,
         )
 
-        block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
+        block_ids = self.kv_cache_manager.get_block_ids_for_computed_tokens(
+            request_id=request.request_id,
+            num_computed_tokens=request.num_computed_tokens,
+        )
 
         if not isinstance(self.connector, SupportsHMA):
             # NOTE(Kuntai): We should deprecate this code path after we enforce
@@ -2393,6 +2460,7 @@ class Scheduler(SchedulerInterface):
             new_computed_blocks=self.kv_cache_manager.empty_kv_cache_blocks.blocks,
             num_encoder_tokens=0,
             total_computed_tokens=request.num_computed_tokens,
+            num_local_computed_tokens=request.num_computed_tokens,
             num_tokens_main_model=full_num_tokens,
             apply_admission_cap=True,
         )

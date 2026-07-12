@@ -206,8 +206,6 @@ def _warm_zero_kv_blocks_kernel(
             N_SEGS=config.n_segs,
             PAGE_SIZE_EL=config.page_size_el,
             BLOCK_SIZE=config.block_size,
-            num_warps=4,
-            num_stages=3,
         )
 
 
@@ -372,11 +370,10 @@ def qwen_triton_warmup(
     logger.info("Warming up Qwen Triton kernels for model_type=%s.", model_type)
 
     zero_config = _zero_kv_warmup_config(runner)
-    if _warm_zero_kv_blocks_with_runner_zeroer(runner):
-        pass
-    elif zero_config is not None:
+    warmed_zeroer = _warm_zero_kv_blocks_with_runner_zeroer(runner)
+    if zero_config is not None:
         _warm_zero_kv_blocks_kernel(device, zero_config)
-    else:
+    elif not warmed_zeroer:
         logger.info("Skipping Qwen zero-kv warmup: no KVBlockZeroer metadata.")
 
     _warm_compute_slot_mapping_kernel(device)

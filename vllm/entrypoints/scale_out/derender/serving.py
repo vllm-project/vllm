@@ -64,6 +64,8 @@ class ServingDerender(BaseServing):
         """
         max_n = envs.VLLM_MAX_N_SEQUENCES
         max_model_len = self.model_config.max_model_len
+        # See ModelConfig.max_logprobs for semantics and default value.
+        max_logprobs = self.model_config.max_logprobs
 
         if len(generate_responses) > max_n:
             return self.create_error_response(
@@ -95,11 +97,16 @@ class ServingDerender(BaseServing):
                             f"max_model_len ({max_model_len})."
                         )
                     for entry in choice.logprobs.content:
-                        if entry.top_logprobs and len(entry.top_logprobs) > 20:
+                        if (
+                            max_logprobs >= 0
+                            and entry.top_logprobs
+                            and len(entry.top_logprobs) > max_logprobs
+                        ):
                             return self.create_error_response(
                                 f"top_logprobs count "
                                 f"({len(entry.top_logprobs)}) in "
-                                f"choice {choice.index} exceeds maximum (20)."
+                                f"choice {choice.index} exceeds "
+                                f"max_logprobs ({max_logprobs})."
                             )
 
             if gen.prompt_logprobs and len(gen.prompt_logprobs) > max_model_len:
