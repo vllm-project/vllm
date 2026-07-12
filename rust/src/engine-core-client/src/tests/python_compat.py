@@ -71,6 +71,7 @@ class EngineCoreRequest(
     priority: int = 0
     trace_headers: dict[str, str] | None = None
     resumable: bool = False
+    session_id: str | None = None
     external_req_id: str | None = None
     reasoning_ended: bool | None = None
     reasoning_parser_kwargs: dict[str, object] | None = None
@@ -136,6 +137,7 @@ request = EngineCoreRequest(
     pooling_params=None,
     arrival_time=42.5,
     client_index=0,
+    session_id="session-1",
 )
 
 # All defaults -> empty map. Regression guard for the sparse-map decode.

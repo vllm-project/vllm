@@ -159,6 +159,7 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
             ..EngineCoreSamplingParams::for_test()
         }),
         arrival_time: 42.5,
+        session_id: Some("session-1".to_string()),
         ..EngineCoreRequest::default()
     }
 }

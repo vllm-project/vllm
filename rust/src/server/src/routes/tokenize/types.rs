@@ -91,6 +91,7 @@ impl TokenizeChatRequest {
             cache_salt: None,
             add_special_tokens: self.add_special_tokens,
             data_parallel_rank: None,
+            session_id: None,
             lora_request: None,
         })
     }
