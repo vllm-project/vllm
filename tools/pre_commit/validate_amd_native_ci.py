@@ -7,8 +7,6 @@ from typing import Any
 
 import yaml
 
-AMD_MODELS = {"250", "300", "325", "355"}
-AMD_GPU_COUNTS = {"1", "2", "4", "8"}
 TEST_AMD = Path(".buildkite/test-amd.yaml")
 TEST_AREAS = Path(".buildkite/test_areas")
 
@@ -18,10 +16,11 @@ def _parse_amd_device(device: Any) -> tuple[str, int] | None:
     if (
         separator
         and model.startswith("mi")
-        and model.removeprefix("mi") in AMD_MODELS
-        and gpu_count in AMD_GPU_COUNTS
+        and model.removeprefix("mi").isdigit()
+        and gpu_count.isdigit()
+        and int(gpu_count) > 0
     ):
-        return model.removeprefix("mi"), int(gpu_count)
+        return model, int(gpu_count)
     return None
 
 
@@ -44,13 +43,9 @@ def _validate_runtime(
     if parsed_device is None:
         return [f"{label}: invalid AMD device or agent pool {device!r}"]
 
-    model, expected_gpus = parsed_device
-    expected_native = model == "300"
+    _, expected_gpus = parsed_device
     if not isinstance(native, bool):
         errors.append(f"{label}: native_ci must be a boolean")
-    elif native != expected_native:
-        expected = "native" if expected_native else "legacy DinD"
-        errors.append(f"{label}: {device} must use {expected}")
 
     if native and (num_nodes or 1) > 1:
         errors.append(f"{label}: native AMD jobs cannot be multi-node")
@@ -74,7 +69,7 @@ def _load(path: Path) -> dict[str, Any]:
     return data
 
 
-def validate_legacy_config() -> tuple[list[str], int]:
+def validate_test_amd_config() -> tuple[list[str], int]:
     errors: list[str] = []
     validated = 0
     for index, step in enumerate(_load(TEST_AMD).get("steps", []), start=1):
@@ -117,7 +112,7 @@ def validate_test_areas() -> tuple[list[str], int]:
                         ),
                         num_nodes=step.get("num_nodes"),
                         no_plugin=step.get("no_plugin", False),
-                        require_explicit_gpu_count=False,
+                        require_explicit_gpu_count=True,
                     )
                 )
                 validated += 1
@@ -141,7 +136,7 @@ def validate_test_areas() -> tuple[list[str], int]:
                     ),
                     num_nodes=amd.get("num_nodes", step.get("num_nodes")),
                     no_plugin=amd.get("no_plugin", step.get("no_plugin", False)),
-                    require_explicit_gpu_count=False,
+                    require_explicit_gpu_count=True,
                 )
             )
             validated += 1
@@ -149,17 +144,17 @@ def validate_test_areas() -> tuple[list[str], int]:
 
 
 def main() -> int:
-    legacy_errors, legacy_count = validate_legacy_config()
+    test_amd_errors, test_amd_count = validate_test_amd_config()
     area_errors, area_count = validate_test_areas()
-    errors = legacy_errors + area_errors
+    errors = test_amd_errors + area_errors
     if errors:
         raise SystemExit(
             "Invalid AMD native CI configuration:\n- " + "\n- ".join(errors)
         )
 
     print(
-        "AMD native CI policy validation passed "
-        f"({legacy_count} legacy steps, {area_count} test-area steps)"
+        "AMD native CI configuration validation passed "
+        f"({test_amd_count} test-amd steps, {area_count} test-area steps)"
     )
     return 0
 

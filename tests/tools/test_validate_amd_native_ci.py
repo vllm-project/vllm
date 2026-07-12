@@ -41,57 +41,49 @@ def _legacy_step(
     return step
 
 
-def test_legacy_accepts_native_mi300_and_legacy_families(config_paths) -> None:
-    test_amd, _ = config_paths
-    steps = [
-        _legacy_step(
-            f"mi300_{gpu_count}",
-            native_ci=True,
-            num_gpus=gpu_count,
-        )
-        for gpu_count in (1, 2, 4, 8)
-    ]
-    steps.extend(_legacy_step(f"{family}_1") for family in ("mi250", "mi325", "mi355"))
-    _write_yaml(test_amd, steps)
-
-    errors, count = validator.validate_legacy_config()
-
-    assert errors == []
-    assert count == 7
-
-
-@pytest.mark.parametrize(
-    ("step", "message"),
-    [
-        (_legacy_step("mi300_1"), "mi300_1 must use native"),
-        (
-            _legacy_step("mi325_1", native_ci=True),
-            "mi325_1 must use legacy DinD",
-        ),
-        (
-            _legacy_step("mi300_1", native_ci="true"),
-            "native_ci must be a boolean",
-        ),
-    ],
-)
-def test_legacy_rejects_missing_or_wrong_native_flag(
+def test_legacy_accepts_explicit_modes_for_current_and_future_devices(
     config_paths,
-    step: dict[str, Any],
-    message: str,
 ) -> None:
     test_amd, _ = config_paths
-    _write_yaml(test_amd, [step])
+    steps = [
+        _legacy_step("mi300_1", native_ci=True),
+        _legacy_step("mi300_1", native_ci=False),
+        _legacy_step("mi325_1", native_ci=True),
+        _legacy_step("mi325_1"),
+        _legacy_step("mi400_16", native_ci=True, num_gpus=16),
+    ]
+    _write_yaml(test_amd, steps)
 
-    errors, _ = validator.validate_legacy_config()
+    errors, count = validator.validate_test_amd_config()
 
-    assert any(message in error for error in errors)
+    assert errors == []
+    assert count == 5
 
 
 @pytest.mark.parametrize(
     "step",
     [
-        _legacy_step("mi300_4", native_ci=True),
-        _legacy_step("mi300_4", native_ci=True, num_gpus=2),
+        _legacy_step("mi300_1", native_ci="true"),
+        _legacy_step("mi400_16", native_ci=1, num_gpus=16),
+    ],
+)
+def test_legacy_rejects_non_boolean_native_flag(
+    config_paths,
+    step: dict[str, Any],
+) -> None:
+    test_amd, _ = config_paths
+    _write_yaml(test_amd, [step])
+
+    errors, _ = validator.validate_test_amd_config()
+
+    assert any("native_ci must be a boolean" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "step",
+    [
+        _legacy_step("mi400_16", native_ci=True),
+        _legacy_step("mi400_16", native_ci=True, num_gpus=8),
     ],
 )
 def test_legacy_rejects_gpu_count_that_does_not_match_pool_suffix(
@@ -101,9 +93,9 @@ def test_legacy_rejects_gpu_count_that_does_not_match_pool_suffix(
     test_amd, _ = config_paths
     _write_yaml(test_amd, [step])
 
-    errors, _ = validator.validate_legacy_config()
+    errors, _ = validator.validate_test_amd_config()
 
-    assert any("does not match mi300_4 (4)" in error for error in errors)
+    assert any("does not match mi400_16 (16)" in error for error in errors)
 
 
 @pytest.mark.parametrize(
@@ -119,10 +111,10 @@ def test_legacy_rejects_unsupported_native_modes(
     message: str,
 ) -> None:
     test_amd, _ = config_paths
-    step = _legacy_step("mi300_1", native_ci=True, **overrides)
+    step = _legacy_step("mi400_16", native_ci=True, num_gpus=16, **overrides)
     _write_yaml(test_amd, [step])
 
-    errors, _ = validator.validate_legacy_config()
+    errors, _ = validator.validate_test_amd_config()
 
     assert any(message in error for error in errors)
 
@@ -133,27 +125,27 @@ def test_test_areas_accept_direct_and_nested_amd_devices(config_paths) -> None:
         test_areas / "valid.yaml",
         [
             {
-                "label": "Direct MI300",
-                "device": "mi300_2",
+                "label": "Direct native future device",
+                "device": "mi400_2",
                 "native_ci": True,
                 "num_devices": 2,
             },
             {
-                "label": "Direct legacy MI355",
-                "device": "mi355_1",
+                "label": "Direct legacy current device",
+                "device": "mi300_1",
             },
             {
-                "label": "Label says H100-MI300 but mirror is MI325",
+                "label": "Label does not determine runtime mode",
                 "device": "h100",
-                "mirror": {"amd": {"device": "mi325_1"}},
+                "mirror": {"amd": {"device": "mi300_1"}},
             },
             {
-                "label": "Nested MI300 mirror",
+                "label": "Nested native mirror",
                 "device": "h100",
-                "num_devices": 4,
+                "num_devices": 16,
                 "mirror": {
                     "amd": {
-                        "device": "mi300_4",
+                        "device": "mi400_16",
                         "native_ci": True,
                     }
                 },
@@ -183,17 +175,13 @@ def test_test_areas_reject_native_flag_on_non_amd_direct_step(config_paths) -> N
 @pytest.mark.parametrize(
     ("amd", "message"),
     [
-        ({"device": "mi300_1"}, "mi300_1 must use native"),
+        ({"device": "mi400_1", "native_ci": "true"}, "must be a boolean"),
         (
-            {"device": "mi325_1", "native_ci": True},
-            "mi325_1 must use legacy DinD",
-        ),
-        (
-            {"device": "mi300_1", "native_ci": True, "num_nodes": 2},
+            {"device": "mi400_1", "native_ci": True, "num_nodes": 2},
             "cannot be multi-node",
         ),
         (
-            {"device": "mi300_1", "native_ci": True, "no_plugin": True},
+            {"device": "mi400_1", "native_ci": True, "no_plugin": True},
             "cannot use no_plugin",
         ),
     ],

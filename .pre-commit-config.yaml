@@ -190,7 +190,7 @@ repos:
     language: script
     types: [shell]
   - id: validate-amd-native-ci
-    name: Validate AMD native CI device policy
+    name: Validate AMD native CI configuration
     entry: python tools/pre_commit/validate_amd_native_ci.py
     language: python
     additional_dependencies: [pyyaml]

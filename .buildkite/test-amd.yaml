@@ -14,8 +14,8 @@
 # command(str): the single command to run for tests. incompatible with commands.
 # commands(list): the list of commands to run for the test. incompatible with command.
 # mirror_hardwares(list): the list of hardware to run the test on as well. currently only supports [amdexperimental]
-# native_ci(bool): run MI300 jobs directly in the AMD Kubernetes pod instead of Docker-in-Docker.
-#     Omit this for MI250, MI325, and MI355 jobs, which still use the legacy Docker path.
+# native_ci(bool): when true, run the job directly in the AMD Kubernetes pod.
+#     When false or omitted, use the legacy Docker-in-Docker path.
 # num_gpus(int): override the number of GPUs for the test. defaults to 1 GPU. currently supports 2,4,8.
 # num_nodes(int): whether to simulate multi-node setup by launching multiple containers on one host,
 #     in this case, commands must be specified. the first command runs on the first host, the second
