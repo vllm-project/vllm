@@ -9,6 +9,9 @@ import contextlib
 import functools
 import importlib
 import os
+import re
+import shutil
+import subprocess
 from collections.abc import Callable
 from enum import Enum
 from typing import Any, NoReturn
@@ -91,12 +94,65 @@ class DeepGemmQuantScaleFMT(Enum):
 
 
 @functools.cache
+@functools.cache
+def _nvcc_version() -> tuple[int, int] | None:
+    """Best-effort version of the local toolkit's nvcc.
+
+    Locates the toolkit via torch's standard ``CUDA_HOME`` resolution
+    (CUDA_HOME/CUDA_PATH env, nvcc on PATH, /usr/local/cuda) — the same
+    discovery JIT backends effectively use. ``torch.version.cuda`` is the
+    build-time CUDA of the wheel and says nothing about the local
+    toolchain, so the version must come from running nvcc itself.
+
+    Returns ``None`` when nvcc cannot be located or parsed — callers must
+    treat that as "unknown", not as a failure.
+    """
+    from torch.utils.cpp_extension import CUDA_HOME
+
+    candidates = []
+    if CUDA_HOME:
+        candidates.append(os.path.join(CUDA_HOME, "bin", "nvcc"))
+    which_nvcc = shutil.which("nvcc")
+    if which_nvcc:
+        candidates.append(which_nvcc)
+    for nvcc in candidates:
+        try:
+            out = subprocess.run(
+                [nvcc, "--version"], capture_output=True, text=True, timeout=10
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        match = re.search(r"release (\d+)\.(\d+)", out)
+        if match:
+            return int(match.group(1)), int(match.group(2))
+    return None
+
+
+# Minimum toolchain DeepGEMM's JIT accepts; older nvcc trips an assertion
+# in its compiler.hpp at first kernel compile, long after backend selection.
+_DEEP_GEMM_MIN_NVCC = (12, 3)
+
+
 def is_deep_gemm_supported() -> bool:
     """Return `True` if DeepGEMM is supported on the current platform.
     Currently, only Hopper and Blackwell GPUs are supported.
     """
     is_supported_arch = current_platform.support_deep_gemm()
-    return envs.VLLM_USE_DEEP_GEMM and has_deep_gemm() and is_supported_arch
+    if not (envs.VLLM_USE_DEEP_GEMM and has_deep_gemm() and is_supported_arch):
+        return False
+    # DeepGEMM JIT-compiles kernels at first use; a toolchain its compiler
+    # rejects would otherwise crash mid-weight-load. Only a positively
+    # identified too-old nvcc disqualifies — unknown means supported.
+    nvcc_version = _nvcc_version()
+    if nvcc_version is not None and nvcc_version < _DEEP_GEMM_MIN_NVCC:
+        logger.warning_once(
+            "DeepGEMM disabled: found nvcc %d.%d but DeepGEMM's JIT requires "
+            ">= %d.%d. Set CUDA_HOME to a newer toolkit to enable it.",
+            *nvcc_version,
+            *_DEEP_GEMM_MIN_NVCC,
+        )
+        return False
+    return True
 
 
 @functools.cache
