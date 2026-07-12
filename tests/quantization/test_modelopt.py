@@ -605,3 +605,33 @@ def test_modelopt_mixed_precision_builds_w4a16_sibling_config():
     assert config.nvfp4_config.LinearMethodCls is m.ModelOptNvFp4LinearMethod
     assert config.w4a16_nvfp4_config.quant_method == "W4A16_NVFP4"
     assert config.w4a16_nvfp4_config.LinearMethodCls is m.ModelOptNvFp4W4A16LinearMethod
+
+
+def test_modelopt_fp8_pb_wo_runs_block_kernel_process_weights():
+    """FP8_PB_WO must forward process_weights_after_loading to its block kernel.
+
+    The kernel is stored as ``w8a8_block_fp8_linear``, but the post-load call
+    was gated on ``hasattr(self, "fp8_linear")`` -- an attribute this method
+    never sets -- so the mandatory scale/layout relayout (deep_gemm on
+    Hopper/Blackwell, e4m3fn->e4m3fnuz on ROCm) was silently skipped and
+    ``apply`` ran the GEMM on unprocessed weights.
+    """
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptFp8PbWoLinearMethod,
+    )
+
+    method = object.__new__(ModelOptFp8PbWoLinearMethod)
+    method.w8a8_block_fp8_linear = Mock()
+
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(
+        torch.zeros(128, 128, dtype=torch.float8_e4m3fn), requires_grad=False
+    )
+    # ModelOpt exports block scales as [out_blk, 1, in_blk, 1].
+    layer.weight_scale = torch.nn.Parameter(torch.ones(1, 1, 1, 1), requires_grad=False)
+
+    method.process_weights_after_loading(layer)
+
+    method.w8a8_block_fp8_linear.process_weights_after_loading.assert_called_once_with(
+        layer
+    )
