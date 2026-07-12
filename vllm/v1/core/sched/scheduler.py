@@ -705,7 +705,7 @@ class Scheduler(SchedulerInterface):
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
-                    # Get locally-cached tokens.
+                    new_computed_blocks = None
                     if (
                         self.connector is not None
                         and self.has_mamba_layers
@@ -714,42 +714,42 @@ class Scheduler(SchedulerInterface):
                             HybridKVCacheCoordinator,
                         )
                     ):
+                        # NOTE(ZhanqiuHu): report the FA hit as the local prefix
+                        # so the connector only transfers what is missing
+                        # (external = total - local); the Mamba state is
+                        # transferred unconditionally by nixl's _apply_prefix_caching.
+                        coordinator = self.kv_cache_manager.coordinator
                         computed, per_group_hits = (
-                            self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
+                            coordinator.find_longest_cache_hit_per_group(
                                 request.block_hashes, request.num_tokens - 1
                             )
                         )
-                        new_computed_blocks = (
-                            self.kv_cache_manager.create_kv_cache_blocks(computed)
-                        )
-                        # NOTE(ZhanqiuHu): For Mamba hybrid models,
-                        # num_new_local_computed_tokens should be the FA hit
-                        # length. This value is passed to the connector's
-                        # get_num_new_matched_tokens which computes:
-                        # external = total - local_computed.
-                        # Using the FA hit skips re-transferring FA blocks
-                        # already cached on D-side. The Mamba state (always
-                        # the last block) is transferred unconditionally by
-                        # _apply_prefix_caching in nixl/worker.py.
-                        num_new_local_computed_tokens = max(per_group_hits)
-                        # The per-group lookup does not detect an uncached shared
-                        # prefix, so there is no junction to pin in this path.
-                        request.shared_prefix_boundary = 0
-                        if self.kv_cache_manager.log_stats:
-                            assert self.kv_cache_manager.prefix_cache_stats is not None
-                            self.kv_cache_manager.prefix_cache_stats.record(
-                                num_tokens=request.num_tokens,
-                                num_hits=num_new_local_computed_tokens,
-                                preempted=request.num_preemptions > 0,
+                        fa_group_id = coordinator.full_attention_group_id
+                        if fa_group_id is not None and all(
+                            hit <= per_group_hits[fa_group_id] for hit in per_group_hits
+                        ):
+                            new_computed_blocks = (
+                                self.kv_cache_manager.create_kv_cache_blocks(computed)
                             )
-                    else:
+                            num_new_local_computed_tokens = per_group_hits[fa_group_id]
+                            # Per-group lookups don't detect shared prefixes.
+                            request.shared_prefix_boundary = 0
+                            if self.kv_cache_manager.log_stats:
+                                stats = self.kv_cache_manager.prefix_cache_stats
+                                assert stats is not None
+                                stats.record(
+                                    num_tokens=request.num_tokens,
+                                    num_hits=num_new_local_computed_tokens,
+                                    preempted=request.num_preemptions > 0,
+                                )
+                        # else: a group hit deeper than FA means its FA blocks
+                        # were evicted - the reconciled lookup below converges on a
+                        # boundary consistent across all groups.
+                    if new_computed_blocks is None:
                         (
                             new_computed_blocks,
                             num_new_local_computed_tokens,
-                            # Junction to pin (Marconi-style APC) so its
-                            # sparse-retention state (Mamba block / sliding-window
-                            # tail) survives retention and serves a later hit; 0
-                            # if no uncached shared prefix was detected.
+                            # Marconi shared-prefix junction to pin; 0 if none.
                             request.shared_prefix_boundary,
                         ) = self.kv_cache_manager.get_computed_blocks(request)
 

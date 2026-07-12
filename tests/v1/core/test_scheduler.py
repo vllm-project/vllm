@@ -25,14 +25,17 @@ from vllm.multimodal.inputs import (
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    MambaSpec,
 )
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -5246,3 +5249,145 @@ def test_async_load_reservation_prevents_wedge_e2e():
     assert b.status == RequestStatus.WAITING
     assert b.num_preemptions == 0
     assert b.request_id not in req_to_blocks
+
+
+def _create_hybrid_mamba_connector_scheduler(
+    matched_tokens: int,
+    block_size: int = 16,
+    num_blocks: int = 100,
+) -> Scheduler:
+    """FA + Mamba ("all" cache mode) scheduler with a MockKVConnector."""
+    model_config = ModelConfig(
+        model="facebook/opt-125m",
+        trust_remote_code=True,
+        dtype="float16",
+        seed=42,
+        skip_tokenizer_init=True,
+    )
+    vllm_config = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=4,
+            max_num_batched_tokens=8192,
+            max_model_len=8192,
+            enable_chunked_prefill=True,
+            is_encoder_decoder=False,
+            watermark=0.0,
+        ),
+        model_config=model_config,
+        cache_config=CacheConfig(
+            block_size=block_size,
+            enable_prefix_caching=True,
+            mamba_cache_mode="all",
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="MockKVConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "matched_tokens": matched_tokens,
+                "is_async": False,
+            },
+        ),
+    )
+    vllm_config.cache_config.num_gpu_blocks = num_blocks
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["fa"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="all",
+                ),
+            ),
+        ],
+    )
+    register_all_kvcache_specs(vllm_config)
+    return Scheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        structured_output_manager=StructuredOutputManager(vllm_config),
+        block_size=block_size,
+        hash_block_size=block_size,
+        log_stats=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "matched_tokens,expected_num_computed",
+    [
+        # No external hit: resume on the deepest locally-consistent boundary
+        # (block 0's state survives for both groups).
+        (0, 16),
+        # One external block on top of the reconciled local boundary.
+        (16, 32),
+    ],
+)
+def test_hybrid_per_group_hit_divergence_with_connector(
+    matched_tokens: int, expected_num_computed: int
+):
+    """Per-group prefix hits can diverge for hybrid models with a connector
+    (#46453): under block pressure the FA prefix tail is evicted while a
+    deeper Mamba state block survives. The scheduler must not report the
+    deeper hit as locally computed (evicted FA blocks are not resident ->
+    engine crash / dirty KV); it falls back to the reconciled boundary that
+    every group is consistent at.
+    """
+    block_size = 16
+    scheduler = _create_hybrid_mamba_connector_scheduler(matched_tokens)
+    manager = scheduler.kv_cache_manager
+    assert isinstance(manager.coordinator, HybridKVCacheCoordinator)
+
+    # Seed a 4-block prefix so both groups cache all four boundaries
+    # (mamba cache mode "all" caches every block's state densely).
+    [fill] = create_requests(
+        num_requests=1,
+        num_tokens=4 * block_size,
+        max_tokens=1,
+        same_prompt=True,
+        block_size=block_size,
+        req_ids=["fill"],
+    )
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(fill)
+    blocks = manager.allocate_slots(
+        fill, fill.num_tokens, num_computed, computed_blocks
+    )
+    fa_ids = [b.block_id for b in blocks.blocks[0]]
+    mamba_ids = [b.block_id for b in blocks.blocks[1]]
+    manager.free(fill)
+
+    # Evict the FA tail and the middle mamba states; block 0 (both groups)
+    # and the deep mamba state at block 3 survive.
+    manager.block_pool.evict_blocks({fa_ids[2], fa_ids[3], mamba_ids[1], mamba_ids[2]})
+
+    # A replay of the prefix plus one extra block now sees diverged
+    # per-group hits: FA stops at the evicted tail, while the mamba lookup
+    # finds the deeper surviving state.
+    [replay] = create_requests(
+        num_requests=1,
+        num_tokens=5 * block_size,
+        max_tokens=1,
+        same_prompt=True,
+        block_size=block_size,
+        req_ids=["replay"],
+    )
+    _, per_group_hits = manager.coordinator.find_longest_cache_hit_per_group(
+        replay.block_hashes, replay.num_tokens - 1
+    )
+    assert per_group_hits == (2 * block_size, 4 * block_size)  # diverged
+
+    scheduler.add_request(replay)
+    output = scheduler.schedule()
+    num_scheduled = output.num_scheduled_tokens[replay.request_id]
+    assert replay.num_tokens - num_scheduled == expected_num_computed
