@@ -118,7 +118,7 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             "<|vision_start|><|video_pad|><|vision_end|>"
             "Describe this video in one sentence."
         ),
-        needs_video_metadata=False,
+        needs_video_metadata=True,
         marks=[pytest.mark.core_model],
     ),
     "kimi_vl": VitCudagraphTestConfig(

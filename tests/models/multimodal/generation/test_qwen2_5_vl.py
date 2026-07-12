@@ -4,9 +4,9 @@
 import pytest
 
 from vllm.assets.image import ImageAsset
-from vllm.multimodal.video import sample_frames_from_video
 
 from ....conftest import VIDEO_ASSETS
+from .vlm_utils.builders import sample_frames_with_video_metadata
 
 models = ["Qwen/Qwen2.5-VL-3B-Instruct"]
 target_dtype = "bfloat16"
@@ -76,7 +76,9 @@ def test_qwen2_5_vl_evs_functionality(
 
     # Sample frames from video assets
     sampled_vids = [
-        sample_frames_from_video(asset.np_ndarrays, num_frames)
+        sample_frames_with_video_metadata(
+            (asset.np_ndarrays, asset.metadata), num_frames
+        )
         for asset in video_assets
     ]
 
@@ -136,7 +138,9 @@ def test_qwen2_5_vl_evs_batched_videos(
     monkeypatch.setenv("VLLM_USE_BYTECODE_HOOK", "1" if use_bytecode_hook else "0")
     # Sample frames from video assets
     sampled_vids = [
-        sample_frames_from_video(asset.np_ndarrays, num_frames)
+        sample_frames_with_video_metadata(
+            (asset.np_ndarrays, asset.metadata), num_frames
+        )
         for asset in video_assets
     ]
 
