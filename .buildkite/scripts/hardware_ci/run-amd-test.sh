@@ -145,7 +145,11 @@ prepare_artifact_image() {
   fi
 
   cp "${wheel_dir}"/*.whl "${context_dir}/wheels/" || return 1
-  tar -C "${wheel_dir}" --exclude='*.whl' -cf - . \
+  tar -C "${wheel_dir}" \
+    --exclude='*.whl' \
+    --exclude='.vllm-ci-artifact' \
+    --exclude='./.vllm-ci-artifact' \
+    -cf - . \
     | tar -C "${workspace_dir}" -xf - || return 1
   cat > "${context_dir}/Dockerfile" <<'EOF'
 ARG BASE_IMAGE
@@ -172,6 +176,36 @@ is_native_runtime() {
   [[ "${AMD_CI_RUNTIME:-}" == "native" || "${NATIVE_CI:-}" == "true" ]]
 }
 
+validate_native_workspace() {
+  local workspace_dir="${VLLM_CI_WORKSPACE:-/vllm-workspace}"
+  local workspace_real=""
+  local checkout_real=""
+  local workspace_mount=""
+
+  mkdir -p "${workspace_dir}" || return 1
+  workspace_real=$(readlink -m "${workspace_dir}") || return 1
+  if [[ -n "${BUILDKITE_BUILD_CHECKOUT_PATH:-}" ]]; then
+    checkout_real=$(readlink -m "${BUILDKITE_BUILD_CHECKOUT_PATH}") || return 1
+    if [[ "${checkout_real}" == "${workspace_real}" \
+      || "${checkout_real}" == "${workspace_real}/"* \
+      || "${workspace_real}" == "${checkout_real}/"* ]]; then
+      echo "Refusing to replace ${workspace_real}; it overlaps the Buildkite checkout ${checkout_real}" >&2
+      return 1
+    fi
+  fi
+  if [[ "${VLLM_CI_REQUIRE_WORKSPACE_MOUNT:-1}" == "1" ]]; then
+    if ! command -v findmnt >/dev/null 2>&1; then
+      echo "findmnt is required to verify the native workspace mount" >&2
+      return 1
+    fi
+    workspace_mount=$(findmnt -n -T "${workspace_real}" -o TARGET 2>/dev/null || true)
+    if [[ "$(readlink -m "${workspace_mount:-/}")" != "${workspace_real}" ]]; then
+      echo "Native CI requires a dedicated volume mounted at ${workspace_real}" >&2
+      return 1
+    fi
+  fi
+}
+
 prepare_native_workspace() {
   if [[ "${VLLM_CI_USE_ARTIFACTS:-0}" != "1" ]]; then
     echo "Native CI requires VLLM_CI_USE_ARTIFACTS=1"
@@ -181,63 +215,207 @@ prepare_native_workspace() {
     echo "buildkite-agent not found; cannot download ROCm wheel artifact"
     return 1
   fi
+  validate_native_workspace || return 1
 
   local artifact_glob="${VLLM_CI_ARTIFACT_GLOB:-artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz}"
+  local artifact_checksum_glob="${VLLM_CI_ARTIFACT_CHECKSUM_GLOB:-${artifact_glob}.sha256}"
+  local artifact_step="${VLLM_CI_ARTIFACT_STEP:-image-build-amd}"
   local archive=""
+  local checksum=""
+  local download_dir=""
+  local metadata_dir=""
+  local recorded_base=""
+  local recorded_commit=""
+  local recorded_wheel=""
+  local workspace_dir="${VLLM_CI_WORKSPACE:-/vllm-workspace}"
   local wheel_dir=""
+  local attempt=0
+  local attempt_dir=""
+  local -a archives=()
+  local -a checksums=()
+  local -a wheels=()
 
-  artifact_work_dir=$(mktemp -d -t vllm-rocm-artifact.XXXXXX)
+  artifact_work_dir=$(mktemp -d -t vllm-rocm-artifact.XXXXXX) || return 1
   wheel_dir="${artifact_work_dir}/wheels"
-  mkdir -p "${wheel_dir}"
+  mkdir -p "${wheel_dir}" || return 1
 
-  echo "--- Downloading ROCm wheel artifact (native in-pod)"
-  if ! buildkite-agent artifact download "${artifact_glob}" "${artifact_work_dir}"; then
-    echo "Failed to download ${artifact_glob}"
+  echo "--- Downloading ROCm wheel artifact from ${artifact_step} (native in-pod)"
+  for attempt in 1 2 3; do
+    attempt_dir="${artifact_work_dir}/download-${attempt}"
+    rm -rf "${attempt_dir}" || return 1
+    mkdir -p "${attempt_dir}" || return 1
+    if buildkite-agent artifact download \
+      "${artifact_glob}" "${attempt_dir}" --step "${artifact_step}" \
+      && buildkite-agent artifact download \
+        "${artifact_checksum_glob}" "${attempt_dir}" --step "${artifact_step}"; then
+      download_dir="${attempt_dir}"
+      break
+    fi
+    echo "Artifact download attempt ${attempt}/3 failed"
+    if [[ "${attempt}" -lt 3 ]]; then
+      sleep $((attempt * 2))
+    fi
+  done
+  if [[ -z "${download_dir}" ]]; then
+    echo "Failed to download ${artifact_glob} and ${artifact_checksum_glob} from ${artifact_step}"
     return 1
   fi
 
-  archive=$(find "${artifact_work_dir}" -name "vllm-rocm-install.tar.gz" -type f | head -1)
-  if [[ -z "${archive}" || ! -f "${archive}" ]]; then
-    echo "ROCm wheel artifact archive was not found"
+  mapfile -t archives < <(
+    find "${download_dir}" -name "vllm-rocm-install.tar.gz" -type f -print
+  )
+  mapfile -t checksums < <(
+    find "${download_dir}" -name "vllm-rocm-install.tar.gz.sha256" -type f -print
+  )
+  if [[ ${#archives[@]} -ne 1 || ${#checksums[@]} -ne 1 ]]; then
+    echo "Expected exactly one ROCm archive and checksum; found ${#archives[@]} archive(s) and ${#checksums[@]} checksum(s)" >&2
     return 1
   fi
+  archive="${archives[0]}"
+  checksum="${checksums[0]}"
+  if [[ "$(dirname "${archive}")" != "$(dirname "${checksum}")" ]]; then
+    echo "ROCm archive and checksum were downloaded to different directories" >&2
+    return 1
+  fi
+  (
+    cd "$(dirname "${archive}")"
+    sha256sum -c "$(basename "${checksum}")"
+  ) || return 1
 
-  tar -xzf "${archive}" -C "${wheel_dir}" || return 1
-  if ! ls "${wheel_dir}"/*.whl >/dev/null 2>&1; then
-    echo "ROCm wheel artifact did not contain a wheel"
+  tar --no-same-owner -xzf "${archive}" -C "${wheel_dir}" || return 1
+  mapfile -t wheels < <(
+    find "${wheel_dir}" -maxdepth 1 -type f -name '*.whl' -print
+  )
+  if [[ ${#wheels[@]} -ne 1 ]]; then
+    echo "ROCm artifact must contain exactly one top-level wheel; found ${#wheels[@]}" >&2
     return 1
   fi
-  if [[ ! -d "${wheel_dir}/tests" ]]; then
-    echo "ROCm wheel artifact did not contain the test workspace"
+  metadata_dir="${wheel_dir}/.vllm-ci-artifact"
+  for metadata_file in commit.txt native-base-image.txt wheel-filename.txt; do
+    if [[ ! -s "${metadata_dir}/${metadata_file}" ]]; then
+      echo "ROCm artifact metadata is missing ${metadata_file}" >&2
+      return 1
+    fi
+  done
+  for metadata_file in ci-base-image.txt fallback-image.txt; do
+    if [[ ! -f "${metadata_dir}/${metadata_file}" ]]; then
+      echo "ROCm artifact metadata is missing ${metadata_file}" >&2
+      return 1
+    fi
+  done
+
+  recorded_commit=$(tr -d '\r\n' < "${metadata_dir}/commit.txt")
+  recorded_base=$(tr -d '\r\n' < "${metadata_dir}/native-base-image.txt")
+  recorded_wheel=$(tr -d '\r\n' < "${metadata_dir}/wheel-filename.txt")
+  if [[ -z "${BUILDKITE_COMMIT:-}" || "${recorded_commit}" != "${BUILDKITE_COMMIT}" ]]; then
+    echo "ROCm artifact commit ${recorded_commit} does not match ${BUILDKITE_COMMIT:-unset}" >&2
     return 1
   fi
+  if [[ -z "${VLLM_CI_BASE_IMAGE:-}" || "${recorded_base}" != "${VLLM_CI_BASE_IMAGE}" ]]; then
+    echo "ROCm artifact base ${recorded_base} does not match ${VLLM_CI_BASE_IMAGE:-unset}" >&2
+    return 1
+  fi
+  if [[ "${recorded_wheel}" != "$(basename "${wheels[0]}")" ]]; then
+    echo "ROCm artifact wheel manifest ${recorded_wheel} does not match $(basename "${wheels[0]}")" >&2
+    return 1
+  fi
+  for required_dir in tests .buildkite requirements; do
+    if [[ ! -d "${wheel_dir}/${required_dir}" ]]; then
+      echo "ROCm wheel artifact did not contain ${required_dir}/" >&2
+      return 1
+    fi
+  done
 
   echo "--- Installing ROCm wheel into pod environment"
-  python3 -m pip install --no-deps --force-reinstall "${wheel_dir}"/*.whl || return 1
+  python3 -m pip install --no-deps --force-reinstall "${wheels[0]}" || return 1
 
-  echo "--- Preparing /vllm-workspace from artifact"
-  rm -rf /vllm-workspace || return 1
-  mkdir -p /vllm-workspace || return 1
-  tar -C "${wheel_dir}" --exclude='*.whl' -cf - . \
-    | tar -C /vllm-workspace -xf - || return 1
+  echo "--- Preparing ${workspace_dir} from artifact"
+  find "${workspace_dir}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || return 1
+  tar -C "${wheel_dir}" \
+    --exclude='*.whl' \
+    --exclude='.vllm-ci-artifact' \
+    --exclude='./.vllm-ci-artifact' \
+    -cf - . | tar --no-same-owner -C "${workspace_dir}" -xf - || return 1
+  if [[ ! -d "${workspace_dir}/tests" ]]; then
+    echo "Failed to stage the native test workspace" >&2
+    return 1
+  fi
 
   return 0
 }
 
-run_native_preflight() {
-  : "${TMPDIR:=/tmp}"
-  : "${TORCHINDUCTOR_CACHE_DIR:=/tmp/vllm-native/torchinductor}"
-  : "${TRITON_CACHE_DIR:=/tmp/vllm-native/triton}"
-  : "${VLLM_CACHE_ROOT:=/home/buildkite-agent/huggingface/vllm-cache}"
-  : "${XDG_CACHE_HOME:=/tmp/vllm-native/xdg}"
+initialize_native_environment() {
+  local job_id="${BUILDKITE_JOB_ID:-${BUILDKITE_PARALLEL_JOB:-local}}"
+  local native_root=""
+  local hf_mount=""
+
+  if [[ "$(id -u)" -ne 0 ]]; then
+    echo "Native ROCm CI currently requires the ci_base container to run as root" >&2
+    return 1
+  fi
+
+  job_id="${job_id//[^A-Za-z0-9_.-]/_}"
+  native_root="/tmp/vllm-native-${job_id}"
+  : "${TMPDIR:=${native_root}/tmp}"
+  : "${TORCHINDUCTOR_CACHE_DIR:=${native_root}/cache/torchinductor}"
+  : "${TRITON_CACHE_DIR:=${native_root}/cache/triton}"
+  : "${VLLM_CACHE_ROOT:=${native_root}/cache/vllm}"
+  : "${XDG_CACHE_HOME:=${native_root}/cache/xdg}"
+  : "${HF_HOME:=/home/buildkite-agent/huggingface}"
+  : "${HF_HUB_DOWNLOAD_TIMEOUT:=300}"
+  : "${HF_HUB_ETAG_TIMEOUT:=60}"
   export TMPDIR TORCHINDUCTOR_CACHE_DIR TRITON_CACHE_DIR VLLM_CACHE_ROOT XDG_CACHE_HOME
+  export HF_HOME HF_HUB_DOWNLOAD_TIMEOUT HF_HUB_ETAG_TIMEOUT
+  export PYTORCH_ROCM_ARCH=""
 
   mkdir -p "${TMPDIR}" \
     "${TORCHINDUCTOR_CACHE_DIR}" \
     "${TRITON_CACHE_DIR}" \
     "${VLLM_CACHE_ROOT}" \
-    "${XDG_CACHE_HOME}" || return 1
-  python3 -c "import encodings, importlib.metadata as im, importlib.util as iu; [im.version(d) for d in ('transformers', 'torch', 'ray', 'sympy', 'markupsafe', 'vllm')]; missing=[m for m in ('torch.utils.model_zoo', 'transformers.models.nomic_bert', 'ray.dag', 'sympy.physics', 'markupsafe._speedups') if iu.find_spec(m) is None]; assert not missing, missing"
+    "${XDG_CACHE_HOME}" \
+    "${HF_HOME}" || return 1
+
+  if [[ "${VLLM_CI_REQUIRE_PERSISTENT_HF_CACHE:-0}" == "1" ]]; then
+    if ! command -v findmnt >/dev/null 2>&1; then
+      echo "findmnt is required to verify the native Hugging Face cache mount" >&2
+      return 1
+    fi
+    hf_mount=$(findmnt -n -T "${HF_HOME}" -o TARGET 2>/dev/null || true)
+    if [[ -z "${hf_mount}" || "${hf_mount}" == "/" ]]; then
+      echo "Native CI requires a persistent volume mounted at or above ${HF_HOME}" >&2
+      return 1
+    fi
+  fi
+}
+
+run_native_preflight() {
+  local expected_gpus="${VLLM_CI_EXPECTED_GPU_COUNT:-1}"
+
+  if [[ ! "${expected_gpus}" =~ ^[0-9]+$ ]]; then
+    echo "Invalid VLLM_CI_EXPECTED_GPU_COUNT=${expected_gpus}" >&2
+    return 1
+  fi
+
+  python3 -c "import encodings, importlib.metadata as im, importlib.util as iu; [im.version(d) for d in ('transformers', 'torch', 'ray', 'sympy', 'markupsafe', 'vllm')]; missing=[m for m in ('torch.utils.model_zoo', 'transformers.models.nomic_bert', 'ray.dag', 'sympy.physics', 'markupsafe._speedups') if iu.find_spec(m) is None]; assert not missing, missing" || return 1
+
+  if [[ "${expected_gpus}" == "0" ]]; then
+    echo "Native CPU-only AMD job: skipping ROCm device validation"
+    return 0
+  fi
+
+  echo "--- ROCm info"
+  rocminfo || return 1
+  VLLM_CI_EXPECTED_GPU_COUNT="${expected_gpus}" python3 - <<'PY'
+import os
+
+import torch
+
+expected = int(os.environ["VLLM_CI_EXPECTED_GPU_COUNT"])
+assert torch.version.hip, "PyTorch is not a ROCm build"
+assert torch.cuda.is_available(), "ROCm GPU is not available to PyTorch"
+actual = torch.cuda.device_count()
+assert actual == expected, f"Expected {expected} ROCm GPU(s), found {actual}"
+PY
 }
 
 is_multi_node() {
@@ -422,9 +600,9 @@ re_quote_pytest_markers() {
 # Main
 ###############################################################################
 
-# --- GPU initialization ---
-echo "--- ROCm info"
-rocminfo
+if [[ "${VLLM_CI_RUN_AMD_TEST_LIB_ONLY:-0}" == "1" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 if is_native_runtime; then
   echo "--- Native in-pod ROCm CI (AMD_CI_RUNTIME=${AMD_CI_RUNTIME:-unset}, NATIVE_CI=${NATIVE_CI:-unset})"
@@ -436,11 +614,6 @@ if is_native_runtime; then
     fi
   }
   trap cleanup_native_workspace EXIT
-
-  if ! prepare_native_workspace; then
-    echo "Failed to prepare native test workspace"
-    exit 1
-  fi
 
   if [[ -n "${VLLM_TEST_COMMANDS:-}" ]]; then
     commands="${VLLM_TEST_COMMANDS}"
@@ -463,16 +636,26 @@ if is_native_runtime; then
     exit 1
   fi
 
-  export PYTHONPATH="/vllm-workspace"
-  : "${HF_HUB_DOWNLOAD_TIMEOUT:=300}"
-  : "${HF_HUB_ETAG_TIMEOUT:=60}"
-  export HF_HUB_DOWNLOAD_TIMEOUT HF_HUB_ETAG_TIMEOUT
+  if ! initialize_native_environment; then
+    echo "Failed to initialize the native test environment"
+    exit 1
+  fi
+  if ! prepare_native_workspace; then
+    echo "Failed to prepare native test workspace"
+    exit 1
+  fi
+
+  export PYTHONPATH="${VLLM_CI_WORKSPACE:-/vllm-workspace}"
 
   echo "Native test commands: $commands"
   run_native_preflight || exit 1
-  /bin/bash -c "${commands}"
+  /bin/bash -o pipefail -c "${commands}"
   handle_pytest_exit "$?"
 fi
+
+# --- GPU initialization for legacy Docker execution ---
+echo "--- ROCm info"
+rocminfo
 
 # --- Docker status ---
 report_docker_usage
