@@ -3,14 +3,19 @@
 """A layer that compute logits from hidden_stats."""
 
 import torch
+import torch.nn.functional as F
 
+from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_gather,
 )
 from vllm.model_executor.custom_op import PluggableLayer
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    UnquantizedEmbeddingMethod,
+    VocabParallelEmbedding,
+)
 from vllm.platforms import current_platform
 
 
@@ -50,6 +55,11 @@ class LogitsProcessor(PluggableLayer):
         self.soft_cap = soft_cap
         # Whether to use gather or all-gather to gather the logits.
         self.use_all_gather = current_platform.use_all_gather()
+        # Dtype of the lm_head projection. Defaults to the model dtype; an
+        # fp32 head (via `--hf-overrides '{"head_dtype": "float32"}'`) is
+        # required for RL training-inference consistency.
+        model_config = get_current_vllm_config().model_config
+        self.head_dtype = model_config.head_dtype if model_config is not None else None
 
     def forward(
         self,
@@ -93,7 +103,39 @@ class LogitsProcessor(PluggableLayer):
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor | None:
         # Get the logits for the next tokens.
-        logits = lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias)
+        if self.head_dtype is not None and self.head_dtype != hidden_states.dtype:
+            if not isinstance(lm_head.quant_method, UnquantizedEmbeddingMethod):
+                raise ValueError(
+                    "A head_dtype different from the model dtype is only "
+                    "supported for an unquantized lm_head."
+                )
+            if (
+                self.head_dtype == torch.float32
+                and current_platform.is_cuda()
+                and hidden_states.is_cuda
+            ):
+                # Accumulate the projection directly into fp32. This avoids
+                # materializing an fp32 copy of the lm_head weight on every
+                # step, unlike casting both operands. `torch.mm(out_dtype=...)`
+                # is CUDA-only and only supports fp32 output for fp16/bf16
+                # inputs, so other cases fall back to the cast path below.
+                flat = hidden_states.reshape(-1, hidden_states.shape[-1])
+                logits = torch.mm(flat, lm_head.weight.t(), out_dtype=self.head_dtype)
+                if embedding_bias is not None:
+                    logits = logits + embedding_bias.to(self.head_dtype)
+                logits = logits.reshape(*hidden_states.shape[:-1], -1)
+            else:
+                logits = F.linear(
+                    hidden_states.to(self.head_dtype),
+                    lm_head.weight.to(self.head_dtype),
+                    embedding_bias.to(self.head_dtype)
+                    if embedding_bias is not None
+                    else None,
+                )
+        else:
+            logits = lm_head.quant_method.apply(
+                lm_head, hidden_states, bias=embedding_bias
+            )
 
         # Gather logits for TP
         logits = self._gather_logits(logits)
