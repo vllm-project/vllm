@@ -2478,7 +2478,13 @@ class Scheduler(SchedulerInterface):
         )
 
     def _inflight_prefill_reserved_blocks(self, exclude: Request | None = None) -> int:
-        """Num blocks in-flight prefills still need to finish (their reservation)."""
+        """Num blocks in-flight prefills still need to finish (their reservation).
+
+        Every admission and running allocation must fit within (free - this
+        reservation) so ordinary work cannot consume capacity a parked async
+        KV load or a running chunked prefill is relying on to complete.
+        `exclude` lets a request spend its own reservation.
+        """
 
         return sum(
             self._request_remaining_blocks(req)
@@ -2506,6 +2512,9 @@ class Scheduler(SchedulerInterface):
                 # No valid computed tokens, release allocated blocks.
                 # There may be a local cache hit on retry.
                 self.kv_cache_manager.free(request)
+                # Holding no blocks, it waits like any other request and
+                # must not keep a completion reservation.
+                self._inflight_prefills.discard(request)
 
             self.failed_recving_kv_req_ids.remove(request.request_id)
         else:
