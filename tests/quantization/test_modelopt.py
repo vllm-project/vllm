@@ -6,6 +6,7 @@ Run `pytest tests/quantization/test_modelopt.py`.
 """
 
 import os
+from types import SimpleNamespace
 from typing import Any, NoReturn
 from unittest.mock import MagicMock, Mock, patch
 
@@ -14,13 +15,23 @@ import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm.config.model import ModelConfig
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.config.quantization import QuantizationConfigArgs
+from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
     ModelOptMixedPrecisionConfig,
     ModelOptMxFp8Config,
+    ModelOptMxFp8LinearMethod,
     ModelOptNvFp4Config,
     ModelOptNvFp4LinearMethod,
+)
+from vllm.model_executor.layers.quantization.online.fp8 import (
+    Fp8PtpcOnlineLinearMethod,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    MXFP8_SCALE_DTYPE,
+    MXFP8_VALUE_DTYPE,
+    dequant_mxfp8_to_bf16,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -206,6 +217,196 @@ def test_modelopt_mixed_precision_does_not_infer_missing_sibling_linear(
     method = config.get_quant_method(fake_layer, missing_prefix)
 
     assert isinstance(method, UnquantizedLinearMethod)
+
+
+@pytest.mark.parametrize(
+    ("is_rocm", "online_args", "uses_ptpc"),
+    [
+        (True, QuantizationConfigArgs(linear="fp8_per_channel"), True),
+        (
+            True,
+            QuantizationConfigArgs(
+                linear="fp8_per_channel",
+                ignore=["model.layers.0.self_attn.qkv_proj"],
+            ),
+            False,
+        ),
+        (True, None, False),
+        (False, QuantizationConfigArgs(linear="fp8_per_channel"), False),
+    ],
+)
+def test_modelopt_mxfp8_uses_generic_online_ptpc_override(
+    is_rocm, online_args, uses_ptpc
+):
+    prefix = "model.layers.0.self_attn.qkv_proj"
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_config=SimpleNamespace(model_type="not_minimax"),
+            quantization_config=online_args,
+        ),
+        kernel_config=SimpleNamespace(linear_backend="auto"),
+    )
+    config = ModelOptMxFp8Config(
+        is_checkpoint_mxfp8_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
+    layer = MagicMock(spec=LinearBase)
+
+    with (
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt.get_current_vllm_config",
+            return_value=vllm_config,
+        ),
+        patch(
+            "vllm.model_executor.layers.quantization.online.fp8."
+            "get_current_vllm_config",
+            return_value=vllm_config,
+        ),
+        patch.object(current_platform, "is_rocm", return_value=is_rocm),
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt.init_mxfp8_linear_kernel"
+        ),
+    ):
+        method = config.get_quant_method(layer, prefix)
+
+    if uses_ptpc:
+        assert isinstance(method, Fp8PtpcOnlineLinearMethod)
+        assert isinstance(method.requantization_source, ModelOptMxFp8LinearMethod)
+    else:
+        assert isinstance(method, ModelOptMxFp8LinearMethod)
+
+
+def test_modelopt_mxfp8_ptpc_rejects_incompatible_rocm_backend():
+    prefix = "model.layers.0.self_attn.qkv_proj"
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            quantization_config=QuantizationConfigArgs(linear="fp8_per_channel"),
+        ),
+        kernel_config=SimpleNamespace(linear_backend="emulation"),
+    )
+    config = ModelOptMxFp8Config(
+        is_checkpoint_mxfp8_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
+    layer = MagicMock(spec=LinearBase)
+
+    with (
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt.get_current_vllm_config",
+            return_value=vllm_config,
+        ),
+        patch(
+            "vllm.model_executor.layers.quantization.online.fp8."
+            "get_current_vllm_config",
+            return_value=vllm_config,
+        ),
+        patch.object(current_platform, "is_rocm", return_value=True),
+        pytest.raises(
+            ValueError,
+            match="ModelOpt MXFP8.*use --linear-backend=auto",
+        ),
+    ):
+        config.get_quant_method(layer, prefix)
+
+
+def test_modelopt_mxfp8_ptpc_loads_and_requantizes_source_weight(monkeypatch):
+    class FakeAiterKernel:
+        def __init__(self):
+            self.processed = False
+
+        def process_weights_after_loading(self, layer):
+            self.processed = True
+
+    fake_kernel = FakeAiterKernel()
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        kernel_config=SimpleNamespace(linear_backend="auto"),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.online.fp8.get_current_vllm_config",
+        lambda: vllm_config,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.online.fp8.init_fp8_linear_kernel",
+        lambda **kwargs: fake_kernel,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear."
+        "AiterPreshuffledPerTokenFp8ScaledMMLinearKernel",
+        FakeAiterKernel,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+
+    captured: list[torch.Tensor] = []
+
+    def fake_scaled_fp8_quant(weight, *, scale=None, **kwargs):
+        assert scale is None
+        assert kwargs == {"use_per_token_if_dynamic": True}
+        captured.append(weight.clone())
+        return (
+            torch.empty_like(weight, dtype=MXFP8_VALUE_DTYPE),
+            torch.ones((weight.shape[0], 1), dtype=torch.float32),
+        )
+
+    monkeypatch.setattr(
+        "vllm._custom_ops.scaled_fp8_quant",
+        fake_scaled_fp8_quant,
+    )
+
+    config = ModelOptMxFp8Config(
+        is_checkpoint_mxfp8_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
+    source_method = ModelOptMxFp8LinearMethod(config, init_kernel=False)
+    method = Fp8PtpcOnlineLinearMethod()
+    method.set_requantization_source(source_method)
+    layer = torch.nn.Module()
+
+    method.create_weights(
+        layer,
+        input_size_per_partition=64,
+        output_partition_sizes=[16],
+        input_size=64,
+        output_size=16,
+        params_dtype=torch.bfloat16,
+        weight_loader=MagicMock(),
+    )
+
+    assert method.uses_meta_device is False
+    assert layer.weight.shape == (16, 64)
+    assert layer.weight.dtype == MXFP8_VALUE_DTYPE
+    assert layer.weight_scale.shape == (16, 2)
+    assert layer.weight_scale.dtype == MXFP8_SCALE_DTYPE
+    assert method.fp8_linear is fake_kernel
+
+    source_weight = torch.linspace(-1.5, 1.5, 16 * 64).reshape(16, 64)
+    source_weight = source_weight.to(MXFP8_VALUE_DTYPE)
+    source_scale = torch.arange(32, dtype=torch.uint8).reshape(16, 2)
+    source_scale = (source_scale % 3 + 126).to(MXFP8_SCALE_DTYPE)
+    layer.weight.data.copy_(source_weight)
+    layer.weight_scale.data.copy_(source_scale)
+    expected_bf16 = dequant_mxfp8_to_bf16(source_weight, source_scale)
+
+    method.process_weights_after_loading(layer)
+
+    assert len(captured) == 1
+    torch.testing.assert_close(captured[0], expected_bf16, rtol=0, atol=0)
+    assert layer.weight.shape == (64, 16)
+    assert layer.weight_scale.shape == (16, 1)
+    assert fake_kernel.processed
 
 
 def test_vocab_parallel_embedding_weight_loader_accepts_scalar_scale():

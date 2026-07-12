@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import torch
 from torch.nn import Module
@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
+from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
 from vllm.model_executor.kernels.linear.scaled_mm import (
     CutlassFP8ScaledMMLinearKernel,
@@ -53,6 +54,26 @@ from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.utils.math_utils import round_up
+
+logger = init_logger(__name__)
+
+
+class LinearRequantizationSource(Protocol):
+    """Serialized linear method that can materialize an unquantized weight."""
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None: ...
+
+    def dequantize_weight(self, layer: torch.nn.Module) -> torch.Tensor: ...
+
 
 # ---------------------------------------------------------------------------
 # Online FP8 Linear Methods
@@ -292,6 +313,18 @@ class Fp8PtpcOnlineLinearMethod(_Fp8OnlineLinearBase):
     weight_quant_key = kFp8StaticChannelSym
     activation_quant_key = kFp8DynamicTokenSym
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.requantization_source: LinearRequantizationSource | None = None
+        self.input_is_partitioned = False
+
+    def set_requantization_source(
+        self, source_method: LinearRequantizationSource
+    ) -> None:
+        """Load a serialized source scheme before converting it to PTPC."""
+        self.requantization_source = source_method
+        self.uses_meta_device = False
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -302,15 +335,27 @@ class Fp8PtpcOnlineLinearMethod(_Fp8OnlineLinearBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        super().create_weights(
-            layer,
-            input_size_per_partition,
-            output_partition_sizes,
-            input_size,
-            output_size,
-            params_dtype,
-            **extra_weight_attrs,
-        )
+        self.input_is_partitioned = input_size_per_partition != input_size
+        if self.requantization_source is None:
+            super().create_weights(
+                layer,
+                input_size_per_partition,
+                output_partition_sizes,
+                input_size,
+                output_size,
+                params_dtype,
+                **extra_weight_attrs,
+            )
+        else:
+            self.requantization_source.create_weights(
+                layer,
+                input_size_per_partition,
+                output_partition_sizes,
+                input_size,
+                output_size,
+                params_dtype,
+                **extra_weight_attrs,
+            )
 
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=self.activation_quant_key,
@@ -329,15 +374,49 @@ class Fp8PtpcOnlineLinearMethod(_Fp8OnlineLinearBase):
                 "weight-only. Requires SM89+ for Cutlass FP8 or ROCm MI3xx "
                 "for rowwise scaled_mm."
             )
+        if self.requantization_source is not None and current_platform.is_rocm():
+            from vllm.model_executor.kernels.linear import (
+                AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+            )
+
+            if not isinstance(
+                self.fp8_linear,
+                AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+            ):
+                raise RuntimeError(
+                    "ROCm source-aware FP8 PTPC requantization requires the "
+                    "AITER preshuffled per-token FP8 kernel, selected "
+                    f"{type(self.fp8_linear).__name__}."
+                )
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
+        weight = (
+            layer.weight
+            if self.requantization_source is None
+            else self.requantization_source.dequantize_weight(layer)
+        )
         layer.input_scale = None
         qweight, weight_scale = ops.scaled_fp8_quant(
-            layer.weight, scale=None, use_per_token_if_dynamic=True
+            weight, scale=None, use_per_token_if_dynamic=True
         )
+        if self.requantization_source is not None and self.input_is_partitioned:
+            from vllm.distributed import get_tp_group
+
+            tp_group = get_tp_group()
+            if tp_group.world_size > 1:
+                torch.distributed.all_reduce(
+                    weight_scale,
+                    op=torch.distributed.ReduceOp.MAX,
+                    group=tp_group.device_group,
+                )
+                qweight, weight_scale = ops.scaled_fp8_quant(
+                    weight,
+                    scale=weight_scale,
+                    group_shape=(1, -1),
+                )
 
         replace_parameter(layer, "weight", qweight.t())
         replace_parameter(layer, "weight_scale", weight_scale)
@@ -345,6 +424,12 @@ class Fp8PtpcOnlineLinearMethod(_Fp8OnlineLinearBase):
         self.fp8_linear.process_weights_after_loading(layer)
 
         layer._already_called_process_weights_after_loading = True
+        if self.requantization_source is not None:
+            logger.info_once(
+                "Requantized serialized weights to FP8 PTPC via %s",
+                type(self.fp8_linear).__name__,
+                scope="global",
+            )
 
     def apply(
         self,
