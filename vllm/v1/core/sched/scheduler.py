@@ -573,6 +573,7 @@ class Scheduler(SchedulerInterface):
                         request,
                         num_new_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens,
+                        reserved_blocks=self._inflight_prefill_reserved_blocks(request),
                     )
 
                     if new_blocks is not None:
@@ -931,13 +932,7 @@ class Scheduler(SchedulerInterface):
                         for i in encoder_inputs_to_schedule
                     )
 
-                reserved_blocks = 0
-                if load_kv_async:
-                    # An async load holds its blocks for the whole transfer with
-                    # no forward progress and isn't preemptible here. Admit it
-                    # only if it fits in (free - other in-flight reservations), to
-                    # avoid deadlock and predictable preemptions.
-                    reserved_blocks = self._inflight_prefill_reserved_blocks()
+                reserved_blocks = self._inflight_prefill_reserved_blocks(request)
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
@@ -2482,11 +2477,13 @@ class Scheduler(SchedulerInterface):
             apply_admission_cap=True,
         )
 
-    def _inflight_prefill_reserved_blocks(self) -> int:
+    def _inflight_prefill_reserved_blocks(self, exclude: Request | None = None) -> int:
         """Num blocks in-flight prefills still need to finish (their reservation)."""
 
         return sum(
-            self._request_remaining_blocks(req) for req in self._inflight_prefills
+            self._request_remaining_blocks(req)
+            for req in self._inflight_prefills
+            if req is not exclude
         )
 
     def _update_waiting_for_remote_kv(self, request: Request) -> None:

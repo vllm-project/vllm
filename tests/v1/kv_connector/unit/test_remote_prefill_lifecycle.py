@@ -711,6 +711,37 @@ def test_async_load_reserves_blocks_for_inflight():
     assert req_b.request_id not in req_to_blocks
 
 
+def test_local_admission_respects_async_load_reservation():
+    vllm_config = create_vllm_config()
+    block_size = vllm_config.cache_config.block_size
+    scheduler = create_scheduler(vllm_config, num_blocks=8)  # usable = 7
+
+    remote_req = create_request(
+        request_id=1,
+        block_size=block_size,
+        num_tokens=block_size * 4,
+        do_remote_prefill=True,
+        num_remote_blocks=1,
+    )
+    local_req = create_request(
+        request_id=2,
+        block_size=block_size,
+        num_tokens=block_size * 4,
+    )
+    scheduler.add_request(remote_req)
+    scheduler.add_request(local_req)
+
+    with patch.object(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        side_effect=[(block_size, True), (0, False)],
+    ):
+        scheduler.schedule()
+
+    assert remote_req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert local_req.status == RequestStatus.WAITING
+
+
 def test_async_loads_both_admitted_when_pool_fits():
     """Sanity: with a pool large enough, the reservation gate admits both async
     loads (it is not over-conservative)."""
