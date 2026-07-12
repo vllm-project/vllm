@@ -74,8 +74,8 @@ class RocmAttentionMetadata:
     rswa_window: int | None = None
 
     # Decode scheduling buffers used by the shared Triton unified-attention
-    # kernel. ROCM_ATTN owns a different cache shape from TRITON_ATTN, but the
-    # runtime scheduling contract is intentionally the same.
+    # kernel. ROCM_ATTN and TRITON_ATTN share the packed-cache scheduling
+    # contract.
     seq_threshold_3D: int = 0
     num_par_softmax_segments: int = 0
     softmax_segm_output: torch.Tensor | None = None

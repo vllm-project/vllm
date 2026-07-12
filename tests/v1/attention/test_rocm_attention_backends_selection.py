@@ -413,21 +413,50 @@ def test_rocm_attn_decode_segment_policy():
 
 
 def test_rocm_aiter_unified_stride_order_matches_shape():
-    # RocmAiterUnifiedAttention subclasses RocmAttentionBackend but keeps the
-    # legacy 5D contiguous KV layout, so it must NOT inherit the parent's
-    # content-packed 4D stride order: the runner asserts
-    # len(stride_order) == len(shape) and does not catch AssertionError, so a
-    # mismatch crashes KV-cache init for every model on that backend.
+    # AITER unified now shares ROCM_ATTN's packed 4D cache contract and must
+    # inherit both of its supported physical layouts.
     from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
         RocmAiterUnifiedAttentionBackend,
     )
 
-    shape = RocmAiterUnifiedAttentionBackend.get_kv_cache_shape(100, 16, 8, 128)
-    order = RocmAiterUnifiedAttentionBackend.get_kv_cache_stride_order()
-    order_l = RocmAiterUnifiedAttentionBackend.get_kv_cache_stride_order(True)
-    assert len(order) == len(shape)
-    assert sorted(order) == list(range(len(shape)))
-    assert sorted(order_l) == list(range(len(shape) + 1))
+    assert RocmAiterUnifiedAttentionBackend.get_kv_cache_shape(100, 16, 8, 128) == (
+        100,
+        8,
+        16,
+        256,
+    )
+    try:
+        set_kv_cache_layout("HND")
+        assert RocmAiterUnifiedAttentionBackend.get_kv_cache_stride_order() == (
+            0,
+            1,
+            2,
+            3,
+        )
+        assert RocmAiterUnifiedAttentionBackend.get_kv_cache_stride_order(True) == (
+            1,
+            2,
+            0,
+            3,
+            4,
+        )
+
+        set_kv_cache_layout("NHD")
+        assert RocmAiterUnifiedAttentionBackend.get_kv_cache_stride_order() == (
+            0,
+            2,
+            1,
+            3,
+        )
+        assert RocmAiterUnifiedAttentionBackend.get_kv_cache_stride_order(True) == (
+            1,
+            0,
+            3,
+            2,
+            4,
+        )
+    finally:
+        set_kv_cache_layout(None)
 
 
 def test_rocm_attn_content_packed_split_views():

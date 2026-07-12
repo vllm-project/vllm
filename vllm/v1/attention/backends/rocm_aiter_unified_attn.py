@@ -87,20 +87,8 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        return (num_blocks, 2, block_size, num_kv_heads, head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        # RocmAiterUnifiedAttention keeps the legacy contiguous KV layout
-        # (num_blocks, 2, block_size, num_kv_heads, head_size) rather than the
-        # content-packed layout of its RocmAttentionBackend parent, so the
-        # physical order matches the logical shape (identity permutation). Do not
-        # inherit the parent's content-packed stride order: it has one fewer
-        # dimension than this shape and would fail the len() check in the runner.
-        ndims = 6 if include_num_layers_dimension else 5
-        return tuple(range(ndims))
+        # K and V are packed into the content dim: logical (B, H, N, 2*hs).
+        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
@@ -163,10 +151,8 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
     def _split_kv_cache(
         self, kv_cache: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Blocks-first ``(num_blocks, 2, ...)``. The model runner normalizes any
-        # shared decoder/cross-attention allocation to this layout, so no
-        # per-backend restriding is needed here.
-        return kv_cache.unbind(1)
+        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
+        return kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
 
     def forward(
         self,
@@ -187,7 +173,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [num_blocks, 2, block_size, num_kv_heads, head_size]
+                [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]

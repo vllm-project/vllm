@@ -110,8 +110,8 @@ class SimpleCPUOffloadWorker:
         # storage so that stride(0) gives block_bytes for the copy op.
         #
         # The physical layout varies across attention backends:
-        #   FlashAttn:    (2, num_blocks, ...) -> K/V outermost, 2 segments
-        #   Blocks-first: (num_blocks, ...)    -> one segment per block
+        #   Legacy K/V-first: (2, num_blocks, ...) -> 2 outer segments
+        #   Blocks-first:     (num_blocks, ...)    -> one segment per block
         # We derive page_size_bytes = storage.nbytes() // num_blocks, then
         # classify dims: any dim whose byte-stride exceeds page_size_bytes
         # must be an outer segment dim (e.g. the K/V dim of size 2). A less
