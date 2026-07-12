@@ -44,11 +44,14 @@ jobs:
           file: docker/Dockerfile
           target: vllm-openai
           push: true
+          load: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ steps.meta.outputs.sha_short }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.date }}-sha-${{ steps.meta.outputs.sha_short }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           build-args: |
-            TORCH_CUDA_ARCH_LIST=8.6
-            max_jobs=16
-            nvcc_threads=4
+            torch_cuda_arch_list=8.6
+            max_jobs=32
+            nvcc_threads=1
