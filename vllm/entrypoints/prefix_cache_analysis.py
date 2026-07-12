@@ -214,6 +214,13 @@ def analyze(
     total_full_block_tokens = 0
 
     for record in records:
+        if record.request_id in chains:
+            raise ValueError(
+                f"duplicate request_id {record.request_id!r} in input records -- "
+                "each record must have a unique id, or reuse would be silently "
+                "undercounted (the later record would overwrite the earlier "
+                "one's chain after both had already been tokenized)"
+            )
         token_ids = tokenizer.encode(record.text)
         total_prompt_tokens += len(token_ids)
         chain = _full_block_hash_chain(token_ids, block_size, hash_fn)

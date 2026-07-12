@@ -105,3 +105,18 @@ def test_reusable_tokens_does_not_double_count_overlapping_groups():
         "c": [BlockHash(h) for h in (b"h0", b"h1", b"hC_diverge")],
     }
     assert _reusable_tokens_from_chains(chains, block_size=16) == 112
+
+
+def test_analyze_rejects_duplicate_request_ids():
+    """Regression test: without this check, chains[record.request_id] = chain
+    silently overwrites the earlier record's chain on a duplicate id, but
+    total_prompt_tokens/total_full_block_tokens were already incremented for
+    both records before the collision -- undercounting num_requests and
+    silently dropping the overwritten record from grouping and reuse
+    accounting instead of raising.
+    """
+    record_a = PromptRecord("dup", "first prompt")
+    record_b = PromptRecord("dup", "second prompt, different text")
+
+    with pytest.raises(ValueError, match="duplicate request_id 'dup'"):
+        analyze([record_a, record_b], model=MODEL_NAME, block_size=4)
