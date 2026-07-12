@@ -3,6 +3,7 @@
 
 import io
 from collections.abc import Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -120,6 +121,15 @@ def _preprocess_prompt(
         )
         for prompt in prompt_to_seq(prompt_or_prompts)
     ]
+
+
+@pytest.fixture
+def fast_renderer():
+    from transformers import AutoTokenizer
+
+    renderer = object.__new__(HfRenderer)
+    renderer.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True)
+    return renderer
 
 
 class TestValidatePrompt:
@@ -446,6 +456,66 @@ class TestRenderPrompt:
         assert len(results[0]["prompt_token_ids"]) == 4
 
         assert renderer.tokenizer._captured_text_len <= 100
+
+
+class TestBatchTokenizePrompts:
+    def test_fast_tokenizer_batches_plain_text(
+        self, fast_renderer: HfRenderer, monkeypatch: pytest.MonkeyPatch
+    ):
+        prompts = [
+            {"prompt": "HELLO WORLD FROM VLLM"},
+            {"prompt": "A SHORTER PROMPT"},
+        ]
+        params = TokenizeParams(
+            max_total_tokens=None,
+            truncate_prompt_tokens=4,
+            truncation_side="left",
+            do_lower_case=True,
+            return_token_offsets=True,
+        )
+        expected = [
+            fast_renderer.tokenize_prompt(prompt, params)
+            for prompt in deepcopy(prompts)
+        ]
+
+        tokenizer_type = type(fast_renderer.tokenizer)
+        original_call = tokenizer_type.__call__
+        call_inputs = []
+
+        def track_call(tokenizer, text, *args, **kwargs):
+            call_inputs.append(text)
+            return original_call(tokenizer, text, *args, **kwargs)
+
+        monkeypatch.setattr(tokenizer_type, "__call__", track_call)
+
+        actual = fast_renderer.tokenize_prompts(deepcopy(prompts), params)
+
+        assert actual == expected
+        assert call_inputs == [[prompt["prompt"].lower() for prompt in prompts]]
+
+    def test_mixed_prompts_use_singleton_fallback(
+        self, fast_renderer: HfRenderer, monkeypatch: pytest.MonkeyPatch
+    ):
+        prompts = [
+            {"prompt": "text prompt"},
+            {"prompt_token_ids": [1, 2, 3]},
+        ]
+        params = TokenizeParams(max_total_tokens=None)
+
+        tokenizer_type = type(fast_renderer.tokenizer)
+        original_call = tokenizer_type.__call__
+        call_inputs = []
+
+        def track_call(tokenizer, text, *args, **kwargs):
+            call_inputs.append(text)
+            return original_call(tokenizer, text, *args, **kwargs)
+
+        monkeypatch.setattr(tokenizer_type, "__call__", track_call)
+
+        actual = fast_renderer.tokenize_prompts(deepcopy(prompts), params)
+
+        assert actual[1]["prompt_token_ids"] == [1, 2, 3]
+        assert call_inputs == ["text prompt"]
 
 
 class TestRenderEmbedPrompt:
