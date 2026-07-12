@@ -5,12 +5,10 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_realtime
+from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.utils import get_mm_features_in_window, group_and_batch_mm_kwargs
-from vllm.v1.worker.gpu.mm.encoder_budget import (
-    EncoderCacheBudget,
-    EncoderProfileInputFactory,
-)
+from vllm.v1.worker.gpu.mm.encoder_budget import EncoderProfileInputFactory
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
 
@@ -59,7 +57,7 @@ class EncoderRunner:
     def profile_encoder_cache(
         self,
         get_dummy_inputs: EncoderProfileInputFactory,
-        budget: EncoderCacheBudget,
+        budget: MultiModalBudget,
     ) -> None:
         """Profile multimodal encoder and temporary encoder cache memory."""
         if (encoder_budget := budget.get_encoder_budget()) <= 0:

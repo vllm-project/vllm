@@ -43,6 +43,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.math_utils import cdiv
@@ -93,10 +94,7 @@ from vllm.v1.worker.gpu.lora_utils import (
     get_lora_capture_cases,
     get_num_active_loras_for_dispatch,
 )
-from vllm.v1.worker.gpu.mm.encoder_budget import (
-    EncoderCacheBudget,
-    get_dummy_encoder_profile_inputs,
-)
+from vllm.v1.worker.gpu.mm.encoder_budget import get_dummy_encoder_profile_inputs
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
@@ -653,9 +651,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.supports_mm_inputs and self.is_first_pp_rank:
             mm_config = self.model_config.multimodal_config
             if mm_config is not None and not mm_config.skip_mm_profiling:
-                encoder_cache_budget = EncoderCacheBudget.compute_encoder_cache_budget(
+                mm_budget = MultiModalBudget(
                     self.vllm_config,
                     self.mm_registry,
+                    enable_cache=False,
                 )
                 get_dummy_inputs = functools.partial(
                     get_dummy_encoder_profile_inputs,
@@ -664,7 +663,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 self.model_state.encoder_runner.profile_encoder_cache(
                     get_dummy_inputs,
-                    encoder_cache_budget,
+                    mm_budget,
                 )
 
         hidden_states, sample_hidden_states = self._dummy_run(

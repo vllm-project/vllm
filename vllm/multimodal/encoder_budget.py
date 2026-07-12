@@ -48,6 +48,8 @@ class MultiModalBudget:
         self,
         vllm_config: VllmConfig,
         mm_registry: MultiModalRegistry,
+        *,
+        enable_cache: bool = True,
     ) -> None:
         super().__init__()
 
@@ -58,7 +60,11 @@ class MultiModalBudget:
         self.max_num_reqs = scheduler_config.max_num_seqs
 
         with set_default_torch_num_threads():  # Avoid hang during startup
-            cache = mm_registry.processor_only_cache_from_config(vllm_config)
+            cache = (
+                mm_registry.processor_only_cache_from_config(vllm_config)
+                if enable_cache
+                else None
+            )
             processor = mm_registry.create_processor(model_config, cache=cache)
 
             self.cache = cache
