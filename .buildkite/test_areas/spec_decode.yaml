@@ -14,6 +14,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode -k "eagle_correctness"
   mirror:
     amd:
+      native_ci: true
       device: mi325_1
       timeout_in_minutes: 60
       depends_on:
@@ -53,6 +54,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode -k "speculators or mtp_correctness"
   mirror:
     amd:
+      native_ci: true
       device: mi325_1
       timeout_in_minutes: 65
       depends_on:
@@ -92,6 +94,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode -k "ngram or suffix"
   mirror:
     amd:
+      native_ci: true
       device: mi325_1
       timeout_in_minutes: 55
       # TODO(akaratza): Test after Torch >= 2.12 bump
@@ -119,6 +122,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode -k "draft_model or no_sync or batch_inference"
   mirror:
     amd:
+      native_ci: true
       device: mi325_1
       timeout_in_minutes: 55
       depends_on:

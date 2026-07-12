@@ -79,6 +79,7 @@ steps:
   parallelism: 2
   mirror:
     amd:
+      native_ci: true
       device: mi325_1
       timeout_in_minutes: 90
       depends_on:
@@ -117,6 +118,7 @@ steps:
   parallelism: 2
   mirror:
     amd:
+      native_ci: true
       device: mi325_1
       source_file_dependencies:
       - csrc/quantization/
@@ -147,6 +149,7 @@ steps:
   parallelism: 5
   mirror:
     amd:
+      native_ci: true
       device: mi325_1
       timeout_in_minutes: 65
       source_file_dependencies:

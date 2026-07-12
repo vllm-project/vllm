@@ -42,6 +42,7 @@ steps:
     - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py
   mirror:
     amd:
+      native_ci: true
       device: mi325_1
       depends_on:
       - image-build-amd

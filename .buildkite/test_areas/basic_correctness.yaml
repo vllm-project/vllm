@@ -18,6 +18,7 @@ steps:
   - pytest -v -s basic_correctness/test_cpu_offload.py
   mirror:
     amd:
+      native_ci: true
       device: mi325_1
       timeout_in_minutes: 70
       depends_on:

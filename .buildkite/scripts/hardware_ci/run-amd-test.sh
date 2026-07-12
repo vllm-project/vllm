@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# This script runs tests inside the corresponding ROCm docker container.
-# It handles both single-node and multi-node test configurations.
+# This script runs ROCm tests either directly in a native CI pod or inside the
+# corresponding Docker container. Multi-node tests continue to use Docker.
 #
 # Multi-node detection: Instead of matching on fragile group names, we detect
 # multi-node jobs structurally by looking for the bracket command syntax
@@ -166,6 +166,78 @@ EOF
     "${context_dir}" || return 1
   image_name="${artifact_image}"
   return 0
+}
+
+is_native_runtime() {
+  [[ "${AMD_CI_RUNTIME:-}" == "native" || "${NATIVE_CI:-}" == "true" ]]
+}
+
+prepare_native_workspace() {
+  if [[ "${VLLM_CI_USE_ARTIFACTS:-0}" != "1" ]]; then
+    echo "Native CI requires VLLM_CI_USE_ARTIFACTS=1"
+    return 1
+  fi
+  if ! command -v buildkite-agent >/dev/null 2>&1; then
+    echo "buildkite-agent not found; cannot download ROCm wheel artifact"
+    return 1
+  fi
+
+  local artifact_glob="${VLLM_CI_ARTIFACT_GLOB:-artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz}"
+  local archive=""
+  local wheel_dir=""
+
+  artifact_work_dir=$(mktemp -d -t vllm-rocm-artifact.XXXXXX)
+  wheel_dir="${artifact_work_dir}/wheels"
+  mkdir -p "${wheel_dir}"
+
+  echo "--- Downloading ROCm wheel artifact (native in-pod)"
+  if ! buildkite-agent artifact download "${artifact_glob}" "${artifact_work_dir}"; then
+    echo "Failed to download ${artifact_glob}"
+    return 1
+  fi
+
+  archive=$(find "${artifact_work_dir}" -name "vllm-rocm-install.tar.gz" -type f | head -1)
+  if [[ -z "${archive}" || ! -f "${archive}" ]]; then
+    echo "ROCm wheel artifact archive was not found"
+    return 1
+  fi
+
+  tar -xzf "${archive}" -C "${wheel_dir}" || return 1
+  if ! ls "${wheel_dir}"/*.whl >/dev/null 2>&1; then
+    echo "ROCm wheel artifact did not contain a wheel"
+    return 1
+  fi
+  if [[ ! -d "${wheel_dir}/tests" ]]; then
+    echo "ROCm wheel artifact did not contain the test workspace"
+    return 1
+  fi
+
+  echo "--- Installing ROCm wheel into pod environment"
+  python3 -m pip install --no-deps --force-reinstall "${wheel_dir}"/*.whl || return 1
+
+  echo "--- Preparing /vllm-workspace from artifact"
+  rm -rf /vllm-workspace || return 1
+  mkdir -p /vllm-workspace || return 1
+  tar -C "${wheel_dir}" --exclude='*.whl' -cf - . \
+    | tar -C /vllm-workspace -xf - || return 1
+
+  return 0
+}
+
+run_native_preflight() {
+  : "${TMPDIR:=/tmp}"
+  : "${TORCHINDUCTOR_CACHE_DIR:=/tmp/vllm-native/torchinductor}"
+  : "${TRITON_CACHE_DIR:=/tmp/vllm-native/triton}"
+  : "${VLLM_CACHE_ROOT:=/home/buildkite-agent/huggingface/vllm-cache}"
+  : "${XDG_CACHE_HOME:=/tmp/vllm-native/xdg}"
+  export TMPDIR TORCHINDUCTOR_CACHE_DIR TRITON_CACHE_DIR VLLM_CACHE_ROOT XDG_CACHE_HOME
+
+  mkdir -p "${TMPDIR}" \
+    "${TORCHINDUCTOR_CACHE_DIR}" \
+    "${TRITON_CACHE_DIR}" \
+    "${VLLM_CACHE_ROOT}" \
+    "${XDG_CACHE_HOME}" || return 1
+  python3 -c "import encodings, importlib.metadata as im, importlib.util as iu; [im.version(d) for d in ('transformers', 'torch', 'ray', 'sympy', 'markupsafe', 'vllm')]; missing=[m for m in ('torch.utils.model_zoo', 'transformers.models.nomic_bert', 'ray.dag', 'sympy.physics', 'markupsafe._speedups') if iu.find_spec(m) is None]; assert not missing, missing"
 }
 
 is_multi_node() {
@@ -353,6 +425,54 @@ re_quote_pytest_markers() {
 # --- GPU initialization ---
 echo "--- ROCm info"
 rocminfo
+
+if is_native_runtime; then
+  echo "--- Native in-pod ROCm CI (AMD_CI_RUNTIME=${AMD_CI_RUNTIME:-unset}, NATIVE_CI=${NATIVE_CI:-unset})"
+  artifact_work_dir=""
+
+  cleanup_native_workspace() {
+    if [[ -n "${artifact_work_dir}" ]]; then
+      rm -rf "${artifact_work_dir}"
+    fi
+  }
+  trap cleanup_native_workspace EXIT
+
+  if ! prepare_native_workspace; then
+    echo "Failed to prepare native test workspace"
+    exit 1
+  fi
+
+  if [[ -n "${VLLM_TEST_COMMANDS:-}" ]]; then
+    commands="${VLLM_TEST_COMMANDS}"
+    commands_source="env"
+  else
+    commands="$*"
+    commands_source="argv"
+    if [[ -z "$commands" ]]; then
+      echo "Error: No test commands provided for native CI." >&2
+      exit 1
+    fi
+  fi
+
+  if [[ "$commands_source" == "argv" ]]; then
+    commands=$(re_quote_pytest_markers "$commands")
+  fi
+
+  if is_multi_node "$commands"; then
+    echo "Native CI does not support multi-node jobs yet."
+    exit 1
+  fi
+
+  export PYTHONPATH="/vllm-workspace"
+  : "${HF_HUB_DOWNLOAD_TIMEOUT:=300}"
+  : "${HF_HUB_ETAG_TIMEOUT:=60}"
+  export HF_HUB_DOWNLOAD_TIMEOUT HF_HUB_ETAG_TIMEOUT
+
+  echo "Native test commands: $commands"
+  run_native_preflight || exit 1
+  /bin/bash -c "${commands}"
+  handle_pytest_exit "$?"
+fi
 
 # --- Docker status ---
 report_docker_usage
