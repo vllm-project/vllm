@@ -102,19 +102,21 @@ class WorkerLoRAManager:
         self._adapter_manager = lora_manager
         return lora_manager.model
 
+    def _expected_lora_modules(self) -> set[str]:
+        expected_lora_modules: list[str] = []
+        packed_modules_mapping = self._adapter_manager.packed_modules_mapping
+        for module in self._adapter_manager.supported_lora_modules:
+            if module in packed_modules_mapping:
+                expected_lora_modules.extend(packed_modules_mapping[module])
+            else:
+                expected_lora_modules.append(module)
+            if module == "experts":
+                expected_lora_modules.append(module)
+        return set(expected_lora_modules)
+
     def _load_adapter(self, lora_request: LoRARequest) -> LoRAModel:
         try:
-            supported_lora_modules = self._adapter_manager.supported_lora_modules
-            packed_modules_mapping = self._adapter_manager.packed_modules_mapping
-            expected_lora_lst: list[str] = []
-            for module in supported_lora_modules:
-                if module in packed_modules_mapping:
-                    expected_lora_lst.extend(packed_modules_mapping[module])
-                else:
-                    expected_lora_lst.append(module)
-                if module == "experts":
-                    expected_lora_lst.append(module)
-            expected_lora_modules = set(expected_lora_lst)
+            expected_lora_modules = self._expected_lora_modules()
             lora_path = get_adapter_absolute_path(lora_request.lora_path)
 
             peft_helper = PEFTHelper.from_local_dir(
@@ -170,6 +172,47 @@ class WorkerLoRAManager:
             raise e
 
         return lora
+
+    def replace_adapter_from_tensors(
+        self,
+        lora_int_id: int,
+        tensors: dict[str, torch.Tensor],
+        peft_config: dict[str, Any],
+        *,
+        is_3d_lora_weight: bool = False,
+    ) -> None:
+        if not tensors:
+            raise ValueError("No LoRA tensors were received")
+
+        peft_config = dict(peft_config)
+        peft_config["vllm_max_position_embeddings"] = self.max_position_embeddings
+        peft_helper = PEFTHelper.from_dict(peft_config)
+        peft_helper.validate_legal(self.lora_config)
+
+        model = self._adapter_manager.model
+        weights_mapper = getattr(model, "hf_to_vllm_mapper", None)
+        skip_prefixes = getattr(model, "lora_skip_prefixes", None)
+        expected_lora_modules = self._expected_lora_modules()
+        self._lora_model_cls.check_unexpected_modules(
+            tensors.keys(),
+            expected_lora_modules,
+            weights_mapper=weights_mapper,
+            skip_prefixes=skip_prefixes,
+            source="transferred LoRA tensors",
+        )
+        lora = self._lora_model_cls.from_lora_tensors(
+            lora_model_id=lora_int_id,
+            tensors=tensors,
+            peft_helper=peft_helper,
+            device="cpu",
+            dtype=self.lora_config.lora_dtype,
+            model_vocab_size=self.vocab_size,
+            weights_mapper=weights_mapper,
+            skip_prefixes=skip_prefixes,
+        )
+        lora.is_3d_lora_weight = is_3d_lora_weight
+
+        self._adapter_manager.replace_adapter(lora)
 
     def add_dummy_lora(self, lora_request: LoRARequest, rank: int) -> bool:
         if lora_request.lora_int_id in self.list_adapters():

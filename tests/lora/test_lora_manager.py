@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -20,6 +22,7 @@ from vllm.lora.lora_model import LoRAModel
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.model_manager import (
     DEFAULT_LANGUAGE_WRAPPER_KEY,
+    AdapterLRUCache,
     LoRAMapping,
     LoRAModelManager,
     LRUCacheLoRAModelManager,
@@ -72,6 +75,143 @@ def test_from_lora_tensors(qwen3_lora_files, device):
             f"{lora.lora_a.shape=}, {lora.lora_b.shape=}"
         )
         assert lora.lora_a.shape[0] == 8
+
+
+def test_replace_adapter_from_tensors_uses_existing_lora_pipeline():
+    manager = object.__new__(WorkerLoRAManager)
+    manager.max_position_embeddings = 4096
+    manager.vocab_size = 32000
+    manager.lora_config = LoRAConfig(
+        max_lora_rank=16,
+        lora_dtype=torch.float32,
+    )
+
+    adapter_manager = MagicMock()
+    adapter_manager.list_adapters.return_value = {1: MagicMock()}
+    adapter_manager.supported_lora_modules = ["q_proj"]
+    adapter_manager.packed_modules_mapping = {}
+    adapter_manager.model = SimpleNamespace()
+    manager._adapter_manager = adapter_manager
+
+    lora_model_cls = MagicMock()
+    loaded_lora = SimpleNamespace(id=1, is_3d_lora_weight=False)
+    lora_model_cls.from_lora_tensors.return_value = loaded_lora
+    manager._lora_model_cls = lora_model_cls
+
+    tensors = {
+        "base_model.model.layers.0.self_attn.q_proj.lora_A.weight": torch.ones(8, 16),
+        "base_model.model.layers.0.self_attn.q_proj.lora_B.weight": torch.ones(16, 8),
+    }
+    manager.replace_adapter_from_tensors(
+        lora_int_id=1,
+        tensors=tensors,
+        peft_config={
+            "r": 8,
+            "lora_alpha": 16,
+            "target_modules": ["q_proj"],
+        },
+        is_3d_lora_weight=True,
+    )
+
+    lora_model_cls.check_unexpected_modules.assert_called_once()
+    lora_model_cls.from_lora_tensors.assert_called_once()
+    assert loaded_lora.is_3d_lora_weight is True
+    adapter_manager.replace_adapter.assert_called_once_with(loaded_lora)
+
+
+def test_replace_adapter_restores_old_adapter_on_activation_failure():
+    manager = object.__new__(LoRAModelManager)
+    old_lora = SimpleNamespace(id=1)
+    new_lora = SimpleNamespace(id=1)
+    manager._registered_adapters = AdapterLRUCache(1, manager.deactivate_adapter)
+    manager._active_adapters = AdapterLRUCache(1, manager._deactivate_adapter)
+    manager.lora_index_to_id = [1]
+    manager.modules = {}
+    manager.lora_config = SimpleNamespace(max_cpu_loras=1, max_loras=1)
+    manager._create_merged_loras_inplace = MagicMock()
+    manager._registered_adapters.put(1, old_lora)
+    manager._active_adapters.put(1, None)
+
+    activation_attempts = 0
+
+    def activate_adapter(adapter_id):
+        nonlocal activation_attempts
+        activation_attempts += 1
+        if activation_attempts == 1:
+            raise RuntimeError("activation failed")
+        return LoRAModelManager.activate_adapter(manager, adapter_id)
+
+    manager.activate_adapter = activate_adapter
+
+    with pytest.raises(RuntimeError, match="activation failed"):
+        LoRAModelManager.replace_adapter(manager, new_lora)
+
+    assert manager.get_adapter(1) is old_lora
+    assert 1 in manager._active_adapters
+    assert manager.lora_index_to_id == [1]
+
+
+def test_replace_adapter_preserves_lru_pin_state():
+    manager = object.__new__(LoRAModelManager)
+    old_lora = SimpleNamespace(id=1)
+    new_lora = SimpleNamespace(id=1)
+    manager._active_adapters = AdapterLRUCache(1, manager._deactivate_adapter)
+    manager._registered_adapters = AdapterLRUCache(1, manager.deactivate_adapter)
+    manager.lora_index_to_id = [1]
+    manager.modules = {}
+    manager.lora_config = SimpleNamespace(max_cpu_loras=1, max_loras=1)
+    manager._create_merged_loras_inplace = MagicMock()
+    manager._registered_adapters.put(1, old_lora)
+    manager._active_adapters.put(1, None)
+    manager._registered_adapters.pin(1)
+    manager._active_adapters.pin(1)
+
+    LoRAModelManager.replace_adapter(manager, new_lora)
+
+    assert manager.get_adapter(1) is new_lora
+    assert 1 in manager._registered_adapters.pinned_items
+    assert 1 in manager._active_adapters.pinned_items
+
+
+def test_replace_inactive_adapter_does_not_take_gpu_slot():
+    manager = object.__new__(LoRAModelManager)
+    old_lora = SimpleNamespace(id=1)
+    active_lora = SimpleNamespace(id=2)
+    new_lora = SimpleNamespace(id=1)
+    manager._registered_adapters = AdapterLRUCache(2, manager.deactivate_adapter)
+    manager._active_adapters = AdapterLRUCache(1, manager._deactivate_adapter)
+    manager.lora_index_to_id = [2]
+    manager.modules = {}
+    manager.lora_config = SimpleNamespace(max_cpu_loras=2, max_loras=1)
+    manager._create_merged_loras_inplace = MagicMock()
+    manager._registered_adapters.put(1, old_lora)
+    manager._registered_adapters.put(2, active_lora)
+    manager._active_adapters.put(2, None)
+
+    LoRAModelManager.replace_adapter(manager, new_lora)
+
+    assert manager.get_adapter(1) is new_lora
+    assert list(manager._active_adapters) == [2]
+    assert manager.lora_index_to_id == [2]
+
+
+def test_from_lora_tensors_rejects_incomplete_pair():
+    peft_helper = PEFTHelper(
+        r=8,
+        lora_alpha=16,
+        target_modules=["q_proj"],
+    )
+    tensors = {
+        "base_model.model.layers.0.self_attn.q_proj.lora_A.weight": torch.ones(8, 16)
+    }
+
+    with pytest.raises(ValueError, match="both A and B"):
+        LoRAModel.from_lora_tensors(
+            1,
+            tensors,
+            peft_helper=peft_helper,
+            device="cpu",
+        )
 
 
 def create_lora(

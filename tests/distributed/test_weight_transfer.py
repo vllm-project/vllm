@@ -231,6 +231,49 @@ class TestNCCLEngineParsing:
         assert update_info.shapes == [[100, 100], [50]]
 
 
+@pytest.mark.parametrize(
+    ("backend", "engine_cls"),
+    [
+        ("nccl", NCCLWeightTransferEngine),
+        ("ipc", IPCWeightTransferEngine),
+    ],
+)
+def test_dense_engine_skips_model_reload_for_lora_target(
+    backend, engine_cls, monkeypatch
+):
+    from vllm.model_executor.model_loader import reload as reload_module
+
+    initialize = MagicMock()
+    finalize = MagicMock()
+    monkeypatch.setattr(reload_module, "initialize_layerwise_reload", initialize)
+    monkeypatch.setattr(reload_module, "finalize_layerwise_reload", finalize)
+    original_model = MagicMock(spec=torch.nn.Module)
+    target = MagicMock()
+    engine = engine_cls(
+        WeightTransferConfig(backend=backend),
+        create_mock_vllm_config(),
+        torch.device("cuda"),
+        original_model,
+    )
+
+    engine.set_weight_update_target(
+        target,
+        MagicMock(),
+        requires_model_reload=False,
+    )
+    engine.start_weight_update()
+    engine.finish_weight_update()
+
+    initialize.assert_not_called()
+    finalize.assert_not_called()
+    assert engine.model is target
+    assert engine.requires_model_reload is False
+
+    engine.reset_weight_update_target()
+    assert engine.model is original_model
+    assert engine.requires_model_reload is True
+
+
 # --- Unit Tests: Engine Registry ---
 
 

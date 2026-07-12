@@ -144,6 +144,7 @@ def test_openapi_stateless(case: schemathesis.Case):
     # (weight_transfer_config) and are meant to be stateful.
     if case.operation.path in (
         "/init_weight_transfer_engine",
+        "/start_lora_weight_update",
         "/start_weight_update",
         "/start_draft_weight_update",
         "/update_weights",

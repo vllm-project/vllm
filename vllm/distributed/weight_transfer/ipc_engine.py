@@ -146,6 +146,7 @@ class IPCWeightTransferEngine(
     # Define backend-specific dataclass types
     init_info_cls = IPCWeightTransferInitInfo
     update_info_cls = IPCWeightTransferUpdateInfo
+    supports_lora_weight_update = True
 
     def __init__(
         self,
@@ -208,6 +209,8 @@ class IPCWeightTransferEngine(
 
     def start_weight_update(self) -> None:
         """Initialize layerwise reloading for the incoming checkpoint weights."""
+        if not self.requires_model_reload:
+            return
         from vllm.model_executor.model_loader.reload import (
             initialize_layerwise_reload,
         )
@@ -216,6 +219,8 @@ class IPCWeightTransferEngine(
 
     def finish_weight_update(self) -> None:
         """Finalize layerwise reloading after all weights have been received."""
+        if not self.requires_model_reload:
+            return
         from vllm.model_executor.model_loader.reload import (
             finalize_layerwise_reload,
         )

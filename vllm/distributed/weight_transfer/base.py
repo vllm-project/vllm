@@ -49,6 +49,24 @@ class WeightTransferUpdateRequest:
     update_info: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class LoRAWeightUpdateRequest:
+    """Metadata required to update an existing LoRA adapter in memory."""
+
+    lora_int_id: int
+    peft_config: dict[str, Any]
+    tensor_names: list[str]
+    is_3d_lora_weight: bool = False
+
+    def __post_init__(self) -> None:
+        if self.lora_int_id < 1:
+            raise ValueError(
+                f"lora_int_id must be greater than 0, got {self.lora_int_id}"
+            )
+        if not self.tensor_names:
+            raise ValueError("tensor_names cannot be empty")
+
+
 class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
     """
     Base class for weight transfer engines that handle transport of model weights
@@ -74,6 +92,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
     update_info_cls: type[TUpdateInfo]
 
     supports_draft_weight_update: bool = True
+    supports_lora_weight_update: bool = False
 
     def __init__(
         self,
@@ -99,20 +118,25 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         self.model = model
         self._default_model_config = self.model_config
         self._default_model = model
+        self.requires_model_reload = True
 
     def set_weight_update_target(
         self,
-        model: torch.nn.Module,
+        model: Any,
         model_config: Any,
+        *,
+        requires_model_reload: bool = True,
     ) -> None:
         """Set the model that will receive the active weight update."""
         self.model = model
         self.model_config = model_config
+        self.requires_model_reload = requires_model_reload
 
     def reset_weight_update_target(self) -> None:
         """Restore weight updates to the engine's default target model."""
         self.model = self._default_model
         self.model_config = self._default_model_config
+        self.requires_model_reload = True
 
     def parse_init_info(self, init_dict: dict[str, Any]) -> TInitInfo:
         """

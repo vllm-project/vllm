@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed.weight_transfer.base import (
+    LoRAWeightUpdateRequest,
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )
@@ -250,6 +251,10 @@ class EngineClient(ABC):
 
     async def start_draft_weight_update(self) -> None:
         """Start a new weight update targeting the speculative draft model."""
+        raise NotImplementedError
+
+    async def start_lora_weight_update(self, request: LoRAWeightUpdateRequest) -> None:
+        """Start an update for an existing LoRA adapter."""
         raise NotImplementedError
 
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
