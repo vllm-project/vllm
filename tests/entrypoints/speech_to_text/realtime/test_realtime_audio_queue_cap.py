@@ -142,7 +142,7 @@ async def test_cumulative_bytes_reset_by_generation():
     # Drive the real reset path: _run_generation clears the queue and the
     # byte counter in its finally block.
     audio_stream = conn.audio_stream_generator()
-    input_stream = asyncio.Queue()
+    input_stream: asyncio.Queue[list[int]] = asyncio.Queue()
     await conn._run_generation(audio_stream, input_stream)
 
     assert conn._accumulated_audio_bytes == 0
