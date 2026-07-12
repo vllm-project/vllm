@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Triton attention backend with different K/V head dimensions (DiffKV).
 
-The KV cache layout is identical to ``FlashAttentionDiffKVBackend``: K and V
-are packed along the last dim in the logical shape
-``[num_blocks, num_kv_heads, block_size, head_size_qk + head_size_v]``.
+The KV cache layout is identical to ``FlashAttentionDiffKVBackend`` — K
+and V are packed along the last dim:
+
+    [num_blocks, block_size, num_kv_heads, head_size_qk + head_size_v]
+
+so existing helpers (``triton_reshape_and_cache_flash_diffkv``) are reused.
 """
 
 from typing import ClassVar
@@ -103,12 +106,10 @@ class TritonAttentionDiffKVBackend(TritonAttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        # Logical (blocks-first, head-major) layout: K and V (with their
-        # different head sizes) packed in the content dim.
         return (
             num_blocks,
-            num_kv_heads,
             block_size,
+            num_kv_heads,
             head_size + TritonAttentionDiffKVBackend.head_size_v,
         )
 
@@ -116,22 +117,19 @@ class TritonAttentionDiffKVBackend(TritonAttentionBackend):
     def get_kv_cache_stride_order(
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
-        # `stride_order` indicates the permutation that gets us from
-        # `get_kv_cache_shape` (logical (B, H, N, C_k+C_v)) to the actual
-        # memory layout we want.
         cache_layout = get_kv_cache_layout()
         if cache_layout == "NHD" and include_num_layers_dimension:
-            # (num_blocks, num_layers, block_size, num_kv_heads, C_k+C_v)
-            return (1, 0, 3, 2, 4)
+            # (num_blocks, num_layers, block_size,
+            #  num_kv_heads, head_size + head_size_v)
+            return (1, 0, 2, 3, 4)
         elif cache_layout == "NHD":
-            # (num_blocks, block_size, num_kv_heads, C_k+C_v)
-            return (0, 2, 1, 3)
-        elif cache_layout == "HND" and include_num_layers_dimension:
-            # (num_blocks, num_kv_heads, num_layers, block_size, C_k+C_v)
-            return (1, 2, 0, 3, 4)
-        elif cache_layout == "HND":
-            # (num_blocks, num_kv_heads, block_size, C_k+C_v)
             return (0, 1, 2, 3)
+        elif cache_layout == "HND" and include_num_layers_dimension:
+            # (num_blocks, num_kv_heads, num_layers,
+            #  block_size, head_size + head_size_v)
+            return (1, 3, 0, 2, 4)
+        elif cache_layout == "HND":
+            return (0, 2, 1, 3)
         else:
             raise ValueError(f"Unknown cache layout format {cache_layout}.")
 
@@ -177,12 +175,13 @@ class TritonAttentionDiffKVImpl(TritonAttentionImpl):
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> None:
-        # Cache is logical (B, H, N, C); the diffkv reshape kernel expects
-        # (B, N, H, C).
+        # Cache is packed [..., head_size_qk + head_size_v]; the diffkv
+        # reshape kernel writes K to [..., :head_size_qk] and V to
+        # [..., head_size_qk:hqk+hv].
         triton_reshape_and_cache_flash_diffkv(
             key,
             value,
-            kv_cache.transpose(1, 2),
+            kv_cache,
             slot_mapping,
             self.kv_cache_dtype,
             layer._k_scale,
@@ -211,7 +210,7 @@ class TritonAttentionDiffKVImpl(TritonAttentionImpl):
             query:    [num_tokens, num_heads, head_size_qk]
             key:      [num_tokens, num_kv_heads, head_size_qk]
             value:    [num_tokens, num_kv_heads, head_size_v]
-            kv_cache: [num_blocks, num_kv_heads, block_size,
+            kv_cache: [num_blocks, block_size, num_kv_heads,
                        head_size_qk + head_size_v]
             output:   [num_tokens, num_heads, head_size_v]
         """
@@ -232,8 +231,8 @@ class TritonAttentionDiffKVImpl(TritonAttentionImpl):
         head_size_qk = self.head_size
         head_size_v = TritonAttentionDiffKVBackend.head_size_v
 
-        # Triton DiffKV kernels consume (B, N, H, D) cache views.
-        kv_cache = kv_cache.transpose(1, 2)
+        # Slice the packed cache into K / V views.  Strides on dims 0/1/2
+        # match the original cache; dim 3 stays contiguous (stride 1).
         key_cache = kv_cache[..., :head_size_qk]
         value_cache = kv_cache[..., head_size_qk : head_size_qk + head_size_v]
 
