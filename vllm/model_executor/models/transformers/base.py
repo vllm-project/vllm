@@ -556,18 +556,31 @@ class Base(
             ):
                 per_layer_sliding_window = self.config.sliding_window
 
+            # Handle heterogeneous head counts across layers (e.g. Gemma 4 Unified)
+            layer_num_heads = num_heads
+            layer_num_kv_heads = num_kv_heads
+            for m in self.model.modules():
+                if getattr(m, "layer_idx", None) == i:
+                    h_heads = getattr(m, "num_heads", None) or getattr(m, "num_attention_heads", None)
+                    h_kv = getattr(m, "num_kv_heads", None) or getattr(m, "num_key_value_heads", None)
+                    if h_heads is not None:
+                        layer_num_heads = h_heads // self.parallel_config.tensor_parallel_size
+                    if h_kv is not None:
+                        layer_num_kv_heads = max(1, h_kv // self.parallel_config.tensor_parallel_size)
+                    break
+
             attn_cls = (
                 EncoderOnlyAttention
                 if attn_type == AttentionType.ENCODER_ONLY
                 else Attention
             )
             attention_instances[i] = attn_cls(
-                num_heads=num_heads,
+                num_heads=layer_num_heads,
                 head_size=head_size,
                 # NOTE: We use Llama scale as default, if it's set by
                 # Transformers, it's updated in vllm_attention_forward
                 scale=head_size**-0.5,
-                num_kv_heads=num_kv_heads,
+                num_kv_heads=layer_num_kv_heads,
                 cache_config=self.cache_config,
                 quant_config=self.quant_config,
                 logits_soft_cap=logits_soft_cap,
