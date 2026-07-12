@@ -3,6 +3,7 @@
 
 from typing import TYPE_CHECKING, Any, Union
 
+import regex as re
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.nn import Parameter
@@ -75,6 +76,15 @@ logger = init_logger(__name__)
 # [0,4,1,5,2,6,3,7]. This permutation reverses that ordering.
 _REVERSE_AWQ_PACK_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
 
+# Quark real_quantized AWQ exports use ".weight" for packed int4 weights on
+# linear projections. Remap only known projection suffixes so unquantized
+# tensors such as embed_tokens.weight are left unchanged.
+_QUARK_AWQ_LINEAR_WEIGHT_REGEX = re.compile(
+    r"\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj|out_proj|"
+    r"in_proj_qkv|in_proj_z|in_proj_b|in_proj_a)\.weight$"
+)
+_QUARK_AWQ_TOP_LEVEL_LM_HEAD_WEIGHT_REGEX = re.compile(r"^lm_head\.weight$")
+
 
 def _replace_or_register_parameter(
     layer: torch.nn.Module,
@@ -94,6 +104,8 @@ def _convert_awq_to_standard_format(
     w_q_name: str,
     w_zp_name: str,
     size_bits: int,
+    *,
+    apply_awq_pack_reorder: bool = True,
 ) -> None:
     """Convert AWQ weight and zero-point tensors to standard GPTQ-like format.
 
@@ -104,10 +116,13 @@ def _convert_awq_to_standard_format(
     pack_factor = 32 // size_bits
     mask = (1 << size_bits) - 1
     device = getattr(layer, w_q_name).device
-    reverse_order = torch.tensor(
-        _REVERSE_AWQ_PACK_ORDER, dtype=torch.long, device=device
-    )
     shifts = torch.arange(0, 32, size_bits, dtype=torch.int32, device=device)
+    if apply_awq_pack_reorder:
+        pack_order = torch.tensor(
+            _REVERSE_AWQ_PACK_ORDER, dtype=torch.long, device=device
+        )
+    else:
+        pack_order = torch.arange(pack_factor, dtype=torch.long, device=device)
 
     # --- Convert qweight: (K, N // pack) packed_dim=1 → (K // pack, N) packed_dim=0
     qw = getattr(layer, w_q_name).data
@@ -116,7 +131,7 @@ def _convert_awq_to_standard_format(
 
     # Unpack int32 → individual values, fix AWQ ordering
     unpacked = (qw.unsqueeze(-1) >> shifts) & mask  # (K, N_packed, pack_factor)
-    unpacked = unpacked[:, :, reverse_order]
+    unpacked = unpacked[:, :, pack_order]
     unpacked = unpacked.reshape(K, N)  # (K, N)
 
     # Repack along input dim (dim 0)
@@ -146,7 +161,7 @@ def _convert_awq_to_standard_format(
     G, _ = qz.shape
 
     unpacked_zp = (qz.unsqueeze(-1) >> shifts) & mask  # (G, N_packed, pack_factor)
-    unpacked_zp = unpacked_zp[:, :, reverse_order]
+    unpacked_zp = unpacked_zp[:, :, pack_order]
     unpacked_zp = unpacked_zp.reshape(G, N)  # (G, N) individual values
 
     # Transpose and repack along dim 0 (output dim)
@@ -187,6 +202,8 @@ class AutoAWQConfig(QuantizationConfig):
         lm_head_quantized: bool,
         modules_to_not_convert: list[str] | None = None,
         full_config: dict[str, Any] | None = None,
+        is_quark_format: bool = False,
+        quark_pack_reorder: bool = True,
     ) -> None:
         super().__init__()
         self.pack_factor = 32 // weight_bits  # packed into int32
@@ -196,6 +213,11 @@ class AutoAWQConfig(QuantizationConfig):
         self.weight_bits = weight_bits
         self.modules_to_not_convert = modules_to_not_convert or []
         self.full_config = full_config or {}
+        # Quark exports AWQ models with pack_method "order" or "reorder" and uses
+        # "qscales"/"qqzeros" or "weight"/"weight_scale" tensor names.
+        self.is_quark_format = is_quark_format
+        # True for pack_method="reorder" (AWQ nibble order); False for "order".
+        self.quark_pack_reorder = quark_pack_reorder
 
         if self.weight_bits not in self.TYPE_MAP:
             supported = ", ".join(str(k) for k in self.TYPE_MAP)
@@ -233,19 +255,118 @@ class AutoAWQConfig(QuantizationConfig):
     def get_config_filenames(cls) -> list[str]:
         return ["quantize_config.json", "quant_config.json"]
 
+    @staticmethod
+    def _quark_pack_method(config: dict[str, Any]) -> str | None:
+        export_config = config.get("export", {})
+        pack_method = export_config.get("pack_method")
+        if pack_method is not None:
+            return pack_method
+        return config.get("pack_method")
+
+    @staticmethod
+    def _is_quark_awq_export(config: dict[str, Any]) -> bool:
+        if config.get("quant_method", "").lower() != "quark":
+            return False
+        pack_method = AutoAWQConfig._quark_pack_method(config)
+        if pack_method not in ("order", "reorder"):
+            return False
+        algo_configs = config.get("algo_config") or []
+        return any(
+            isinstance(algo, dict) and algo.get("name") == "awq"
+            for algo in algo_configs
+        )
+
+    @staticmethod
+    def _is_quark_packed_int4_export(config: dict[str, Any]) -> bool:
+        if config.get("quant_method", "").lower() != "quark":
+            return False
+        pack_method = AutoAWQConfig._quark_pack_method(config)
+        if pack_method not in ("order", "reorder"):
+            return False
+        global_weight = config.get("global_quant_config", {}).get("weight", {})
+        return global_weight.get("dtype") in {"int4", "int8"}
+
+    @staticmethod
+    def _normalize_quark_excludes(exclude: list[str] | None) -> list[str] | None:
+        if not exclude:
+            return exclude
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+
+        def add(module_name: str) -> None:
+            if module_name and module_name not in seen:
+                seen.add(module_name)
+                normalized.append(module_name)
+
+        for module_name in exclude:
+            candidates = {
+                module_name,
+                module_name.removeprefix("model.language_model."),
+                module_name.replace("model.language_model.", "model.", 1),
+            }
+            for candidate in tuple(candidates):
+                if candidate.endswith(".gate.linear"):
+                    candidates.add(candidate.removesuffix(".linear"))
+                elif candidate.endswith(".gate"):
+                    candidates.add(f"{candidate}.linear")
+            for candidate in candidates:
+                add(candidate)
+
+        return normalized
+
+    @classmethod
+    def _normalize_quark_awq_config(cls, config: dict[str, Any]) -> dict[str, Any]:
+        global_weight = config.get("global_quant_config", {}).get("weight", {})
+        dtype_to_bits = {"int4": 4, "int8": 8}
+        weight_dtype = global_weight.get("dtype")
+        if weight_dtype not in dtype_to_bits:
+            raise ValueError(
+                f"Unsupported Quark AWQ weight dtype: {weight_dtype!r}"
+            )
+        export_config = config.get("export", {})
+        return {
+            **config,
+            "bits": dtype_to_bits[weight_dtype],
+            "group_size": global_weight.get("group_size", 128),
+            "zero_point": not global_weight.get("symmetric", True),
+            "pack_method": export_config.get("pack_method"),
+            "modules_to_not_convert": cls._normalize_quark_excludes(
+                config.get("exclude")
+            ),
+        }
+
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "AutoAWQConfig":
+        if cls._is_quark_awq_export(config) or cls._is_quark_packed_int4_export(
+            config
+        ):
+            config = cls._normalize_quark_awq_config(config)
+
         weight_bits = cls.get_from_keys(config, ["w_bit", "bits"])
         group_size = cls.get_from_keys(config, ["q_group_size", "group_size"])
-        zero_point = cls.get_from_keys(config, ["zero_point"])
+        zero_point = cls.get_from_keys_or(config, ["zero_point"], default=False)
         lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"], default=False)
         modules_to_not_convert = cls.get_from_keys_or(
-            config, ["modules_to_not_convert"], None
+            config, ["modules_to_not_convert", "exclude"], None
         )
         # Ensure full_config uses "awq" as quant_method for MoE fallback compatibility.
         # MoeWNA16Config only accepts "gptq" or "awq", so we normalize here.
         full_config = config.copy()
         full_config["quant_method"] = "awq"
+        pack_method = config.get("pack_method")
+        is_quark_format = pack_method in ("order", "reorder")
+        quark_pack_reorder = pack_method == "reorder"
+        if is_quark_format and not lm_head_quantized:
+            exclude = modules_to_not_convert or []
+            lm_head_excluded = any(
+                item == "lm_head"
+                or item.endswith(".lm_head")
+                or item.startswith("lm_head.")
+                for item in exclude
+            )
+            if not lm_head_excluded:
+                lm_head_quantized = True
         return cls(
             weight_bits,
             group_size,
@@ -253,6 +374,8 @@ class AutoAWQConfig(QuantizationConfig):
             lm_head_quantized,
             modules_to_not_convert,
             full_config,
+            is_quark_format,
+            quark_pack_reorder,
         )
 
     @classmethod
@@ -266,7 +389,10 @@ class AutoAWQConfig(QuantizationConfig):
 
         quant_method = hf_quant_cfg.get("quant_method", "").lower()
 
-        if quant_method != "awq":
+        if quant_method != "awq" and not (
+            cls._is_quark_awq_export(hf_quant_cfg)
+            or cls._is_quark_packed_int4_export(hf_quant_cfg)
+        ):
             return None
 
         is_valid_user_quant = user_quant is None or user_quant in (
@@ -382,6 +508,101 @@ class AutoAWQConfig(QuantizationConfig):
         return check_marlin_supported(
             quant_type=cls.TYPE_MAP[num_bits], group_size=group_size, has_zp=zero_point
         )
+
+    def get_cache_scale_mapper(self) -> "WeightsMapper":
+        """Extend the base mapper with Quark AWQ tensor name remappings.
+
+        Quark exports AWQ checkpoints with pack_method="reorder". Depending on
+        the exporter version, tensors may use either the legacy AutoAWQ names
+        ("qweight"/"qscales"/"qqzeros") or the real_quantized names
+        ("weight"/"weight_scale"/"weight_zero_point"). Add remappings for both
+        conventions so the loader finds the right params.
+        """
+        from vllm.model_executor.models.utils import WeightsMapper
+
+        base_mapper = super().get_cache_scale_mapper()
+        if not self.is_quark_format:
+            return base_mapper
+
+        excluded_modules = set(self.modules_to_not_convert)
+        for module_name in tuple(excluded_modules):
+            if module_name.endswith(".gate"):
+                excluded_modules.add(f"{module_name}.linear")
+            elif module_name.endswith(".gate.linear"):
+                excluded_modules.add(module_name.removesuffix(".linear"))
+
+        excluded_linear_modules = [
+            re.escape(module_name)
+            for module_name in excluded_modules
+            if module_name.endswith(".linear")
+        ]
+        excluded_gate_modules = [
+            re.escape(module_name)
+            for module_name in excluded_modules
+            if module_name.endswith(".gate")
+        ]
+        excluded_module_pattern = "|".join(
+            re.escape(module_name) for module_name in excluded_modules
+        )
+
+        quark_suffix_map: dict[str, str | None] = {
+            ".qscales": ".scales",
+            ".weight_scale": ".scales",
+        }
+        if self.zero_point:
+            quark_suffix_map[".qqzeros"] = ".qzeros"
+            quark_suffix_map[".weight_zero_point"] = ".qzeros"
+        else:
+            # Quark symmetric AWQ may still export all-zero zero points.
+            quark_suffix_map[".qqzeros"] = None
+            quark_suffix_map[".weight_zero_point"] = None
+
+        quark_regex_map: dict[re.Pattern[str], str | None] = {
+            _QUARK_AWQ_LINEAR_WEIGHT_REGEX: r".\1.qweight",
+            re.compile(r"\.shared_expert_gate\.weight_scale$"): None,
+            re.compile(r"\.shared_expert_gate\.weight_zero_point$"): None,
+        }
+        linear_exclude = "|".join(excluded_linear_modules)
+        linear_weight_pattern = (
+            rf"^(?!(?:{linear_exclude})\.weight$)(?P<prefix>.*)\.linear\.weight$"
+            if linear_exclude
+            else r"^(?P<prefix>.*)\.linear\.weight$"
+        )
+        quark_regex_map[re.compile(linear_weight_pattern)] = (
+            r"\g<prefix>.linear.qweight"
+        )
+        if linear_exclude:
+            quark_regex_map[
+                re.compile(rf"^(?P<prefix>{linear_exclude})\.qweight$")
+            ] = r"\g<prefix>.weight"
+
+        gate_exclude = "|".join(excluded_gate_modules)
+        gate_weight_pattern = (
+            rf"^(?!(?:{gate_exclude})\.weight$)(?P<prefix>.*)\.gate\.weight$"
+            if gate_exclude
+            else r"^(?P<prefix>.*)\.gate\.weight$"
+        )
+        quark_regex_map[re.compile(gate_weight_pattern)] = r"\g<prefix>.gate.qweight"
+        if gate_exclude:
+            quark_regex_map[
+                re.compile(rf"^(?P<prefix>{gate_exclude})\.qweight$")
+            ] = r"\g<prefix>.weight"
+
+        if excluded_module_pattern:
+            quark_regex_map[
+                re.compile(rf"^(?P<prefix>{excluded_module_pattern})\.qweight$")
+            ] = r"\g<prefix>.weight"
+
+        if self.lm_head_quantized:
+            quark_regex_map[_QUARK_AWQ_TOP_LEVEL_LM_HEAD_WEIGHT_REGEX] = (
+                "lm_head.qweight"
+            )
+
+        quark_suffix_mapper = WeightsMapper(
+            orig_to_new_suffix=quark_suffix_map,
+            orig_to_new_regex=quark_regex_map,
+        )
+        return base_mapper | quark_suffix_mapper
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
         if self.modules_to_not_convert:
@@ -530,7 +751,14 @@ class AutoAWQMarlinLinearMethod(LinearMethodBase):
         # (GPTQ-like: standard bit order, qweight packed along input dim)
         # before handing off to the kernel.
         _convert_awq_to_standard_format(
-            layer, "qweight", "qzeros", self.quant_config.quant_type.size_bits
+            layer,
+            "qweight",
+            "qzeros",
+            self.quant_config.quant_type.size_bits,
+            apply_awq_pack_reorder=(
+                not self.quant_config.is_quark_format
+                or self.quant_config.quark_pack_reorder
+            ),
         )
         self.kernel.process_weights_after_loading(layer)
 
@@ -913,6 +1141,8 @@ class AutoAWQLinearMethod(BaseAWQLinearMethod):
         layer.qweight = torch.nn.Parameter(layer.qweight.data, requires_grad=False)
         layer.qzeros = torch.nn.Parameter(layer.qzeros.data, requires_grad=False)
         layer.scales = torch.nn.Parameter(layer.scales.data, requires_grad=False)
+        if not self.quant_config.zero_point:
+            layer.qzeros.data.zero_()
 
     def apply(
         self,
@@ -924,18 +1154,33 @@ class AutoAWQLinearMethod(BaseAWQLinearMethod):
         scales = layer.scales
         qzeros = layer.qzeros
         pack_factor = self.quant_config.pack_factor
+        signed_int4 = self.quant_config.is_quark_format
+        pack_reorder = self.quant_config.quark_pack_reorder
         out_shape = x.shape[:-1] + (qweight.shape[-1] * pack_factor,)
         reshaped_x = x.reshape(-1, x.shape[-1])
 
-        # num_tokens >= threshold
-        FP16_MATMUL_HEURISTIC_CONDITION = x.shape[:-1].numel() >= 256
-        # Batch invariant mode requires torch.matmul path
-        # for Triton override
-        if FP16_MATMUL_HEURISTIC_CONDITION or envs.VLLM_BATCH_INVARIANT:
-            out = ops.awq_dequantize(qweight, scales, qzeros, 0, 0, 0)
+        if x.shape[:-1].numel() >= 256 or envs.VLLM_BATCH_INVARIANT:
+            out = ops.awq_dequantize(
+                qweight,
+                scales,
+                qzeros,
+                0,
+                0,
+                0,
+                signed_int4=signed_int4,
+                pack_reorder=pack_reorder,
+            )
             out = torch.matmul(reshaped_x, out)
         else:
-            out = ops.awq_gemm(reshaped_x, qweight, scales, qzeros, pack_factor)
+            out = ops.awq_gemm(
+                reshaped_x,
+                qweight,
+                scales,
+                qzeros,
+                pack_factor,
+                signed_int4=signed_int4,
+                pack_reorder=pack_reorder,
+            )
         if bias is not None:
             out.add_(bias)
         return out.reshape(out_shape)

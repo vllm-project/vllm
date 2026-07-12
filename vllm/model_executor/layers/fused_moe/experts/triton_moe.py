@@ -675,6 +675,7 @@ class TritonWNA16Experts(TritonExperts):
             use_int8_w8a16=self.quant_config.use_int8_w8a16,
             use_int4_w4a16=self.quant_config.use_int4_w4a16,
             block_shape=self.block_shape,
+            signed_int4=self.quant_config.signed_int4,
         )
 
         self.activation(
@@ -708,6 +709,7 @@ class TritonWNA16Experts(TritonExperts):
             use_int8_w8a16=self.quant_config.use_int8_w8a16,
             use_int4_w4a16=self.quant_config.use_int4_w4a16,
             block_shape=self.block_shape,
+            signed_int4=self.quant_config.signed_int4,
         )
 
         # separate function is required for MoE + LoRA

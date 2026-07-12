@@ -104,6 +104,7 @@ def fused_moe_kernel_gptq_awq(
     has_zp: tl.constexpr,
     use_int4_w4a16: tl.constexpr,
     use_int8_w8a16: tl.constexpr,
+    signed_int4: tl.constexpr,
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
@@ -231,6 +232,9 @@ def fused_moe_kernel_gptq_awq(
         b = tl.load(b_ptrs)
         if use_int4_w4a16:
             b = (b >> b_shifter) & 0xF
+            if signed_int4:
+                b = b.to(tl.int32)
+                b = tl.where(b >= 8, b - 16, b)
 
         b_scale_ptrs = (
             b_scale_ptr
@@ -266,6 +270,8 @@ def fused_moe_kernel_gptq_awq(
         # We accumulate along the K dimension.
         if has_zp:
             b = ((b.to(tl.float32) - b_zp) * b_scale).to(compute_type)
+        elif signed_int4 and use_int4_w4a16:
+            b = (b.to(tl.float32) * b_scale).to(compute_type)
         else:
             b = ((b.to(tl.float32) - b_zp_num) * b_scale).to(compute_type)
         accumulator = tl.dot(a, b, acc=accumulator)
@@ -659,6 +665,7 @@ def invoke_fused_moe_wna16_triton_kernel(
     use_int8_w8a16: bool,
     use_int4_w4a16: bool,
     block_shape: list[int] | None,
+    signed_int4: bool = False,
 ):
     assert B_scale is not None and B_scale.ndim == 3
     assert B_zp is None or B_zp.ndim == 3
@@ -728,6 +735,7 @@ def invoke_fused_moe_wna16_triton_kernel(
         has_zp=B_zp is not None,
         use_int4_w4a16=use_int4_w4a16,
         use_int8_w8a16=use_int8_w8a16,
+        signed_int4=signed_int4,
         **config,
     )
 
@@ -871,6 +879,7 @@ def dispatch_fused_moe_kernel(
     per_channel_quant: bool,
     block_shape: list[int] | None = None,
     B_bias: torch.Tensor | None = None,
+    signed_int4: bool = False,
 ) -> None:
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
@@ -891,7 +900,7 @@ def dispatch_fused_moe_kernel(
             bit=4 if use_int4_w4a16 else 8,
         )
 
-        if use_moe_wna16_cuda:
+        if use_moe_wna16_cuda and not signed_int4:
             invoke_fused_moe_wna16_cuda_kernel(
                 A,
                 B,
@@ -925,6 +934,7 @@ def dispatch_fused_moe_kernel(
             use_int8_w8a16,
             use_int4_w4a16,
             block_shape,
+            signed_int4,
         )
 
     else:
@@ -1411,6 +1421,7 @@ def fused_experts_op(
     block_shape: list[int] | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    signed_int4: bool = False,
 ) -> torch.Tensor:
     return fused_experts_impl(
         hidden_states,
@@ -1437,6 +1448,7 @@ def fused_experts_op(
         block_shape,
         w1_bias,
         w2_bias,
+        signed_int4,
     )
 
 
@@ -1465,6 +1477,7 @@ def fused_experts_op_fake(
     block_shape: list[int] | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    signed_int4: bool = False,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
@@ -1566,6 +1579,7 @@ def fused_experts(
         block_shape=quant_config.block_shape,
         w1_bias=quant_config.w1_bias,
         w2_bias=quant_config.w2_bias,
+        signed_int4=quant_config.signed_int4,
     )
 
 
@@ -1613,6 +1627,7 @@ def fused_experts_impl(
     block_shape: list[int] | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    signed_int4: bool = False,
 ) -> torch.Tensor:
     if ocp_mx_scheme is not None:
         raise NotImplementedError(
@@ -1745,6 +1760,7 @@ def fused_experts_impl(
         per_channel_quant=per_channel_quant,
         block_shape=block_shape,
         B_bias=w1_bias,
+        signed_int4=signed_int4,
     )
 
     apply_moe_activation(
@@ -1784,6 +1800,7 @@ def fused_experts_impl(
         per_channel_quant=per_channel_quant,
         block_shape=block_shape,
         B_bias=w2_bias,
+        signed_int4=signed_int4,
     )
 
     ops.moe_sum(

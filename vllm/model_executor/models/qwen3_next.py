@@ -78,6 +78,58 @@ logger = init_logger(__name__)
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
 
+def _dequantize_quark_shared_expert_gate(
+    qweight: torch.Tensor, scales: torch.Tensor
+) -> torch.Tensor:
+    values = qweight.to(torch.int32) & 0xF
+    values = torch.where(values >= 8, values - 16, values)
+    scales = scales.to(torch.float32).repeat_interleave(128, dim=0)
+    return (values.to(torch.float32) * scales).T.contiguous()
+
+
+def _dequantize_quark_shared_expert_gate_weights(
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> Iterable[tuple[str, torch.Tensor]]:
+    pending_weights: dict[str, torch.Tensor] = {}
+    pending_scales: dict[str, torch.Tensor] = {}
+
+    def maybe_emit(prefix: str):
+        qweight = pending_weights.pop(prefix, None)
+        scales = pending_scales.pop(prefix, None)
+        if qweight is None or scales is None:
+            if qweight is not None:
+                pending_weights[prefix] = qweight
+            if scales is not None:
+                pending_scales[prefix] = scales
+            return None
+        return prefix + ".weight", _dequantize_quark_shared_expert_gate(
+            qweight, scales
+        )
+
+    for name, weight in weights:
+        if name.endswith(".shared_expert_gate.weight_scale"):
+            prefix = name[: -len(".weight_scale")]
+            pending_scales[prefix] = weight
+            emitted = maybe_emit(prefix)
+            if emitted is not None:
+                yield emitted
+            continue
+        if name.endswith(".shared_expert_gate.weight") and weight.dtype in (
+            torch.int32,
+            torch.int64,
+        ):
+            prefix = name[: -len(".weight")]
+            pending_weights[prefix] = weight
+            emitted = maybe_emit(prefix)
+            if emitted is not None:
+                yield emitted
+            continue
+        yield name, weight
+
+    for prefix, weight in pending_weights.items():
+        yield prefix + ".weight", weight
+
+
 def _is_shared_expert_fse_compatible(quant_config) -> bool:
     """Check if shared expert can be fused with routed experts.
 
@@ -139,7 +191,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             config.hidden_size,
             config.num_experts,
             bias=False,
-            quant_config=None,
+            quant_config=quant_config,
             prefix=f"{prefix}.gate",
         )
 
@@ -638,6 +690,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
                 orig_to_new_substr={"mlp.shared_expert.": f"mlp.experts.{num_routed}."}
             )
         loader = AutoWeightsLoader(self)
+        weights = _dequantize_quark_shared_expert_gate_weights(weights)
         return loader.load_weights(weights, mapper=mapper)
 
 

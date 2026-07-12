@@ -206,7 +206,11 @@ class Qwen3_5Model(Qwen3NextModel):
             ".in_proj_z": (".in_proj_qkvz", 3),
             ".in_proj_b": (".in_proj_ba", 0),
             ".in_proj_a": (".in_proj_ba", 1),
-        }
+        },
+        # Quark AWQ exports nest the router under gate.linear.*
+        orig_to_new_substr={
+            ".gate.linear.": ".gate.",
+        },
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -250,6 +254,76 @@ class Qwen3_5Model(Qwen3NextModel):
             self.norm = PPMissingLayer()
 
         self.aux_hidden_state_layers: tuple[int, ...] = ()
+
+    @staticmethod
+    def _dequantize_shared_expert_gate_weights(
+        weights: Iterable[tuple[str, torch.Tensor]],
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        """Dequantize Quark AWQ shared-expert gate weights to fp16."""
+        weight_map: dict[str, torch.Tensor] = {}
+        scale_map: dict[str, torch.Tensor] = {}
+        passthrough: list[tuple[str, torch.Tensor]] = []
+
+        for name, weight in weights:
+            if name.endswith(".shared_expert_gate.weight_scale") or name.endswith(
+                ".shared_expert_gate.scales"
+            ):
+                prefix = name.rsplit(".", 1)[0]
+                scale_map[prefix] = weight
+            elif name.endswith(".shared_expert_gate.weight") or name.endswith(
+                ".shared_expert_gate.qweight"
+            ):
+                prefix = name.rsplit(".", 1)[0]
+                weight_map[prefix] = weight
+            else:
+                passthrough.append((name, weight))
+
+        group_size = 128
+        dequantized_prefixes: set[str] = set()
+        dequantized: list[tuple[str, torch.Tensor]] = []
+        for prefix, weight in weight_map.items():
+            scale = scale_map.get(prefix)
+            if scale is None:
+                passthrough.append((f"{prefix}.weight", weight))
+                continue
+            values = weight.to(torch.int32) & 0xF
+            values = torch.where(values >= 8, values - 16, values)
+            scale_expanded = scale.to(torch.float32).repeat_interleave(
+                group_size, dim=0
+            )
+            dequantized.append(
+                (
+                    f"{prefix}.weight",
+                    (values.to(torch.float32) * scale_expanded)
+                    .t()
+                    .contiguous(),
+                )
+            )
+            dequantized_prefixes.add(prefix)
+
+        for prefix, scale in scale_map.items():
+            if prefix not in dequantized_prefixes:
+                passthrough.append((f"{prefix}.weight_scale", scale))
+
+        for name, weight in passthrough:
+            if ".shared_expert_gate." in name and (
+                name.endswith(".weight_zero_point")
+                or name.endswith(".scales")
+                or name.endswith(".qzeros")
+                or name.endswith(".qweight")
+            ):
+                continue
+            if name.endswith(".shared_expert_gate.weight_scale"):
+                prefix = name.removesuffix(".weight_scale")
+                if prefix in dequantized_prefixes:
+                    continue
+            if name.endswith(".shared_expert_gate.weight"):
+                prefix = name.rsplit(".", 1)[0]
+                if prefix in dequantized_prefixes:
+                    continue
+            yield name, weight
+
+        yield from dequantized
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         mapper = self.hf_to_vllm_mapper
@@ -357,11 +431,16 @@ class Qwen3_5ForCausalLMBase(
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        skip_prefixes = ["mtp."]
+        if self.config.tie_word_embeddings:
+            skip_prefixes = ["lm_head.", *skip_prefixes]
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=["mtp."],
+            skip_prefixes=skip_prefixes,
         )
-        return loader.load_weights(weights)
+        return loader.load_weights(
+            Qwen3_5Model._dequantize_shared_expert_gate_weights(weights)
+        )
 
 
 class Qwen3_5ForCausalLM(Qwen3_5ForCausalLMBase):
@@ -503,11 +582,17 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        skip_prefixes = ["mtp."]
+        if self.language_model.config.tie_word_embeddings:
+            skip_prefixes = ["language_model.lm_head.", *skip_prefixes]
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=["mtp."],
+            skip_prefixes=skip_prefixes,
         )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(
+            Qwen3_5Model._dequantize_shared_expert_gate_weights(weights),
+            mapper=self.hf_to_vllm_mapper,
+        )
 
     @classmethod
     def get_mamba_state_dtype_from_config(

@@ -261,6 +261,11 @@ class FusedMoEQuantConfig:
 
     mx_alignment: int = 0
 
+    # Some INT4 exporters (for example Quark symmetric weight-only INT4) store
+    # signed two's-complement nibbles instead of AWQ's unsigned values centered
+    # around an implicit zero point of 8.
+    signed_int4: bool = False
+
     def __post_init__(self):
         assert not self.per_act_token_quant or self.block_shape is None, (
             "illegal quantization"
@@ -887,6 +892,7 @@ def int4_w4a16_moe_quant_config(
     block_shape: list[int] | None = None,
     a1_gscale: torch.Tensor | None = None,
     a2_gscale: torch.Tensor | None = None,
+    signed_int4: bool = False,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for 16-bit float activations and int4 weights.
@@ -897,6 +903,7 @@ def int4_w4a16_moe_quant_config(
         _a2=FusedMoEQuantDesc(shape=group_shape, alpha_or_gscale=a2_gscale),
         _w1=FusedMoEQuantDesc("int4", group_shape, w1_scale, None, w1_zp, w1_bias),
         _w2=FusedMoEQuantDesc("int4", group_shape, w2_scale, None, w2_zp, w2_bias),
+        signed_int4=signed_int4,
     )
 
 
