@@ -120,7 +120,7 @@ class ECSharedRegion:
             logger.warning(
                 "cudaHostRegister failed (code=%d) — "
                 "transfers will still work but may be slower (unpinned DMA)",
-                result,
+                result.value,
             )
         else:
             logger.debug("cudaHostRegister %.2f MB", self._blocks_nbytes / 1e6)
