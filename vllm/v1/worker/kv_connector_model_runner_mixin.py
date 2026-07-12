@@ -33,6 +33,48 @@ logger = init_logger(__name__)
 # Defined as a kv connector functionality mixin for ModelRunner (GPU, TPU)
 class KVConnectorModelRunnerMixin:
     @staticmethod
+    def register_kv_caches_with_connector(
+        kv_caches: dict[str, torch.Tensor],
+    ) -> None:
+        """Register the runner's paged KV caches with the configured connector.
+
+        Device-neutral host-contract helper: any model runner (GPU, TPU, or an
+        out-of-tree backend) calls this after building its per-layer KV tensors
+        in ``initialize_kv_cache``. It is a no-op when no ``kv_transfer_config``
+        is set. The runner is responsible only for supplying ``kv_caches`` as a
+        ``{layer_name: torch.Tensor}`` mapping (a backend whose cache is not
+        natively a torch tensor exposes a torch view of its buffers); this
+        helper contains no device- or connector-specific knowledge.
+        """
+        if not has_kv_transfer_group():
+            return
+        get_kv_transfer_group().register_kv_caches(kv_caches)
+
+    def sync_kv_caches_before_save(self, scheduler_output: "SchedulerOutput") -> None:
+        """Hook: make the registered KV tensors reflect the live cache pre-save.
+
+        Default no-op. A backend whose registered tensors are a *copy/view* of
+        its native buffers (rather than an alias) overrides this to refresh the
+        touched blocks before the connector reads them for a store. Called by
+        the shared execute path immediately before connector finalize. Device-
+        and connector-agnostic: the base contract is simply "the registered
+        tensors are current."
+        """
+        return
+
+    def writeback_kv_caches_after_load(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> None:
+        """Hook: push loaded KV from the registered tensors into the live cache.
+
+        Default no-op. A backend whose registered tensors are a copy/view
+        overrides this to write loaded blocks back into its native buffers
+        after a retrieve. Called by the shared execute path after loads
+        complete. Device- and connector-agnostic.
+        """
+        return
+
+    @staticmethod
     def kv_connector_no_forward(
         scheduler_output: "SchedulerOutput", vllm_config: VllmConfig
     ) -> ModelRunnerOutput:
