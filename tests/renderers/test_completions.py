@@ -65,14 +65,17 @@ class DummyTokenizer:
     def __post_init__(self) -> None:
         self._captured_encode_kwargs: dict = {}
         self._captured_text_len: int = 0
+        self._captured_encode_texts: list[str] = []
+        self._captured_batch_texts: list[str] = []
+        self._encode_calls = 0
+        self._batch_encode_calls = 0
+        self._call_encode_calls = 0
 
     def decode(self, tokens: list[int]):
         return str(tokens)
 
-    def encode(self, text: str, **kwargs):
-        self._captured_encode_kwargs = kwargs
-        self._captured_text_len = len(text)
-
+    @staticmethod
+    def _encode_text(text: str, **kwargs):
         in_length = len(text)
         truncation = kwargs.get("truncation")
         max_length = kwargs.get("max_length")
@@ -81,10 +84,29 @@ class DummyTokenizer:
 
         return list(range(in_length))
 
-    def __call__(self, text: str, **kwargs):
-        # BaseRenderer._tokenize_prompt calls the tokenizer via __call__ (to
-        # unify the output type), so mirror a real tokenizer's BatchEncoding.
-        return {"input_ids": self.encode(text, **kwargs)}
+    def encode(self, text: str, **kwargs):
+        self._encode_calls += 1
+        self._captured_encode_kwargs = kwargs
+        self._captured_text_len = len(text)
+        self._captured_encode_texts.append(text)
+        return self._encode_text(text, **kwargs)
+
+    def batch_encode_plus(self, texts: list[str], **kwargs):
+        self._batch_encode_calls += 1
+        self._captured_encode_kwargs = kwargs
+        self._captured_batch_texts = list(texts)
+        return {"input_ids": [self._encode_text(text, **kwargs) for text in texts]}
+
+    def __call__(self, texts: str | list[str], **kwargs):
+        if isinstance(texts, str):
+            # BaseRenderer._tokenize_prompt calls the tokenizer via __call__
+            # for single-prompt fallback, so mirror a real BatchEncoding.
+            return {"input_ids": self.encode(texts, **kwargs)}
+
+        self._call_encode_calls += 1
+        self._captured_encode_kwargs = kwargs
+        self._captured_batch_texts = list(texts)
+        return {"input_ids": [self._encode_text(text, **kwargs) for text in texts]}
 
 
 def _build_renderer(
@@ -201,6 +223,112 @@ class TestRenderPrompt:
         assert len(results) == 3
         for text_input, result in zip(text_list_input, results):
             assert len(result["prompt_token_ids"]) == len(text_input)
+        assert renderer.tokenizer._batch_encode_calls == 1
+        assert renderer.tokenizer._encode_calls == 0
+
+    def test_text_list_input_uses_callable_batch_tokenizer(self):
+        renderer = _build_renderer(MockModelConfig())
+        renderer.tokenizer.batch_encode_plus = None
+
+        text_list_input = ["x" * 10, "x" * 12, "x" * 14]
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, text_list_input)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(max_total_tokens=100),
+        )
+
+        assert len(results) == 3
+        for text_input, result in zip(text_list_input, results):
+            assert len(result["prompt_token_ids"]) == len(text_input)
+        assert renderer.tokenizer._call_encode_calls == 1
+        assert renderer.tokenizer._encode_calls == 0
+
+    def test_text_list_batch_tokenize_failure_does_not_mutate_fallback(self):
+        class PrefixTokenizeParams(TokenizeParams):
+            pre_calls = 0
+            post_calls = 0
+
+            def apply_pre_tokenization(self, tokenizer, prompt):
+                self.pre_calls += 1
+                prompt["prompt"] = "prefix:" + prompt["prompt"]
+                return prompt
+
+            def apply_post_tokenization(self, tokenizer, prompt):
+                self.post_calls += 1
+                return super().apply_post_tokenization(tokenizer, prompt)
+
+        renderer = _build_renderer(MockModelConfig())
+
+        def broken_batch_encode_plus(texts: list[str], **kwargs):
+            renderer.tokenizer._batch_encode_calls += 1
+            renderer.tokenizer._captured_batch_texts = list(texts)
+            return {"input_ids": []}
+
+        renderer.tokenizer.batch_encode_plus = broken_batch_encode_plus
+        text_list_input = ["abc", "def"]
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, text_list_input)
+        )
+        params = PrefixTokenizeParams(max_total_tokens=100)
+        results = renderer.tokenize_prompts(prompts, params)
+
+        assert len(results) == 2
+        assert renderer.tokenizer._batch_encode_calls == 1
+        assert renderer.tokenizer._encode_calls == 2
+        assert renderer.tokenizer._captured_batch_texts == [
+            "prefix:abc",
+            "prefix:def",
+        ]
+        assert renderer.tokenizer._captured_encode_texts == [
+            "prefix:abc",
+            "prefix:def",
+        ]
+        assert [prompt["prompt"] for prompt in prompts] == ["abc", "def"]
+        assert params.pre_calls == 2
+        assert params.post_calls == 2
+
+    def test_text_list_malformed_nested_batch_result_uses_fallback(self):
+        renderer = _build_renderer(MockModelConfig())
+
+        def malformed_batch_encode_plus(texts: list[str], **kwargs):
+            return {"input_ids": [[1, 2], 3]}
+
+        renderer.tokenizer.batch_encode_plus = malformed_batch_encode_plus
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, ["abc", "def"])
+        )
+
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(max_total_tokens=100),
+        )
+
+        assert [result["prompt_token_ids"] for result in results] == [
+            [0, 1, 2],
+            [0, 1, 2],
+        ]
+        assert renderer.tokenizer._encode_calls == 2
+
+    def test_text_list_batch_tokenizer_type_error_is_not_hidden(self):
+        renderer = _build_renderer(MockModelConfig())
+
+        def buggy_batch_encode_plus(texts: list[str], **kwargs):
+            raise TypeError("unexpected tokenizer implementation bug")
+
+        renderer.tokenizer.batch_encode_plus = buggy_batch_encode_plus
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, ["abc", "def"])
+        )
+
+        with pytest.raises(TypeError, match="unexpected tokenizer implementation bug"):
+            renderer.tokenize_prompts(
+                prompts,
+                TokenizeParams(max_total_tokens=100),
+            )
+
+        assert renderer.tokenizer._encode_calls == 0
 
     def test_zero_truncation(self):
         renderer = _build_renderer(MockModelConfig())
