@@ -156,8 +156,8 @@ steps:
               --build-arg MOONCAKE_WHEEL_AARCH64="${MOONCAKE_WHEEL_AARCH64_2_35}" \
               --build-arg MOONCAKE_WHEEL_X86_64="${MOONCAKE_WHEEL_X86_64}" \
               --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.2-devel-ubuntu22.04 \
-              --cache-from type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-release-cache:x86_64-cu130-ubuntu2204,mode=max \
-              --cache-to type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-release-cache:x86_64-cu130-ubuntu2204,mode=max,compression=zstd \
+              --cache-from type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache:release-x86_64-cu130-ubuntu2204,mode=max \
+              --cache-to type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache:release-x86_64-cu130-ubuntu2204,mode=max,compression=zstd,ignore-error=true \
               --target vllm-openai \
               --load \
               --progress plain \
@@ -212,8 +212,8 @@ steps:
               --build-arg INSTALL_KV_CONNECTORS=true \
               --build-arg MOONCAKE_WHEEL_AARCH64="${MOONCAKE_WHEEL_AARCH64_2_35}" \
               --build-arg MOONCAKE_WHEEL_X86_64="${MOONCAKE_WHEEL_X86_64}" \
-              --cache-from type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-release-cache:x86_64-cu129-ubuntu2204,mode=max \
-              --cache-to type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-release-cache:x86_64-cu129-ubuntu2204,mode=max,compression=zstd \
+              --cache-from type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache:release-x86_64-cu129-ubuntu2204,mode=max \
+              --cache-to type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache:release-x86_64-cu129-ubuntu2204,mode=max,compression=zstd,ignore-error=true \
               --target vllm-openai \
               --load \
               --progress plain \
@@ -270,8 +270,8 @@ steps:
               --build-arg MOONCAKE_WHEEL_AARCH64="${MOONCAKE_WHEEL_AARCH64_2_39}" \
               --build-arg MOONCAKE_WHEEL_X86_64="${MOONCAKE_WHEEL_X86_64}" \
               --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.2-devel-ubuntu24.04 \
-              --cache-from type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-release-cache:x86_64-cu130-ubuntu2404,mode=max \
-              --cache-to type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-release-cache:x86_64-cu130-ubuntu2404,mode=max,compression=zstd \
+              --cache-from type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache:release-x86_64-cu130-ubuntu2404,mode=max \
+              --cache-to type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache:release-x86_64-cu130-ubuntu2404,mode=max,compression=zstd,ignore-error=true \
               --target vllm-openai \
               --load \
               --progress plain \
@@ -329,8 +329,8 @@ steps:
               --build-arg INSTALL_KV_CONNECTORS=true \
               --build-arg MOONCAKE_WHEEL_AARCH64="${MOONCAKE_WHEEL_AARCH64_2_39}" \
               --build-arg MOONCAKE_WHEEL_X86_64="${MOONCAKE_WHEEL_X86_64}" \
-              --cache-from type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-release-cache:x86_64-cu129-ubuntu2404,mode=max \
-              --cache-to type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-release-cache:x86_64-cu129-ubuntu2404,mode=max,compression=zstd \
+              --cache-from type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache:release-x86_64-cu129-ubuntu2404,mode=max \
+              --cache-to type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache:release-x86_64-cu129-ubuntu2404,mode=max,compression=zstd,ignore-error=true \
               --target vllm-openai \
               --load \
               --progress plain \

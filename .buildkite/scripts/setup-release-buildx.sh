@@ -11,8 +11,7 @@
 # fall back to a docker-container builder. The default `docker` driver cannot
 # export registry cache, so we never fall back to it here.
 #
-# Also logs in to the private ECR that hosts the release BuildKit cache
-# (vllm-release-cache); the release queues are granted read/write by ci-infra.
+# Also logs in to the private ECR that hosts the shared BuildKit cache.
 set -euo pipefail
 
 CACHE_REGISTRY="936637512419.dkr.ecr.us-east-1.amazonaws.com"
