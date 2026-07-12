@@ -86,6 +86,6 @@ def test_moe_fused_mul_sum_expert_map(num_tokens, top_k, hidden_size, with_inval
     out = moe_fused_mul_sum(
         inputs, topk_weights, topk_ids=topk_ids, expert_map=expert_map
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     ref = ref_impl(inputs, topk_weights, topk_ids, expert_map)
     torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
