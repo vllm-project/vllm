@@ -495,6 +495,8 @@ class DeepseekV32Attention(MLAAttention):
                 self.indexer.max_total_seq_len,
                 self.topk_indices_buffer,
                 True,  # skip_k_cache_insert
+                False,  # use_pcp
+                "",  # short-prefill scoring skip is not used by this path
                 False,  # use_fp4_cache
                 # fused_norm_rope already cleared the topk buffer this forward.
                 skip_topk_buffer_clear=True,
