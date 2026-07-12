@@ -37,6 +37,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
     TrtLlmNvFp4ExpertsModular,
 )
+from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
+    prepare_static_weights_for_trtllm_fp4_moe,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 from vllm.utils.math_utils import next_power_of_2
@@ -257,6 +260,135 @@ def test_trtllm_fp4_moe_no_graph(
         )
 
         torch.testing.assert_close(torch_output, trtllm_output, atol=2e-1, rtol=2e-1)
+
+
+@pytest.mark.parametrize("num_experts", [1, 3])
+@pytest.mark.parametrize("is_gated_activation", [False, True])
+@torch.inference_mode()
+def test_prepare_static_weights_matches_per_expert_reference(
+    num_experts: int, is_gated_activation: bool
+):
+    """The preallocated path must preserve the TRT-LLM byte layout."""
+    from flashinfer import nvfp4_block_scale_interleave
+    from flashinfer.fused_moe.core import (
+        _maybe_get_cached_w3_w1_permute_indices,
+        get_w2_permute_indices_with_cache,
+    )
+
+    hidden_size = 256
+    intermediate_size = 128
+    gemm1_rows = intermediate_size * (2 if is_gated_activation else 1)
+
+    def make_bytes(shape: tuple[int, ...]) -> torch.Tensor:
+        return torch.randint(0, 256, shape, device="cuda", dtype=torch.uint8)
+
+    gemm1_weights = make_bytes((num_experts, gemm1_rows, hidden_size // 2))
+    gemm1_scales = make_bytes((num_experts, gemm1_rows, hidden_size // 16))
+    gemm2_weights = make_bytes((num_experts, hidden_size, intermediate_size // 2))
+    gemm2_scales = make_bytes((num_experts, hidden_size, intermediate_size // 16))
+
+    actual = prepare_static_weights_for_trtllm_fp4_moe(
+        gemm1_weights,
+        gemm2_weights,
+        gemm1_scales,
+        gemm2_scales,
+        hidden_size,
+        intermediate_size,
+        num_experts,
+        is_gated_activation,
+    )
+
+    cache: dict = {}
+    gemm1_weight_indices = _maybe_get_cached_w3_w1_permute_indices(
+        cache,
+        gemm1_weights[0],
+        128,
+        is_gated_act_gemm=is_gated_activation,
+    )
+    gemm1_scale_indices = _maybe_get_cached_w3_w1_permute_indices(
+        cache,
+        gemm1_scales[0],
+        128,
+        num_elts_per_sf=16,
+        is_gated_act_gemm=is_gated_activation,
+    )
+    gemm2_weight_indices = get_w2_permute_indices_with_cache(
+        cache, gemm2_weights[0], 128
+    )
+    gemm2_scale_indices = get_w2_permute_indices_with_cache(
+        cache, gemm2_scales[0], 128, num_elts_per_sf=16
+    )
+
+    expected_dtypes = (
+        torch.uint8,
+        torch.float8_e4m3fn,
+        torch.uint8,
+        torch.float8_e4m3fn,
+    )
+    expected = (
+        torch.stack([weights[gemm1_weight_indices] for weights in gemm1_weights]),
+        torch.stack(
+            [
+                nvfp4_block_scale_interleave(scales[gemm1_scale_indices])
+                for scales in gemm1_scales
+            ]
+        ).reshape(actual[1].shape),
+        torch.stack([weights[gemm2_weight_indices] for weights in gemm2_weights]),
+        torch.stack(
+            [
+                nvfp4_block_scale_interleave(scales[gemm2_scale_indices])
+                for scales in gemm2_scales
+            ]
+        ).reshape(actual[3].shape),
+    )
+    for output, reference, dtype in zip(actual, expected, expected_dtypes):
+        assert output.dtype == dtype
+        assert output.is_contiguous()
+        assert torch.equal(output.view(torch.uint8), reference.view(torch.uint8))
+
+
+@pytest.mark.parametrize("is_gated_activation", [False, True])
+@torch.inference_mode()
+def test_prepare_static_weights_supports_zero_local_experts(
+    is_gated_activation: bool,
+):
+    hidden_size = 256
+    intermediate_size = 128
+    gemm1_rows = intermediate_size * (2 if is_gated_activation else 1)
+
+    input_shapes = (
+        (0, gemm1_rows, hidden_size // 2),
+        (0, hidden_size, intermediate_size // 2),
+        (0, gemm1_rows, hidden_size // 16),
+        (0, hidden_size, intermediate_size // 16),
+    )
+    inputs = tuple(
+        torch.empty(shape, device="cuda", dtype=torch.uint8) for shape in input_shapes
+    )
+    actual = prepare_static_weights_for_trtllm_fp4_moe(
+        *inputs,
+        hidden_size,
+        intermediate_size,
+        0,
+        is_gated_activation,
+    )
+
+    expected_shapes = (
+        (0, gemm1_rows, hidden_size // 2),
+        (0, gemm1_rows, hidden_size // 16),
+        (0, hidden_size, intermediate_size // 2),
+        (0, hidden_size, intermediate_size // 16),
+    )
+    expected_dtypes = (
+        torch.uint8,
+        torch.float8_e4m3fn,
+        torch.uint8,
+        torch.float8_e4m3fn,
+    )
+    for output, shape, dtype in zip(actual, expected_shapes, expected_dtypes):
+        assert output.shape == shape
+        assert output.dtype == dtype
+        assert output.is_contiguous()
 
 
 if __name__ == "__main__":
