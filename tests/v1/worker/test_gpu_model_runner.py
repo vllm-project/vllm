@@ -857,6 +857,51 @@ def test_reload_weights_before_load_model(model_runner):
         model_runner.reload_weights()
 
 
+@pytest.mark.parametrize(
+    ("runner_type", "is_last_rank", "should_allocate"),
+    [
+        ("generate", True, True),
+        ("generate", False, False),
+        ("pooling", True, False),
+        ("draft", True, False),
+    ],
+)
+def test_sampler_workspace_allocation_is_limited_to_last_generation_rank(
+    monkeypatch: pytest.MonkeyPatch,
+    runner_type: str,
+    is_last_rank: bool,
+    should_allocate: bool,
+):
+    runner = object.__new__(GPUModelRunner)
+    runner.sampler = SimpleNamespace(sampler_workspace="stale")
+    runner.model_config = SimpleNamespace(
+        runner_type=runner_type,
+        get_vocab_size=lambda: 11,
+    )
+    runner.max_num_reqs = 7
+    runner.device = torch.device("cpu")
+
+    allocated = torch.empty((7, 11), dtype=torch.float32)
+    empty = Mock(return_value=allocated)
+    monkeypatch.setattr(gpu_model_runner_module.torch, "empty", empty)
+    monkeypatch.setattr(
+        gpu_model_runner_module,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_last_rank=is_last_rank),
+    )
+
+    GPUModelRunner._allocate_sampler_workspace(runner)
+
+    if should_allocate:
+        empty.assert_called_once_with(
+            (7, 11), dtype=torch.float32, device=torch.device("cpu")
+        )
+        assert runner.sampler.sampler_workspace is allocated
+    else:
+        empty.assert_not_called()
+        assert runner.sampler.sampler_workspace is None
+
+
 def test_sample_passes_reordered_draft_probs_to_rejection_sampler():
     runner = object.__new__(GPUModelRunner)
     runner.use_async_scheduling = False

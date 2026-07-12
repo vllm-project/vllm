@@ -30,6 +30,70 @@ def _create_fake_logits(batch_size: int, vocab_size: int) -> torch.Tensor:
     return fake_logits
 
 
+def test_sampler_workspace_reused_for_float32_cast():
+    sampler = Sampler()
+    logits = torch.arange(8, dtype=torch.float16).reshape(2, 4)
+    workspace = torch.empty((3, 4), dtype=torch.float32)
+    sampler.sampler_workspace = workspace
+
+    logits_fp32 = sampler._convert_logits_to_float32(logits)
+
+    assert logits_fp32.data_ptr() == workspace.data_ptr()
+    torch.testing.assert_close(logits_fp32, logits.to(torch.float32))
+
+
+def test_sampler_workspace_falls_back_when_too_small():
+    sampler = Sampler()
+    logits = torch.arange(8, dtype=torch.float16).reshape(2, 4)
+    sampler.sampler_workspace = torch.empty((1, 4), dtype=torch.float32)
+
+    logits_fp32 = sampler._convert_logits_to_float32(logits)
+
+    assert logits_fp32.shape == logits.shape
+    assert logits_fp32.dtype == torch.float32
+    assert logits_fp32.data_ptr() != sampler.sampler_workspace.data_ptr()
+    torch.testing.assert_close(logits_fp32, logits.to(torch.float32))
+
+
+def test_sampler_workspace_leaves_float32_logits_in_place():
+    sampler = Sampler()
+    logits = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+    sampler.sampler_workspace = torch.empty((2, 4), dtype=torch.float32)
+
+    logits_fp32 = sampler._convert_logits_to_float32(logits)
+
+    assert logits_fp32 is logits
+
+
+def test_sampler_full_processed_logits_do_not_alias_reusable_workspace():
+    batch_size = 2
+    vocab_size = 4
+    sampler = Sampler(logprobs_mode="processed_logits")
+    sampler.sampler_workspace = torch.empty(
+        (batch_size, vocab_size), dtype=torch.float32
+    )
+    logits = torch.arange(batch_size * vocab_size, dtype=torch.float16).reshape(
+        batch_size, vocab_size
+    )
+    metadata = _create_default_sampling_metadata(
+        num_output_tokens=0,
+        batch_size=batch_size,
+        vocab_size=vocab_size,
+        device=torch.device("cpu"),
+    )
+    metadata.max_num_logprobs = -1
+
+    output = sampler(logits, metadata)
+
+    assert output.logprobs_tensors is not None
+    returned_logits = output.logprobs_tensors.logprobs
+    assert (
+        returned_logits.untyped_storage().data_ptr()
+        != sampler.sampler_workspace.untyped_storage().data_ptr()
+    )
+    torch.testing.assert_close(returned_logits, logits.to(torch.float32))
+
+
 def _create_penalty_tensor(
     batch_size: int, penalty_value: float, device: torch.device
 ) -> torch.Tensor:
