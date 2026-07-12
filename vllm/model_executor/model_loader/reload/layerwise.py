@@ -20,6 +20,7 @@ from .meta import (
     materialize_layer,
     restore_layer_on_meta,
 )
+from .sanitize import restore_layer_refs
 from .types import LayerReloadingInfo
 from .utils import (
     get_info_size,
@@ -100,11 +101,18 @@ def initialize_layerwise_reload(model: torch.nn.Module):
     model._original_do_torchao_reload = getattr(model, "_do_torchao_reload", False)
     model._do_torchao_reload = False
 
+    direct_layers = 0
+    layerwise_layers = 0
     for layer in model.modules():
         info = get_layerwise_info(layer)
 
         # Skip if the layer has already been initialized
         if info.can_load():
+            continue
+
+        if _supports_direct_weight_reload(layer, info):
+            _restore_loading_metadata(layer, info)
+            direct_layers += 1
             continue
 
         # Save current tensors for later copying
@@ -117,6 +125,63 @@ def initialize_layerwise_reload(model: torch.nn.Module):
 
         # Wrap weight loaders to buffer loading
         initialize_online_processing(layer)
+        layerwise_layers += 1
+
+    logger.info_once(
+        "Weight reload uses %d direct layers and %d layerwise layers",
+        direct_layers,
+        layerwise_layers,
+    )
+
+
+def _supports_direct_weight_reload(
+    layer: torch.nn.Module, info: LayerReloadingInfo
+) -> bool:
+    if isinstance(layer, (Attention, MLAAttention)):
+        return False
+
+    restore_params, restore_buffers = info.restore_metadata
+    runtime_params, runtime_buffers = get_layer_params_buffers(layer)
+    if not _matching_tensor_layouts(restore_params, runtime_params):
+        return False
+    if not _matching_tensor_layouts(restore_buffers, runtime_buffers):
+        return False
+
+    quant_method = getattr(layer, "quant_method", None)
+    if not isinstance(quant_method, QuantizeMethodBase):
+        return True
+    return quant_method.supports_direct_weight_reload(layer)
+
+
+def _restore_loading_metadata(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
+    restore_params, restore_buffers = info.restore_metadata
+    runtime_params, runtime_buffers = get_layer_params_buffers(layer)
+    for checkpoint_tensors, runtime_tensors in (
+        (restore_params, runtime_params),
+        (restore_buffers, runtime_buffers),
+    ):
+        for name, checkpoint_tensor in checkpoint_tensors.items():
+            runtime_tensor = runtime_tensors[name]
+            checkpoint_tensor = restore_layer_refs(checkpoint_tensor, layer)
+            runtime_tensor.__class__ = checkpoint_tensor.__class__
+            runtime_tensor.__dict__.update(checkpoint_tensor.__dict__)
+
+
+def _matching_tensor_layouts(
+    checkpoint_tensors: dict[str, torch.Tensor],
+    runtime_tensors: dict[str, torch.Tensor],
+) -> bool:
+    for name, checkpoint_tensor in checkpoint_tensors.items():
+        runtime_tensor = runtime_tensors.get(name)
+        if runtime_tensor is None:
+            return False
+        if (
+            checkpoint_tensor.shape != runtime_tensor.shape
+            or checkpoint_tensor.stride() != runtime_tensor.stride()
+            or checkpoint_tensor.dtype != runtime_tensor.dtype
+        ):
+            return False
+    return True
 
 
 def initialize_online_processing(layer: torch.nn.Module):

@@ -10,6 +10,7 @@ from torch.nn.parameter import UninitializedParameter
 
 import vllm.model_executor.model_loader.reload.meta as reload_meta
 from vllm.model_executor.layers.linear import QKVParallelLinear
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
@@ -99,6 +100,41 @@ class _NonPersistentBufferLayer(torch.nn.Module):
         self.register_buffer("scale", torch.tensor(0.25), persistent=False)
 
 
+class _DirectReloadMethod(QuantizeMethodBase):
+    def __init__(self, supported: bool):
+        self.supported = supported
+        self.process_calls = 0
+
+    def create_weights(self, layer, *weight_args, **extra_weight_attrs):
+        raise NotImplementedError
+
+    def apply(self, layer, *args, **kwargs):
+        raise NotImplementedError
+
+    def process_weights_after_loading(self, layer):
+        self.process_calls += 1
+
+    def supports_direct_weight_reload(self, layer):
+        return self.supported
+
+
+class _DirectReloadLayer(torch.nn.Module):
+    def __init__(self, supported: bool):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.arange(6.0).reshape(2, 3))
+        self.weight.weight_loader = default_weight_loader
+        self.quant_method = _DirectReloadMethod(supported)
+
+
+class _DirectReloadParameter(torch.nn.Parameter):
+    def load_merged_weight(self, loaded_weight):
+        self.data.copy_(loaded_weight)
+
+
+def _merged_weight_loader(param, loaded_weight):
+    param.load_merged_weight(loaded_weight)
+
+
 def test_move_metatensors():
     tensor = torch.empty((1, 2, 3))
     meta_tensor = to_meta_tensor(tensor)
@@ -135,6 +171,61 @@ def test_reload_lifecycle():
         assert tensor.shape == materialized_tensor.shape
         assert tensor.__class__ == materialized_tensor.__class__
         assert tensor.__dict__ == materialized_tensor.__dict__
+
+
+@pytest.mark.parametrize("supported", [True, False])
+def test_direct_weight_reload_preserves_runtime_storage(supported):
+    layer = _DirectReloadLayer(supported)
+    model = torch.nn.Sequential(layer)
+    original_data_ptr = layer.weight.data_ptr()
+    loaded_weight = torch.full_like(layer.weight, 7.0)
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+
+    if supported:
+        assert not layer.weight.is_meta
+    else:
+        assert layer.weight.is_meta
+
+    layer.weight.weight_loader(layer.weight, loaded_weight)
+    finalize_layerwise_reload(model, model_config=None)
+
+    assert torch.equal(layer.weight, loaded_weight)
+    assert layer.weight.data_ptr() == original_data_ptr
+    assert layer.quant_method.process_calls == (0 if supported else 1)
+
+
+def test_direct_weight_reload_requires_matching_layout():
+    layer = _DirectReloadLayer(supported=True)
+    model = torch.nn.Sequential(layer)
+
+    record_metadata_for_reloading(model)
+    layer.weight = torch.nn.Parameter(layer.weight.t().contiguous())
+    layer.weight.weight_loader = default_weight_loader
+    initialize_layerwise_reload(model)
+
+    assert layer.weight.is_meta
+
+
+def test_direct_weight_reload_restores_parameter_loading_metadata():
+    layer = _DirectReloadLayer(supported=True)
+    layer.weight = _DirectReloadParameter(layer.weight.data)
+    layer.weight.weight_loader = _merged_weight_loader
+    model = torch.nn.Sequential(layer)
+    loaded_weight = torch.full_like(layer.weight, 7.0)
+
+    record_metadata_for_reloading(model)
+    original_data_ptr = layer.weight.data_ptr()
+    layer.weight = torch.nn.Parameter(layer.weight.data)
+    initialize_layerwise_reload(model)
+
+    assert isinstance(layer.weight, _DirectReloadParameter)
+    layer.weight.weight_loader(layer.weight, loaded_weight)
+    finalize_layerwise_reload(model, model_config=None)
+
+    assert torch.equal(layer.weight, loaded_weight)
+    assert layer.weight.data_ptr() == original_data_ptr
 
 
 def test_materialize_layer_preserves_non_meta_tensors():

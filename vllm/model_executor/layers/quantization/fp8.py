@@ -18,6 +18,9 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
     CutlassFP8ScaledMMLinearKernel,
     MarlinFP8ScaledMMLinearKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+    CutlassFp8BlockScaledMMKernel,
+)
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEMethodBase,
@@ -443,6 +446,13 @@ class Fp8LinearMethod(LinearMethodBase):
 
         self.fp8_linear.process_weights_after_loading(layer)
 
+    def supports_direct_weight_reload(self, layer: torch.nn.Module) -> bool:
+        return (
+            self.block_quant
+            and isinstance(self.fp8_linear, CutlassFp8BlockScaledMMKernel)
+            and not current_platform.is_fp8_fnuz()
+        )
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -760,6 +770,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # Shuffle weights to runtime format and setup kernel.
         self._setup_kernel(
             layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
+        )
+
+    def supports_direct_weight_reload(self, layer: torch.nn.Module) -> bool:
+        return (
+            self.block_quant
+            and self.fp8_backend in (Fp8MoeBackend.TRITON, Fp8MoeBackend.BATCHED_TRITON)
+            and not current_platform.is_fp8_fnuz()
         )
 
     def maybe_make_prepare_finalize(

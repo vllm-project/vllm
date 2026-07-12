@@ -71,6 +71,10 @@ class QuantizeMethodBase(ABC):
         """
         return
 
+    def supports_direct_weight_reload(self, layer: nn.Module) -> bool:
+        """Whether checkpoint weights can reload into runtime tensors directly."""
+        return False
+
 
 def method_has_implemented_embedding(method_class: type[QuantizeMethodBase]) -> bool:
     """

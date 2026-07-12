@@ -217,6 +217,9 @@ class UnquantizedLinearMethod(LinearMethodBase):
 
             dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
 
+    def supports_direct_weight_reload(self, layer: torch.nn.Module) -> bool:
+        return not current_platform.is_cpu()
+
     def apply(
         self,
         layer: torch.nn.Module,
