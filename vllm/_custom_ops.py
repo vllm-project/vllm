@@ -2067,8 +2067,13 @@ def wvSplitKQ(
 
 
 # moe
-def moe_sum(input: torch.Tensor, output: torch.Tensor):
-    torch.ops._moe_C.moe_sum(input, output)
+def moe_sum(
+    input: torch.Tensor,
+    output: torch.Tensor,
+    topk_ids: torch.Tensor | None = None,
+    expert_map: torch.Tensor | None = None,
+):
+    torch.ops._moe_C.moe_sum(input, output, topk_ids, expert_map)
 
 
 def moe_align_block_size(
