@@ -308,12 +308,15 @@ def _reshape_kv_cache(
                 kernel_num_blocks = num_blocks * num_blocks_per_kv_block
                 # Skipped layers (--kv-cache-dtype-skip-layers) keep the
                 # unquantized shape; only the quantized primary uses the
-                # quantized cache dtype's (possibly packed) layout.
+                # quantized cache dtype's (possibly packed) layout. Prefer the
+                # spec's own cache_dtype_str: it reflects the layer's backend
+                # (e.g. fp8_ds_mla for sparse MLA) even when it diverges from
+                # the global cache_dtype.
                 layer_cache_dtype = (
                     "auto"
                     if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
                     and not isinstance(kv_cache_spec, TQFullAttentionSpec)
-                    else cache_dtype
+                    else getattr(kv_cache_spec, "cache_dtype_str", None) or cache_dtype
                 )
                 kv_cache_shape = group.backend.get_kv_cache_shape(
                     kernel_num_blocks,

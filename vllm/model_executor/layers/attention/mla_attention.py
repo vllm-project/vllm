@@ -277,6 +277,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheSpec,
     MLAAttentionSpec,
+    get_kv_quant_mode,
 )
 
 logger = init_logger(__name__)
@@ -1001,12 +1002,19 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, vllm_config.model_config
         )
+        # Use the layer's own kv_cache_dtype, not the global
+        # cache_config.cache_dtype: sparse MLA backends canonicalize fp8 to
+        # fp8_ds_mla and write it back to the global config, which backends
+        # of other layers do not necessarily support. kv_quant_mode must
+        # match cache_dtype_str so the model runner reshapes the cache with
+        # the same layout it was allocated with (#48405).
         return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_size,
             dtype=kv_cache_dtype,
-            cache_dtype_str=vllm_config.cache_config.cache_dtype,
+            cache_dtype_str=self.kv_cache_dtype,
+            kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
