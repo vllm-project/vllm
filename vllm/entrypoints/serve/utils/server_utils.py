@@ -509,13 +509,16 @@ async def validation_exception_handler(req: Request, exc: RequestValidationError
         if loc:
             param = clean_loc_for_param(loc)
 
-    exc_str = str(exc)
-    errors_str = str(errors)
-
-    if errors and errors_str and errors_str != exc_str:
-        message = f"{exc_str} {errors_str}"
+    # Build the message from exc.errors() instead of str(exc) - str(exc)
+    # leaks the server's file path via FastAPI's endpoint context.
+    if errors:
+        count = len(errors)
+        label = "error" if count == 1 else "errors"
+        message = f"{count} validation {label}:\n"
+        message += "".join(f"  {err}\n" for err in errors)
+        message = message.rstrip()
     else:
-        message = exc_str
+        message = "Validation error"
 
     err = ErrorResponse(
         error=ErrorInfo(
