@@ -600,10 +600,6 @@ re_quote_pytest_markers() {
 # Main
 ###############################################################################
 
-if [[ "${VLLM_CI_RUN_AMD_TEST_LIB_ONLY:-0}" == "1" ]]; then
-  return 0 2>/dev/null || exit 0
-fi
-
 if is_native_runtime; then
   echo "--- Native in-pod ROCm CI (AMD_CI_RUNTIME=${AMD_CI_RUNTIME:-unset}, NATIVE_CI=${NATIVE_CI:-unset})"
   artifact_work_dir=""

@@ -2121,8 +2121,4 @@ main() {
     upload_wheel_artifacts_if_present
 }
 
-if [[ "${VLLM_CI_BAKE_ROCM_LIB_ONLY:-0}" == "1" ]]; then
-    return 0 2>/dev/null || exit 0
-fi
-
 main "$@"

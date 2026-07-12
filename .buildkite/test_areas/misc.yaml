@@ -282,8 +282,6 @@ steps:
   commands:
   - bash standalone_tests/python_only_compile.sh
   mirror:
-    # This mirror intentionally leaves native_ci disabled because the test
-    # requires the full source tree rather than the thin native artifact.
     amd:
       device: mi325_1
       timeout_in_minutes: 45
