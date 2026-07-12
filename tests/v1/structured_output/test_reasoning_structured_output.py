@@ -3,7 +3,7 @@
 
 """Unit tests for reasoning-aware structured output functionality (PR #25515)."""
 
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 
@@ -209,37 +209,11 @@ class TestReasoningStructuredOutput:
             mock_request_with_structured_output
         )
 
-        # Should set reasoning_ended to True but return False for this step
+        # The scheduler trims the reasoning prefix before advancing the grammar.
         assert (
             mock_request_with_structured_output.structured_output_request.reasoning_ended
             is True
         )
-        assert result is False
-
-    def test_should_advance_reasoning_just_ended_with_spec_decode_structural_tag(
-        self,
-        manager_with_reasoner,
-        mock_request_with_structured_output,
-    ):
-        """When reasoning ends this step, advance immediately for structural
-        tags with speculative decoding."""
-        structured_req = mock_request_with_structured_output.structured_output_request
-        structured_req.reasoning_ended = False
-        structured_req.structured_output_key = (
-            StructuredOutputOptions.STRUCTURAL_TAG,
-            "{}",
-        )
-        reasoner = MockReasoner(tokenizer=Mock())
-        reasoner.is_reasoning_end_streaming.return_value = True
-        structured_req.reasoner = reasoner
-
-        manager_with_reasoner.vllm_config.speculative_config = Mock()
-
-        result = manager_with_reasoner.should_advance(
-            mock_request_with_structured_output
-        )
-
-        assert structured_req.reasoning_ended is True
         assert result is True
 
     def test_should_advance_reasoning_already_ended(
@@ -305,7 +279,7 @@ class TestReasoningStructuredOutput:
         assert list(called_delta) == new_token_ids
 
         assert structured_req.reasoning_ended is True
-        assert result is False
+        assert result is True
 
     def test_should_advance_without_new_token_ids_falls_back(
         self,
@@ -334,16 +308,12 @@ class TestReasoningStructuredOutput:
         assert list(called_delta) == [4, 5]
         assert result is False
 
-    def test_should_advance_drains_post_marker_into_grammar(
+    def test_should_advance_trims_reasoning_prefix_for_json(
         self,
         manager_with_reasoner,
         mock_request_with_structured_output,
     ):
-        """On the step that ends reasoning, post-marker content tokens are
-        fed to the grammar so the next step's bitmask reflects the post-
-        marker FSM state. Without this, the model can emit a duplicate
-        opening token (e.g. "{{" for json_object).
-        """
+        """JSON uses the common trim-then-advance path at the boundary."""
         structured_req = mock_request_with_structured_output.structured_output_request
         structured_req.reasoning_ended = False
         structured_req.structured_output_key = (
@@ -372,131 +342,10 @@ class TestReasoningStructuredOutput:
             new_token_ids=new_token_ids,
         )
 
-        # grammar.accept_tokens was called exactly once with the post-marker
-        # portion of new_token_ids, excluding the reasoning prefix and the
-        # marker itself.
-        accept_calls = structured_req.grammar.accept_tokens.call_args_list
-        assert len(accept_calls) == 1
-        _, fed_tokens = accept_calls[0].args
-        assert fed_tokens == [271, 5005]
-
-        assert structured_req.reasoning_ended is True
-        # Deferred backend: still return False so the scheduler does not
-        # also feed full new_token_ids (which would include reasoning).
-        assert result is False
-
-    def test_should_advance_no_postmarker_skips_grammar_accept(
-        self,
-        manager_with_reasoner,
-        mock_request_with_structured_output,
-    ):
-        """When the marker is the last token in new_token_ids, there is no
-        post-marker tail to drain, so grammar.accept_tokens is not called.
-        """
-        structured_req = mock_request_with_structured_output.structured_output_request
-        structured_req.reasoning_ended = False
-        structured_req.structured_output_key = (
-            StructuredOutputOptions.JSON_OBJECT,
-            "{}",
-        )
-
-        marker = 248069
-
-        class MarkerReasoner:
-            def __init__(self, *_, **__):
-                pass
-
-            def is_reasoning_end_streaming(self, input_ids, delta_ids):
-                return marker in list(delta_ids)
-
-        structured_req.reasoner = MarkerReasoner()
-
-        new_token_ids = [9, 198, marker]
-        mock_request_with_structured_output.all_token_ids = (
-            [1, 2, 3] + new_token_ids
-        )
-
-        result = manager_with_reasoner.should_advance(
-            mock_request_with_structured_output,
-            new_token_ids=new_token_ids,
-        )
-
         structured_req.grammar.accept_tokens.assert_not_called()
         assert structured_req.reasoning_ended is True
-        assert result is False
-
-    def test_should_advance_structural_tag_with_new_token_ids(
-        self,
-        manager_with_reasoner,
-        mock_request_with_structured_output,
-    ):
-        """The structural-tag path uses the exact current-step window."""
-        structured_req = mock_request_with_structured_output.structured_output_request
-        structured_req.reasoning_ended = False
-        structured_req.structured_output_key = (
-            StructuredOutputOptions.STRUCTURAL_TAG,
-            "{}",
-        )
-
-        marker = 248069
-        reasoner = MockReasoner(tokenizer=Mock())
-        reasoner.is_reasoning_end_streaming = Mock(
-            side_effect=lambda input_ids, delta_ids: marker in list(delta_ids)
-        )
-        structured_req.reasoner = reasoner
-        manager_with_reasoner.vllm_config.speculative_config = Mock()
-
-        new_token_ids = [9, marker, 271]
-        mock_request_with_structured_output.all_token_ids = (
-            [1, 2, 3] + new_token_ids
-        )
-
-        result = manager_with_reasoner.should_advance(
-            mock_request_with_structured_output,
-            new_token_ids=new_token_ids,
-        )
-
         assert result is True
-        assert structured_req.reasoning_end_token_index == 4
+        assert structured_req.reasoning_end_token_index == 5
         assert manager_with_reasoner.trim_reasoning_for_advance(
             mock_request_with_structured_output, new_token_ids
-        ) == [271]
-
-    def test_should_advance_tolerates_rejected_post_marker_tokens(
-        self,
-        manager_with_reasoner,
-        mock_request_with_structured_output,
-    ):
-        """A rejected speculative tail must not fail the request."""
-        structured_req = mock_request_with_structured_output.structured_output_request
-        structured_req.reasoning_ended = False
-        structured_req.structured_output_key = (
-            StructuredOutputOptions.JSON_OBJECT,
-            "{}",
-        )
-        structured_req.grammar.accept_tokens.return_value = False
-
-        marker = 248069
-        reasoner = MockReasoner(tokenizer=Mock())
-        reasoner.is_reasoning_end_streaming = Mock(
-            side_effect=lambda input_ids, delta_ids: marker in list(delta_ids)
-        )
-        structured_req.reasoner = reasoner
-
-        new_token_ids = [9, marker, 271]
-        mock_request_with_structured_output.all_token_ids = (
-            [1, 2, 3] + new_token_ids
-        )
-
-        with patch("vllm.v1.structured_output.logger.warning") as warning:
-            result = manager_with_reasoner.should_advance(
-                mock_request_with_structured_output,
-                new_token_ids=new_token_ids,
-            )
-
-        assert result is False
-        assert structured_req.reasoning_ended is True
-        structured_req.grammar.accept_tokens.assert_called_once_with(
-            "mock_req", [271]
-        )
-        warning.assert_called_once()
+        ) == [271, 5005]

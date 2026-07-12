@@ -7,7 +7,6 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.import_utils import LazyLoader
@@ -15,7 +14,6 @@ from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
-    StructuredOutputOptions,
 )
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 
@@ -28,9 +26,6 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 else:
     torch = LazyLoader("torch", globals(), "torch")
-
-
-logger = init_logger(__name__)
 
 
 class StructuredOutputManager:
@@ -422,54 +417,13 @@ class StructuredOutputManager:
         if reasoner.is_reasoning_end_streaming(all_token_ids, delta_ids):
             structured_req.reasoning_ended = True
 
-            # Locate the reasoning-end marker within the step once; both
-            # branches below rely on it. Everything up to and including the
-            # marker is reasoning content and must never reach the grammar.
+            # Record the boundary so the scheduler can exclude reasoning tokens.
             end_index = self._find_reasoning_end_index(
                 reasoner, all_token_ids, start
             )
 
-            # Reasoning just ended this step. Defer FSM advance until the next
-            # pass (see reasoning_ended check above) for JSON/regex/choice/grammar:
-            # advancing on the closing boundary token can accept tokens that still
-            # belong to the reasoning stream. Structural tags are the only safe
-            # same-step exception: they model phased output (e.g. thinking tag ->
-            # answer tag), and speculative decoding must run grammar.validate_tokens
-            # on draft tokens produced immediately after that transition.
-            if (
-                self.vllm_config.speculative_config is not None
-                and structured_req.structured_output_key[0]
-                == StructuredOutputOptions.STRUCTURAL_TAG
-            ):
-                # The scheduler will advance the grammar with this step's
-                # tokens right away, but the step still contains reasoning
-                # content up to and including the end marker. Record where
-                # it ends so trim_reasoning_for_advance() can drop it.
-                structured_req.reasoning_end_token_index = end_index
-                return True
-
             structured_req.reasoning_end_token_index = end_index
-
-            # Deferred backends still need the post-marker tail of this step's
-            # new_token_ids to be drained into the FSM, otherwise the next
-            # step's bitmask preparation sees grammar at its initial state and
-            # the model can emit a duplicate opening token (e.g. "{{") when
-            # reasoning ended inside a spec-decode window.
-            if new_token_ids:
-                end_offset = end_index - start
-                post_marker = list(new_token_ids[end_offset + 1 :])
-                grammar = structured_req.grammar
-                if post_marker and grammar is not None:
-                    if not grammar.accept_tokens(request.request_id, post_marker):
-                        # These tokens were sampled before the grammar became
-                        # active and are not guaranteed valid; tolerate the
-                        # rejection like grammar_bitmask does post-marker.
-                        logger.warning(
-                            "Grammar rejected post-reasoning tokens %s for "
-                            "request %s; continuing without the advance.",
-                            post_marker,
-                            request.request_id,
-                        )
+            return True
 
         return False
 
