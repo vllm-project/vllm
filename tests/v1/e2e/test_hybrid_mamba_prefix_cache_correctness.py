@@ -521,7 +521,7 @@ def test_cold_concurrent_prefill_mamba_prefix_cache(
 
     # Vacuous-pass guard, checked AFTER the corruption gates: on a
     # bug-live tree the trigger mechanics themselves can suppress the
-    # probe's hits (fragmented cold prefill mis-caching plus the
+    # probe's hits (fragmented cold prefill caching the wrong state plus the
     # spec-decode boundary reservation), so a zero here is only
     # meaningful — a silently-disabled cache — when no corruption fired
     # above. On a fixed tree the >=3-block probe must hit.
