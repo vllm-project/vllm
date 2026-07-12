@@ -613,6 +613,18 @@ class OpenAIServingCompletion(GenerateBaseServing):
             )
 
         request_metadata.final_usage_info = usage
+        # x-vllm-* headers reflect a single request's timing. For multi-prompt
+        # batch requests the per-prompt FinishedRequestStats can't be
+        # meaningfully aggregated (queue/prefill/decode intervals are
+        # per-prompt), so we skip emitting headers entirely in that case.
+        # n>1 is likewise suppressed: stats belong to one of the n sequences.
+        # Token counts in usage are correctly summed across all prompts.
+        if (
+            last_final_res is not None
+            and len(final_res_batch) == 1
+            and (request.n or 1) == 1
+        ):
+            request_metadata._finished_stats = last_final_res.finished_stats
 
         per_request_metrics: PerRequestTimingMetrics | None = None
         if (

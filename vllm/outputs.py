@@ -13,7 +13,7 @@ from typing_extensions import TypeVar
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.v1.metrics.stats import RequestStateStats
+from vllm.v1.metrics.stats import FinishedRequestStats, RequestStateStats
 
 logger = init_logger(__name__)
 
@@ -104,6 +104,8 @@ class RequestOutput:
                                   None if decoder-only.
         num_cached_tokens: The number of tokens with prefix cache hit.
         kv_transfer_params: The params for remote K/V transfer.
+        finished_stats: Computed timing intervals for the finished request,
+            set on the terminal RequestOutput. Internal use only.
     """
 
     def __init__(
@@ -121,6 +123,7 @@ class RequestOutput:
         num_cached_tokens: int | None = None,
         *,
         kv_transfer_params: dict[str, Any] | None = None,
+        finished_stats: FinishedRequestStats | None = None,
         # Forward compatibility, code that uses args added in new release can
         # still run with older versions of vLLM without breaking.
         **kwargs: Any,
@@ -141,6 +144,7 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
         self.kv_transfer_params = kv_transfer_params
+        self.finished_stats = finished_stats
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
@@ -183,6 +187,7 @@ class RequestOutput:
             f"outputs={self.outputs}, "
             f"finished={self.finished}, "
             f"metrics={self.metrics}, "
+            f"finished_stats={self.finished_stats}, "
             f"lora_request={self.lora_request}, "
             f"num_cached_tokens={self.num_cached_tokens})"
         )

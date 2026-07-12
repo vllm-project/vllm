@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pytest
+
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.stats import (
     IterationStats,
     PrefillStats,
     PromptTokenStats,
     RequestStateStats,
+    compute_timing_intervals,
 )
 
 
@@ -244,3 +247,155 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
     assert stats.total == 1000
+
+
+def test_update_from_finished_request_returns_finished_stats():
+    """update_from_finished_request returns the same FinishedRequestStats it appends."""
+    iteration_stats = IterationStats()
+    req_stats = RequestStateStats(
+        arrival_time=100.0,
+        queued_ts=100.05,
+        scheduled_ts=100.10,
+        first_token_ts=100.20,
+        last_token_ts=100.50,
+        num_generation_tokens=5,
+    )
+
+    returned = iteration_stats.update_from_finished_request(
+        finish_reason=FinishReason.STOP,
+        request_id="req-1",
+        num_prompt_tokens=10,
+        max_tokens_param=None,
+        req_stats=req_stats,
+        num_cached_tokens=3,
+    )
+
+    assert returned is not None
+    assert iteration_stats.finished_requests[-1] is returned
+    assert returned.request_id == "req-1"
+    assert returned.num_cached_tokens == 3
+
+
+def test_update_from_finished_request_no_negative_intervals():
+    # Aborted before first token: first_token_ts/last_token_ts == 0.0.
+    iteration_stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=0.0)
+    req_stats.queued_ts = 1.0
+    req_stats.scheduled_ts = 1.5
+    # first_token_ts and last_token_ts remain 0.0
+
+    finished = iteration_stats.update_from_finished_request(
+        finish_reason=FinishReason.ABORT,
+        request_id="aborted-req",
+        num_prompt_tokens=10,
+        max_tokens_param=None,
+        req_stats=req_stats,
+    )
+
+    # Previously these were negative (0.0 - 1.5). Now clamped to 0.0.
+    assert finished.prefill_time == 0.0
+    assert finished.decode_time == 0.0
+    assert finished.inference_time == 0.0
+    assert finished.mean_time_per_output_token == 0.0
+    assert finished.queued_time == pytest.approx(0.5)  # measured, unchanged
+
+
+def test_update_from_finished_request_populated_unchanged():
+    iteration_stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=0.0)
+    req_stats.queued_ts = 1.0
+    req_stats.scheduled_ts = 1.5
+    req_stats.first_token_ts = 2.0
+    req_stats.last_token_ts = 3.0
+    req_stats.num_generation_tokens = 2
+
+    finished = iteration_stats.update_from_finished_request(
+        finish_reason=FinishReason.STOP,
+        request_id="ok-req",
+        num_prompt_tokens=10,
+        max_tokens_param=None,
+        req_stats=req_stats,
+    )
+
+    assert finished.queued_time == pytest.approx(0.5)
+    assert finished.prefill_time == pytest.approx(0.5)
+    assert finished.decode_time == pytest.approx(1.0)
+    assert finished.inference_time == pytest.approx(1.5)
+    assert finished.mean_time_per_output_token == pytest.approx(1.0)  # 1.0/(2-1)
+
+
+def test_update_from_finished_request_single_token_mean_is_zero():
+    # A request that finishes with exactly one output token has no
+    # inter-token interval: the core returns None for mean_per_output_token
+    # (n-1 == 0), which the engine path must coerce to 0.0 for Prometheus.
+    iteration_stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=0.0)
+    req_stats.queued_ts = 1.0
+    req_stats.scheduled_ts = 1.5
+    req_stats.first_token_ts = 2.0
+    req_stats.last_token_ts = 2.0
+    req_stats.num_generation_tokens = 1
+
+    finished = iteration_stats.update_from_finished_request(
+        finish_reason=FinishReason.STOP,
+        request_id="single-token-req",
+        num_prompt_tokens=10,
+        max_tokens_param=None,
+        req_stats=req_stats,
+    )
+
+    assert finished.mean_time_per_output_token == 0.0
+    assert finished.queued_time == pytest.approx(0.5)
+    assert finished.prefill_time == pytest.approx(0.5)
+    # decode == last - first == 0.0 (measured but zero, single token)
+    assert finished.decode_time == 0.0
+
+
+def test_compute_timing_intervals_fully_populated():
+    stats = RequestStateStats(
+        queued_ts=1.0,
+        scheduled_ts=1.5,
+        first_token_ts=2.0,
+        last_token_ts=3.0,
+        num_generation_tokens=2,
+    )
+    iv = compute_timing_intervals(stats, num_generation_tokens=10)
+    assert iv.queue == pytest.approx(0.5)
+    assert iv.prefill == pytest.approx(0.5)
+    assert iv.decode == pytest.approx(1.0)
+    assert iv.inference == pytest.approx(1.5)
+    assert iv.mean_per_output_token == pytest.approx(1.0 / 9)
+    assert iv.tokens_per_second == pytest.approx(10.0 / 1.5)
+
+
+def test_compute_timing_intervals_missing_first_token_is_none():
+    # Aborted before first token: first_token_ts/last_token_ts never set.
+    stats = RequestStateStats(queued_ts=1.0, scheduled_ts=1.5)
+    iv = compute_timing_intervals(stats, num_generation_tokens=0)
+    assert iv.queue == pytest.approx(0.5)
+    assert iv.prefill is None  # not negative (was 0 - 1.5 = -1.5)
+    assert iv.decode is None
+    assert iv.inference is None
+    assert iv.mean_per_output_token is None
+    assert iv.tokens_per_second is None
+
+
+def test_compute_timing_intervals_mean_itl_needs_two_tokens():
+    stats = RequestStateStats(
+        queued_ts=1.0, scheduled_ts=1.5, first_token_ts=2.0, last_token_ts=3.0
+    )
+    iv = compute_timing_intervals(stats, num_generation_tokens=1)
+    assert iv.mean_per_output_token is None  # n-1 == 0
+
+
+def test_finish_reason_importable_without_leaf_module():
+    import importlib
+
+    import vllm.v1.engine as engine
+    import vllm.v1.metrics.stats as stats  # must import w/o circular error
+
+    assert engine.FinishReason.ABORT == 2
+    assert str(engine.FinishReason.STOP) == "stop"
+    assert stats.FinishedRequestStats  # dataclass importable
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("vllm.v1.finish_reason")

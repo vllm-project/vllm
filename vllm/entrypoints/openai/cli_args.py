@@ -150,6 +150,11 @@ class BaseFrontendArgs:
     """
     log_error_stack: bool = envs.VLLM_SERVER_DEV_MODE
     """If set to True, log the stack trace of error responses"""
+    enable_request_stats_headers: bool = False
+    """If set to True, include per-request timing and compute stats as
+    x-vllm-* response headers on non-streaming responses. Headers reflect
+    the same intervals reported by Prometheus (e2e, queued, prefill,
+    decode, inference, mean time per output token)."""
     tokens_only: bool = False
     """
     If set to True, only enable the Tokens In<>Out endpoint.
@@ -396,6 +401,12 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
+    if args.enable_request_stats_headers and args.disable_log_stats:
+        raise TypeError(
+            "Error: --enable-request-stats-headers requires per-request stats "
+            "collection, which is disabled by --disable-log-stats. Drop one of "
+            "the two flags."
+        )
 
     if getattr(args, "enable_per_request_metrics", False) and getattr(
         args, "disable_log_stats", False
