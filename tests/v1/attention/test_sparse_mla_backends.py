@@ -1424,6 +1424,8 @@ def test_flashmla_fp8_paths_accept_decode_subset(monkeypatch, use_mixed_batch: b
         topk_indices_buffer=topk_indices,
         num_heads=2,
         kv_lora_rank=1,
+        dcp_world_size=1,
+        need_to_return_lse_for_decode=False,
         _fp8_flash_mla_kernel=run_kernel,
     )
     impl._forward_fp8_kv_mixed_batch = MethodType(
@@ -1444,3 +1446,94 @@ def test_flashmla_fp8_paths_accept_decode_subset(monkeypatch, use_mixed_batch: b
     assert kernel_q_shapes == [(1, num_decode_tokens, 2, 3)]
     assert output.shape == (num_decode_tokens, 2, 1)
     assert lse is None
+
+
+def _build_sparse_dcp_vllm_config(
+    local_heads: int,
+    dcp_world_size: int,
+    comm_backend: str = "ag_rs",
+):
+    """Minimal sparse-MLA VllmConfig for the FlashMLASparse DCP head-envelope
+    guard. TP is simulated by mocking ``get_num_attention_heads`` to return the
+    per-rank head count, as the decode-correctness test above does.
+    """
+    kv_lora_rank = 512
+    qk_nope_head_dim = 128
+    qk_rope_head_dim = 64
+    v_head_dim = 128
+    head_size = kv_lora_rank + qk_rope_head_dim
+    topk_tokens = 128
+
+    vllm_config = create_vllm_config(
+        model_name="deepseek-ai/DeepSeek-V2-Lite-Chat",
+        tensor_parallel_size=1,
+        max_model_len=4096,
+        block_size=64,
+        hf_config_override={
+            "index_topk": topk_tokens,
+            "attn_module_list_cfg": [{"topk_tokens": topk_tokens}],
+        },
+    )
+    model_config = vllm_config.model_config
+    model_config.dtype = torch.bfloat16
+    model_config.hf_text_config = SimpleNamespace(
+        q_lora_rank=None,
+        kv_lora_rank=kv_lora_rank,
+        qk_nope_head_dim=qk_nope_head_dim,
+        qk_rope_head_dim=qk_rope_head_dim,
+        v_head_dim=v_head_dim,
+        model_type="deepseek_v2",
+    )
+    model_config.get_num_attention_heads = MethodType(
+        lambda self, parallel_config: local_heads, model_config
+    )
+    model_config.get_num_kv_heads = MethodType(
+        lambda self, parallel_config: 1, model_config
+    )
+    model_config.get_head_size = MethodType(lambda self: head_size, model_config)
+    model_config.get_sliding_window = MethodType(lambda self: None, model_config)
+
+    vllm_config.cache_config.cache_dtype = "fp8_ds_mla"
+    vllm_config.parallel_config.decode_context_parallel_size = dcp_world_size
+    vllm_config.parallel_config.dcp_comm_backend = comm_backend
+    # The base builder clones the layer's dense-MHA prefill backend from
+    # static_forward_context; the guard tests never run prefill.
+    vllm_config.compilation_config.static_forward_context["placeholder"] = (
+        SimpleNamespace(prefill_backend=None)
+    )
+    return vllm_config
+
+
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() < (9, 0),
+    reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
+)
+@pytest.mark.parametrize(
+    "local_heads,dcp_world_size,should_raise",
+    [
+        (16, 8, True),
+        (24, 4, True),
+        (16, 4, False),
+        (16, 1, False),
+    ],
+)
+def test_fp8_dcp_head_envelope_guard(local_heads, dcp_world_size, should_raise):
+    """The fp8 decode envelope (head padding + tile-scheduler metadata) is
+    sized from the local head count while the kernel runs on the DCP-gathered
+    heads, so the builder must reject configs where the two pad differently.
+    """
+    device = torch.device(DEVICE_TYPE)
+    vllm_config = _build_sparse_dcp_vllm_config(local_heads, dcp_world_size)
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+    builder_cls = FlashMLASparseBackend.get_builder_cls()
+
+    if should_raise:
+        with pytest.raises(NotImplementedError, match="envelope"):
+            builder_cls(kv_cache_spec, ["placeholder"], vllm_config, device)
+    else:
+        builder = builder_cls(kv_cache_spec, ["placeholder"], vllm_config, device)
+        gathered_heads = local_heads * dcp_world_size
+        local_pad = 64 if local_heads <= 64 else 128
+        gathered_pad = 64 if gathered_heads <= 64 else 128
+        assert builder.fp8_decode_padded_heads == local_pad
+        assert local_pad == gathered_pad
