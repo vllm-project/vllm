@@ -92,6 +92,12 @@ class GroupOffloadConfig(NamedTuple):
     # of these groups is volatile and lacks a stable hash, so it must
     # be excluded from store and load scheduling.
     is_eagle_group: bool = False
+    # Mirrors KVCacheGroupSpec.eagle_group_is_veto_exempt (see
+    # SpeculativeConfig.has_ephemeral_draft_context()). Only meaningful when
+    # is_eagle_group is True: whether a lookup miss on this group must not
+    # veto the whole request's lookup, because the group's stored content
+    # has no request-independent reuse value (DSpark today).
+    eagle_group_is_veto_exempt: bool = False
 
 
 def get_sliding_window_size_in_blocks(
@@ -175,6 +181,17 @@ class SchedulerOffloadConfig(NamedTuple):
             for idx, g in enumerate(spec.kv_cache_config.kv_cache_groups)
             if g.is_eagle_group
         }
+        # Subset of eagle_groups whose miss must not veto the rest of the
+        # lookup (see GroupOffloadConfig.eagle_group_is_veto_exempt). Left
+        # empty in the "flag all groups" fallback below, matching
+        # HybridKVCacheCoordinator's identical fallback for the same reason:
+        # per-group veto-exemption is unknown when no group was explicitly
+        # annotated, so we conservatively keep the original behavior.
+        veto_exempt_groups = {
+            idx
+            for idx, g in enumerate(spec.kv_cache_config.kv_cache_groups)
+            if g.is_eagle_group and g.eagle_group_is_veto_exempt
+        }
 
         use_eagle = (
             spec.vllm_config.speculative_config is not None
@@ -215,6 +232,7 @@ class SchedulerOffloadConfig(NamedTuple):
                         spec.kv_cache_config.kv_cache_groups[idx]
                     ),
                     is_eagle_group=idx in eagle_groups,
+                    eagle_group_is_veto_exempt=idx in veto_exempt_groups,
                 )
                 for idx, gpu_block_size in enumerate(spec.gpu_block_size)
             ),
@@ -251,6 +269,11 @@ class RequestOffloadState:
     # time.monotonic() of this request's first deferred offload lookup;
     # None once consumed (observed) or while no lookup is pending.
     deferred_lookup_start_time: float | None = None
+    # Group indices dropped from the most recent successful _lookup() call
+    # because they are veto-exempt eagle groups that reported 0 hit blocks
+    # (see GroupOffloadConfig.eagle_group_is_veto_exempt). Consumed by
+    # update_state_after_alloc to skip prepare_load for their keys.
+    lookup_excluded_groups: frozenset[int] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
         self.group_states = tuple(
@@ -513,6 +536,16 @@ class OffloadingConnectorScheduler:
         groups (suffix lookup). Each group may tighten max_hit_size_tokens, which
         can invalidate an earlier group's result, so the loop re-runs when that
         happens until num_hit_tokens converges.
+
+        A veto-exempt eagle group (GroupOffloadConfig.eagle_group_is_veto_exempt,
+        mirroring HybridKVCacheCoordinator.find_longest_cache_hit's identical
+        mechanism) that reports zero hit blocks is dropped from the rest of
+        this lookup call instead of zeroing the whole request: such a group's
+        stored content has no request-independent reuse value, so its miss
+        does not mean the other groups' independently-confirmed hits are
+        unavailable. The excluded set is recorded on
+        req_status.lookup_excluded_groups so update_state_after_alloc knows
+        not to ask prepare_load for keys that were never confirmed present.
         """
         num_computed_tokens = req_status.num_locally_computed_tokens
         max_hit_size_tokens: int = req_status.req.num_tokens
@@ -535,6 +568,10 @@ class OffloadingConnectorScheduler:
         # in the current convergence iteration. Reset when a non-eagle group
         # tightens the hit boundary, requiring a fresh pop.
         eagle_verified: set[int] = set()
+        # Veto-exempt eagle groups dropped from this lookup call because they
+        # reported 0 hit blocks.
+        excluded_groups: set[int] = set()
+        req_status.lookup_excluded_groups = frozenset()
         while lookup_groups:
             looked_up_sliding_window: bool = False
             groups_iter = iter(lookup_groups)
@@ -600,6 +637,11 @@ class OffloadingConnectorScheduler:
                         req_status.req_context,
                     )
                 if num_hit_blocks == 0:
+                    if group_config.is_eagle_group and (
+                        group_config.eagle_group_is_veto_exempt
+                    ):
+                        excluded_groups.add(group_idx)
+                        continue
                     return 0
 
                 if num_hit_blocks is None:
@@ -626,14 +668,27 @@ class OffloadingConnectorScheduler:
                         # make another iteration on all groups to check
                         # if we still need to defer lookup
                         defer_lookup = False
-                        lookup_groups = self._lookup_groups
+                        # exclude groups already dropped this call: they'll
+                        # deterministically report 0 hits again (their data
+                        # hasn't changed).
+                        lookup_groups = tuple(
+                            g for g in self._lookup_groups if g not in excluded_groups
+                        )
                     elif looked_up_sliding_window and not lookup_groups:
                         # we need another iteration to confirm previously looked up
                         # sliding window works with the new_num_hit_tokens
-                        lookup_groups = self._sliding_window_groups
+                        lookup_groups = tuple(
+                            g
+                            for g in self._sliding_window_groups
+                            if g not in excluded_groups
+                        )
 
                 looked_up_sliding_window |= sliding_window_size_in_blocks is not None
                 num_hit_tokens = new_num_hit_tokens
+
+        # persist which groups this call dropped, so update_state_after_alloc
+        # knows not to load them.
+        req_status.lookup_excluded_groups = frozenset(excluded_groups)
 
         if defer_lookup:
             logger.debug(
@@ -647,6 +702,10 @@ class OffloadingConnectorScheduler:
             for group_config, group_state in zip(
                 self.config.kv_group_configs, req_status.group_states
             ):
+                # this group's keys were never confirmed present for the
+                # boundary num_hit_tokens settled on, nothing to check here.
+                if group_config.group_idx in excluded_groups:
+                    continue
                 offloaded_block_size = group_config.offloaded_block_size
                 sliding_window_size_in_blocks = (
                     group_config.sliding_window_size_in_blocks
@@ -770,6 +829,18 @@ class OffloadingConnectorScheduler:
             self._current_batch_allocated_block_ids.update(
                 block.block_id for block in group_blocks if block.block_id != 0
             )
+
+            # This group was dropped from the lookup that produced
+            # num_external_tokens (see _lookup()), so its keys for this hit
+            # boundary were never confirmed present. Report 0 pending blocks
+            # to keep group_sizes/block_indices index-aligned with
+            # blocks.blocks, without asking prepare_load for keys that were
+            # never verified: avoids `assert block is not None` in
+            # CPUOffloadingManager.prepare_load.
+            if group_config.group_idx in req_status.lookup_excluded_groups:
+                group_sizes.append(0)
+                block_indices.append(0)
+                continue
 
             gpu_block_size = group_config.gpu_block_size
             offloaded_block_size = group_config.offloaded_block_size

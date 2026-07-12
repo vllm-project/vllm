@@ -31,6 +31,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
     get_offload_block_hash,
+    get_offload_group_idx,
     make_offload_key,
 )
 from vllm.v1.request import RequestStatus
@@ -2510,6 +2511,272 @@ class TestEagle:
                 (1, 0),
                 (1, 1),
             ),
+        )
+
+    def test_veto_exempt_eagle_group_does_not_poison_other_groups_lookup(
+        self, request_runner
+    ):
+        """A non-eagle group with a full real hit must not be zeroed out by
+        a co-existing veto-exempt eagle group (GroupOffloadConfig.
+        eagle_group_is_veto_exempt, e.g. DSpark's draft-context group)
+        whose own stored blocks are sparse/discontinuous, not just a single
+        volatile trailing block.
+
+        Setup: 2 full-attention groups, block_size=4, 3 blocks (12 tokens)
+        each.
+        - Group 0 (non-eagle): all 3 keys hit -> real, reusable content.
+        - Group 1 (eagle, veto-exempt): key at prefix position 0 is already
+          a MISS, so _maximal_prefix_lookup breaks on the very first key
+          regardless of whatever hits might exist later -> num_hit_blocks
+          == 0 for this group.
+
+        Without eagle_group_is_veto_exempt reaching this group, group 1
+        reporting 0 hits would hit the `if num_hit_blocks == 0: return 0`
+        short-circuit in _lookup(), discarding group 0's real 12-token hit,
+        so the result would be 0.
+
+        With eagle_group_is_veto_exempt=True, group 1 is dropped from the
+        rest of THIS lookup call the moment it reports 0 hits
+        (excluded_groups), but group 0, processed first, already
+        contributed its real hit before that happens. Result: 12 (group 0's
+        full hit, unaffected by group 1).
+        """
+        block_size = 4
+        groups = [
+            KVCacheGroupSpec(
+                ["layer0"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=False,
+            ),
+            KVCacheGroupSpec(
+                ["layer1"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=2,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=True,
+                eagle_group_is_veto_exempt=True,
+            ),
+        ]
+        runner = request_runner(
+            block_size=block_size,
+            num_gpu_blocks=100,
+            async_scheduling=False,
+            kv_cache_groups=groups,
+        )
+        sched = runner.connector_scheduler
+
+        # Group 0 keys {10,11,12}: all hit (real, reusable).
+        # Group 1 (eagle, veto-exempt) keys {1,2,3}: NONE hit, i.e.
+        # sparse/discontinuous storage, not merely "last block missing".
+        # Disjoint int ranges let a single side_effect distinguish which
+        # group a key belongs to, matching the convention already used by
+        # the sibling TestEagle tests above.
+        runner.manager.lookup.side_effect = lambda key, req_context: (
+            LookupResult.HIT
+            if int(get_offload_block_hash(key).decode()) in {10, 11, 12}
+            else LookupResult.MISS
+        )
+        req_status = self._make_req_status(
+            sched,
+            num_tokens=12,
+            offload_keys_per_group=[[10, 11, 12], [1, 2, 3]],
+        )
+
+        result = sched._lookup(req_status)
+
+        # Core regression assertion: group 0's real hit must survive group
+        # 1's (veto-exempt eagle) sparse/zero hit.
+        assert result == 12, (
+            "a veto-exempt eagle group's sparse/discontinuous storage must "
+            "not zero out a co-existing non-eagle group's real cache hit"
+        )
+
+        # Group 1 was actually queried (the exclusion drops a group only
+        # AFTER it reports 0 hits; it is not skipped up front). This is
+        # what makes the fix a no-op for eagle groups that DO hit: they are
+        # never excluded in the first place.
+        looked_up_hashes = {
+            int(get_offload_block_hash(call.args[0]).decode())
+            for call in runner.manager.lookup.call_args_list
+        }
+        assert looked_up_hashes & {1, 2, 3}, (
+            "expected group 1's keys to have been queried at least once "
+            "before being excluded"
+        )
+
+        # And it was recorded as excluded, for update_state_after_alloc to
+        # see.
+        assert req_status.lookup_excluded_groups == frozenset({1})
+
+    def test_non_veto_exempt_eagle_group_miss_still_zeros_whole_request(
+        self, request_runner
+    ):
+        """The exclusion branch must be unreachable for eagle-family groups
+        that are NOT veto-exempt (the default: EAGLE, EAGLE3, MTP, DFlash's
+        own incrementally-computed draft KV). Identical scenario to
+        test_veto_exempt_eagle_group_does_not_poison_other_groups_lookup
+        except eagle_group_is_veto_exempt is left at its default (False),
+        so a 0-hit eagle group must still zero out the entire request,
+        exactly as before this change.
+        """
+        block_size = 4
+        groups = [
+            KVCacheGroupSpec(
+                ["layer0"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=False,
+            ),
+            KVCacheGroupSpec(
+                ["layer1"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=2,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=True,
+                # eagle_group_is_veto_exempt left at its default: False.
+            ),
+        ]
+        runner = request_runner(
+            block_size=block_size,
+            num_gpu_blocks=100,
+            async_scheduling=False,
+            kv_cache_groups=groups,
+        )
+        sched = runner.connector_scheduler
+        assert sched.config.kv_group_configs[1].eagle_group_is_veto_exempt is False
+
+        runner.manager.lookup.side_effect = lambda key, req_context: (
+            LookupResult.HIT
+            if int(get_offload_block_hash(key).decode()) in {10, 11, 12}
+            else LookupResult.MISS
+        )
+        req_status = self._make_req_status(
+            sched,
+            num_tokens=12,
+            offload_keys_per_group=[[10, 11, 12], [1, 2, 3]],
+        )
+
+        result = sched._lookup(req_status)
+
+        assert result == 0, (
+            "eagle-family groups without eagle_group_is_veto_exempt must "
+            "keep the original all-or-nothing behavior unchanged: the "
+            "exclusion branch must never trigger for them"
+        )
+        # Nothing was ever excluded: the branch was never taken.
+        assert req_status.lookup_excluded_groups == frozenset()
+
+    @pytest.mark.parametrize("async_scheduling", [True, False])
+    def test_veto_exempt_eagle_group_load_excludes_only_the_failing_group(
+        self, request_runner, async_scheduling: bool
+    ):
+        """End-to-end: store phase is untouched (native "pop one trailing
+        block" behavior, exactly like test_full_attn_store_then_load), but
+        on reload the veto-exempt eagle group's blocks happen to all miss
+        (simulating DSpark's real sparse/non-reusable storage, as opposed to
+        a merely-volatile tail block). The non-eagle group must still load
+        its full, real hit, and the veto-exempt group must load NOTHING,
+        not the artificially-shrunk "N-1 blocks" the previous code would
+        have forced onto BOTH groups via the shared max_hit_size_tokens
+        intersection.
+
+        Compare directly against test_full_attn_store_then_load, which uses
+        a blanket `LookupResult.HIT` and gets `expected_loaded=((0,0),(0,1),
+        (1,0),(1,1))`: group 0's real 3-block hit gets dragged down to 2
+        blocks by group 1's (eagle) pop-adjusted hit. Here group 1 never
+        hits at all, so it is excluded outright and group 0 loads its full,
+        unconstrained 3-block hit instead.
+        """
+        block_size = 4
+        offloaded_block_size = block_size
+        num_gpu_blocks = 100
+
+        kv_cache_groups = [
+            KVCacheGroupSpec(
+                ["layer0"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer1"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=2,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=True,
+                eagle_group_is_veto_exempt=True,
+            ),
+        ]
+
+        runner = request_runner(
+            block_size=block_size,
+            num_gpu_blocks=num_gpu_blocks,
+            async_scheduling=async_scheduling,
+            kv_cache_groups=kv_cache_groups,
+        )
+
+        # Store phase: identical to test_full_attn_store_then_load. This is
+        # a pure-prefill request (all prompt tokens, immediate EOS), so the
+        # pre-existing, untouched storable_blocks()/_build_store_jobs logic
+        # stores all 3 blocks for BOTH groups: the eagle group's trailing-
+        # block exclusion only kicks in once actually decoding. This change
+        # does not affect storage at all, for any eagle-family method.
+        runner.new_request(token_ids=[0] * offloaded_block_size * 3)
+        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+            generate_store_output(keys)
+        )
+        runner.run(
+            decoded_tokens=[EOS_TOKEN_ID],
+            expected_stored=(
+                (0, 0),
+                (0, 1),
+                (0, 2),
+                (1, 0),
+                (1, 1),
+                (1, 2),
+            ),
+        )
+
+        runner.scheduler.reset_prefix_cache()
+
+        # Load phase: group 0 always hits; group 1 (eagle, veto-exempt)
+        # always misses, regardless of which of its (previously stored)
+        # blocks is queried: simulating storage that, in production,
+        # doesn't reliably round-trip.
+        runner.new_request(token_ids=[0] * offloaded_block_size * 3 + [1])
+        runner.manager.lookup.side_effect = lambda key, req_context: (
+            LookupResult.HIT if get_offload_group_idx(key) == 0 else LookupResult.MISS
+        )
+        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+            generate_store_output([])
+        )
+        runner.run(
+            decoded_tokens=[EOS_TOKEN_ID],
+            # Group 0's real, unconstrained 3-block hit, NOT shrunk to 2 by
+            # group 1's failure. Group 1 loads nothing (excluded outright),
+            # so no (1, ...) entries appear at all.
+            expected_loaded=((0, 0), (0, 1), (0, 2)),
         )
 
 
