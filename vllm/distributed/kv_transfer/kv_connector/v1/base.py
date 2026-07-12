@@ -42,8 +42,8 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING, Any, Literal
+from collections.abc import Callable, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 import torch
 
@@ -51,6 +51,19 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
+
+# One layer's registered KV cache. The common case is a single fused
+# ``torch.Tensor``; a backend whose native key and value caches are physically
+# separate (e.g. a host-memory backend that exposes zero-copy views of distinct
+# key/value buffers) may register a tuple of per-layer tensors instead. vLLM
+# core treats this value as opaque: it forwards the registration to the selected
+# connector without inspecting or interpreting it. Concrete connectors are
+# responsible for validating which representations they support.
+KVCacheRegistrationValue: TypeAlias = torch.Tensor | tuple[torch.Tensor, ...]
+# The registration mapping passed to ``register_kv_caches``: layer name ->
+# registered value. ``Mapping`` (not ``dict``) so callers may pass any read-only
+# mapping; vLLM core only iterates/forwards it.
+KVCacheRegistration: TypeAlias = Mapping[str, KVCacheRegistrationValue]
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -248,13 +261,19 @@ class KVConnectorBase_V1(ABC):
         """
         return self._connector_metadata is not None
 
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+    def register_kv_caches(self, kv_caches: KVCacheRegistration):
         """
         Initialize with the KV caches. Useful for pre-registering the
         KV Caches in the KVConnector (e.g. for NIXL).
 
+        vLLM core forwards this mapping to the connector without interpreting
+        the values. Each value is either a fused ``torch.Tensor`` (the common
+        case) or a tuple of per-layer tensors for backends whose native key and
+        value caches are physically separate. A concrete connector is
+        responsible for validating which representations it supports.
+
         Args:
-            kv_caches: dictionary of layer names, kv cache
+            kv_caches: mapping of layer name -> registered KV cache value
         """
         return
 

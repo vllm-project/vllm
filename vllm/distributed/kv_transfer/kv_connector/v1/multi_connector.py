@@ -13,6 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
+    KVCacheRegistration,
     KVConnectorBase_V1,
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
@@ -242,7 +243,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for c in self._connectors:
             c.register_cross_layers_kv_cache(kv_cache, attn_backend)
 
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+    def register_kv_caches(self, kv_caches: KVCacheRegistration):
+        # Forward the registration verbatim to each connector; MultiConnector
+        # does not inspect or rewrite the values (a value may be a fused tensor
+        # or a per-layer tuple, opaque to core).
         for c in self._connectors:
             c.register_kv_caches(kv_caches)
 
