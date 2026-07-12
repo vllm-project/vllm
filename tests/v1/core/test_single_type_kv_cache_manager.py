@@ -14,11 +14,15 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
+    FullAttentionManager,
+    MambaManager,
     RSWAManager,
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
+    FullAttentionSpec,
+    MambaSpec,
     RSWASpec,
     SlidingWindowSpec,
 )
@@ -534,3 +538,74 @@ def test_predictor_matches_allocator_blocks_calculation_with_admission_cap():
             f"but allocator pulled {len(new_blocks)}"
         )
         total_computed = num_tokens
+
+
+def test_mamba_honors_drop_eagle_block():
+    """MambaManager must drop the EAGLE lookahead block, like FullAttentionManager.
+
+    EAGLE/MTP requires the final matched block of a cache hit be dropped and
+    recomputed: it can hold state written over draft positions that verification
+    later rejects. FullAttentionManager pops it. Before this fix MambaManager
+    accepted `drop_eagle_block` and ignored it, so its hit came back one block
+    longer, and the retained block's recurrent-state snapshot -- taken over the
+    unverified positions -- stayed hash-reachable for every later request sharing
+    the prefix (#43559).
+
+    block_size == alignment_tokens here, so the alignment loop is a no-op in both
+    managers and the eagle drop is the only behavior under test.
+    """
+    block_size = 16
+    num_blocks = 5
+    full_gid, mamba_gid = 0, 1
+
+    block_pool = BlockPool(
+        num_gpu_blocks=64, enable_caching=True, hash_block_size=block_size
+    )
+    block_hashes = [BlockHash(f"blk{i:04d}".encode()) for i in range(num_blocks)]
+
+    # Cache the same prefix chain under both groups, each on real blocks.
+    for gid in (full_gid, mamba_gid):
+        for i, (block_hash, block) in enumerate(
+            zip(block_hashes, block_pool.get_new_blocks(num_blocks))
+        ):
+            block_pool._insert_block_hash(
+                make_block_hash_with_group_id(block_hash, gid),
+                block,
+                num_tokens=(i + 1) * block_size,
+            )
+
+    full_spec = FullAttentionSpec(
+        block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float16
+    )
+    mamba_spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1,),),
+        dtypes=(torch.float16,),
+        mamba_cache_mode="align",
+    )
+
+    def hit_blocks(manager, gid, spec, drop_eagle_block):
+        return len(
+            manager.find_longest_cache_hit(
+                block_hashes=block_hashes,
+                max_length=num_blocks * block_size,
+                kv_cache_group_ids=[gid],
+                block_pool=block_pool,
+                kv_cache_spec=spec,
+                drop_eagle_block=drop_eagle_block,
+                alignment_tokens=block_size,
+            )[0]
+        )
+
+    # Control: with no eagle drop, both groups see the whole cached prefix.
+    assert hit_blocks(FullAttentionManager, full_gid, full_spec, False) == num_blocks
+    assert hit_blocks(MambaManager, mamba_gid, mamba_spec, False) == num_blocks
+
+    # With the eagle drop requested, both must give up the final block.
+    full_hit = hit_blocks(FullAttentionManager, full_gid, full_spec, True)
+    mamba_hit = hit_blocks(MambaManager, mamba_gid, mamba_spec, True)
+    assert full_hit == num_blocks - 1
+    assert mamba_hit == full_hit, (
+        f"MambaManager ignored drop_eagle_block: full-attention dropped the "
+        f"lookahead block (hit={full_hit}), mamba kept it (hit={mamba_hit})"
+    )
