@@ -45,7 +45,9 @@ def triton_w4a16_gemm_kernel(
     zeros_ptr,   # [K//G, N//8] int32 packed zeros
     c_ptr,       # [M, N]  fp16/bf16 output
     # Dimensions
-    M, N, K,
+    M, 
+    N, 
+    K,
     # Strides
     stride_am, stride_ak,
     stride_bk, stride_bn,  # Stride for original int32 tensor
@@ -64,46 +66,18 @@ def triton_w4a16_gemm_kernel(
     pid_n = tl.program_id(1)
     pid_k = tl.program_id(2)
     
+    
     num_k_blocks = tl.cdiv(K, BLOCK_K)
     num_k_blocks_per_pid = tl.cdiv(num_k_blocks, SPLIT_K)
     k_start_idx = pid_k * num_k_blocks_per_pid
     k_end_idx = min(k_start_idx + num_k_blocks_per_pid, num_k_blocks)
 
-    # 1. Initialize Block Pointers for A and C (O(1) register overhead)
-    a_block_ptr = tl.make_block_ptr(
-        base=a_ptr,
-        shape=(M, K),
-        strides=(stride_am, stride_ak),
-        offsets=(pid_m * BLOCK_M, k_start_idx * BLOCK_K),
-        block_shape=(BLOCK_M, BLOCK_K),
-        order=(1, 0)
-    )
-    
-    c_block_ptr = tl.make_block_ptr(
-        base=c_ptr,
-        shape=(M, N),
-        strides=(stride_cm, stride_cn),
-        offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N),
-        block_shape=(BLOCK_M, BLOCK_N),
-        order=(1, 0)
-    )
-
-    # 2. Reinterpret b_ptr as uint8 to drastically reduce interleave footprint
+    # Reinterpret b_ptr as uint8 to drastically reduce interleave footprint
     # N//8 int32 columns equals N//2 uint8 columns
     b_ptr_u8 = b_ptr.to(tl.pointer_type(tl.uint8))
     stride_bk_u8 = stride_bk * 4 
     
-    # Initialize Block Pointer for B in int8 view
-    b_block_ptr = tl.make_block_ptr(
-        base=b_ptr_u8,
-        shape=(K, N // 2),
-        strides=(stride_bk_u8, 1), 
-        offsets=(k_start_idx * BLOCK_K, pid_n * (BLOCK_N // 2)),
-        block_shape=(BLOCK_K, BLOCK_N // 2),
-        order=(1, 0)
-    )
-
-    # 3. Setup 1D offsets for scale and zero vector loading
+    # Setup 1D offsets for scale and zero vector loading
     offs_sn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     scale_mask = offs_sn < N
     
@@ -115,12 +89,30 @@ def triton_w4a16_gemm_kernel(
 
     # Main K-loop using block pointer advanced scaling
     for k_idx in range(k_start_idx, k_end_idx):
+        a_block_ptr = tl.make_block_ptr(
+            base=a_ptr,
+            shape=(M, K),
+            strides=(stride_am, stride_ak),
+            offsets=(pid_m * BLOCK_M, k_idx * BLOCK_K),
+            block_shape=(BLOCK_M, BLOCK_K),
+            order=(1, 0)
+        )
+        
+        b_block_ptr = tl.make_block_ptr(
+            base=b_ptr_u8,
+            shape=(K, N // 2),
+            strides=(stride_bk_u8, 1), 
+            offsets=(k_idx * BLOCK_K, pid_n * (BLOCK_N // 2)),
+            block_shape=(BLOCK_K, BLOCK_N // 2),
+            order=(1, 0)
+        )
+        
         # ---- Load A ----
-        a = tl.load(a_block_ptr, boundary_check=(0, 1))
+        a = tl.load(a_block_ptr, boundary_check=(0, 1,))
 
         # ---- Load B (uint8 mode, half the data footprint in registers) ----
         # b_packed_u8 shape: [BLOCK_K, BLOCK_N // 2]
-        b_packed_u8 = tl.load(b_block_ptr, boundary_check=(0, 1))
+        b_packed_u8 = tl.load(b_block_ptr, boundary_check=(0, 1,))
 
         # ---- Fast Unpacking via single int8 Interleave ----
         # Extract low 4-bit and high 4-bit nibbles separately
@@ -129,7 +121,7 @@ def triton_w4a16_gemm_kernel(
         b_low = (b_packed_u8 & 0x0F).to(tl.int8)
         b_high = ((b_packed_u8 >> 4) & 0x0F).to(tl.int8)  
         b = tl.interleave(b_low, b_high) 
-
+        
         # ---- Compute scale/zero group row index ----
         g_idx = (k_idx * BLOCK_K) // group_size
 
@@ -161,23 +153,22 @@ def triton_w4a16_gemm_kernel(
         accumulator += tl.dot(a, b_fp, out_dtype=tl.float32)
 
         # ---- Advance Block Pointers for next tile ----
-        a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_K))
-        b_block_ptr = tl.advance(b_block_ptr, (BLOCK_K, 0))
+        #a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_K))
+        #b_block_ptr = tl.advance(b_block_ptr, (BLOCK_K, 0))
 
     # ---- Store Output C ----
     c = accumulator.to(c_ptr.dtype.element_ty)
     
+    offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    
+    c_ptrs = c_ptr + (offs_cm[:, None] * stride_cm + offs_cn[None, :] * stride_cn)
+    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     if SPLIT_K == 1:
-        tl.store(c_block_ptr, c, boundary_check=(0, 1))
+        tl.store(c_ptrs, c, mask=c_mask)
     else:
-        offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-        offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    
-        c_ptrs = c_ptr + (offs_cm[:, None] * stride_cm + offs_cn[None, :] * stride_cn)
-        c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-    
         tl.atomic_add(c_ptrs, c, mask=c_mask)
-
+        
 def triton_w4a16_gemm(
     a: torch.Tensor,  # [M, K] fp16/bf16
     b_q: torch.Tensor,  # [K, N//8] int32
@@ -214,34 +205,37 @@ def triton_w4a16_gemm(
     assert scales.shape == (K // group_size, N), (
         f"scales shape mismatch: {scales.shape} vs ({K // group_size}, {N})"
     )
+
     if qzeros is not None:
         assert qzeros.shape == (K // group_size, N // 8), (
             f"qzeros shape mismatch: {qzeros.shape}"
         )
 
-    c = torch.zeros((M, N), dtype=a.dtype, device=a.device)
-
     has_zp = qzeros is not None
     # Provide a dummy pointer when HAS_ZP=False (Triton requires a valid ptr)
     zeros_ptr = qzeros if has_zp else b_q
     
-    BLOCK_M = 64 if M >= 64 else 1 << (M - 1).bit_length()
+    BLOCK_M = max(16, triton.next_power_of_2(M))
+    BLOCK_M = 64 if BLOCK_M > 64 else BLOCK_M
+
     BLOCK_N = 128 #if BLOCK_M >= 64 else 256
     BLOCK_K = group_size if group_size <=32 else 64 #gs=K when gs==-1
     
     num_cu = torch.cuda.get_device_properties(a.device).multi_processor_count
-    
     active_cu = triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N)
-    pra_ratio = active_cu / num_cu
-    if pra_ratio <= 0.125:
-        split_k = 8
-    elif pra_ratio <= 0.4:
-        split_k = 4
-    elif pra_ratio <= 0.8:
-        split_k = 2
+    pra_ratio = num_cu // active_cu
+    
+    split_k = 1 if pra_ratio <= 1 else pra_ratio
+    split_k = 8 if split_k >= 8 else split_k
+    
+    num_warps = 4 if BLOCK_M * BLOCK_N <=64*64 else 8
+    num_stages= 2
+    
+    if split_k > 1:
+        c = torch.zeros((M, N), dtype=a.dtype, device=a.device)
     else:
-        split_k = 1
-
+        c = torch.empty((M, N), dtype=a.dtype, device=a.device)    
+        
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N), split_k)
     
     triton_w4a16_gemm_kernel[grid](
@@ -266,6 +260,8 @@ def triton_w4a16_gemm(
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
         SPLIT_K=split_k,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
     return c
 
