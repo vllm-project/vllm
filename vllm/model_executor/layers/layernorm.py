@@ -283,7 +283,9 @@ class RMSNormGated(CustomOp):
     def forward_cuda(
         self, x: torch.Tensor, z: torch.Tensor | None = None
     ) -> torch.Tensor:
-        from vllm.model_executor.layers.fla.ops.layernorm_guard import rmsnorm_fn
+        from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
+            rmsnorm_fn,
+        )
 
         return rmsnorm_fn(
             x,

@@ -1388,9 +1388,9 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/model_executor/layers/fla/ops/kda.py
-  - vllm/model_executor/layers/fla/ops/chunk_delta_h.py
-  - vllm/model_executor/layers/fla/ops/l2norm.py
+  - vllm/third_party/flash_linear_attention/ops/kda.py
+  - vllm/third_party/flash_linear_attention/ops/chunk_delta_h.py
+  - vllm/third_party/flash_linear_attention/ops/l2norm.py
   - tests/kernels/test_kda.py
   - vllm/platforms/rocm.py
   commands:
@@ -3104,7 +3104,7 @@ steps:
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/qwen3_next.py
   - vllm/model_executor/models/qwen3_next_mtp.py
-  - vllm/model_executor/layers/fla/ops/
+  - vllm/third_party/flash_linear_attention/ops/
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
@@ -3341,7 +3341,7 @@ steps:
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/qwen3_next.py
   - vllm/model_executor/models/qwen3_next_mtp.py
-  - vllm/model_executor/layers/fla/ops/
+  - vllm/third_party/flash_linear_attention/ops/
   - vllm/_aiter_ops.py
   - vllm/v1/attention/backends/triton_attn.py
   - vllm/v1/attention/backends/rocm_attn.py

@@ -1,2 +1,2 @@
 collect_env.py
-vllm/model_executor/layers/fla/ops/*.py
+vllm/third_party/flash_linear_attention/ops/*.py

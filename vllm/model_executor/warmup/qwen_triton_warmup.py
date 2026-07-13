@@ -274,9 +274,7 @@ def _warm_causal_conv1d_fwd_kernel(
 def _warm_fused_post_conv_kernel(
     device: torch.device, config: _QwenGDNWarmupConfig
 ) -> None:
-    from vllm.model_executor.layers.fla.ops.fused_gdn_prefill_post_conv import (
-        fused_post_conv_prep,
-    )
+    from vllm.third_party.flash_linear_attention.ops import fused_post_conv_prep
 
     qkv_dim = 2 * config.h * config.k + config.hv * config.v
     for length in _FLA_POST_CONV_WARMUP_LENGTHS:
@@ -304,7 +302,7 @@ def _warm_fused_sigmoid_gating_delta_rule_update_kernel(
     device: torch.device,
     config: _QwenGDNWarmupConfig,
 ) -> None:
-    from vllm.model_executor.layers.fla.ops.fused_sigmoid_gating import (
+    from vllm.third_party.flash_linear_attention.ops.fused_sigmoid_gating import (
         fused_sigmoid_gating_delta_rule_update,
     )
 

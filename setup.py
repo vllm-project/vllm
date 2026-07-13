@@ -1168,6 +1168,7 @@ package_data = {
         "entrypoints/serve/instrumentator/static/*.js",
         "entrypoints/serve/instrumentator/static/*.css",
         "distributed/kv_transfer/kv_connector/v1/hf3fs/utils/*.cpp",
+        "third_party/flash_linear_attention/LICENSE",
         # DeepGEMM JIT include headers (vendored via cmake)
         "third_party/deep_gemm/include/**/*.cuh",
         "third_party/deep_gemm/include/**/*.h",
