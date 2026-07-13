@@ -26,6 +26,7 @@ from vllm.model_executor.models.qwen3_5 import (
 )
 from vllm.model_executor.models.qwen3_next import (
     QwenNextMixtureOfExperts,
+    _all_gather_hidden_and_residual,
     _is_shared_expert_fse_compatible,
 )
 from vllm.sequence import IntermediateTensors
@@ -150,7 +151,8 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             residual = intermediate_tensors["residual"]
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
-        hidden_states, residual = self.layers[current_step_idx](
+        mtp_layer = self.layers[current_step_idx]
+        hidden_states, residual = mtp_layer(
             positions=positions,
             hidden_states=hidden_states,
             residual=residual,
@@ -161,6 +163,13 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
+        if mtp_layer.use_attn_reduce_scatter_for_moe:
+            hidden_states, residual = _all_gather_hidden_and_residual(
+                hidden_states,
+                residual,
+                positions.shape[-1],
+                self.config.hidden_size,
+            )
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
