@@ -64,6 +64,7 @@ from vllm.logprobs import Logprob
 from vllm.multimodal.media import MediaWithBytes
 from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
+from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.collection_utils import is_list_of
@@ -73,7 +74,7 @@ from torch._inductor.utils import fresh_cache
 
 
 if TYPE_CHECKING:
-    from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+    from transformers import PythonBackend, TokenizersBackend
     from transformers.generation.utils import GenerateOutput
 
 
@@ -498,7 +499,7 @@ class HfRunner:
             self.model = model
 
         if not skip_tokenizer_init:
-            self.tokenizer: "PreTrainedTokenizer | PreTrainedTokenizerFast" = (
+            self.tokenizer: "PythonBackend | TokenizersBackend" = (
                 AutoTokenizer.from_pretrained(
                     tokenizer_name or model_name,
                     trust_remote_code=trust_remote_code,
@@ -852,6 +853,24 @@ class HfRunner:
         return self.model.predict(prompts, *args, convert_to_tensor=True, **kwargs)
 
     def __enter__(self):
+        if current_platform.is_rocm():
+            # Record starting memory usage stats on ROCm so that we can wait for
+            # memory to roughly settle back below these levels on shutdown. This is
+            # helpful in cases where the HfRunner is initialized after significant GPU
+            # memory is already occupied, e.g. in
+            # tests/basic_correctness/test_basic_correctness.py::test_models_distributed
+            from tests.utils import (
+                get_physical_device_indices,
+                record_gpu_memory_usage_stats,
+            )
+
+            if (device_count := current_platform.device_count()) > 0:
+                devices = get_physical_device_indices(devices=list(range(device_count)))
+                mem_usage_stats = record_gpu_memory_usage_stats(devices=devices)
+                self.threshold_ratios = {
+                    device: 0.05 + mem_used / mem_tot
+                    for device, (mem_used, mem_tot) in mem_usage_stats.items()
+                }
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -861,7 +880,11 @@ class HfRunner:
         cleanup_dist_env_and_memory()
         # ROCm frees VRAM lazily; wait so a runner started right after this HF
         # model exits does not OOM on its startup memory guard.
-        wait_for_rocm_memory_to_settle()
+        wait_for_rocm_memory_to_settle(
+            threshold_ratio=getattr(self, "threshold_ratios", None)
+        )
+        if hasattr(self, "threshold_ratios"):
+            del self.threshold_ratios
 
 
 @pytest.fixture(scope="session")
@@ -1564,7 +1587,13 @@ class AssetHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError) as e:
+            logger.debug(
+                "Client disconnected while serving test asset %s: %r", filename, e
+            )
+            self.close_connection = True
 
 
 def _find_free_port() -> int:

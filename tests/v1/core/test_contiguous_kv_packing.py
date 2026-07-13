@@ -7,9 +7,8 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from vllm import envs
 from vllm.v1.core.kv_cache_utils import (
-    _get_kv_cache_config_deepseek_v4,
+    _get_kv_cache_config_packed,
     get_kv_cache_config_from_groups,
 )
 from vllm.v1.kv_cache_interface import (
@@ -84,15 +83,19 @@ def _make_groups(n_c4, n_c128, n_swa):
     return [mla_group, swa_group]
 
 
-def _mock_vllm_config():
+def _mock_vllm_config(kv_connector_extra_config: dict[str, str] | None = None):
     config = MagicMock()
     config.cache_config.num_gpu_blocks_override = None
+    config.kv_transfer_config = None
+    if kv_connector_extra_config is not None:
+        config.kv_transfer_config = MagicMock()
+        config.kv_transfer_config.kv_connector_extra_config = kv_connector_extra_config
     return config
 
 
 def _run(n_c4=3, n_c128=2, n_swa=5, mem=100 * 1024 * 1024):
     groups = _make_groups(n_c4, n_c128, n_swa)
-    return _get_kv_cache_config_deepseek_v4(_mock_vllm_config(), groups, mem)
+    return _get_kv_cache_config_packed(_mock_vllm_config(), groups, mem)
 
 
 def _page_sizes_by_layer(
@@ -135,7 +138,7 @@ class TestInterleavedPacking:
     def test_strided_views_are_independent(self):
         groups = _make_groups(n_c4=3, n_c128=2, n_swa=5)
         page_sizes = _page_sizes_by_layer(groups)
-        num_blocks, tensors = _get_kv_cache_config_deepseek_v4(
+        num_blocks, tensors = _get_kv_cache_config_packed(
             _mock_vllm_config(), groups, 100 * 1024 * 1024
         )
         backing = torch.zeros(tensors[0].size, dtype=torch.uint8)
@@ -156,8 +159,7 @@ class TestInterleavedPacking:
         for i, v in enumerate(views):
             assert (v == i + 1).all(), f"View {i} was corrupted"
 
-    def test_hma_attention_groups_keep_default_backing(self, monkeypatch):
-        monkeypatch.setattr(envs, "VLLM_USE_PACKED_HMA_KV_CACHE", False, raising=False)
+    def test_hma_attention_groups_keep_default_backing(self):
         full = _make_full_spec()
         sw = _make_sw_spec()
         page_size = full.page_size_bytes
@@ -178,8 +180,7 @@ class TestInterleavedPacking:
             KVCacheTensor(size=page_size * 32, shared_by=["full.1", "sw.2", "sw.3"]),
         ]
 
-    def test_hma_attention_groups_use_packed_backing_with_flag(self, monkeypatch):
-        monkeypatch.setattr(envs, "VLLM_USE_PACKED_HMA_KV_CACHE", True, raising=False)
+    def test_hma_attention_groups_use_packed_backing_with_enable_cross_layers(self):
         full = _make_full_spec()
         sw = _make_sw_spec()
         page_size = full.page_size_bytes
@@ -190,7 +191,9 @@ class TestInterleavedPacking:
         ]
 
         config = get_kv_cache_config_from_groups(
-            _mock_vllm_config(), groups, available_memory=page_size * 2 * 32
+            _mock_vllm_config({"enable_cross_layers_blocks": "True"}),
+            groups,
+            available_memory=page_size * 2 * 32,
         )
 
         assert config.num_blocks == 32

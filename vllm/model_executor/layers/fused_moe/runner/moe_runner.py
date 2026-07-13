@@ -292,6 +292,11 @@ class MoERunner(MoERunnerInterface):
         # For smuggling this layer into the fused moe custom op
         register_layer_for_moe_forward_op(get_current_vllm_config(), self)
 
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[str]:
+        return self.routed_experts.load_weights(weights)
+
     def _select_forward(self) -> Callable:
         if current_platform.is_tpu() or current_platform.is_cpu():
             # TODO: Once the OOM issue for the TPU backend is resolved, we
@@ -440,11 +445,19 @@ class MoERunner(MoERunnerInterface):
         here. Skipped when sequence-parallel is active (SP handles its
         own reduction) or when the early path already reduced both outputs.
         """
+        # skip_final_all_reduce must not coexist with a pre-reduced fused
+        # output. This should be enforced by MoE config initialization.
+        if self.moe_config.skip_final_all_reduce:
+            assert not self._fused_output_is_reduced, (
+                "skip_final_all_reduce requires an un-reduced fused output"
+            )
+
         # We don't need to reduce the final output if:
         # - We are not running with TP or DP
         # - The MK already reduced the fused output itself.
         if (
             not self.moe_config.is_sequence_parallel
+            and not self.moe_config.skip_final_all_reduce
             and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
             and not self._fused_output_is_reduced
         ):
@@ -718,8 +731,8 @@ class MoERunner(MoERunnerInterface):
     @property
     def do_naive_dispatch_combine(self) -> bool:
         return (
-            self.moe_config.dp_size > 1 and not self._quant_method.supports_internal_mk
-        )
+            self.moe_config.dp_size > 1 or self.moe_config.is_sequence_parallel
+        ) and not self._quant_method.supports_internal_mk
 
     def _maybe_dispatch(
         self,

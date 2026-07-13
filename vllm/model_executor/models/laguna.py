@@ -269,8 +269,14 @@ class LagunaAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         attention_sink: bool = False,
+        layer_idx: int | None = None,
+        attention_prefix: str | None = None,
     ) -> None:
         super().__init__()
+        if layer_idx is None:
+            layer_idx = extract_layer_index(prefix)
+        if attention_prefix is None:
+            attention_prefix = prefix
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -294,7 +300,6 @@ class LagunaAttention(nn.Module):
         # Per-layer sliding window (follows Gemma2/Cohere2 convention)
         layer_types = getattr(config, "layer_types", None)
         if layer_types is not None:
-            layer_idx = extract_layer_index(prefix)
             is_sliding = layer_types[layer_idx] == "sliding_attention"
             self.sliding_window = config.sliding_window if is_sliding else None
         else:
@@ -361,9 +366,7 @@ class LagunaAttention(nn.Module):
         # crash `get_rope`'s cache lookup, so always pull out the layer's
         # sub-dict before forwarding.
         layer_type = (
-            layer_types[extract_layer_index(prefix)]
-            if layer_types is not None
-            else "full_attention"
+            layer_types[layer_idx] if layer_types is not None else "full_attention"
         )
         is_sliding = layer_type == "sliding_attention"
 
@@ -415,7 +418,7 @@ class LagunaAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             per_layer_sliding_window=self.sliding_window,
-            prefix=f"{prefix}.attn",
+            prefix=f"{attention_prefix}.attn",
             sinks=sinks,
         )
 
@@ -468,10 +471,13 @@ class LagunaDecoderLayer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
+        layer_idx: int | None = None,
+        attention_prefix: str | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        layer_idx = extract_layer_index(prefix)
+        if layer_idx is None:
+            layer_idx = extract_layer_index(prefix)
 
         # Determine if this layer uses sliding window attention
         layer_types = getattr(config, "layer_types", None)
@@ -503,6 +509,12 @@ class LagunaDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             attention_sink=attention_sink,
+            layer_idx=layer_idx,
+            attention_prefix=(
+                f"{attention_prefix}.self_attn"
+                if attention_prefix is not None
+                else None
+            ),
         )
 
         # Check if this layer uses MoE or dense MLP (matches Qwen2/Qwen3 convention)

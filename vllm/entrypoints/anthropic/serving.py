@@ -491,6 +491,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             top_p=anthropic_request.top_p,
             top_k=anthropic_request.top_k,
             kv_transfer_params=anthropic_request.kv_transfer_params,
+            ec_transfer_params=anthropic_request.ec_transfer_params,
             chat_template_kwargs=anthropic_request.chat_template_kwargs,
         )
 
@@ -630,6 +631,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                 generator.usage,
             ),
             kv_transfer_params=generator.kv_transfer_params,
+            ec_transfer_params=generator.ec_transfer_params,
         )
         choice = generator.choices[0]
         if choice.finish_reason == "stop":
@@ -664,6 +666,12 @@ class AnthropicServingMessages(OpenAIServingChat):
                 input=json.loads(tool_call.function.arguments),
             )
             content += [anthropic_tool_call]
+
+        # Anthropic's canonical shape for an empty completion is a single
+        # empty text block, not []. Some strict clients assume content[0]
+        # exists, so emit one here.
+        if not content:
+            content.append(AnthropicContentBlock(type="text", text=""))
 
         result.content = content
 
