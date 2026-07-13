@@ -9,14 +9,16 @@ import torch.nn as nn
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.model_executor.layers.fused_embed_norm import (
+    ReplicatedEmbedding,
+    fused_embed_eh_norm,
+    make_input_embedding,
+)
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding,
-)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -73,18 +75,33 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         positions: torch.Tensor,
         previous_hidden_states: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
+        embed_table: torch.Tensor | None = None,
         spec_step_index: int = 0,
     ) -> torch.Tensor:
-        assert inputs_embeds is not None
-        # Fused: zero pos-0 embeds + enorm(embeds) + hnorm(prev) + cat -> [N, 2H].
-        eh_input = fused_eh_norm(
-            positions,
-            inputs_embeds,
-            previous_hidden_states,
-            self.enorm.weight,
-            self.hnorm.weight,
-            self.enorm.variance_epsilon,
-        )
+        # Fused zero pos-0 + enorm(embeds) + hnorm(prev) + cat -> [N, 2H]. With a
+        # replicated table the caller passes ``embed_table`` so the embedding
+        # lookup is folded in too (fused_embed_eh_norm); otherwise the embeds are
+        # precomputed and go through the model-local fused_eh_norm.
+        if embed_table is not None:
+            eh_input = fused_embed_eh_norm(
+                positions,
+                input_ids,
+                embed_table,
+                previous_hidden_states,
+                self.enorm.weight,
+                self.hnorm.weight,
+                self.enorm.variance_epsilon,
+            )
+        else:
+            assert inputs_embeds is not None
+            eh_input = fused_eh_norm(
+                positions,
+                inputs_embeds,
+                previous_hidden_states,
+                self.enorm.weight,
+                self.hnorm.weight,
+                self.enorm.variance_epsilon,
+            )
         hidden_states = self.eh_proj(eh_input)
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
@@ -124,11 +141,15 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
                 )
             }
         )
-        self.embed_tokens = VocabParallelEmbedding(
+        self.embed_tokens = make_input_embedding(
             config.vocab_size,
             config.hidden_size,
+            quant_config=vllm_config.quant_config,
             prefix=maybe_prefix(prefix, "embed_tokens"),
+            tie_word_embeddings=getattr(config, "tie_word_embeddings", False),
         )
+        # A replicated table lets the eh_norm fusion fold in the embedding gather.
+        self.replicated_embed = isinstance(self.embed_tokens, ReplicatedEmbedding)
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
     def set_skip_topk(self, skip: bool):
@@ -158,14 +179,21 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
+        # With a replicated table, defer the embedding gather to fused_eh_norm
+        # (folded into the enorm/hnorm/cat launch); otherwise gather it here.
+        embed_table = None
         if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
+            if self.replicated_embed:
+                embed_table = self.embed_tokens.weight
+            else:
+                inputs_embeds = self.embed_tokens(input_ids)
         current_step_idx = spec_step_idx % self.num_mtp_layers
         return self.layers[str(self.mtp_start_layer_idx + current_step_idx)](
             input_ids,
             positions,
             previous_hidden_states,
             inputs_embeds,
+            embed_table,
             current_step_idx,
         )
 
