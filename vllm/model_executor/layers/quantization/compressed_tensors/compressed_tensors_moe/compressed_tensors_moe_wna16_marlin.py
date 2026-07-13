@@ -416,6 +416,27 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Process weights using the shared oracle infrastructure
         is_flashinfer = self.wna16_backend == WNA16MoEBackend.FLASHINFER_TRTLLM
+        converted = convert_to_wna16_moe_kernel_format(
+            backend=self.wna16_backend,
+            layer=layer,
+            quant_config=self.weight_quant,
+            input_dtype=self.marlin_input_dtype,
+            w13=layer.w13_weight_packed,
+            w2=layer.w2_weight_packed,
+            w13_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            w13_g_idx=layer.w13_weight_g_idx,
+            w2_g_idx=layer.w2_weight_g_idx,
+            w13_qzeros=getattr(layer, "w13_weight_zero_point", None),
+            w2_qzeros=getattr(layer, "w2_weight_zero_point", None),
+        )
+        if converted is None:
+            # In-place backends (e.g. Humming) are not wired through this
+            # marlin-only method; fail clearly rather than unpacking None.
+            raise NotImplementedError(
+                f"{type(self).__name__} does not support the "
+                f"{self.wna16_backend.value} MoE backend."
+            )
         (
             w13_qweight,
             w2_qweight,
@@ -431,20 +452,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             w2_input_global_scale,
             _,  # w13_bias
             _,  # w2_bias
-        ) = convert_to_wna16_moe_kernel_format(
-            backend=self.wna16_backend,
-            layer=layer,
-            quant_config=self.weight_quant,
-            input_dtype=self.marlin_input_dtype,
-            w13=layer.w13_weight_packed,
-            w2=layer.w2_weight_packed,
-            w13_scale=layer.w13_weight_scale,
-            w2_scale=layer.w2_weight_scale,
-            w13_g_idx=layer.w13_weight_g_idx,
-            w2_g_idx=layer.w2_weight_g_idx,
-            w13_qzeros=getattr(layer, "w13_weight_zero_point", None),
-            w2_qzeros=getattr(layer, "w2_weight_zero_point", None),
-        )
+        ) = converted
 
         # Replace common parameters
         replace_parameter(layer, "w13_weight_packed", w13_qweight)
