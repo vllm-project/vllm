@@ -323,7 +323,7 @@ class TieringOffloadingManager(OffloadingManager):
 
         params = req_context.kv_transfer_params
         scope = params.get(LOOKUP_SCOPE_KEY) if params else None
-        if scope == LookupScope.PRIMARY.value:
+        if scope == LookupScope.CPU.value:
             return LookupResult.MISS
 
         lookup_start = time.monotonic()

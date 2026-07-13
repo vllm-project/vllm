@@ -990,7 +990,7 @@ class TestTieringOffloadingManager:
 
         ctx = ReqContext(
             req_id="r1",
-            kv_transfer_params={LOOKUP_SCOPE_KEY: LookupScope.PRIMARY.value},
+            kv_transfer_params={LOOKUP_SCOPE_KEY: LookupScope.CPU.value},
         )
         assert self.manager.lookup(blocks[0], ctx) is LookupResult.HIT
         assert self.manager.lookup(blocks[1], ctx) is LookupResult.MISS
