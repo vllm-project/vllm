@@ -390,10 +390,13 @@ class Scheduler(SchedulerInterface):
             elif num_computed_tokens_after_sched < last_cache_position:
                 # Align the chunk END (not its length) to block_size;
                 # identical to flooring the length when the start is
-                # block-aligned. May yield 0 (insufficient budget to reach
-                # the next boundary); the caller then skips the request.
+                # block-aligned. If alignment would collapse to 0, keep the
+                # original sub-block chunk so encoder-cache contention between
+                # adjacent MM inputs cannot permanently stall the request.
                 aligned_end = num_computed_tokens_after_sched // block_size * block_size
-                num_new_tokens = max(aligned_end - num_computed_tokens, 0)
+                aligned = max(aligned_end - num_computed_tokens, 0)
+                if aligned > 0:
+                    num_new_tokens = aligned
             elif (
                 num_computed_tokens
                 < last_cache_position
@@ -427,7 +430,9 @@ class Scheduler(SchedulerInterface):
             ):
                 num_new_tokens = num_uncached_common_prefix_tokens
                 # keep alignment to block_size
-                num_new_tokens = num_new_tokens // block_size * block_size
+                aligned = num_new_tokens // block_size * block_size
+                if aligned > 0:
+                    num_new_tokens = aligned
         return num_new_tokens
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
