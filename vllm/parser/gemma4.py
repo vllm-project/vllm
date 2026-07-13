@@ -39,6 +39,8 @@ CHANNEL_START = "<|channel>"
 CHANNEL_END = "<channel|>"
 TOOL_CALL_START = "<|tool_call>"
 TOOL_CALL_END = "<tool_call|>"
+TURN_END = "<turn|>"
+EOS_TOKEN = "<eos>"
 STRING_DELIM = '<|"|>'
 _DELIM_LEN = len(STRING_DELIM)
 
@@ -302,6 +304,8 @@ def gemma4_config() -> ParserEngineConfig:
             "THINK_END": CHANNEL_END,
             "TOOL_START": TOOL_CALL_START,
             "TOOL_END": TOOL_CALL_END,
+            "TURN_END": TURN_END,
+            "EOS": EOS_TOKEN,
             "CALL_PREFIX": "call:",
             "OPEN_BRACE": "{",
         },
@@ -363,6 +367,16 @@ def gemma4_config() -> ParserEngineConfig:
             # Absorb a bare <channel|> that arrives after we already
             # returned to CONTENT; prevents leaking it as TEXT_CHUNK.
             (ParserState.CONTENT, "THINK_END"): Transition(
+                ParserState.CONTENT,
+                (),
+            ),
+            # Drop response-ending tokens even if text arrives before the
+            # corresponding token ID reaches the streaming parser.
+            (ParserState.CONTENT, "TURN_END"): Transition(
+                ParserState.CONTENT,
+                (),
+            ),
+            (ParserState.CONTENT, "EOS"): Transition(
                 ParserState.CONTENT,
                 (),
             ),

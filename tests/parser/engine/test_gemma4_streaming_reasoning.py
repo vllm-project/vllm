@@ -27,6 +27,8 @@ TOOL_CALL_START_ID = 48  # <|tool_call>
 TOOL_CALL_END_ID = 49  # <tool_call|>
 QUOTED_ID = 52  # <|"|>
 NEW_TURN_ID = 53  # <|turn>
+TURN_END_ID = 54  # <turn|>
+EOS_ID = 55  # <eos>
 SPECIAL_TOKEN_MAP = {
     CHANNEL_START_ID: "<|channel>",
     CHANNEL_END_ID: "<channel|>",
@@ -34,6 +36,8 @@ SPECIAL_TOKEN_MAP = {
     TOOL_CALL_END_ID: "<tool_call|>",
     QUOTED_ID: '<|"|>',
     NEW_TURN_ID: "<|turn>",
+    TURN_END_ID: "<turn|>",
+    EOS_ID: "<eos>",
 }
 
 SPECIAL_TEXT_TO_ID = {v: k for k, v in SPECIAL_TOKEN_MAP.items()}
@@ -182,6 +186,34 @@ def request_obj():
 
 
 # ── Tests ────────────────────────────────────────────────────────────
+
+
+class TestGemma4DroppedTerminalText:
+    """Response-ending special-token text must not leak into content."""
+
+    @pytest.fixture
+    def plain_tokenizer(self):
+        return _make_tokenizer([(6000, "The answer is 4.")])
+
+    @pytest.fixture
+    def plain_parser(self, plain_tokenizer):
+        return Gemma4Parser(plain_tokenizer)
+
+    @pytest.mark.parametrize("terminal_text", ["<turn|>", "<eos>"])
+    def test_terminal_text_without_token_id_is_dropped(
+        self, plain_parser, request_obj, terminal_text
+    ):
+        delta = plain_parser.parse_delta(
+            f"The answer is 4.{terminal_text}",
+            [6000],
+            request_obj,
+            prompt_token_ids=[],
+            finished=True,
+        )
+
+        assert delta is not None
+        assert delta.content == "The answer is 4."
+        assert terminal_text not in delta.content
 
 
 class TestGemma4StreamingReasoningThenToolCall:
