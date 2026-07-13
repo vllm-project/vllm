@@ -1225,13 +1225,6 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             mm_kwargs["audio_kwargs"] = dict(mm_kwargs.get("audio_kwargs") or {})
             mm_kwargs["text_kwargs"] = dict(mm_kwargs.get("text_kwargs") or {})
         elif mm_kwargs.get("use_audio_in_video"):
-            # The caller requested `use_audio_in_video=True`, but no audio
-            # was actually extracted from the input (e.g. the video has no
-            # audio track). The upstream HF processor assumes
-            # `use_audio_in_video=True` implies at least one audio item per
-            # video and raises an opaque `StopIteration` from
-            # `replace_multimodal_special_tokens` otherwise. Raise a clear
-            # error instead.
             raise ValueError(
                 "Video doesn't have audio track with `audio_in_video=True`"
             )

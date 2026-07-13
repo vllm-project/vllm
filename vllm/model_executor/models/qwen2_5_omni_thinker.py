@@ -478,6 +478,10 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             mm_kwargs = dict(
                 **mm_kwargs,
             )
+        elif mm_kwargs.get("use_audio_in_video"):
+            raise ValueError(
+                "Video doesn't have audio track with `audio_in_video=True`"
+            )
 
         hf_inputs = super()._call_hf_processor(
             prompt=prompt,
