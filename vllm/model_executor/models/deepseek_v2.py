@@ -639,6 +639,39 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
         return DeepseekV32IndexerBackend
 
 
+def _indexer_quant_q_mxfp4(
+    q: torch.Tensor, n_head: int, head_dim: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize the DSA lightning-indexer query to MXFP4.
+
+    Produces the (packed E2M1 values, packed UE8M0 block scales) pair expected by
+    the MXFP4 indexer logits kernels, matching the FP4 indexer K-cache layout.
+    Block size is 32 (one UE8M0 scale per 32 elements). Done in PyTorch since the
+    indexer q is tiny relative to attention; the K-side quant is fused in the
+    cache-insert kernel.
+    """
+    rows = q.shape[0]
+    xb = q.float().reshape(-1, head_dim // 32, 32)
+    amax = xb.abs().amax(-1, keepdim=True).clamp(min=6 * 2**-126)
+    # UE8M0 block exponent (E8M0, bias 127)
+    l2 = (amax / 6.0).log2().ceil().clamp(-127, 127)
+    ue = (l2 + 127).to(torch.int32).squeeze(-1)
+    nblk = head_dim // 32
+    shift = torch.arange(nblk, device=q.device, dtype=torch.int32) * 8
+    q_scale = (ue << shift).sum(-1, dtype=torch.int32).view(-1, n_head)
+    # E2M1 (FP4) value encode via magnitude thresholds + sign bit
+    sc = (xb / l2.exp2()).reshape(rows, head_dim)
+    thr = torch.tensor(
+        [0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0], device=q.device
+    )
+    code = ((sc < 0).to(torch.uint8) << 3) | torch.bucketize(sc.abs(), thr).to(
+        torch.uint8
+    )
+    packed = (code[:, 0::2] | (code[:, 1::2] << 4)).to(torch.uint8)
+    q_fp4 = packed.view(-1, n_head, head_dim // 2)
+    return q_fp4, q_scale
+
+
 class Indexer(nn.Module):
     def __init__(
         self,
@@ -687,11 +720,25 @@ class Indexer(nn.Module):
         self.quant_block_size = 128  # TODO: get from config
         self.topk_indices_buffer = topk_indices_buffer
 
+        # Optionally store the DSA indexer K-cache in MXFP4 (4-bit) instead of
+        # FP8, halving the indexer KV-cache footprint. Gated by the attention
+        # config flag `use_fp4_indexer_cache`. Reuses the existing MXFP4
+        # indexer insert/read kernels (added for DeepSeek-V4); this only wires
+        # them into the GLM / deepseek_v2 Indexer path.
+        self.use_fp4_cache = getattr(
+            vllm_config.attention_config, "use_fp4_indexer_cache", False
+        )
+
         # NOTE: (zyongye) we use fp8 naive cache,
         #       where we store value in fp8 and scale in fp32
         #       per self.quant_block_size element
         self.k_cache = DeepseekV32IndexerCache(
-            head_dim=self.head_dim + self.head_dim // self.quant_block_size * 4,
+            head_dim=(
+                # MXFP4: head_dim//2 packed e2m1 nibbles + head_dim//32 ue8m0 scales
+                self.head_dim // 2 + self.head_dim // 32
+                if self.use_fp4_cache
+                else self.head_dim + self.head_dim // self.quant_block_size * 4
+            ),
             dtype=torch.uint8,
             prefix=f"{prefix}.k_cache",
             cache_config=cache_config,
@@ -710,6 +757,7 @@ class Indexer(nn.Module):
             self.max_model_len,
             self.max_total_seq_len,
             self.topk_indices_buffer,
+            use_fp4_cache=self.use_fp4_cache,
         )
 
         self.is_inplace_rope = is_inplace_rope
@@ -720,6 +768,7 @@ class Indexer(nn.Module):
             and self.head_dim == 128
             and self.rope_dim == 64
             and self.scale_fmt is not None
+            and not self.use_fp4_cache
         )
 
     def forward(
@@ -802,6 +851,11 @@ class Indexer(nn.Module):
 
         # we only quant q here since k quant is fused with cache insertion
         q = q.view(-1, self.head_dim)
+        if self.use_fp4_cache:
+            q_fp4, q_scale = _indexer_quant_q_mxfp4(q, self.n_head, self.head_dim)
+            # MXFP4 indexer logits kernel requires fp32 weights
+            weights = weights.float() * self.softmax_scale * self.n_head_scale
+            return self.indexer_op(hidden_states, (q_fp4, q_scale), k, weights)
         q_fp8, q_scale = per_token_group_quant_fp8(
             q,
             self.quant_block_size,

@@ -1,4 +1,5 @@
 #include "torch_utils.h"
+#include <cuda_bf16.h>
 #include "dispatch_utils.h"
 
 #include "../cuda_utils.h"
@@ -1458,6 +1459,63 @@ void cp_gather_and_upconvert_fp8_kv_cache(
           slot_mapping.const_data_ptr<int64_t>(), head_dim, quant_block_size, \
           cache_block_size, cache_block_stride, use_ue8m0);
 
+__device__ __forceinline__ uint8_t mxfp4_e2m1_code(float x) {
+  float ax = fabsf(x);
+  uint8_t c;
+  if (ax < 0.25f) c = 0; else if (ax < 0.75f) c = 1;
+  else if (ax < 1.25f) c = 2; else if (ax < 1.75f) c = 3;
+  else if (ax < 2.5f) c = 4; else if (ax < 3.5f) c = 5;
+  else if (ax < 5.0f) c = 6; else c = 7;
+  if (signbit(x)) c |= 0x8;
+  return c;
+}
+
+// Fused MXFP4 (E2M1 values + UE8M0 block-32 scales) indexer-K quant+insert.
+// Layout per token (fp4_bytes = head_dim/2 + head_dim/32): [E2M1 values | UE8M0 scales].
+// byte j = (e2m1(dim 2j+1)<<4) | e2m1(dim 2j) (low nibble = even index). scale byte = exp+127.
+__global__ void indexer_k_quant_and_cache_mxfp4_kernel(
+    const __nv_bfloat16* __restrict__ k,       // [num_tokens, head_dim]
+    uint8_t* __restrict__ kv_cache,            // [num_blocks, block_size, fp4_bytes]
+    const int64_t* __restrict__ slot_mapping,  // [num_tokens]
+    const int head_dim, const int block_size, const int fp4_bytes) {
+  const int t = blockIdx.x;
+  const int lane = threadIdx.x;
+  const int64_t slot = slot_mapping[t];
+  if (slot < 0) return;
+  const int d0 = lane * 4;
+  if (d0 >= head_dim) return;
+  float v[4];
+#pragma unroll
+  for (int i = 0; i < 4; i++)
+    v[i] = __bfloat162float(k[(int64_t)t * head_dim + d0 + i]);
+  float amax = 0.f;
+#pragma unroll
+  for (int i = 0; i < 4; i++) amax = fmaxf(amax, fabsf(v[i]));
+  // reduce amax within 8-lane (32-elem) block
+  for (int m = 4; m > 0; m /= 2)
+    amax = fmaxf(amax, __shfl_xor_sync(0xffffffff, amax, m));
+  float safe = fmaxf(amax, 6.0f * exp2f(-126.0f));
+  int e = (int)ceilf(log2f(safe / 6.0f));
+  e = max(-127, min(127, e));
+  float inv = 1.0f / exp2f((float)e);
+  uint16_t packed = (uint16_t)mxfp4_e2m1_code(v[0] * inv) |
+                    ((uint16_t)mxfp4_e2m1_code(v[1] * inv) << 4) |
+                    ((uint16_t)mxfp4_e2m1_code(v[2] * inv) << 8) |
+                    ((uint16_t)mxfp4_e2m1_code(v[3] * inv) << 12);
+  // BLOCK-SPLIT layout (matches fp8 indexer + cp_gather + paged reader):
+  //   [block_size * (head_dim/2) values][block_size * (head_dim/32) scales]
+  const int64_t bi = slot / block_size, bo = slot % block_size;
+  const int64_t block_base = bi * (int64_t)block_size * (int64_t)fp4_bytes;
+  uint8_t* vbase = kv_cache + block_base + bo * (int64_t)(head_dim / 2);
+  vbase[lane * 2 + 0] = (uint8_t)(packed & 0xFF);
+  vbase[lane * 2 + 1] = (uint8_t)((packed >> 8) & 0xFF);
+  if ((lane & 7) == 0) {
+    int blk = d0 / 32;
+    kv_cache[block_base + (int64_t)block_size * (head_dim / 2) +
+             bo * (int64_t)(head_dim / 32) + blk] = (uint8_t)(e + 127);
+  }
+}
+
 void indexer_k_quant_and_cache(
     torch::stable::Tensor& k,         // [num_tokens, head_dim]
     torch::stable::Tensor& kv_cache,  // [num_blocks, block_size, cache_stride]
@@ -1484,6 +1542,17 @@ void indexer_k_quant_and_cache(
   const torch::stable::accelerator::DeviceGuard device_guard(
       k.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
+
+  if (scale_fmt == "mxfp4") {
+    int fp4_bytes = head_dim / 2 + head_dim / 32;
+    dim3 g(num_tokens), b(32);
+    indexer_k_quant_and_cache_mxfp4_kernel<<<g, b, 0, stream>>>(
+        reinterpret_cast<__nv_bfloat16*>(k.data_ptr()),
+        reinterpret_cast<uint8_t*>(kv_cache.data_ptr()),
+        slot_mapping.const_data_ptr<int64_t>(), head_dim, cache_block_size,
+        fp4_bytes);
+    return;
+  }
 
   static const std::string kv_cache_dtype = "fp8_e4m3";
   DISPATCH_BY_KV_CACHE_DTYPE(k.scalar_type(), kv_cache_dtype,
