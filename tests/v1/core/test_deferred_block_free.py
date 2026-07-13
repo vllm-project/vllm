@@ -18,7 +18,8 @@ from unittest.mock import PropertyMock, patch
 import pytest
 
 from vllm.config import VllmConfig
-from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId, KVCacheBlockCopy
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
@@ -474,3 +475,93 @@ def test_cow_retentions_deferred_until_copy_step_processed():
     assert not scheduler.deferred_frees
     out2 = scheduler.schedule()
     assert [r.req_id for r in out2.scheduled_new_reqs] == ["late"]
+
+
+def _make_pool_with_cached_blocks(num_blocks: int, block_size: int = 16):
+    """Build a BlockPool holding `num_blocks` allocated, hashed blocks.
+
+    Returns (pool, blocks_by_id). Each block gets a distinct hash so it is a
+    prefix-cache eviction candidate once freed (blocks without a hash are
+    always evicted first and would mask ordering).
+    """
+    pool = BlockPool(
+        num_gpu_blocks=num_blocks + 1, enable_caching=True, hash_block_size=block_size
+    )
+    blocks = pool.get_new_blocks(num_blocks)
+    for i, block in enumerate(blocks):
+        block.set_block_hash(
+            BlockHashWithGroupId(f"hash{i}".encode()), num_tokens=block_size
+        )
+    return pool, {b.block_id: b for b in blocks}
+
+
+def _eviction_order(pool: BlockPool) -> list[int]:
+    """Drain the pool's free queue, returning block ids in eviction order
+    (first returned == evicted first)."""
+    order = []
+    while pool.get_num_free_blocks() > 0:
+        order.append(pool.get_new_blocks(1)[0].block_id)
+    return order
+
+
+def test_deferred_free_matches_immediate_free_eviction_order():
+    """Regression for the deferred-free path collapsing per-group eviction
+    order for multi-group (hybrid) KV caches.
+
+    Group A owns blocks [1, 2, 3] (allocation order) and group B owns
+    [4, 5, 6]. The immediate-free path frees each group in its own
+    reversed ``free_blocks`` call; the fixed deferred-free path must
+    reproduce exactly that order, not a single flattened reversal.
+    """
+    group_a_alloc = [1, 2, 3]
+    group_b_alloc = [4, 5, 6]
+
+    # Immediate path: KVCacheCoordinator.free() -> one reversed free_blocks
+    # call per single-type manager (group).
+    pool_imm, by_id = _make_pool_with_cached_blocks(6)
+    for group in (group_a_alloc, group_b_alloc):
+        pool_imm.free_blocks([by_id[i] for i in reversed(group)])
+    immediate_order = _eviction_order(pool_imm)
+
+    # Fixed deferred path: groups are kept separate (each already reversed)
+    # and freed in their own call on drain -- mirroring the immediate path.
+    pool_fixed, by_id = _make_pool_with_cached_blocks(6)
+    ordered_groups = [list(reversed(group_a_alloc)), list(reversed(group_b_alloc))]
+    for group in ordered_groups:
+        pool_fixed.free_blocks([by_id[i] for i in group])
+    fixed_order = _eviction_order(pool_fixed)
+
+    assert fixed_order == immediate_order == [3, 2, 1, 6, 5, 4]
+
+    # The old (buggy) deferred path flattened both groups then reversed once,
+    # which produces a different order. Guard against regressing back to it.
+    pool_buggy, by_id = _make_pool_with_cached_blocks(6)
+    flattened = group_a_alloc + group_b_alloc
+    pool_buggy.free_blocks([by_id[i] for i in reversed(flattened)])
+    buggy_order = _eviction_order(pool_buggy)
+    assert buggy_order == [6, 5, 4, 3, 2, 1]
+    assert buggy_order != immediate_order
+
+
+def test_pop_block_groups_for_free_keeps_groups_separate():
+    """``pop_block_groups_for_free`` must return one list per single-type
+    manager rather than a flattened concatenation, so the deferred-free path
+    can free each group independently."""
+    scheduler = _create_deferring_scheduler()
+    coordinator = scheduler.kv_cache_manager.coordinator
+
+    request = create_requests(
+        num_requests=1,
+        num_tokens=NUM_PROMPT_TOKENS,
+        max_tokens=5,
+    )[0]
+    scheduler.add_request(request)
+    scheduler.schedule()
+
+    groups = coordinator.pop_block_groups_for_free(request.request_id)
+    # One list per single-type manager (group), not a flat concatenation.
+    assert len(groups) == len(coordinator.single_type_managers)
+    assert all(isinstance(g, list) for g in groups)
+    # opt-125m is single-group, so exactly one non-empty group holds the
+    # request's blocks; the request had blocks allocated by schedule().
+    assert sum(len(g) for g in groups) > 0

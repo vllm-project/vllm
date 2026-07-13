@@ -531,6 +531,21 @@ class KVCacheManager:
         """
         return self.coordinator.pop_blocks_for_free(request.request_id)
 
+    def pop_block_groups_for_free(self, request: Request) -> list[list[KVCacheBlock]]:
+        """Pop the request's bookkeeping and return its blocks grouped per
+        single-type manager, without returning them to the block pool. The
+        caller must eventually free each group in reverse order (so that tail
+        blocks are evicted first), in a separate `block_pool.free_blocks` call
+        per group.
+
+        Args:
+            request: The request to pop the blocks for.
+
+        Returns:
+            One list of blocks (in allocation order) per single-type manager.
+        """
+        return self.coordinator.pop_block_groups_for_free(request.request_id)
+
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
 
