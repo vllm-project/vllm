@@ -74,7 +74,7 @@ from torch._inductor.utils import fresh_cache
 
 
 if TYPE_CHECKING:
-    from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+    from transformers import PythonBackend, TokenizersBackend
     from transformers.generation.utils import GenerateOutput
 
 
@@ -499,7 +499,7 @@ class HfRunner:
             self.model = model
 
         if not skip_tokenizer_init:
-            self.tokenizer: "PreTrainedTokenizer | PreTrainedTokenizerFast" = (
+            self.tokenizer: "PythonBackend | TokenizersBackend" = (
                 AutoTokenizer.from_pretrained(
                     tokenizer_name or model_name,
                     trust_remote_code=trust_remote_code,
