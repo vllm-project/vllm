@@ -77,5 +77,43 @@ class TestSetCudaContext:
             current_platform.set_device(torch.device("cpu"))
 
 
+def test_get_device_capability_uses_visible_device_ordinal(monkeypatch):
+    import vllm.platforms.interface as platform_interface
+    from vllm.platforms.cuda import NvmlCudaPlatform, pynvml
+
+    seen_indices: list[int] = []
+
+    def record_handle(index: int) -> str:
+        seen_indices.append(index)
+        return f"handle-{index}"
+
+    monkeypatch.setattr(platform_interface, "_assigned_physical_gpu_ids", [1])
+    monkeypatch.setenv(NvmlCudaPlatform.device_control_env_var, "0,1")
+    monkeypatch.setattr(
+        NvmlCudaPlatform,
+        "device_control_id_to_physical_device_id",
+        classmethod(lambda _cls, device_id: int(device_id)),
+    )
+    monkeypatch.setattr(pynvml, "nvmlInit", lambda: None)
+    monkeypatch.setattr(pynvml, "nvmlShutdown", lambda: None)
+    monkeypatch.setattr(
+        pynvml,
+        "nvmlDeviceGetHandleByIndex",
+        record_handle,
+    )
+    monkeypatch.setattr(
+        pynvml,
+        "nvmlDeviceGetCudaComputeCapability",
+        lambda _handle: (9, 0),
+    )
+    NvmlCudaPlatform.get_device_capability.cache_clear()
+
+    capability = NvmlCudaPlatform.get_device_capability(device_id=1)
+
+    assert capability is not None
+    assert capability.to_int() == 90
+    assert seen_indices == [1]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
