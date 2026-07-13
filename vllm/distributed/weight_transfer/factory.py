@@ -228,8 +228,3 @@ WeightTransferEngineFactory.register_engine(
     "vllm.distributed.weight_transfer.sparse_nccl_engine",
     "SparseNCCLWeightTransferEngine",
 )
-
-# Trainer-side engines are registered by the per-backend migration PRs that add
-# the concrete `TrainerWeightTransferEngine` subclasses (IPC, then NCCL). Until
-# then `WeightTransferTrainerFactory`'s registry is intentionally empty: this PR
-# ships the abstractions only.
