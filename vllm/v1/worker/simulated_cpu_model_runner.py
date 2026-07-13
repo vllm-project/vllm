@@ -63,6 +63,13 @@ class SimulatedCPUModelRunner(CPUModelRunner):
             self._simulated_token_ids_by_req[req_id] = (
                 self._get_simulated_output_token_ids(new_req_data)
             )
+            # Terminate generation once caller-provided tokens run out by
+            # appending EOS, mirroring how a real model signals completion.
+            # With ``ignore_eos`` set, ``eos_token_id`` is None and generation
+            # instead pads to ``max_tokens`` (see _next_simulated_token_id).
+            eos_token_id = sampling_params.eos_token_id if sampling_params else None
+            if eos_token_id is not None:
+                self._simulated_token_ids_by_req[req_id].append(eos_token_id)
 
     def update_requests(self, scheduler_output: "SchedulerOutput") -> None:
         reqs = scheduler_output.scheduled_cached_reqs
