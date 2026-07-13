@@ -4331,6 +4331,14 @@ class GPUModelRunner(
                 num_tokens_unpadded,
                 ubatch_slices_padded,
             )
+        is_padding = None
+        if num_tokens_padded > num_tokens_unpadded:
+            is_padding = torch.zeros(
+                num_tokens_padded,
+                dtype=torch.bool,
+                device=self.device,
+            )
+            is_padding[num_tokens_unpadded:num_tokens_padded] = True
         with (
             set_forward_context(
                 attn_metadata,
@@ -4342,6 +4350,7 @@ class GPUModelRunner(
                 ubatch_slices=ubatch_slices_padded,
                 slot_mapping=slot_mappings,
                 skip_compiled=has_encoder_input,
+                is_padding=is_padding,
             ),
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(

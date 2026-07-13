@@ -974,6 +974,69 @@ def test_cpu_ep_sequence_parallel_uses_ep_group():
     )
 
 
+def _non_sp_padding_reslice_worker(
+    rank,
+    world_size,
+    tp_size,
+    dp_size,
+    port,
+    dp_port,
+    dp_token_counts,
+    err_q,
+):
+    try:
+        os.environ.setdefault("VLLM_DIST_IDENT", f"test_cpu_ep_pad_reslice_{port}")
+        _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
+
+        from vllm.distributed.parallel_state import get_dp_group, get_ep_group
+        from vllm.forward_context import get_forward_context
+
+        dp_rank = rank // tp_size
+        local_rows = dp_token_counts[dp_rank]
+
+        is_padding = torch.zeros(local_rows, dtype=torch.bool)
+        if local_rows > 1:
+            is_padding[local_rows // 2 :] = True
+
+        hidden = _filled(local_rows, HIDDEN_SIZE, float(rank + 1))
+        router = _filled(local_rows, NUM_EXPERTS, float((rank + 1) * 10))
+
+        with _make_forward_context(dp_rank, dp_size, local_rows, dp_token_counts):
+            get_forward_context().is_padding = is_padding
+
+            get_ep_group().dispatch_router_logits(hidden.clone(), router.clone())
+
+            total_rows = sum(dp_token_counts)
+            expert_out = torch.arange(total_rows, dtype=torch.float32).unsqueeze(
+                1
+            ).expand(total_rows, HIDDEN_SIZE).contiguous() + float((dp_rank + 1) * 1000)
+            combined = get_ep_group().combine(expert_out)
+            torch.testing.assert_close(
+                combined,
+                _expected_combined(dp_rank, dp_token_counts, HIDDEN_SIZE),
+            )
+
+            assert get_dp_group().rank_in_group == dp_rank
+            torch.testing.assert_close(get_forward_context().is_padding, is_padding)
+
+        dist.barrier()
+    except Exception as err:
+        _report_worker_failure(rank, err_q, err)
+
+
+@pytest.mark.distributed
+def test_cpu_ep_combine_reslices_padding_mask_by_dp_group():
+    """TP=2, DP=3 (EP=6): combine()'s is_padding reslice must key off the DP
+    group, not the EP group, or unequal DP ranks read each other's mask."""
+    _spawn_workers(
+        _non_sp_padding_reslice_worker,
+        world_size=6,
+        tp_size=2,
+        dp_size=3,
+        params=[4, 8, 6],
+    )
+
+
 @pytest.mark.distributed
 @pytest.mark.skipif(not hasattr(torch, "compile"), reason="torch.compile required")
 def test_cpu_ep_compile_ragged_fastpath():

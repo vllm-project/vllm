@@ -10,6 +10,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from vllm.config import VllmConfig
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -571,6 +573,81 @@ def test_w8a16_block_fp8_cpu_fused_moe_expert_parallel_apply(
         summed += out
 
     torch.testing.assert_close(ref_out.bfloat16(), summed, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("seed", [0])
+def test_w8a16_block_fp8_cpu_ep_apply_masks_forward_padding(seed):
+    """apply() must zero padding rows even though topk_ids routes them to
+    real experts, since padding rows carry arbitrary router output."""
+    set_random_seed(seed)
+    M, N, K, E, topk, num_ranks = 8, 256, 512, 8, 2, 3
+    padded_rows = 2
+
+    a = torch.randn(M, K, dtype=torch.bfloat16) / math.sqrt(K)
+    w1, w2, w1_s, w2_s = _make_fp8_moe_weights(E, N, K, BLOCK_SIZE)
+
+    router_logits = torch.randn(M, E, dtype=torch.float32)
+    score = torch.softmax(router_logits, dim=-1)
+    topk_weight, topk_ids = torch.topk(score, topk)
+    topk_ids = topk_ids.to(torch.int32)
+    topk_ids[-padded_rows:] = -1
+
+    ref_out = ref_w8a16_block_fp8_moe(
+        a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, BLOCK_SIZE
+    )
+
+    is_padding = torch.zeros(M, dtype=torch.bool)
+    is_padding[-padded_rows:] = True
+    moe_parallel_config = FusedMoEParallelConfig.make_no_parallel()
+
+    summed = torch.zeros(M, K, dtype=torch.bfloat16)
+    with set_forward_context(None, VllmConfig(), is_padding=is_padding):
+        for rank in range(num_ranks):
+            local_num_experts, expert_map, _ = determine_expert_map(
+                ep_size=num_ranks,
+                ep_rank=rank,
+                global_num_experts=E,
+            )
+            assert expert_map is not None
+
+            local_experts = _get_local_expert_slice(expert_map, local_num_experts)
+            moe_config = FusedMoEConfig(
+                num_experts=E,
+                experts_per_token=topk,
+                hidden_dim=K,
+                intermediate_size=N,
+                num_local_experts=local_num_experts,
+                num_logical_experts=E,
+                moe_parallel_config=moe_parallel_config,
+                activation=MoEActivation.SILU,
+                in_dtype=torch.bfloat16,
+                device="cpu",
+                routing_method=RoutingMethodType.Default,
+            )
+            quant_config = FusedMoEQuantConfig.make(
+                torch.float8_e4m3fn,
+                block_shape=BLOCK_SIZE,
+                w1_scale=w1_s[local_experts].contiguous(),
+                w2_scale=w2_s[local_experts].contiguous(),
+            )
+            experts = CPUExpertsFp8(moe_config, quant_config)
+            out = experts.apply(
+                hidden_states=a.clone(),
+                w1=_prepack_experts(w1[local_experts].contiguous()),
+                w2=_prepack_experts(w2[local_experts].contiguous()),
+                router_logits=router_logits,
+                activation=MoEActivation.SILU,
+                global_num_experts=E,
+                expert_map=expert_map,
+                a1q_scale=None,
+                apply_router_weight_on_input=False,
+            )
+            summed += out
+
+    torch.testing.assert_close(ref_out.bfloat16(), summed, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(
+        summed[-padded_rows:], torch.zeros_like(summed[-padded_rows:])
+    )
 
 
 # ===========================================================================

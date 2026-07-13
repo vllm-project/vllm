@@ -436,22 +436,21 @@ class CpuCommunicator(DeviceCommunicatorBase):
             hidden_states: torch.Tensor,
             router_logits: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            # Piggyback any per-token padding mask already present in the
-            # forward context on the same all-gather so skipping padding rows
-            # in the MoE kernel needs no extra collective.
+            # Always piggyback the padding mask: DP ranks can disagree on
+            # whether they have padding, but must agree on the gather shape.
             is_padding = get_forward_context().is_padding
-            extra_tensors = None
-            if is_padding is not None:
-                extra_tensors = [is_padding[: hidden_states.shape[0]].to(torch.float32)]
+            if is_padding is None:
+                padding = hidden_states.new_zeros((hidden_states.shape[0],))
+            else:
+                padding = is_padding[: hidden_states.shape[0]].to(torch.float32)
             result = _with_non_sp_dp_sizes(
                 lambda: mgr.dispatch_router_logits(
-                    hidden_states, router_logits, extra_tensors=extra_tensors
+                    hidden_states,
+                    router_logits,
+                    extra_tensors=[padding],
                 )
             )
-            if extra_tensors is not None:
-                gathered_pad = result[2][0]
-            else:
-                gathered_pad = hidden_states.new_zeros((0,), dtype=torch.float32)
+            gathered_pad = result[2][0]
             return result[0], result[1], gathered_pad
 
         @_dispatch_rl.register_fake
@@ -464,11 +463,10 @@ class CpuCommunicator(DeviceCommunicatorBase):
             # symint instead of the uniform shape[0] * world_size (GPU parity).
             ctx = torch.library.get_ctx()
             n = ctx.new_dynamic_size()
-            pad_n = ctx.new_dynamic_size()
             return (
                 hidden_states.new_empty((n,) + hidden_states.shape[1:]),
                 router_logits.new_empty((n,) + router_logits.shape[1:]),
-                hidden_states.new_empty((pad_n,), dtype=torch.float32),
+                hidden_states.new_empty((n,), dtype=torch.float32),
             )
 
         @torch.library.custom_op(
@@ -619,12 +617,10 @@ class CpuCommunicator(DeviceCommunicatorBase):
             # it here -- outside the op's opaque boundary -- triggers a
             # data-dependent guard failure.
             forward_context = get_forward_context()
-            has_padding_mask = forward_context.is_padding is not None
             gathered_hidden, gathered_rl, gathered_pad = self._ep_dispatch_rl_op(
                 hidden_states, router_logits
             )
-            if has_padding_mask:
-                forward_context.is_padding = gathered_pad > 0.5
+            forward_context.is_padding = gathered_pad > 0.5
             return gathered_hidden, gathered_rl
         return self.all2all_manager.dispatch_router_logits(
             hidden_states, router_logits, is_sequence_parallel, extra_tensors
@@ -669,7 +665,28 @@ class CpuCommunicator(DeviceCommunicatorBase):
         if is_sequence_parallel and hasattr(self, "_ep_combine_sp_op"):
             return self._ep_combine_sp_op(hidden_states)
         if not is_sequence_parallel and hasattr(self, "_ep_combine_op"):
-            return self._ep_combine_op(hidden_states)
+            forward_context = get_forward_context()
+            gathered_padding = forward_context.is_padding
+            output = self._ep_combine_op(hidden_states)
+            if gathered_padding is not None:
+                from vllm.distributed.parallel_state import get_dp_group
+
+                dp_metadata = forward_context.dp_metadata
+                assert dp_metadata is not None
+                # It was gathered over the DP group, not the (larger) EP
+                # group, so re-slice with DP rank and un-replicated sizes.
+                sizes = [
+                    int(size) for size in dp_metadata.num_tokens_across_dp_cpu.tolist()
+                ]
+                assert sum(sizes) == gathered_padding.shape[0], (
+                    f"{sum(sizes)} != {gathered_padding.shape[0]}"
+                )
+                rank = get_dp_group().rank_in_group
+                start = sum(sizes[:rank])
+                forward_context.is_padding = gathered_padding[
+                    start : start + sizes[rank]
+                ]
+            return output
         return self.all2all_manager.combine(hidden_states, is_sequence_parallel)
 
 
