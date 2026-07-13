@@ -250,6 +250,7 @@ class TestDeviceTransfers:
             assert torch.equal(
                 sizes_tensor, torch.tensor([256, 256], dtype=torch.int64)
             )
+        store.is_pinned = False
         _cleanup(store)
 
 

@@ -57,17 +57,8 @@ class ServingObjectStorage:
         """Stream the object identified by the given UUID."""
 
         try:
-            async with self.client.get_iterator_numpy(uuid) as it:
-
-                async def stream_data() -> AsyncGenerator[bytes, None]:
-                    for array, offset in it:
-                        yield array[:offset].tobytes()
-
-                return StreamingResponse(
-                    stream_data(),
-                    media_type="application/octet-stream",
-                    headers={"Content-Disposition": f'attachment; filename="{uuid}"'},
-                )
+            cm = self.client.get_iterator_numpy(uuid)
+            it = await cm.__aenter__()
         except RuntimeError as e:
             # Map server-side "not found" errors to 404
             if "not found" in str(e).lower():
@@ -75,6 +66,19 @@ class ServingObjectStorage:
                     status_code=404, detail="Object not found"
                 ) from None
             raise HTTPException(status_code=500, detail=str(e)) from None
+
+        async def stream_data() -> AsyncGenerator[bytes, None]:
+            try:
+                for array, offset in it:
+                    yield array[:offset].tobytes()
+            finally:
+                await cm.__aexit__(None, None, None)
+
+        return StreamingResponse(
+            stream_data(),
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{uuid}"'},
+        )
 
     async def delete(self, uuid: str):
         """Delete the object with the specified UUID."""
