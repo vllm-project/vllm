@@ -147,7 +147,7 @@ run_model() {
 
   # --- start server (logs stream to this terminal) ---
   echo "[$key] starting vllm serve ..."
-  env $env vllm serve --model "$model" --host localhost --port "$PORT" $serve &
+  ( export $env; vllm serve --model "$model" --host localhost --port "$PORT" $serve ) &
   server_pid=$!
 
   local ready=0
