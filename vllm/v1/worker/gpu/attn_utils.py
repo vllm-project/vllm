@@ -218,7 +218,7 @@ def _reshape_attention_kv_cache(
         kv_cache = (
             kv_raw_tensor.view(-1, block_stride)[:, offset : offset + page_bytes]
             .view(dtype)
-            .view(kv_cache_shape)
+            .view(permuted_kv_cache_shape)
         )
     elif kv_cache_spec.page_size_padded is not None:
         # Use a strided view to skip the padding between physical pages.
@@ -238,7 +238,7 @@ def _reshape_attention_kv_cache(
         page_stride = kv_cache_spec.page_size_bytes // dtype_size
 
         num_blocks_dim = inv_order[0]
-        strides = list(torch.empty(permuted_kv_cache_shape).stride())
+        strides = list(torch.empty(permuted_kv_cache_shape, device="meta").stride())
         strides[num_blocks_dim] = page_stride
 
         kv_cache = torch.as_strided(
@@ -543,7 +543,15 @@ def init_kv_cache(
         shared_kv_cache_layers=shared_kv_cache_layers,
         kv_cache_config=kv_cache_config,
     )
-    bind_kv_cache(kv_caches, forward_context, runner_kv_caches)
+    # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
+    # decoder layer, so a layer name carries two integers (layer + module index).
+    num_attn_module = (
+        2
+        if vllm_config.model_config.hf_config.model_type
+        in ("longcat_flash", "longcat_flash_ngram")
+        else 1
+    )
+    bind_kv_cache(kv_caches, forward_context, runner_kv_caches, num_attn_module)
     return kv_caches
 
 
@@ -576,7 +584,7 @@ def build_attn_metadata(
     mm_req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None,
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
-    causal: bool | Mapping[int, bool] = True,
+    causal: bool | torch.Tensor | Mapping[int, bool] = True,
     rswa_prefix_lens: torch.Tensor | None = None,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
@@ -591,7 +599,9 @@ def build_attn_metadata(
         block_table = block_tables[i]
         slot_mapping = slot_mappings[i]
         # Per-group causal for hybrid drafters (mixed SWA/full attention).
-        group_causal = causal if isinstance(causal, bool) else causal.get(i, True)
+        group_causal = (
+            causal if isinstance(causal, (bool, torch.Tensor)) else causal.get(i, True)
+        )
 
         common_attn_metadata_extra_kwargs = (
             model_specific_attn_metadata.get_extra_common_attn_kwargs(i, num_reqs)
