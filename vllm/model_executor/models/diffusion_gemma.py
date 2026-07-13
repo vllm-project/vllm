@@ -47,6 +47,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.transformers.utils import recursive_replace_linear
 from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor, async_copy_to_gpu
@@ -515,11 +516,6 @@ def _compiled_sample_step(
     caller can compute logprobs outside the compiled region."""
     num_decode = decode_slots.shape[0]
     device = decode_slots.device
-
-    # Clear outputs so prefill / non-decode slots report 0 (decode slots are
-    # overwritten below).
-    sampled.zero_()
-    num_sampled.zero_()
 
     # ---- Phase 1: Temperature schedule ----
     steps_f = step_tensor[decode_slots].float()
@@ -1276,9 +1272,12 @@ class DiffusionSampler:
             src = (starts.unsqueeze(1) + ar.unsqueeze(0)).clamp_max(logits.shape[0] - 1)
             logits = logits[src.reshape(-1)] * valid.reshape(-1, 1).to(logits.dtype)
 
-        # Cleared inside _compiled_sample_step so prefill/non-decode slots stay 0.
+        # Clear once: the tiled loop below only scatters its own decode slots,
+        # so it must not re-clear earlier tiles' writes.
         sampled = self._sampled[:num_reqs]
         num_sampled = self._num_sampled[:num_reqs]
+        sampled.zero_()
+        num_sampled.zero_()
 
         all_slots = input_batch.idx_mapping[:num_reqs]
 
@@ -1286,94 +1285,109 @@ class DiffusionSampler:
         # since it mutates is_encoder_phase (commit→False, converge→True).
         is_committing = states.is_encoder_phase[decode_slots].clone()
 
-        # --- Single compiled call: temp → sample → probs → post-process ---
-        scaled = _compiled_sample_step(
-            logits,
-            decode_slots,
-            decode_idx,
-            all_slots,
-            valid_canvas_len,
-            # State
-            states.canvas,
-            states.argmax_canvas,
-            states.step,
-            states.is_encoder_phase,
-            states.confident,
-            states.self_conditioning_embeds,
-            self.embed_weight,
-            self.normalizer,
-            states.accepted_canvas_history,
-            states.accepted_canvas_history_len,
-            # Output
-            sampled,
-            num_sampled,
-            self.req_states.draft_tokens,
-            # Config
-            max_denoising_steps=float(states.max_denoising_steps),
-            t_min=self.t_min,
-            t_max=self.t_max,
-            confidence_threshold=self.confidence_threshold,
-            vocab_size=self.vocab_size,
-            CL=self.canvas_length,
-            ST=states.stability_threshold,
-            entropy_bound=self.entropy_bound,
-            sc_vocab_start=self.sc_vocab_start,
-            sc_vocab_end=self.sc_vocab_end,
-            tp_size=self.tp_size,
-            tp_group_name=self.tp_group_name,
-        )
-
-        # --- Logprobs: stash on convergence, return on commit ---
         slots_np = input_batch.idx_mapping_np[:num_reqs]
         is_decode_np = per_req_nlogits_np > 0
-
-        logprobs_tensors = None
         max_num_logprobs = self.sampling_states.max_num_logprobs(slots_np)
-        if max_num_logprobs >= 0:
-            # Denoise steps that just converged: the compiled step flipped
-            # is_encoder_phase from False→True. Detect as slots where
-            # is_encoder_phase is now True but is_committing was False.
-            converged_mask = states.is_encoder_phase[decode_slots]
-            just_converged = converged_mask & ~is_committing
-            if just_converged.any():
-                flat_logits = scaled.reshape(-1, scaled.shape[-1])
-                argmax_tokens = scaled.argmax(dim=-1)
-                for local_idx in just_converged.nonzero(as_tuple=True)[0]:
-                    li = local_idx.item()
-                    slot = decode_slots[local_idx]
-                    # Stash only the real canvas positions (== CL unless this
-                    # canvas was truncated near max_model_len); padded tail
-                    # positions are never emitted.
-                    k_i = int(valid_canvas_len_np[li])
-                    start = li * CL
-                    self._pending_logprobs[slot.item()] = compute_topk_logprobs(
-                        flat_logits[start : start + k_i],
-                        max_num_logprobs,
-                        argmax_tokens[local_idx][:k_i],
-                    )
 
-            # Commit steps: is_committing was True at entry. Reassemble
-            # previously stashed logprobs and attach to SamplerOutput.
-            if is_committing.any() and self._pending_logprobs:
-                parts_ids, parts_lp, parts_ranks = [], [], []
-                cu_gen: list[int] = []
-                flat_offset = 0
-                for i in range(num_reqs):
-                    cu_gen.append(flat_offset)
-                    slot = int(slots_np[i])
-                    if is_decode_np[i] and slot in self._pending_logprobs:
-                        lp = self._pending_logprobs.pop(slot)
-                        parts_ids.append(lp.logprob_token_ids)
-                        parts_lp.append(lp.logprobs)
-                        parts_ranks.append(lp.selected_token_ranks)
-                        flat_offset += lp.logprobs.shape[0]
-                if parts_ids:
-                    logprobs_tensors = LogprobsTensors(
-                        logprob_token_ids=torch.cat(parts_ids),
-                        logprobs=torch.cat(parts_lp),
-                        selected_token_ranks=torch.cat(parts_ranks),
-                        cu_num_generated_tokens=cu_gen,
-                    )
+        # Sample over the [num_decode * CL, vocab] logits. The fp32 pipeline in
+        # _compiled_sample_step keeps several live [group * CL, vocab] copies, so
+        # size each tile to a fraction of free memory to bound the transient at
+        # high concurrency. Tiling is bit-identical to a single pass.
+        group = max(num_decode, 1)
+        if num_decode > 0:
+            free, _ = current_platform.mem_get_info()
+            # ~10 transient fp32 copies of [group * CL, vocab] inside the step
+            # (eager peaks at ~8; pad for allocator overhead and small tensors).
+            bytes_per_req = CL * self.vocab_size * 4 * 10
+            budget = int(free * 0.5) // max(bytes_per_req, 1)
+            group = max(1, min(num_decode, budget))
+
+        for start_req in range(0, num_decode, group):
+            end_req = min(start_req + group, num_decode)
+            tile = slice(start_req, end_req)
+            tile_slots = decode_slots[tile]
+
+            scaled = _compiled_sample_step(
+                logits[start_req * CL : end_req * CL],
+                tile_slots,
+                decode_idx[tile],
+                all_slots,
+                valid_canvas_len[tile],
+                # State
+                states.canvas,
+                states.argmax_canvas,
+                states.step,
+                states.is_encoder_phase,
+                states.confident,
+                states.self_conditioning_embeds,
+                self.embed_weight,
+                self.normalizer,
+                states.accepted_canvas_history,
+                states.accepted_canvas_history_len,
+                # Output
+                sampled,
+                num_sampled,
+                self.req_states.draft_tokens,
+                # Config
+                max_denoising_steps=float(states.max_denoising_steps),
+                t_min=self.t_min,
+                t_max=self.t_max,
+                confidence_threshold=self.confidence_threshold,
+                vocab_size=self.vocab_size,
+                CL=CL,
+                ST=states.stability_threshold,
+                entropy_bound=self.entropy_bound,
+                sc_vocab_start=self.sc_vocab_start,
+                sc_vocab_end=self.sc_vocab_end,
+                tp_size=self.tp_size,
+                tp_group_name=self.tp_group_name,
+            )
+
+            # Logprobs for denoise steps that just converged (is_encoder_phase
+            # flipped False→True), stashed per tile so `scaled` is freed each tile.
+            if max_num_logprobs >= 0:
+                converged_mask = states.is_encoder_phase[tile_slots]
+                just_converged = converged_mask & ~is_committing[tile]
+                if just_converged.any():
+                    flat_logits = scaled.reshape(-1, scaled.shape[-1])
+                    argmax_tokens = scaled.argmax(dim=-1)
+                    for local_idx in just_converged.nonzero(as_tuple=True)[0]:
+                        li = local_idx.item()
+                        slot = tile_slots[local_idx]
+                        # Stash only the real canvas positions (== CL unless this
+                        # canvas was truncated near max_model_len); padded tail
+                        # positions are never emitted.
+                        k_i = int(valid_canvas_len_np[start_req + li])
+                        pos = li * CL
+                        self._pending_logprobs[slot.item()] = compute_topk_logprobs(
+                            flat_logits[pos : pos + k_i],
+                            max_num_logprobs,
+                            argmax_tokens[local_idx][:k_i],
+                        )
+
+        # Commit steps: is_committing was True at entry. Reassemble previously
+        # stashed logprobs and attach to SamplerOutput.
+        logprobs_tensors = None
+        if max_num_logprobs >= 0 and is_committing.any() and self._pending_logprobs:
+            parts_ids, parts_lp, parts_ranks = [], [], []
+            cu_gen: list[int] = []
+            flat_offset = 0
+            for i in range(num_reqs):
+                cu_gen.append(flat_offset)
+                slot = int(slots_np[i])
+                if is_decode_np[i] and slot in self._pending_logprobs:
+                    lp = self._pending_logprobs.pop(slot)
+                    parts_ids.append(lp.logprob_token_ids)
+                    parts_lp.append(lp.logprobs)
+                    parts_ranks.append(lp.selected_token_ranks)
+                    flat_offset += lp.logprobs.shape[0]
+            if parts_ids:
+                logprobs_tensors = LogprobsTensors(
+                    logprob_token_ids=torch.cat(parts_ids),
+                    logprobs=torch.cat(parts_lp),
+                    selected_token_ranks=torch.cat(parts_ranks),
+                    cu_num_generated_tokens=cu_gen,
+                )
 
         return self._build_output(
             input_batch,
