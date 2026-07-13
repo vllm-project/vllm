@@ -62,7 +62,6 @@ def build_region_meta(
     block_size: int,
     block_stride_bytes: int,
     region_content_bytes: int,
-    virtually_split: bool = False,
 ) -> torch.Tensor:
     """Build a ``(B, H, N, C)`` meta tensor for one KV cache region.
 
@@ -75,9 +74,7 @@ def build_region_meta(
     """
     dtype = getattr(spec, "dtype", torch.int8)
     elem = get_dtype_size(dtype)
-    H, N, C = spec.compute_transfer_shape(
-        region_content_bytes, block_size, virtually_split
-    )
+    H, N, C = spec.compute_transfer_shape(region_content_bytes, block_size)
 
     meta = torch.as_strided(
         torch.empty(1, dtype=dtype, device="meta"),
@@ -108,7 +105,6 @@ class DescriptorView:
     contents: list[int]
     num_blocks: int
     descs_per_region: int
-    virtually_split: bool
 
     @property
     def num_view_regions(self) -> int:
@@ -255,12 +251,10 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
                 ]
                 contents = [sum(self._mamba_ssm_size) for _ in all_indices]
                 num_blocks = self._logical_num_blocks
-                view_virtually_split = False
             elif isinstance(representative_spec, AttentionSpec):
                 strides = [self.block_stride_per_layer[i] for i in all_indices]
                 contents = [self.block_len_per_layer[i] for i in all_indices]
                 num_blocks = self.num_blocks
-                view_virtually_split = self.transfer_topo.virtually_split_kv_in_blocks
             else:
                 raise ValueError(
                     f"Unsupported spec type for DescriptorView: "
@@ -274,7 +268,6 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
                 block_size=self.block_size,
                 block_stride_bytes=strides[0],
                 region_content_bytes=contents[0],
-                virtually_split=view_virtually_split,
             )
             probe_slices = representative_spec.slice_for_tp_transfer(
                 probe_meta,
@@ -283,7 +276,6 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
                 self.world_size,
                 self.tp_rank,
                 self.model_config,
-                virtually_split=view_virtually_split,
             )
             descs_per_region = len(probe_slices)
 
@@ -295,7 +287,6 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
                     contents=contents,
                     num_blocks=num_blocks,
                     descs_per_region=descs_per_region,
-                    virtually_split=view_virtually_split,
                 )
             )
             group_to_view[group_idx] = len(views) - 1
@@ -323,7 +314,7 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
             logger.warning(
                 "[DEBUG VIEW %d] spec=%s regions=%s strides=%s "
                 "contents=%s num_blocks=%d descs_per_region=%d "
-                "virtually_split=%s total_descs=%d",
+                "total_descs=%d",
                 vi,
                 type(v.spec).__name__,
                 v.region_indices,
@@ -331,7 +322,6 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
                 v.contents,
                 v.num_blocks,
                 v.descs_per_region,
-                v.virtually_split,
                 v.num_descs(),
             )
 
@@ -378,7 +368,6 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
                 block_size=self.block_size,
                 block_stride_bytes=view.strides[region_pos] // block_size_ratio,
                 region_content_bytes=view.contents[region_pos] // block_size_ratio,
-                virtually_split=view.virtually_split,
             )
             slices = view.spec.slice_for_tp_transfer(
                 meta,
@@ -387,7 +376,6 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
                 self.world_size,
                 self.tp_rank,
                 self.model_config,
-                virtually_split=view.virtually_split,
             )
             for slice_view in slices:
                 descs = self._view_to_descriptors(
@@ -466,7 +454,6 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
                     nixl_agent_meta.block_lens[region_idx],
                     sum(nixl_agent_meta.ssm_sizes),
                 ),
-                virtually_split=view.virtually_split,
             )
             slices = view.spec.slice_for_tp_transfer(
                 meta,
@@ -475,7 +462,6 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
                 remote_tp_size,
                 remote_tp_rank,
                 self.model_config,
-                virtually_split=view.virtually_split,
             )
             for slice_view in slices:
                 descs = self._view_to_descriptors(

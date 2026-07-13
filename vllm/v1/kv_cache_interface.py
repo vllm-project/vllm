@@ -134,7 +134,6 @@ class KVCacheSpec:
         self,
         region_content_bytes: int,
         block_size: int,
-        virtually_split: bool,
     ) -> tuple[int, int, int]:
         """Compute (num_heads, N, C) per-block shape for a descriptor meta tensor.
 
@@ -152,13 +151,12 @@ class KVCacheSpec:
         other_tp: int,
         other_rank: int,
         model_config: ModelConfig,
-        virtually_split: bool = False,
     ) -> list[torch.Tensor]:
         """Decompose and narrow a region meta tensor for transfer.
 
         This is the single dispatch point for all descriptor construction.
         It handles both:
-          1. Component decomposition (K/V split, Mamba sub-projections)
+          1. Component decomposition (Mamba sub-projections)
           2. TP head/channel narrowing
 
         For local descriptors, call with my_tp==other_tp, my_rank==other_rank.
@@ -166,24 +164,11 @@ class KVCacheSpec:
 
         Args:
             tensor: (B, H, N, C) meta tensor for the full region.
-            virtually_split: True when K/V are co-located in same region
-                (FlashInfer layout) and need separate descriptor streams.
 
         Returns:
             List of narrowed/decomposed meta tensors. Each becomes one
             descriptor stream in the NIXL transfer.
         """
-        if virtually_split:
-            B, H, N, C = tensor.shape
-            v_offset = H * N * C
-            k_view = tensor
-            v_view = torch.as_strided(
-                tensor,
-                (B, H, N, C),
-                stride=tensor.stride(),
-                storage_offset=tensor.storage_offset() + v_offset,
-            )
-            return [k_view, v_view]
         return [tensor]
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
@@ -256,7 +241,6 @@ class AttentionSpec(KVCacheSpec):
         self,
         region_content_bytes: int,
         block_size: int,
-        virtually_split: bool,
     ) -> tuple[int, int, int]:
         elem = get_dtype_size(self.dtype)
         N = block_size
@@ -265,11 +249,10 @@ class AttentionSpec(KVCacheSpec):
         else:
             head_dim = self.head_size
 
-        if virtually_split:
-            H = region_content_bytes // (2 * N * head_dim * elem)
-        else:
-            H = region_content_bytes // (N * head_dim * elem)
-        return (H, N, head_dim)
+        # Post-2/N: K and V are packed into the content dim as 2*head_dim.
+        content_dim = 2 * head_dim
+        H = region_content_bytes // (N * content_dim * elem)
+        return (H, N, content_dim)
 
     def slice_for_tp_transfer(
         self,
@@ -279,26 +262,9 @@ class AttentionSpec(KVCacheSpec):
         other_tp: int,
         other_rank: int,
         model_config: ModelConfig,
-        virtually_split: bool = False,
     ) -> list[torch.Tensor]:
-        # tensor shape: (B, H, N, C) where H = heads, C = head_size
-
-        # Split K/V if virtually_split. FlashInfer layout stores K and V
-        # as two contiguous blocks [K_all | V_all], so V starts at offset
-        # H * N * C from the block base.
-        if virtually_split:
-            B, H, N, C = tensor.shape
-            v_offset = H * N * C
-            k_view = tensor
-            v_view = torch.as_strided(
-                tensor,
-                (B, H, N, C),
-                stride=tensor.stride(),
-                storage_offset=tensor.storage_offset() + v_offset,
-            )
-            parts = [k_view, v_view]
-        else:
-            parts = [tensor]
+        # tensor shape: (B, H, N, 2*head_dim) — K/V packed in content dim.
+        parts = [tensor]
 
         if my_tp == other_tp and my_rank == other_rank:
             return parts
@@ -562,7 +528,6 @@ class MLAAttentionSpec(FullAttentionSpec):
         other_tp: int,
         other_rank: int,
         model_config: ModelConfig,
-        virtually_split: bool = False,
     ) -> list[torch.Tensor]:
         return [tensor]
 
@@ -808,7 +773,6 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         other_tp: int,
         other_rank: int,
         model_config: ModelConfig,
-        virtually_split: bool = False,
     ) -> list[torch.Tensor]:
         return [tensor]
 
@@ -949,7 +913,6 @@ class MambaSpec(KVCacheSpec):
         self,
         region_content_bytes: int,
         block_size: int,
-        virtually_split: bool,
     ) -> tuple[int, int, int]:
         return (1, 1, region_content_bytes)
 
@@ -961,7 +924,6 @@ class MambaSpec(KVCacheSpec):
         other_tp: int,
         other_rank: int,
         model_config: ModelConfig,
-        virtually_split: bool = False,
     ) -> list[torch.Tensor]:
         B, H_in, N, flat_C = tensor.shape
         assert H_in == 1 and N == 1, (
