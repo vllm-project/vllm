@@ -7,7 +7,7 @@ import torch
 
 from tests.v1.kv_connector.unit.utils import create_vllm_config
 from vllm.config import KVEventsConfig, KVTransferConfig
-from vllm.distributed.kv_events import BlockRemoved, BlockStored
+from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
     OffloadingEventGroupSpec,
     OffloadingEventsTracker,
@@ -28,10 +28,9 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     make_offload_key,
 )
-from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
-_CPU_MEDIUM = CPULoadStoreSpec.medium()
+_CPU_MEDIUM = MEDIUM_CPU
 _FULL_ATTENTION_EVENT_SPEC = OffloadingEventGroupSpec(
     kv_cache_spec_kind=KVCacheSpecKind.FULL_ATTENTION.value,
     kv_cache_spec_sliding_window=None,
