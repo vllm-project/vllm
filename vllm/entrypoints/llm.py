@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from tqdm.auto import tqdm
 from typing_extensions import TypeVar, overload
 
-from vllm.beam_search import (
+from vllm.entrypoints.generate.beam_search.utils import (
     BeamSearchInstance,
     BeamSearchOutput,
     BeamSearchSequence,
@@ -50,7 +50,7 @@ from vllm.entrypoints.pooling.factories import init_pooling_io_processors
 from vllm.entrypoints.pooling.scoring.io_processor import ScoringIOProcessor
 from vllm.entrypoints.pooling.scoring.typing import ScoreInput
 from vllm.entrypoints.pooling.typing import OfflineInputsContext, OfflineOutputsContext
-from vllm.entrypoints.utils import log_non_default_args
+from vllm.entrypoints.serve.utils.api_utils import log_non_default_args
 from vllm.inputs import (
     DataPrompt,
     EngineInput,
