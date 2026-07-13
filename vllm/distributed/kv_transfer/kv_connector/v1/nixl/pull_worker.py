@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Slack (s) subtracted from D's exported block-expiry deadline on the turn-2
+# Slack (seconds) subtracted from D's exported block-expiry deadline on the turn-2
 # readback, absorbing clock-offset error and read latency.
 _KV_BLOCKS_EXPIRY_SAFETY_MARGIN = 5.0
 

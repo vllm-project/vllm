@@ -456,7 +456,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         if decode_engine_id in self._remote_agents:
             return True
         try:
-            # Offset is unused on the push side (turn-2 readback is pull-only).
             remote_agents, _ = self._nixl_handshake(
                 decode_host,
                 decode_port,

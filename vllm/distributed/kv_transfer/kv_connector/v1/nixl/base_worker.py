@@ -708,7 +708,6 @@ class NixlBaseConnectorWorker:
                 remote_ranks = (remote_pp_rank, remote_rank)
                 remote_rank_to_agent_name[remote_ranks] = remote_agent_name
 
-        # A handshake always makes at least one round-trip, so the offset is set.
         assert best_offset is not None
         return remote_rank_to_agent_name, best_offset
 
