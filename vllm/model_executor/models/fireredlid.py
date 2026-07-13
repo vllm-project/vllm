@@ -702,6 +702,7 @@ class FireRedLIDForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
+        embedding_modalities: Sequence[str] | None = None,
     ) -> torch.Tensor:
         return self.model.decoder.embed_input_ids(input_ids)
 

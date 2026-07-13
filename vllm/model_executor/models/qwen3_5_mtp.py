@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3_5 MTP model."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 import torch
 from torch import nn
@@ -238,6 +238,7 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal):
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
+        embedding_modalities: Sequence[str] | None = None,
     ) -> torch.Tensor:
         inputs_embeds = self._embed_text_input_ids(
             input_ids,

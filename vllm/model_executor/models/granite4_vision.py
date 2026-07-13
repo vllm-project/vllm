@@ -9,7 +9,7 @@ LoRA support: use --enable-lora --default-mm-loras for LM-only LoRA adapters.
 """
 
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from fractions import Fraction
 from itertools import islice
 
@@ -800,6 +800,7 @@ class Granite4VisionForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
+        embedding_modalities: Sequence[str] | None = None,
         handle_oov_mm_token: bool = True,
     ) -> torch.Tensor:
         """Merge text and vision embeddings, apply embedding_multiplier.

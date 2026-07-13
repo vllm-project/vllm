@@ -3,7 +3,7 @@
 
 import asyncio
 import math
-from collections.abc import AsyncGenerator, Iterable, Iterator, Mapping
+from collections.abc import AsyncGenerator, Iterable, Iterator, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -291,6 +291,7 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
+        embedding_modalities: Sequence[str] | None = None,
         # Multi-modal token ID may exceed vocab size
     ) -> torch.Tensor:
         """Pass post-conv embeddings directly as input.

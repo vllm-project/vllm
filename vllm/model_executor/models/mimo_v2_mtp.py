@@ -18,7 +18,7 @@ Checkpoint weight layout (model.mtp.layers.{idx}.*):
   final_layernorm  - norm applied before logit computation
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 import torch
 import torch.nn as nn
@@ -345,6 +345,7 @@ class MiMoV2OmniMTP(MiMoV2MTP, SupportsMultiModal):
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
+        embedding_modalities: Sequence[str] | None = None,
     ) -> torch.Tensor:
         inputs_embeds = self._embed_text_input_ids(
             input_ids,

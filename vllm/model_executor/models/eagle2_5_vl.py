@@ -3,7 +3,7 @@
 # Adapted from NVIDIA Eagle2.5-VL model
 # https://huggingface.co/nvidia/Eagle2.5-8B
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Annotated, Literal, TypeAlias
 
 import torch
@@ -362,6 +362,7 @@ class Eagle2_5_VLForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
+        embedding_modalities: Sequence[str] | None = None,
     ) -> torch.Tensor:
         """Embed input IDs with optional multimodal embeddings."""
         if multimodal_embeddings is None or is_multimodal is None:
@@ -371,6 +372,7 @@ class Eagle2_5_VLForConditionalGeneration(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
+            embedding_modalities=embedding_modalities,
         )
 
     def forward(
