@@ -23,6 +23,7 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TextPrompt
 from vllm.model_executor.models.interfaces import (
+    DiarizedTranscriptionSegment,
     MultiModalEmbeddings,
     SupportsMultiModal,
     SupportsPP,
@@ -75,6 +76,41 @@ DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT = (
     "（[S01]、[S02]、[S03]…）开头，正文为对应的语音内容，"
     "并在段末标注结束时间戳，以清晰标明该段语音范围。"
 )
+
+
+def _find_timestamp(
+    text: str, position: int, stop: int
+) -> tuple[float, int, int] | None:
+    while position < stop:
+        position = text.find("[", position, stop)
+        if position == -1:
+            return None
+        marker_end = text.find("]", position + 1, stop)
+        if marker_end == -1:
+            return None
+        marker = text[position + 1 : marker_end]
+        if marker and marker.count(".") <= 1 and marker.replace(".", "").isdigit():
+            return float(marker), position, marker_end + 1
+        position += 1
+    return None
+
+
+def _find_diarized_header(
+    text: str, position: int
+) -> tuple[float, str, int, int] | None:
+    while (timestamp := _find_timestamp(text, position, len(text))) is not None:
+        start, header_start, speaker_start = timestamp
+        if speaker_start >= len(text) or text[speaker_start] != "[":
+            position = speaker_start
+            continue
+        speaker_end = text.find("]", speaker_start + 1)
+        if speaker_end == -1:
+            return None
+        speaker = text[speaker_start + 1 : speaker_end]
+        if len(speaker) >= 2 and speaker[0] == "S" and speaker[1:].isdigit():
+            return start, speaker, header_start, speaker_end + 1
+        position = speaker_end + 1
+    return None
 
 
 class MossTranscribeDiarizeAudioInputs(TensorSchema):
@@ -564,6 +600,7 @@ class MossTranscribeDiarizeForConditionalGeneration(
     supports_transcription = True
     supports_transcription_only = True
     supports_segment_timestamp = False
+    supports_diarized_transcription = True
     supported_languages = ISO639_1_SUPPORTED_LANGS
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -631,6 +668,42 @@ class MossTranscribeDiarizeForConditionalGeneration(
     @classmethod
     def post_process_output(cls, text: str) -> str:
         return text.strip()
+
+    @classmethod
+    def parse_diarized_transcript(cls, text: str) -> list[DiarizedTranscriptionSegment]:
+        """Parse MOSS's canonical ``[start][Sxx]text[end]`` transcript."""
+        segments: list[DiarizedTranscriptionSegment] = []
+        position = 0
+
+        while (header := _find_diarized_header(text, position)) is not None:
+            start, speaker, _, text_start = header
+            next_header = _find_diarized_header(text, text_start)
+            segment_end = next_header[2] if next_header is not None else len(text)
+
+            last_timestamp = None
+            marker_position = text_start
+            while timestamp := _find_timestamp(text, marker_position, segment_end):
+                last_timestamp = timestamp
+                marker_position = timestamp[2]
+
+            if last_timestamp is not None:
+                end, text_end, _ = last_timestamp
+                segment_text = text[text_start:text_end].strip()
+                if segment_text and end >= start:
+                    segments.append(
+                        DiarizedTranscriptionSegment(
+                            start=start,
+                            end=end,
+                            speaker=speaker,
+                            text=segment_text,
+                        )
+                    )
+
+            if next_header is None:
+                break
+            position = next_header[2]
+
+        return segments
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()

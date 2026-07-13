@@ -43,6 +43,7 @@ from vllm.utils.async_utils import make_async_with_semaphore, merge_async_iterat
 
 from ..transcription.protocol import (
     TranscriptionResponse,
+    TranscriptionResponseDiarized,
     TranscriptionResponseStreamChoice,
     TranscriptionResponseVerbose,
     TranscriptionSegment,
@@ -56,7 +57,9 @@ from ..translation.protocol import (
     TranslationStreamResponse,
 )
 
-SpeechToTextResponse: TypeAlias = TranscriptionResponse | TranslationResponse
+SpeechToTextResponse: TypeAlias = (
+    TranscriptionResponse | TranslationResponse | TranscriptionResponseDiarized
+)
 SpeechToTextResponseVerbose: TypeAlias = (
     TranscriptionResponseVerbose | TranslationResponseVerbose
 )
@@ -70,6 +73,7 @@ ResponseType: TypeAlias = (
     TranscriptionResponse
     | TranslationResponse
     | TranscriptionResponseVerbose
+    | TranscriptionResponseDiarized
     | TranslationResponseVerbose
 )
 
@@ -441,10 +445,15 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
-        if request.response_format not in ["text", "json", "verbose_json"]:
+        if request.response_format not in [
+            "text",
+            "json",
+            "verbose_json",
+            "diarized_json",
+        ]:
             return self.create_error_response(
                 "Currently only support response_format: "
-                "`text`, `json` or `verbose_json`"
+                "`text`, `json`, `verbose_json` or `diarized_json`"
             )
 
         if (
@@ -455,9 +464,20 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 f"Currently do not support verbose_json for {request.model}"
             )
 
-        if request.response_format == "verbose_json" and request.stream:
+        if (
+            request.response_format == "diarized_json"
+            and not self.model_cls.supports_diarized_transcription
+        ):
             return self.create_error_response(
-                "verbose_json format doesn't support streaming case"
+                f"Currently do not support diarized_json for {request.model}"
+            )
+
+        if (
+            request.response_format in {"verbose_json", "diarized_json"}
+            and request.stream
+        ):
+            return self.create_error_response(
+                f"{request.response_format} format doesn't support streaming case"
             )
         request_id = f"{self.task_type}-{self._base_request_id(raw_request)}"
 
@@ -624,7 +644,33 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     # rounded up as per openAI specs
                     "seconds": int(math.ceil(duration_s)),
                 }
-                if request.response_format != "verbose_json":
+                if request.response_format == "diarized_json":
+                    diarized_segments = self.model_cls.parse_diarized_transcript(text)
+                    if not diarized_segments:
+                        return self.create_error_response(
+                            "Model output did not contain a valid diarized transcript"
+                        )
+                    final_response = cast(
+                        T,
+                        TranscriptionResponseDiarized(
+                            duration=duration_s,
+                            text=separator.join(
+                                segment.text for segment in diarized_segments
+                            ),
+                            segments=[
+                                {
+                                    "id": f"segment_{index}",
+                                    "start": segment.start,
+                                    "end": segment.end,
+                                    "text": segment.text,
+                                    "speaker": segment.speaker,
+                                }
+                                for index, segment in enumerate(diarized_segments)
+                            ],
+                            usage=usage,
+                        ),
+                    )
+                elif request.response_format != "verbose_json":
                     final_response = cast(
                         T, TranscriptionResponse(text=text, usage=usage)
                     )
