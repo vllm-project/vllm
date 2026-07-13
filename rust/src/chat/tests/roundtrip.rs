@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Roundtrip tests for the real chat-template and output-processor pairing.
 //!
 //! The invariant under test is that a structured assistant message rendered as history can be
@@ -676,6 +679,7 @@ fn decoded_completion_stream(
                     usage: Default::default(),
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }
         });
@@ -686,6 +690,7 @@ fn decoded_completion_stream(
                 usage: Default::default(),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             });
             events.push(DecodedTextEvent::TextDelta {
                 delta: chunk.delta,
