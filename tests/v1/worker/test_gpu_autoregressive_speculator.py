@@ -3,10 +3,13 @@
 
 from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import Mock
 
+import pytest
 import torch
 
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as spec_module
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,
@@ -80,3 +83,52 @@ def test_run_model_reuses_tensor_return_for_mtp(monkeypatch):
 
     assert actual_logits_hidden is hidden
     assert actual_feedback_hidden is hidden
+
+
+@pytest.mark.parametrize(
+    (
+        "cg_mode",
+        "use_fused_decode_graph",
+        "expected_eager_calls",
+        "expected_graph_replays",
+    ),
+    [
+        (CUDAGraphMode.NONE, True, 3, 0),
+        (CUDAGraphMode.FULL, True, 0, 1),
+        (CUDAGraphMode.FULL, False, 0, 3),
+    ],
+)
+def test_multi_step_decode_replays_captured_graph_as_expected(
+    cg_mode,
+    use_fused_decode_graph,
+    expected_eager_calls,
+    expected_graph_replays,
+):
+    speculator = object.__new__(_TestSpeculator)
+    speculator.num_speculative_steps = 4
+    speculator.current_draft_step = torch.tensor(0)
+    speculator.input_buffers = SimpleNamespace(
+        positions=torch.arange(2),
+        query_start_loc=torch.arange(3),
+    )
+    speculator.idx_mapping = torch.arange(2)
+    speculator.use_fused_decode_graph = use_fused_decode_graph
+    generate_draft = Mock()
+    speculator._generate_draft = generate_draft
+    run_fullgraph = Mock()
+    speculator.decode_cudagraph_manager = SimpleNamespace(run_fullgraph=run_fullgraph)
+    batch_desc = BatchExecutionDescriptor(
+        cg_mode=cg_mode,
+        num_tokens=2,
+        num_reqs=2,
+    )
+
+    speculator._multi_step_decode(
+        num_reqs=2,
+        skip_attn=True,
+        batch_desc=batch_desc,
+        num_tokens_across_dp=None,
+    )
+
+    assert generate_draft.call_count == expected_eager_calls
+    assert run_fullgraph.call_count == expected_graph_replays

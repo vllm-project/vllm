@@ -278,6 +278,10 @@ class AttentionGroup:
         assert len(self.metadata_builders) > ubatch_id
         return self.metadata_builders[ubatch_id]
 
+    @property
+    def supports_fused_decode_graph(self) -> bool:
+        return self.get_metadata_builder().supports_fused_decode_graph
+
     def refresh_meta_for_draft_decodes(
         self,
         attn_metadata: Mapping[str, Any],

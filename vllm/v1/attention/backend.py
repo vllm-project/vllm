@@ -625,6 +625,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     # Does this backend/builder support updating the block table in existing
     # metadata
     supports_update_block_table: bool = False
+    supports_fused_decode_graph: bool = False
 
     @abstractmethod
     def __init__(
