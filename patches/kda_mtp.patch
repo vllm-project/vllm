@@ -1,0 +1,1394 @@
+diff --git a/vllm/config/speculative.py b/vllm/config/speculative.py
+index 47d35f4ff..ec97f794b 100644
+--- a/vllm/config/speculative.py
++++ b/vllm/config/speculative.py
+@@ -50,6 +50,7 @@ MTPModelTypes = Literal[
+     "step3p5_mtp",
+     "hy_v3_mtp",
+     "gemma4_mtp",
++    "glm5_next_mtp",
+ ]
+ NgramGPUTypes = Literal["ngram_gpu"]
+ DFlashModelTypes = Literal["dflash"]
+@@ -511,6 +512,13 @@ class SpeculativeConfig:
+                 text_config.num_kv_shared_layers = 0
+             hf_config.update({"n_predict": 1, "architectures": ["Gemma4MTPModel"]})
+ 
++        if hf_config.model_type == "glm5_next":
++            hf_config.model_type = "glm5_next_mtp"
++            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
++            hf_config.update(
++                {"n_predict": n_predict, "architectures": ["Glm5NextMTPModel"]}
++            )
++
+         return hf_config
+ 
+     def __post_init__(self):
+diff --git a/vllm/model_executor/layers/fla/ops/kda.py b/vllm/model_executor/layers/fla/ops/kda.py
+index 1a6f7cc0f..6d9b4a271 100644
+--- a/vllm/model_executor/layers/fla/ops/kda.py
++++ b/vllm/model_executor/layers/fla/ops/kda.py
+@@ -118,6 +118,7 @@ def fused_recurrent_kda(
+     use_qk_l2norm_in_kernel: bool = True,
+     cu_seqlens: torch.Tensor | None = None,
+     ssm_state_indices: torch.LongTensor | None = None,
++    num_accepted_tokens: torch.Tensor | None = None,
+     **kwargs,
+ ) -> tuple[torch.Tensor, torch.Tensor]:
+     if cu_seqlens is not None and q.shape[0] != 1:
+@@ -139,7 +140,7 @@ def fused_recurrent_kda(
+         inplace_final_state=inplace_final_state,
+         cu_seqlens=cu_seqlens,
+         ssm_state_indices=ssm_state_indices,
+-        num_accepted_tokens=None,
++        num_accepted_tokens=num_accepted_tokens,
+         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+     )
+     return o, final_state
+diff --git a/vllm/model_executor/layers/kda.py b/vllm/model_executor/layers/kda.py
+index f079f3dc9..4a1cbcc12 100644
+--- a/vllm/model_executor/layers/kda.py
++++ b/vllm/model_executor/layers/kda.py
+@@ -101,7 +101,11 @@ class KimiDeltaAttention(nn.Module, MambaBase):
+         self,
+     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+         return MambaStateShapeCalculator.kda_state_shape(
+-            self.tp_size, self.num_heads, self.head_dim, conv_kernel_size=self.conv_size
++            self.tp_size,
++            self.num_heads,
++            self.head_dim,
++            conv_kernel_size=self.conv_size,
++            num_spec=self.num_spec,
+         )
+ 
+     def __init__(
+@@ -244,7 +248,14 @@ class KimiDeltaAttention(nn.Module, MambaBase):
+             prefix=f"{prefix}.o_proj",
+         )
+ 
+-        compilation_config = get_current_vllm_config().compilation_config
++        vllm_config = get_current_vllm_config()
++        self.num_spec = (
++            vllm_config.speculative_config.num_speculative_tokens
++            if vllm_config.speculative_config
++            else 0
++        )
++
++        compilation_config = vllm_config.compilation_config
+         if prefix in compilation_config.static_forward_context:
+             raise ValueError(f"Duplicate layer name: {prefix}")
+         compilation_config.static_forward_context[prefix] = self
+@@ -300,29 +311,21 @@ class KimiDeltaAttention(nn.Module, MambaBase):
+         attn_metadata_raw = forward_context.attn_metadata
+ 
+         if attn_metadata_raw is None:
+-            #     # V1 profile run
+             return
+ 
+         assert isinstance(attn_metadata_raw, dict)
+-        attn_metadata_narrowed = attn_metadata_raw[self.prefix]
+-        assert isinstance(attn_metadata_narrowed, GDNAttentionMetadata)
+-        has_initial_state = attn_metadata_narrowed.has_initial_state
+-        non_spec_query_start_loc = attn_metadata_narrowed.non_spec_query_start_loc
+-        non_spec_state_indices_tensor = (
+-            attn_metadata_narrowed.non_spec_state_indices_tensor
+-        )  # noqa: E501
+-        num_actual_tokens = attn_metadata_narrowed.num_actual_tokens
+-        constant_caches = self.kv_cache
++        attn_metadata = attn_metadata_raw[self.prefix]
++        assert isinstance(attn_metadata, GDNAttentionMetadata)
++        num_actual_tokens = attn_metadata.num_actual_tokens
++        has_initial_state = attn_metadata.has_initial_state
+ 
+         q_proj_states = q_proj_states[:num_actual_tokens]
+         k_proj_states = k_proj_states[:num_actual_tokens]
+         v_proj_states = v_proj_states[:num_actual_tokens]
+-        g1 = g1[:num_actual_tokens]
+-        beta = beta[:num_actual_tokens]
++        g1 = g1[:, :num_actual_tokens]
++        beta = beta[:, :num_actual_tokens]
+ 
+-        (conv_state_q, conv_state_k, conv_state_v, recurrent_state) = constant_caches
+-        # conv_state must be (..., dim, width-1) for the conv kernels.
+-        # DS layout stores it that way directly; SD layout needs a transpose.
++        (conv_state_q, conv_state_k, conv_state_v, recurrent_state) = self.kv_cache
+         if not is_conv_state_dim_first():
+             conv_state_q = conv_state_q.transpose(-1, -2)
+             conv_state_k = conv_state_k.transpose(-1, -2)
+@@ -337,120 +340,238 @@ class KimiDeltaAttention(nn.Module, MambaBase):
+         v_conv_weights = self.v_conv1d.weight.view(
+             self.v_conv1d.weight.size(0), self.v_conv1d.weight.size(2)
+         )
+-        if attn_metadata_narrowed.num_prefills > 0:
+-            q_proj_states = q_proj_states.transpose(0, 1)
+-            k_proj_states = k_proj_states.transpose(0, 1)
+-            v_proj_states = v_proj_states.transpose(0, 1)
+-            q = causal_conv1d_fn(
+-                q_proj_states,
++
++        spec_sequence_masks = attn_metadata.spec_sequence_masks
++        spec_token_indx = attn_metadata.spec_token_indx
++        non_spec_token_indx = attn_metadata.non_spec_token_indx
++        spec_state_indices = attn_metadata.spec_state_indices_tensor
++        non_spec_state_indices = attn_metadata.non_spec_state_indices_tensor
++        spec_query_start_loc = attn_metadata.spec_query_start_loc
++        non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
++        num_accepted_tokens = attn_metadata.num_accepted_tokens
++
++        # ── Separate spec / non-spec tokens ──
++        if spec_sequence_masks is not None:
++            if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
++                q_spec = q_proj_states
++                k_spec = k_proj_states
++                v_spec = v_proj_states
++                g_spec = g1
++                b_spec = beta
++                q_non_spec = k_non_spec = v_non_spec = None
++                g_non_spec = b_non_spec = None
++            else:
++                q_spec = q_proj_states.index_select(0, spec_token_indx)
++                k_spec = k_proj_states.index_select(0, spec_token_indx)
++                v_spec = v_proj_states.index_select(0, spec_token_indx)
++                g_spec = g1.index_select(1, spec_token_indx)
++                b_spec = beta.index_select(1, spec_token_indx)
++                q_non_spec = q_proj_states.index_select(0, non_spec_token_indx)
++                k_non_spec = k_proj_states.index_select(0, non_spec_token_indx)
++                v_non_spec = v_proj_states.index_select(0, non_spec_token_indx)
++                g_non_spec = g1.index_select(1, non_spec_token_indx)
++                b_non_spec = beta.index_select(1, non_spec_token_indx)
++        else:
++            q_spec = k_spec = v_spec = None
++            g_spec = b_spec = None
++            q_non_spec = q_proj_states
++            k_non_spec = k_proj_states
++            v_non_spec = v_proj_states
++            g_non_spec = g1
++            b_non_spec = beta
++
++        # ── 1. Conv1d ──
++
++        # 1.1: Spec decode conv1d (1D indices + num_accepted_tokens)
++        if spec_sequence_masks is not None:
++            assert spec_state_indices is not None
++            spec_conv_indices = spec_state_indices[:, 0][
++                : attn_metadata.num_spec_decodes
++            ]
++            q_spec = causal_conv1d_update(
++                q_spec,
++                conv_state_q,
++                q_conv_weights,
++                self.q_conv1d.bias,
++                activation="silu",
++                conv_state_indices=spec_conv_indices,
++                num_accepted_tokens=num_accepted_tokens,
++                query_start_loc=spec_query_start_loc,
++                max_query_len=spec_state_indices.size(-1),
++            )
++            k_spec = causal_conv1d_update(
++                k_spec,
++                conv_state_k,
++                k_conv_weights,
++                self.k_conv1d.bias,
++                activation="silu",
++                conv_state_indices=spec_conv_indices,
++                num_accepted_tokens=num_accepted_tokens,
++                query_start_loc=spec_query_start_loc,
++                max_query_len=spec_state_indices.size(-1),
++            )
++            v_spec = causal_conv1d_update(
++                v_spec,
++                conv_state_v,
++                v_conv_weights,
++                self.v_conv1d.bias,
++                activation="silu",
++                conv_state_indices=spec_conv_indices,
++                num_accepted_tokens=num_accepted_tokens,
++                query_start_loc=spec_query_start_loc,
++                max_query_len=spec_state_indices.size(-1),
++            )
++
++        # 1.2: Non-spec prefill conv1d (causal_conv1d_fn, batched)
++        core_attn_out_non_spec = None
++        if attn_metadata.num_prefills > 0:
++            assert q_non_spec is not None
++            assert k_non_spec is not None
++            assert v_non_spec is not None
++            q_pf = q_non_spec.transpose(0, 1)
++            k_pf = k_non_spec.transpose(0, 1)
++            v_pf = v_non_spec.transpose(0, 1)
++            q_non_spec = causal_conv1d_fn(
++                q_pf,
+                 q_conv_weights,
+                 self.q_conv1d.bias,
+                 activation="silu",
+                 conv_states=conv_state_q,
+                 has_initial_state=has_initial_state,
+-                cache_indices=non_spec_state_indices_tensor,
++                cache_indices=non_spec_state_indices,
+                 query_start_loc=non_spec_query_start_loc,
+-                metadata=attn_metadata_narrowed,
++                metadata=attn_metadata,
+             ).transpose(0, 1)
+-            k = causal_conv1d_fn(
+-                k_proj_states,
++            k_non_spec = causal_conv1d_fn(
++                k_pf,
+                 k_conv_weights,
+                 self.k_conv1d.bias,
+                 activation="silu",
+                 conv_states=conv_state_k,
+                 has_initial_state=has_initial_state,
+-                cache_indices=non_spec_state_indices_tensor,
++                cache_indices=non_spec_state_indices,
+                 query_start_loc=non_spec_query_start_loc,
+-                metadata=attn_metadata_narrowed,
++                metadata=attn_metadata,
+             ).transpose(0, 1)
+-            v = causal_conv1d_fn(
+-                v_proj_states,
++            v_non_spec = causal_conv1d_fn(
++                v_pf,
+                 v_conv_weights,
+                 self.v_conv1d.bias,
+                 activation="silu",
+                 conv_states=conv_state_v,
+                 has_initial_state=has_initial_state,
+-                cache_indices=non_spec_state_indices_tensor,
++                cache_indices=non_spec_state_indices,
+                 query_start_loc=non_spec_query_start_loc,
+-                metadata=attn_metadata_narrowed,
++                metadata=attn_metadata,
+             ).transpose(0, 1)
+-        else:
+-            assert non_spec_state_indices_tensor is not None
+-            decode_conv_indices = non_spec_state_indices_tensor[
+-                : attn_metadata_narrowed.num_actual_tokens
+-            ]
+-            q = causal_conv1d_update(
+-                q_proj_states,
++
++            q_pf_out = rearrange(q_non_spec, "n (h d) -> 1 n h d", d=self.head_dim)
++            k_pf_out = rearrange(k_non_spec, "n (h d) -> 1 n h d", d=self.head_dim)
++            v_pf_out = rearrange(v_non_spec, "n (h d) -> 1 n h d", d=self.head_dim)
++
++            assert has_initial_state is not None
++            zero_idx = non_spec_state_indices[~has_initial_state]
++            recurrent_state[zero_idx] = 0
++            initial_state = recurrent_state[non_spec_state_indices].contiguous()
++            core_attn_out_pf, last_recurrent_state = chunk_kda(
++                q=q_pf_out,
++                k=k_pf_out,
++                v=v_pf_out,
++                g=g_non_spec,
++                beta=b_non_spec,
++                initial_state=initial_state,
++                output_final_state=True,
++                use_qk_l2norm_in_kernel=True,
++                cu_seqlens=non_spec_query_start_loc,
++            )
++            recurrent_state[non_spec_state_indices] = last_recurrent_state
++            core_attn_out_non_spec = core_attn_out_pf
++
++        # 1.3: Non-spec decode conv1d (1D indices, no num_accepted_tokens)
++        elif attn_metadata.num_decodes > 0:
++            assert q_non_spec is not None
++            ns_decode_indices = non_spec_state_indices[: attn_metadata.num_decodes]
++            q_non_spec = causal_conv1d_update(
++                q_non_spec,
+                 conv_state_q,
+                 q_conv_weights,
+                 self.q_conv1d.bias,
+                 activation="silu",
+-                conv_state_indices=decode_conv_indices,
+-                validate_data=True,
++                conv_state_indices=ns_decode_indices,
+             )
+-            k = causal_conv1d_update(
+-                k_proj_states,
++            k_non_spec = causal_conv1d_update(
++                k_non_spec,
+                 conv_state_k,
+                 k_conv_weights,
+                 self.k_conv1d.bias,
+                 activation="silu",
+-                conv_state_indices=decode_conv_indices,
+-                validate_data=True,
++                conv_state_indices=ns_decode_indices,
+             )
+-            v = causal_conv1d_update(
+-                v_proj_states,
++            v_non_spec = causal_conv1d_update(
++                v_non_spec,
+                 conv_state_v,
+                 v_conv_weights,
+                 self.v_conv1d.bias,
+                 activation="silu",
+-                conv_state_indices=decode_conv_indices,
+-                validate_data=True,
++                conv_state_indices=ns_decode_indices,
+             )
+ 
+-        q, k, v = map(
+-            lambda x: rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim), (q, k, v)
+-        )
+-
+-        if attn_metadata_narrowed.num_prefills > 0:
+-            assert non_spec_state_indices_tensor is not None
+-            assert has_initial_state is not None
+-            zero_idx = non_spec_state_indices_tensor[~has_initial_state]
+-            recurrent_state[zero_idx] = 0
+-            initial_state = recurrent_state[non_spec_state_indices_tensor].contiguous()
+-            (
+-                core_attn_out_non_spec,
+-                last_recurrent_state,
+-            ) = chunk_kda(
+-                q=q,
+-                k=k,
+-                v=v,
+-                g=g1,
+-                beta=beta,
+-                initial_state=initial_state,
+-                output_final_state=True,
++        # ── 2. Recurrent attention ──
++
++        # 2.1: Spec decode recurrent (2D state_indices + num_accepted_tokens)
++        core_attn_out_spec = None
++        if spec_sequence_masks is not None:
++            q_s = rearrange(q_spec, "n (h d) -> 1 n h d", d=self.head_dim)
++            k_s = rearrange(k_spec, "n (h d) -> 1 n h d", d=self.head_dim)
++            v_s = rearrange(v_spec, "n (h d) -> 1 n h d", d=self.head_dim)
++            core_attn_out_spec, _ = fused_recurrent_kda(
++                q=q_s,
++                k=k_s,
++                v=v_s,
++                g=g_spec,
++                beta=b_spec,
++                initial_state=recurrent_state,
+                 use_qk_l2norm_in_kernel=True,
+-                cu_seqlens=non_spec_query_start_loc,
++                cu_seqlens=spec_query_start_loc[: attn_metadata.num_spec_decodes + 1],
++                ssm_state_indices=spec_state_indices,
++                num_accepted_tokens=num_accepted_tokens,
+             )
+-            # Init cache
+-            recurrent_state[non_spec_state_indices_tensor] = last_recurrent_state
+-        else:
+-            assert non_spec_query_start_loc is not None
+-            (
+-                core_attn_out_non_spec,
+-                last_recurrent_state,
+-            ) = fused_recurrent_kda(
+-                q=q,
+-                k=k,
+-                v=v,
+-                g=g1,
+-                beta=beta,
++
++        # 2.2: Non-spec decode recurrent (1D state_indices)
++        if attn_metadata.num_decodes > 0 and attn_metadata.num_prefills == 0:
++            assert q_non_spec is not None
++            q_ns = rearrange(q_non_spec, "n (h d) -> 1 n h d", d=self.head_dim)
++            k_ns = rearrange(k_non_spec, "n (h d) -> 1 n h d", d=self.head_dim)
++            v_ns = rearrange(v_non_spec, "n (h d) -> 1 n h d", d=self.head_dim)
++            core_attn_out_non_spec, _ = fused_recurrent_kda(
++                q=q_ns,
++                k=k_ns,
++                v=v_ns,
++                g=g_non_spec,
++                beta=b_non_spec,
+                 initial_state=recurrent_state,
+                 use_qk_l2norm_in_kernel=True,
+-                cu_seqlens=non_spec_query_start_loc[
+-                    : attn_metadata_narrowed.num_decodes + 1
+-                ],
+-                ssm_state_indices=non_spec_state_indices_tensor,
++                cu_seqlens=non_spec_query_start_loc[: attn_metadata.num_decodes + 1],
++                ssm_state_indices=non_spec_state_indices,
++            )
++
++        # ── 3. Merge output ──
++        # Ensure 4D (kernel outputs may be 3D or 4D depending on compilation)
++        if core_attn_out_spec is not None and core_attn_out_spec.dim() == 3:
++            core_attn_out_spec = core_attn_out_spec.unsqueeze(0)
++        if core_attn_out_non_spec is not None and core_attn_out_non_spec.dim() == 3:
++            core_attn_out_non_spec = core_attn_out_non_spec.unsqueeze(0)
++
++        if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
++            merged_out = torch.empty(
++                (1, num_actual_tokens, self.local_num_heads, self.head_dim),
++                dtype=core_attn_out_non_spec.dtype,
++                device=core_attn_out_non_spec.device,
+             )
+-        core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
+-            0, :num_actual_tokens
+-        ]
++            merged_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
++            merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
++            core_attn_out[:, :num_actual_tokens] = merged_out
++        elif spec_sequence_masks is not None:
++            core_attn_out[:, :num_actual_tokens] = core_attn_out_spec
++        elif core_attn_out_non_spec is not None:
++            core_attn_out[:, :num_actual_tokens] = core_attn_out_non_spec
+diff --git a/vllm/model_executor/layers/mamba/mamba_utils.py b/vllm/model_executor/layers/mamba/mamba_utils.py
+index c1fd81e40..1dd05a474 100644
+--- a/vllm/model_executor/layers/mamba/mamba_utils.py
++++ b/vllm/model_executor/layers/mamba/mamba_utils.py
+@@ -253,10 +253,10 @@ class MambaStateShapeCalculator:
+         proj_k_size = num_k_heads * head_k_dim
+ 
+         conv_state_shape = cls._orient_conv_shape(
+-            divide(proj_size, tp_world_size), conv_kernel_size - 1
++            divide(proj_size, tp_world_size), conv_kernel_size - 1 + num_spec
+         )
+         conv_state_k_shape = cls._orient_conv_shape(
+-            divide(proj_k_size, tp_world_size), conv_kernel_size - 1
++            divide(proj_k_size, tp_world_size), conv_kernel_size - 1 + num_spec
+         )
+         recurrent_state_shape = (divide(num_heads, tp_world_size), head_dim, head_dim)
+         return (
+diff --git a/vllm/model_executor/models/glm5_next.py b/vllm/model_executor/models/glm5_next.py
+index 1b27312d8..be7e1bdaf 100644
+--- a/vllm/model_executor/models/glm5_next.py
++++ b/vllm/model_executor/models/glm5_next.py
+@@ -4,10 +4,13 @@
+ from collections.abc import Iterable
+ 
+ import torch
++from einops import rearrange
+ from torch import nn
+ 
+ from vllm.compilation.decorators import support_torch_compile
+ from vllm.config import (
++    CacheConfig,
++    ModelConfig,
+     VllmConfig,
+ )
+ from vllm.distributed import (
+@@ -17,21 +20,31 @@ from vllm.distributed import (
+ from vllm.logger import init_logger
+ from vllm.model_executor.layers.cp_utils import (
+     cp_plain_all_gather,
++    cp_plain_local_slice,
+     cp_plain_split,
+     cp_plain_to_scattered,
+     cp_rr_split,
+     cp_scattered_to_plain,
+     pcp_is_active,
+ )
++from vllm.model_executor.layers.fla.ops.kda import fused_kda_gate
+ from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
++from vllm.model_executor.layers.kda import KimiDeltaAttention
+ from vllm.model_executor.layers.layernorm import RMSNorm
+ from vllm.model_executor.layers.logits_processor import LogitsProcessor
++from vllm.model_executor.layers.mamba.mamba_utils import (
++    MambaStateCopyFunc,
++    MambaStateCopyFuncCalculator,
++    MambaStateDtypeCalculator,
++    MambaStateShapeCalculator,
++)
+ from vllm.model_executor.layers.mhc import (
+     MHCPostOp,
+     MHCPreOp,
+     hc_contract,
+     hc_expand,
+ )
++from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+ from vllm.model_executor.layers.quantization.utils.quant_utils import (
+     GroupShape,
+     scaled_dequantize,
+@@ -43,11 +56,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
+ from vllm.model_executor.model_loader.weight_utils import (
+     default_weight_loader,
+     maybe_remap_kv_scale_name,
++    sharded_weight_loader,
+ )
+ from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLAAttention
+ from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLP as Glm5NextMLP
+ from vllm.model_executor.models.deepseek_v2 import DeepseekV2MoE as Glm5NextMoE
+ from vllm.model_executor.models.interfaces import (
++    HasInnerState,
++    IsHybrid,
+     MixtureOfExperts,
+     SupportsPP,
+ )
+@@ -83,6 +99,20 @@ def _log_tensor_stats(
+     log_cp_tensor(f"glm5_{tag}", tensor, extra=extra)
+ 
+ 
++def naive_kda_lowerbound_gate(
++    g: torch.Tensor,
++    A_log: torch.Tensor,
++    dt_bias: torch.Tensor,
++    lower_bound: float = -5.0,
++    output_dtype: torch.dtype = torch.float32,
++) -> torch.Tensor:
++    g = g.float()
++    g = g + dt_bias.view(1, -1)
++    g = g.view(g.shape[0], A_log.numel(), -1)
++    g = lower_bound * torch.nn.functional.sigmoid(A_log.view(-1, 1).exp() * g)
++    return g.to(output_dtype)
++
++
+ class Glm5NextMLAAttention(DeepseekV2MLAAttention):
+     def forward(
+         self, hidden_states: torch.Tensor, positions: torch.Tensor, output: torch.Tensor
+@@ -121,6 +151,94 @@ class Glm5NextMLAAttention(DeepseekV2MLAAttention):
+         output[:] = mla.o_proj(attn_out)[0]
+ 
+ 
++class Glm5NextLinearAttention(KimiDeltaAttention):
++    """GLM5-Next variant of KDA"""
++
++    def __init__(
++        self,
++        layer_idx: int,
++        hidden_size: int,
++        quant_config: QuantizationConfig | None = None,
++        cache_config: CacheConfig | None = None,
++        model_config: ModelConfig | None = None,
++        rms_norm_eps: float = 1e-5,
++        prefix: str = "",
++        **kwargs,
++    ) -> None:
++        super().__init__(
++            layer_idx,
++            hidden_size,
++            quant_config,
++            cache_config,
++            model_config,
++            rms_norm_eps,
++            prefix,
++        )
++        self.lower_bound = self.model_config.linear_attn_config.get("lower_bound", None)
++
++        def a_log_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor):
++            if loaded_weight.dim() == 1:
++                loaded_weight = loaded_weight.view([1, 1, -1, 1])
++            return sharded_weight_loader(2)(param, loaded_weight)
++
++        self.A_log.weight_loader = a_log_weight_loader
++
++    def forward(
++        self,
++        positions: torch.Tensor,
++        hidden_states: torch.Tensor,
++        output: torch.Tensor,
++    ) -> None:
++        _kda_cp = pcp_is_active(hidden_states.shape[0])
++        if _kda_cp:
++            # KDA needs the full sequence for causal_conv1d / chunk_kda
++            hidden_states = cp_plain_all_gather(hidden_states)
++
++        num_tokens = hidden_states.size(0)
++
++        q = self.q_proj(hidden_states)[0]
++        k = self.k_proj(hidden_states)[0]
++        v = self.v_proj(hidden_states)[0]
++
++        beta = self.b_proj(hidden_states)[0].float().sigmoid()
++        beta = beta.unsqueeze(0)
++
++        g1 = self.f_b_proj(self.f_a_proj(hidden_states)[0])[0]
++        if self.lower_bound is not None:
++            g1 = naive_kda_lowerbound_gate(
++                g1, self.A_log, self.dt_bias, lower_bound=self.lower_bound
++            )
++        else:
++            g1 = fused_kda_gate(g1, self.A_log, self.head_dim, g_bias=self.dt_bias)
++        g1 = g1.unsqueeze(0)
++
++        g_proj_states = self.g_b_proj(self.g_a_proj(hidden_states)[0])[0]
++        g2 = rearrange(g_proj_states, "... (h d) -> ... h d", d=self.head_dim)
++
++        core_attn_out = torch.zeros(
++            (1, num_tokens, self.local_num_heads, self.head_dim),
++            dtype=hidden_states.dtype,
++            device=hidden_states.device,
++        )
++        torch.ops.vllm.kda_attention(
++            q,
++            k,
++            v,
++            g1,
++            beta,
++            core_attn_out,
++            self.prefix,
++        )
++
++        core_attn_out = self.o_norm(core_attn_out, g2)
++
++        core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
++        projected = self.o_proj(core_attn_out)[0]
++        if _kda_cp:
++            projected = cp_plain_local_slice(projected)
++        output[:] = projected
++
++
+ class Glm5NextDecoderLayer(nn.Module):
+     def __init__(
+         self,
+@@ -129,6 +247,7 @@ class Glm5NextDecoderLayer(nn.Module):
+         layer_idx: int,
+         prefix: str = "",
+         topk_indices_buffer: torch.Tensor | None = None,
++        is_mtp_layer: bool = False,
+         **kwargs,
+     ) -> None:
+         super().__init__()
+@@ -143,28 +262,42 @@ class Glm5NextDecoderLayer(nn.Module):
+         self.num_hidden_layers = config.num_hidden_layers
+         self.rms_norm_eps = config.rms_norm_eps
+         self.num_experts = config.n_routed_experts
++        self.is_mtp_layer = is_mtp_layer
+         self.mhc = config.mhc
+-        self.layer_kind = "mla"
+-
+-        self.self_attn = Glm5NextMLAAttention(
+-            vllm_config=vllm_config,
+-            config=config,
+-            hidden_size=self.hidden_size,
+-            num_heads=config.num_attention_heads,
+-            qk_nope_head_dim=config.qk_nope_head_dim,
+-            qk_rope_head_dim=config.qk_rope_head_dim,
+-            v_head_dim=config.v_head_dim,
+-            q_lora_rank=config.q_lora_rank if hasattr(config, "q_lora_rank") else None,
+-            kv_lora_rank=config.kv_lora_rank
+-            if hasattr(config, "kv_lora_rank")
+-            else None,
+-            max_position_embeddings=config.max_position_embeddings,
+-            cache_config=cache_config,
+-            quant_config=None,  # MLA projections are BF16 in checkpoint
+-            prefix=f"{prefix}.self_attn",
+-            topk_indices_buffer=topk_indices_buffer,
+-            skip_rope=getattr(config, "mla_nope", False),
+-        )
++        self.layer_kind = "kda" if config.is_kda_layer(layer_idx) else "mla"
++
++        if config.is_kda_layer(layer_idx):
++            self.self_attn = Glm5NextLinearAttention(
++                layer_idx=layer_idx,
++                hidden_size=config.hidden_size,
++                quant_config=None,  # KDA projections are BF16 in checkpoint
++                cache_config=cache_config,
++                model_config=config,
++                rms_norm_eps=config.rms_norm_eps,
++                prefix=f"{prefix}.self_attn",
++            )
++        else:
++            self.self_attn = Glm5NextMLAAttention(
++                vllm_config=vllm_config,
++                config=config,
++                hidden_size=self.hidden_size,
++                num_heads=config.num_attention_heads,
++                qk_nope_head_dim=config.qk_nope_head_dim,
++                qk_rope_head_dim=config.qk_rope_head_dim,
++                v_head_dim=config.v_head_dim,
++                q_lora_rank=config.q_lora_rank
++                if hasattr(config, "q_lora_rank")
++                else None,
++                kv_lora_rank=config.kv_lora_rank
++                if hasattr(config, "kv_lora_rank")
++                else None,
++                max_position_embeddings=config.max_position_embeddings,
++                cache_config=cache_config,
++                quant_config=None,  # MLA projections are BF16 in checkpoint
++                prefix=f"{prefix}.self_attn",
++                topk_indices_buffer=topk_indices_buffer,
++                skip_rope=getattr(config, "mla_nope", False),
++            )
+ 
+         if (
+             self.is_moe
+@@ -191,7 +324,7 @@ class Glm5NextDecoderLayer(nn.Module):
+             config.hidden_size, eps=config.rms_norm_eps
+         )
+ 
+-        if self.mhc:
++        if self.mhc and not is_mtp_layer:
+             # mhc config
+             self.mhc_num_residual_streams = config.mhc_num_residual_streams
+             self.mhc_no_norm_weight = config.mhc_no_norm_weight
+@@ -233,7 +366,7 @@ class Glm5NextDecoderLayer(nn.Module):
+         _log_tensor_stats("layer_input", x, self.layer_idx, self.layer_kind)
+ 
+         # 70B or MTP layers: KDA + MoE without HC
+-        if not self.mhc:
++        if not self.mhc or self.is_mtp_layer:
+             residual = x
+             x = self.input_layernorm(x)
+ 
+@@ -497,6 +630,10 @@ class Glm5NextModel(nn.Module):
+             kwargs = args[2] if len(args) > 2 else {}
+             if "rotary_emb.inv_freq" in name:
+                 continue
++
++            spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
++            if spec_layer is not None:
++                continue  # skip spec decode layers for main model
+             if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
+                 # Models trained using ColossalAI may include these tensors in
+                 # the checkpoint. Skip them.
+@@ -569,7 +706,11 @@ class Glm5NextModel(nn.Module):
+                     break
+                 else:
+                     # Skip loading extra bias for GPTQ models.
+-                    if name.endswith(".bias") and name not in params_dict:  # noqa: E501
++                    if (
++                        name.endswith(".bias")
++                        and name not in params_dict
++                        and not self.config.is_linear_attn
++                    ):  # noqa: E501
+                         continue
+                     # Remapping the name of FP8 kv-scale.
+                     name = maybe_remap_kv_scale_name(name, params_dict)
+@@ -587,7 +728,9 @@ class Glm5NextModel(nn.Module):
+         return loaded_params
+ 
+ 
+-class Glm5NextForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
++class Glm5NextForCausalLM(
++    nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid
++):
+     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+         super().__init__()
+         self.model_config = vllm_config.model_config
+@@ -628,6 +771,43 @@ class Glm5NextForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
+         )
+         return hidden_states
+ 
++    @classmethod
++    def get_mamba_state_dtype_from_config(
++        cls,
++        vllm_config: "VllmConfig",
++    ) -> tuple[torch.dtype, torch.dtype, torch.dtype, torch.dtype]:
++        return MambaStateDtypeCalculator.kda_state_dtype(
++            vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
++        )
++
++    @classmethod
++    def get_mamba_state_shape_from_config(
++        cls, vllm_config: "VllmConfig"
++    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
++        parallel_config = vllm_config.parallel_config
++        hf_config = vllm_config.model_config.hf_config
++        tp_size = parallel_config.tensor_parallel_size
++        num_spec = (
++            vllm_config.speculative_config.num_speculative_tokens
++            if vllm_config.speculative_config
++            else 0
++        )
++        return MambaStateShapeCalculator.kda_state_shape(
++            tp_size,
++            hf_config.linear_attn_config["num_heads"],
++            hf_config.linear_attn_config["head_dim"],
++            conv_kernel_size=hf_config.linear_attn_config["short_conv_kernel_size"],
++            num_spec=num_spec,
++        )
++
++    @classmethod
++    def get_mamba_state_copy_func(
++        cls,
++    ) -> tuple[
++        MambaStateCopyFunc, MambaStateCopyFunc, MambaStateCopyFunc, MambaStateCopyFunc
++    ]:
++        return MambaStateCopyFuncCalculator.kda_state_copy_func()
++
+     def compute_logits(
+         self,
+         hidden_states: torch.Tensor,
+@@ -646,6 +826,19 @@ class Glm5NextForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
+         return loader.load_weights(weights)
+ 
+ 
++def get_spec_layer_idx_from_weight_name(
++    config: Glm5NextConfig, weight_name: str
++) -> int | None:
++    if hasattr(config, "num_nextn_predict_layers") and (
++        config.num_nextn_predict_layers > 0
++    ):
++        layer_idx = config.num_hidden_layers
++        for i in range(config.num_nextn_predict_layers):
++            if weight_name.startswith(f"layers.{layer_idx + i}."):
++                return layer_idx + i
++    return None
++
++
+ def _try_load_fp8_indexer_wk(name, tensor, buf, params_dict, loaded_params):
+     if "indexer.wk." not in name or "wk_weights" in name:
+         return False
+diff --git a/vllm/model_executor/models/glm5_next_mtp.py b/vllm/model_executor/models/glm5_next_mtp.py
+new file mode 100644
+index 000000000..c1cb5a5e8
+--- /dev/null
++++ b/vllm/model_executor/models/glm5_next_mtp.py
+@@ -0,0 +1,447 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++
++import copy
++import typing
++from collections.abc import Callable, Iterable
++
++import torch
++import torch.nn as nn
++from transformers import PretrainedConfig
++
++from vllm._aiter_ops import rocm_aiter_ops
++from vllm.config import VllmConfig
++from vllm.model_executor.layers.fused_moe import (
++    FusedMoE,
++    fused_moe_make_expert_params_mapping,
++)
++from vllm.model_executor.layers.layernorm import RMSNorm
++from vllm.model_executor.layers.logits_processor import LogitsProcessor
++from vllm.model_executor.layers.mamba.mamba_utils import (
++    MambaStateCopyFunc,
++    MambaStateCopyFuncCalculator,
++    MambaStateDtypeCalculator,
++    MambaStateShapeCalculator,
++)
++from vllm.model_executor.layers.quantization import QuantizationConfig
++from vllm.model_executor.layers.vocab_parallel_embedding import (
++    ParallelLMHead,
++    VocabParallelEmbedding,
++)
++from vllm.model_executor.model_loader.weight_utils import (
++    default_weight_loader,
++    maybe_remap_kv_scale_name,
++)
++from vllm.model_executor.models.deepseek_v2 import DeepseekV2MixtureOfExperts
++from vllm.sequence import IntermediateTensors
++
++from .glm5_next import (
++    Glm5NextDecoderLayer,
++    Glm5NextMoE,
++    get_spec_layer_idx_from_weight_name,
++)
++from .interfaces import IsHybrid, SupportsPP
++from .utils import maybe_prefix
++
++
++class SharedHead(nn.Module):
++    def __init__(
++        self,
++        config: PretrainedConfig,
++        prefix: str,
++        quant_config: QuantizationConfig | None = None,
++    ) -> None:
++        super().__init__()
++        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
++        self.head = ParallelLMHead(
++            config.vocab_size,
++            config.hidden_size,
++            quant_config=quant_config,
++            prefix=maybe_prefix(prefix, "head"),
++        )
++
++    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
++        return self.norm(hidden_states)
++
++
++class Glm5NextMultiTokenPredictorLayer(nn.Module):
++    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
++        super().__init__()
++
++        base_config = vllm_config.model_config.hf_config
++        draft_config = vllm_config.speculative_config.draft_model_config.hf_config
++        quant_config = vllm_config.quant_config
++
++        # Determine MTP layer index from the base model config
++        mtp_layer_idx = base_config.num_hidden_layers
++
++        # Deep-copy base config and add mtp_layer_idx to kda_layers so that
++        # is_kda_layer(mtp_layer_idx) returns True for the decoder layer.
++        layer_config = copy.deepcopy(base_config)
++        if (
++            layer_config.linear_attn_config is not None
++            and "kda_layers" in layer_config.linear_attn_config
++        ):
++            layer_config.linear_attn_config["kda_layers"].append(mtp_layer_idx)
++
++        self.enorm = RMSNorm(base_config.hidden_size, eps=base_config.rms_norm_eps)
++        self.hnorm = RMSNorm(base_config.hidden_size, eps=base_config.rms_norm_eps)
++        self.eh_proj = nn.Linear(
++            base_config.hidden_size * 2, base_config.hidden_size, bias=False
++        )
++
++        topk_indices_buffer = None
++
++        self.shared_head = SharedHead(
++            config=draft_config, prefix=prefix, quant_config=quant_config
++        )
++        self.mtp_block = Glm5NextDecoderLayer(
++            vllm_config=vllm_config,
++            config=layer_config,
++            layer_idx=mtp_layer_idx,
++            prefix=prefix,
++            topk_indices_buffer=topk_indices_buffer,
++            is_mtp_layer=True,
++        )
++
++    def forward(
++        self,
++        input_ids: torch.Tensor,
++        positions: torch.Tensor,
++        previous_hidden_states: torch.Tensor,
++        inputs_embeds: torch.Tensor | None = None,
++        spec_step_index: int = 0,
++    ) -> torch.Tensor:
++        assert inputs_embeds is not None
++        # masking inputs at position 0, as not needed by MTP
++        inputs_embeds[positions == 0] = 0
++        inputs_embeds = self.enorm(inputs_embeds)
++        previous_hidden_states = self.hnorm(previous_hidden_states)
++
++        hidden_states = self.eh_proj(
++            torch.cat([inputs_embeds, previous_hidden_states], dim=-1)
++        )
++
++        # MTP decoder layer: KDA + MoE, no HC (is_mtp_layer=True).
++        hidden_states = self.mtp_block(positions=positions, x=hidden_states)
++
++        return hidden_states
++
++
++class Glm5NextMultiTokenPredictor(nn.Module):
++    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
++        super().__init__()
++        config = vllm_config.model_config.hf_config
++        self.mtp_start_layer_idx = config.num_hidden_layers
++        self.num_mtp_layers = config.num_nextn_predict_layers
++        # to map the exact layer index from weights
++        self.layers = torch.nn.ModuleDict(
++            {
++                str(idx): Glm5NextMultiTokenPredictorLayer(
++                    vllm_config=vllm_config,
++                    prefix=f"{prefix}.layers.{idx}",
++                )
++                for idx in range(
++                    self.mtp_start_layer_idx,
++                    self.mtp_start_layer_idx + self.num_mtp_layers,
++                )
++            }
++        )
++        self.embed_tokens = VocabParallelEmbedding(
++            config.vocab_size,
++            config.hidden_size,
++        )
++        self.logits_processor = LogitsProcessor(config.vocab_size)
++
++    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
++        return self.embed_tokens(input_ids)
++
++    def forward(
++        self,
++        input_ids: torch.Tensor,
++        positions: torch.Tensor,
++        previous_hidden_states: torch.Tensor,
++        inputs_embeds: torch.Tensor | None = None,
++        spec_step_idx: int = 0,
++    ) -> torch.Tensor:
++        if inputs_embeds is None:
++            inputs_embeds = self.embed_tokens(input_ids)
++        current_step_idx = spec_step_idx % self.num_mtp_layers
++        return self.layers[str(self.mtp_start_layer_idx + current_step_idx)](
++            input_ids,
++            positions,
++            previous_hidden_states,
++            inputs_embeds,
++            current_step_idx,
++        )
++
++    def compute_logits(
++        self,
++        hidden_states: torch.Tensor,
++        spec_step_idx: int = 0,
++    ) -> torch.Tensor:
++        current_step_idx = spec_step_idx % self.num_mtp_layers
++        mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
++        logits = self.logits_processor(
++            mtp_layer.shared_head.head, mtp_layer.shared_head(hidden_states)
++        )
++        return logits
++
++
++class Glm5NextMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts, IsHybrid):
++    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
++        super().__init__()
++        self.config = vllm_config.model_config.hf_config
++        self.model = Glm5NextMultiTokenPredictor(
++            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
++        )
++
++        self.expert_weights = []
++
++        # Set MoE hyperparameters
++        self.num_moe_layers = self.config.num_nextn_predict_layers
++        self.num_expert_groups = self.config.n_group
++
++        self.moe_layers: list[FusedMoE] = []
++        self.moe_mlp_layers: list[Glm5NextMoE] = []
++        example_moe = None
++        for layer in self.model.layers.values():
++            assert isinstance(layer, Glm5NextMultiTokenPredictorLayer)
++            block = layer.mtp_block
++            assert isinstance(block, Glm5NextDecoderLayer)
++            if isinstance(block.mlp, Glm5NextMoE):
++                example_moe = block.mlp
++                self.moe_mlp_layers.append(block.mlp)
++                self.moe_layers.append(block.mlp.experts)
++        self.extract_moe_parameters(example_moe)
++
++    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
++        return self.model.embed_input_ids(input_ids)
++
++    def forward(
++        self,
++        input_ids: torch.Tensor | None,
++        positions: torch.Tensor,
++        hidden_states: torch.Tensor,
++        intermediate_tensors: IntermediateTensors | None = None,
++        inputs_embeds: torch.Tensor | None = None,
++        spec_step_idx: int = 0,
++    ) -> torch.Tensor:
++        hidden_states = self.model(
++            input_ids, positions, hidden_states, inputs_embeds, spec_step_idx
++        )
++        return hidden_states
++
++    def compute_logits(
++        self,
++        hidden_states: torch.Tensor,
++        spec_step_idx: int = 0,
++    ) -> torch.Tensor | None:
++        return self.model.compute_logits(hidden_states, spec_step_idx)
++
++    # -- HasInnerState / IsHybrid mamba state management for KDA layers --
++
++    @classmethod
++    def get_mamba_state_dtype_from_config(
++        cls,
++        vllm_config: "VllmConfig",
++    ) -> tuple[torch.dtype, torch.dtype, torch.dtype, torch.dtype]:
++        return MambaStateDtypeCalculator.kda_state_dtype(
++            vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
++        )
++
++    @classmethod
++    def get_mamba_state_shape_from_config(
++        cls, vllm_config: "VllmConfig"
++    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
++        parallel_config = vllm_config.parallel_config
++        hf_config = vllm_config.model_config.hf_config
++        tp_size = parallel_config.tensor_parallel_size
++        num_spec = (
++            vllm_config.speculative_config.num_speculative_tokens
++            if vllm_config.speculative_config
++            else 0
++        )
++        return MambaStateShapeCalculator.kda_state_shape(
++            tp_size,
++            hf_config.linear_attn_config["num_heads"],
++            hf_config.linear_attn_config["head_dim"],
++            conv_kernel_size=hf_config.linear_attn_config["short_conv_kernel_size"],
++            num_spec=num_spec,
++        )
++
++    @classmethod
++    def get_mamba_state_copy_func(
++        cls,
++    ) -> tuple[
++        MambaStateCopyFunc, MambaStateCopyFunc, MambaStateCopyFunc, MambaStateCopyFunc
++    ]:
++        return MambaStateCopyFuncCalculator.kda_state_copy_func()
++
++    # -- Weight loading --
++
++    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
++        rocm_aiter_moe_shared_expert_enabled = (
++            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
++        )
++        # KDA layers have separate q/k/v projections — no QKV fusion.
++        # Only gate_up_proj stacking is needed for MoE experts.
++        stacked_params_mapping = [
++            ("gate_up_proj", "gate_proj", 0),
++            ("gate_up_proj", "up_proj", 1),
++        ]
++
++        expert_params_mapping = fused_moe_make_expert_params_mapping(
++            self,
++            ckpt_gate_proj_name="gate_proj",
++            ckpt_down_proj_name="down_proj",
++            ckpt_up_proj_name="up_proj",
++            num_experts=self.config.n_routed_experts
++            + (
++                self.config.n_shared_experts
++                if rocm_aiter_moe_shared_expert_enabled
++                else 0
++            ),
++        )
++
++        params_dict = dict(self.named_parameters())
++        loaded_params: set[str] = set()
++        for name, loaded_weight in weights:
++            if "rotary_emb.inv_freq" in name:
++                continue
++            spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
++            if spec_layer is None:
++                continue
++            is_fusion_moe_shared_experts_layer = (
++                rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
++            )
++            name = self._rewrite_spec_layer_name(spec_layer, name)
++            for param_name, weight_name, shard_id in stacked_params_mapping:
++                if weight_name not in name:
++                    continue
++                if ("mlp.experts." in name) and name not in params_dict:
++                    continue
++                if is_fusion_moe_shared_experts_layer:
++                    continue
++                name_mapped = name.replace(weight_name, param_name)
++                name = name_mapped
++
++                if name.endswith(".bias") and name not in params_dict:
++                    continue
++
++                param = params_dict[name]
++                weight_loader = param.weight_loader
++                weight_loader(param, loaded_weight, shard_id)
++                break
++            else:
++                num_chunks = 1
++                if is_fusion_moe_shared_experts_layer:
++                    num_chunks = getattr(self.config, "n_shared_experts", 1) or 1
++                    split_dim = 1 if "down_proj.weight" in name else 0
++                    total = loaded_weight.shape[split_dim]
++                    assert total % num_chunks == 0, (
++                        f"Shared expert weight dim {total} "
++                        f"not divisible by num_chunks {num_chunks}"
++                    )
++                    chunk_size = total // num_chunks
++
++                for j in range(num_chunks):
++                    chunk_name = name
++                    weight_to_load = loaded_weight
++
++                    if is_fusion_moe_shared_experts_layer:
++                        if split_dim == 0:
++                            weight_to_load = loaded_weight[
++                                j * chunk_size : (j + 1) * chunk_size, :
++                            ]
++                        else:
++                            weight_to_load = loaded_weight[
++                                :, j * chunk_size : (j + 1) * chunk_size
++                            ]
++                        chunk_name = name.replace(
++                            "mlp.shared_experts",
++                            f"mlp.experts.{self.config.n_routed_experts + j}",
++                        )
++
++                    is_expert_weight = False
++                    for mapping in expert_params_mapping:
++                        param_name, weight_name, expert_id, shard_id = mapping
++                        if weight_name not in chunk_name:
++                            continue
++
++                        is_expert_weight = True
++
++                        name_mapped = chunk_name.replace(weight_name, param_name)
++
++                        param = params_dict[name_mapped]
++                        weight_loader = typing.cast(
++                            Callable[..., bool], param.weight_loader
++                        )
++                        success = weight_loader(
++                            param,
++                            weight_to_load,
++                            name_mapped,
++                            shard_id=shard_id,
++                            expert_id=expert_id,
++                            return_success=True,
++                        )
++                        if success:
++                            if not is_fusion_moe_shared_experts_layer:
++                                name = name_mapped
++                            else:
++                                loaded_params.add(name_mapped)
++                            break
++                    else:
++                        if is_expert_weight:
++                            continue
++
++                        if name.endswith(".bias") and name not in params_dict:
++                            continue
++
++                        name = maybe_remap_kv_scale_name(name, params_dict)
++                        if name is None:
++                            continue
++
++                        # MTP modules share embedding layer — only load for
++                        # the first spec layer.
++                        if (
++                            spec_layer != self.model.mtp_start_layer_idx
++                            and ".layers" not in name
++                        ):
++                            continue
++
++                        param = params_dict[name]
++                        weight_loader = getattr(
++                            param, "weight_loader", default_weight_loader
++                        )
++                        weight_loader(param, loaded_weight)
++            if not is_fusion_moe_shared_experts_layer:
++                loaded_params.add(name)
++        return loaded_params
++
++    def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
++        spec_layer_weight_names = [
++            "embed_tokens",
++            "enorm",
++            "hnorm",
++            "eh_proj",
++            "shared_head",
++        ]
++        shared_weight_names = ["embed_tokens"]
++        spec_layer_weight = False
++        shared_weight = False
++        for weight_name in spec_layer_weight_names:
++            if weight_name in name:
++                spec_layer_weight = True
++                if weight_name in shared_weight_names:
++                    shared_weight = True
++                break
++        if not spec_layer_weight:
++            # Decoder layer weights get .mtp_block. prefix
++            name = name.replace(
++                f"model.layers.{spec_layer}.", f"model.layers.{spec_layer}.mtp_block."
++            )
++        elif shared_weight:
++            # Shared weights promoted to model top level
++            name = name.replace(f"model.layers.{spec_layer}.", "model.")
++        return name
+diff --git a/vllm/model_executor/models/registry.py b/vllm/model_executor/models/registry.py
+index 020de8db5..daefc0014 100644
+--- a/vllm/model_executor/models/registry.py
++++ b/vllm/model_executor/models/registry.py
+@@ -624,6 +624,7 @@ _SPECULATIVE_DECODING_MODELS = {
+     "Glm4MoeMTPModel": ("glm4_moe_mtp", "Glm4MoeMTP"),
+     "Glm4MoeLiteMTPModel": ("glm4_moe_lite_mtp", "Glm4MoeLiteMTP"),
+     "GlmOcrMTPModel": ("glm_ocr_mtp", "GlmOcrMTP"),
++    "Glm5NextMTPModel": ("glm5_next_mtp", "Glm5NextMTP"),
+     "MedusaModel": ("medusa", "Medusa"),
+     "OpenPanguMTPModel": ("openpangu_mtp", "OpenPanguMTP"),
+     "Qwen3NextMTP": ("qwen3_next_mtp", "Qwen3NextMTP"),
+diff --git a/vllm/transformers_utils/configs/glm5_next.py b/vllm/transformers_utils/configs/glm5_next.py
+index 584315b99..403cfd6cc 100644
+--- a/vllm/transformers_utils/configs/glm5_next.py
++++ b/vllm/transformers_utils/configs/glm5_next.py
+@@ -49,6 +49,8 @@ class Glm5NextConfig(PretrainedConfig):
+         qk_rope_head_dim: int = 0,
+         v_head_dim: int | None = 256,
+         mla_nope: bool | None = True,
++        num_nextn_predict_layers: int = 1,
++        linear_attn_config: dict | None = None,
+         index_head_dim: int | None = None,
+         index_topk: int | None = None,
+         index_n_heads: int | None = None,
+@@ -106,6 +108,12 @@ class Glm5NextConfig(PretrainedConfig):
+         self.use_grouped_topk = use_grouped_topk
+         self.n_group = n_group
+         self.topk_group = topk_group
++        self.num_nextn_predict_layers = num_nextn_predict_layers
++
++        if linear_attn_config is not None:
++            assert linear_attn_config["kda_layers"] is not None
++            assert linear_attn_config["full_attn_layers"] is not None
++        self.linear_attn_config = linear_attn_config
+ 
+         # dsa index config
+         self.index_head_dim = index_head_dim
+@@ -148,6 +156,28 @@ class Glm5NextConfig(PretrainedConfig):
+     def is_moe(self):
+         return self.n_routed_experts is not None
+ 
++    @property
++    def is_linear_attn(self) -> bool:
++        return not (
++            self.linear_attn_config is None
++            or (
++                isinstance(self.linear_attn_config, dict)
++                and self.linear_attn_config["kda_layers"] is not None
++                and len(self.linear_attn_config["kda_layers"]) == 0
++            )
++        )
++
++    def is_kda_layer(self, layer_idx: int):
++        return (
++            self.linear_attn_config is not None
++            and layer_idx in self.linear_attn_config["kda_layers"]
++        )
++
+     @property
+     def layers_block_type(self):
+-        return ["attention"] * self.num_hidden_layers
++        if not self.is_linear_attn:
++            return ["attention"] * self.num_hidden_layers
++        return [
++            "linear_attention" if self.is_kda_layer(i) else "attention"
++            for i in range(self.num_hidden_layers)
++        ]
+diff --git a/vllm/v1/attention/backends/mla/triton_mla.py b/vllm/v1/attention/backends/mla/triton_mla.py
+index 32654cf79..93681b82e 100644
+--- a/vllm/v1/attention/backends/mla/triton_mla.py
++++ b/vllm/v1/attention/backends/mla/triton_mla.py
+@@ -13,6 +13,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
+     MLACommonImpl,
+     MLACommonMetadata,
+     MLACommonMetadataBuilder,
++    QueryLenSupport,
+ )
+ from vllm.platforms import current_platform
+ from vllm.platforms.interface import DeviceCapability
+@@ -31,6 +32,7 @@ logger = init_logger(__name__)
+ 
+ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
+     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
++    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
+ 
+ 
+ class TritonMLABackend(MLACommonBackend):
+@@ -150,6 +152,23 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
+         B = q.shape[0]
+         q_num_heads = q.shape[1]
+ 
++        # Flatten multi-token decode queries (speculative decoding).
++        # The Triton decode kernel assumes 1 token per batch item, so we
++        # tile block_table and expand seq_lens to match total_tokens.
++        num_decodes = attn_metadata.num_decodes
++        query_len = B // num_decodes
++        block_table = attn_metadata.decode.block_table
++        seq_lens = attn_metadata.decode.seq_lens
++
++        if query_len > 1:
++            block_table = block_table.repeat_interleave(query_len, dim=0)
++            offsets = torch.arange(
++                query_len, device=seq_lens.device, dtype=seq_lens.dtype
++            )
++            seq_lens = (seq_lens[:, None] - query_len + offsets[None, :] + 1).reshape(
++                -1
++            )
++
+         o = torch.zeros(
+             B, q_num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
+         )
+@@ -202,8 +221,8 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
+             kv_c_cache,
+             o,
+             lse,
+-            attn_metadata.decode.block_table,
+-            attn_metadata.decode.seq_lens,
++            block_table,
++            seq_lens,
+             attn_logits,
+             num_kv_splits,
+             self.scale,
