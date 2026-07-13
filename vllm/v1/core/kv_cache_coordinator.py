@@ -7,6 +7,7 @@ from typing import NamedTuple
 from vllm import envs
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
+from vllm.v1.core.mamba_mtp_debug import debug_enabled, debug_log
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashList,
@@ -658,6 +659,24 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     alignment_tokens=self.scheduler_block_size,
                 )
                 _new_hit_length = len(hit_blocks[0]) * spec.block_size
+                if debug_enabled():
+                    debug_log(
+                        "hybrid_cache_hit_group",
+                        coordinator_type=type(self).__name__,
+                        group_idx=idx,
+                        group_ids=group_ids,
+                        spec_type=type(spec).__name__,
+                        max_cache_hit_length=max_cache_hit_length,
+                        input_hit_length=hit_length,
+                        curr_hit_length_before=curr_hit_length,
+                        lookup_max_length=_max_length,
+                        new_hit_length=_new_hit_length,
+                        block_size=spec.block_size,
+                        scheduler_block_size=self.scheduler_block_size,
+                        drop_eagle_block=drop_eagle_block,
+                        eagle_verified=sorted(eagle_verified),
+                        hit_block_lens=[len(blocks) for blocks in hit_blocks],
+                    )
                 if drop_eagle_block:
                     eagle_verified.add(idx)
                 elif _new_hit_length < curr_hit_length:
@@ -681,6 +700,25 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 if (blks := hit_blocks_by_group[group_id]) is not None:
                     del blks[num_blocks:]
 
+        if debug_enabled():
+            debug_log(
+                "hybrid_cache_hit_final",
+                coordinator_type=type(self).__name__,
+                max_cache_hit_length=max_cache_hit_length,
+                final_hit_length=hit_length,
+                group_block_lens=[
+                    len(blocks) if blocks is not None else 0
+                    for blocks in hit_blocks_by_group
+                ],
+                attention_groups=[
+                    {
+                        "spec_type": type(group.spec).__name__,
+                        "group_ids": group.group_ids,
+                        "use_eagle": group.use_eagle,
+                    }
+                    for group in self.attention_groups
+                ],
+            )
         return tuple(
             blocks if blocks is not None else [] for blocks in hit_blocks_by_group
         ), hit_length

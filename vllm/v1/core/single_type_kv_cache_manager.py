@@ -7,6 +7,7 @@ from collections.abc import Sequence
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.mamba_mtp_debug import blocks_meta_tail, debug_log
 from vllm.v1.core.kv_cache_utils import (
     BlockHashList,
     BlockHashWithGroupId,
@@ -369,6 +370,14 @@ class SingleTypeKVCacheManager(ABC):
         """
         # Default to [] in case a request is freed (aborted) before alloc.
         req_blocks = self.req_to_blocks.pop(request_id, [])
+        debug_log(
+            "single_type_free",
+            req_id=request_id,
+            group_id=self.kv_cache_group_id,
+            manager_type=type(self).__name__,
+            block_size=self.block_size,
+            blocks=blocks_meta_tail(req_blocks),
+        )
 
         # Free blocks in reverse order so that the tail blocks are
         # freed first.
@@ -497,6 +506,19 @@ class SingleTypeKVCacheManager(ABC):
         # `prepend=True` makes uncached scratch blocks the next allocation
         # candidates, while cached blocks stay behind them as best-effort
         # prefix-cache entries.
+        debug_log(
+            "single_type_remove_skipped_blocks",
+            req_id=request_id,
+            group_id=self.kv_cache_group_id,
+            manager_type=type(self).__name__,
+            block_size=self.block_size,
+            total_computed_tokens=total_computed_tokens,
+            num_skipped_tokens=num_skipped_tokens,
+            num_skipped_blocks=num_skipped_blocks,
+            removed_cached_blocks=blocks_meta_tail(removed_cached_blocks),
+            removed_uncached_blocks=blocks_meta_tail(removed_uncached_blocks),
+            blocks_after=blocks_meta_tail(blocks),
+        )
         self.block_pool.free_blocks(removed_cached_blocks)
         self.block_pool.free_blocks(removed_uncached_blocks, prepend=True)
 
@@ -1042,8 +1064,27 @@ class MambaManager(SingleTypeKVCacheManager):
             ):
                 blocks = self.req_to_blocks[request_id]
                 if blocks[last_state_block_idx] != self._null_block:
-                    self.block_pool.free_blocks([blocks[last_state_block_idx]])
+                    block_to_free = blocks[last_state_block_idx]
+                    debug_log(
+                        "mamba_free_last_state_block",
+                        req_id=request_id,
+                        group_id=self.kv_cache_group_id,
+                        block_size=self.block_size,
+                        num_computed_tokens=num_computed_tokens,
+                        num_speculative_blocks=self.num_speculative_blocks,
+                        last_state_block_idx=last_state_block_idx,
+                        block=blocks_meta_tail([block_to_free]),
+                        blocks_before=blocks_meta_tail(blocks),
+                    )
+                    self.block_pool.free_blocks([block_to_free])
                     blocks[last_state_block_idx] = self._null_block
+                    debug_log(
+                        "mamba_free_last_state_block_done",
+                        req_id=request_id,
+                        group_id=self.kv_cache_group_id,
+                        last_state_block_idx=last_state_block_idx,
+                        blocks_after=blocks_meta_tail(blocks),
+                    )
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """
@@ -1116,7 +1157,27 @@ class MambaManager(SingleTypeKVCacheManager):
             num_evictable_computed_blocks = self._get_num_evictable_blocks(
                 new_computed_blocks
             )
-            return num_new_blocks + num_evictable_computed_blocks
+            total_new_blocks = num_new_blocks + num_evictable_computed_blocks
+            debug_log(
+                "mamba_get_num_blocks_to_allocate",
+                req_id=request_id,
+                group_id=self.kv_cache_group_id,
+                mamba_cache_mode=self.mamba_cache_mode,
+                block_size=self.block_size,
+                num_tokens=num_tokens,
+                num_tokens_main_model=num_tokens_main_model,
+                total_computed_tokens=total_computed_tokens,
+                num_required_blocks=num_required_blocks,
+                num_new_blocks=num_new_blocks,
+                num_speculative_blocks=self.num_speculative_blocks,
+                num_req_blocks=len(self.req_to_blocks[request_id]),
+                blocks_allocated=request_id in self._allocated_block_reqs,
+                last_state_block_idx=self.last_state_block_idx.get(request_id),
+                new_computed_blocks=blocks_meta_tail(new_computed_blocks),
+                num_evictable_computed_blocks=num_evictable_computed_blocks,
+                total_new_blocks=total_new_blocks,
+            )
+            return total_new_blocks
 
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
@@ -1149,6 +1210,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 return []
             else:
                 prev_block_len = len(req_blocks)
+                blocks_before = list(req_blocks)
                 blocks_allocated = request_id in self._allocated_block_reqs
                 # Record the last state block
                 if blocks_allocated:
@@ -1192,7 +1254,27 @@ class MambaManager(SingleTypeKVCacheManager):
                 new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
                 req_blocks.extend(new_blocks)
                 self._allocated_block_reqs.add(request_id)
-                return req_blocks[prev_block_len:]
+                returned_blocks = req_blocks[prev_block_len:]
+                debug_log(
+                    "mamba_allocate_new_blocks",
+                    req_id=request_id,
+                    group_id=self.kv_cache_group_id,
+                    mamba_cache_mode=self.mamba_cache_mode,
+                    block_size=self.block_size,
+                    num_tokens=num_tokens,
+                    num_tokens_main_model=num_tokens_main_model,
+                    num_required_blocks=num_required_blocks,
+                    num_skipped_blocks=num_skipped_blocks,
+                    num_speculative_blocks=self.num_speculative_blocks,
+                    blocks_allocated=blocks_allocated,
+                    prev_block_len=prev_block_len,
+                    last_state_block_idx=self.last_state_block_idx.get(request_id),
+                    blocks_before=blocks_meta_tail(blocks_before),
+                    new_blocks=blocks_meta_tail(new_blocks),
+                    returned_blocks=blocks_meta_tail(returned_blocks),
+                    blocks_after=blocks_meta_tail(req_blocks),
+                )
+                return returned_blocks
 
     def free(self, request_id: str) -> None:
         if self.mamba_cache_mode == "align":

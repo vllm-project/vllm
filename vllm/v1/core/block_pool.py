@@ -12,6 +12,7 @@ from vllm.distributed.kv_events import (
 )
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
+from vllm.v1.core.mamba_mtp_debug import blocks_meta_tail, debug_log
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashList,
@@ -341,7 +342,8 @@ class BlockPool:
         Returns:
             A list of new block.
         """
-        if num_blocks > self.get_num_free_blocks():
+        free_blocks_before = self.get_num_free_blocks()
+        if num_blocks > free_blocks_before:
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
         ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
@@ -360,6 +362,13 @@ class BlockPool:
                 block.ref_cnt += 1
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
+        debug_log(
+            "block_pool_get_new_blocks",
+            num_blocks=num_blocks,
+            free_blocks_before=free_blocks_before,
+            free_blocks_after=self.get_num_free_blocks(),
+            blocks=blocks_meta_tail(ret),
+        )
         return ret
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
@@ -387,6 +396,13 @@ class BlockPool:
             # eviction is not needed
             return False
 
+        debug_log(
+            "block_pool_evict_cached_block",
+            block_id=block.block_id,
+            block_hash=str(block_hash),
+            ref_cnt=block.ref_cnt,
+            group_id=get_group_id(block_hash),
+        )
         block.reset_hash()
 
         if self.enable_kv_cache_events:
@@ -435,10 +451,20 @@ class BlockPool:
         freed_blocks = [
             block for block in blocks_list if block.ref_cnt == 0 and not block.is_null
         ]
+        free_blocks_before = self.get_num_free_blocks()
         if prepend:
             self.free_block_queue.prepend_n(freed_blocks)
         else:
             self.free_block_queue.append_n(freed_blocks)
+        if blocks_list:
+            debug_log(
+                "block_pool_free_blocks",
+                prepend=prepend,
+                input_blocks=blocks_meta_tail(blocks_list),
+                freed_blocks=blocks_meta_tail(freed_blocks),
+                free_blocks_before=free_blocks_before,
+                free_blocks_after=self.get_num_free_blocks(),
+            )
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.

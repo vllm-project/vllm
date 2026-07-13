@@ -36,6 +36,7 @@ from vllm.v1.core.encoder_cache_manager import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
+from vllm.v1.core.mamba_mtp_debug import block_ids_tail, debug_enabled, debug_log
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -980,6 +981,25 @@ class Scheduler(SchedulerInterface):
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
         )
+        debug_log(
+            "scheduler_preempt_request",
+            step=self.current_step,
+            req_id=request.request_id,
+            status=str(request.status),
+            num_tokens=request.num_tokens,
+            num_tokens_with_spec=request.num_tokens_with_spec,
+            num_computed_tokens=request.num_computed_tokens,
+            num_output_placeholders=request.num_output_placeholders,
+            num_spec_tokens=len(request.spec_token_ids),
+            num_preemptions=request.num_preemptions,
+            block_ids=block_ids_tail(
+                self.kv_cache_manager.get_blocks(
+                    request.request_id
+                ).get_block_ids(allow_none=True)
+            )
+            if debug_enabled()
+            else None,
+        )
         self.kv_cache_manager.free(request)
         self.encoder_cache_manager.free(request)
         self._inflight_prefills.discard(request)
@@ -988,6 +1008,12 @@ class Scheduler(SchedulerInterface):
         if request.spec_token_ids:
             request.spec_token_ids = []
         request.num_preemptions += 1
+        debug_log(
+            "scheduler_preempt_request_done",
+            step=self.current_step,
+            req_id=request.request_id,
+            num_preemptions=request.num_preemptions,
+        )
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
@@ -1418,6 +1444,8 @@ class Scheduler(SchedulerInterface):
                 num_draft_tokens = len(scheduled_spec_token_ids)
                 num_accepted = len(generated_token_ids) - 1
                 num_rejected = num_draft_tokens - num_accepted
+                num_computed_tokens_before_reject = request.num_computed_tokens
+                num_output_placeholders_before_reject = request.num_output_placeholders
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
                 # tokens and rejections. If some tokens are rejected,
@@ -1429,6 +1457,28 @@ class Scheduler(SchedulerInterface):
                 # the scheduled spec tokens count and so is similarly adjusted.
                 if request.num_output_placeholders > 0:
                     request.num_output_placeholders -= num_rejected
+                debug_log(
+                    "scheduler_spec_reject_rollback",
+                    step=self.current_step,
+                    req_id=req_id,
+                    num_draft_tokens=num_draft_tokens,
+                    num_accepted=num_accepted,
+                    num_rejected=num_rejected,
+                    num_computed_tokens_before=num_computed_tokens_before_reject,
+                    num_computed_tokens_after=request.num_computed_tokens,
+                    num_output_placeholders_before=(
+                        num_output_placeholders_before_reject
+                    ),
+                    num_output_placeholders_after=request.num_output_placeholders,
+                    num_scheduled_tokens=num_tokens_scheduled,
+                    block_ids=block_ids_tail(
+                        self.kv_cache_manager.get_blocks(
+                            req_id
+                        ).get_block_ids(allow_none=True)
+                    )
+                    if debug_enabled()
+                    else None,
+                )
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
                     num_draft_tokens=num_draft_tokens,
@@ -2313,6 +2363,17 @@ class Scheduler(SchedulerInterface):
                     # as computed when rescheduled.
                     # Currently this only applies to sync loading; Async
                     # loading does not yet support block sharing
+                    debug_log(
+                        "scheduler_invalid_block_shared",
+                        step=self.current_step,
+                        req_id=req_id,
+                        block_id=block_id,
+                        block_idx=idx,
+                        evict_blocks=evict_blocks,
+                        req_num_computed_tokens=req_num_computed_tokens,
+                        request_num_computed_tokens=request.num_computed_tokens,
+                        req_block_ids=block_ids_tail(req_block_ids),
+                    )
                     continue
 
                 marked_invalid_block_ids.add(block_id)
@@ -2324,6 +2385,7 @@ class Scheduler(SchedulerInterface):
 
                 marked_invalid_block = True
                 # Truncate the computed tokens at the first failed block
+                num_computed_tokens_before_invalid = request.num_computed_tokens
                 request.num_computed_tokens = idx * self.block_size
                 num_affected_tokens = (
                     req_num_computed_tokens - request.num_computed_tokens
@@ -2333,6 +2395,23 @@ class Scheduler(SchedulerInterface):
                 # collect invalid block and all downstream dependent blocks
                 if evict_blocks:
                     blocks_to_evict.update(req_block_ids[idx:])
+                debug_log(
+                    "scheduler_invalid_block_rollback",
+                    step=self.current_step,
+                    req_id=req_id,
+                    block_id=block_id,
+                    block_idx=idx,
+                    block_size=self.block_size,
+                    evict_blocks=evict_blocks,
+                    num_computed_tokens_before=(
+                        num_computed_tokens_before_invalid
+                    ),
+                    num_computed_tokens_after=request.num_computed_tokens,
+                    req_num_computed_tokens=req_num_computed_tokens,
+                    num_affected_tokens=num_affected_tokens,
+                    req_block_ids=block_ids_tail(req_block_ids),
+                    downstream_block_ids=block_ids_tail(req_block_ids[idx:]),
+                )
 
             if is_affected:
                 if not marked_invalid_block:
@@ -2341,10 +2420,23 @@ class Scheduler(SchedulerInterface):
                     # Revert to considering only cached tokens as computed.
                     # Currently this only applies to sync loading; Async
                     # loading does not yet support block sharing
+                    num_computed_tokens_before_shared = request.num_computed_tokens
                     total_affected_tokens += (
                         request.num_computed_tokens - req_num_computed_tokens
                     )
                     request.num_computed_tokens = req_num_computed_tokens
+                    debug_log(
+                        "scheduler_invalid_block_shared_rollback",
+                        step=self.current_step,
+                        req_id=req_id,
+                        evict_blocks=evict_blocks,
+                        num_computed_tokens_before=(
+                            num_computed_tokens_before_shared
+                        ),
+                        num_computed_tokens_after=request.num_computed_tokens,
+                        req_num_computed_tokens=req_num_computed_tokens,
+                        req_block_ids=block_ids_tail(req_block_ids),
+                    )
 
                 affected_req_ids.add(request.request_id)
 
@@ -2391,6 +2483,19 @@ class Scheduler(SchedulerInterface):
 
         if not total_failed_requests:
             return set()
+
+        debug_log(
+            "scheduler_handle_invalid_blocks",
+            step=self.current_step,
+            invalid_block_ids=block_ids_tail(list(invalid_block_ids)),
+            async_failed_req_ids=sorted(async_failed_req_ids),
+            sync_failed_req_ids=sorted(sync_failed_req_ids),
+            total_failed_requests=total_failed_requests,
+            total_failed_tokens=total_failed_tokens,
+            sync_blocks_to_evict=block_ids_tail(list(sync_blocks_to_evict)),
+            recompute_kv_load_failures=self.recompute_kv_load_failures,
+            should_fail=should_fail,
+        )
 
         # evict invalid blocks and downstream dependent blocks from cache
         # only when not using recompute policy (where blocks will be recomputed
