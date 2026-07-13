@@ -623,6 +623,10 @@ class MiniCPMV4_6ViTWindowAttentionSelfAttn(nn.Module):
             "q_proj": ("qkv_proj", "q"),
             "k_proj": ("qkv_proj", "k"),
             "v_proj": ("qkv_proj", "v"),
+        },
+        # 兜底:处理0.25.0加载时误生成的qkqkv_proj,映射回qkv_proj(修复回归bug)
+        orig_to_new_prefix={
+            "qkqkv_proj": "qkv_proj",
         }
     )
 
