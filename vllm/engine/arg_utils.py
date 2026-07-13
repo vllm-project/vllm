@@ -614,9 +614,6 @@ class EngineArgs:
         SchedulerConfig.prefill_delayer_max_delay_passes
     )
     prefill_delayer_max_delay_ms: float = SchedulerConfig.prefill_delayer_max_delay_ms
-    prefill_delayer_token_usage_low_watermark: float | None = (
-        SchedulerConfig.prefill_delayer_token_usage_low_watermark
-    )
 
     watermark: float = SchedulerConfig.watermark
 
@@ -1481,10 +1478,6 @@ class EngineArgs:
             **scheduler_kwargs["prefill_delayer_max_delay_ms"],
         )
         scheduler_group.add_argument(
-            "--prefill-delayer-token-usage-low-watermark",
-            **scheduler_kwargs["prefill_delayer_token_usage_low_watermark"],
-        )
-        scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
         )
@@ -2195,9 +2188,6 @@ class EngineArgs:
             enable_prefill_delayer=self.enable_prefill_delayer,
             prefill_delayer_max_delay_passes=self.prefill_delayer_max_delay_passes,
             prefill_delayer_max_delay_ms=self.prefill_delayer_max_delay_ms,
-            prefill_delayer_token_usage_low_watermark=(
-                self.prefill_delayer_token_usage_low_watermark
-            ),
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,

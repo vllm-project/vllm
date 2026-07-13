@@ -11,7 +11,7 @@ ready, so dense prefills fire together (balanced) rather than straggling.
 
 Mechanism (per scheduler step):
   1. Each rank reports its local state via one CPU MAX all_reduce:
-       (local_prefillable, watermark_force_allow).
+       (local_prefillable, not local_prefillable).
   2. Derive a 3-way status across ranks:
        - "all"   -> every rank has a new prefill ready -> allow (aligned).
        - "none"  -> no rank has a prefill              -> allow (vacuous).
@@ -19,9 +19,6 @@ Mechanism (per scheduler step):
   3. In "mixed", refuse the prefill for up to ``max_delay_passes`` consecutive
      steps OR ``max_delay_ms`` wall-clock, whichever comes first, then
      force-allow to bound worst-case TTFT.
-  4. Safety valve: if any rank's KV-cache usage drops below
-     ``token_usage_low_watermark``, all ranks force-allow this step (don't delay
-     while a GPU is idling).
 """
 
 from __future__ import annotations
@@ -43,19 +40,16 @@ class PrefillDelayer:
         cpu_group,
         max_delay_passes: int = 30,
         max_delay_ms: float = 5000.0,
-        token_usage_low_watermark: float | None = None,
     ):
         self.dp_size = dp_size
         self.cpu_group = cpu_group
         self.max_delay_passes = max_delay_passes
         self.max_delay_ms = max_delay_ms
-        self.token_usage_low_watermark = token_usage_low_watermark
 
-        # 3-slot MAX-reduce buffer on CPU (gloo-friendly):
+        # 2-slot MAX-reduce buffer on CPU (gloo-friendly):
         #   slot 0 = local_prefillable      (MAX -> any rank prefillable)
-        #   slot 1 = local_force            (MAX -> any rank forces allow)
-        #   slot 2 = NOT local_prefillable  (MAX -> any rank lacks prefill)
-        self._reduce_buf = torch.zeros(3, dtype=torch.int64, device="cpu")
+        #   slot 1 = NOT local_prefillable  (MAX -> any rank lacks prefill)
+        self._reduce_buf = torch.zeros(2, dtype=torch.int64, device="cpu")
 
         self._delayed_count: int = 0
         self._delay_start_ts: float = 0.0
@@ -65,17 +59,15 @@ class PrefillDelayer:
 
         logger.info(
             "PrefillDelayer initialized: dp_size=%d max_delay_passes=%d "
-            "max_delay_ms=%.1f watermark=%s",
+            "max_delay_ms=%.1f",
             dp_size,
             max_delay_passes,
             max_delay_ms,
-            token_usage_low_watermark,
         )
 
     def should_allow_prefill(
         self,
         local_prefillable: bool,
-        token_usage: float,
     ) -> bool:
         """Return True iff this rank may admit new prefills this step.
 
@@ -84,31 +76,16 @@ class PrefillDelayer:
 
         Args:
             local_prefillable: This rank has a new prefill ready to admit.
-            token_usage: Fraction of KV cache blocks in use, in [0, 1]. Used by
-                the low-watermark safety valve.
         """
-        force = (
-            self.token_usage_low_watermark is not None
-            and local_prefillable
-            and token_usage < self.token_usage_low_watermark
-        )
-
         self._reduce_buf[0] = 1 if local_prefillable else 0
-        self._reduce_buf[1] = 1 if force else 0
-        self._reduce_buf[2] = 0 if local_prefillable else 1
+        self._reduce_buf[1] = 0 if local_prefillable else 1
         dist.all_reduce(
             self._reduce_buf,
             op=dist.ReduceOp.MAX,
             group=self.cpu_group,
         )
         any_prefillable = int(self._reduce_buf[0].item()) > 0
-        force_max = int(self._reduce_buf[1].item())
-        any_not_prefillable = int(self._reduce_buf[2].item()) > 0
-
-        # Any rank below the watermark forces all ranks to allow this step.
-        if force_max > 0:
-            self._reset_delay()
-            return True
+        any_not_prefillable = int(self._reduce_buf[1].item()) > 0
 
         # Skip the first call to maximize initial decode batch build-up.
         if self._skip_first:

@@ -1810,9 +1810,6 @@ class DPEngineCoreProc(EngineCoreProc):
                 cpu_group=self.dp_group,
                 max_delay_passes=scheduler_config.prefill_delayer_max_delay_passes,
                 max_delay_ms=scheduler_config.prefill_delayer_max_delay_ms,
-                token_usage_low_watermark=(
-                    scheduler_config.prefill_delayer_token_usage_low_watermark
-                ),
             )
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
@@ -1962,8 +1959,7 @@ class DPEngineCoreProc(EngineCoreProc):
             self._delayer_throttle = False
             return
         allow = self._prefill_delayer.should_allow_prefill(
-            local_prefillable=self.scheduler.local_prefillable(),
-            token_usage=self.scheduler.kv_cache_usage(),
+            local_prefillable=self.scheduler.get_request_counts()[1] > 0,
         )
         self._delayer_throttle = not allow
 

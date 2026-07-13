@@ -170,11 +170,6 @@ class SchedulerConfig:
     state before force-allowing, whichever comes first with
     `prefill_delayer_max_delay_passes`."""
 
-    prefill_delayer_token_usage_low_watermark: float | None = None
-    """KV-cache usage fraction below which the PrefillDelayer force-allows
-    prefills cluster-wide (don't delay while a GPU is idling). None disables
-    the watermark valve."""
-
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.
