@@ -121,8 +121,6 @@ class NgramEmbedding(nn.Module):
             for index in range(num_embedders):
                 emb_vocab_dim = int(self.m + index * 2 + 1)
                 # Use VocabParallelEmbedding for TP sharding per embedder
-                # Int4 quantization is applied automatically when using
-                # --quantization int4_per_channel_weight_only
                 self.embedders.append(
                     VocabParallelEmbedding(
                         emb_vocab_dim,
