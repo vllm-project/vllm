@@ -16,8 +16,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsMxfp4,
 )
-from vllm.model_executor.layers.fused_moe.experts.marlin_moe import MarlinExperts
-from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsMxFp4
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
@@ -25,6 +23,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
+    select_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,
@@ -49,21 +48,19 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe) -> None:
         super().__init__(moe)
         self.group_size = 32
-        self.mxfp4_backend = Mxfp4MoeBackend.MARLIN
-        # Use CUTLASS if the device supports it, otherwise XPU on Intel GPUs,
-        # otherwise fall back to weight-only Marlin.
+        # CutlassExpertsMxfp4 (true W4A4 on supported GPUs) is not represented
+        # in the MXFP4 backend oracle, so keep an explicit device check for it;
+        # otherwise defer backend / experts selection to the shared
+        # select_mxfp4_moe_backend oracle (native XPU kernel or the Marlin
+        # weight-only fallback).
         self.use_cutlass_mxfp4 = CutlassExpertsMxfp4._supports_current_device()
         self.experts_cls: type
         if self.use_cutlass_mxfp4:
-            logger.info_once("Using CutlassExpertsMxfp4 for AutoRound MXFP4 MoE")
+            self.mxfp4_backend = Mxfp4MoeBackend.MARLIN
             self.experts_cls = CutlassExpertsMxfp4
-        elif current_platform.is_xpu():
-            self.mxfp4_backend = Mxfp4MoeBackend.XPU
-            self.experts_cls = XPUExpertsMxFp4
-            logger.info_once("Using XPUExpertsMxFp4 for AutoRound MXFP4 MoE on XPU")
+            logger.info_once("Using CutlassExpertsMxfp4 for AutoRound MXFP4 MoE")
         else:
-            logger.info_once("Using MarlinExperts for AutoRound MXFP4 MoE")
-            self.experts_cls = MarlinExperts
+            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
 
     def create_weights(
         self,
