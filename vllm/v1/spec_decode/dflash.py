@@ -70,7 +70,12 @@ class DFlashProposer(SpecDecodeBaseProposer):
         # For DFlash we use the input embeddings to embed the mask token
         self.parallel_drafting_hidden_state_tensor = None
 
-        self.dflash_causal = self.dflash_config.get("causal", False)
+        # Uniform-causality scalar; honors SWA-derived causality, not just the override.
+        from vllm.model_executor.models.qwen3_dflash import dflash_has_any_noncausal
+
+        self.dflash_causal = not dflash_has_any_noncausal(
+            self.draft_model_config.hf_config
+        )
 
     @override
     def _create_draft_vllm_config(self) -> VllmConfig:
