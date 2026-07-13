@@ -3272,6 +3272,136 @@ def test_priority_capacity_preemption_skips_lora_limited_waiter():
     assert len(scheduler.running) == 2
 
 
+def test_priority_capacity_preemption_keeps_lora_of_admitted_waiter():
+    """Evicting a runner must not discard a LoRA still used by a waiter
+    admitted earlier in the same scheduling pass.
+
+    Cascade in one schedule() call (``max_num_seqs=4``, ``max_loras=2``):
+    w1 (lora-a) evicts r1, then w2 (lora-b) evicts r2 (lora-a).  At that
+    point lora-a is only referenced by w1, which sits in
+    ``scheduled_new_reqs`` — if the discard check only scans
+    ``scheduled_running_reqs``, lora-a leaks out of ``scheduled_loras``
+    and w3 (lora-c) is admitted as a third distinct LoRA in the batch.
+    """
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=4,
+        max_num_batched_tokens=512,
+        num_blocks=10000,
+        lora_config=LoRAConfig(max_loras=2, max_cpu_loras=4),
+    )
+
+    lora_a = LoRARequest("lora-a", 1, "/tmp/lora-a")
+    lora_b = LoRARequest("lora-b", 2, "/tmp/lora-b")
+    lora_c = LoRARequest("lora-c", 3, "/tmp/lora-c")
+
+    r1, r2, r3, r4 = create_requests_with_priority(
+        num_requests=4,
+        priorities=[9, 8, 7, 0],
+        arrival_times=[1.0, 2.0, 3.0, 4.0],
+        num_tokens=10,
+        req_ids=["r1", "r2", "r3", "r4"],
+    )
+    r1.lora_request = lora_a
+    r2.lora_request = lora_a
+    for req in (r1, r2, r3, r4):
+        scheduler.add_request(req)
+
+    output = scheduler.schedule()
+    assert len(scheduler.running) == 4
+
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["r1", "r2", "r3", "r4"],
+            req_id_to_index={"r1": 0, "r2": 1, "r3": 2, "r4": 3},
+            sampled_token_ids=[[100], [100], [100], [100]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    w1, w2, w3 = create_requests_with_priority(
+        num_requests=3,
+        priorities=[1, 2, 3],
+        arrival_times=[5.0, 6.0, 7.0],
+        num_tokens=10,
+        req_ids=["w1", "w2", "w3"],
+    )
+    w1.lora_request = lora_a
+    w2.lora_request = lora_b
+    w3.lora_request = lora_c
+    for req in (w1, w2, w3):
+        scheduler.add_request(req)
+
+    scheduler.schedule()
+
+    running_ids = {r.request_id for r in scheduler.running}
+    assert running_ids == {"r3", "r4", "w1", "w2"}
+    assert scheduler.requests["r1"].status == RequestStatus.PREEMPTED
+    assert scheduler.requests["r2"].status == RequestStatus.PREEMPTED
+    # w3 would be the third distinct LoRA in the batch: must stay waiting
+    # and must not cost r3 a wasted eviction.
+    assert scheduler.requests["r3"].status == RequestStatus.RUNNING
+    assert scheduler.requests["w3"].status == RequestStatus.WAITING
+
+
+def test_priority_capacity_preemption_skips_blocked_waiter():
+    """A blocked top-priority waiter (e.g. WAITING_FOR_REMOTE_KVS) must not
+    stall capacity preemption for admittable lower-priority waiters."""
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=2,
+        max_num_batched_tokens=512,
+        num_blocks=10000,
+    )
+
+    lo1, lo2 = create_requests_with_priority(
+        num_requests=2,
+        priorities=[5, 4],
+        arrival_times=[1.0, 2.0],
+        num_tokens=10,
+        req_ids=["lo1", "lo2"],
+    )
+    scheduler.add_request(lo1)
+    scheduler.add_request(lo2)
+
+    output = scheduler.schedule()
+    assert len(scheduler.running) == 2
+
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["lo1", "lo2"],
+            req_id_to_index={"lo1": 0, "lo2": 1},
+            sampled_token_ids=[[100], [100]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    blocked, hi = create_requests_with_priority(
+        num_requests=2,
+        priorities=[0, 1],
+        arrival_times=[3.0, 4.0],
+        num_tokens=10,
+        req_ids=["blocked", "hi"],
+    )
+    scheduler.add_request(blocked)
+    scheduler.add_request(hi)
+    # Simulate a pending remote KV transfer: promotion fails until the
+    # worker reports the transfer finished.
+    scheduler.requests["blocked"].status = RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    scheduler.schedule()
+
+    running_ids = {r.request_id for r in scheduler.running}
+    assert "hi" in running_ids
+    assert scheduler.requests["lo1"].status == RequestStatus.PREEMPTED
+    assert scheduler.requests["lo2"].status == RequestStatus.RUNNING
+    assert scheduler.requests["blocked"].status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+
 def test_priority_scheduling_fcfs_fallback():
     """Test that FCFS behavior is maintained when all
     requests have same priority."""

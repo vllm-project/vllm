@@ -679,9 +679,15 @@ class Scheduler(SchedulerInterface):
                     and victim.lora_request.lora_int_id > 0
                 ):
                     lora_id = victim.lora_request.lora_int_id
+                    # Waiting requests admitted earlier in this pass also
+                    # occupy LoRA slots in the batch, not only running ones.
                     if not any(
                         r.lora_request and r.lora_request.lora_int_id == lora_id
-                        for r in scheduled_running_reqs
+                        for r in itertools.chain(
+                            scheduled_running_reqs,
+                            scheduled_new_reqs,
+                            scheduled_resumed_reqs,
+                        )
                     ):
                         scheduled_loras.discard(lora_id)
             self._preempt_request(victim, scheduled_timestamp)
@@ -712,13 +718,16 @@ class Scheduler(SchedulerInterface):
                         top_waiting = candidate_queue.peek_request()
                         # Don't preempt for a request that cannot be
                         # admitted yet (e.g. waiting for grammar/KV
-                        # transfer). Defer to the next schedule() call.
+                        # transfer); skip it so the next candidate can
+                        # still be considered.
                         if self._is_blocked_waiting_status(
                             top_waiting.status
                         ) and not self._try_promote_blocked_waiting_request(
                             top_waiting
                         ):
-                            break
+                            candidate_queue.pop_request()
+                            step_skipped_waiting.prepend_request(top_waiting)
+                            continue
                         # Don't evict a runner for a waiting request that
                         # max_loras would itself reject this step; skip it
                         # so the eviction is not wasted.
