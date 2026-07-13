@@ -1513,7 +1513,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         tokenizer="meta-llama/Llama-4-Scout-17B-16E-Instruct",
     ),
     "EagleMiniCPMForCausalLM": _HfExamplesInfo(
-        "openbmb/MiniCPM-1B-sft-bf16",
+        "openbmb/MiniCPM-2B-sft-bf16",
         trust_remote_code=True,
         speculative_model="openbmb/MiniCPM-2B-sft-bf16",
         speculative_method="eagle",

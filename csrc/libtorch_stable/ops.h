@@ -313,7 +313,7 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
     std::optional<torch::stable::Tensor> index_cache, int64_t block_size,
     std::optional<torch::stable::Tensor> q_out,
     std::optional<torch::stable::Tensor> index_q_out,
-    const std::string& kv_cache_dtype);
+    const std::string& kv_cache_dtype, bool skip_index_branch);
 
 // Sampler kernels (shared CUDA/ROCm)
 void apply_repetition_penalties_(
@@ -413,6 +413,8 @@ void swigluoai_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
 void gelu_new(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_fast(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_quick(torch::stable::Tensor& out, torch::stable::Tensor& input);
+
+void relu_squared(torch::stable::Tensor& out, torch::stable::Tensor& input);
 
 // INT8 quantization kernels (shared CUDA/ROCm)
 void static_scaled_int8_quant(torch::stable::Tensor& out,

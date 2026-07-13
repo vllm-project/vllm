@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Chat-layer multimodal media preparation.
 //!
 //! This module owns the multimodal path for chat requests: it extracts media
