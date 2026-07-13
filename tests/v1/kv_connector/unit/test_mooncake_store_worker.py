@@ -2128,9 +2128,13 @@ def test_topology_forwards_non_default_tenant_id(tmp_path, monkeypatch):
     assert store.setup.call_args.kwargs == {"tenant_id": "tenant-a"}
 
 
-def test_non_default_tenant_requires_new_mooncake(tmp_path, monkeypatch):
+def test_non_default_tenant_preserves_setup_type_error(tmp_path, monkeypatch):
     store = MagicMock()
-    store.setup.side_effect = TypeError("tenant_id is an invalid keyword argument")
+    setup_error = TypeError(
+        "setup(): incompatible function arguments; "
+        "supported signature includes tenant_id"
+    )
+    store.setup.side_effect = setup_error
     _install_fake_mooncake(monkeypatch, store)
     _patch_worker_runtime(monkeypatch)
     monkeypatch.setenv(
@@ -2149,8 +2153,10 @@ def test_non_default_tenant_requires_new_mooncake(tmp_path, monkeypatch):
         ),
     )
 
-    with pytest.raises(RuntimeError, match="tenant_id"):
+    with pytest.raises(TypeError) as exc_info:
         worker.MooncakeStoreWorker(_make_vllm_config(rank=1), _make_kv_cache_config())
+
+    assert exc_info.value is setup_error
 
 
 # ---------------------------------------------------------------------------

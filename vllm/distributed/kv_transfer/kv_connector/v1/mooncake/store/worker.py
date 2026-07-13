@@ -1054,25 +1054,16 @@ class MooncakeStoreWorker:
         setup_kwargs: dict[str, str] = {}
         if store_config.tenant_id != DEFAULT_TENANT_ID:
             setup_kwargs["tenant_id"] = store_config.tenant_id
-        try:
-            ret = self.store.setup(
-                local_hostname,
-                store_config.metadata_server,
-                store_config.global_segment_size,
-                store_config.local_buffer_size,
-                store_config.protocol,
-                store_config.device_name,
-                store_config.master_server_address,
-                **setup_kwargs,
-            )
-        except TypeError as e:
-            if "tenant_id" in setup_kwargs and "tenant_id" in str(e):
-                raise RuntimeError(
-                    "The installed Mooncake version does not support tenant_id "
-                    "in MooncakeDistributedStore.setup(). Please upgrade "
-                    "Mooncake to use non-default Mooncake tenants with vLLM."
-                ) from e
-            raise
+        ret = self.store.setup(
+            local_hostname,
+            store_config.metadata_server,
+            store_config.global_segment_size,
+            store_config.local_buffer_size,
+            store_config.protocol,
+            store_config.device_name,
+            store_config.master_server_address,
+            **setup_kwargs,
+        )
         if ret != 0:
             msg = "Initialize MooncakeDistributedStore failed."
             logger.error(msg)
