@@ -573,6 +573,20 @@ def rocm_fp8_mqa_logits(
     # Remove this branch once vLLM bumps AITER to a version that includes
     # ROCm/aiter#3257.
     if _ON_GFX942 and rocm_aiter_ops.is_enabled():
+        # Opt-in (VLLM_ROCM_MQA_LOGITS_GLUON=1): native-fp8-MFMA Gluon port,
+        # ~5x the vendored generic kernel on MI300X. Falls back to the vendored
+        # kernel when disabled or when shapes exceed the buffer-op 2 GiB cap.
+        from vllm.v1.attention.ops.gluon_fp8_mqa_logits_gfx942 import (
+            fp8_mqa_logits_gfx942_gluon,
+            supported as _gluon_gfx942_supported,
+        )
+
+        seq_len_kv = k_fp8.shape[0]
+        if _gluon_gfx942_supported(q, k_fp8, q.shape[0], seq_len_kv):
+            return fp8_mqa_logits_gfx942_gluon(
+                q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke
+            )
+
         from vllm.v1.attention.ops.triton_fp8_mqa_logits import (
             fp8_mqa_logits_gfx942,
         )
