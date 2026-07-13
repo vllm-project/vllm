@@ -16,7 +16,9 @@ from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 class MockReasoner:
     def __init__(self, tokenizer):
         self.is_reasoning_end = Mock(return_value=False)
+        self.is_reasoning_end_from_prompt = Mock(return_value=False)
         self.is_reasoning_end_streaming = Mock(return_value=False)
+        self.extract_content_ids = Mock(return_value=[])
 
 
 class TestReasoningStructuredOutput:
@@ -62,6 +64,7 @@ class TestReasoningStructuredOutput:
         request = Mock(spec=Request)
         request.structured_output_request = Mock()
         request.structured_output_request.reasoning_ended = None
+        request.structured_output_request.deferred_grammar_start_index = None
         request.structured_output_request.grammar = Mock()
         request.structured_output_request.reasoning_parser_kwargs = None
         request.structured_output_request.reasoner = None
@@ -70,6 +73,7 @@ class TestReasoningStructuredOutput:
         )
         request.use_structured_output = True
         request.prompt_token_ids = [1, 2, 3, 4, 5]
+        request.num_prompt_tokens = len(request.prompt_token_ids)
         request.all_token_ids = [1, 2, 3, 4, 5, 6, 7, 8]
         request.num_computed_tokens = 5
         request.num_output_placeholders = 0
@@ -138,6 +142,9 @@ class TestReasoningStructuredOutput:
 
             def is_reasoning_end(self, input_ids):
                 return not self.chat_template_kwargs.get("enable_thinking", False)
+
+            def is_reasoning_end_from_prompt(self, prompt_token_ids):
+                return self.is_reasoning_end(prompt_token_ids)
 
         manager = StructuredOutputManager(mock_vllm_config)
         manager.reasoner_cls = KwargReasoner
@@ -258,3 +265,39 @@ class TestReasoningStructuredOutput:
 
         # Should return True since reasoning has ended
         assert result is True
+
+    def test_should_advance_replays_speculative_content_after_reasoning(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = None
+        structured_req.structured_output_key = (
+            StructuredOutputOptions.JSON,
+            "{}",
+        )
+        reasoner = MockReasoner(tokenizer=Mock())
+        reasoner.is_reasoning_end_streaming.return_value = True
+        reasoner.extract_content_ids.return_value = [8]
+        structured_req.reasoner = reasoner
+        manager_with_reasoner.vllm_config.speculative_config = Mock()
+
+        assert manager_with_reasoner.should_advance(mock_request_with_structured_output)
+        assert structured_req.reasoning_end_token_index == 6
+        assert manager_with_reasoner.trim_reasoning_for_advance(
+            mock_request_with_structured_output, [6, 7, 8]
+        ) == [8]
+
+    def test_speculative_replay_is_validated_before_accepting(
+        self, manager_with_reasoner
+    ):
+        grammar = Mock()
+        grammar.validate_tokens.return_value = [10]
+
+        accepted = manager_with_reasoner._accept_validated_tokens(
+            grammar, "test-request", [10, 11]
+        )
+
+        assert accepted == 0
+        grammar.accept_tokens.assert_not_called()

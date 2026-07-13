@@ -196,6 +196,20 @@ class StructuredOutputManager:
                 # requests here.
                 self._grammar_bitmask[index].fill_(self._full_mask)
 
+    @staticmethod
+    def _accept_validated_tokens(
+        grammar: StructuredOutputGrammar,
+        request_id: str,
+        token_ids: list[int],
+    ) -> int:
+        if grammar.validate_tokens(token_ids) != token_ids:
+            return 0
+        return len(token_ids) if grammar.accept_tokens(request_id, token_ids) else 0
+
+    @staticmethod
+    def _output_start_index(request: "Request") -> int:
+        return min(request.num_prompt_tokens, len(request.all_token_ids))
+
     def _async_submit_fill_bitmask(
         self, batch: list[tuple[StructuredOutputGrammar, int, bool]]
     ) -> Future:
@@ -280,6 +294,9 @@ class StructuredOutputManager:
                 )
                 simulated_buf: list[int] | None = None
                 history_len = 0
+                reasoning_was_undetermined = (
+                    structured_output_request.reasoning_ended is None
+                )
 
                 state_advancements = 0
                 post_reasoning_end_in_window = False
@@ -296,7 +313,8 @@ class StructuredOutputManager:
                         and not apply_bitmask
                     ):
                         if simulated_buf is None:
-                            history = list(request.all_token_ids)
+                            output_start = self._output_start_index(request)
+                            history = list(request.all_token_ids[output_start:])
                             history_len = len(history)
                             simulated_buf = history + list(req_tokens)
                         simulated = simulated_buf[: history_len + i + 1]
@@ -311,6 +329,16 @@ class StructuredOutputManager:
                             apply_bitmask = True
                             advance_grammar = False
                             post_reasoning_end_in_window = True
+                            if reasoning_was_undetermined:
+                                content_ids = reasoner.extract_content_ids(simulated)
+                                if (
+                                    content_ids == simulated
+                                    and not grammar.is_terminated()
+                                ):
+                                    state_advancements += self._accept_validated_tokens(
+                                        grammar, req_id, content_ids
+                                    )
+                                reasoning_was_undetermined = False
                     if advance_grammar and not grammar.is_terminated():
                         accepted = grammar.accept_tokens(req_id, [token])
                         if accepted:
@@ -363,9 +391,11 @@ class StructuredOutputManager:
                 # After unifying the `openai_gptoss` and non-`openai_gptoss` styles,
                 # it can be removed.
                 request.structured_output_request.reasoning_ended = (
-                    reasoner.is_reasoning_end(request.prompt_token_ids or [])
+                    reasoner.is_reasoning_end_from_prompt(
+                        request.prompt_token_ids or []
+                    )
                 )
-            return request.structured_output_request.reasoning_ended
+            return request.structured_output_request.reasoning_ended is True
         return True
 
     def should_advance(self, request: "Request") -> bool:
@@ -391,24 +421,44 @@ class StructuredOutputManager:
         if structured_req.reasoning_ended:
             return True
 
+        reasoning_was_undetermined = structured_req.reasoning_ended is None
+
         # Check if reasoning ends in *this* step
         delta_from = request.num_computed_tokens - request.num_output_placeholders
         all_token_ids = request.all_token_ids
         start = (
             delta_from if delta_from >= 0 else max(len(all_token_ids) + delta_from, 0)
         )
+        output_start = self._output_start_index(request)
+        output_token_ids = all_token_ids[output_start:]
+        step_start = max(start, output_start)
+        output_delta_start = step_start - output_start
         if reasoner.is_reasoning_end_streaming(
-            all_token_ids, itertools.islice(all_token_ids, start, None)
+            output_token_ids,
+            itertools.islice(output_token_ids, output_delta_start, None),
         ):
             structured_req.reasoning_ended = True
+            output_token_ids = list(output_token_ids)
+            content_ids = reasoner.extract_content_ids(output_token_ids)
 
-            # Reasoning just ended this step. Defer FSM advance until the next
-            # pass (see reasoning_ended check above) for JSON/regex/choice/grammar:
-            # advancing on the closing boundary token can accept tokens that still
-            # belong to the reasoning stream. Structural tags are the only safe
-            # same-step exception: they model phased output (e.g. thinking tag ->
-            # answer tag), and speculative decoding must run grammar.validate_tokens
-            # on draft tokens produced immediately after that transition.
+            if reasoning_was_undetermined:
+                if content_ids == output_token_ids:
+                    structured_req.deferred_grammar_start_index = output_start
+                    return True
+                structured_req.deferred_grammar_start_index = None
+
+            if content_ids and output_token_ids[-len(content_ids) :] == content_ids:
+                structured_req.reasoning_end_token_index = (
+                    len(all_token_ids) - len(content_ids) - 1
+                )
+                return True
+
+            # No post-reasoning content suffix was identified, so defer FSM
+            # advance until the next pass for JSON/regex/choice/grammar. Advancing
+            # on the closing boundary token can accept reasoning-stream tokens.
+            # Structural tags remain a safe same-step exception because they model
+            # tagged output transitions, and speculative decoding must validate
+            # drafts produced immediately after the transition.
             if (
                 self.vllm_config.speculative_config is not None
                 and structured_req.structured_output_key[0]
@@ -419,15 +469,27 @@ class StructuredOutputManager:
                 # content up to and including the end marker. Record where
                 # it ends so trim_reasoning_for_advance() can drop it.
                 structured_req.reasoning_end_token_index = (
-                    self._find_reasoning_end_index(reasoner, all_token_ids, start)
+                    self._find_reasoning_end_index(
+                        reasoner, all_token_ids, output_start, step_start
+                    )
                 )
                 return True
+
+        elif (
+            reasoning_was_undetermined
+            and structured_req.deferred_grammar_start_index is None
+            and start < len(all_token_ids)
+        ):
+            structured_req.deferred_grammar_start_index = output_start
 
         return False
 
     @staticmethod
     def _find_reasoning_end_index(
-        reasoner: "ReasoningParser", all_token_ids: Sequence[int], start: int
+        reasoner: "ReasoningParser",
+        all_token_ids: Sequence[int],
+        output_start: int,
+        start: int,
     ) -> int:
         """Locates the last reasoning token within ``all_token_ids[start:]``.
 
@@ -438,7 +500,7 @@ class StructuredOutputManager:
             a multi-token marker only recognized on the full delta), which
             conservatively treats the whole step as reasoning content.
         """
-        prefix = list(itertools.islice(all_token_ids, start))
+        prefix = list(itertools.islice(all_token_ids, output_start, start))
         for idx in range(start, len(all_token_ids)):
             token = all_token_ids[idx]
             prefix.append(token)
@@ -463,6 +525,10 @@ class StructuredOutputManager:
         structured_req = request.structured_output_request
         if structured_req is None:
             return new_token_ids
+        deferred_start = structured_req.deferred_grammar_start_index
+        if deferred_start is not None:
+            structured_req.deferred_grammar_start_index = None
+            return list(request.all_token_ids[deferred_start:])
         end_idx = structured_req.reasoning_end_token_index
         if end_idx is None:
             return new_token_ids
