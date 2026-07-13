@@ -191,6 +191,7 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/pause` - Pause generation (causes denial of service)
 - `/resume` - Resume generation
 - `/is_paused` - Check if generation is paused
+- `/abort_requests` - Abort in-flight requests (causes loss of in-flight work)
 - `/scale_elastic_ep` - Trigger scaling operations
 - `/is_scaling_elastic_ep` - Check if scaling is in progress
 - `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
