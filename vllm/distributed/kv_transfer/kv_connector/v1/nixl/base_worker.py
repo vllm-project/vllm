@@ -521,8 +521,8 @@ class NixlBaseConnectorWorker:
         # combining both (e.g. GQA main + MLA Eagle-3 draft).
         self._region_is_mla = list[bool]()
 
-        # Enable different block lengths for different layers *only* when MLA is used.
-        # This is not used for SSM layers, which use the counterpart `mamba_ssm_size`.
+        # Per-region block lengths. SSM layers use the counterpart
+        # `mamba_ssm_size` for heterogeneous-TP validation.
         self.block_len_per_layer = list[int]()
 
         # Per-engine TP mappings. Generated during handshake.
@@ -1058,8 +1058,6 @@ class NixlBaseConnectorWorker:
         # (roughly 8KB vs 5KB).
         # Conversely for FlashInfer, K and V are registered in the same region
         # to better exploit the memory layout (ie num_blocks is the first dim).
-        tensor_size_bytes = None
-
         for layer_name, cache_or_caches in xfer_buffers.items():
             # NOTE (NickLucche) Hybrid SSM models assume a layout that is similar to
             # that of FI, with block laid out as in `get_backend_aware_kv_block_len`.
@@ -1131,13 +1129,6 @@ class NixlBaseConnectorWorker:
                 )
                 self._region_is_mla.append(is_mla_region)
 
-                if not is_mla_region:
-                    if tensor_size_bytes is None:
-                        tensor_size_bytes = curr_tensor_size_bytes
-                    assert tensor_size_bytes == curr_tensor_size_bytes, (
-                        "All non-MLA kv cache tensors must have the same size"
-                    )
-
                 if cache.shape[0] != num_blocks:
                     raise AssertionError(
                         "All kv cache tensors must have the same number of "
@@ -1167,6 +1158,19 @@ class NixlBaseConnectorWorker:
             == len(seen_base_addresses)
             == len(self._region_is_mla)
         )
+
+        non_mla_block_lens = {
+            block_len
+            for block_len, is_mla in zip(self.block_len_per_layer, self._region_is_mla)
+            if not is_mla
+        }
+        if len(non_mla_block_lens) > 1:
+            logger.info(
+                "Registered non-MLA KV cache regions with different block "
+                "lengths: %s. This is supported when prefill and decode use "
+                "the same tensor-parallel size.",
+                sorted(non_mla_block_lens),
+            )
 
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(caches_data)
@@ -1510,6 +1514,18 @@ class NixlBaseConnectorWorker:
                 start:end
             ]
             nixl_agent_meta.block_lens = nixl_agent_meta.block_lens[start:end]
+
+        non_mla_block_lens = {
+            block_len
+            for block_len, is_mla in zip(self.block_len_per_layer, self._region_is_mla)
+            if not is_mla
+        }
+        if remote_tp_size != self.world_size and len(non_mla_block_lens) > 1:
+            raise NotImplementedError(
+                "NIXL heterogeneous-TP transfer does not support non-MLA KV "
+                "cache regions with different block lengths. Use matching "
+                "prefill/decode tensor-parallel sizes."
+            )
 
         ### Register remote engine in TransferTopology (idempotent).
         assert self.transfer_topo is not None
