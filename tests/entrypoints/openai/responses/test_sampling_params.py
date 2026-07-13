@@ -14,7 +14,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
     ResponseTextConfig,
 )
-from vllm.sampling_params import StructuredOutputsParams
+from vllm.sampling_params import RepetitionDetectionParams, StructuredOutputsParams
 
 
 class TestResponsesRequestSamplingParams:
@@ -45,6 +45,9 @@ class TestResponsesRequestSamplingParams:
             input="test input",
             repetition_penalty=1.2,
             penalty_decay=0.95,
+            repetition_detection=RepetitionDetectionParams(
+                max_pattern_size=8, min_count=3
+            ),
             seed=42,
             stop=["END", "STOP"],
             ignore_eos=True,
@@ -55,6 +58,7 @@ class TestResponsesRequestSamplingParams:
 
         assert sampling_params.repetition_penalty == 1.2
         assert sampling_params.penalty_decay == 0.95
+        assert sampling_params.repetition_detection.max_pattern_size == 8
         assert sampling_params.seed == 42
         assert sampling_params.stop == ["END", "STOP"]
         assert sampling_params.ignore_eos is True

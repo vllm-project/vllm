@@ -66,6 +66,7 @@ from vllm.logger import init_logger
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.sampling_params import (
     RAPID_PENALTY_DECAY_DEFAULT,
+    RepetitionDetectionParams,
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
@@ -273,6 +274,10 @@ class ResponsesRequest(OpenAIBaseModel):
 
     repetition_penalty: float | None = None
     penalty_decay: float | None = None
+    repetition_detection: RepetitionDetectionParams | None = Field(
+        default=None,
+        description="Parameters for detecting repetitive N-gram patterns in output.",
+    )
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: str | list[str] | None = []
     ignore_eos: bool = False
@@ -445,6 +450,7 @@ class ResponsesRequest(OpenAIBaseModel):
             presence_penalty=presence_penalty,
             repetition_penalty=repetition_penalty,
             penalty_decay=penalty_decay,
+            repetition_detection=self.repetition_detection,
             seed=self.seed,
             ignore_eos=self.ignore_eos,
             stop_token_ids=stop_token_ids,
