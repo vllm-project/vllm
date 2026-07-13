@@ -7,7 +7,9 @@ use crate::error::ApiError;
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::completions::validate;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format_value;
-use crate::utils::{ResolvedRequestContext, convert_logit_bias, merge_kv_transfer_params};
+use crate::utils::{
+    ResolvedRequestContext, convert_logit_bias, merge_ec_transfer_params, merge_kv_transfer_params,
+};
 
 /// Lowered completion request plus the public response metadata carried by
 /// every SSE chunk.
@@ -127,7 +129,7 @@ pub(super) fn prepare_completion_request(
             structured_outputs,
             skip_reading_prefix_cache: None,
             vllm_xargs: merge_kv_transfer_params(
-                request.vllm_xargs,
+                merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),
                 request.kv_transfer_params.as_ref(),
             ),
         },
@@ -144,6 +146,7 @@ pub(super) fn prepare_completion_request(
         data_parallel_rank: ctx.data_parallel_rank,
         reasoning_parser_kwargs: None,
         lora_request: lora_resolution.lora_request.clone(),
+        arrival_time: None,
     };
 
     Ok(PreparedRequest {

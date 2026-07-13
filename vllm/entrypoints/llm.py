@@ -877,6 +877,10 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         """Start a new weight update."""
         self.llm_engine.collective_rpc("start_weight_update")
 
+    def start_draft_weight_update(self) -> None:
+        """Start a new weight update targeting the speculative draft model."""
+        self.llm_engine.collective_rpc("start_draft_weight_update")
+
     def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
         """
         Update the weights of the model.
