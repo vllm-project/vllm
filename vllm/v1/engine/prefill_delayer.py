@@ -49,7 +49,10 @@ class PrefillDelayer:
         # 2-slot MAX-reduce buffer on CPU (gloo-friendly):
         #   slot 0 = local_prefillable      (MAX -> any rank prefillable)
         #   slot 1 = NOT local_prefillable  (MAX -> any rank lacks prefill)
-        self._reduce_buf = torch.zeros(2, dtype=torch.int64, device="cpu")
+        # int32 matches the other DP-group collectives (has_unfinished_dp /
+        # sync_dp_state); a wider dtype here desyncs byte sizes on the shared
+        # gloo group and trips its size check.
+        self._reduce_buf = torch.zeros(2, dtype=torch.int32, device="cpu")
 
         self._delayed_count: int = 0
         self._delay_start_ts: float = 0.0
