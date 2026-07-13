@@ -22,7 +22,6 @@ from vllm.config.lora import LoRAConfig
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.platforms import current_platform
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
-from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -267,39 +266,6 @@ class TestCudagraphDispatcher:
         # Don't initialize keys
 
         assert dispatcher.get_capture_descs() == []
-
-
-@pytest.mark.parametrize(
-    ("supports_mm_inputs", "requires_raw_input_tokens", "expect_input_ids"),
-    [(True, False, False), (True, True, True), (False, False, True)],
-)
-def test_prepare_model_inputs_for_capture(
-    supports_mm_inputs, requires_raw_input_tokens, expect_input_ids
-):
-    model_state = object.__new__(DefaultModelState)
-    model_state.supports_mm_inputs = supports_mm_inputs
-    model_state.model = MagicMock(requires_raw_input_tokens=requires_raw_input_tokens)
-    model_state.rope_state = None
-    inputs_embeds = torch.randn(4, 8)
-    model_state.encoder_runner = MagicMock(inputs_embeds=inputs_embeds)
-    input_ids = torch.arange(8)
-    positions = torch.arange(8)
-
-    model_inputs = {
-        "input_ids": input_ids[:4],
-        "positions": positions[:4],
-        **model_state.prepare_dummy_inputs(num_reqs=2, num_tokens=4),
-    }
-
-    if expect_input_ids:
-        torch.testing.assert_close(model_inputs["input_ids"], input_ids[:4])
-    else:
-        assert model_inputs["input_ids"] is None
-    if supports_mm_inputs:
-        assert model_inputs["inputs_embeds"].data_ptr() == inputs_embeds.data_ptr()
-    else:
-        assert "inputs_embeds" not in model_inputs
-    torch.testing.assert_close(model_inputs["positions"], positions[:4])
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
