@@ -1653,32 +1653,16 @@ class NixlBaseConnectorWorker:
                 self.src_xfer_handles_by_tp_ratio[tp_ratio].append(handle)
 
         ### Register remote agent memory regions
-        # With homogeneous TP, D pulls the whole kv cache from corresponding rank. With
-        # heterogeneous TP, prepare the descriptors by splitting the P KV cache along
-        # kv_head dim, of D worker's kv_head size (D>P).
-        # Eg. PTP1 DTP2 => P0 KV:[block0-KV_0 | block0-KV_1..].
-
-        # Register all remote blocks, but only the corresponding kv heads.
-        blocks_data = self._build_fa_remote(
-            plan,
+        blocks_data = self._build_all_remote_descs(
             nixl_agent_meta,
+            plan,
             block_size_ratio,
-        )
-        logger.debug(
-            "Created %s blocks for dst engine %s with remote rank %s and local rank %s",
-            len(blocks_data),
-            engine_id,
+            tp_ratio,
+            transfer_info,
+            physical_blocks_per_logical,
             remote_tp_rank,
-            self.tp_rank,
+            remote_tp_size,
         )
-        if self._has_mamba:
-            logger.debug(
-                "Registering remote Mamba blocks for engine %s rank %s",
-                engine_id,
-                remote_tp_rank,
-            )
-            mamba = self._build_mamba_remote(nixl_agent_meta, tp_ratio, transfer_info)
-            blocks_data = np.concatenate([blocks_data, mamba])
 
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
@@ -1694,6 +1678,35 @@ class NixlBaseConnectorWorker:
             )
 
         return remote_agent_name
+
+    def _build_all_remote_descs(
+        self,
+        nixl_agent_meta: NixlAgentMetadata,
+        plan: TPMapping,
+        block_size_ratio: int,
+        tp_ratio: int,
+        transfer_info: EngineTransferInfo,
+        physical_blocks_per_logical: int,
+        remote_tp_rank: int,
+        remote_tp_size: int,
+    ) -> np.ndarray:
+        """Build remote descriptors for one remote rank.
+
+        Override in subclass for view-based descriptor building.
+        """
+        blocks_data = self._build_fa_remote(
+            plan,
+            nixl_agent_meta,
+            block_size_ratio,
+        )
+        if self._has_mamba:
+            mamba = self._build_mamba_remote(
+                nixl_agent_meta,
+                tp_ratio,
+                transfer_info,
+            )
+            blocks_data = np.concatenate([blocks_data, mamba])
+        return blocks_data
 
     def _validate_remote_agent_handshake(
         self, nixl_agent_meta: NixlAgentMetadata, remote_tp_size: int

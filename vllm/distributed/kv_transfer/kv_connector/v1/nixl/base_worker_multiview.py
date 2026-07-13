@@ -32,7 +32,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     TPMapping,
-    compute_tp_mapping,
 )
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import (
@@ -489,124 +488,45 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
         return result
 
     # ------------------------------------------------------------------
-    # add_remote_agent override
+    # Remote descriptor building override
     # ------------------------------------------------------------------
 
-    def add_remote_agent(
+    def _build_all_remote_descs(
         self,
         nixl_agent_meta: NixlAgentMetadata,
-        remote_tp_rank: int = 0,
-        remote_tp_size: int = 1,
-    ) -> str:
-        """Add remote NIXL agent using multi-view descriptors."""
+        plan: TPMapping,
+        block_size_ratio: int,
+        tp_ratio: int,
+        transfer_info: EngineTransferInfo,
+        physical_blocks_per_logical: int,
+        remote_tp_rank: int,
+        remote_tp_size: int,
+    ) -> list[tuple[int, int, int]]:
+        """Build remote descriptors using multi-view layout."""
         if self._is_packed_kv:
-            return super().add_remote_agent(
+            return super()._build_all_remote_descs(
                 nixl_agent_meta,
-                remote_tp_rank,
-                remote_tp_size,
-            )
-
-        engine_id = nixl_agent_meta.engine_id
-        if remote_tp_rank in self._remote_agents.get(engine_id, {}):
-            return self._remote_agents[engine_id][remote_tp_rank]
-
-        assert self.transfer_topo is not None
-        transfer_topo = self.transfer_topo
-        physical_blocks_per_logical = (
-            nixl_agent_meta.physical_blocks_per_logical_kv_block
-        )
-        transfer_info = EngineTransferInfo(
-            remote_tp_size=remote_tp_size,
-            remote_block_size=nixl_agent_meta.block_size,
-            remote_block_len=nixl_agent_meta.block_lens[0],
-            remote_physical_blocks_per_logical=physical_blocks_per_logical,
-        )
-        transfer_topo.register_remote_engine(engine_id, transfer_info)
-
-        self.tp_mappings[engine_id] = compute_tp_mapping(
-            transfer_topology=transfer_topo,
-            remote_tp_size=remote_tp_size,
-            group_spec_types=self._group_spec_types,
-        )
-
-        remote_agent_name = self.nixl_wrapper.add_remote_agent(
-            nixl_agent_meta.agent_metadata
-        )
-
-        block_size_ratio = transfer_topo.block_size_ratio(nixl_agent_meta.block_size)
-
-        if engine_id not in self.dst_num_blocks:
-            self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
-
-        self.kv_caches_base_addr[engine_id][remote_tp_rank] = (
-            nixl_agent_meta.kv_caches_base_addr
-        )
-        self._validate_remote_agent_handshake(nixl_agent_meta, remote_tp_size)
-
-        tp_ratio = transfer_topo.tp_ratio(remote_tp_size)
-        plan = self.tp_mappings[engine_id]
-
-        # (Optional) Register local splits for P_TP > D_TP.
-        if (
-            tp_ratio < 0
-            and not self.use_mla
-            and tp_ratio not in self.src_xfer_handles_by_tp_ratio
-        ):
-            self.src_xfer_handles_by_tp_ratio[tp_ratio] = []
-            for handle_data in self._build_local_splits_from_plan(
                 plan,
-                self.src_blocks_data,
-            ):
-                descs = self.nixl_wrapper.get_xfer_descs(
-                    handle_data, self.nixl_memory_type
-                )
-                handle = self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs)
-                self.src_xfer_handles_by_tp_ratio[tp_ratio].append(handle)
-
-        # Register remote agent memory regions using views.
-        blocks_data: list[tuple[int, int, int]] = []
-        for vi, view in enumerate(self._views):
-            view_descs = self._build_view_remote(
-                view,
-                nixl_agent_meta,
-                physical_blocks_per_logical,
-                remote_tp_rank=remote_tp_rank,
-                remote_tp_size=remote_tp_size,
-            )
-            unique_sizes = sorted(set(d[1] for d in view_descs))
-            logger.warning(
-                "[DEBUG REMOTE] view=%d spec=%s regions=%s "
-                "num_descs=%d unique_sizes=%s "
-                "tp_ratio=%d remote_tp=%d/%d",
-                vi,
-                type(view.spec).__name__,
-                view.region_indices,
-                len(view_descs),
-                unique_sizes,
+                block_size_ratio,
                 tp_ratio,
+                transfer_info,
+                physical_blocks_per_logical,
                 remote_tp_rank,
                 remote_tp_size,
             )
-            blocks_data.extend(view_descs)
 
-        logger.warning(
-            "[DEBUG REMOTE TOTAL] total_remote_descs=%d "
-            "total_local_descs=%d (src_blocks_data)",
-            len(blocks_data),
-            len(self.src_blocks_data),
-        )
-
-        descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
-        self.dst_xfer_side_handles[engine_id][remote_tp_rank] = (
-            self.nixl_wrapper.prep_xfer_dlist(remote_agent_name, descs)
-        )
-
-        if block_size_ratio > 1:
-            self.src_xfer_handles_by_block_size[nixl_agent_meta.block_size] = (
-                self.register_local_xfer_handler(nixl_agent_meta.block_size)[0]
+        blocks_data: list[tuple[int, int, int]] = []
+        for view in self._views:
+            blocks_data.extend(
+                self._build_view_remote(
+                    view,
+                    nixl_agent_meta,
+                    physical_blocks_per_logical,
+                    remote_tp_rank=remote_tp_rank,
+                    remote_tp_size=remote_tp_size,
+                )
             )
-
-        return remote_agent_name
+        return blocks_data
 
     # ------------------------------------------------------------------
     # _build_local_splits_from_plan override
@@ -618,7 +538,12 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
         src_blocks_data: list[tuple[int, int, int]],
         num_fa_descs: int | None = None,
     ) -> Iterator[list[tuple[int, int, int]]]:
-        """Build split handle data for P_TP > D_TP using view layout."""
+        """Build split handle data for P_TP > D_TP using view layout.
+
+        Unlike the base class which uses a flat num_fa_descs boundary,
+        this iterates per-view to determine split counts and slot
+        mappings, making it independent of view ordering.
+        """
         if self._is_packed_kv:
             yield from super()._build_local_splits_from_plan(
                 plan,
@@ -626,27 +551,46 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
                 num_fa_descs if num_fa_descs is not None else 0,
             )
             return
-        if num_fa_descs is None:
-            num_fa_descs = sum(
-                view.num_descs()
-                for view in self._views
-                if isinstance(view.spec, AttentionSpec)
+
+        # Per-view: (start, end, num_splits, rank_to_slot).
+        view_info: list[tuple[int, int, int, dict[int, int]]] = []
+        position = 0
+        for view_idx, view in enumerate(self._views):
+            representative_group = next(
+                group_idx
+                for group_idx, mapped in self._group_to_view_idx.items()
+                if mapped == view_idx
             )
-        logger.warning(
-            "[DEBUG SPLIT] num_fa_descs=%d total_src=%d fa_sizes=%s ssm_sizes=%s",
-            num_fa_descs,
-            len(src_blocks_data),
-            sorted(set(d[1] for d in src_blocks_data[:num_fa_descs]))[:10],
-            sorted(set(d[1] for d in src_blocks_data[num_fa_descs:]))[:10],
-        )
-        for split_idx, handle_data in enumerate(
-            super()._build_local_splits_from_plan(plan, src_blocks_data, num_fa_descs)
-        ):
-            split_unique = sorted(set(d[1] for d in handle_data))
-            logger.warning(
-                "[DEBUG SPLIT %d] descs=%d unique_sizes=%s",
-                split_idx,
-                len(handle_data),
-                split_unique[:10],
+            if isinstance(view.spec, MambaSpec):
+                rank_to_slot = {r: idx for idx, r in enumerate(plan.all_source_ranks)}
+                num_splits = len(plan.source_ranks_per_group[representative_group])
+            else:
+                rank_to_slot = {
+                    r: plan.rank_to_attention_slot.get(r, 0)
+                    for r in plan.all_source_ranks
+                }
+                num_splits = len(
+                    set(
+                        plan.rank_to_attention_slot[r]
+                        for r in plan.source_ranks_per_group[representative_group]
+                    )
+                )
+            view_info.append(
+                (
+                    position,
+                    position + view.num_descs(),
+                    num_splits,
+                    rank_to_slot,
+                )
             )
-            yield handle_data
+            position += view.num_descs()
+
+        for _source_idx, source_rank in enumerate(plan.all_source_ranks):
+            handle: list[tuple[int, int, int]] = []
+            for start, end, num_splits, rank_to_slot in view_info:
+                slot = rank_to_slot[source_rank]
+                for j in range(start, end):
+                    addr, local_len, dev = src_blocks_data[j]
+                    chunk = local_len // num_splits
+                    handle.append((addr + slot * chunk, chunk, dev))
+            yield handle
