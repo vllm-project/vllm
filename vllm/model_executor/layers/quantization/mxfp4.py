@@ -706,7 +706,33 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 layer=layer,
             )
 
+    @property
+    def supports_expert_lru_cache(self) -> bool:
+        """True when the MXFP4 kernel is modular and accepts remapped IDs."""
+        return not self.is_monolithic
+
     def process_weights_after_loading(self, layer):
+        # When expert LRU cache is requested, prefer modular kernel classes
+        # that accept externally-provided topk_ids. Monolithic kernels
+        # perform internal routing and are incompatible with ID remapping.
+        cache_size = getattr(layer, "_moe_expert_cache_size", 0)
+        if cache_size > 0 and self.is_monolithic:
+            logger.info(
+                "MXFP4 expert cache: re-selecting backend with "
+                "prefer_modular=True (kernel was monolithic)."
+            )
+            self.mxfp4_backend, self.experts_cls = \
+                select_deepseek_v4_mxfp4_moe_backend(
+                    self.moe, prefer_modular=True)
+            if self.is_monolithic:
+                raise ValueError(
+                    f"--moe-expert-cache-size={cache_size} requires a modular "
+                    f"MXFP4 MoE kernel, but backend {self.mxfp4_backend!r} "
+                    f"only provides monolithic kernels. Fallback not "
+                    f"available. Use a different MoE backend or reduce "
+                    f"--moe-expert-cache-size."
+                )
+
         w13 = layer.w13_weight
         w2 = layer.w2_weight
         w13_scale = layer.w13_weight_scale
@@ -718,6 +744,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             return
 
         self._setup_kernel(layer, w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
+
+        # Initialize expert LRU cache when requested and compatible.
+        if self.supports_expert_lru_cache:
+            layer._maybe_init_expert_lru_cache()
 
     def get_fused_moe_quant_config(
         self,
