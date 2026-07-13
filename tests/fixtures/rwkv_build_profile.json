@@ -1,0 +1,22 @@
+{
+  "profile": "rwkv",
+  "configured_targets": ["_rapid_sampling", "rwkv7_ops"],
+  "external_projects": [],
+  "unrestricted": false,
+  "supported_architectures": ["RWKV7ForCausalLM"],
+  "supported_weight_suffixes": [".pth"],
+  "supported_device_types": ["cuda"],
+  "supported_runner_types": ["generate"],
+  "supported_serving_features": [
+    "text_generation",
+    "openai_chat",
+    "openai_completions",
+    "streaming",
+    "stop",
+    "prometheus_metrics",
+    "rapid_sampling"
+  ],
+  "supported_tensor_parallel_sizes": [1],
+  "supported_pipeline_parallel_sizes": [1],
+  "supported_data_parallel_sizes": [1]
+}

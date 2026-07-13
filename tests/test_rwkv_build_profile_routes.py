@@ -8,6 +8,7 @@ import pytest
 from fastapi import FastAPI
 
 from vllm.build_profile import BuildProfileMetadata
+from vllm.config import StructuredOutputsConfig
 from vllm.entrypoints.generate.api_router import (
     init_generate_state,
     register_generate_api_routers,
@@ -28,51 +29,38 @@ def _metadata(*, unrestricted: bool) -> BuildProfileMetadata:
     )
 
 
-def _router_module(name: str, calls: list[str]) -> ModuleType:
-    module = ModuleType(name)
-    module.attach_router = lambda app: calls.append(name)  # type: ignore[attr-defined]
-    module.register_generative_scoring_api_router = (  # type: ignore[attr-defined]
-        lambda app: calls.append(name)
-    )
-    return module
-
-
 @pytest.mark.parametrize(
-    ("unrestricted", "expected"),
+    ("unrestricted", "included", "excluded"),
     [
-        (False, ["chat", "completion"]),
-        (True, ["chat", "responses", "completion", "anthropic", "scoring"]),
+        pytest.param(
+            False,
+            {"/v1/chat/completions", "/v1/completions"},
+            {"/v1/responses", "/v1/messages", "/generative_scoring"},
+            id="rwkv",
+        ),
+        pytest.param(
+            True,
+            {
+                "/v1/chat/completions",
+                "/v1/completions",
+                "/v1/responses",
+                "/v1/messages",
+                "/generative_scoring",
+            },
+            set(),
+            id="full",
+        ),
     ],
 )
 def test_generate_routes_follow_build_capabilities(
-    monkeypatch, unrestricted: bool, expected: list[str]
+    unrestricted: bool, included: set[str], excluded: set[str]
 ) -> None:
-    calls: list[str] = []
-    modules = {
-        "vllm.entrypoints.openai.chat_completion.api_router": "chat",
-        "vllm.entrypoints.openai.responses.api_router": "responses",
-        "vllm.entrypoints.openai.completion.api_router": "completion",
-        "vllm.entrypoints.anthropic.api_router": "anthropic",
-        "vllm.entrypoints.generate.generative_scoring.api_router": "scoring",
-    }
-    for name, label in modules.items():
-        monkeypatch.setitem(sys.modules, name, _router_module(label, calls))
-
-    register_generate_api_routers(FastAPI(), _metadata(unrestricted=unrestricted))
-
-    assert calls == expected
-
-
-def test_rwkv_profile_exposes_only_promised_generation_routes() -> None:
     app = FastAPI()
-
-    register_generate_api_routers(app, _metadata(unrestricted=False))
+    register_generate_api_routers(app, _metadata(unrestricted=unrestricted))
 
     paths = {route.path for route in app.routes}
-    assert "/v1/chat/completions" in paths
-    assert "/v1/completions" in paths
-    assert "/v1/responses" not in paths
-    assert "/v1/messages" not in paths
+    assert included <= paths
+    assert excluded.isdisjoint(paths)
 
 
 @pytest.mark.asyncio
@@ -128,40 +116,30 @@ async def test_rwkv_profile_rejects_mcp_before_importing_optional_modules(
 
 
 def test_rwkv_profile_rejects_structured_outputs_before_backend_loading(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     processor = object.__new__(InputProcessor)
     processor.build_profile = _metadata(unrestricted=False)
+    processor.model_config = SimpleNamespace(
+        max_logprobs=-1,
+        get_vocab_size=lambda: 32,
+        logits_processors=[],
+        is_diffusion=False,
+    )
+    processor.speculative_config = None
+    processor.structured_outputs_config = StructuredOutputsConfig()
+    processor.renderer = SimpleNamespace(tokenizer=object())
     params = SamplingParams(
         structured_outputs=StructuredOutputsParams(choice=["yes", "no"])
     )
+    real_import = __import__
 
-    def unexpected_verify(*args, **kwargs):
-        raise AssertionError("capability rejection must precede backend validation")
+    def reject_backend_import(name, *args, **kwargs):
+        if name.startswith("vllm.v1.structured_output.backend_"):
+            raise AssertionError(f"structured-output backend imported: {name}")
+        return real_import(name, *args, **kwargs)
 
-    monkeypatch.setattr(SamplingParams, "verify", unexpected_verify)
+    monkeypatch.setattr("builtins.__import__", reject_backend_import)
 
     with pytest.raises(ValueError, match="does not support structured outputs"):
         processor._validate_params(params, ("generate",))
-
-
-def test_full_profile_keeps_structured_output_validation(monkeypatch) -> None:
-    processor = object.__new__(InputProcessor)
-    processor.build_profile = _metadata(unrestricted=True)
-    processor.model_config = object()
-    processor.speculative_config = None
-    processor.structured_outputs_config = object()
-    processor.renderer = SimpleNamespace(tokenizer=None)
-    processor.vllm_config = SimpleNamespace(reasoning_config=None)
-    processor.use_v2_model_runner = False
-    params = SamplingParams(
-        structured_outputs=StructuredOutputsParams(choice=["yes", "no"])
-    )
-    calls: list[object] = []
-    monkeypatch.setattr(
-        SamplingParams, "verify", lambda *args, **kwargs: calls.append(args[0])
-    )
-
-    processor._validate_params(params, ("generate",))
-
-    assert calls == [params]

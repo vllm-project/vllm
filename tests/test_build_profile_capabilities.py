@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -70,29 +69,28 @@ def make_config(
     )
 
 
-def rwkv_metadata() -> BuildProfileMetadata:
-    return BuildProfileMetadata(
-        profile="rwkv",
-        configured_targets=("_rapid_sampling", "rwkv7_ops"),
-        external_projects=(),
-        unrestricted=False,
-        supported_architectures=("RWKV7ForCausalLM",),
-        supported_weight_suffixes=(".pth",),
-        supported_device_types=("cuda",),
-        supported_runner_types=("generate",),
-        supported_serving_features=(
-            "text_generation",
-            "openai_chat",
-            "openai_completions",
-            "streaming",
-            "stop",
-            "prometheus_metrics",
-            "rapid_sampling",
-        ),
-        supported_tensor_parallel_sizes=(1,),
-        supported_pipeline_parallel_sizes=(1,),
-        supported_data_parallel_sizes=(1,),
-    )
+RWKV_METADATA = BuildProfileMetadata(
+    profile="rwkv",
+    configured_targets=("_rapid_sampling", "rwkv7_ops"),
+    external_projects=(),
+    unrestricted=False,
+    supported_architectures=("RWKV7ForCausalLM",),
+    supported_weight_suffixes=(".pth",),
+    supported_device_types=("cuda",),
+    supported_runner_types=("generate",),
+    supported_serving_features=(
+        "text_generation",
+        "openai_chat",
+        "openai_completions",
+        "streaming",
+        "stop",
+        "prometheus_metrics",
+        "rapid_sampling",
+    ),
+    supported_tensor_parallel_sizes=(1,),
+    supported_pipeline_parallel_sizes=(1,),
+    supported_data_parallel_sizes=(1,),
+)
 
 
 def test_missing_metadata_defaults_to_full(tmp_path: Path) -> None:
@@ -101,40 +99,14 @@ def test_missing_metadata_defaults_to_full(tmp_path: Path) -> None:
     assert metadata.profile == "full"
 
 
-def test_loads_immutable_metadata(tmp_path: Path) -> None:
-    path = tmp_path / "profile.json"
-    path.write_text(
-        json.dumps(
-            {
-                "profile": "rwkv",
-                "configured_targets": ["_rapid_sampling", "rwkv7_ops"],
-                "external_projects": [],
-                "unrestricted": False,
-                "supported_architectures": ["RWKV7ForCausalLM"],
-                "supported_weight_suffixes": [".pth"],
-                "supported_device_types": ["cuda"],
-                "supported_runner_types": ["generate"],
-                "supported_serving_features": [
-                    "text_generation",
-                    "openai_chat",
-                    "openai_completions",
-                    "streaming",
-                    "stop",
-                    "prometheus_metrics",
-                    "rapid_sampling",
-                ],
-                "supported_tensor_parallel_sizes": [1],
-                "supported_pipeline_parallel_sizes": [1],
-                "supported_data_parallel_sizes": [1],
-            }
-        )
-    )
+def test_rwkv_manifest_fixture_matches_runtime_contract() -> None:
+    path = Path(__file__).with_name("fixtures") / "rwkv_build_profile.json"
 
-    assert load_build_profile_metadata(path) == rwkv_metadata()
+    assert load_build_profile_metadata(path) == RWKV_METADATA
 
 
 def test_rwkv_profile_accepts_declared_configuration() -> None:
-    validate_build_profile_capabilities(make_config(), rwkv_metadata())
+    validate_build_profile_capabilities(make_config(), RWKV_METADATA)
 
 
 @pytest.mark.parametrize(
@@ -166,7 +138,7 @@ def test_rwkv_profile_rejects_unsupported_configuration(
     overrides: dict[str, Any], reason: str
 ) -> None:
     with pytest.raises(ValueError, match=rf"RWKV build profile.*{reason}.*full build"):
-        validate_build_profile_capabilities(make_config(**overrides), rwkv_metadata())
+        validate_build_profile_capabilities(make_config(**overrides), RWKV_METADATA)
 
 
 def test_full_profile_adds_no_rejection() -> None:
@@ -192,25 +164,19 @@ def test_full_profile_adds_no_rejection() -> None:
     )
 
 
-def test_vllm_config_validates_profile_before_model_specific_verification(
+def test_vllm_config_reports_profile_error_before_model_verification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = object.__new__(VllmConfig)
-    config.performance_mode = "balanced"
-
-    def reject_profile(_config: VllmConfig) -> None:
-        raise ValueError("profile rejected")
-
+    config = VllmConfig()
+    config.model_config = make_config(architecture="LlamaForCausalLM").model_config
     monkeypatch.setattr(
-        "vllm.build_profile.validate_build_profile_capabilities", reject_profile
+        "vllm.build_profile.get_build_profile_metadata", lambda: RWKV_METADATA
     )
     monkeypatch.setattr(
         VllmConfig,
         "try_verify_and_update_config",
-        lambda _config: pytest.fail(
-            "model verification ran before profile validation"
-        ),
+        lambda _config: pytest.fail("model-specific verification ran first"),
     )
 
-    with pytest.raises(ValueError, match="profile rejected"):
+    with pytest.raises(ValueError, match="requires architecture RWKV7ForCausalLM"):
         config.__post_init__()
