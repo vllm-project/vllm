@@ -31,15 +31,15 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
+from vllm.entrypoints.generate.base.serving import (
+    GenerateBaseServing,
+    GenerationError,
+)
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
     RequestResponseMetadata,
-)
-from vllm.entrypoints.openai.engine.serving import (
-    GenerationError,
-    OpenAIServing,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
@@ -147,7 +147,7 @@ def _extract_allowed_tools_from_mcp_requests(
     return allowed_tools_map
 
 
-class OpenAIServingResponses(OpenAIServing):
+class OpenAIServingResponses(GenerateBaseServing):
     def __init__(
         self,
         engine_client: EngineClient,
@@ -932,6 +932,7 @@ class OpenAIServingResponses(OpenAIServing):
             status=status,
             usage=usage,
             kv_transfer_params=context.kv_transfer_params,
+            ec_transfer_params=context.ec_transfer_params,
         )
 
         if request.store:
@@ -1068,11 +1069,15 @@ class OpenAIServingResponses(OpenAIServing):
                 enable_auto_tools=self.enable_auto_tools,
                 model_output_token_ids=final_output.token_ids,
             )
+            if not request.include_reasoning:
+                reasoning = None
+                logprobs = None
             return build_response_output_items(
                 reasoning=reasoning,
                 content=content,
                 tool_calls=tool_calls,
                 logprobs=logprobs,
+                tools=request.tools,
             )
 
         # Fallback when no parser is configured
@@ -1339,12 +1344,16 @@ class OpenAIServingResponses(OpenAIServing):
             [StreamingResponsesResponse], StreamingResponsesResponse
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
-        processor = SimpleStreamingEventProcessor()
+        processor = SimpleStreamingEventProcessor(tools=request.tools)
+
+        hide_stream_metadata = not request.include_reasoning and self.parser is not None
 
         def _get_logprobs(
             output: CompletionOutput,
         ) -> list[response_text_delta_event.Logprob]:
             if not request.is_include_output_logprobs():
+                return []
+            if hide_stream_metadata:
                 return []
             return self._create_stream_response_logprobs(
                 token_ids=output.token_ids,

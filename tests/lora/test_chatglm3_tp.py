@@ -115,6 +115,7 @@ def test_chatglm3_lora_tp4_fully_sharded_loras(chatglm3_lora_files):
         enable_lora=True,
         max_loras=2,
         max_lora_rank=64,
+        max_num_seqs=16,
         tensor_parallel_size=4,
         trust_remote_code=True,
         fully_sharded_loras=True,

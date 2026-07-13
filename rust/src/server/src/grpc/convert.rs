@@ -3,7 +3,8 @@
 
 use tonic::Status;
 use uuid::Uuid;
-use vllm_engine_core_client::protocol::{StopReason, StructuredOutputsParams};
+use vllm_engine_core_client::protocol::output::StopReason;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
     DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, SamplingParams,
     TextDecodeOptions, TextRequest,
@@ -68,6 +69,11 @@ pub fn to_text_request(
             let map = sampling_params.vllm_xargs.get_or_insert_with(Default::default);
             map.insert("kv_transfer_params".to_string(), kv_json);
         }
+        if let Some(ec_struct) = kv.ec_transfer_params.as_ref() {
+            let ec_json = proto_struct_to_json(ec_struct);
+            let map = sampling_params.vllm_xargs.get_or_insert_with(Default::default);
+            map.insert("ec_transfer_params".to_string(), ec_json);
+        }
         if kv.bypass_prefix_cache {
             sampling_params.skip_reading_prefix_cache = Some(true);
         }
@@ -93,6 +99,7 @@ pub fn to_text_request(
         data_parallel_rank: None,
         reasoning_parser_kwargs: None,
         lora_request: None,
+        arrival_time: None,
     })
 }
 
@@ -230,32 +237,18 @@ fn convert_structured_output(
         StructuredOutput::Json(schema) => {
             let json: serde_json::Value = serde_json::from_str(schema)
                 .map_err(|e| Status::invalid_argument(format!("invalid json schema: {e}")))?;
-            StructuredOutputsParams {
-                json: Some(json),
-                ..Default::default()
-            }
+            StructuredOutputsParams::json(json)
         }
-        StructuredOutput::Regex(regex) => StructuredOutputsParams {
-            regex: Some(regex.clone()),
-            ..Default::default()
-        },
-        StructuredOutput::Choice(choices) => StructuredOutputsParams {
-            choice: Some(choices.choices.clone()),
-            ..Default::default()
-        },
-        StructuredOutput::Grammar(grammar) => StructuredOutputsParams {
-            grammar: Some(grammar.clone()),
-            ..Default::default()
-        },
-        StructuredOutput::JsonObject(true) => StructuredOutputsParams {
-            json_object: Some(true),
-            ..Default::default()
-        },
+        StructuredOutput::Regex(regex) => StructuredOutputsParams::regex(regex.clone()),
+        StructuredOutput::Choice(choices) => {
+            StructuredOutputsParams::choice(choices.choices.clone())
+        }
+        StructuredOutput::Grammar(grammar) => StructuredOutputsParams::grammar(grammar.clone()),
+        StructuredOutput::JsonObject(true) => StructuredOutputsParams::json_object(),
         StructuredOutput::JsonObject(false) => return Ok(None),
-        StructuredOutput::StructuralTag(tag) => StructuredOutputsParams {
-            structural_tag: Some(tag.clone()),
-            ..Default::default()
-        },
+        StructuredOutput::StructuralTag(tag) => {
+            StructuredOutputsParams::structural_tag(tag.clone())
+        }
     };
     Ok(Some(params))
 }
@@ -345,7 +338,7 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> pb::FinishInfo {
             (PbFinishReason::Stop as i32, sr)
         }
         FinishReason::Length => (PbFinishReason::Length as i32, None),
-        FinishReason::Abort | FinishReason::Error | FinishReason::Repetition => {
+        FinishReason::Abort | FinishReason::Error | FinishReason::Repetition(_) => {
             (PbFinishReason::Aborted as i32, None)
         }
     };
@@ -355,6 +348,7 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> pb::FinishInfo {
         finish_reason,
         stop_reason,
         kv_transfer_params: finished.kv_transfer_params.as_ref().and_then(json_to_proto_struct),
+        ec_transfer_params: finished.ec_transfer_params.as_ref().and_then(json_to_proto_struct),
     }
 }
 
@@ -502,7 +496,7 @@ impl ResponseOpts {
 
 #[cfg(test)]
 mod tests {
-    use vllm_engine_core_client::protocol::StopReason;
+    use vllm_engine_core_client::protocol::output::StopReason;
     use vllm_text::{FinishReason, Finished, Prompt};
 
     use super::pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
@@ -598,6 +592,7 @@ mod tests {
             },
             finish_reason: reason,
             kv_transfer_params: None,
+            ec_transfer_params: None,
         }
     }
 
