@@ -1224,12 +1224,6 @@ def test_ipc_receive_weights_missing_gpu_uuid_raises():
         engine.receive_weights(update_info)
 
 
-# --- Unit Tests: trainer-side abstractions (no GPU) ---
-#
-# The concrete NCCL/IPC trainer engines (and their end-to-end transfer tests)
-# land in the per-backend migration PRs. This PR ships the abstractions only, so
-# these tests exercise the base class, the `WeightSource`/`ModuleSource`
-# contract, the built-in clients, and the trainer factory mechanics.
 
 
 class RecordingClient:
