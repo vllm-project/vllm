@@ -833,33 +833,38 @@ class RocmPlatform(Platform):
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 
-        cls._verify_aiter_fused_shared_experts(parallel_config)
+        cls._maybe_disable_aiter_fused_shared_experts(parallel_config)
 
     @classmethod
-    def _verify_aiter_fused_shared_experts(
+    def _maybe_disable_aiter_fused_shared_experts(
         cls, parallel_config: "ParallelConfig"
     ) -> None:
-        """Reject AITER fused shared-experts + incompatible features.
+        """Auto-disable AITER fused shared-experts on incompatible configs.
 
         The fused shared-expert slot changes the per-rank routed-expert count,
-        which breaks EPLB bookkeeping and dual batch overlap (DBO).
+        which breaks EPLB bookkeeping and dual batch overlap (DBO). When either
+        is enabled, disable fusion (with a warning) instead of erroring out.
         """
         from vllm._aiter_ops import rocm_aiter_ops
 
         if not rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
             return
 
+        conflicts = []
         if parallel_config.enable_eplb:
-            raise ValueError(
-                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is incompatible with "
-                "EPLB. Disable one of them."
-            )
-
+            conflicts.append("EPLB")
         if parallel_config.use_ubatching:
-            raise ValueError(
-                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is incompatible with "
-                "dual batch overlap (DBO). Disable one of them."
-            )
+            conflicts.append("dual batch overlap (DBO)")
+        if not conflicts:
+            return
+
+        os.environ["VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS"] = "0"
+        rocm_aiter_ops.refresh_env_variables()
+        logger.warning_once(
+            "Disabling VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS because it is "
+            "incompatible with %s; shared experts will run unfused.",
+            " and ".join(conflicts),
+        )
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
