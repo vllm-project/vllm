@@ -1057,6 +1057,7 @@ class OpenAIServingChat(GenerateBaseServing):
             ),
             prompt_text=prompt_text,
             kv_transfer_params=final_res.kv_transfer_params,
+            ec_transfer_params=final_res.ec_transfer_params,
             metrics=per_request_metrics,
         )
 
