@@ -498,10 +498,15 @@ class FusedMoE(PluggableLayer):
                 f"parameters but they are missing on layer {self.layer_name}."
             )
         if self.moe_config.has_bias:
-            raise ValueError(
-                "Expert LRU cache does not support MoE layers with bias "
-                "terms (fused_experts() receives w1/w2 only, not bias). "
-                f"Layer: {self.layer_name}."
+            logger.warning(
+                "Expert LRU cache layer %s: bias terms detected (%s bytes). "
+                "Biases stay on GPU outside the cache.",
+                self.layer_name,
+                sum(
+                    getattr(self, n, torch.empty(0)).numel()
+                    * getattr(self, n, torch.empty(0)).element_size()
+                    for n in ("w13_bias", "w2_bias")
+                ),
             )
         from vllm.model_executor.layers.fused_moe.expert_weight_provider import (
             CachedWeightProvider,
