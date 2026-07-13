@@ -1843,6 +1843,7 @@ class SpecDecodeBaseProposer:
             from vllm.models.deepseek_v4.common.ops.fused_mtp_input_rmsnorm import (
                 mtp_shared_head_rmsnorm,
             )
+
             dummy_hidden = torch.zeros(
                 (1, self.hidden_size), dtype=self.dtype, device=self.device
             )
@@ -1852,6 +1853,87 @@ class SpecDecodeBaseProposer:
             # eps is a runtime float (not constexpr); any value matches
             # the production specialization key.
             mtp_shared_head_rmsnorm(dummy_hidden, dummy_weight, 1e-6)
+
+        # ---- exhaustive specialization coverage ----
+        # Triton specializes integer args whose runtime value is 1 into
+        # compile-time constants, producing a separate cubin per "which
+        # params are 1" combination. The single-shape warmup above only
+        # covers the production shape; the first request with a different
+        # combination (e.g. ``num_reqs=1`` vs ``num_reqs>1``, or
+        # ``num_sampled=1`` when ``draft_tokens=0``) would still JIT.
+        # Enumerate all (1, non-1) combinations for the three integer
+        # params × all relevant BLOCK_SIZE_TOKENS values so every cache
+        # entry is pre-compiled.
+        import itertools
+
+        num_sampled = num_sampled_per_req
+        # Cover BLOCK_SIZE_TOKENS from 1 up to the power-of-2 needed by
+        # the configured num_speculative_tokens, so smaller draft-token
+        # configs (including draft_tokens=0 → num_sampled=1 → BLOCK=1)
+        # are also covered.
+        max_block = 1
+        while max_block < num_sampled:
+            max_block *= 2
+        block_sizes = [1]
+        b = 2
+        while b <= max_block:
+            block_sizes.append(b)
+            b *= 2
+
+        # Each int param: (value when ==1, value when !=1).  Triton only
+        # differentiates "is 1" vs "is not 1"; the specific non-1 value
+        # does not affect the cache key.  ``vocab_size`` is never 1 in
+        # practice (model constant ≥ thousands), so it is never
+        # specialized and omitted from the enumeration.
+        int_choices = [
+            (1, num_sampled),  # num_sampled_tokens_per_req
+            (1, 2),  # num_reqs (1 vs multi-request)
+            (1, num_sampled),  # stride_sampled_token_ids
+        ]
+        for bs in block_sizes:
+            for v_sampled, v_reqs, v_stride in itertools.product(*int_choices):
+                sampled = torch.zeros(
+                    (v_reqs, max(v_stride, v_sampled)),
+                    dtype=torch.int32,
+                    device=device,
+                )
+                discard = torch.zeros(v_reqs, dtype=torch.bool, device=device)
+                backup = torch.zeros(v_reqs, dtype=torch.int32, device=device)
+                next_tok = torch.empty(v_reqs, dtype=torch.int32, device=device)
+                vcount = torch.empty(v_reqs, dtype=torch.int32, device=device)
+                eagle_prepare_next_token_padded_kernel[(v_reqs,)](
+                    sampled,
+                    discard,
+                    backup,
+                    next_tok,
+                    vcount,
+                    128,
+                    v_sampled,
+                    v_reqs,
+                    v_stride,
+                    BLOCK_SIZE_TOKENS=bs,
+                )
+
+        # eagle_prepare_inputs_padded_kernel: only ``num_reqs`` can be
+        # specialized.  Two calls cover both cases.
+        for v_reqs in (1, 2):
+            cu_num_draft = torch.full((v_reqs,), 4, dtype=torch.int32, device=device)
+            valid_count = torch.full((v_reqs,), 2, dtype=torch.int32, device=device)
+            qsl = torch.zeros(v_reqs + 1, dtype=torch.int32, device=device)
+            for i in range(v_reqs):
+                qsl[i + 1] = qsl[i] + 4
+            token_indices = torch.empty(v_reqs, dtype=torch.int32, device=device)
+            num_rejected = torch.empty(v_reqs, dtype=torch.int32, device=device)
+            eagle_prepare_inputs_padded_kernel[(v_reqs,)](
+                cu_num_draft,
+                valid_count,
+                qsl,
+                token_indices,
+                num_rejected,
+                v_reqs,
+            )
+
+        torch.accelerator.synchronize()
 
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
         """
