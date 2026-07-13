@@ -3,6 +3,7 @@
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import torch
@@ -26,23 +27,12 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     get_conv_copy_spec,
     get_temporal_copy_spec,
 )
-from vllm.model_executor.layers.fla.ops import (
-    fused_mul_recurrent_rwkv7,
-    fused_mul_recurrent_rwkv7_with_checkpoints,
-    rwkv7_recurrent_reference,
-    rwkv7_recurrent_reference_with_checkpoints,
-)
 from vllm.model_executor.models.config import MambaModelConfig, MODELS_CONFIG_MAP
 from vllm.model_executor.models.rwkv7 import (
     RWKV7Block,
     RWKV7ForCausalLM,
-    _rwkv7_cache_all_block_index_bounds,
-    _rwkv7_cache_all_block_indices,
-    _rwkv7_cache_all_boundary_positions,
-    _rwkv7_plan_cache_all_prefill,
 )
 from vllm.transformers_utils.configs.rwkv7 import RWKV7Config
-from vllm.utils.network_utils import get_open_port
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
 try:
@@ -109,121 +99,6 @@ def _make_decode_metadata(
     )
 
 
-def test_rwkv7_cache_all_block_index_helpers():
-    block_size = 8
-
-    assert _rwkv7_cache_all_block_index_bounds(0, 17, block_size) == (0, 0, 2)
-    assert _rwkv7_cache_all_block_index_bounds(8, 9, block_size) == (0, 1, 1)
-    assert _rwkv7_cache_all_block_index_bounds(9, 17, block_size) == (1, 1, 2)
-
-    block_idx_last_computed, block_idx_first_scheduled, block_idx_last_scheduled = (
-        _rwkv7_cache_all_block_indices(
-            torch.tensor([0, 8, 9], dtype=torch.int32),
-            torch.tensor([17, 9, 17], dtype=torch.int32),
-            block_size,
-        )
-    )
-    torch.testing.assert_close(
-        block_idx_last_computed,
-        torch.tensor([0, 0, 1], dtype=torch.int32),
-    )
-    torch.testing.assert_close(
-        block_idx_first_scheduled,
-        torch.tensor([0, 1, 1], dtype=torch.int32),
-    )
-    torch.testing.assert_close(
-        block_idx_last_scheduled,
-        torch.tensor([2, 1, 2], dtype=torch.int32),
-    )
-
-    torch.testing.assert_close(
-        _rwkv7_cache_all_boundary_positions(
-            num_computed_tokens=0,
-            total_seq_len=17,
-            block_size=block_size,
-            query_len=17,
-            device=torch.device("cpu"),
-        ),
-        torch.tensor([7, 15], dtype=torch.long),
-    )
-    torch.testing.assert_close(
-        _rwkv7_cache_all_boundary_positions(
-            num_computed_tokens=9,
-            total_seq_len=17,
-            block_size=block_size,
-            query_len=8,
-            device=torch.device("cpu"),
-        ),
-        torch.tensor([6], dtype=torch.long),
-    )
-    torch.testing.assert_close(
-        _rwkv7_cache_all_boundary_positions(
-            num_computed_tokens=8,
-            total_seq_len=9,
-            block_size=block_size,
-            query_len=1,
-            device=torch.device("cpu"),
-        ),
-        torch.empty((0,), dtype=torch.long),
-    )
-
-
-def test_rwkv7_cache_all_prefill_plan_helper():
-    plan = _rwkv7_plan_cache_all_prefill(
-        state_indices=torch.tensor(
-            [[10, 11, 12], [20, 21, 22]],
-            dtype=torch.long,
-        ),
-        num_computed_tokens=torch.tensor([0, 9], dtype=torch.int32),
-        total_seq_lens=torch.tensor([17, 17], dtype=torch.int32),
-        query_start_loc=torch.tensor([0, 17, 25], dtype=torch.int32),
-        block_size=8,
-    )
-
-    torch.testing.assert_close(
-        plan.block_idx_last_computed,
-        torch.tensor([0, 1], dtype=torch.int32),
-    )
-    torch.testing.assert_close(
-        plan.block_idx_first_scheduled,
-        torch.tensor([0, 1], dtype=torch.int32),
-    )
-    torch.testing.assert_close(
-        plan.block_idx_last_scheduled,
-        torch.tensor([2, 2], dtype=torch.int32),
-    )
-    torch.testing.assert_close(
-        plan.input_slot_ids,
-        torch.tensor([10, 21], dtype=torch.long),
-    )
-    torch.testing.assert_close(
-        plan.output_slot_ids,
-        torch.tensor([12, 22], dtype=torch.long),
-    )
-    torch.testing.assert_close(
-        plan.has_initial_state,
-        torch.tensor([False, True]),
-    )
-    torch.testing.assert_close(
-        plan.checkpoint_positions,
-        torch.tensor([7, 15, 6], dtype=torch.long),
-    )
-    torch.testing.assert_close(
-        plan.checkpoint_absolute_positions,
-        torch.tensor([7, 15, 23], dtype=torch.long),
-    )
-    torch.testing.assert_close(
-        plan.checkpoint_counts,
-        torch.tensor([2, 1], dtype=torch.long),
-    )
-    torch.testing.assert_close(
-        plan.checkpoint_offsets,
-        torch.tensor([0, 2, 3], dtype=torch.long),
-    )
-    torch.testing.assert_close(
-        plan.block_slot_ids,
-        torch.tensor([10, 11, 21], dtype=torch.long),
-    )
 
 
 def _make_multi_decode_metadata(
@@ -268,81 +143,15 @@ def _make_multi_prefill_metadata(
     )
 
 
-def _make_cache_all_prefill_metadata(
-    *,
-    query_len: int,
-    total_seq_len: int,
-    block_table: list[int],
-    num_computed_tokens: int,
-    device: torch.device,
-) -> LinearAttentionMetadata:
-    return LinearAttentionMetadata(
-        num_prefills=1,
-        num_prefill_tokens=query_len,
-        num_decodes=0,
-        num_decode_tokens=0,
-        query_start_loc=torch.tensor([0, query_len], dtype=torch.int32, device=device),
-        seq_lens=torch.tensor([total_seq_len], dtype=torch.int32, device=device),
-        state_indices_tensor=torch.tensor([block_table], dtype=torch.long, device=device),
-        num_computed_tokens=torch.tensor(
-            [num_computed_tokens], dtype=torch.int32, device=device
-        ),
-    )
-
-
-def _make_cache_all_multi_prefill_metadata(
-    *,
-    query_lens: list[int],
-    total_seq_lens: list[int],
-    block_tables: list[list[int]],
-    num_computed_tokens: list[int],
-    device: torch.device,
-) -> LinearAttentionMetadata:
-    query_start_loc = [0]
-    for query_len in query_lens:
-        query_start_loc.append(query_start_loc[-1] + query_len)
-    return LinearAttentionMetadata(
-        num_prefills=len(query_lens),
-        num_prefill_tokens=query_start_loc[-1],
-        num_decodes=0,
-        num_decode_tokens=0,
-        query_start_loc=torch.tensor(query_start_loc, dtype=torch.int32, device=device),
-        seq_lens=torch.tensor(total_seq_lens, dtype=torch.int32, device=device),
-        state_indices_tensor=torch.tensor(block_tables, dtype=torch.long, device=device),
-        num_computed_tokens=torch.tensor(
-            num_computed_tokens, dtype=torch.int32, device=device
-        ),
-    )
-
-
-def _make_cache_all_decode_metadata(
-    *,
-    total_seq_len: int,
-    block_table: list[int],
-    num_computed_tokens: int,
-    device: torch.device,
-) -> LinearAttentionMetadata:
-    return LinearAttentionMetadata(
-        num_prefills=0,
-        num_prefill_tokens=0,
-        num_decodes=1,
-        num_decode_tokens=1,
-        query_start_loc=torch.tensor([0, 1], dtype=torch.int32, device=device),
-        seq_lens=torch.tensor([total_seq_len], dtype=torch.int32, device=device),
-        state_indices_tensor=torch.tensor([block_table], dtype=torch.long, device=device),
-        num_computed_tokens=torch.tensor(
-            [num_computed_tokens], dtype=torch.int32, device=device
-        ),
-    )
 
 
 def _require_reference_checkpoint() -> tuple[Path, object]:
     """Resolve optional dependencies for RWKV7 reference parity tests only.
 
-    RWKV7 inference in vLLM uses the vendored recurrent kernels under
-    ``vllm.model_executor.layers.fla.ops``. The external top-level ``fla``
-    package is only needed here so parity tests can import the reference
-    Hugging Face implementation from a flash-linear-attention checkout.
+    The external top-level ``fla`` package is only needed here so parity tests
+    can import the reference Hugging Face implementation from a
+    flash-linear-attention checkout. RWKV7 runtime in this PR stays within the
+    vLLM tree and does not depend on that external package.
     """
     if pytest is None:
         raise RuntimeError("pytest is required to run RWKV7 integration tests.")
@@ -373,7 +182,7 @@ def _require_reference_checkpoint() -> tuple[Path, object]:
         sys.path.insert(0, str(fla_dir))
 
     # Test-only import of the reference implementation from an external FLA
-    # checkout. RWKV7 runtime continues to use vLLM's vendored FLA ops.
+    # checkout. RWKV7 runtime itself does not depend on that package.
     from fla.models.rwkv7 import RWKV7ForCausalLM as ReferenceRWKV7ForCausalLM
 
     return model_dir, ReferenceRWKV7ForCausalLM
@@ -409,6 +218,17 @@ def _make_vllm_config(
     )
 
 
+def _local_distributed_init_method() -> str:
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["GLOO_SOCKET_IFNAME"] = "lo"
+    os.environ.setdefault("RANK", "0")
+    os.environ.setdefault("LOCAL_RANK", "0")
+    os.environ.setdefault("WORLD_SIZE", "1")
+    fd, path = tempfile.mkstemp(prefix="rwkv7-dist-")
+    os.close(fd)
+    return f"file://{path}"
+
+
 def _allocate_kv_cache(model: RWKV7ForCausalLM, *, device: torch.device) -> None:
     for layer in model.model.layers:
         state_shapes = layer.get_state_shape()
@@ -427,7 +247,7 @@ def test_rwkv7_block_forward_without_metadata():
             world_size=1,
             rank=0,
             local_rank=0,
-            distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
+            distributed_init_method=_local_distributed_init_method(),
             backend="gloo",
         )
         ensure_model_parallel_initialized(1, 1, backend="gloo")
@@ -457,7 +277,7 @@ def test_rwkv7_block_registers_static_forward_context():
             world_size=1,
             rank=0,
             local_rank=0,
-            distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
+            distributed_init_method=_local_distributed_init_method(),
             backend="gloo",
         )
         ensure_model_parallel_initialized(1, 1, backend="gloo")
@@ -487,7 +307,7 @@ def test_rwkv7_attention_custom_op_matches_direct_forward():
             world_size=1,
             rank=0,
             local_rank=0,
-            distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
+            distributed_init_method=_local_distributed_init_method(),
             backend="nccl",
         )
         ensure_model_parallel_initialized(1, 1, backend="nccl")
@@ -507,112 +327,6 @@ def test_rwkv7_attention_custom_op_matches_direct_forward():
             cleanup_dist_env_and_memory()
 
 
-def test_rwkv7_fused_recurrent_matches_reference():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required to exercise the RWKV7 fused recurrent op.")
-
-    torch.manual_seed(0)
-    device = torch.device("cuda")
-    batch_size = 1
-    seq_len = 17
-    num_heads = 4
-    head_dim = 16
-    head_v_dim = 16
-
-    r = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
-    w = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
-    k = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
-    v = torch.randn(batch_size, seq_len, num_heads, head_v_dim, device=device)
-    kk = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
-    a = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
-    initial_state = torch.randn(
-        batch_size, num_heads, head_dim, head_v_dim, device=device
-    )
-
-    out_ref, state_ref = rwkv7_recurrent_reference(
-        r=r,
-        w=w,
-        k=k,
-        v=v,
-        kk=kk,
-        a=a,
-        initial_state=initial_state,
-        output_final_state=True,
-    )
-    out_fused, state_fused = fused_mul_recurrent_rwkv7(
-        r=r,
-        w=w,
-        k=k,
-        v=v,
-        kk=kk,
-        a=a,
-        initial_state=initial_state,
-        output_final_state=True,
-    )
-
-    torch.testing.assert_close(out_fused, out_ref, rtol=2e-4, atol=1e-3)
-    torch.testing.assert_close(state_fused, state_ref, rtol=2e-4, atol=1e-3)
-
-
-def test_rwkv7_fused_recurrent_checkpoint_states_match_reference():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required to exercise RWKV7 checkpoint emission.")
-
-    torch.manual_seed(1)
-    device = torch.device("cuda")
-    batch_size = 1
-    seq_len = 17
-    num_heads = 4
-    head_dim = 16
-    head_v_dim = 16
-
-    r = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
-    w = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
-    k = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
-    v = torch.randn(batch_size, seq_len, num_heads, head_v_dim, device=device)
-    kk = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
-    a = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
-    initial_state = torch.randn(
-        batch_size, num_heads, head_dim, head_v_dim, device=device
-    )
-    checkpoint_positions = torch.tensor([7, 15], device=device, dtype=torch.long)
-    checkpoint_offsets = torch.tensor([0, 2], device=device, dtype=torch.long)
-
-    out_ref, state_ref, checkpoint_ref = rwkv7_recurrent_reference_with_checkpoints(
-        r=r,
-        w=w,
-        k=k,
-        v=v,
-        kk=kk,
-        a=a,
-        initial_state=initial_state,
-        output_final_state=True,
-        checkpoint_positions=checkpoint_positions,
-        checkpoint_offsets=checkpoint_offsets,
-        output_checkpoint_states=True,
-    )
-    out_fused, state_fused, checkpoint_fused = (
-        fused_mul_recurrent_rwkv7_with_checkpoints(
-            r=r,
-            w=w,
-            k=k,
-            v=v,
-            kk=kk,
-            a=a,
-            checkpoint_positions=checkpoint_positions,
-            checkpoint_offsets=checkpoint_offsets,
-            initial_state=initial_state,
-            output_final_state=True,
-        )
-    )
-
-    torch.testing.assert_close(out_fused, out_ref, rtol=2e-3, atol=1e-1)
-    torch.testing.assert_close(state_fused, state_ref, rtol=2e-3, atol=1e-1)
-    torch.testing.assert_close(
-        checkpoint_fused, checkpoint_ref, rtol=2e-3, atol=1e-1
-    )
-
-
 def test_rwkv7_block_updates_cached_states():
     config = _make_config()
     vllm_config = VllmConfig(device_config=DeviceConfig("cpu"))
@@ -621,7 +335,7 @@ def test_rwkv7_block_updates_cached_states():
             world_size=1,
             rank=0,
             local_rank=0,
-            distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
+            distributed_init_method=_local_distributed_init_method(),
             backend="gloo",
         )
         ensure_model_parallel_initialized(1, 1, backend="gloo")
@@ -668,7 +382,7 @@ def test_rwkv7_block_batches_decode_tokens_without_changing_results():
             world_size=1,
             rank=0,
             local_rank=0,
-            distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
+            distributed_init_method=_local_distributed_init_method(),
             backend="gloo",
         )
         ensure_model_parallel_initialized(1, 1, backend="gloo")
@@ -740,7 +454,7 @@ def test_rwkv7_block_batches_decode_tokens_without_changing_results_cuda():
             world_size=1,
             rank=0,
             local_rank=0,
-            distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
+            distributed_init_method=_local_distributed_init_method(),
             backend="nccl",
         )
         ensure_model_parallel_initialized(1, 1, backend="nccl")
@@ -819,7 +533,7 @@ def test_rwkv7_block_batches_prefill_tokens_without_changing_results():
             world_size=1,
             rank=0,
             local_rank=0,
-            distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
+            distributed_init_method=_local_distributed_init_method(),
             backend="gloo",
         )
         ensure_model_parallel_initialized(1, 1, backend="gloo")
@@ -983,7 +697,7 @@ def test_rwkv7_block_uses_fp32_runtime_state_dtype():
             world_size=1,
             rank=0,
             local_rank=0,
-            distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
+            distributed_init_method=_local_distributed_init_method(),
             backend="gloo",
         )
         ensure_model_parallel_initialized(1, 1, backend="gloo")
@@ -1011,7 +725,7 @@ def test_rwkv7_model_keeps_weights_and_pp_buffers_in_model_dtype(tmp_path: Path)
             world_size=1,
             rank=0,
             local_rank=0,
-            distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
+            distributed_init_method=_local_distributed_init_method(),
             backend="gloo",
         )
         ensure_model_parallel_initialized(1, 1, backend="gloo")
@@ -1043,345 +757,6 @@ def test_rwkv7_model_keeps_weights_and_pp_buffers_in_model_dtype(tmp_path: Path)
             cleanup_dist_env_and_memory()
 
 
-def test_rwkv7_block_cache_all_prefill_writes_aligned_states():
-    config = _make_config()
-    block_size = 8
-    cache_config = CacheConfig(
-        enable_prefix_caching=True,
-        mamba_cache_mode="all",
-        block_size=block_size,
-        mamba_block_size=block_size,
-    )
-    vllm_config = VllmConfig(
-        cache_config=cache_config,
-        device_config=DeviceConfig("cpu"),
-    )
-    with set_current_vllm_config(vllm_config):
-        init_distributed_environment(
-            world_size=1,
-            rank=0,
-            local_rank=0,
-            distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
-            backend="gloo",
-        )
-        ensure_model_parallel_initialized(1, 1, backend="gloo")
-        try:
-            block_all = RWKV7Block(
-                config=config,
-                layer_idx=0,
-                cache_config=cache_config,
-                prefix="model.layers.0",
-            )
-            _initialize_module_parameters(block_all)
-
-            block_ref = RWKV7Block(
-                config=config,
-                layer_idx=0,
-                cache_config=cache_config,
-                prefix="model.layers.1",
-            )
-            block_ref.load_state_dict(block_all.state_dict())
-
-            state_shapes = block_all.get_state_shape()
-            state_dtypes = block_all.get_state_dtype()
-            block_all.kv_cache = tuple(
-                torch.zeros((3, *shape), dtype=dtype)
-                for shape, dtype in zip(state_shapes, state_dtypes)
-            )
-            block_ref.kv_cache = tuple(cache.clone() for cache in block_all.kv_cache)
-
-            hidden_states = torch.randn(17, config.hidden_size, dtype=torch.float32)
-            metadata = _make_cache_all_prefill_metadata(
-                query_len=17,
-                total_seq_len=17,
-                block_table=[0, 1, 2],
-                num_computed_tokens=0,
-                device=torch.device("cpu"),
-            )
-
-            output_all, v_first_all = block_all(hidden_states, None, metadata)
-
-            output_ref = torch.empty_like(hidden_states)
-            v_first_ref = torch.empty_like(hidden_states)
-            state = (None, None, None)
-            boundaries = [(0, 8, 0), (8, 16, 1), (16, 17, 2)]
-            for start, end, slot_id in boundaries:
-                out, vf_out, attn_shift, recurrent, ffn_shift = block_ref._run_sequence(
-                    hidden_states[start:end],
-                    None,
-                    *state,
-                )
-                output_ref[start:end] = out
-                v_first_ref[start:end] = vf_out
-                block_ref._store_kv_state(slot_id, attn_shift, recurrent, ffn_shift)
-                state = (attn_shift, recurrent, ffn_shift)
-
-            torch.testing.assert_close(output_all, output_ref, rtol=2e-4, atol=1e-4)
-            torch.testing.assert_close(
-                v_first_all, v_first_ref, rtol=2e-4, atol=1e-4
-            )
-            for cached_all, cached_ref in zip(block_all.kv_cache, block_ref.kv_cache):
-                torch.testing.assert_close(
-                    cached_all, cached_ref, rtol=2e-4, atol=1e-4
-                )
-        finally:
-            cleanup_dist_env_and_memory()
-
-
-def test_rwkv7_block_cache_all_prefill_unpacked_path_matches_reference():
-
-    config = _make_config()
-    block_size = 8
-    cache_config = CacheConfig(
-        enable_prefix_caching=True,
-        mamba_cache_mode="all",
-        block_size=block_size,
-        mamba_block_size=block_size,
-    )
-    vllm_config = VllmConfig(
-        cache_config=cache_config,
-        device_config=DeviceConfig("cpu"),
-    )
-    with set_current_vllm_config(vllm_config):
-        init_distributed_environment(
-            world_size=1,
-            rank=0,
-            local_rank=0,
-            distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
-            backend="gloo",
-        )
-        ensure_model_parallel_initialized(1, 1, backend="gloo")
-        try:
-            block_all = RWKV7Block(
-                config=config,
-                layer_idx=0,
-                cache_config=cache_config,
-                prefix="model.layers.0",
-            )
-            _initialize_module_parameters(block_all)
-
-            block_ref = RWKV7Block(
-                config=config,
-                layer_idx=0,
-                cache_config=cache_config,
-                prefix="model.layers.1",
-            )
-            block_ref.load_state_dict(block_all.state_dict())
-
-            state_shapes = block_all.get_state_shape()
-            state_dtypes = block_all.get_state_dtype()
-            block_all.kv_cache = tuple(
-                torch.zeros((3, *shape), dtype=dtype)
-                for shape, dtype in zip(state_shapes, state_dtypes)
-            )
-            block_ref.kv_cache = tuple(cache.clone() for cache in block_all.kv_cache)
-
-            hidden_states = torch.randn(17, config.hidden_size, dtype=torch.float32)
-            metadata = _make_cache_all_prefill_metadata(
-                query_len=17,
-                total_seq_len=17,
-                block_table=[0, 1, 2],
-                num_computed_tokens=0,
-                device=torch.device("cpu"),
-            )
-
-            output_all, v_first_all = block_all(hidden_states, None, metadata)
-
-            output_ref = torch.empty_like(hidden_states)
-            v_first_ref = torch.empty_like(hidden_states)
-            state = (None, None, None)
-            boundaries = [(0, 8, 0), (8, 16, 1), (16, 17, 2)]
-            for start, end, slot_id in boundaries:
-                out, vf_out, attn_shift, recurrent, ffn_shift = block_ref._run_sequence(
-                    hidden_states[start:end],
-                    None,
-                    *state,
-                )
-                output_ref[start:end] = out
-                v_first_ref[start:end] = vf_out
-                block_ref._store_kv_state(slot_id, attn_shift, recurrent, ffn_shift)
-                state = (attn_shift, recurrent, ffn_shift)
-
-            torch.testing.assert_close(output_all, output_ref, rtol=2e-4, atol=1e-4)
-            torch.testing.assert_close(
-                v_first_all, v_first_ref, rtol=2e-4, atol=1e-4
-            )
-            for cached_all, cached_ref in zip(block_all.kv_cache, block_ref.kv_cache):
-                torch.testing.assert_close(
-                    cached_all, cached_ref, rtol=2e-4, atol=1e-4
-                )
-        finally:
-            cleanup_dist_env_and_memory()
-
-
-def test_rwkv7_block_cache_all_prefill_batches_multiple_sequences():
-    config = _make_config()
-    block_size = 8
-    cache_config = CacheConfig(
-        enable_prefix_caching=True,
-        mamba_cache_mode="all",
-        block_size=block_size,
-        mamba_block_size=block_size,
-    )
-    vllm_config = VllmConfig(
-        cache_config=cache_config,
-        device_config=DeviceConfig("cpu"),
-    )
-    with set_current_vllm_config(vllm_config):
-        init_distributed_environment(
-            world_size=1,
-            rank=0,
-            local_rank=0,
-            distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
-            backend="gloo",
-        )
-        ensure_model_parallel_initialized(1, 1, backend="gloo")
-        try:
-            block_all = RWKV7Block(
-                config=config,
-                layer_idx=0,
-                cache_config=cache_config,
-                prefix="model.layers.0",
-            )
-            _initialize_module_parameters(block_all)
-
-            block_ref = RWKV7Block(
-                config=config,
-                layer_idx=0,
-                cache_config=cache_config,
-                prefix="model.layers.1",
-            )
-            block_ref.load_state_dict(block_all.state_dict())
-
-            state_shapes = block_all.get_state_shape()
-            state_dtypes = block_all.get_state_dtype()
-            block_all.kv_cache = tuple(
-                torch.zeros((5, *shape), dtype=dtype)
-                for shape, dtype in zip(state_shapes, state_dtypes)
-            )
-            block_ref.kv_cache = tuple(cache.clone() for cache in block_all.kv_cache)
-
-            query_lens = [17, 10]
-            total_seq_lens = [17, 10]
-            block_tables = [[0, 1, 2], [3, 4, 4]]
-            hidden_states = torch.randn(
-                sum(query_lens), config.hidden_size, dtype=torch.float32
-            )
-            metadata = _make_cache_all_multi_prefill_metadata(
-                query_lens=query_lens,
-                total_seq_lens=total_seq_lens,
-                block_tables=block_tables,
-                num_computed_tokens=[0, 0],
-                device=torch.device("cpu"),
-            )
-
-            output_all, v_first_all = block_all(hidden_states, None, metadata)
-
-            output_ref = torch.empty_like(hidden_states)
-            v_first_ref = torch.empty_like(hidden_states)
-            start = 0
-            ref_boundaries = [
-                [(0, 8, 0), (8, 16, 1), (16, 17, 2)],
-                [(0, 8, 3), (8, 10, 4)],
-            ]
-            for query_len, boundaries in zip(query_lens, ref_boundaries, strict=True):
-                seq_hidden = hidden_states[start:start + query_len]
-                state = (None, None, None)
-                seq_output = torch.empty_like(seq_hidden)
-                seq_v_first = torch.empty_like(seq_hidden)
-                for boundary_start, boundary_end, slot_id in boundaries:
-                    out, vf_out, attn_shift, recurrent, ffn_shift = block_ref._run_sequence(
-                        seq_hidden[boundary_start:boundary_end],
-                        None,
-                        *state,
-                    )
-                    seq_output[boundary_start:boundary_end] = out
-                    seq_v_first[boundary_start:boundary_end] = vf_out
-                    block_ref._store_kv_state(slot_id, attn_shift, recurrent, ffn_shift)
-                    state = (attn_shift, recurrent, ffn_shift)
-                output_ref[start:start + query_len] = seq_output
-                v_first_ref[start:start + query_len] = seq_v_first
-                start += query_len
-
-            torch.testing.assert_close(output_all, output_ref)
-            torch.testing.assert_close(v_first_all, v_first_ref)
-            for cached_all, cached_ref in zip(block_all.kv_cache, block_ref.kv_cache):
-                torch.testing.assert_close(cached_all, cached_ref)
-        finally:
-            cleanup_dist_env_and_memory()
-
-
-def test_rwkv7_block_cache_all_decode_writes_next_block_slot():
-    config = _make_config()
-    block_size = 8
-    cache_config = CacheConfig(
-        enable_prefix_caching=True,
-        mamba_cache_mode="all",
-        block_size=block_size,
-        mamba_block_size=block_size,
-    )
-    vllm_config = VllmConfig(
-        cache_config=cache_config,
-        device_config=DeviceConfig("cpu"),
-    )
-    with set_current_vllm_config(vllm_config):
-        init_distributed_environment(
-            world_size=1,
-            rank=0,
-            local_rank=0,
-            distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
-            backend="gloo",
-        )
-        ensure_model_parallel_initialized(1, 1, backend="gloo")
-        try:
-            block_all = RWKV7Block(
-                config=config,
-                layer_idx=0,
-                cache_config=cache_config,
-                prefix="model.layers.0",
-            )
-            _initialize_module_parameters(block_all)
-
-            block_ref = RWKV7Block(
-                config=config,
-                layer_idx=0,
-                cache_config=cache_config,
-                prefix="model.layers.1",
-            )
-            block_ref.load_state_dict(block_all.state_dict())
-
-            generator = torch.Generator().manual_seed(321)
-            state_shapes = block_all.get_state_shape()
-            state_dtypes = block_all.get_state_dtype()
-            block_all.kv_cache = tuple(
-                torch.randn((2, *shape), generator=generator, dtype=dtype)
-                for shape, dtype in zip(state_shapes, state_dtypes)
-            )
-            block_ref.kv_cache = tuple(cache.clone() for cache in block_all.kv_cache)
-
-            decode_hidden = torch.randn(1, config.hidden_size, generator=generator)
-            metadata = _make_cache_all_decode_metadata(
-                total_seq_len=9,
-                block_table=[0, 1],
-                num_computed_tokens=8,
-                device=torch.device("cpu"),
-            )
-
-            output_all, v_first_all = block_all(decode_hidden, None, metadata)
-
-            states = block_ref._get_kv_state(0, use_initial_state=True)
-            output_ref, v_first_ref, attn_shift, recurrent, ffn_shift = (
-                block_ref._run_sequence(decode_hidden, None, *states)
-            )
-            block_ref._store_kv_state(1, attn_shift, recurrent, ffn_shift)
-
-            torch.testing.assert_close(output_all, output_ref)
-            torch.testing.assert_close(v_first_all, v_first_ref)
-            for cached_all, cached_ref in zip(block_all.kv_cache, block_ref.kv_cache):
-                torch.testing.assert_close(cached_all, cached_ref)
-        finally:
-            cleanup_dist_env_and_memory()
-
 
 def test_rwkv7_reference_parity_full_forward():
     if pytest is None:
@@ -1407,7 +782,7 @@ def test_rwkv7_reference_parity_full_forward():
             world_size=1,
             rank=0,
             local_rank=0,
-            distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
+            distributed_init_method=_local_distributed_init_method(),
             backend="nccl",
         )
         ensure_model_parallel_initialized(1, 1, backend="nccl")
@@ -1463,7 +838,7 @@ def test_rwkv7_reference_parity_prefill_decode():
             world_size=1,
             rank=0,
             local_rank=0,
-            distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
+            distributed_init_method=_local_distributed_init_method(),
             backend="nccl",
         )
         ensure_model_parallel_initialized(1, 1, backend="nccl")

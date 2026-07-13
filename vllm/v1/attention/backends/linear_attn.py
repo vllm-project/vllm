@@ -41,8 +41,7 @@ class LinearAttentionMetadata:
     query_start_loc: torch.Tensor
     seq_lens: torch.Tensor
 
-    state_indices_tensor: torch.Tensor  # shape: [batch] or [batch, max_blocks]
-    num_computed_tokens: torch.Tensor | None = None
+    state_indices_tensor: torch.Tensor  # shape: [batch,]
 
 
 class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMetadata]):
@@ -66,23 +65,15 @@ class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMet
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> LinearAttentionMetadata:
-        del common_prefix_len, fast_build
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
-        cache_mode = self.vllm_config.cache_config.mamba_cache_mode
 
-        num_computed_tokens = None
-
-        if cache_mode == "all":
-            num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
-            state_indices_tensor = common_attn_metadata.block_table_tensor
-        else:
-            state_indices_tensor = mamba_get_block_table_tensor(
-                common_attn_metadata.block_table_tensor,
-                common_attn_metadata.seq_lens,
-                self.kv_cache_spec,
-                cache_mode,
-            )[:, 0]
+        state_indices_tensor = mamba_get_block_table_tensor(
+            common_attn_metadata.block_table_tensor,
+            common_attn_metadata.seq_lens,
+            self.kv_cache_spec,
+            self.vllm_config.cache_config.mamba_cache_mode,
+        )[:, 0]
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
@@ -98,6 +89,5 @@ class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMet
             query_start_loc=query_start_loc,
             seq_lens=seq_lens,
             state_indices_tensor=state_indices_tensor,
-            num_computed_tokens=num_computed_tokens,
         )
         return attn_metadata
