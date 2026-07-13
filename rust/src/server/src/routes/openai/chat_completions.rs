@@ -324,6 +324,7 @@ fn collect_beam_search_chat_completion(
         requested_logprobs,
         return_token_ids,
         include_reasoning: _,
+        echo,
         ..
     }: ResponseOptions,
     tokenizer: &dyn Tokenizer,
@@ -362,7 +363,10 @@ fn collect_beam_search_chat_completion(
                 index: i as u32,
                 message: ChatCompletionMessage {
                     role: AssistantRole,
-                    content: Some(decoded).filter(|t| !t.is_empty()),
+                    content: match &echo {
+                        Some(prefix) => Some(format!("{prefix}{decoded}")),
+                        None => Some(decoded).filter(|t| !t.is_empty()),
+                    },
                     tool_calls: None,
                     reasoning: None,
                 },
