@@ -50,7 +50,7 @@ torch._dynamo.config.recompile_limit = 16
 create_block_mask_compiled = torch.compile(
     create_block_mask, fullgraph=True, mode="reduce-overhead"
 )
-flex_attention_compiled = torch.compile(flex_attention, fullgraph=True)
+flex_attention_compiled = torch.compile(flex_attention, fullgraph=True, dynamic=True)
 
 
 def _offsets_to_doc_ids_tensor(
