@@ -25,6 +25,10 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# Slack (s) subtracted from D's exported block-expiry deadline on the turn-2
+# readback, absorbing clock-offset error and read latency.
+_KV_BLOCKS_EXPIRY_SAFETY_MARGIN = 5.0
+
 
 class NixlPullConnectorWorker(NixlBaseConnectorWorker):
     """Pull-specific (READ) worker logic."""
@@ -98,6 +102,17 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # requests sit in the D scheduler WAITING queue.
         self._send_heartbeats(metadata)
 
+    def _is_turn2_read_expired(self, meta: ReqMeta) -> bool:
+        """Whether D's cached blocks for this turn-2 readback have (nearly) expired."""
+        assert meta.remote is not None
+        blocks_expiry_time = meta.remote.blocks_expiry_time
+        # Deadline may be absent (router may not forward it) -> read as usual.
+        if blocks_expiry_time is None or not meta.local_physical_block_ids:
+            return False
+        clock_offset = self._engine_clock_offset[meta.remote.engine_id]
+        deadline = blocks_expiry_time - clock_offset
+        return time.perf_counter() + _KV_BLOCKS_EXPIRY_SAFETY_MARGIN >= deadline
+
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.transfer_topo is not None
         engine_id = meta.remote.engine_id
@@ -105,19 +120,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # thread (this one), so we don't race on this structure.
         self._engine_last_active[engine_id] = time.perf_counter()
 
-        # Turn-2 readback: decline expired/near-expiry reads.
-        blocks_expiry_time = meta.remote.blocks_expiry_time
-        clock_offset = self._engine_clock_offset.get(engine_id)
-        if (
-            blocks_expiry_time is not None
-            and clock_offset is not None
-            and len(meta.local_physical_block_ids) > 0
-            and time.perf_counter() + self._kv_blocks_expiry_safety_margin
-            >= blocks_expiry_time - clock_offset
-        ):
+        if self._bidirectional_kv_xfer_enabled and self._is_turn2_read_expired(meta):
             logger.warning(
-                "Declining expired remote read for %s from engine %s; "
-                "recomputing locally.",
+                "Declining expired remote read for %s from engine %s.",
                 req_id,
                 engine_id,
             )

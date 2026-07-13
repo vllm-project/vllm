@@ -87,7 +87,7 @@ def _make_connector_with_fake_worker(
     hand_shake_latency=0, cycles_before_done=0, do_handshake=True
 ):
     """Create a NixlConnector with FakeNixlConnectorWorker."""
-    vllm_config = create_vllm_config()
+    vllm_config = create_vllm_config(kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG)
     kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=2)
     connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
     connector.connector_worker = FakeNixlConnectorWorker(
@@ -100,7 +100,7 @@ def _make_connector_with_fake_worker(
     assert isinstance(worker.nixl_wrapper, FakeNixlWrapper)
     worker.kv_cache_layout = "HND"
     if do_handshake:
-        remote_agents = worker._nixl_handshake(
+        remote_agents, _ = worker._nixl_handshake(
             host="localhost",
             port=1234,
             remote_tp_size=1,
@@ -931,10 +931,8 @@ _REMOTE = FakeNixlConnectorWorker.REMOTE_ENGINE_ID
         pytest.param(0.0, 2.0, True, id="near_expiry_within_margin"),
         # far-future deadline -> read proceeds.
         pytest.param(0.0, 1000.0, False, id="valid_far_deadline"),
-        # no deadline field (older peer) -> check skipped.
+        # no deadline field (older peer / router did not forward) -> skipped.
         pytest.param(0.0, None, False, id="missing_expiry_field"),
-        # no handshake offset -> check skipped even though deadline passed.
-        pytest.param(None, -10.0, False, id="missing_offset"),
     ],
 )
 @patch(
@@ -945,9 +943,7 @@ def test_turn2_deadline_gate(dist_init, offset, expiry_delta, expect_declined):
     """P declines on the turn-2 readback if the deadline is known,
     near-expiry and a handshake clock offset is known"""
     connector, worker = _make_connector_with_fake_worker()
-    assert worker._kv_blocks_expiry_safety_margin == 5
-    if offset is not None:
-        worker._engine_clock_offset[_REMOTE] = offset
+    worker._engine_clock_offset[_REMOTE] = offset
     expiry_time = None if expiry_delta is None else time.perf_counter() + expiry_delta
     meta = NixlConnectorMetadata()
     params = {
@@ -1047,7 +1043,7 @@ def test_handshake_listener_appends_perf_counter_frame():
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import zmq_ctx
     from vllm.utils.network_utils import get_open_port, make_zmq_path
 
-    encoded_data = {0: b"payload-rank-0"}
+    encoded_data = {(0, 0): b"payload-rank-0"}
     ready_event = threading.Event()
     stop_event = threading.Event()
     host = "127.0.0.1"
@@ -1064,7 +1060,7 @@ def test_handshake_listener_appends_perf_counter_frame():
         with zmq_ctx(zmq.REQ, path) as sock:  # type: ignore[attr-defined]
             sock.setsockopt(zmq.RCVTIMEO, 5000)  # type: ignore[attr-defined]
             t0 = time.perf_counter()
-            sock.send(msgspec.msgpack.encode((GET_META_MSG, 0)))
+            sock.send(msgspec.msgpack.encode((GET_META_MSG, 0, 0)))
             parts = sock.recv_multipart()
             t1 = time.perf_counter()
         assert len(parts) == 2

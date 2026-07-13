@@ -322,6 +322,10 @@ class NixlBaseConnectorScheduler:
                 )
                 if msg != GET_META_MSG:
                     logger.warning("Connection listener got unexpected message %s", msg)
+                # Echo our perf_counter so P can estimate the clock offset.
+                # perf_counter is only comparable within a process, so this
+                # listener must run in the same process that stamps the block
+                # expiry deadline (`_reqs_need_send`).
                 ts = msgspec.msgpack.encode(time.perf_counter())
                 sock.send_multipart(
                     (identity, b"", encoded_data[(target_pp_rank, target_tp_rank)], ts)
