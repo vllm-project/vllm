@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from vllm.config.speech_to_text import SpeechToTextConfig
-from vllm.entrypoints.speech_to_text.base.serving import OpenAISpeechToText
+from vllm.entrypoints.speech_to_text.base.serving import SpeechToTextBaseServing
 
 SR = 16_000
 _PATCH = "vllm.entrypoints.speech_to_text.base.serving"
@@ -33,7 +33,7 @@ async def test_chunk_offsets_are_cumulative_not_nominal():
     expected_offsets = [0.0, 29.5, 29.5 + 29.7]  # cumulative seconds
     wrong_offsets = [0.0, 30.0, 60.0]  # what the old bug produced
 
-    serving = OpenAISpeechToText.__new__(OpenAISpeechToText)
+    serving = SpeechToTextBaseServing.__new__(SpeechToTextBaseServing)
     serving._decode_and_chunk_speech_async = AsyncMock(return_value=(chunks, duration))
     serving.asr_config = SpeechToTextConfig(
         sample_rate=float(SR),
