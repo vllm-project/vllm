@@ -1254,7 +1254,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     loaded_params.add(name)
                     continue
 
-        self.finalize_mhc_broadcast_weights()
         return loaded_params
 
     def _pad_shared_expert_weight(
