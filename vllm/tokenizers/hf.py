@@ -207,6 +207,31 @@ class CachedHfTokenizer(TokenizerLike):
         **kwargs,
     ) -> HfTokenizer:
         try:
+            # --- transformers v5 LlamaTokenizerFast fix ---
+            # LlamaTokenizerFast.__init__ in transformers v5 configures
+            # the Rust decoder incorrectly, producing garbled spaces/newlines
+            # (Ġ → 'G', \n → 'C'). Replace __init__ with the base
+            # PreTrainedTokenizerFast version, then restore after loading.
+            try:
+                from transformers import (
+                    LlamaTokenizerFast,
+                    PreTrainedTokenizerFast,
+                )
+                from tokenizers import decoders as _decoders
+
+                _orig_llama_init = LlamaTokenizerFast.__init__
+
+                def _fixed_init(self, *args, **kwargs):
+                    PreTrainedTokenizerFast.__init__(self, *args, **kwargs)
+                    self._tokenizer.decoder = _decoders.ByteLevel(
+                        add_prefix_space=False, trim_offsets=True
+                    )
+
+                LlamaTokenizerFast.__init__ = _fixed_init
+                _llama_init_patched = True
+            except ImportError:
+                _llama_init_patched = False
+
             tokenizer = AutoTokenizer.from_pretrained(
                 path_or_repo_id,
                 *args,
@@ -215,6 +240,10 @@ class CachedHfTokenizer(TokenizerLike):
                 cache_dir=download_dir,
                 **kwargs,
             )
+
+            if _llama_init_patched:
+                LlamaTokenizerFast.__init__ = _orig_llama_init
+            # --- end fix ---
         except ValueError as e:
             # If the error pertains to the tokenizer class not existing or not
             # currently being imported,
