@@ -1131,7 +1131,12 @@ class Gemma4ForConditionalGeneration(
         self.num_redundant_experts = self.language_model.num_redundant_experts
 
         gen_cfg = vllm_config.model_config.try_get_generation_config()
-        self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
+        ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
+        self.register_buffer(
+            "_suppress_token_ids",
+            torch.tensor(ids, dtype=torch.long) if ids else None,
+            persistent=False,
+        )
 
     # ------------------------------------------------------------------ #
     # Input parsing
@@ -1612,8 +1617,8 @@ class Gemma4ForConditionalGeneration(
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         logits = self.language_model.compute_logits(hidden_states)
-        if logits is not None and self._suppress_token_ids:
-            logits[:, self._suppress_token_ids] = -float("inf")
+        if logits is not None and self._suppress_token_ids is not None:
+            logits.index_fill_(1, self._suppress_token_ids, float("-inf"))
         return logits
 
     # ------------------------------------------------------------------ #
