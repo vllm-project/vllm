@@ -11,6 +11,7 @@
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.platforms import current_platform
 
 from .index import prepare_chunk_indices
 from .op import exp
@@ -48,6 +49,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
+    CAST_K_TRANS: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -83,7 +85,15 @@ def chunk_scaled_dot_kkt_fwd_kernel(
         )
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_kb = b_k * b_beta[:, None]
-        b_A += tl.dot(b_kb, tl.trans(b_k).to(b_kb.dtype))
+        if CAST_K_TRANS:
+            # NVIDIA Hopper: align tl.dot operand layout with WGMMA to
+            # avoid GDN KKT precision loss (gh #42076).
+            b_A += tl.dot(b_kb, tl.trans(b_k).to(b_kb.dtype))
+        else:
+            # ROCm/RDNA (e.g. gfx1201 / Radeon AI PRO R9700): the WGMMA-
+            # aligned operand layout mis-compiles and deadlocks this kernel
+            # during the profiling forward pass, hanging TP>=2 startup.
+            b_A += tl.dot(b_kb.to(b_k.dtype), tl.trans(b_k))
 
     if USE_G:
         p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
@@ -154,5 +164,6 @@ def chunk_scaled_dot_kkt_fwd(
         Hg=Hg,
         K=K,
         BT=BT,
+        CAST_K_TRANS=current_platform.is_cuda(),
     )
     return A
