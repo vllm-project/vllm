@@ -79,6 +79,14 @@ class PrefillDelayer:
         # status == "mixed" -> delay within budget.
         if self._delayed_count == 0:
             self._delay_start_ts = time.perf_counter()
+            logger.info(
+                "PrefillDelayer postponing prefill: %d/%d DP ranks prefillable "
+                "(mixed); holding up to %d passes / %.1f ms.",
+                prefillable_count,
+                self.dp_size,
+                self.max_delay_passes,
+                self.max_delay_ms,
+            )
         elapsed_ms = (time.perf_counter() - self._delay_start_ts) * 1000.0
 
         if (
@@ -89,6 +97,12 @@ class PrefillDelayer:
             return False
 
         # Timed out -> force allow to bound worst-case TTFT.
+        logger.info(
+            "PrefillDelayer force-allowing prefill after %d passes / %.1f ms "
+            "(TTFT bound reached).",
+            self._delayed_count,
+            elapsed_ms,
+        )
         self.reset()
         return True
 
