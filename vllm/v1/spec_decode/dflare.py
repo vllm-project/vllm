@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import torch
+
 from vllm.config import VllmConfig
 from vllm.v1.spec_decode.dflash import DFlashProposer
 
@@ -20,6 +22,8 @@ class DFlareProposer(DFlashProposer):
         device: torch.device,
         runner=None,
     ):
+        assert vllm_config.speculative_config is not None
+        assert vllm_config.speculative_config.method == "dflare"
         super().__init__(
             vllm_config=vllm_config,
             device=device,
