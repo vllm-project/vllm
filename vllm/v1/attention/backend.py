@@ -259,6 +259,10 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_sliding_window(cls) -> bool:
+        return False
+
+    @classmethod
     def supports_non_causal(cls) -> bool:
         """Check if backend supports non-causal (bidirectional) attention
         for decoder models.
@@ -319,6 +323,7 @@ class AttentionBackend(ABC):
         use_per_head_quant_scales: bool,
         device_capability: "DeviceCapability",
         attn_type: str,
+        has_sliding_window: bool = False,
         use_non_causal: bool = False,
         use_batch_invariant: bool = False,
         use_kv_connector: bool = False,
@@ -354,6 +359,8 @@ class AttentionBackend(ABC):
             invalid_reasons.append("compute capability not supported")
         if not cls.supports_attn_type(attn_type):
             invalid_reasons.append(f"attention type {attn_type} not supported")
+        if has_sliding_window and not cls.supports_sliding_window():
+            invalid_reasons.append("sliding window not supported")
         if use_non_causal and not cls.supports_non_causal():
             invalid_reasons.append("non-causal attention not supported")
         if use_batch_invariant and not cls.supports_batch_invariance():
