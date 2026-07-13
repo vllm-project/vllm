@@ -146,6 +146,97 @@ def test_materialize_layer_preserves_non_meta_tensors():
     assert torch.equal(layer.bias.data, bias_values)
 
 
+def test_machete_post_load_preserves_act_perm_address(monkeypatch, dist_init):
+    """Machete's act-order permutation is baked into captured CUDA graphs via
+    `self.act_perm`; reload must recompute it into the same storage (#48312)."""
+    from vllm import _custom_ops as ops
+    from vllm.model_executor.kernels.linear.mixed_precision.machete import (
+        MacheteLinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
+        MPLinearLayerConfig,
+    )
+    from vllm.model_executor.parameter import (
+        GroupQuantScaleParameter,
+        PackedvLLMParameter,
+        RowvLLMParameter,
+    )
+    from vllm.scalar_type import scalar_types
+
+    size_k, size_n, group_size = 128, 64, 64
+
+    monkeypatch.setattr(
+        ops,
+        "machete_prepack_B",
+        lambda x, a_type, b_type, group_scales_type: torch.zeros_like(x),
+    )
+
+    def load_checkpoint_format_weights(layer, g_idx):
+        layer.qweight = PackedvLLMParameter(
+            data=torch.zeros(size_k // 8, size_n, dtype=torch.int32),
+            input_dim=0,
+            output_dim=1,
+            packed_dim=0,
+            packed_factor=8,
+            weight_loader=default_weight_loader,
+        )
+        layer.scales = GroupQuantScaleParameter(
+            data=torch.ones(size_k // group_size, size_n, dtype=torch.float16),
+            input_dim=0,
+            output_dim=1,
+            weight_loader=default_weight_loader,
+        )
+        layer.g_idx = RowvLLMParameter(
+            data=g_idx.clone(),
+            input_dim=0,
+            weight_loader=default_weight_loader,
+        )
+
+    kernel = object.__new__(MacheteLinearKernel)
+    kernel.config = MPLinearLayerConfig(
+        full_weight_shape=(size_k, size_n),
+        partition_weight_shape=(size_k, size_n),
+        weight_type=scalar_types.uint4b8,
+        act_type=torch.float16,
+        group_size=group_size,
+        zero_points=False,
+        has_g_idx=True,
+    )
+    kernel.w_q_name = "qweight"
+    kernel.w_s_name = "scales"
+    kernel.w_zp_name = None
+    kernel.w_gidx_name = "g_idx"
+
+    generator = torch.Generator().manual_seed(0)
+    first_g_idx = torch.randint(
+        0, size_k // group_size, (size_k,), dtype=torch.int32, generator=generator
+    )
+    second_g_idx = torch.randint(
+        0, size_k // group_size, (size_k,), dtype=torch.int32, generator=generator
+    )
+
+    layer = torch.nn.Module()
+    load_checkpoint_format_weights(layer, first_g_idx)
+    kernel.process_weights_after_loading(layer)
+
+    # fp16 act with size_k % 8 == 0 takes the `ops.permute_cols` path
+    assert kernel.use_permute_cols
+    perm_ptr = layer.g_idx_sort_indices.data_ptr()
+
+    # Reload: fresh checkpoint-format tensors with a different act-order
+    load_checkpoint_format_weights(layer, second_g_idx)
+    kernel.process_weights_after_loading(layer)
+
+    assert layer.g_idx_sort_indices.data_ptr() == perm_ptr
+    expected_perm = torch.argsort(second_g_idx).to(torch.int)
+    assert torch.equal(layer.g_idx_sort_indices.data, expected_perm)
+    # registered as a Parameter so layerwise reload copy-back preserves it,
+    # and apply_weights resolves it via the layer: no tensor is captured
+    # inside a kernel-held callable (the pre-fix act_perm pattern).
+    assert isinstance(layer.g_idx_sort_indices, torch.nn.Parameter)
+    assert not hasattr(kernel, "act_perm")
+
+
 def test_model_cleanup(dist_init, default_vllm_config):
     layer = QKVParallelLinear(2, 3, 4)
     assert layer.weight.weight_loader.__self__ is layer
