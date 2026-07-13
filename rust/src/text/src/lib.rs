@@ -201,6 +201,7 @@ impl TextLlm {
         )?;
 
         let params = crate::beam_search::BeamSearchParams {
+            request_id: request.request_id,
             beam_width: request.sampling_params.n.unwrap_or(1),
             max_tokens,
             temperature: request
@@ -210,13 +211,13 @@ impl TextLlm {
                 .unwrap_or(1.0),
             length_penalty: request.sampling_params.length_penalty.unwrap_or(1.0),
             ignore_eos: request.sampling_params.ignore_eos,
+            include_stop_str_in_output: request.decode_options.include_stop_str_in_output,
             eos_token_id: sampling_hints.primary_eos_token_id,
             extra_eos_token_ids: sampling_hints.extra_eos_token_ids.clone(),
             lora_request: request.lora_request,
             cache_salt: request.cache_salt,
             priority: request.priority,
             data_parallel_rank: request.data_parallel_rank,
-            stop_token_ids: request.sampling_params.stop_token_ids.unwrap_or_default(),
         };
 
         crate::beam_search::run_beam_search(&self.llm, prompt_token_ids, params).await

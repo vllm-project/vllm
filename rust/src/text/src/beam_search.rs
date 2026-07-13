@@ -2,7 +2,6 @@ use std::collections::BTreeSet;
 
 use vllm_engine_core_client::protocol::logprobs::TokenLogprob;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
-use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_llm::{FinishReason, GenerateOutputStreamExt, GenerateRequest};
 
@@ -40,18 +39,19 @@ pub struct BeamSearchOutput {
 
 /// Configuration for one beam search invocation.
 pub(crate) struct BeamSearchParams {
+    pub request_id: String,
     pub beam_width: u32,
     pub max_tokens: u32,
     pub temperature: f32,
     pub length_penalty: f32,
     pub ignore_eos: bool,
+    pub include_stop_str_in_output: bool,
     pub eos_token_id: Option<u32>,
     pub extra_eos_token_ids: BTreeSet<u32>,
     pub lora_request: Option<LoraRequest>,
     pub cache_salt: Option<String>,
     pub priority: i32,
     pub data_parallel_rank: Option<u32>,
-    pub stop_token_ids: Vec<u32>,
 }
 
 /// One candidate extension during beam search step processing.
@@ -89,23 +89,24 @@ fn get_beam_search_score(
 }
 
 fn all_stop_ids(params: &BeamSearchParams) -> BTreeSet<u32> {
-    let mut ids: BTreeSet<u32> = params.stop_token_ids.iter().copied().collect();
-    ids.extend(params.extra_eos_token_ids.iter().copied());
+    let mut ids: BTreeSet<u32> = params.extra_eos_token_ids.iter().copied().collect();
     if let Some(eos) = params.eos_token_id {
         ids.insert(eos);
     }
     ids
 }
 
-fn stop_ids_for_engine(params: &BeamSearchParams) -> Vec<u32> {
-    let mut ids = params.stop_token_ids.clone();
-    if !params.ignore_eos {
-        ids.extend(params.extra_eos_token_ids.iter().copied());
-    }
-    ids
+/// Given a scored token produced by the engine, determine whether it should
+/// terminate the current beam (move it to `completed`) rather than become a
+/// candidate for the next step.
+///
+/// Matching Python's online and offline beam search, only the primary EOS
+/// token terminates a beam.  Custom stop tokens (`stop_token_ids`) and
+/// extra EOS tokens (`extra_eos_token_ids`) remain active candidates.
+fn should_terminate_beam(eos_token_id: Option<u32>, token_id: u32, ignore_eos: bool) -> bool {
+    eos_token_id.is_some_and(|eos| token_id == eos) && !ignore_eos
 }
 
-/// Run beam search for one prompt.
 pub(crate) async fn run_beam_search(
     llm: &vllm_llm::Llm,
     prompt_token_ids: Vec<u32>,
@@ -124,7 +125,6 @@ pub(crate) async fn run_beam_search(
     }];
     let mut completed: Vec<BeamSearchSequence> = vec![];
 
-    let stop_token_ids = stop_ids_for_engine(&params);
     let all_stop_token_ids = all_stop_ids(&params);
 
     for step in 0..params.max_tokens {
@@ -136,7 +136,7 @@ pub(crate) async fn run_beam_search(
                 max_tokens: 1,
                 min_tokens: 0,
                 logprobs: Some(logprobs_num as i32),
-                stop_token_ids: stop_token_ids.clone(),
+                stop_token_ids: vec![],
                 eos_token_id: if params.ignore_eos {
                     None
                 } else {
@@ -147,7 +147,7 @@ pub(crate) async fn run_beam_search(
             };
 
             let gen_req = GenerateRequest {
-                request_id: format!("beam-{i}-step-{step}"),
+                request_id: format!("{}-beam-{i}-step-{step}", params.request_id),
                 prompt_token_ids: seq.tokens.clone(),
                 sampling_params,
                 // TODO: pass through seq.mm_features once BeamSearchSequence
@@ -185,30 +185,24 @@ pub(crate) async fn run_beam_search(
                             continue;
                         }
                         let candidate_logprob = current_seq.cum_logprob + entry.logprob;
-                        let is_eos = params.eos_token_id.is_some_and(|eos| entry.token_id == eos);
-                        let is_extra_eos = !params.ignore_eos
-                            && params.extra_eos_token_ids.contains(&entry.token_id);
-                        let is_stop = params.stop_token_ids.contains(&entry.token_id);
 
-                        if (is_eos && !params.ignore_eos) || is_extra_eos || is_stop {
+                        if should_terminate_beam(
+                            params.eos_token_id,
+                            entry.token_id,
+                            params.ignore_eos,
+                        ) {
+                            let mut tokens = current_seq.tokens.clone();
+                            if params.include_stop_str_in_output {
+                                tokens.push(entry.token_id);
+                            }
                             let mut logprobs = current_seq.logprobs.clone();
                             logprobs.push(position.entries.clone());
-                            let stop_token = entry.token_id;
-                            let finish = if is_eos {
-                                FinishReason::stop_eos()
-                            } else {
-                                FinishReason::Stop(Some(
-                                    StopReason::TokenId(
-                                        stop_token,
-                                    ),
-                                ))
-                            };
                             completed.push(BeamSearchSequence {
-                                tokens: current_seq.tokens.clone(),
+                                tokens,
                                 cum_logprob: candidate_logprob,
                                 logprobs,
-                                finish_reason: Some(finish),
-                                stop_reason: Some(stop_token),
+                                finish_reason: Some(FinishReason::stop_eos()),
+                                stop_reason: Some(entry.token_id),
                                 lora_request: current_seq.lora_request.clone(),
                             });
                         } else {
@@ -221,19 +215,6 @@ pub(crate) async fn run_beam_search(
                         }
                     }
                 }
-            } else {
-                let stop_reason = output.finish_reason.as_stop_reason().and_then(|sr| match sr {
-                    StopReason::TokenId(id) => Some(*id),
-                    _ => None,
-                });
-                completed.push(BeamSearchSequence {
-                    tokens: current_seq.tokens.clone(),
-                    cum_logprob: current_seq.cum_logprob,
-                    logprobs: current_seq.logprobs.clone(),
-                    finish_reason: Some(output.finish_reason),
-                    stop_reason,
-                    lora_request: current_seq.lora_request.clone(),
-                });
             }
         }
 
@@ -334,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn beam_score_longer_penalized_with_lp_gt_1() {
+    fn beam_score_longer_higher_with_same_cum_logprob_and_lp_gt_1() {
         let short = get_beam_search_score(&[1, 2], -3.0, Some(99), 2.0);
         let long = get_beam_search_score(&[1, 2, 3, 4, 5], -3.0, Some(99), 2.0);
         assert!(long > short);
@@ -389,57 +370,49 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // stop_ids_for_engine / all_stop_ids
+    // all_stop_ids
     // -----------------------------------------------------------------------
 
     #[test]
-    fn stop_ids_includes_extra_eos_when_not_ignore_eos() {
+    fn all_stop_ids_collects_eos_and_extra_eos() {
         let params = BeamSearchParams {
+            request_id: "test".into(),
             beam_width: 1,
             max_tokens: 10,
             temperature: 1.0,
             length_penalty: 1.0,
             ignore_eos: false,
+            include_stop_str_in_output: false,
             eos_token_id: Some(99),
             extra_eos_token_ids: BTreeSet::from([151643]),
             lora_request: None,
             cache_salt: None,
             priority: 0,
             data_parallel_rank: None,
-            stop_token_ids: vec![42],
         };
-        let stop = stop_ids_for_engine(&params);
-        assert!(stop.contains(&42));
-        assert!(stop.contains(&151643));
-
         let all = all_stop_ids(&params);
-        assert!(all.contains(&42));
         assert!(all.contains(&151643));
         assert!(all.contains(&99));
     }
 
     #[test]
-    fn stop_ids_excludes_extra_eos_when_ignore_eos() {
+    fn all_stop_ids_always_includes_extra_eos_regardless_of_ignore_eos() {
         let params = BeamSearchParams {
+            request_id: "test".into(),
             beam_width: 1,
             max_tokens: 10,
             temperature: 1.0,
             length_penalty: 1.0,
             ignore_eos: true,
+            include_stop_str_in_output: false,
             eos_token_id: Some(99),
             extra_eos_token_ids: BTreeSet::from([151643]),
             lora_request: None,
             cache_salt: None,
             priority: 0,
             data_parallel_rank: None,
-            stop_token_ids: vec![42],
         };
-        let stop = stop_ids_for_engine(&params);
-        assert!(stop.contains(&42));
-        assert!(!stop.contains(&151643));
-
         let all = all_stop_ids(&params);
-        assert!(all.contains(&42));
         assert!(all.contains(&151643));
         assert!(all.contains(&99));
     }
@@ -494,18 +467,19 @@ mod tests {
     #[test]
     fn params_beam_width_clamped_to_one() {
         let params = BeamSearchParams {
+            request_id: "test".into(),
             beam_width: 0,
             max_tokens: 10,
             temperature: 1.0,
             length_penalty: 1.0,
             ignore_eos: false,
+            include_stop_str_in_output: false,
             eos_token_id: None,
             extra_eos_token_ids: BTreeSet::new(),
             lora_request: None,
             cache_salt: None,
             priority: 0,
             data_parallel_rank: None,
-            stop_token_ids: vec![],
         };
         assert_eq!(params.beam_width.max(1) as usize, 1);
     }
@@ -516,6 +490,7 @@ mod tests {
         let logprobs_num = 2 * beam_width;
         assert_eq!(logprobs_num, 6);
     }
+
 
     // -----------------------------------------------------------------------
     // EOS / stop completion logic — behavior via scoring
@@ -556,5 +531,106 @@ mod tests {
 
         assert_eq!(sequences[0].cum_logprob, -3.0);
         assert_eq!(sequences[1].cum_logprob, -5.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // should_terminate_beam — EOS-only termination (Python compatibility)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn eos_terminates_when_not_ignored() {
+        assert!(should_terminate_beam(Some(99), 99, false));
+    }
+
+    #[test]
+    fn eos_does_not_terminate_when_ignored() {
+        assert!(!should_terminate_beam(Some(99), 99, true));
+    }
+
+    #[test]
+    fn non_eos_token_never_terminates() {
+        assert!(!should_terminate_beam(Some(99), 42, false));
+        assert!(!should_terminate_beam(Some(99), 42, true));
+    }
+
+    #[test]
+    fn nothing_terminates_when_eos_token_id_is_none() {
+        assert!(!should_terminate_beam(None, 99, false));
+        assert!(!should_terminate_beam(None, 42, false));
+    }
+
+    // -----------------------------------------------------------------------
+    // candidate dedup — duplicate token_ids in logprobs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn seen_token_ids_dedup_skips_duplicate_entries() {
+        // Simulate the dedup loop: entries with duplicate token_id
+        // should be skipped, so only the first occurrence is processed.
+        let mut seen: BTreeSet<u32> = BTreeSet::new();
+        let entries = [1, 2, 1, 3, 2, 4];
+        let mut accepted: Vec<u32> = vec![];
+
+        for &id in &entries {
+            if seen.insert(id) {
+                accepted.push(id);
+            }
+        }
+
+        assert_eq!(accepted, vec![1, 2, 3, 4]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Beam candidate split — eos vs active per step
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn per_step_eos_goes_to_completed_non_eos_to_candidates() {
+        // Simulate one step: given a parent beam and the top logprob
+        // entries from the engine, split them into "completed" (EOS hits)
+        // and "candidates" (all other tokens).
+        let eos_token_id = Some(99u32);
+        let ignore_eos = false;
+
+        let logprob_entries: Vec<(u32, f32)> = vec![
+            (99, -0.5),   // EOS — should complete
+            (42, -1.0),   // normal token
+            (77, -1.5),   // normal token
+            (151643, -2.0), // extra EOS — should NOT complete (matching Python)
+        ];
+
+        let mut completed_count = 0;
+        let mut candidate_count = 0;
+
+        for (token_id, _) in &logprob_entries {
+            if should_terminate_beam(eos_token_id, *token_id, ignore_eos) {
+                completed_count += 1;
+            } else {
+                candidate_count += 1;
+            }
+        }
+
+        assert_eq!(completed_count, 1, "only primary EOS (99) terminates");
+        assert_eq!(candidate_count, 3, "all non-EOS including extra_eos are candidates");
+    }
+
+    // -----------------------------------------------------------------------
+    // include_stop_str_in_output — EOS token affects length-penalty scoring
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn include_stop_str_in_output_affects_score_via_length_penalty() {
+        let eos = 99u32;
+        // Sequence without EOS appended: length 3, score = -3.0 / 3^2 = -0.333
+        let tokens_without_eos = vec![1, 2, 3];
+        // Sequence with EOS appended: length 4, but EOS subtracts 1 → 3
+        // score = -3.0 / 3^2 = -0.333
+        let tokens_with_eos = vec![1, 2, 3, eos];
+
+        let score_without = get_beam_search_score(&tokens_without_eos, -3.0, Some(eos), 2.0);
+        let score_with = get_beam_search_score(&tokens_with_eos, -3.0, Some(eos), 2.0);
+
+        assert!((score_without - score_with).abs() < 1e-6,
+            "including EOS should not change the score since EOS subtracts 1 from length");
     }
 }
