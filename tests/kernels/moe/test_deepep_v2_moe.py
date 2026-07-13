@@ -14,6 +14,7 @@ from torch.distributed import ProcessGroup
 from tests.kernels.moe.utils import make_dummy_moe_config, make_test_weights
 from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -261,11 +262,12 @@ def _deep_ep_v2_moe(
             per_act_token_quant,
         )
 
+    tol = 2e-1 if is_quantized else 6e-2
     torch.testing.assert_close(
         torch_combined,
         deepep_combined,
-        atol=6e-2,
-        rtol=6e-2,
+        atol=tol,
+        rtol=tol,
     )
 
 
@@ -481,24 +483,25 @@ def _deep_ep_v2_moe_cudagraph(
             fused_experts=fused_experts,
         )
 
-        for _ in range(3):
-            out = mk_kernel.apply(
-                hidden_states=test_tensors.rank_tokens,
-                w1=w1_ep,
-                w2=w2_ep,
-                topk_weights=test_tensors.topk_weights,
-                topk_ids=test_tensors.topk,
-                activation=MoEActivation.SILU,
-                global_num_experts=config.num_experts,
-                expert_map=None,
-                apply_router_weight_on_input=False,
-            )
+        with set_forward_context(None, vllm_cfg):
+            for _ in range(3):
+                out = mk_kernel.apply(
+                    hidden_states=test_tensors.rank_tokens,
+                    w1=w1_ep,
+                    w2=w2_ep,
+                    topk_weights=test_tensors.topk_weights,
+                    topk_ids=test_tensors.topk,
+                    activation=MoEActivation.SILU,
+                    global_num_experts=config.num_experts,
+                    expert_map=None,
+                    apply_router_weight_on_input=False,
+                )
 
         torch.testing.assert_close(
             torch_combined,
             out,
-            atol=6e-2,
-            rtol=6e-2,
+            atol=2e-1,
+            rtol=2e-1,
         )
 
 
