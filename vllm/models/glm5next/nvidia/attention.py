@@ -271,6 +271,20 @@ class Indexer(nn.Module):
         # F.linear(x, gate) = x @ gate.T  with gate [head_dim, hidden_size].
         gate_score = F.linear(hidden_states, self.index_kpool_compress_gate)
 
+        # DeepGEMM's MQA-logits kernels (fp8_mqa_logits /
+        # fp8_fp4_paged_mqa_logits) require num_heads in {32, 64}; this
+        # checkpoint uses index_n_heads=16. Zero-pad q and the per-head
+        # weights: logits are a weights-weighted sum over heads, so
+        # zero-weight padded heads contribute exactly nothing.
+        if self.n_head < 32:
+            pad = 32 - self.n_head
+            q_fp8 = torch.cat(
+                [q_fp8, q_fp8.new_zeros(q_fp8.shape[0], pad, self.head_dim)], dim=1
+            )
+            weights = torch.cat(
+                [weights, weights.new_zeros(weights.shape[0], pad)], dim=1
+            )
+
         return self.indexer_op(
             hidden_states,
             q_fp8,

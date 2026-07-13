@@ -7361,31 +7361,6 @@ class GPUModelRunner(
             if kv_tensor.block_stride > 0:
                 for ln in kv_tensor.shared_by:
                     layer_packing[ln] = (kv_tensor.offset, kv_tensor.block_stride)
-        # Co-location (concat) groups: a UniformTypeKVCacheSpecs group pairing a
-        # compressed MLA (compress_ratio>1, e.g. the kpool indexer — which
-        # DeepGEMM forbids from virtual-splitting) with a plain MLA. Such a
-        # group is allocated as ONE shared tensor (concatenated: indexer region
-        # at offset 0 + MLA region at offset=indexer bytes) so the two layers
-        # share one block_table and a common physical page space. Map:
-        #   gid -> (group_page_bytes (SUM), indexer_region_bytes (MLA offset))
-        concat_info: dict[int, tuple[int, int]] = {}
-        for _gid, _g in enumerate(self.kv_cache_config.kv_cache_groups):
-            _spec = _g.kv_cache_spec
-            if isinstance(_spec, UniformTypeKVCacheSpecs):
-                _inner = _spec.kv_cache_specs.values()
-                _idx = [s for s in _inner if getattr(s, "compress_ratio", 1) > 1]
-                _plain = [s for s in _inner if getattr(s, "compress_ratio", 1) == 1]
-                if _idx and _plain:
-                    # Per-(indexer, MLA) pair tensors are now allocated (see
-                    # get_kv_cache_config_from_groups), so the page size used to
-                    # recover num_blocks from each raw tensor is the PAIR page
-                    # size (indexer + MLA region), not the group page size (which
-                    # sums over all pairs and would under-count num_blocks by the
-                    # pair count).
-                    concat_info[_gid] = (
-                        _idx[0].page_size_bytes + _plain[0].page_size_bytes,
-                        _idx[0].page_size_bytes,
-                    )
         for group in self._kv_cache_spec_attn_group_iterator():
             kv_cache_spec = group.kv_cache_spec
             attn_backend = group.backend
@@ -7398,16 +7373,7 @@ class GPUModelRunner(
                     continue
                 raw_tensor = kv_cache_raw_tensors[layer_name]
                 packing = layer_packing.get(layer_name)
-                _gid = group.kv_cache_group_id
-                _concat = _gid in concat_info
-                if _concat:
-                    # Shared (concat) tensor: num_blocks is over the GROUP page
-                    # (SUM of indexer+MLA region page sizes), identical for both
-                    # layers in the group.
-                    _sum_page_bytes = concat_info[_gid][0]
-                    assert raw_tensor.numel() % _sum_page_bytes == 0
-                    num_blocks = raw_tensor.numel() // _sum_page_bytes
-                elif packing is not None:
+                if packing is not None:
                     _, blk_stride = packing
                     num_blocks = raw_tensor.numel() // blk_stride
                 else:
@@ -7458,20 +7424,6 @@ class GPUModelRunner(
                         assert len(kv_cache_stride_order) == len(kv_cache_shape)
                     except (AttributeError, NotImplementedError):
                         kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
-                    raw_tensor = kv_cache_raw_tensors[layer_name]
-                    # Co-located (concat) layers view only their own region of
-                    # the shared tensor: indexer at offset 0, MLA at offset =
-                    # the indexer region bytes. _reshape_attention_kv_cache
-                    # applies storage_offset to the strided/contiguous view.
-                    _storage_offset = 0
-                    if _concat:
-                        _dtype_size = get_dtype_size(kv_cache_spec.dtype)
-                        _is_indexer = getattr(kv_cache_spec, "compress_ratio", 1) > 1
-                        _idx_page_bytes = concat_info[_gid][1]
-                        _off_bytes = (
-                            0 if _is_indexer else (num_blocks * _idx_page_bytes)
-                        )
-                        _storage_offset = _off_bytes // _dtype_size
                     kv_caches[layer_name] = _reshape_attention_kv_cache(
                         raw_tensor,
                         kv_cache_spec,
@@ -7479,7 +7431,6 @@ class GPUModelRunner(
                         kv_cache_stride_order,
                         kernel_num_blocks,
                         packing,
-                        storage_offset=_storage_offset,
                     )
 
                 elif isinstance(kv_cache_spec, MambaSpec):

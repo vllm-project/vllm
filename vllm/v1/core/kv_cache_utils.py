@@ -7,7 +7,7 @@ import hashlib
 import math
 import os
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
@@ -860,8 +860,7 @@ def check_enough_kv_cache_memory(
 
 
 def create_kv_cache_group_specs(
-    kv_cache_spec: Mapping[str, KVCacheSpec],
-    grouped_layer_names: list[list[str]],
+    kv_cache_spec: dict[str, KVCacheSpec], grouped_layer_names: list[list[str]]
 ) -> list[KVCacheGroupSpec]:
     """
     Create KVCacheGroupSpec object for each kv cache group layer.
@@ -921,22 +920,18 @@ def get_max_concurrency_for_kv_cache_config(
     """
     Get the maximum concurrency for the given KV cache configuration.
 
-    A request at max_model_len consumes whole blocks from each group's block
-    table — cdiv(per-request bytes, page bytes) of the group's spec — and all
-    groups draw those block ids from one shared pool, so the per-request
-    total is the sum over groups. The memory/page ratio is identical whether
-    a group carries an aggregated UniformTypeKVCacheSpecs (worker config) or
-    a representative per-layer spec (scheduler config), so both capacity
-    call sites agree.
+    Block ids are globally unique across groups (one BlockPool), so a
+    max-length request costs the sum over groups of that group's block
+    demand — layout-independent, each group divides by its own page size.
     """
-    max_memory_usage_per_request = _max_memory_usage_bytes_from_groups(
-        vllm_config, kv_cache_config.kv_cache_groups
+    num_blocks_per_request = sum(
+        cdiv(
+            group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
+            group.kv_cache_spec.page_size_bytes,
+        )
+        for group in kv_cache_config.kv_cache_groups
     )
-    memory_per_block = _pool_bytes_per_block(
-        vllm_config, kv_cache_config.kv_cache_groups
-    )
-    num_block_per_request = cdiv(max_memory_usage_per_request, memory_per_block)
-    max_concurrency = kv_cache_config.num_blocks / num_block_per_request
+    max_concurrency = kv_cache_config.num_blocks / num_blocks_per_request
     return max_concurrency
 
 
@@ -948,34 +943,6 @@ def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
     if vllm_config.cache_config.num_gpu_blocks_override is not None:
         num_blocks = vllm_config.cache_config.num_gpu_blocks_override
     return num_blocks
-
-
-def _group_bytes_per_block(group: KVCacheGroupSpec) -> int:
-    """Return bytes per block across all physical layers in a mixed group."""
-    if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-        return group.kv_cache_spec.page_size_bytes
-    return group.kv_cache_spec.page_size_bytes * len(group.layer_names)
-
-
-def _groups_have_mixed_page_sizes(
-    kv_cache_groups: list[KVCacheGroupSpec],
-) -> bool:
-    """Whether the groups must be accounted for independently.
-
-    True when a ``UniformTypeKVCacheSpecs`` group is present (its page size is a
-    sum over inner specs, so it never equals a sibling spec's per-layer page
-    size), or when sibling specs simply have differing page sizes. The latter
-    arises after ``generate_scheduler_kv_cache_config`` flattens a
-    ``UniformTypeKVCacheSpecs`` group into one plain spec: e.g. an MLA group
-    becomes a single ``MLAAttentionSpec`` whose page size differs from the
-    ``MambaSpec`` groups. In both cases the uniform-page-size general path does
-    not apply, so each group contributes independently.
-    """
-    if any(
-        isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs) for g in kv_cache_groups
-    ):
-        return True
-    return len({g.kv_cache_spec.page_size_bytes for g in kv_cache_groups}) > 1
 
 
 def _pool_bytes_per_block(
@@ -991,17 +958,16 @@ def _pool_bytes_per_block(
         kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
     ):
         return kv_cache_groups[0].kv_cache_spec.page_size_bytes
+    if (glm5 := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
+        # GLM-5-Next hybrid slot sharing: mamba layers co-own the MLA slot
+        # tensors, so a block costs one MLA page per slot plus the per-layer
+        # indexer pages.
+        _, _, mla_names, idx_names, mla_page, idx_page = glm5
+        return len(mla_names) * mla_page + len(idx_names) * idx_page
     if _use_packed_kv_cache_config(vllm_config, kv_cache_groups):
         # buckets = {page_size: [[layer_names], [layer_names], ...]}
         buckets = _bucket_layers_by_page_size(kv_cache_groups)
         return sum(ps * len(slots) for ps, slots in buckets.items())
-    elif _groups_have_mixed_page_sizes(kv_cache_groups):
-        # Mixed groups: UniformTypeKVCacheSpecs + other types (e.g. MambaSpec),
-        # or specs with differing page sizes (e.g. an MLA group flattened to a
-        # single MLAAttentionSpec next to MambaSpec groups after scheduler
-        # unwrap). Sum physical layer page sizes, matching the mixed allocator
-        # in get_kv_cache_config_from_groups.
-        return sum(_group_bytes_per_block(g) for g in kv_cache_groups)
     group_size = max(len(g.layer_names) for g in kv_cache_groups)
     page_size = get_uniform_page_size([g.kv_cache_spec for g in kv_cache_groups])
     return page_size * group_size
@@ -1361,6 +1327,152 @@ def _get_kv_cache_config_packed(
     return num_blocks, kv_cache_tensors
 
 
+def _pp_balanced_mamba_group_count(
+    vllm_config: VllmConfig,
+    mamba_layer_names: list[str],
+    mla_layer_names: list[str],
+) -> int | None:
+    """Mamba group count for `_get_kv_cache_groups_glm5_next`.
+
+    The minimum is ``ceil(num_mamba / num_mla)`` — each group costs one
+    block id per request. Under PP, projection filters each group to a
+    stage's local layers, and the slot layout needs every stage's largest
+    projected mamba group slice to fit the stage's MLA count (e.g. GLM-5
+    at PP=4's default [11,11,12,11] partition leaves stage 0 with 2 MLA
+    layers but a slice of 3 under 4 groups). The smallest satisfying count
+    is ``max over stages of ceil(stage_mamba / stage_mla)``. Returns None
+    when no count works (a stage has mamba layers but no MLA layer).
+    """
+    num_groups = cdiv(len(mamba_layer_names), len(mla_layer_names))
+    pp_size = vllm_config.parallel_config.pipeline_parallel_size
+    if pp_size == 1:
+        return num_groups
+
+    from vllm.distributed.utils import get_pp_indices
+    from vllm.model_executor.models.utils import extract_layer_index
+
+    total_layers = vllm_config.model_config.get_total_num_hidden_layers()
+    mamba_indices = [extract_layer_index(name) for name in mamba_layer_names]
+    mla_indices = [extract_layer_index(name) for name in mla_layer_names]
+    for rank in range(pp_size):
+        start, end = get_pp_indices(total_layers, rank, pp_size)
+        num_mamba = sum(start <= i < end for i in mamba_indices)
+        num_mla = sum(start <= i < end for i in mla_indices)
+        if not num_mamba:
+            continue
+        if not num_mla:
+            return None
+        # A stage's mamba layers are contiguous in round-robin order, so its
+        # largest slice under `count` groups is exactly cdiv(num_mamba, count),
+        # which fits num_mla slots iff count >= cdiv(num_mamba, num_mla).
+        num_groups = max(num_groups, cdiv(num_mamba, num_mla))
+    return num_groups
+
+
+def _get_kv_cache_groups_glm5_next(
+    vllm_config: VllmConfig,
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec] | None:
+    """Groups for GLM-5-Next-style hybrids: MLA(+kpool indexer) + mamba.
+
+    Mamba layers share the MLA layers' KV cache tensors. Indexer layers get
+    their own KV cache tensors as indexer blocks are small.
+    """
+    mamba_specs = {k: v for k, v in kv_cache_spec.items() if isinstance(v, MambaSpec)}
+    attn_specs = {
+        k: v for k, v in kv_cache_spec.items() if not isinstance(v, MambaSpec)
+    }
+    if not mamba_specs or not all(
+        type(s) is MLAAttentionSpec for s in attn_specs.values()
+    ):
+        return None
+    mla_specs = cast(dict[str, MLAAttentionSpec], attn_specs)
+    idx_pages = {s.page_size_bytes for s in mla_specs.values() if s.compress_ratio > 1}
+    if not idx_pages:
+        return None
+
+    assert all(s.page_size_padded is None for s in mla_specs.values())
+    assert len(idx_pages) == 1
+    mla_names = [n for n, s in mla_specs.items() if s.compress_ratio == 1]
+    mla_pages = {mla_specs[n].page_size_bytes for n in mla_names}
+    assert len(mla_pages) == 1
+    mla_page = mla_pages.pop()
+    uniform_spec = UniformTypeKVCacheSpecs.from_specs(attn_specs)
+    assert uniform_spec is not None
+
+    any_mamba = next(iter(mamba_specs.values()))
+    assert all(spec == any_mamba for spec in mamba_specs.values())
+    if any_mamba.real_page_size_bytes > mla_page:
+        raise ValueError(
+            f"the mamba state page ({any_mamba.real_page_size_bytes} bytes) "
+            f"does not fit the MLA page ({mla_page} bytes); increase tensor "
+            "parallelism or use a wider KV cache dtype"
+        )
+    padded_specs: dict[str, KVCacheSpec] = {
+        name: replace(any_mamba, page_size_padded=mla_page) for name in mamba_specs
+    }
+    num_groups = _pp_balanced_mamba_group_count(
+        vllm_config, list(mamba_specs), mla_names
+    )
+    if num_groups is None:
+        raise ValueError(
+            "a pipeline stage has mamba layers but no MLA layer to share "
+            "slots with; realign the stage boundaries (VLLM_PP_LAYER_PARTITION)"
+        )
+    mamba_grouped_names: list[list[str]] = [[] for _ in range(num_groups)]
+    for k, name in enumerate(mamba_specs):
+        mamba_grouped_names[k % num_groups].append(name)
+    return [
+        KVCacheGroupSpec(list(attn_specs), uniform_spec)
+    ] + create_kv_cache_group_specs(padded_specs, mamba_grouped_names)
+
+
+def _glm5_next_tensor_layout(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> (
+    tuple[KVCacheGroupSpec, list[KVCacheGroupSpec], list[str], list[str], int, int]
+    | None
+):
+    """Detect the `_get_kv_cache_groups_glm5_next` layout from the
+    (possibly PP-projected) groups, so tensor emission and the accounting
+    paths can never disagree.
+
+    Returns:
+      - (attn_group, mamba_groups, mla_names, idx_names, mla_page, idx_page)
+      - None if the group config is invalid
+    """
+    attn_groups = [
+        g
+        for g in kv_cache_groups
+        if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs)
+    ]
+    mamba_groups = [
+        g for g in kv_cache_groups if isinstance(g.kv_cache_spec, MambaSpec)
+    ]
+    if len(attn_groups) != 1 or not mamba_groups:
+        return None
+    if len(attn_groups) + len(mamba_groups) != len(kv_cache_groups):
+        return None
+    attn_group = attn_groups[0]
+    assert isinstance(attn_group.kv_cache_spec, UniformTypeKVCacheSpecs)
+    if not all(
+        type(s) is MLAAttentionSpec and s.page_size_padded is None
+        for s in attn_group.kv_cache_spec.kv_cache_specs.values()
+    ):
+        return None
+    inner = cast(dict[str, MLAAttentionSpec], attn_group.kv_cache_spec.kv_cache_specs)
+    mla_names = [n for n in attn_group.layer_names if inner[n].compress_ratio == 1]
+    idx_names = [n for n in attn_group.layer_names if inner[n].compress_ratio > 1]
+    mla_pages = {inner[n].page_size_bytes for n in mla_names}
+    idx_pages = {inner[n].page_size_bytes for n in idx_names}
+    if len(mla_pages) != 1 or len(idx_pages) != 1:
+        return None
+    mla_page = mla_pages.pop()
+    if any(g.kv_cache_spec.page_size_bytes != mla_page for g in mamba_groups):
+        return None
+    return (attn_group, mamba_groups, mla_names, idx_names, mla_page, idx_pages.pop())
+
+
 def get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
@@ -1405,102 +1517,33 @@ def get_kv_cache_config_from_groups(
             )
             for layer_name in kv_cache_groups[0].layer_names
         ]
+    elif (glm5n := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
+        # GLM-5-Next hybrid slot sharing: one tensor per MLA layer, co-owned
+        # by that MLA layer and one mamba layer from each mamba group; kpool
+        # indexer layers get plain per-layer tensors. Must precede the packed
+        # layout, which would break the MLA contiguous virtual split.
+        _, mamba_groups, mla_names, idx_names, mla_page, idx_page = glm5n
+        num_blocks = available_memory // (
+            len(mla_names) * mla_page + len(idx_names) * idx_page
+        )
+        num_blocks = may_override_num_blocks(vllm_config, num_blocks)
+        kv_cache_tensors = [
+            KVCacheTensor(
+                size=mla_page * num_blocks,
+                shared_by=[mla_name]
+                + [g.layer_names[i] for g in mamba_groups if i < len(g.layer_names)],
+            )
+            for i, mla_name in enumerate(mla_names)
+        ] + [
+            KVCacheTensor(size=idx_page * num_blocks, shared_by=[idx_name])
+            for idx_name in idx_names
+        ]
     elif _use_packed_kv_cache_config(vllm_config, kv_cache_groups):
         # DeepSeek V4 uses the packed layout by default. Other multi-group
         # layouts can opt in with --enable-cross-layers.
         num_blocks, kv_cache_tensors = _get_kv_cache_config_packed(
             vllm_config, kv_cache_groups, available_memory
         )
-    elif any(
-        isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-        for group in kv_cache_groups
-    ):
-        # Mixed groups: some UniformTypeKVCacheSpecs (e.g. MLA + Indexer),
-        # some other types (e.g. MambaSpec for linear attention).
-        # Each layer gets its own tensor allocation.
-        total_page_size = sum(
-            _group_bytes_per_block(group) for group in kv_cache_groups
-        )
-        num_blocks = available_memory // total_page_size
-        num_blocks = may_override_num_blocks(vllm_config, num_blocks)
-        kv_cache_tensors = []
-        for group in kv_cache_groups:
-            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-                # Detect a co-location group: a UniformType group pairing an
-                # MLAAttentionSpec with compress_ratio>1 (the kpool indexer,
-                # which DeepGEMM forbids from virtual-splitting) with a plain
-                # compress_ratio==1 MLA. These two must share ONE physical
-                # tensor (concatenated: indexer region at offset 0 + MLA region
-                # at offset=indexer bytes) and one block_table, so the indexer's
-                # shared 64-token block_table indexes a common page space.
-                inner_specs = group.kv_cache_spec.kv_cache_specs.values()
-                colocate = any(
-                    isinstance(s, MLAAttentionSpec) and s.compress_ratio > 1
-                    for s in inner_specs
-                ) and any(
-                    isinstance(s, MLAAttentionSpec) and s.compress_ratio == 1
-                    for s in inner_specs
-                )
-                if colocate:
-                    # One concat tensor PER (indexer, MLA) transformer-block pair
-                    # (indexer region at offset 0 + MLA region after it), NOT one
-                    # tensor shared by every layer in the group. The group holds
-                    # all 45 indexer + 45 MLA layers; a single shared tensor would
-                    # make every block write the *same* physical pages, so the 45
-                    # MLA layers clobber one another. Prefill masks this (each
-                    # layer reads slot S immediately after its own write, before
-                    # the next layer overwrites it), but decode reads the stale KV
-                    # left by whichever layer wrote slot S last in the prior pass,
-                    # corrupting attention. Per-pair tensors give the intended
-                    # within-pair co-location (indexer_i + mla_i share a tensor and
-                    # the group's block_table) while isolating different blocks,
-                    # exactly like standard N-layer MLA (N tensors, one shared
-                    # block_table). Total bytes are unchanged: the group page size
-                    # already sums over all pairs, so num_blocks was sized for it.
-                    inner = group.kv_cache_spec.kv_cache_specs
-                    idx_names = [
-                        n
-                        for n in group.layer_names
-                        if getattr(inner[n], "compress_ratio", 1) > 1
-                    ]
-                    mla_names = [
-                        n
-                        for n in group.layer_names
-                        if getattr(inner[n], "compress_ratio", 1) == 1
-                    ]
-                    assert len(idx_names) == len(mla_names) > 0, (
-                        "co-location requires equal indexer/MLA layer counts"
-                    )
-                    num_pairs = len(idx_names)
-                    pair_page_bytes = group.kv_cache_spec.page_size_bytes // num_pairs
-                    for idx_n, mla_n in zip(idx_names, mla_names):
-                        kv_cache_tensors.append(
-                            KVCacheTensor(
-                                size=pair_page_bytes * num_blocks,
-                                shared_by=[idx_n, mla_n],
-                            )
-                        )
-                else:
-                    for layer_name in group.layer_names:
-                        kv_cache_tensors.append(
-                            KVCacheTensor(
-                                size=(
-                                    group.kv_cache_spec.kv_cache_specs[
-                                        layer_name
-                                    ].page_size_bytes
-                                    * num_blocks
-                                ),
-                                shared_by=[layer_name],
-                            )
-                        )
-            else:
-                for layer_name in group.layer_names:
-                    kv_cache_tensors.append(
-                        KVCacheTensor(
-                            size=group.kv_cache_spec.page_size_bytes * num_blocks,
-                            shared_by=[layer_name],
-                        )
-                    )
     else:
         # General case:
         # We will have group_size memory pools, each is shared by one layer from
@@ -1910,69 +1953,36 @@ def get_kv_cache_groups(
         kv_cache_groups = _get_kv_cache_groups_uniform_groups(grouped_specs)
         _annotate_eagle_groups_deepseek_v4(vllm_config, kv_cache_spec, kv_cache_groups)
         return kv_cache_groups
+    elif glm5_groups := _get_kv_cache_groups_glm5_next(vllm_config, kv_cache_spec):
+        # GLM-5-Next case: one uniform MLA(+kpool indexer) attention group
+        # plus mamba groups whose layers share the MLA layers' slot tensors.
+        return glm5_groups
 
-    # Pull HiddenStateCacheSpec and MambaSpec layers out before the general
-    # multi-group path so they don't affect page-size unification or grouping.
-    # MambaSpec page sizes are based on fixed state tensor shapes and are not
-    # proportional to block_size, so they cannot be unified with attention
-    # specs by adjusting block_size.
+    # Pull HiddenStateCacheSpec layers out before the general multi-group
+    # path so they don't affect page-size unification or grouping.
     hidden_specs = {
         k: v for k, v in kv_cache_spec.items() if isinstance(v, HiddenStateCacheSpec)
     }
-    mamba_specs = {k: v for k, v in kv_cache_spec.items() if isinstance(v, MambaSpec)}
     filtered_spec = {
         k: v
         for k, v in kv_cache_spec.items()
-        if not isinstance(v, (HiddenStateCacheSpec, MambaSpec))
+        if not isinstance(v, HiddenStateCacheSpec)
     }
 
-    if not filtered_spec:
-        # All layers are MambaSpec / HiddenStateCacheSpec — no attention
-        # layers to group.
-        groups = []
-    elif uniform_spec := UniformTypeKVCacheSpecs.from_specs(filtered_spec):
-        # After removing MambaSpec, all remaining specs may be the same type
-        # (e.g. MLA + Indexer are both MLAAttentionSpec).  Use the
-        # uniform-type path which handles different page sizes within the
-        # same type — no block_size scaling needed.
-        groups = _get_kv_cache_groups_uniform_type(uniform_spec)
-    else:
-        # As KVCacheManager can only allocate memory of one size, we need to
-        # unify the page size of the layers.  For cases that cannot be unified,
-        # this function will raise an error.
-        filtered_spec = unify_kv_cache_spec_page_size(filtered_spec)
-        groups = _get_kv_cache_groups_uniform_page_size(filtered_spec)
+    # As KVCacheManager can only allocate memory of one size, we need to unify
+    # the page size of the layers. For cases cannot be unified, this function
+    # will raise an error.
+    filtered_spec = unify_kv_cache_spec_page_size(filtered_spec)
+    groups = _get_kv_cache_groups_uniform_page_size(filtered_spec)
 
     # Add hidden-state layers back with page aligned to the common page.
     if hidden_specs:
-        common_page = (
-            get_uniform_page_size([g.kv_cache_spec for g in groups]) if groups else 0
-        )
+        common_page = get_uniform_page_size([g.kv_cache_spec for g in groups])
         for name, spec in hidden_specs.items():
             per_token = spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
-            new_bs = max(common_page // per_token, 1) if common_page else 1
-            aligned = replace(
-                spec, block_size=new_bs, page_size_padded=common_page or None
-            )
+            new_bs = max(common_page // per_token, 1)
+            aligned = replace(spec, block_size=new_bs, page_size_padded=common_page)
             groups.append(KVCacheGroupSpec([name], aligned))
-
-    # Add mamba layers back as balanced groups. No page-size padding is
-    # needed because MambaSpec groups manage their own block tables
-    # independently from attention groups. Group by position within each
-    # consecutive run of mamba layers, so (M, M, M, A) * 11 + M yields
-    # three groups containing 12, 11, and 11 layers respectively.
-    if mamba_specs:
-        mamba_grouped_names: list[list[str]] = []
-        run_pos = 0
-        for name in kv_cache_spec:
-            if name not in mamba_specs:
-                run_pos = 0
-                continue
-            if run_pos == len(mamba_grouped_names):
-                mamba_grouped_names.append([])
-            mamba_grouped_names[run_pos].append(name)
-            run_pos += 1
-        groups.extend(create_kv_cache_group_specs(mamba_specs, mamba_grouped_names))
 
     return groups
 
@@ -2078,24 +2088,19 @@ def _max_memory_usage_bytes_from_groups(
             total_max_mem_usage_bytes += g_max_mem_usage_page_bytes
         return total_max_mem_usage_bytes
 
-    elif _groups_have_mixed_page_sizes(kv_cache_groups):
-        # Mixed groups: UniformTypeKVCacheSpecs + other types (e.g. MambaSpec),
-        # or specs with differing page sizes (e.g. an MLA group flattened to a
-        # single MLAAttentionSpec next to MambaSpec groups after the scheduler
-        # unwrap). Each group contributes independently.
-        total = 0
-        for group in kv_cache_groups:
-            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-                per_layer_specs = group.kv_cache_spec.kv_cache_specs
-                total += sum(
-                    spec.max_memory_usage_bytes(vllm_config)
-                    for spec in per_layer_specs.values()
-                )
-            else:
-                total += group.kv_cache_spec.max_memory_usage_bytes(vllm_config) * len(
-                    group.layer_names
-                )
-        return total
+    elif (glm5n := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
+        # GLM-5-Next hybrid slot sharing: every block id — attention- or
+        # mamba-owned — is charged the full per-block byte sum.
+        attn_group, mamba_groups, mla_names, idx_names, mla_page, idx_page = glm5n
+        uniform_spec = attn_group.kv_cache_spec
+        assert isinstance(uniform_spec, UniformTypeKVCacheSpecs)
+        blocks_needed = uniform_spec.max_memory_usage_pages(vllm_config)
+        for group in mamba_groups:
+            spec = group.kv_cache_spec
+            blocks_needed += cdiv(
+                spec.max_memory_usage_bytes(vllm_config), spec.page_size_bytes
+            )
+        return blocks_needed * (len(mla_names) * mla_page + len(idx_names) * idx_page)
 
     # General case: group_size pools, each shared by one layer per group
     # Memory = group_size * page_size * blocks_for_max_len

@@ -64,6 +64,32 @@ def in_wsl() -> bool:
     return "microsoft" in " ".join(platform.uname()).lower()
 
 
+def _indexer_aligned_block_size(
+    attn_block_size: int, index_kpool: int, mamba_page_size: int
+) -> int:
+    """Round a hybrid model's attention block size up to one the kpool
+    sparse indexer supports.
+
+    The indexer storage block (``block_size / index_kpool``) must be one of
+    DeepGEMM paged-MQA's supported sizes {32, 64}, i.e. ``block_size`` in
+    {512, 1024} for ``index_kpool=16`` (e.g. GLM-5-Next). Fails closed when
+    even the largest valid block cannot cover the mamba state page (larger
+    storage blocks are unverified).
+    """
+    valid_block_sizes = [index_kpool * 32, index_kpool * 64]
+    for candidate in valid_block_sizes:
+        if candidate >= attn_block_size:
+            return candidate
+    raise ValueError(
+        f"The mamba state page ({mamba_page_size} bytes) needs an attention "
+        f"block of {attn_block_size} tokens to fit inside the attention "
+        f"page, but the kpool sparse indexer only supports block sizes "
+        f"{valid_block_sizes} (storage block 32 or 64). Increase tensor "
+        f"parallelism to shard the mamba state or use a wider KV cache "
+        f"dtype to grow the attention page."
+    )
+
+
 class PlatformEnum(enum.Enum):
     """Enumeration of supported hardware platforms."""
 
@@ -803,6 +829,7 @@ class Platform:
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
+                cache_dtype_str=cache_config.cache_dtype,
                 kv_quant_mode=kv_quant_mode,
             ).page_size_bytes
         elif cache_config.cache_dtype.startswith("turboquant_"):
@@ -905,6 +932,11 @@ class Platform:
                 mamba_page_size,
                 kernel_block_alignment_size * attn_page_size_1_token,
             )
+            index_kpool = getattr(model_config.hf_text_config, "index_kpool", None)
+            if index_kpool and index_kpool > 1:
+                attn_block_size = _indexer_aligned_block_size(
+                    attn_block_size, index_kpool, mamba_page_size
+                )
 
         if cache_config.block_size < attn_block_size:
             cache_config.block_size = attn_block_size
