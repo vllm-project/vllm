@@ -30,6 +30,32 @@ write_env() {
   } >> "$GITHUB_ENV"
 }
 
+print_file_tail() {
+  local label=$1
+  local path=$2
+  local lines=${3:-120}
+
+  if [[ -f "$path" ]]; then
+    echo "---- ${label}: ${path} (last ${lines} lines) ----" >&2
+    tail -n "$lines" "$path" >&2
+    echo "---- end ${label} ----" >&2
+  else
+    echo "---- ${label}: ${path} not found ----" >&2
+  fi
+}
+
+print_multi_scenario_summary() {
+  local summary_file=$1
+
+  echo "---- multi-scenario benchmark summary ----" >&2
+  if command -v column >/dev/null 2>&1; then
+    column -t -s $'\t' "$summary_file" >&2 || cat "$summary_file" >&2
+  else
+    cat "$summary_file" >&2
+  fi
+  echo "---- end multi-scenario benchmark summary ----" >&2
+}
+
 scenarios=()
 SCENARIOS_RAW=${SCENARIOS_RAW//$'\n'/,}
 IFS=',' read -r -a raw_scenarios <<< "$SCENARIOS_RAW"
@@ -61,25 +87,29 @@ for scenario in "${scenarios[@]}"; do
   scenario_result_root="${RESULT_ROOT_BASE}/${slug}"
   scenario_submission_dir="${scenario_result_root}/submissions/${scenario_run_id}"
   scenario_raw_result="${scenario_result_root}/raw_benchmark.json"
+  scenario_log="${scenario_result_root}/scenario.log"
+  mkdir -p "$scenario_result_root"
 
   echo "::group::Ascend benchmark scenario: ${scenario}"
   set +e
-  BENCH_SCENARIO="$scenario" \
-    BENCH_SCENARIOS="$scenario" \
-    BENCH_SCENARIO_COUNT=1 \
-    RUN_ID="$scenario_run_id" \
-    RESULT_ROOT="$scenario_result_root" \
-    RAW_RESULT_FILE="$scenario_raw_result" \
-    SUBMISSIONS_ROOT="${scenario_result_root}/submissions" \
-    SUBMISSION_DIR="$scenario_submission_dir" \
-    AGGREGATE_OUTPUT_DIR="${scenario_result_root}/leaderboard-data" \
-    SERVER_LOG="${scenario_result_root}/server.log" \
-    RUNNER_PREFLIGHT_FAILURE_FILE="${scenario_result_root}/runner_preflight_failure.txt" \
-    DIAGNOSTICS_DIR="${scenario_result_root}/diagnostics" \
-    NODE_ENV_FAILURE_FILE="${scenario_result_root}/node_env_failure.txt" \
-    SAME_SPEC_SPEC_FILE="" \
-    bash .github/workflows/scripts/run_ascend_benchmark_ci.sh
-  scenario_exit_code=$?
+  (
+    BENCH_SCENARIO="$scenario" \
+      BENCH_SCENARIOS="$scenario" \
+      BENCH_SCENARIO_COUNT=1 \
+      RUN_ID="$scenario_run_id" \
+      RESULT_ROOT="$scenario_result_root" \
+      RAW_RESULT_FILE="$scenario_raw_result" \
+      SUBMISSIONS_ROOT="${scenario_result_root}/submissions" \
+      SUBMISSION_DIR="$scenario_submission_dir" \
+      AGGREGATE_OUTPUT_DIR="${scenario_result_root}/leaderboard-data" \
+      SERVER_LOG="${scenario_result_root}/server.log" \
+      RUNNER_PREFLIGHT_FAILURE_FILE="${scenario_result_root}/runner_preflight_failure.txt" \
+      DIAGNOSTICS_DIR="${scenario_result_root}/diagnostics" \
+      NODE_ENV_FAILURE_FILE="${scenario_result_root}/node_env_failure.txt" \
+      SAME_SPEC_SPEC_FILE="" \
+      bash .github/workflows/scripts/run_ascend_benchmark_ci.sh
+  ) 2>&1 | tee "$scenario_log"
+  scenario_exit_code=${PIPESTATUS[0]}
   set -e
   echo "::endgroup::"
 
@@ -98,4 +128,21 @@ done
 
 write_env BENCHMARK_MULTI_SCENARIO_SUMMARY_FILE "$summary_file"
 echo "Multi-scenario benchmark summary: $summary_file"
+print_multi_scenario_summary "$summary_file"
+
+if [[ "$overall_exit_code" -ne 0 ]]; then
+  while IFS=$'\t' read -r scenario scenario_run_id scenario_result_root raw_result submission_dir exit_code; do
+    if [[ "$scenario" == "scenario" || -z "$scenario" || "$exit_code" == "0" ]]; then
+      continue
+    fi
+
+    echo "::group::Failed Ascend benchmark scenario diagnostics: ${scenario}"
+    print_file_tail "scenario output" "${scenario_result_root}/scenario.log" 160
+    print_file_tail "vLLM server log" "${scenario_result_root}/server.log" 160
+    print_file_tail "runner preflight failure" "${scenario_result_root}/runner_preflight_failure.txt" 80
+    print_file_tail "node environment failure" "${scenario_result_root}/node_env_failure.txt" 80
+    echo "::endgroup::"
+  done < "$summary_file"
+fi
+
 exit "$overall_exit_code"
