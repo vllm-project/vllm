@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
 use crate::tool::{Result, StructuralTagModel, Tool, ToolParser, ToolParserOutput};
 
@@ -280,7 +283,7 @@ mod tests {
             .unwrap_err();
 
         expect![[r#"
-            tool parser parsing failed: invalid Qwen XML
+            tool parser parsing failed: near "{\"arguments\":{},\"name\":\"get_weather\"}\n</tool_call>": invalid Qwen XML
             expected `name`"#]]
         .assert_eq(&error.to_report_string());
     }

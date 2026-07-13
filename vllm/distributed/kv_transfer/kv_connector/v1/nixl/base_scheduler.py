@@ -185,6 +185,7 @@ class NixlBaseConnectorScheduler:
         host = params.get("remote_host")
         port = params.get("remote_port")
         tp_size = params.get("tp_size")
+        pp_size = params.get("pp_size", 1)
         if (
             remote_engine_id is None
             or remote_request_id is None
@@ -199,6 +200,7 @@ class NixlBaseConnectorScheduler:
                 host=host,
                 port=port,
                 tp_size=tp_size,
+                pp_size=pp_size,
             )
         self._heartbeat_by_engine[remote_engine_id].req_ids.add(remote_request_id)
         self._heartbeat_req_engine[request.request_id] = (
@@ -244,7 +246,7 @@ class NixlBaseConnectorScheduler:
         )
 
     def set_xfer_handshake_metadata(
-        self, metadata: dict[int, KVConnectorHandshakeMetadata]
+        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
     ) -> None:
         """
         Set the KV connector handshake metadata for this connector.
@@ -252,19 +254,20 @@ class NixlBaseConnectorScheduler:
         Args:
             metadata (dict): the handshake metadata to set.
         """
-        encoded_data: dict[int, bytes] = {}
+        encoded_data: dict[tuple[int, int], bytes] = {}
         encoder = msgspec.msgpack.Encoder()
-        for tp_rank, rank_metadata in metadata.items():
+        for (pp_rank, tp_rank), rank_metadata in metadata.items():
             if not isinstance(rank_metadata, NixlHandshakePayload):
                 raise ValueError(
                     "NixlConnectorScheduler expects NixlHandshakePayload for "
                     "handshake metadata."
                 )
-            encoded_data[tp_rank] = encoder.encode(rank_metadata)
+            encoded_data[(pp_rank, tp_rank)] = encoder.encode(rank_metadata)
             logger.debug(
-                "Tp rank %d: encoded NixlHandshakePayload size: %s bytes",
+                "PP rank %d, TP rank %d: encoded NixlHandshakePayload size: %s bytes",
+                pp_rank,
                 tp_rank,
-                str(len(encoded_data[tp_rank])),
+                str(len(encoded_data[(pp_rank, tp_rank)])),
             )
 
         # Only start the listener when we have metadata to serve.
@@ -287,7 +290,7 @@ class NixlBaseConnectorScheduler:
 
     @staticmethod
     def _nixl_handshake_listener(
-        encoded_data: dict[int, Any],
+        encoded_data: dict[tuple[int, int], Any],
         ready_event: threading.Event,
         stop_event: threading.Event,
         host: str,
@@ -310,17 +313,20 @@ class NixlBaseConnectorScheduler:
                     if stop_event.is_set():
                         break
                     continue
-                # Decode the message which contains (GET_META_MSG, rank)
-                msg, target_tp_rank = msgspec.msgpack.decode(msg)
+                # Decode (GET_META_MSG, pp_rank, tp_rank).
+                msg, target_pp_rank, target_tp_rank = msgspec.msgpack.decode(msg)
                 logger.debug(
-                    "Received message for tp rank %s",
+                    "Received message for pp rank %s, tp rank %s",
+                    target_pp_rank,
                     target_tp_rank,
                 )
                 if msg != GET_META_MSG:
                     logger.warning("Connection listener got unexpected message %s", msg)
-                sock.send_multipart((identity, b"", encoded_data[target_tp_rank]))
+                sock.send_multipart(
+                    (identity, b"", encoded_data[(target_pp_rank, target_tp_rank)])
+                )
 
-    def _mamba_prefill_token_count(self, num_prompt_tokens: int) -> int:
+    def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. Returns N-1 for Mamba models since the decoder
         always recomputes the last token and must start from h(N-1)."""
         if self._has_mamba and num_prompt_tokens > 1:

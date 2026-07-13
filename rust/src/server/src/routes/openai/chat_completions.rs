@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 pub(crate) mod convert;
 mod types;
 mod validate;
@@ -21,7 +24,7 @@ use vllm_chat::{
     AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatEventStream, ChatEventStreamTrait,
     CollectedAssistantMessage, FinishReason,
 };
-use vllm_engine_core_client::protocol::StopReason;
+use vllm_engine_core_client::protocol::output::StopReason;
 
 use self::convert::{ResponseOptions, prepare_chat_request};
 use crate::config::ApiServerOptions;
@@ -144,6 +147,7 @@ async fn collect_chat_completion(
         usage,
         finish_reason,
         kv_transfer_params,
+        ec_transfer_params,
     } = collected;
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let saw_tool_calls = message.tool_calls().next().is_some();
@@ -211,7 +215,7 @@ async fn collect_chat_completion(
                     Some(prefix) => Some(format!("{prefix}{}", message.text())),
                     None => Some(message.text()).filter(|t| !t.is_empty()),
                 },
-                tool_calls: Some(tool_calls).filter(|calls| !calls.is_empty()),
+                tool_calls,
                 reasoning: if include_reasoning { reasoning } else { None },
             },
             logprobs,
@@ -224,6 +228,7 @@ async fn collect_chat_completion(
         prompt_logprobs,
         prompt_token_ids: return_token_ids.then(|| prompt_token_ids.to_vec()),
         kv_transfer_params,
+        ec_transfer_params,
     })
 }
 
@@ -805,7 +810,7 @@ fn chat_finish_reason_to_openai(
         FinishReason::Stop(_) => Ok("stop"),
         FinishReason::Length => Ok("length"),
         FinishReason::Abort => Ok("abort"),
-        FinishReason::Repetition => Ok("stop"),
+        FinishReason::Repetition(_) => Ok("repetition"),
         FinishReason::Error => {
             bail_server_error!("Internal server error");
         }
@@ -825,7 +830,7 @@ mod tests {
     use vllm_chat::{
         AssistantBlockKind, AssistantContentBlock, AssistantToolCall, ChatEvent, FinishReason,
     };
-    use vllm_engine_core_client::protocol::StopReason;
+    use vllm_engine_core_client::protocol::output::StopReason;
     use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
 
     use super::{
@@ -951,6 +956,7 @@ mod tests {
                 },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 
@@ -1031,6 +1037,7 @@ mod tests {
                 },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 
@@ -1086,6 +1093,7 @@ mod tests {
                 },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 
@@ -1167,6 +1175,7 @@ mod tests {
                 },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 
@@ -1300,6 +1309,7 @@ mod tests {
                 },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 
@@ -1381,6 +1391,7 @@ mod tests {
                 },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 

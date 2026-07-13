@@ -120,6 +120,14 @@ at::Tensor fused_sigmoid_gating_delta_rule_update_cpu(
     bool use_qk_l2norm_in_kernel, double softplus_beta = 1.0,
     double softplus_threshold = 20.0);
 
+at::Tensor fused_sigmoid_gating_delta_rule_update_spec_cpu(
+    const at::Tensor& A_log, const at::Tensor& dt_bias, const at::Tensor& q,
+    const at::Tensor& k, const at::Tensor& v, const at::Tensor& a,
+    const at::Tensor& b, at::Tensor& initial_state_source,
+    const at::Tensor& spec_state_indices, const at::Tensor& num_accepted_tokens,
+    const at::Tensor& cu_seqlens, bool use_qk_l2norm_in_kernel,
+    double softplus_beta = 1.0, double softplus_threshold = 20.0);
+
 std::tuple<at::Tensor, at::Tensor> fused_gdn_gating_cpu(
     const at::Tensor& A_log, const at::Tensor& a, const at::Tensor& b,
     const at::Tensor& dt_bias);
@@ -278,7 +286,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "dynamic_4bit_int_moe("
       "Tensor x, Tensor topk_ids, Tensor topk_weights,"
-      "Tensor w13_packed, Tensor w2_packed, int H, int I, int I2,"
+      "Tensor w13_packed, Tensor w2_packed,"
+      "int hidden_size, int intermediate_size,"
       "int group_size, bool apply_router_weight_on_input, int activation_kind"
       ") -> Tensor");
 
@@ -297,6 +306,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Activation function used in GeGLU with `tanh` approximation.
   ops.def("gelu_tanh_and_mul(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_tanh_and_mul", torch::kCPU, &gelu_tanh_and_mul);
+
+  // GELU tanh implementation.
+  ops.def("gelu_tanh(Tensor! out, Tensor input) -> ()");
+  ops.impl("gelu_tanh", torch::kCPU, &gelu_tanh);
 
   // GELU implementation used in GPT-2.
   ops.def("gelu_new(Tensor! out, Tensor input) -> ()");
@@ -503,6 +516,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "softplus_threshold=20.0) -> Tensor");
   ops.impl("fused_sigmoid_gating_delta_rule_update_cpu", torch::kCPU,
            &fused_sigmoid_gating_delta_rule_update_cpu);
+  ops.def(
+      "fused_sigmoid_gating_delta_rule_update_spec_cpu(Tensor A_log, Tensor "
+      "dt_bias, Tensor q, Tensor k, Tensor v, Tensor a, Tensor b, "
+      "Tensor(a!) initial_state_source, Tensor spec_state_indices, "
+      "Tensor num_accepted_tokens, Tensor cu_seqlens, bool "
+      "use_qk_l2norm_in_kernel, float softplus_beta=1.0, float "
+      "softplus_threshold=20.0) -> Tensor");
+  ops.impl("fused_sigmoid_gating_delta_rule_update_spec_cpu", torch::kCPU,
+           &fused_sigmoid_gating_delta_rule_update_spec_cpu);
   ops.def(
       "fused_gdn_gating_cpu(Tensor A_log, Tensor a, Tensor b, Tensor dt_bias) "
       "-> (Tensor, Tensor)");

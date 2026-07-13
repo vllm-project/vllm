@@ -21,7 +21,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheTensor,
 )
-from vllm.v1.kv_offload.base import OffloadingSpec
+from vllm.v1.kv_offload.base import OffloadingHistogramMetadata, OffloadingSpec
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
@@ -248,8 +248,8 @@ def test_duplicate_registration_raises():
 # ---------------------------------------------------------------------------
 
 
-def test_build_metric_definitions_empty_below_threshold():
-    """store_threshold < 2 → only base metric (no stores_skipped)."""
+def test_build_metric_definitions_below_threshold():
+    """store_threshold < 2 keeps stores_skipped disabled."""
     from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
 
     config = _make_vllm_config(store_threshold=1)
@@ -258,6 +258,32 @@ def test_build_metric_definitions_empty_below_threshold():
         config.kv_transfer_config.kv_connector_extra_config
     )
     assert CPUOffloadingMetrics.STORES_SKIPPED not in metrics
+    assert CPUOffloadingMetrics.CPU_ALLOCATION_SIZE in metrics
+
+
+def test_build_metric_definitions_allocation_size_histogram():
+    """CPU allocation size is always reported as a histogram."""
+    from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
+
+    config = _make_vllm_config(store_threshold=0)
+    spec_cls = OffloadingSpecFactory.get_spec_cls(config)
+    metrics = spec_cls.build_metric_definitions(
+        config.kv_transfer_config.kv_connector_extra_config
+    )
+    metadata = metrics[CPUOffloadingMetrics.CPU_ALLOCATION_SIZE]
+    assert isinstance(metadata, OffloadingHistogramMetadata)
+    assert metadata.buckets == (
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536,
+        262144,
+    )
 
 
 def test_build_metric_definitions_returns_counter_at_threshold():
