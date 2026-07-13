@@ -75,11 +75,12 @@ class ClientRole:
         # (req_id, h) is in _unsent_lookups_by_req[req_id] from register_lookup
         # until the next flush_pending_lookups, which drains and clears it.
         self._unsent_lookups_by_req: dict[str, list[bytes]] = {}
-        # Tracks kv_request_ids we have already emitted a LookupMsg for,
-        # to enforce the at-most-one-LookupMsg-per-request invariant.
-        # Cleared on cancel_lookups / close so an id that is later
-        # cancelled and re-used (if that ever happens) is not falsely
-        # flagged.
+        # Tracks kv_request_ids we have emitted at least one LookupMsg
+        # for. A request's block set may be discovered across several
+        # scheduler steps, so more than one LookupMsg can go out per id;
+        # this only records that the peer has opened lookup state for the
+        # id, which cancel_lookups reads to decide whether a terminal
+        # empty FetchMsg is owed. Cleared on cancel_lookups / close.
         self._flushed_req_ids: set[str] = set()
         # Tracks kv_request_ids we have already emitted a FetchMsg for.
         # cancel_lookups uses this to decide whether it must send a
@@ -219,24 +220,27 @@ class ClientRole:
         return None
 
     def flush_pending_lookups(self) -> None:
-        """Send one LookupMsg per kv_request_id covering all unsent entries.
+        """Send a LookupMsg for each kv_request_id with unsent entries.
 
         Called once per scheduler step from the manager's
-        ``on_schedule_end()``. Send-gating is handled by the injected
-        ``_send`` callback (queues until ConnectAckMsg if needed).
+        ``on_schedule_end()``. A request's block set may be discovered
+        across several scheduler steps, so more than one LookupMsg can
+        go out per kv_request_id — one per step that registered new
+        hashes. register_lookup() de-dups in-flight and already-resolved
+        (req_id, hash) pairs, so each LookupMsg carries only the hashes
+        first probed in that step. The peer's lookup phase for the id is
+        still closed by exactly one FetchMsg, which the client contract
+        guarantees is sent after every lookup for the id has resolved
+        (see request_blocks / cancel_lookups). Send-gating is handled by
+        the injected ``_send`` callback (queues until ConnectAckMsg if
+        needed).
         """
         if not self._unsent_lookups_by_req:
             return
         for req_id, hashes in self._unsent_lookups_by_req.items():
-            # At most one LookupMsg per kv_request_id per session:
-            # all block lookups for a request are registered in a
-            # single scheduler step and flushed together here.
-            # While in-flight, register_lookup() for the same
-            # (req_id, hash) is a no-op, so no new unsent entries
-            # can accumulate for a req_id after its first flush.
-            assert req_id not in self._flushed_req_ids, (
-                f"LookupMsg already sent for kv_request_id={req_id}"
-            )
+            # Record that the peer now holds lookup state for this id so
+            # cancel_lookups knows a terminal empty FetchMsg may be owed;
+            # idempotent across the request's multiple LookupMsgs.
             self._flushed_req_ids.add(req_id)
             logger.debug(
                 "P2P LOOKUP client %s: SEND LookupMsg kv_request_id=%s hashes=%d",

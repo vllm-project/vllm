@@ -566,7 +566,7 @@ class TestLookupFlow:
         # Entries are gone — a fresh register starts a new pending entry.
         assert session.register_lookup("req-1", b"hA") is None
 
-    def test_one_lookup_msg_per_kv_request_id(self):
+    def test_separate_lookup_msg_per_kv_request_id(self):
         """Hashes for different kv_request_ids flush as separate LookupMsgs."""
         session, conn, _ = _make_session()
         _activate(session, conn)
@@ -582,6 +582,35 @@ class TestLookupFlow:
         by_req = {m[LookupMsg.KV_REQUEST_ID]: m[LookupMsg.BLOCK_HASHES] for m in sent}
         assert sorted(by_req["req-A"]) == [b"h1", b"h3"]
         assert by_req["req-B"] == [b"h2"]
+
+    def test_multiple_lookup_msgs_across_steps(self):
+        """A request's block set may be discovered across scheduler steps:
+        each step that registers new hashes flushes its own LookupMsg for
+        the same kv_request_id, carrying only the newly-probed hashes."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        # Step 1: probe hA, hB.
+        session.register_lookup("req-1", b"hA")
+        session.register_lookup("req-1", b"hB")
+        sent_before = len(conn._sent)
+        session.flush_pending_lookups()
+        first = [m for m in conn._sent[sent_before:] if m[TYPE_KEY] == LookupMsg.TYPE]
+        assert len(first) == 1
+        assert first[0][LookupMsg.KV_REQUEST_ID] == "req-1"
+        assert sorted(first[0][LookupMsg.BLOCK_HASHES]) == [b"hA", b"hB"]
+
+        # Step 2: a new hash is discovered for the same request. The
+        # in-flight hashes from step 1 are not re-sent; a second LookupMsg
+        # goes out carrying only the newly-probed hash.
+        assert session.register_lookup("req-1", b"hA") is None  # in-flight no-op
+        session.register_lookup("req-1", b"hC")
+        sent_before = len(conn._sent)
+        session.flush_pending_lookups()
+        second = [m for m in conn._sent[sent_before:] if m[TYPE_KEY] == LookupMsg.TYPE]
+        assert len(second) == 1
+        assert second[0][LookupMsg.KV_REQUEST_ID] == "req-1"
+        assert second[0][LookupMsg.BLOCK_HASHES] == [b"hC"]
 
     def test_split_response_resolves_across_messages(self):
         """Producer may answer one LookupMsg's hashes across multiple
