@@ -33,6 +33,13 @@ def should_ignore_layer(
     if layer_name is None:
         return False
 
+    # MoE layers are currently all-or-nothing: if any child is ignored,
+    # the parent layer must be ignored as well. For example, the
+    # amd/GLM-5.2-MXFP4 config ignores children like
+    # model.layers.78.mlp.experts.*.down_proj, while the layer checked
+    # here is the parent model.layers.N.mlp.experts.
+    # See:
+    # https://huggingface.co/amd/GLM-5.2-MXFP4/blob/main/config.json#L793-L795
     if check_children and any(
         target == layer_name or target.startswith(layer_name + ".")
         for target in ignore
