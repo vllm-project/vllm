@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Adapts decoded text updates into parsed assistant deltas.
 //!
 //! This stage sits between low-level token decoding and final block assembly.
