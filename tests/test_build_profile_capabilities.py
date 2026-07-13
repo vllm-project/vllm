@@ -13,6 +13,7 @@ from vllm.build_profile import (
     load_build_profile_metadata,
     validate_build_profile_capabilities,
 )
+from vllm.config import VllmConfig
 
 
 def make_config(
@@ -191,12 +192,25 @@ def test_full_profile_adds_no_rejection() -> None:
     )
 
 
-def test_vllm_config_validates_profile_before_model_specific_imports() -> None:
-    config_source = (
-        Path(__file__).parents[1] / "vllm" / "config" / "vllm.py"
-    ).read_text()
-    post_init = config_source[config_source.index("    def __post_init__(self):") :]
+def test_vllm_config_validates_profile_before_model_specific_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = object.__new__(VllmConfig)
+    config.performance_mode = "balanced"
 
-    validation_index = post_init.index("validate_build_profile_capabilities(self)")
-    verification_index = post_init.index("self.try_verify_and_update_config()")
-    assert validation_index < verification_index
+    def reject_profile(_config: VllmConfig) -> None:
+        raise ValueError("profile rejected")
+
+    monkeypatch.setattr(
+        "vllm.build_profile.validate_build_profile_capabilities", reject_profile
+    )
+    monkeypatch.setattr(
+        VllmConfig,
+        "try_verify_and_update_config",
+        lambda _config: pytest.fail(
+            "model verification ran before profile validation"
+        ),
+    )
+
+    with pytest.raises(ValueError, match="profile rejected"):
+        config.__post_init__()
