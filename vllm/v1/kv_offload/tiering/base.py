@@ -34,7 +34,7 @@ LOOKUP_SCOPE_KEY = "lookup_scope"
 class LookupScope(Enum):
     """Controls which tiers are queried during KV cache lookup."""
 
-    PRIMARY = "primary"
+    CPU = "cpu"
     LOCAL = "local"  # TODO: not yet implemented — behaves as ALL
     ALL = "all"
 
