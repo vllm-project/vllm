@@ -9,6 +9,8 @@ from vllm.config.utils import config
 @config
 class EncoderCacheManagerConfig:
     encoder_cache_manager_cls: str | None = None
+    """The qualified class name of the custom encoder cache manager."""
+
 
 class EncoderCacheManagerMetadata(ABC):  # noqa: B024
     """

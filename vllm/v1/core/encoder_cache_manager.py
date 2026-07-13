@@ -269,6 +269,7 @@ class EncoderCacheManager:
     def get_manager_metadata(self) -> EncoderCacheManagerMetadata | None:
         return None
 
+
 def compute_mm_encoder_budget(
     scheduler_config: "SchedulerConfig",
     mm_max_toks_per_item: Mapping[str, int],
