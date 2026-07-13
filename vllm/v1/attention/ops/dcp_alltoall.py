@@ -25,11 +25,15 @@ from typing import TYPE_CHECKING
 import torch
 import torch.distributed as dist
 
+from vllm.config import get_current_vllm_config_or_none
+from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
     from vllm.v1.attention.ops.common import CPTritonContext
+
+logger = init_logger(__name__)
 
 
 def _lse_weighted_combine(
@@ -108,31 +112,199 @@ def _dcp_a2a_lse_pack_dim(output_dtype: torch.dtype) -> int:
     raise ValueError(f"Cannot pack fp32 LSE into output dtype {output_dtype}.")
 
 
+_dcp_a2a_buffer_cache: dict[
+    tuple[torch.device, torch.dtype],
+    tuple[torch.Tensor, torch.Tensor],
+] = {}
+_dcp_a2a_fi_send_buffer_cache: dict[
+    tuple[torch.device, torch.dtype],
+    tuple[torch.Tensor, torch.Tensor],
+] = {}
+_dcp_a2a_fi_workspace_cache: dict[tuple[int, torch.device], torch.Tensor] = {}
+_flashinfer_dcp_a2a_supported: bool | None = None
+
+
+def _flashinfer_dcp_a2a_available() -> bool:
+    global _flashinfer_dcp_a2a_supported
+    if _flashinfer_dcp_a2a_supported is None:
+        try:
+            import flashinfer.comm as flashinfer_comm
+
+            _flashinfer_dcp_a2a_supported = hasattr(
+                flashinfer_comm, "decode_cp_a2a_alltoall"
+            )
+        except ImportError:
+            _flashinfer_dcp_a2a_supported = False
+    return _flashinfer_dcp_a2a_supported
+
+
+_dcp_a2a_fi_workspace_memory_cache: dict[tuple[int, torch.device], object] = {}
+
+
 def _dcp_a2a_send_recv_buffers(
     shape: tuple[int, ...],
     device: torch.device,
     dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    # Don't use the shared WorkspaceManager here. A FULL cudagraph bakes in the
-    # buffer address at capture, but the workspace is growable and sized only to
-    # the largest *captured* batch (the cudagraph capture cap). Any eager a2a
-    # with a bigger batch regrows it, freeing that address and poisoning every
-    # captured graph -> illegal memory access on replay. This bites the very
-    # first request: the post-capture warmup runs an eager decode at
-    # max_num_seqs (> the cap), so the graphs are already dangling before the
-    # server is ready. torch.empty buffers instead live in the graph's private
-    # pool and stay valid for its lifetime (as _dcp_a2a_unpack_combine and the
-    # AG+RS combine path already rely on).
+    # FULL cudagraph replay needs stable addresses, while the first eager
+    # prefill/decode warmup can use many more tokens than the captured decode
+    # graph. Allocate flat max-token buffers once so memory profiling accounts
+    # for the largest configured A2A payload and graph addresses stay stable.
+    requested_numel = 1
+    for dim in shape:
+        requested_numel *= dim
+
+    alloc_shape = list(shape)
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is not None and len(alloc_shape) >= 2:
+        alloc_shape[1] = max(
+            alloc_shape[1],
+            int(vllm_config.scheduler_config.max_num_batched_tokens),
+        )
+
+    alloc_numel = 1
+    for dim in alloc_shape:
+        alloc_numel *= dim
+
+    cache_key = (device, dtype)
+    buffers = _dcp_a2a_buffer_cache.get(cache_key)
+    if buffers is None or buffers[0].numel() < alloc_numel:
+        buffers = (
+            torch.empty(alloc_numel, device=device, dtype=dtype),
+            torch.empty(alloc_numel, device=device, dtype=dtype),
+        )
+        _dcp_a2a_buffer_cache[cache_key] = buffers
+
     return (
-        torch.empty(shape, device=device, dtype=dtype),
-        torch.empty(shape, device=device, dtype=dtype),
+        buffers[0][:requested_numel].view(shape),
+        buffers[1][:requested_numel].view(shape),
     )
+
+
+def _dcp_a2a_fi_send_buffers(
+    partial_o_shape: tuple[int, ...],
+    softmax_stats_shape: tuple[int, ...],
+    device: torch.device,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    alloc_partial_o_shape = list(partial_o_shape)
+    alloc_softmax_stats_shape = list(softmax_stats_shape)
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is not None and len(alloc_partial_o_shape) >= 1:
+        max_tokens = int(vllm_config.scheduler_config.max_num_batched_tokens)
+        alloc_partial_o_shape[0] = max(alloc_partial_o_shape[0], max_tokens)
+        alloc_softmax_stats_shape[0] = max(alloc_softmax_stats_shape[0], max_tokens)
+
+    requested_partial_o_numel = 1
+    for dim in partial_o_shape:
+        requested_partial_o_numel *= dim
+    requested_softmax_stats_numel = 1
+    for dim in softmax_stats_shape:
+        requested_softmax_stats_numel *= dim
+
+    alloc_partial_o_numel = 1
+    for dim in alloc_partial_o_shape:
+        alloc_partial_o_numel *= dim
+    alloc_softmax_stats_numel = 1
+    for dim in alloc_softmax_stats_shape:
+        alloc_softmax_stats_numel *= dim
+
+    cache_key = (device, dtype)
+    buffers = _dcp_a2a_fi_send_buffer_cache.get(cache_key)
+    if (
+        buffers is None
+        or buffers[0].numel() < alloc_partial_o_numel
+        or buffers[1].numel() < alloc_softmax_stats_numel
+    ):
+        buffers = (
+            torch.empty(alloc_partial_o_numel, device=device, dtype=dtype),
+            torch.empty(
+                alloc_softmax_stats_numel,
+                device=device,
+                dtype=torch.float32,
+            ),
+        )
+        _dcp_a2a_fi_send_buffer_cache[cache_key] = buffers
+
+    return (
+        buffers[0][:requested_partial_o_numel].view(partial_o_shape),
+        buffers[1][:requested_softmax_stats_numel].view(softmax_stats_shape),
+    )
+
+
+def _dcp_a2a_fi_workspace(
+    cp_group: GroupCoordinator,
+    device: torch.device,
+) -> torch.Tensor:
+    cache_key = (id(cp_group.device_group), device)
+    workspace = _dcp_a2a_fi_workspace_cache.get(cache_key)
+    if workspace is not None:
+        return workspace
+
+    try:
+        import flashinfer.comm as flashinfer_comm
+        from flashinfer.comm.mnnvl import MnnvlConfig, MnnvlMemory, TorchDistBackend
+    except ImportError as err:
+        raise RuntimeError(
+            "The FlashInfer DCP A2A path requires flashinfer.comm "
+            "with decode_cp_a2a support."
+        ) from err
+
+    if not hasattr(flashinfer_comm, "decode_cp_a2a_alltoall"):
+        raise RuntimeError(
+            "The FlashInfer DCP A2A path requires "
+            "flashinfer.comm.decode_cp_a2a_alltoall."
+        )
+
+    comm_mapping = flashinfer_comm.Mapping(
+        world_size=cp_group.world_size,
+        rank=cp_group.rank_in_group,
+        gpus_per_node=torch.accelerator.device_count(),
+        cp_size=1,
+        tp_size=cp_group.world_size,
+        pp_size=1,
+    )
+    workspace_mapping = flashinfer_comm.Mapping(
+        world_size=cp_group.world_size,
+        rank=cp_group.rank_in_group,
+        gpus_per_node=torch.accelerator.device_count(),
+        cp_size=cp_group.world_size,
+        tp_size=1,
+        pp_size=1,
+    )
+    config = MnnvlConfig(
+        comm_backend=TorchDistBackend(group=cp_group.device_group),
+        fabric_page_size=1 << 29,
+        allocation_granularity=0,
+    )
+    # FlashInfer's MNNVL helper splits its communicator by CP rank and uses TP
+    # rank ordering. Seed it with a TP-shaped mapping so our DCP group shares
+    # one workspace address space, then allocate bytes sized for real DCP.
+    MnnvlMemory.initialize()
+    MnnvlMemory.set_comm_from_config(comm_mapping, config)
+    workspace_bytes = flashinfer_comm.decode_cp_a2a_workspace_size(cp_group.world_size)
+    mnnvl_memory = MnnvlMemory(workspace_mapping, workspace_bytes)
+    workspace = mnnvl_memory.as_torch_strided_tensor(torch.int64)
+    flashinfer_comm.decode_cp_a2a_init_workspace(
+        workspace,
+        cp_group.rank_in_group,
+        cp_group.world_size,
+    )
+    dist.barrier(group=cp_group.device_group)
+    _dcp_a2a_fi_workspace_cache[cache_key] = workspace
+    _dcp_a2a_fi_workspace_memory_cache[cache_key] = mnnvl_memory
+    logger.info_once(
+        "Initialized FlashInfer decode CP A2A workspace for DCP size %d",
+        cp_group.world_size,
+    )
+    return workspace
 
 
 @triton.jit
 def _dcp_a2a_pack_send_kernel(
     out_ptr,
     lse_ptr,
+    valid_counts_ptr,
     send_ptr,
     out_stride_B,
     out_stride_H,
@@ -147,10 +319,14 @@ def _dcp_a2a_pack_send_kernel(
     HEAD_DIM: tl.constexpr,
     H_PER_RANK: tl.constexpr,
     LSE_PACK_DIM: tl.constexpr,
+    HAS_VALID_COUNTS: tl.constexpr,
 ):
     batch_idx = tl.program_id(0).to(tl.int64)
     local_head_idx = tl.program_id(1).to(tl.int64)
     d_offsets = tl.arange(0, HEAD_DIM)
+    has_values = True
+    if HAS_VALID_COUNTS:
+        has_values = tl.load(valid_counts_ptr + batch_idx) != 0
 
     for rank_idx in tl.static_range(N):
         src_head_idx = rank_idx * H_PER_RANK + local_head_idx
@@ -167,11 +343,13 @@ def _dcp_a2a_pack_send_kernel(
         )
         tl.store(
             send_ptr + send_base + d_offsets * send_stride_D,
-            tl.load(out_ptr + out_offsets),
+            tl.where(has_values, tl.load(out_ptr + out_offsets), 0.0),
         )
 
-        lse_val = tl.load(
-            lse_ptr + batch_idx * lse_stride_B + src_head_idx * lse_stride_H
+        lse_val = tl.where(
+            has_values,
+            tl.load(lse_ptr + batch_idx * lse_stride_B + src_head_idx * lse_stride_H),
+            -float("inf"),
         )
         if LSE_PACK_DIM == 1:
             tl.store(
@@ -190,6 +368,69 @@ def _dcp_a2a_pack_send_kernel(
                 send_ptr + send_base + (HEAD_DIM + 1) * send_stride_D,
                 hi.to(send_ptr.dtype.element_ty, bitcast=True),
             )
+
+
+@triton.jit
+def _dcp_a2a_fi_pack_send_kernel(
+    out_ptr,
+    lse_ptr,
+    valid_counts_ptr,
+    partial_o_ptr,
+    softmax_stats_ptr,
+    out_stride_B,
+    out_stride_H,
+    out_stride_D,
+    lse_stride_B,
+    lse_stride_H,
+    partial_o_stride_B,
+    partial_o_stride_H,
+    partial_o_stride_N,
+    partial_o_stride_D,
+    stats_stride_B,
+    stats_stride_H,
+    stats_stride_N,
+    stats_stride_S,
+    N: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    H_PER_RANK: tl.constexpr,
+    HAS_VALID_COUNTS: tl.constexpr,
+):
+    batch_idx = tl.program_id(0).to(tl.int64)
+    local_head_idx = tl.program_id(1).to(tl.int64)
+    rank_idx = tl.program_id(2).to(tl.int64)
+    d_offsets = tl.arange(0, HEAD_DIM)
+    has_values = True
+    if HAS_VALID_COUNTS:
+        has_values = tl.load(valid_counts_ptr + batch_idx) != 0
+
+    src_head_idx = rank_idx * H_PER_RANK + local_head_idx
+    out_offsets = (
+        batch_idx * out_stride_B
+        + src_head_idx * out_stride_H
+        + d_offsets * out_stride_D
+    )
+    partial_o_base = (
+        batch_idx * partial_o_stride_B
+        + local_head_idx * partial_o_stride_H
+        + rank_idx * partial_o_stride_N
+    )
+    tl.store(
+        partial_o_ptr + partial_o_base + d_offsets * partial_o_stride_D,
+        tl.where(has_values, tl.load(out_ptr + out_offsets), 0.0),
+    )
+
+    lse_val = tl.where(
+        has_values,
+        tl.load(lse_ptr + batch_idx * lse_stride_B + src_head_idx * lse_stride_H),
+        -float("inf"),
+    )
+    stats_base = (
+        batch_idx * stats_stride_B
+        + local_head_idx * stats_stride_H
+        + rank_idx * stats_stride_N
+    )
+    tl.store(softmax_stats_ptr + stats_base, lse_val)
+    tl.store(softmax_stats_ptr + stats_base + stats_stride_S, 0.0)
 
 
 @triton.jit
@@ -316,6 +557,114 @@ def _dcp_a2a_unpack_combine_kernel(
         tl.store(out_lse_ptr + out_lse_offset, global_lse)
 
 
+@triton.jit
+def _dcp_a2a_fi_unpack_combine_kernel(
+    partial_o_ptr,
+    softmax_stats_ptr,
+    out_ptr,
+    out_lse_ptr,
+    partial_o_stride_B,
+    partial_o_stride_H,
+    partial_o_stride_N,
+    partial_o_stride_D,
+    stats_stride_B,
+    stats_stride_H,
+    stats_stride_N,
+    stats_stride_S,
+    out_stride_B,
+    out_stride_H,
+    out_stride_D,
+    out_lse_stride_B,
+    out_lse_stride_H,
+    N: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    IS_BASE_E: tl.constexpr,
+    RETURN_LSE: tl.constexpr,
+):
+    batch_idx = tl.program_id(0).to(tl.int64)
+    head_idx = tl.program_id(1).to(tl.int64)
+    d_offsets = tl.arange(0, HEAD_DIM)
+
+    lse_max = -float("inf")
+    for rank_idx in tl.static_range(N):
+        stats_base = (
+            batch_idx * stats_stride_B
+            + head_idx * stats_stride_H
+            + rank_idx * stats_stride_N
+        )
+        lse_val = tl.load(softmax_stats_ptr + stats_base).to(tl.float32)
+        lse_val = tl.where(
+            (lse_val != lse_val) | (lse_val == float("inf")),
+            -float("inf"),
+            lse_val,
+        )
+        lse_max = tl.maximum(lse_max, lse_val)
+
+    lse_max = tl.where(lse_max == -float("inf"), 0.0, lse_max)
+
+    lse_sum = 0.0
+    for rank_idx in tl.static_range(N):
+        stats_base = (
+            batch_idx * stats_stride_B
+            + head_idx * stats_stride_H
+            + rank_idx * stats_stride_N
+        )
+        lse_val = tl.load(softmax_stats_ptr + stats_base).to(tl.float32)
+        lse_val = tl.where(
+            (lse_val != lse_val) | (lse_val == float("inf")),
+            -float("inf"),
+            lse_val,
+        )
+        if IS_BASE_E:
+            lse_sum += tl.exp(lse_val - lse_max)
+        else:
+            lse_sum += tl.exp2(lse_val - lse_max)
+
+    if IS_BASE_E:  # noqa: SIM108
+        global_lse = tl.log(lse_sum) + lse_max
+    else:
+        global_lse = tl.log2(lse_sum) + lse_max
+
+    acc = tl.zeros([HEAD_DIM], dtype=tl.float32)
+    for rank_idx in tl.static_range(N):
+        stats_base = (
+            batch_idx * stats_stride_B
+            + head_idx * stats_stride_H
+            + rank_idx * stats_stride_N
+        )
+        lse_val = tl.load(softmax_stats_ptr + stats_base).to(tl.float32)
+        lse_val = tl.where(
+            (lse_val != lse_val) | (lse_val == float("inf")),
+            -float("inf"),
+            lse_val,
+        )
+        if IS_BASE_E:
+            weight = tl.exp(lse_val - global_lse)
+        else:
+            weight = tl.exp2(lse_val - global_lse)
+        weight = tl.where(weight != weight, 0.0, weight)
+        partial_o_base = (
+            batch_idx * partial_o_stride_B
+            + head_idx * partial_o_stride_H
+            + rank_idx * partial_o_stride_N
+        )
+        acc += (
+            tl.load(partial_o_ptr + partial_o_base + d_offsets * partial_o_stride_D).to(
+                tl.float32
+            )
+            * weight
+        )
+
+    final_offsets = (
+        batch_idx * out_stride_B + head_idx * out_stride_H + d_offsets * out_stride_D
+    )
+    tl.store(out_ptr + final_offsets, acc)
+
+    if RETURN_LSE:
+        out_lse_offset = batch_idx * out_lse_stride_B + head_idx * out_lse_stride_H
+        tl.store(out_lse_ptr + out_lse_offset, global_lse)
+
+
 def _dcp_a2a_pack_send(
     cp_attn_out: torch.Tensor,
     cp_attn_lse: torch.Tensor,
@@ -324,11 +673,13 @@ def _dcp_a2a_pack_send(
     h_per_rank: int,
     head_dim: int,
     lse_pack_dim: int,
+    valid_counts: torch.Tensor | None = None,
 ) -> None:
     grid = (cp_attn_out.shape[0], h_per_rank, 1)
     _dcp_a2a_pack_send_kernel[grid](
         cp_attn_out,
         cp_attn_lse,
+        valid_counts,
         send_buffer,
         cp_attn_out.stride(0),
         cp_attn_out.stride(1),
@@ -343,6 +694,44 @@ def _dcp_a2a_pack_send(
         HEAD_DIM=head_dim,
         H_PER_RANK=h_per_rank,
         LSE_PACK_DIM=lse_pack_dim,
+        HAS_VALID_COUNTS=valid_counts is not None,
+    )
+
+
+def _dcp_a2a_fi_pack_send(
+    cp_attn_out: torch.Tensor,
+    cp_attn_lse: torch.Tensor,
+    partial_o: torch.Tensor,
+    softmax_stats: torch.Tensor,
+    world_size: int,
+    h_per_rank: int,
+    head_dim: int,
+    valid_counts: torch.Tensor | None = None,
+) -> None:
+    grid = (cp_attn_out.shape[0], h_per_rank, world_size)
+    _dcp_a2a_fi_pack_send_kernel[grid](
+        cp_attn_out,
+        cp_attn_lse,
+        valid_counts,
+        partial_o,
+        softmax_stats,
+        cp_attn_out.stride(0),
+        cp_attn_out.stride(1),
+        cp_attn_out.stride(2),
+        cp_attn_lse.stride(0),
+        cp_attn_lse.stride(1),
+        partial_o.stride(0),
+        partial_o.stride(1),
+        partial_o.stride(2),
+        partial_o.stride(3),
+        softmax_stats.stride(0),
+        softmax_stats.stride(1),
+        softmax_stats.stride(2),
+        softmax_stats.stride(3),
+        N=world_size,
+        HEAD_DIM=head_dim,
+        H_PER_RANK=h_per_rank,
+        HAS_VALID_COUNTS=valid_counts is not None,
     )
 
 
@@ -352,13 +741,20 @@ def _dcp_a2a_unpack_combine(
     lse_pack_dim: int,
     return_lse: bool,
     is_lse_base_on_e: bool,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     world_size, num_tokens, h_per_rank, _ = recv_buffer.shape
-    out = torch.empty(
-        (num_tokens, h_per_rank, head_dim),
-        device=recv_buffer.device,
-        dtype=recv_buffer.dtype,
-    )
+    if out is None:
+        out = torch.empty(
+            (num_tokens, h_per_rank, head_dim),
+            device=recv_buffer.device,
+            dtype=recv_buffer.dtype,
+        )
+    elif out.shape != (num_tokens, h_per_rank, head_dim):
+        raise ValueError(
+            "Invalid DCP A2A output shape: "
+            f"{tuple(out.shape)}, expected {(num_tokens, h_per_rank, head_dim)}."
+        )
     out_lse = torch.empty(
         (num_tokens, h_per_rank) if return_lse else (1, 1),
         device=recv_buffer.device,
@@ -389,42 +785,148 @@ def _dcp_a2a_unpack_combine(
     return out
 
 
-def dcp_a2a_lse_reduce(
+def _dcp_a2a_fi_unpack_combine(
+    partial_o: torch.Tensor,
+    softmax_stats: torch.Tensor,
+    head_dim: int,
+    return_lse: bool,
+    is_lse_base_on_e: bool,
+    device: torch.device,
+    dtype: torch.dtype,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    num_tokens, h_per_rank, world_size, _ = partial_o.shape
+    if out is None:
+        out = torch.empty(
+            (num_tokens, h_per_rank, head_dim),
+            device=device,
+            dtype=dtype,
+        )
+    elif out.shape != (num_tokens, h_per_rank, head_dim):
+        raise ValueError(
+            "Invalid DCP A2A output shape: "
+            f"{tuple(out.shape)}, expected {(num_tokens, h_per_rank, head_dim)}."
+        )
+    out_lse = torch.empty(
+        (num_tokens, h_per_rank) if return_lse else (1, 1),
+        device=device,
+        dtype=torch.float32 if return_lse else dtype,
+    )
+    grid = (num_tokens, h_per_rank, 1)
+    _dcp_a2a_fi_unpack_combine_kernel[grid](
+        partial_o,
+        softmax_stats,
+        out,
+        out_lse,
+        partial_o.stride(0),
+        partial_o.stride(1),
+        partial_o.stride(2),
+        partial_o.stride(3),
+        softmax_stats.stride(0),
+        softmax_stats.stride(1),
+        softmax_stats.stride(2),
+        softmax_stats.stride(3),
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
+        out_lse.stride(0),
+        out_lse.stride(1),
+        N=world_size,
+        HEAD_DIM=head_dim,
+        IS_BASE_E=is_lse_base_on_e,
+        RETURN_LSE=return_lse,
+    )
+    if return_lse:
+        return out, out_lse
+    return out
+
+
+def _as_torch_tensor(tensor: object) -> torch.Tensor:
+    if torch.is_tensor(tensor):
+        return tensor
+    return torch.utils.dlpack.from_dlpack(tensor)
+
+
+def _dcp_a2a_flashinfer_lse_reduce(
     cp_attn_out: torch.Tensor,
     cp_attn_lse: torch.Tensor,
     cp_group: GroupCoordinator,
-    ctx: CPTritonContext | None = None,
+    return_lse: bool,
+    is_lse_base_on_e: bool,
+    out: torch.Tensor | None = None,
+    valid_counts: torch.Tensor | None = None,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    if cp_attn_out.dtype not in (torch.float16, torch.bfloat16):
+        logger.warning_once(
+            "FlashInfer DCP A2A supports fp16/bf16 outputs; falling back to "
+            "Triton+NCCL for dtype %s.",
+            cp_attn_out.dtype,
+        )
+        return _dcp_a2a_triton_lse_reduce(
+            cp_attn_out,
+            cp_attn_lse,
+            cp_group,
+            return_lse=return_lse,
+            is_lse_base_on_e=is_lse_base_on_e,
+            out=out,
+            valid_counts=valid_counts,
+        )
+
+    import flashinfer.comm as flashinfer_comm
+
+    world_size = cp_group.world_size
+    B, H, D = cp_attn_out.shape
+    H_per_rank = H // world_size
+    workspace = _dcp_a2a_fi_workspace(cp_group, cp_attn_out.device)
+    partial_o, softmax_stats = _dcp_a2a_fi_send_buffers(
+        (B, H_per_rank, world_size, D),
+        (B, H_per_rank, world_size, 2),
+        device=cp_attn_out.device,
+        dtype=cp_attn_out.dtype,
+    )
+    _dcp_a2a_fi_pack_send(
+        cp_attn_out,
+        cp_attn_lse,
+        partial_o,
+        softmax_stats,
+        world_size,
+        H_per_rank,
+        D,
+        valid_counts=valid_counts,
+    )
+    partial_o, softmax_stats = flashinfer_comm.decode_cp_a2a_alltoall(
+        partial_o,
+        softmax_stats,
+        workspace,
+        cp_group.rank_in_group,
+        world_size,
+    )
+    partial_o = _as_torch_tensor(partial_o)
+    softmax_stats = _as_torch_tensor(softmax_stats)
+    return _dcp_a2a_fi_unpack_combine(
+        partial_o,
+        softmax_stats,
+        D,
+        return_lse,
+        is_lse_base_on_e,
+        cp_attn_out.device,
+        cp_attn_out.dtype,
+        out=out,
+    )
+
+
+def _dcp_a2a_triton_lse_reduce(
+    cp_attn_out: torch.Tensor,
+    cp_attn_lse: torch.Tensor,
+    cp_group: GroupCoordinator,
     return_lse: bool = False,
     is_lse_base_on_e: bool = True,
+    out: torch.Tensor | None = None,
+    valid_counts: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """
-    Combine partial attention outputs across DCP ranks using All-to-All.
-
-    The output and fp32 LSE are packed into a single output-dtype buffer, sent
-    with one All-to-All, then unpacked and combined with exact LSE weighting.
-
-    Args:
-        cp_attn_out: [B, H, D] where B=num_tokens, H=total_heads, D=head_dim
-        cp_attn_lse: [B, H] log-sum-exp values (fp32)
-        cp_group: GroupCoordinator for DCP communication
-        ctx: CPTritonContext (unused, for signature compatibility)
-        return_lse: If True, also return the combined global LSE
-        is_lse_base_on_e: If True, LSE is base e; if False, base 2
-
-    Returns:
-        Combined output [B, H/N, D] (head-scattered)
-        If return_lse=True, also returns global_lse [B, H/N]
-    """
     world_size = cp_group.world_size
 
-    if world_size == 1:
-        if return_lse:
-            return cp_attn_out, cp_attn_lse
-        return cp_attn_out
-
     B, H, D = cp_attn_out.shape
-    if H % world_size != 0:
-        raise ValueError(f"H={H} must be divisible by DCP world size {world_size}.")
     H_per_rank = H // world_size
     # The pack kernel bit-casts the LSE as fp32; some MLA backends return it in
     # the activation dtype (bf16/fp16), so enforce the documented fp32 contract.
@@ -446,6 +948,7 @@ def dcp_a2a_lse_reduce(
         H_per_rank,
         D,
         lse_pack_dim,
+        valid_counts=valid_counts,
     )
 
     work = dist.all_to_all_single(
@@ -457,5 +960,77 @@ def dcp_a2a_lse_reduce(
     work.wait()
 
     return _dcp_a2a_unpack_combine(
-        recv_buffer, D, lse_pack_dim, return_lse, is_lse_base_on_e
+        recv_buffer, D, lse_pack_dim, return_lse, is_lse_base_on_e, out=out
+    )
+
+
+def dcp_a2a_lse_reduce(
+    cp_attn_out: torch.Tensor,
+    cp_attn_lse: torch.Tensor,
+    cp_group: GroupCoordinator,
+    ctx: CPTritonContext | None = None,
+    return_lse: bool = False,
+    is_lse_base_on_e: bool = True,
+    out: torch.Tensor | None = None,
+    valid_counts: torch.Tensor | None = None,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    """
+    Combine partial attention outputs across DCP ranks using All-to-All.
+
+    The output and fp32 LSE are packed into a single output-dtype buffer, sent
+    with one All-to-All, then unpacked and combined with exact LSE weighting.
+
+    Args:
+        cp_attn_out: [B, H, D] where B=num_tokens, H=total_heads, D=head_dim
+        cp_attn_lse: [B, H] log-sum-exp values (fp32)
+        cp_group: GroupCoordinator for DCP communication
+        ctx: CPTritonContext (unused, for signature compatibility)
+        return_lse: If True, also return the combined global LSE
+        is_lse_base_on_e: If True, LSE is base e; if False, base 2
+        out: Optional output tensor [B, H/N, D] to write the combined result.
+        valid_counts: Optional [B] local valid sparse-block count. Tokens with
+            count 0 are packed as zero output and -inf LSE.
+
+    Returns:
+        Combined output [B, H/N, D] (head-scattered)
+        If return_lse=True, also returns global_lse [B, H/N]
+    """
+    world_size = cp_group.world_size
+
+    if world_size == 1:
+        if return_lse:
+            if out is not None:
+                out.copy_(cp_attn_out)
+                return out, cp_attn_lse
+            return cp_attn_out, cp_attn_lse
+        if out is not None:
+            out.copy_(cp_attn_out)
+            return out
+        return cp_attn_out
+
+    _B, H, _D = cp_attn_out.shape
+    if H % world_size != 0:
+        raise ValueError(f"H={H} must be divisible by DCP world size {world_size}.")
+
+    # FlashInfer's fused decode-CP all-to-all (helix) is the fastest transport
+    # measured for this exchange; fall back to the Triton/NCCL path when
+    # flashinfer.comm is unavailable.
+    if _flashinfer_dcp_a2a_available():
+        return _dcp_a2a_flashinfer_lse_reduce(
+            cp_attn_out,
+            cp_attn_lse,
+            cp_group,
+            return_lse=return_lse,
+            is_lse_base_on_e=is_lse_base_on_e,
+            out=out,
+            valid_counts=valid_counts,
+        )
+    return _dcp_a2a_triton_lse_reduce(
+        cp_attn_out,
+        cp_attn_lse,
+        cp_group,
+        return_lse=return_lse,
+        is_lse_base_on_e=is_lse_base_on_e,
+        out=out,
+        valid_counts=valid_counts,
     )
