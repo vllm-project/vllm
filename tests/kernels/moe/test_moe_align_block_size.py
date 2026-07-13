@@ -246,19 +246,29 @@ def test_moe_align_block_size(
 @pytest.mark.parametrize("topk", [2, 4])
 @pytest.mark.parametrize("num_experts", [8, 64])
 @pytest.mark.parametrize("block_size", [64])
+@pytest.mark.parametrize("mask_inactive_experts", [False, True])
 def test_moe_align_block_size_with_expert_map(
-    m: int, topk: int, num_experts: int, block_size: int
+    m: int,
+    topk: int,
+    num_experts: int,
+    block_size: int,
+    mask_inactive_experts: bool,
 ):
     """Test moe_align_block_size with expert mapping (EP scenario)"""
-    topk_ids = torch.zeros((m, topk), device="cuda", dtype=torch.int32)
-    for i in range(m):
-        experts = torch.randperm(num_experts, device="cuda")[:topk]
-        topk_ids[i] = experts
-
     expert_map = torch.full((num_experts,), -1, device="cuda", dtype=torch.int32)
     local_experts = list(range(0, num_experts, 2))
     for i, expert_id in enumerate(local_experts):
         expert_map[expert_id] = i
+
+    topk_ids = torch.empty((m, topk), device="cuda", dtype=torch.int32)
+    for i in range(m):
+        experts = torch.randperm(num_experts, device="cuda")[:topk]
+        for k in range(topk):
+            topk_ids[i, k] = (
+                experts[k]
+                if (experts[k] in local_experts) or not mask_inactive_experts
+                else -1
+            )
 
     actual_sorted_ids, actual_expert_ids, actual_num_tokens = moe_align_block_size(
         topk_ids=topk_ids,

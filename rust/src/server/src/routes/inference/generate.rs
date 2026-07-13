@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 mod convert;
 mod types;
 mod validate;
@@ -266,6 +269,7 @@ fn collect_generate(
         }],
         prompt_logprobs,
         kv_transfer_params: collected.kv_transfer_params,
+        ec_transfer_params: collected.ec_transfer_params,
     })
 }
 
@@ -404,6 +408,7 @@ mod tests {
                 finish_reason: None,
                 cached_token_count: 0,
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
             Ok(GenerateOutput {
                 request_id: String::new(),
@@ -416,6 +421,7 @@ mod tests {
                 finish_reason: Some(FinishReason::stop_eos()),
                 cached_token_count: 2,
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 
