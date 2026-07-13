@@ -56,8 +56,8 @@ class AsyncScheduler(Scheduler):
             request, new_token_ids
         )
 
-        # Stale output still delivers its token above; the request's placeholders
-        # were zeroed at preemption, so skip the decrement (it would underflow).
+        # Placeholders were zeroed at preemption; a stale delivery must not
+        # decrement them (it would underflow).
         if not is_stale:
             request.num_output_placeholders -= len(new_token_ids)
             assert request.num_output_placeholders >= 0

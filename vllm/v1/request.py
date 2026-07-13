@@ -144,12 +144,11 @@ class Request:
 
         # Used in async scheduling.
         self.num_output_placeholders = 0
-        # Tokens of this request's in-flight output from steps scheduled before
-        # a preemption rollback: still delivered when it returns, but must not
-        # mutate the reset counters.
+        # Tokens of output in flight when the request was preempted: delivered
+        # on return, but must not mutate the reset counters.
         self.num_stale_output_tokens = 0
-        # If True, drop that stale output instead of delivering it. Set when the
-        # request is resumed in the same step it is preempted (reset_prefix_cache).
+        # Drop the stale output instead, for same-step preempt + resume
+        # (reset_prefix_cache).
         self.drop_stale_output = False
 
         # Tokens of steps whose output is not yet processed (async scheduling

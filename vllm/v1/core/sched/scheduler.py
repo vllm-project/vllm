@@ -663,6 +663,17 @@ class Scheduler(SchedulerInterface):
                     step_skipped_waiting.prepend_request(request)
                     continue
 
+                if (
+                    request.num_stale_output_tokens > 0
+                    and not request.drop_stale_output
+                ):
+                    # Deliverable stale output still in flight: resuming now
+                    # could resample a position that output later delivers.
+                    # It drains within the pipeline depth.
+                    request_queue.pop_request()
+                    step_skipped_waiting.prepend_request(request)
+                    continue
+
                 # Check that adding the request still respects the max_loras
                 # constraint.
                 if (
@@ -1148,9 +1159,9 @@ class Scheduler(SchedulerInterface):
         NOTE: The request should be popped from the running queue outside of this
         method.
 
-        drop_stale_output: drop (rather than deliver) any in-flight output. Used
-        by reset_prefix_cache, which resumes the request in the same step, so a
-        kept token would arrive out of order.
+        drop_stale_output: drop (rather than deliver) any in-flight output; used
+        by reset_prefix_cache, whose same-step resume would otherwise deliver
+        tokens out of order.
         """
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
@@ -1162,14 +1173,17 @@ class Scheduler(SchedulerInterface):
         request.num_computed_tokens = 0
         if request.spec_token_ids:
             request.spec_token_ids = []
-        # Async scheduling: this request has output from steps scheduled before
-        # the rollback still in flight. That output still delivers its tokens
-        # when it returns (dropping them would perturb spec-decode acceptance),
-        # but must not mutate the request's reset counters. num_in_flight_tokens
-        # is its total token count -- any number of steps may be in flight (async
-        # depth, PP, spec); each drains its own share in update_from_output.
-        request.num_stale_output_tokens += request.num_in_flight_tokens
-        request.drop_stale_output = drop_stale_output
+        # Async scheduling: mark all in-flight output as stale. Its tokens are
+        # still delivered on return (dropping them would perturb spec-decode
+        # acceptance) but must not mutate the reset counters; each step drains
+        # its share in update_from_output. num_in_flight_tokens already
+        # includes any undrained stale share, so assign rather than accumulate.
+        # An undrained drop-mode share stays dropped: its positions have
+        # already been resampled.
+        request.drop_stale_output = drop_stale_output or (
+            request.drop_stale_output and request.num_stale_output_tokens > 0
+        )
+        request.num_stale_output_tokens = request.num_in_flight_tokens
         request.num_output_placeholders = 0
         request.num_preemptions += 1
         if self.log_stats:
@@ -1581,8 +1595,14 @@ class Scheduler(SchedulerInterface):
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
+            output_is_stale = False
             if request is not None:
                 request.num_in_flight_tokens -= num_tokens_scheduled
+                # Drain any stale share (see _preempt_request) in lockstep.
+                if request.num_stale_output_tokens > 0:
+                    output_is_stale = True
+                    request.num_stale_output_tokens -= num_tokens_scheduled
+                    assert request.num_stale_output_tokens >= 0
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
                 # skip failed or rescheduled requests from KV load failure
                 continue
@@ -1596,14 +1616,9 @@ class Scheduler(SchedulerInterface):
                 # In this case, we use is_finished() to check.
                 continue
 
-            # Stale in-flight output (see _preempt_request) still delivers its
-            # token but must not touch the request's reset counters; drain the
-            # count as it returns. In drop mode it is discarded instead.
-            output_is_stale = request.num_stale_output_tokens > 0
-            if output_is_stale:
-                request.num_stale_output_tokens -= num_tokens_scheduled
-                if request.drop_stale_output:
-                    continue
+            # Drop-mode stale output (same-step resume) is discarded entirely.
+            if output_is_stale and request.drop_stale_output:
+                continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = (
@@ -1620,10 +1635,10 @@ class Scheduler(SchedulerInterface):
                 num_sampled = self.num_sampled_tokens_per_step
                 num_accepted = max(len(generated_token_ids) - num_sampled, 0)
                 num_rejected = num_draft_tokens - num_accepted
-                # Rejected tokens roll back num_computed_tokens (and, under async
-                # scheduling, num_output_placeholders, which also covers the spec
-                # tokens). Skip for stale output: its rejection count predates
-                # the rollback and would corrupt/underflow the reset counters.
+                # Rejections roll back num_computed_tokens (and, under async
+                # scheduling, num_output_placeholders, which covers the spec
+                # tokens). A stale rejection count predates the preemption
+                # rollback and must not apply.
                 if not output_is_stale:
                     if request.num_computed_tokens > 0:
                         request.num_computed_tokens -= num_rejected
@@ -1786,6 +1801,7 @@ class Scheduler(SchedulerInterface):
         if stopped_preempted_reqs:
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
+            self.skipped_waiting.remove_requests(stopped_preempted_reqs)
 
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
             requests = [self.requests[req_id] for req_id in failed_kv_load_req_ids]
@@ -1921,8 +1937,7 @@ class Scheduler(SchedulerInterface):
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int], is_stale: bool = False
     ) -> tuple[list[int], bool]:
-        # is_stale only matters for the async override (the sync scheduler has
-        # no in-flight output to preempt).
+        # is_stale is only used by the AsyncScheduler override.
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
         # to return empty token ids for the request.
@@ -2239,8 +2254,6 @@ class Scheduler(SchedulerInterface):
             # running queue in FIFO order.
             while self.running:
                 request = self.running.pop()
-                # Preemption + resumption happen in the same step here, so any
-                # in-flight async output is dropped rather than delivered.
                 self._preempt_request(request, timestamp, drop_stale_output=True)
 
             # Clear scheduled request ids cache. Since we are forcing preemption
