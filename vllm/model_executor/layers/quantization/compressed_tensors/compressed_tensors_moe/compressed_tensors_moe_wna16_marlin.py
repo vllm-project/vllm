@@ -488,7 +488,9 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                 self.experts_cls, FusedMoEExpertsModular
             ):
                 layer.workspace = marlin_make_workspace_new(
-                    layer.w13_weight_g_idx.device, 4
+                    layer.w13_weight_g_idx.device,
+                    4,
+                    existing=getattr(layer, "workspace", None),
                 )
 
         # Alias packed weights to w13_weight/w2_weight for the modular kernel interface

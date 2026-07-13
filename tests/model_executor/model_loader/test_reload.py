@@ -240,6 +240,85 @@ def test_marlin_post_load_preserves_runtime_tensor_addresses(monkeypatch, dist_i
     assert isinstance(layer.g_idx_sort_indices, torch.nn.Parameter)
 
 
+@pytest.mark.parametrize("variant", ["fp8", "mxfp8", "nvfp4"])
+def test_marlin_prepare_layer_preserves_workspace_address(monkeypatch, variant):
+    """The Marlin fallback prepare_* functions rerun on weight reload and must
+    reuse the workspace storage whose address captured CUDA graphs hold."""
+    from vllm import _custom_ops as ops
+    from vllm.model_executor.layers.quantization.utils import (
+        marlin_utils,
+        marlin_utils_fp4,
+        marlin_utils_fp8,
+    )
+
+    size_k, size_n = 128, 64
+
+    monkeypatch.setattr(marlin_utils, "num_compute_units", lambda _: 4)
+    monkeypatch.setattr(
+        ops,
+        "gptq_marlin_repack",
+        lambda b_q_weight, perm, size_k, size_n, num_bits, is_a_8bit=False: torch.zeros(
+            size_k // 16, size_n * 2, dtype=torch.int32
+        ),
+    )
+
+    layer = torch.nn.Module()
+    layer.output_size_per_partition = size_n
+    layer.input_size_per_partition = size_k
+    layer.orig_dtype = torch.float16
+    layer.params_dtype = torch.float16
+
+    if variant == "fp8":
+        prepare = marlin_utils_fp8.prepare_fp8_layer_for_marlin
+
+        def load_checkpoint_format_weights():
+            layer.weight = torch.nn.Parameter(
+                torch.zeros(size_k, size_n, dtype=torch.float8_e4m3fn),
+                requires_grad=False,
+            )
+            layer.weight_scale = torch.nn.Parameter(
+                torch.ones(1, dtype=torch.float32), requires_grad=False
+            )
+    elif variant == "mxfp8":
+        prepare = marlin_utils_fp8.prepare_mxfp8_layer_for_marlin
+
+        def load_checkpoint_format_weights():
+            layer.weight = torch.nn.Parameter(
+                torch.zeros(size_n, size_k, dtype=torch.float8_e4m3fn),
+                requires_grad=False,
+            )
+            layer.weight_scale = torch.nn.Parameter(
+                torch.full((size_n, size_k // 32), 127, dtype=torch.uint8),
+                requires_grad=False,
+            )
+    else:
+        prepare = marlin_utils_fp4.prepare_fp4_layer_for_marlin
+
+        def load_checkpoint_format_weights():
+            layer.weight = torch.nn.Parameter(
+                torch.zeros(size_n, size_k // 2, dtype=torch.uint8),
+                requires_grad=False,
+            )
+            layer.weight_scale = torch.nn.Parameter(
+                torch.ones(size_n, size_k // 16, dtype=torch.float8_e4m3fn),
+                requires_grad=False,
+            )
+            layer.weight_global_scale = torch.nn.Parameter(
+                torch.ones(1, dtype=torch.float32), requires_grad=False
+            )
+
+    load_checkpoint_format_weights()
+    prepare(layer)
+    workspace_ptr = layer.workspace.data_ptr()
+
+    # Reload: fresh checkpoint-format tensors, prepare runs again
+    load_checkpoint_format_weights()
+    prepare(layer)
+
+    assert layer.workspace.data_ptr() == workspace_ptr
+    assert torch.all(layer.workspace == 0)
+
+
 def test_model_cleanup(dist_init, default_vllm_config):
     layer = QKVParallelLinear(2, 3, 4)
     assert layer.weight.weight_loader.__self__ is layer
