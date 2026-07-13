@@ -10,6 +10,10 @@ from typing import TYPE_CHECKING, Any
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    OffloadingConnectorStats,
+    _TransferMetricName,
+)
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -28,6 +32,7 @@ from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
 )
+from vllm.v1.simple_kv_offload.metrics import SimpleCPUMetricName
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -176,6 +181,10 @@ class SimpleCPUOffloadScheduler:
         # Events must be reported by all world_size workers before considered complete.
         self._expected_worker_count = vllm_config.parallel_config.world_size
         self._store_event_pending_counts: dict[int, int] = {}
+
+        # Accumulates transfer counters/histograms reported via worker meta
+        # since the last get_stats() call.
+        self._connector_stats = OffloadingConnectorStats()
 
     @staticmethod
     def _derive_cpu_config(
@@ -689,6 +698,35 @@ class SimpleCPUOffloadScheduler:
             else:
                 self._store_event_pending_counts[event_idx] = total
 
+        # --- Transfer stats ---
+        # `meta` here is already the TP/PP-aggregated worker metadata for this
+        # step (see vllm/distributed/kv_transfer/kv_connector/utils.py, which
+        # calls KVConnectorWorkerMetadata.aggregate() across workers before
+        # the scheduler ever sees a KVConnectorOutput), so folding it in once
+        # per call does not double-count per-rank transfer bytes/time.
+        transfer_stats = meta.transfer_stats
+        if not transfer_stats.is_empty():
+            new_stats = OffloadingConnectorStats()
+            if not transfer_stats.load.is_empty():
+                new_stats.increase_counter(
+                    _TransferMetricName.LOAD_BYTES, transfer_stats.load.bytes
+                )
+                new_stats.increase_counter(
+                    _TransferMetricName.LOAD_TIME, transfer_stats.load.time
+                )
+                for size in transfer_stats.load.sizes:
+                    new_stats.observe_histogram(_TransferMetricName.LOAD_SIZE, size)
+            if not transfer_stats.store.is_empty():
+                new_stats.increase_counter(
+                    _TransferMetricName.STORE_BYTES, transfer_stats.store.bytes
+                )
+                new_stats.increase_counter(
+                    _TransferMetricName.STORE_TIME, transfer_stats.store.time
+                )
+                for size in transfer_stats.store.sizes:
+                    new_stats.observe_histogram(_TransferMetricName.STORE_SIZE, size)
+            self._connector_stats.aggregate(new_stats)
+
     def _process_store_event(self, event_idx: int) -> None:
         """Process a fully-completed store event."""
         transfer = self._store_event_to_blocks.pop(event_idx, None)
@@ -760,6 +798,42 @@ class SimpleCPUOffloadScheduler:
         return bool(
             self._store_event_to_blocks or self._abandoned_store_event_to_blocks
         )
+
+    def get_stats(self) -> OffloadingConnectorStats | None:
+        """Pop accumulated transfer stats and merge in the current pool/pending
+        gauges. Gauges are always emitted (scheduler-only emission is
+        guaranteed even absent any worker-reported transfer activity)."""
+        stats: OffloadingConnectorStats | None = None
+        if not self._connector_stats.is_empty():
+            stats = self._connector_stats
+            self._connector_stats = OffloadingConnectorStats()
+        else:
+            stats = OffloadingConnectorStats()
+
+        # Usable blocks, matching BlockPool.get_usage()'s convention of
+        # excluding the null block from the total.
+        total = self.cpu_block_pool.num_gpu_blocks - 1
+        free = self.cpu_block_pool.get_num_free_blocks()
+        used = max(0, total - free)
+        usage = self.cpu_block_pool.get_usage()
+        stats.set_gauge(SimpleCPUMetricName.TOTAL_BLOCKS, total)
+        stats.set_gauge(SimpleCPUMetricName.FREE_BLOCKS, free)
+        stats.set_gauge(SimpleCPUMetricName.USED_BLOCKS, used)
+        stats.set_gauge(SimpleCPUMetricName.USAGE_PERC, usage)
+        # _load_event_to_reqs is a subset view (only requests whose load has
+        # already been dispatched to the worker) of _reqs_to_load -- counting
+        # it separately would double-count the same outstanding loads.
+        stats.set_gauge(SimpleCPUMetricName.PENDING_LOADS, len(self._reqs_to_load))
+        # Event-level count, matching has_pending_stores(): the eager-mode
+        # _reqs_to_store/_store_event_to_reqs/_in_flight_store_gpu_blocks maps
+        # are per-request views of the same in-flight store events, so they
+        # are excluded here to avoid double counting.
+        stats.set_gauge(
+            SimpleCPUMetricName.PENDING_STORES,
+            len(self._store_event_to_blocks)
+            + len(self._abandoned_store_event_to_blocks),
+        )
+        return stats
 
     def request_finished(
         self,

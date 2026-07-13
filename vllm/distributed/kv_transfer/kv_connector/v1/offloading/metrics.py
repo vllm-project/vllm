@@ -60,7 +60,8 @@ TRANSFER_SIZE_BUCKETS = (
 )
 
 
-def get_connector_metric_definitions() -> dict[str, OffloadingMetricMetadata]:
+def get_transfer_metric_definitions() -> dict[str, OffloadingMetricMetadata]:
+    """Flat transfer metric definitions, shared by all offloading connectors."""
     return {
         _TransferMetricName.LOAD_BYTES: OffloadingCounterMetadata(
             documentation="Total bytes loaded from offload storage to GPU.",
@@ -82,6 +83,12 @@ def get_connector_metric_definitions() -> dict[str, OffloadingMetricMetadata]:
             documentation="Histogram of KV offload store operation size, in bytes.",
             buckets=TRANSFER_SIZE_BUCKETS,
         ),
+    }
+
+
+def get_connector_metric_definitions() -> dict[str, OffloadingMetricMetadata]:
+    return {
+        **get_transfer_metric_definitions(),
         _ConnectorMetricName.LOOKUP_SYNC_DELAY: OffloadingHistogramMetadata(
             documentation=(
                 "Histogram of the time spent in a single offload lookup call, "
@@ -321,17 +328,12 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         self.histogram_transfer_size: dict[tuple[int, str], PromMetricT] = {}
         self.counter_kv_bytes: dict[tuple[int, str], PromMetricT] = {}
         self.counter_kv_transfer_time: dict[tuple[int, str], PromMetricT] = {}
-        spec_cls = OffloadingSpecFactory.get_spec_cls(vllm_config)
-        kv_transfer_config = vllm_config.kv_transfer_config
-        assert kv_transfer_config is not None
-        extra_config = kv_transfer_config.kv_connector_extra_config
-        self._offloading_metric_metadata: dict[str, OffloadingMetricMetadata] = {
-            **spec_cls.build_metric_definitions(extra_config),
-            **get_connector_metric_definitions(),
-        }
-        from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
-
-        self._observe_deprecated_metrics = issubclass(spec_cls, CPUOffloadingSpec)
+        self._offloading_metric_metadata: dict[str, OffloadingMetricMetadata] = (
+            self._build_metric_metadata(vllm_config)
+        )
+        self._observe_deprecated_metrics = self._should_observe_deprecated_metrics(
+            vllm_config
+        )
         self._offloading_metric_defs: dict[str, PromMetricT] = {}
         # (engine_idx, metric_name, labelvalues) -> metric with bound labels
         self.offloading_metrics: dict[
@@ -382,6 +384,31 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
             self._offloading_metric_defs[metric_name] = self._create_metric(
                 metric_name, metadata
             )
+
+    def _build_metric_metadata(
+        self, vllm_config: VllmConfig
+    ) -> dict[str, OffloadingMetricMetadata]:
+        """Metric definitions to register, keyed by flat metric name.
+
+        Subclasses that emit a fixed, spec-independent set of metrics (e.g.
+        SimpleCPUOffloadConnector) should override this instead of relying on
+        an ``OffloadingSpec``.
+        """
+        spec_cls = OffloadingSpecFactory.get_spec_cls(vllm_config)
+        kv_transfer_config = vllm_config.kv_transfer_config
+        assert kv_transfer_config is not None
+        extra_config = kv_transfer_config.kv_connector_extra_config
+        return {
+            **spec_cls.build_metric_definitions(extra_config),
+            **get_connector_metric_definitions(),
+        }
+
+    def _should_observe_deprecated_metrics(self, vllm_config: VllmConfig) -> bool:
+        """Whether to mirror the legacy ``transfer_type``-labeled metrics."""
+        spec_cls = OffloadingSpecFactory.get_spec_cls(vllm_config)
+        from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+
+        return issubclass(spec_cls, CPUOffloadingSpec)
 
     def _create_metric(
         self, metric_name: str, metadata: OffloadingMetricMetadata

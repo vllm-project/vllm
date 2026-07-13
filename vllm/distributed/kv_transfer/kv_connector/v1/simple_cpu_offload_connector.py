@@ -15,8 +15,20 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorPromMetrics,
+    KVConnectorStats,
+    PromMetric,
+    PromMetricT,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    OffloadingConnectorStats,
+    OffloadPromMetrics,
+    get_transfer_metric_definitions,
+)
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_offload.base import OffloadingMetricMetadata
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.simple_kv_offload.manager import (
     SimpleCPUOffloadScheduler,
@@ -24,6 +36,7 @@ from vllm.v1.simple_kv_offload.manager import (
 from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
 )
+from vllm.v1.simple_kv_offload.metrics import get_simple_cpu_metric_definitions
 from vllm.v1.simple_kv_offload.worker import (
     SimpleCPUOffloadWorker,
 )
@@ -40,6 +53,28 @@ logger = init_logger(__name__)
 
 # Default CPU capacity: 8 GB
 DEFAULT_CPU_CAPACITY_BYTES = 8 * (1024**3)
+
+
+class SimpleCPUOffloadPromMetrics(OffloadPromMetrics):
+    """Prometheus metrics for SimpleCPUOffloadConnector.
+
+    SimpleCPU has no OffloadingSpec and no lookup/allocation-failure metrics,
+    so it overrides metric discovery instead of relying on the generic
+    spec-factory-driven defaults.
+    """
+
+    def _build_metric_metadata(
+        self, vllm_config: VllmConfig
+    ) -> dict[str, OffloadingMetricMetadata]:
+        return {
+            **get_transfer_metric_definitions(),
+            **get_simple_cpu_metric_definitions(),
+        }
+
+    def _should_observe_deprecated_metrics(self, vllm_config: VllmConfig) -> bool:
+        # SimpleCPU is a CPU offload connector; keep the legacy
+        # transfer_type-labeled series alive during the flat-name migration.
+        return True
 
 
 class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
@@ -252,3 +287,32 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         if self.scheduler_manager is not None:
             return self.scheduler_manager.reset()
         return None
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        # Worker-side stats travel via build_connector_worker_meta() instead
+        # of this hook; only the scheduler side emits stats here.
+        if self.scheduler_manager is not None:
+            return self.scheduler_manager.get_stats()
+        return None
+
+    @classmethod
+    def build_kv_connector_stats(
+        cls, data: dict[str, Any] | None = None
+    ) -> KVConnectorStats | None:
+        return (
+            OffloadingConnectorStats(data=data)
+            if data is not None
+            else OffloadingConnectorStats()
+        )
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> KVConnectorPromMetrics:
+        return SimpleCPUOffloadPromMetrics(
+            vllm_config, metric_types, labelnames, per_engine_labelvalues
+        )
