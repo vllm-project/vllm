@@ -89,14 +89,15 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
-        # mtp_block's MoE output is left un-reduced (reduce_results=False); the
-        # main model fuses that all-reduce into the next norm, but here the
-        # recycle hidden is consumed directly.
-        if hidden_states.shape[0] != positions.shape[0]:
+        # sequence-parallel MoE returns TP-sharded token rows, but the shared
+        # head and the hidden state recycled by the next MTP step need the full
+        # token sequence on every rank.
+        if self.mtp_block.use_sequence_parallel_moe:
             hidden_states, residual = _all_gather_sp_states(
                 hidden_states, residual, positions.shape[0]
             )
         else:
+            # Without sequence parallelism, the MoE output is left un-reduced.
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         # Recycle the POST-final-norm hidden into the next draft step. The
         # residual-add is fused into the final RMSNorm so it is computed
