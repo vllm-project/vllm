@@ -2307,3 +2307,34 @@ async def test_streaming_n_gt1_independent_tool_parsers():
             f"Choice {choice_idx}: expected finish_reason='tool_calls', "
             f"got '{reasons[0]}'"
         )
+
+
+def test_make_request_with_harmony_reuses_kv_transfer_prompt_token_ids():
+    """The Harmony reuse branch honors ids forwarded in kv_transfer_params.
+
+    A GPT-OSS server is impractical to stand up here, so this exercises the
+    branch directly on a harmony-configured renderer.
+    """
+    engine = MockEngine()
+    engine.model_config.hf_config = MockHFConfig(model_type="gpt_oss")
+    models = OpenAIServingModels(engine, BASE_MODEL_PATHS)
+    online_renderer = _build_online_renderer(engine, models.registry)
+    assert online_renderer.use_harmony
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hi"}],
+        kv_transfer_params={
+            "prompt_token_ids": [10, 20, 30],
+            "do_remote_prefill": True,
+        },
+    )
+    conversation, engine_inputs = online_renderer._make_request_with_harmony(request)
+
+    assert conversation == []
+    assert len(engine_inputs) == 1
+    engine_input = engine_inputs[0]
+    assert engine_input["type"] == "token"
+    assert engine_input["prompt_token_ids"] == [10, 20, 30]
+    # The reuse key is consumed and other kv_transfer_params are preserved.
+    assert request.kv_transfer_params == {"do_remote_prefill": True}
