@@ -586,16 +586,29 @@ def select_mxfp4_moe_backend(
 
 def select_deepseek_v4_mxfp4_moe_backend(
     config: FusedMoEConfig,
+    prefer_modular: bool = False,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
     """
     Select the MXFP4 MoE backend with MXFP8 activation as top priority.
     Falls back through BF16 and other backends.
+
+    Args:
+        config: MoE configuration.
+        prefer_modular: When True, prefer modular kernel classes (which
+            accept externally-provided topk_ids) over monolithic kernels
+            (which perform internal routing). Required for expert LRU cache.
     """
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
         if config.moe_parallel_config.use_batched_activation_format
         else mk.FusedMoEActivationFormat.Standard
     )
+
+    def _k_cls_list(backend: Mxfp4MoeBackend) -> list[type[mk.FusedMoEExperts]]:
+        k_cls = backend_to_kernel_cls(backend)
+        if prefer_modular:
+            k_cls = list(reversed(k_cls))
+        return k_cls
 
     # Honor explicit moe_backend (e.g. "marlin", "triton_unfused") before
     # falling back to the auto priority list.
@@ -609,16 +622,19 @@ def select_deepseek_v4_mxfp4_moe_backend(
             ]
         last_error: Exception | None = None
         for requested_backend in requested_backends:
-            try:
-                return _return_or_raise(
-                    requested_backend,
-                    config,
-                    kMxfp4Static,
+            reason: str | None = None
+            for k_cls in _k_cls_list(requested_backend):
+                supported, reason = k_cls.is_supported_config(
+                    k_cls, config, kMxfp4Static,
                     _backend_activation_key(requested_backend),
                     activation_format,
                 )
-            except ValueError as e:
-                last_error = e
+                if supported:
+                    logger.info_once(
+                        _make_log_backend(requested_backend), scope="local")
+                    return requested_backend, k_cls
+            last_error = last_error or ValueError(
+                _make_log_unsupported(requested_backend, reason))
         assert last_error is not None
         raise last_error
 
@@ -639,7 +655,7 @@ def select_deepseek_v4_mxfp4_moe_backend(
     # Iterate priority backends: TRTLLM MXFP8, then Triton.
     for backend in priority_backends:
         activation_key = _backend_activation_key(backend)
-        for k_cls in backend_to_kernel_cls(backend):
+        for k_cls in _k_cls_list(backend):
             supported, reason = k_cls.is_supported_config(
                 k_cls, config, kMxfp4Static, activation_key, activation_format
             )
