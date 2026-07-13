@@ -20,10 +20,7 @@ from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
-from vllm.v1.worker.gpu.spec_decode.dflash.utils import (
-    get_dflash_causal,
-    load_dflash_model,
-)
+from vllm.v1.worker.gpu.spec_decode.dflash.utils import load_dflash_model
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import get_parallel_drafting_token_id
 
@@ -50,7 +47,11 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.draft_model_config.hf_config
         )
 
-        self.dflash_causal = get_dflash_causal(self.draft_model_config)
+        from vllm.model_executor.models.qwen3_dflash import dflash_has_any_noncausal
+
+        self.use_non_causal = dflash_has_any_noncausal(
+            self.draft_model_config.hf_config
+        )
 
         # Whether the anchor query position is itself a prediction. DFlash default uses
         # the anchor as the bonus token (only mask tokens predict); DSpark samples from
@@ -91,7 +92,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.vllm_config,
             attention_config=replace(
                 self.vllm_config.attention_config,
-                use_non_causal=not self.dflash_causal,
+                use_non_causal=self.use_non_causal,
             ),
         )
 
@@ -173,8 +174,8 @@ class DFlashSpeculator(DraftModelSpeculator):
         # of the kv-cache group its cache belongs to. Models that share a single group
         # leave this as None and share one context slot mapping.
         self._layer_group_idx: list[int] | None = None
-        # Per-KV-group causal, falling back to the scalar dflash_causal.
-        self._group_causal: dict[int, bool] | bool = self.dflash_causal
+        # Per-KV-group causal, falling back to whether the drafter is all-causal.
+        self._group_causal: dict[int, bool] | bool = not self.use_non_causal
         if hasattr(self.model, "get_draft_kv_cache_layer_names"):
             layer_names = self.model.get_draft_kv_cache_layer_names()
             name_to_gid = {

@@ -52,6 +52,44 @@ from .utils import (
 logger = init_logger(__name__)
 
 
+_SLIDING_ATTENTION = "sliding_attention"
+
+
+def _dflash_layer_is_sliding(config: Qwen3Config, layer_idx: int) -> bool:
+    """Whether one DFlash draft layer uses sliding-window attention."""
+    dflash_config = getattr(config, "dflash_config", None) or {}
+    layer_types = getattr(config, "layer_types", None)
+    use_swa = dflash_config.get("use_swa", False)
+    if layer_types is None:
+        return use_swa
+    # ``use_swa`` forces SWA on every layer, even an all-full ``layer_types``.
+    if use_swa and not any(lt == _SLIDING_ATTENTION for lt in layer_types):
+        return use_swa
+    return layer_types[layer_idx] == _SLIDING_ATTENTION
+
+
+def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
+    """Whether one DFlash draft layer uses causal attention.
+
+    ``dflash_config.causal`` overrides all layers; otherwise only SWA layers
+    (declared via ``layer_types``) are causal.
+    """
+    override = (getattr(config, "dflash_config", None) or {}).get("causal")
+    if override is not None:
+        return override
+    layer_types = getattr(config, "layer_types", None)
+    return bool(layer_types) and layer_types[layer_idx] == _SLIDING_ATTENTION
+
+
+def dflash_has_any_noncausal(config: Qwen3Config) -> bool:
+    """Whether any draft layer is non-causal, so the selected attention backend
+    must support non-causal attention. Config-only mirror of the model's
+    ``get_draft_attn_causal``, usable before the draft model is built."""
+    return not all(
+        _dflash_layer_causal(config, i) for i in range(config.num_hidden_layers)
+    )
+
+
 def _resolve_layer_attention(
     config: Qwen3Config, layer_idx: int
 ) -> tuple[int | None, bool]:
@@ -78,14 +116,9 @@ def _resolve_layer_attention(
     """
     dflash_config = getattr(config, "dflash_config", None) or {}
     layer_types = getattr(config, "layer_types", None)
-    use_swa = dflash_config.get("use_swa", False)
-    config_causal = dflash_config.get("causal", None)
 
-    SLIDING_ATTENTION = "sliding_attention"
-    any_sliding = False
     if layer_types is not None:
-        num_sliding = sum(lt == SLIDING_ATTENTION for lt in layer_types)
-        any_sliding = num_sliding > 0
+        num_sliding = sum(lt == _SLIDING_ATTENTION for lt in layer_types)
         # Mixed sliding/full attention needs multiple KV groups (V2 runner only).
         if (
             0 < num_sliding < len(layer_types)
@@ -97,19 +130,8 @@ def _resolve_layer_attention(
                 "VLLM_USE_V2_MODEL_RUNNER=1."
             )
 
-    default_causal = False
-    if layer_types is None or (use_swa and not any_sliding):
-        # An absent ``layer_types`` (or the all-"full_attention" one that may
-        # be synthesized when the checkpoint omits it) must not override
-        # ``dflash_config.use_swa``, which forces SWA on every layer.
-        is_sliding = use_swa
-    else:
-        is_sliding = layer_types[layer_idx] == SLIDING_ATTENTION
-        # Full-attention layers default non-causal; SWA layers default causal.
-        default_causal = is_sliding
-
     sliding_window = None
-    if is_sliding:
+    if _dflash_layer_is_sliding(config, layer_idx):
         sliding_window = dflash_config.get(
             "swa_window_size", getattr(config, "sliding_window", None)
         )
@@ -119,8 +141,7 @@ def _resolve_layer_attention(
                 "dflash_config.swa_window_size or the top-level sliding_window."
             )
 
-    causal = config_causal if config_causal is not None else default_causal
-    return sliding_window, causal
+    return sliding_window, _dflash_layer_causal(config, layer_idx)
 
 
 class DFlashQwen3Attention(nn.Module):
