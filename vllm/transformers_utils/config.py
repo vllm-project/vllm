@@ -26,6 +26,10 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.transformers_utils.modelscope_utils import (
+    should_use_modelscope,
+    warn_modelscope_fallback,
+)
 from vllm.transformers_utils.repo_utils import is_mistral_model_repo
 from vllm.transformers_utils.utils import (
     parse_safetensors_file_metadata,
@@ -43,9 +47,11 @@ from .repo_utils import (
     with_retry,
 )
 
-if envs.VLLM_USE_MODELSCOPE:
+if should_use_modelscope():
     from modelscope import AutoConfig
 else:
+    if envs.VLLM_USE_MODELSCOPE:
+        warn_modelscope_fallback("vllm.transformers_utils.config")
     from transformers import AutoConfig
 
 MISTRAL_CONFIG_NAME = "params.json"
@@ -1010,7 +1016,7 @@ def get_hf_image_processor_config(
     **kwargs,
 ) -> dict[str, Any]:
     # ModelScope does not provide an interface for image_processor
-    if envs.VLLM_USE_MODELSCOPE:
+    if should_use_modelscope():
         return dict()
     return get_image_processor_config(
         model, token=hf_token, revision=revision, **kwargs
