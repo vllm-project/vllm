@@ -45,6 +45,15 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         self.hidden_size = hidden_size
         self.dtype = dtype
         self.device = device
+        # The fp32 lm_head path lives in the base LogitsProcessor._get_logits,
+        # which this wrapper bypasses. Rather than silently emit model-dtype
+        # logits, reject the combination until the LoRA path supports it.
+        head_dtype = getattr(base_layer, "head_dtype", None)
+        if head_dtype is not None and head_dtype != dtype:
+            raise ValueError(
+                "A head_dtype different from the model dtype (e.g. an fp32 "
+                "lm_head) is not yet supported with LoRA."
+            )
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
         self.sharded_to_full_mapping = sharded_to_full_mapping

@@ -350,6 +350,25 @@ steps:
           - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129-ubuntu2404"
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129-ubuntu2404"'
 
+      - label: ":docker: Build release image - x86_64 - XPU"
+        depends_on: ~
+        id: build-xpu-release-image
+        agents:
+          queue: cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - |
+            DOCKER_BUILDKIT=1 docker build \
+              $(bash .buildkite/scripts/docker-build-metadata-args.sh xpu) \
+              --build-arg GIT_REPO_CHECK=1 \
+              --target vllm-openai \
+              --progress plain \
+              -f docker/Dockerfile.xpu .
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-xpu"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-xpu"'
+        env:
+          DOCKER_BUILDKIT: "1"
+
       - block: "Build release image for x86_64 CPU"
         key: block-cpu-release-image-build
         depends_on: ~
@@ -444,6 +463,16 @@ steps:
           - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-ubuntu2404 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64-cu129-ubuntu2404 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64-cu129-ubuntu2404 --amend"
           - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-ubuntu2404"
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: CUDA 12.9 Ubuntu 24.04" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-ubuntu2404"'
+
+      - label: "Create manifest - XPU"
+        depends_on:
+          - build-xpu-release-image
+        id: create-manifest-xpu
+        agents:
+          queue: small_cpu_queue_release
+        commands:
+          - "bash .buildkite/scripts/xpu/create-xpu-ecr-manifest.sh"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: XPU" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-xpu"'
 
       - label: "Publish nightly multi-arch image to DockerHub"
         depends_on:
@@ -819,6 +848,23 @@ steps:
       DOCKER_BUILDKIT: "1"
       S3_BUCKET: "vllm-wheels"
 
+  - label: "Publish nightly XPU image to DockerHub"
+    depends_on:
+      - create-manifest-xpu
+    if: build.env("NIGHTLY") == "1"
+    agents:
+      queue: small_cpu_queue_release
+    commands:
+      - "bash .buildkite/scripts/xpu/push-nightly-builds-xpu.sh"
+      - "bash .buildkite/scripts/cleanup-nightly-builds.sh nightly- vllm/vllm-openai-xpu"
+    plugins:
+      - docker-login#v3.0.0:
+          username: vllmbot
+          password-env: DOCKERHUB_TOKEN
+    env:
+      DOCKER_BUILDKIT: "1"
+      DOCKERHUB_USERNAME: "vllmbot"
+
   - label: "Publish nightly ROCm image to DockerHub"
     depends_on:
       - build-rocm-release-image
@@ -849,6 +895,7 @@ steps:
       - create-multi-arch-manifest-cuda-12-9
       - create-multi-arch-manifest-ubuntu2404
       - create-multi-arch-manifest-cuda-12-9-ubuntu2404
+      - create-manifest-xpu
       - build-rocm-release-image
       - input-release-version
       # Wait for CPU builds if their block steps were unblocked, so publish
