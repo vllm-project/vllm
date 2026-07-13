@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 // Route tests should use `Service::call` rather than `ServiceExt::oneshot`.
 // `oneshot` consumes the router and can drop `AppState` before a streaming
 // response body is fully drained, which closes the mock engine connection too
