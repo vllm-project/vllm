@@ -2,15 +2,49 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import tempfile
+from types import SimpleNamespace
 
 import huggingface_hub.constants
+import psutil
 import pytest
 from huggingface_hub.utils import LocalEntryNotFoundError
 
+import vllm.model_executor.model_loader.weight_utils as weight_utils
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
     maybe_remap_kv_scale_name,
 )
+from vllm.utils import cpu_resource_utils
+
+
+@pytest.mark.parametrize(
+    ("is_rocm", "cgroup_memory", "expected"),
+    [
+        (False, (500, 200), 800),
+        (True, (None, None), 800),
+        (True, (500, None), 500),
+        (True, (500, 200), 300),
+        (True, (500, 600), 0),
+    ],
+)
+def test_get_available_ram_bytes(monkeypatch, is_rocm, cgroup_memory, expected):
+    monkeypatch.setattr(
+        psutil,
+        "virtual_memory",
+        lambda: SimpleNamespace(available=800),
+    )
+    monkeypatch.setattr(
+        weight_utils,
+        "current_platform",
+        SimpleNamespace(is_rocm=lambda: is_rocm),
+    )
+    monkeypatch.setattr(
+        cpu_resource_utils,
+        "get_cgroup_memory_limit",
+        lambda: cgroup_memory,
+    )
+
+    assert weight_utils._get_available_ram_bytes() == expected
 
 
 def test_download_weights_from_hf():
