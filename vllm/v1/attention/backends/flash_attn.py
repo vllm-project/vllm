@@ -1126,6 +1126,29 @@ class FlashAttentionImpl(AttentionImpl):
             layer._v_scale,
         )
 
+    def _dcp_head_window(self, total_query_heads: int) -> slice:
+        """This DCP rank's contiguous output-head window within a full
+        query-head tensor.
+
+        The DCP path has a two-head-count contract: the FlashAttention kernel
+        computes on ``q_heads`` query heads, but this rank's ``output`` holds
+        ``out_heads``. They are equal under plain DCP. Under TPA-GQA the query
+        carries the DCP group's full head set, so
+        ``q_heads == out_heads * dcp_world_size``; the context branch is
+        reduce-scattered to ``out_heads`` by ``dcp_combine`` and the local query
+        branch is sliced to this rank's window. Returns the
+        ``[start, start + out_heads)`` slice, applied identically to per-head
+        tensors (attention output on dim 1, LSE on dim 0).
+        """
+        dcp_group = get_dcp_group()
+        assert total_query_heads % dcp_group.world_size == 0, (
+            f"TPA-GQA: query heads ({total_query_heads}) must be divisible by "
+            f"dcp_world_size ({dcp_group.world_size})"
+        )
+        out_heads = total_query_heads // dcp_group.world_size
+        start = dcp_group.rank_in_group * out_heads
+        return slice(start, start + out_heads)
+
     def _forward_with_dcp(
         self,
         query: torch.Tensor,
@@ -1191,10 +1214,7 @@ class FlashAttentionImpl(AttentionImpl):
                 num_splits=attn_metadata.max_num_splits,
             )
             if tpa_gqa_mode:
-                dcp_group = get_dcp_group()
-                hpf = query.shape[1] // dcp_group.world_size
-                head_start = dcp_group.rank_in_group * hpf
-                output.copy_(fast_out[:, head_start : head_start + hpf, :])
+                output.copy_(fast_out[:, self._dcp_head_window(fast_out.shape[1]), :])
             return output
 
         # TPA-GQA: Q already carries this attn-rank's heads, so skip the
@@ -1342,19 +1362,9 @@ class FlashAttentionImpl(AttentionImpl):
         # context branch has been reduce-scattered to H/full_tp; slice the
         # query branch to this DCP rank's head window for merge_attn_states.
         if tpa_gqa_mode:
-            dcp_group = get_dcp_group()
-            dcp_size = dcp_group.world_size
-            dcp_rank = dcp_group.rank_in_group
-            total_heads = query_attn_out.shape[1]
-            assert total_heads % dcp_size == 0, (
-                f"TPA-GQA: query_attn_out heads ({total_heads}) must be "
-                f"divisible by dcp_size ({dcp_size})"
-            )
-            heads_per_full_rank = total_heads // dcp_size
-            head_start = dcp_rank * heads_per_full_rank
-            head_end = head_start + heads_per_full_rank
-            query_attn_out = query_attn_out[:, head_start:head_end, :].contiguous()
-            query_lse = query_lse[head_start:head_end, :].contiguous()
+            head_window = self._dcp_head_window(query_attn_out.shape[1])
+            query_attn_out = query_attn_out[:, head_window, :].contiguous()
+            query_lse = query_lse[head_window, :].contiguous()
         assert context_attn_out_cor.shape == query_attn_out.shape
         assert context_lse_cor.shape == query_lse.shape
         merge_attn_states(
