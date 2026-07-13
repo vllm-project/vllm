@@ -162,15 +162,18 @@ class MambaStateDtypeCalculator:
         mamba_ssm_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, ...]:
         """GDN ReplaySSM state dtypes: baseline ``(conv, ssm)`` plus the ring
-        cache dtypes ``(d_cache, k_cache, g_cache)`` =
-        ``(activation, activation, float32)``. Call only when use_replayssm is
-        on.
+        cache dtypes ``(d_cache, k_cache, g_cache)``. The ``d``/``k`` input
+        caches use fp16 for bf16 activations; ``g_cache`` is float32. Call only
+        when use_replayssm is on.
         """
         conv_dtype, ssm_dtype = cls._mamba_state_dtype(
             model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
         )
         activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
-        return conv_dtype, ssm_dtype, activation_dtype, activation_dtype, torch.float32
+        cache_dtype = (
+            torch.float16 if activation_dtype == torch.bfloat16 else activation_dtype
+        )
+        return conv_dtype, ssm_dtype, cache_dtype, cache_dtype, torch.float32
 
     @classmethod
     def gated_delta_net_replayssm_spec_state_dtype(

@@ -103,7 +103,7 @@ def fused_recurrent_gated_delta_rule_replayssm_kernel(
         p_d_main, mask=mask_v[:, None] & cache_valid[None, :], other=0
     ).to(tl.float32)
     b_d_scaled_tc = (b_d_all * b_replay_decay[None, :]).to(
-        p_o.dtype.element_ty
+        p_d_main.dtype.element_ty
     )  # [BV, BC]
 
     # Current token value (for the delta-rule update).
@@ -169,7 +169,7 @@ def fused_recurrent_gated_delta_rule_replayssm_kernel(
         )
         b_k_all_c = tl.load(
             p_k_c, mask=cache_valid[:, None] & mask_kt[None, :], other=0
-        ).to(p_o.dtype.element_ty)
+        ).to(p_k_c.dtype.element_ty)
         b_h_c = b_h0_c * b_total_decay + tl.dot(b_d_scaled_tc, b_k_all_c).to(
             tl.float32
         )  # [BV, BKT]
@@ -186,7 +186,7 @@ def fused_recurrent_gated_delta_rule_replayssm_kernel(
             )
             tl.store(
                 p_cur_k,
-                k_c.to(p_o.dtype.element_ty),
+                k_c.to(p_cur_k.dtype.element_ty),
                 mask=mask_kt & (b_write_pos < MAX_CACHE_LEN),
             )
 
@@ -228,7 +228,7 @@ def fused_recurrent_gated_delta_rule_replayssm_kernel(
             )
             b_k_all_c = tl.load(
                 p_k_c, mask=cache_valid[:, None] & mask_kt[None, :], other=0
-            ).to(p_o.dtype.element_ty)
+            ).to(p_k_c.dtype.element_ty)
             b_h_c = b_h0_c * b_total_decay + tl.dot(b_d_scaled_tc, b_k_all_c).to(
                 tl.float32
             )
