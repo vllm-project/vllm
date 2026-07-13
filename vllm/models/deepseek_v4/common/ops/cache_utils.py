@@ -572,20 +572,20 @@ _COMBINE_TOPK_SWA_NUM_WORKERS = 128
 
 
 # Representative pointer alignment variants for Triton pointer specialization.
-_COMBINE_TOPK_SWA_INPUT_VARIANTS = (
-    TritonPointerInputVariant.from_alignment(
+_COMBINE_TOPK_SWA_POINTER_INPUTS = zip_inputs(
+    dict(
         topk_indices=True,
         query_start_loc=True,
         seq_lens=True,
         gather_lens=True,
     ),
-    TritonPointerInputVariant.from_alignment(
+    dict(
         topk_indices=True,
         query_start_loc=False,
         seq_lens=False,
         gather_lens=True,
     ),
-    TritonPointerInputVariant.from_alignment(
+    dict(
         topk_indices=False,
         query_start_loc=False,
         seq_lens=False,
@@ -711,12 +711,21 @@ class CombineTopkSwaIndicesKernel(
         self,
         *,
         topk_width: int,
-        input_variant: TritonPointerInputVariant,
+        topk_indices: bool,
+        query_start_loc: bool,
+        seq_lens: bool,
+        gather_lens: bool,
         topk: int,
         compress_ratio: int,
         WINDOW_SIZE: int,
     ) -> CompileKey:
         padded_topk = next_power_of_2(topk_width)
+        input_variant = TritonPointerInputVariant.from_alignment(
+            topk_indices=topk_indices,
+            query_start_loc=query_start_loc,
+            seq_lens=seq_lens,
+            gather_lens=gather_lens,
+        )
         return self.CompileKey(
             TOP_K=topk,
             COMPRESS_RATIO=compress_ratio,
@@ -732,7 +741,7 @@ class CombineTopkSwaIndicesKernel(
         window_size = _hf_config_int(vllm_config, "sliding_window", 128)
         return self._trace_dispatch(self.dispatch)(
             _DSV4_COMBINE_TOPK_SWA_WARMUP_INPUTS,
-            input_variant=_COMBINE_TOPK_SWA_INPUT_VARIANTS,
+            _COMBINE_TOPK_SWA_POINTER_INPUTS,
             WINDOW_SIZE=window_size,
         )
 
@@ -743,15 +752,15 @@ class CombineTopkSwaIndicesKernel(
         input_variant = compile_key.input_variant
         warmup(
             int32_ptr,
-            1, # do not specialize combined_indices_stride
+            1,  # do not specialize combined_indices_stride
             int32_ptr,
             input_variant.pointer("topk_indices", torch.int32),
-            1, # do not specialize topk_indices_stride
+            1,  # do not specialize topk_indices_stride
             input_variant.pointer("query_start_loc", torch.int32),
             input_variant.pointer("seq_lens", torch.int32),
             input_variant.pointer("gather_lens", torch.int32),
-            1, # do not specialize M
-            1, # do not specialize N
+            1,  # do not specialize M
+            1,  # do not specialize N
             TOP_K=compile_key.TOP_K,
             COMPRESS_RATIO=compile_key.COMPRESS_RATIO,
             WINDOW_SIZE=compile_key.WINDOW_SIZE,
