@@ -277,14 +277,21 @@ class PagedShmServerProc:
             self.proc.join()
 
 
-def maybe_start_paged_shm_server(multimodal_config: MultiModalConfig):
-    if multimodal_config.is_paged_shm_enabled():
-        paged_shm_server = PagedShmServerProc(
-            size=multimodal_config.paged_shm_size,
-            block_size=multimodal_config.paged_shm_block_size,
-        )
-        paged_shm_server.start()
+def maybe_start_paged_shm_server(
+    multimodal_config: MultiModalConfig | None,
+) -> PagedShmServerProc | None:
 
-        multimodal_config.paged_shm_server_address = paged_shm_server.address
-        return paged_shm_server
-    return None
+    if multimodal_config is None:
+        return None
+
+    if not multimodal_config.is_paged_shm_enabled():
+        return None
+
+    paged_shm_server = PagedShmServerProc(
+        size=multimodal_config.paged_shm_size,
+        block_size=multimodal_config.paged_shm_block_size,
+    )
+    paged_shm_server.start()
+
+    multimodal_config.paged_shm_server_address = paged_shm_server.address
+    return paged_shm_server

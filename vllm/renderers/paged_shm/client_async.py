@@ -14,15 +14,16 @@ import asyncio
 import contextlib
 import json
 import logging
+from concurrent.futures import Executor, ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Any
 
-import numpy as np
-import torch
 import zmq
 import zmq.asyncio
-from torch._prims_common import DeviceLikeType
 
+from vllm.utils.async_utils import make_async
+
+from .client import PagedShmClient
 from .constant import (
     CLOSE_READ,
     DELETE,
@@ -37,7 +38,6 @@ from .constant import (
     PIN,
     UNPIN,
 )
-from .storage import PagedShmStorage
 
 logger = logging.getLogger(__name__)
 
@@ -163,7 +163,9 @@ class AsyncPagedShmClient(_AsyncBaseClient):
         Maximum number of concurrent ZMQ sockets to keep in the pool.
     """
 
-    def __init__(self, address: str, pin: bool = False, pool_size: int = 4):
+    def __init__(
+        self, address: str, pin: bool = False, pool_size: int = 4, pool_workers: int = 1
+    ):
         self._pin = pin
         self._address = address
         self._ctx = zmq.asyncio.Context()
@@ -174,31 +176,13 @@ class AsyncPagedShmClient(_AsyncBaseClient):
             sock = self._init_sock()
             self._pool.put_nowait(sock)
 
-        # Synchronously fetch storage info (one‑off during init)
-        info = self._fetch_storage_info_sync(address)
-        self._storage = PagedShmStorage(
-            size=info["size"],
-            block_size=info["block_size"],
-            name=info["name"],
-            pin=self._pin,
-        )
+        self.sync_client = PagedShmClient(address, pin, pool_size)
 
-    @staticmethod
-    def _fetch_storage_info_sync(address: str) -> dict[str, Any]:
-        ctx = zmq.Context()
-        sock = ctx.socket(zmq.REQ)
-        try:
-            sock.connect(address)
-            sock.send_multipart([GET_STORAGE_INFO])
-            response = sock.recv_multipart()
-            if response[0] != OK:
-                raise RuntimeError(
-                    f"Failed to get storage info: server returned {response[0]!r}"
-                )
-            return json.loads(response[1].decode("utf-8"))
-        finally:
-            sock.close()
-            ctx.term()
+        self._storage = self.sync_client._storage
+        self._executor: Executor = ThreadPoolExecutor(max_workers=pool_workers)
+
+        self.write = make_async(self.sync_client.write, executor=self._executor)
+        self.read = make_async(self.sync_client.read, executor=self._executor)
 
     # ------------------------------------------------------------------
     # Context manager factories
@@ -213,44 +197,6 @@ class AsyncPagedShmClient(_AsyncBaseClient):
     def read_context(self, uuid: str) -> _AsyncReadContext:
         """Create an async context manager for a read operation."""
         return _AsyncReadContext(self, uuid)
-
-    # ------------------------------------------------------------------
-    # High‑level async methods
-    # ------------------------------------------------------------------
-
-    async def write(
-        self,
-        uuid: str,
-        data: bytes | np.ndarray | torch.Tensor,
-        use_cache: bool = True,
-    ) -> int:
-        """Asynchronously write an item to shared memory."""
-        if isinstance(data, torch.Tensor):
-            size = data.numel() * data.element_size()
-        elif isinstance(data, np.ndarray):
-            size = data.nbytes
-        elif isinstance(data, bytes):
-            size = len(data)
-        else:
-            raise TypeError(f"Unsupported data type: {type(data)}")
-
-        async with self.write_context(uuid, size, use_cache) as ctx:
-            self._storage.write(data, ctx.blocks)
-
-        return size
-
-    async def read(
-        self, uuid: str, device: DeviceLikeType = "cpu"
-    ) -> np.ndarray | torch.Tensor:
-        """Asynchronously read an item from shared memory."""
-        async with self.read_context(uuid) as ctx:
-            if not ctx.blocks:
-                raise ValueError(f"Server returned empty block list for uuid '{uuid}'")
-            if device == "cpu":
-                result = self._storage.read_to_numpy(ctx.size, ctx.blocks)
-            else:
-                result = self._storage.read_to_tensor(ctx.size, ctx.blocks, device)
-        return result
 
     # ------------------------------------------------------------------
     # Async iterators with read‑lock protection
@@ -333,7 +279,7 @@ class AsyncPagedShmClient(_AsyncBaseClient):
 
     async def close(self) -> None:
         """Close all async sockets, terminate context,
-        and detach from shared memory."""
+        and close sync client."""
 
         # 1. Close all pooled sockets
         while not self._pool.empty():
@@ -346,10 +292,8 @@ class AsyncPagedShmClient(_AsyncBaseClient):
         # 2. Destroy context without blocking the event loop
         self._ctx.destroy(linger=0)
 
-        # 3. Detach shared memory
-        if hasattr(self, "_storage"):
-            self._storage.close()
-            logger.debug("Shared memory storage closed.")
+        # 3. close sync client
+        self.sync_client.close()
 
     # ------------------------------------------------------------------
     # Internal helpers

@@ -270,9 +270,9 @@ def build_app(
 
         register_pooling_api_routers(app, supported_tasks, model_config)
 
-    from vllm.entrypoints.scale_out.factories import register_paged_shm_server__routers
+    from vllm.entrypoints.scale_out.factories import register_paged_shm_server_routers
 
-    register_paged_shm_server__routers(app)
+    register_paged_shm_server_routers(app, model_config)
 
     # Endpoint plugins are attached last so their routes are registered after all core
     # routers. This runs even for the CPU only render server. A plugin eligible for
@@ -479,7 +479,7 @@ async def init_app_state(
 
     from vllm.entrypoints.scale_out.factories import init_paged_shm_server_state
 
-    init_paged_shm_server_state(state, vllm_config.model_config.multimodal_config)
+    init_paged_shm_server_state(state, vllm_config.model_config)
 
     await _init_endpoint_plugins_state(engine_client, state, args)
 
@@ -568,7 +568,7 @@ async def init_render_app_state(
 
     from vllm.entrypoints.scale_out.factories import init_paged_shm_server_state
 
-    init_paged_shm_server_state(state, vllm_config.model_config.multimodal_config)
+    init_paged_shm_server_state(state, vllm_config.model_config)
 
     state.vllm_config = vllm_config
     # Disable stats logging — there is no engine to poll.
@@ -729,7 +729,7 @@ async def build_and_serve_renderer(
     if log_config is not None:
         uvicorn_kwargs["log_config"] = log_config
 
-    app = build_app(args, ("render",))
+    app = build_app(args, ("render",), vllm_config.model_config)
     await init_render_app_state(vllm_config, app.state, args)
 
     logger.info("Starting vLLM server on %s", listen_address)

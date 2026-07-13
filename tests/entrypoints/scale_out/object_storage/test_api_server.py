@@ -28,6 +28,7 @@ def server():
             "--paged-shm-block-size",
             f"{1024 * 10244}",  # 1M
         ],
+        env_dict={"VLLM_SERVER_DEV_MODE": "1"},
     ) as remote_server:
         yield remote_server
 
