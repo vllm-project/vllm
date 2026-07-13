@@ -492,6 +492,17 @@ class ModelCudaGraphManager(CudaGraphManager):
                 "positions": input_buffers.positions[:num_tokens],
                 **model_state.prepare_dummy_inputs(num_reqs, num_tokens),
             }
+            # Mirror the decode path (see GPUModelRunner._prepare_inputs): when
+            # precomputed embeddings are available, drop the dummy `input_ids`
+            # unless the model explicitly needs the raw tokens. Passing both
+            # breaks HF models (e.g. Gemma3) that require exactly one of
+            # `input_ids` / `inputs_embeds`.
+            if (
+                model_inputs.get("inputs_embeds") is not None
+                and model_inputs.get("input_ids") is not None
+                and not model.requires_raw_input_tokens
+            ):
+                model_inputs["input_ids"] = None
             if not self.is_first_pp_rank:
                 # Update for non-first PP ranks.
                 model_inputs["input_ids"] = None

@@ -631,13 +631,6 @@ class Base(
             # [seq_len] -> [1, seq_len]
             positions = positions[None, ...]
 
-        # Transformers models require exactly one of `input_ids` / `inputs_embeds`.
-        # During cudagraph capture vLLM may provide both (dummy token ids plus
-        # precomputed embeddings); prefer the embeddings so the "exactly one"
-        # contract enforced by models such as Gemma3 is respected.
-        if input_ids is not None and inputs_embeds is not None:
-            input_ids = None
-
         outputs = self.model(
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
