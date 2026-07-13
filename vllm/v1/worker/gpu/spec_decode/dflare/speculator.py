@@ -14,18 +14,10 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import (
-    DFlashCudaGraphManager,
-)
+from vllm.v1.worker.gpu.spec_decode.dflare.utils import load_dflare_model
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
     DFlashSpeculator,
 )
-from vllm.v1.worker.gpu.spec_decode.dflare.utils import load_dflare_model
-
-from vllm.v1.worker.gpu.spec_decode.utils import (
-    get_parallel_drafting_token_id,
-)
-from vllm.v1.worker.gpu.spec_decode.dflash.utils import get_dflash_causal
 
 
 class DFlareSpeculator(DFlashSpeculator):
@@ -34,8 +26,7 @@ class DFlareSpeculator(DFlashSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
-        # ★ Per-layer fused context states [max_num_tokens, D, H].
-        # DFlash has a single shared hidden_states [max_num_tokens, H];
+        # Per-layer fused context states [max_num_tokens, D, H].
         # DFlare needs a distinct fused representation per draft layer.
         D = self.draft_model_config.hf_config.num_hidden_layers
         self.per_layer_hidden_states = torch.zeros(
@@ -72,14 +63,12 @@ class DFlareSpeculator(DFlashSpeculator):
         num_reqs = input_batch.num_reqs
         num_target_tokens = input_batch.num_tokens
         num_query_tokens = num_reqs * self.num_query_per_req
-        max_seq_len = (
-            input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
-        )
+        max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
         self.draft_max_seq_len = min(
             max_seq_len + self.num_query_per_req, self.max_model_len
         )
 
-        # ★ Per-layer fusion: [N, T*H] → [N, D, H]
+        # Per-layer fusion: [N, T*H] → [N, D, H]
         if aux_hidden_states:
             hidden_states = self.model.combine_hidden_states(
                 torch.cat(aux_hidden_states, dim=-1)
@@ -87,9 +76,7 @@ class DFlareSpeculator(DFlashSpeculator):
         else:
             # Fallback: replicate last_hidden_states across D draft layers
             D = self.draft_model_config.hf_config.num_hidden_layers
-            hidden_states = last_hidden_states.unsqueeze(1).expand(
-                -1, D, -1
-            )
+            hidden_states = last_hidden_states.unsqueeze(1).expand(-1, D, -1)
         self.per_layer_hidden_states[:num_target_tokens].copy_(
             hidden_states[:num_target_tokens]
         )
@@ -148,18 +135,14 @@ class DFlareSpeculator(DFlashSpeculator):
             )
 
         if dummy_run:
-            context_slots: (
-                torch.Tensor | list[torch.Tensor | None] | None
-            ) = None
+            context_slots: torch.Tensor | list[torch.Tensor | None] | None = None
         elif self._layer_group_idx is not None:
             context_slots = [
                 self._context_slot_mappings[gidx][:num_target_tokens]
                 for gidx in self._layer_group_idx
             ]
         else:
-            context_slots = self._context_slot_mappings[0][
-                :num_target_tokens
-            ]
+            context_slots = self._context_slot_mappings[0][:num_target_tokens]
 
         # ★ Precompute with per-layer fused states [N, D, H]
         self.model.precompute_and_store_context_kv(

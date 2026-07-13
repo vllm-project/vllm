@@ -14,15 +14,11 @@ from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
 
 def get_dflare_causal(draft_model_config: ModelConfig) -> bool:
     """Whether the DFlare draft uses causal (vs non-causal) attention."""
-    dflare_config = (
-        getattr(draft_model_config.hf_config, "dflash_config", None) or {}
-    )
+    dflare_config = getattr(draft_model_config.hf_config, "dflash_config", None) or {}
     return dflare_config.get("causal", False)
 
 
-def load_dflare_model(
-    target_model: nn.Module, vllm_config: VllmConfig
-) -> nn.Module:
+def load_dflare_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
     from vllm.compilation.backends import set_model_tag
 
     speculative_config = vllm_config.speculative_config

@@ -185,7 +185,6 @@ from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.custom_class_proposer import create_custom_proposer
 from vllm.v1.spec_decode.dflash import DFlashProposer
-from vllm.v1.spec_decode.dflare import DFlareProposer
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesProposer
@@ -579,7 +578,7 @@ class GPUModelRunner(
                 | NgramProposerGPU
                 | SuffixDecodingProposer
                 | EagleProposer
-                | DFlashProposer | DFlareProposer
+                | DFlashProposer
                 | DraftModelProposer
                 | MedusaProposer
                 | ExtractHiddenStatesProposer
@@ -623,9 +622,6 @@ class GPUModelRunner(
                 self.drafter = Step3p5MTPProposer(self.vllm_config, self.device, self)
             elif self.speculative_config.use_dflash():
                 self.drafter = DFlashProposer(self.vllm_config, self.device, self)
-                self.use_aux_hidden_state_outputs = True
-            elif self.speculative_config.use_dflare():
-                self.drafter = DFlareProposer(self.vllm_config, self.device, self)
                 self.use_aux_hidden_state_outputs = True
             elif self.speculative_config.method == "suffix":
                 self.drafter = SuffixDecodingProposer(self.vllm_config)
@@ -2546,7 +2542,6 @@ class GPUModelRunner(
                     (
                         EagleProposer,
                         DFlashProposer,
-                        DFlareProposer,
                         Gemma4Proposer,
                         ExtractHiddenStatesProposer,
                     ),
@@ -4477,7 +4472,7 @@ class GPUModelRunner(
         assert self.speculative_config is not None
         # DFlash queries one extra token (the bonus token) beyond num_spec_tokens
         num_drafter_query_tokens = self.num_spec_tokens + (
-            1 if self.speculative_config.use_dflash() or self.speculative_config.use_dflare() else 0
+            1 if self.speculative_config.use_dflash() else 0
         )
         return (
             common_attn_metadata.max_seq_len + num_drafter_query_tokens
@@ -4583,7 +4578,7 @@ class GPUModelRunner(
                 assert isinstance(
                     self.drafter,
                     EagleProposer
-                    | DFlashProposer | DFlareProposer
+                    | DFlashProposer
                     | DraftModelProposer
                     | ExtractHiddenStatesProposer
                     | Gemma4Proposer,
@@ -4678,7 +4673,7 @@ class GPUModelRunner(
                 assert isinstance(
                     self.drafter,
                     EagleProposer
-                    | DFlashProposer | DFlareProposer
+                    | DFlashProposer
                     | DraftModelProposer
                     | ExtractHiddenStatesProposer
                     | Gemma4Proposer,
@@ -5088,12 +5083,11 @@ class GPUModelRunner(
         elif (
             spec_config.use_eagle()
             or spec_config.use_dflash()
-            or spec_config.use_dflare()
             or spec_config.uses_draft_model()
         ):
             assert isinstance(
                 self.drafter,
-                EagleProposer | DFlashProposer | DFlareProposer | DraftModelProposer | Gemma4Proposer,
+                EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
             )
 
             if spec_config.disable_padded_drafter_batch:
@@ -6089,7 +6083,7 @@ class GPUModelRunner(
                 assert isinstance(
                     self.drafter,
                     EagleProposer
-                    | DFlashProposer | DFlareProposer
+                    | DFlashProposer
                     | DraftModelProposer
                     | ExtractHiddenStatesProposer
                     | Gemma4Proposer,
@@ -6994,7 +6988,7 @@ class GPUModelRunner(
         ):
             assert isinstance(
                 self.drafter,
-                EagleProposer | DFlashProposer | DFlareProposer | DraftModelProposer | Gemma4Proposer,
+                EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
             )
             self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
 
@@ -7049,7 +7043,7 @@ class GPUModelRunner(
             assert isinstance(
                 self.drafter,
                 EagleProposer
-                | DFlashProposer | DFlareProposer
+                | DFlashProposer
                 | ExtractHiddenStatesProposer
                 | Gemma4Proposer,
             )

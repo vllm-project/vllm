@@ -73,10 +73,15 @@ class EAGLEConfig(PretrainedConfig):
                 for arch in self.model.architectures
             ]
         elif method == "dflare":
+            assert self.model is not None, (
+                "model should not be None when method is dflare"
+            )
             kwargs["architectures"] = [
                 arch
-                if arch.startswith("DFlare") or arch.endswith("DFlare") or "DFlare" in arch
-                else f"Dflare{arch}"
+                if arch.startswith("DFlare")
+                or arch.endswith("DFlare")
+                or "DFlare" in arch
+                else f"DFlare{arch}"
                 for arch in self.model.architectures
             ]
         else:

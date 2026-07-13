@@ -10,7 +10,7 @@ from transformers import Qwen3Config
 
 from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -20,7 +20,6 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -34,11 +33,9 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.multimodal.inputs import NestedTensors
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.v1.attention.backend import AttentionType
 
-from .qwen3 import Qwen3ForCausalLM
 from .qwen3_dflash import (
     DFlashQwen3ForCausalLM,
     _resolve_layer_attention,
@@ -99,7 +96,7 @@ class DFlareQwen3Attention(nn.Module):
         self.head_dim = head_dim or hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim ** -0.5
+        self.scaling = self.head_dim**-0.5
 
         # Draft query projections
         self.q_proj = ColumnParallelLinear(
@@ -218,7 +215,7 @@ class DFlareQwen3DecoderLayer(nn.Module):
         *,
         config: Qwen3Config,
         layer_idx: int,
-        cache_config: "CacheConfig | None" = None,
+        cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -284,9 +281,7 @@ class DFlareQwen3DecoderLayer(nn.Module):
             hidden_states=hidden_states,
         )
 
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual
-        )
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
@@ -330,9 +325,7 @@ class DFlareQwen3Model(nn.Module):
 
         self.mask_token_id = drafter_config.get("mask_token_id")
         self.mask_embedding = nn.Parameter(
-            torch.zeros(
-                self.config.hidden_size, dtype=vllm_config.model_config.dtype
-            ),
+            torch.zeros(self.config.hidden_size, dtype=vllm_config.model_config.dtype),
             requires_grad=False,
         )
         self.has_separate_mask_embedding = False
@@ -345,9 +338,7 @@ class DFlareQwen3Model(nn.Module):
                     layer_idx=layer_idx,
                     cache_config=current_vllm_config.cache_config,
                     quant_config=self.quant_config,
-                    prefix=maybe_prefix(
-                        prefix, f"layers.{layer_idx + start_layer_id}"
-                    ),
+                    prefix=maybe_prefix(prefix, f"layers.{layer_idx + start_layer_id}"),
                 )
                 for layer_idx in range(self.config.num_hidden_layers)
             ]
@@ -370,9 +361,7 @@ class DFlareQwen3Model(nn.Module):
         embeds = self.embed_tokens(input_ids)
         if self.has_separate_mask_embedding and self.mask_token_id is not None:
             is_mask = (input_ids == self.mask_token_id).unsqueeze(-1)
-            embeds = torch.where(
-                is_mask, self.mask_embedding.to(embeds.dtype), embeds
-            )
+            embeds = torch.where(is_mask, self.mask_embedding.to(embeds.dtype), embeds)
         return embeds
 
     def _build_context_kv_buffers(
@@ -389,12 +378,8 @@ class DFlareQwen3Model(nn.Module):
         self._hidden_norm_weight = self.hidden_norm.weight.data
 
         # Stack target KV projection weights: [D, out_features, in_features]
-        k_target = torch.stack(
-            [a.k_proj_target.weight for a in layers_attn]
-        )
-        v_target = torch.stack(
-            [a.v_proj_target.weight for a in layers_attn]
-        )
+        k_target = torch.stack([a.k_proj_target.weight for a in layers_attn])
+        v_target = torch.stack([a.v_proj_target.weight for a in layers_attn])
         self._k_target = k_target  # [D, kv_size, hidden_size]
         self._v_target = v_target  # [D, kv_size, hidden_size]
 
@@ -419,10 +404,7 @@ class DFlareQwen3Model(nn.Module):
             assert (
                 attn.rotary_emb.head_size == self._rope_head_size
                 and attn.rotary_emb.is_neox_style == self._rope_is_neox
-            ), (
-                "All layers must have the same RoPE parameters "
-                "for DFlare precomputation"
-            )
+            ), "All layers must have the same RoPE parameters for DFlare precomputation"
 
         # Layer metadata
         self._num_attn_layers = len(layers_attn)
@@ -436,10 +418,7 @@ class DFlareQwen3Model(nn.Module):
                 and attn.head_dim == self._head_dim
                 and attn.num_kv_heads == self._num_kv_heads
                 and attn.q_norm.variance_epsilon == self._rms_norm_eps
-            ), (
-                "All layers must have the same attn config "
-                "for DFlare precomputation"
-            )
+            ), "All layers must have the same attn config for DFlare precomputation"
 
         self._attn_layers = [layer.self_attn.attn for layer in self.layers]
 
@@ -486,9 +465,7 @@ class DFlareQwen3Model(nn.Module):
         self,
         context_states: torch.Tensor,
         context_positions: torch.Tensor,
-        context_slot_mapping: (
-            torch.Tensor | list[torch.Tensor | None] | None
-        ) = None,
+        context_slot_mapping: (torch.Tensor | list[torch.Tensor | None] | None) = None,
     ) -> None:
         """Precompute K/V from per-layer fused context states.
 
@@ -504,7 +481,6 @@ class DFlareQwen3Model(nn.Module):
             self._build_fused_kv_buffers()
 
         num_layers = self._num_attn_layers
-        num_ctx = context_states.shape[0]  # for single-layer fallback
         L = num_layers
         kv = self._kv_size
         hd = self._head_dim
@@ -574,9 +550,7 @@ class DFlareQwen3Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
@@ -599,9 +573,7 @@ class DFlareQwen3Model(nn.Module):
                 param = params_dict[name]
                 heads_per_rank = loaded_weight.shape[0] // tp_size
                 head_start = tp_rank * heads_per_rank
-                narrow_weight = loaded_weight.narrow(
-                    0, head_start, heads_per_rank
-                )
+                narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
                 param.data.copy_(narrow_weight)
                 loaded_params.add(name)
                 continue
@@ -615,9 +587,7 @@ class DFlareQwen3Model(nn.Module):
                 break
             else:
                 param = params_dict[name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -682,16 +652,13 @@ class DFlareQwen3ForCausalLM(DFlashQwen3ForCausalLM):
             [N, D, H] — one fused representation per draft layer.
         """
         T = len(self.dflare_config["target_layer_ids"])
-        D = self.config.num_hidden_layers
         h = hidden_states.view(-1, T, self.config.hidden_size)  # [N, T, H]
         h_normed = self.model.hidden_norm(h)  # RMSNorm over hidden_size
         alpha = F.softmax(self.model.layer_fusion_weights, dim=-1)  # [D, T]
         fused = torch.einsum("dt,ntH->ndH", alpha, h_normed)  # [N, D, H]
         return fused
 
-    def load_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         model_weights = {}
         includes_draft_id_mapping = False
         includes_embed_tokens = False
