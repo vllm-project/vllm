@@ -2,13 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """External-store cache-hit coordinator for MooncakeStoreConnector."""
 
+from collections.abc import Sequence
 from typing import cast
 
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+    chunk_hashes_for_block_size,
+)
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
-    BlockHashList,
-    BlockHashListWithBlockSize,
     KVCacheBlock,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -22,17 +25,19 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
-# Dummy placeholder hash for store_mask's template computation.
-_DUMMY_BLOCK_HASH = BlockHash(b"\x00" * 32)
-
 
 class ExternalCachedBlockPool:
     """Duck-typed BlockPool backed by a ``(group_id, hash)`` exists set."""
 
-    def __init__(self, exists: set[tuple[int, bytes]] | None = None) -> None:
+    def __init__(
+        self,
+        hash_block_size: int,
+        exists: set[tuple[int, bytes]] | None = None,
+    ) -> None:
         # ``exists=None`` is used on the recv side where hit_length is already
         # determined and we just want each spec's manager to apply its own mask.
         self._exists = exists
+        self.hash_block_size = hash_block_size
         self.null_block = KVCacheBlock(block_id=0)
         # Dummy ID 1 for present block for duck-typing.
         self._present_block = KVCacheBlock(block_id=1)
@@ -62,6 +67,7 @@ class MooncakeStoreCoordinator:
         scheduler_block_size: int,
         hash_block_size: int,
         use_eagle: bool = False,
+        retention_interval: int | None = None,
     ) -> None:
         assert all(
             g.kv_cache_spec.block_size % hash_block_size == 0 for g in kv_cache_groups
@@ -78,6 +84,13 @@ class MooncakeStoreCoordinator:
         self.hash_block_size = hash_block_size
         self.lcm_block_size = scheduler_block_size
         self.use_eagle = use_eagle
+        # Mirror vLLM core's KVCacheCoordinator.retention_interval.
+        self.retention_interval = retention_interval
+        self.eagle_group_ids = {
+            i for i, g in enumerate(kv_cache_groups) if g.is_eagle_group
+        }
+        if use_eagle and not self.eagle_group_ids:
+            self.eagle_group_ids = set(range(len(kv_cache_groups)))
         self._verify_and_split_kv_cache_groups()
 
     def _verify_and_split_kv_cache_groups(self) -> None:
@@ -115,7 +128,7 @@ class MooncakeStoreCoordinator:
 
     def find_longest_cache_hit(
         self,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash],
         max_length: int,
         cached_block_pool: ExternalCachedBlockPool,
         *,
@@ -142,7 +155,7 @@ class MooncakeStoreCoordinator:
 
     def load_mask(
         self,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash],
         token_len: int,
     ) -> tuple[list[bool], ...]:
         """Per-group load masks: ``mask[g][i]`` is True iff group ``g``'s
@@ -158,62 +171,94 @@ class MooncakeStoreCoordinator:
         masks, _ = self.find_longest_cache_hit(
             block_hashes,
             token_len,
-            ExternalCachedBlockPool(),
+            ExternalCachedBlockPool(self.hash_block_size),
             apply_eagle=False,
         )
         return masks
 
-    def store_mask(self, aligned_token_len: int) -> tuple[list[bool], ...]:
-        """Per-group store masks: ``mask[g][i]`` is True iff chunk ``i`` of
-        group ``g`` would be populated by some future cache hit at length
-        ``L = N * lcm_block_size <= aligned_token_len``.
+    def store_mask(
+        self,
+        aligned_token_len: int,
+        start_token: int = 0,
+        num_prompt_tokens: int | None = None,
+    ) -> tuple[list[bool] | None, ...]:
+        """Per-group store masks for the suffix starting at ``start_token``.
+
+        ``mask[g][i]`` is True iff the i-th chunk of group ``g`` *after*
+        ``start_token`` should be written to the store so a future cache hit
+        can consume it. ``None`` is the all-True sentinel for the suffix.
+
+        Reuses the engine's ``SingleTypeKVCacheManager.reachable_block_mask``
+        so the store retains exactly the blocks the local prefix cache would.
         """
+        return self._reachable_masks(
+            aligned_token_len,
+            start_token,
+            retention_interval=self.retention_interval,
+            num_prompt_tokens=num_prompt_tokens,
+        )
+
+    def lookup_mask(
+        self,
+        aligned_token_len: int,
+    ) -> tuple[list[bool] | None, ...]:
+        """Per-group lookup masks.
+
+        ``mask[g][i]`` is True iff chunk ``i`` of group ``g`` should be
+        looked up as an aligned hit boundary. ``None`` is the all-True
+        sentinel.
+        """
+        return self._reachable_masks(
+            aligned_token_len,
+            0,
+            retention_interval=None,
+            num_prompt_tokens=None,
+        )
+
+    def _reachable_masks(
+        self,
+        aligned_token_len: int,
+        start_token: int,
+        *,
+        retention_interval: int | None,
+        num_prompt_tokens: int | None,
+    ) -> tuple[list[bool] | None, ...]:
         assert aligned_token_len % self.lcm_block_size == 0, (
             f"aligned_token_len ({aligned_token_len}) must be a multiple of "
             f"lcm_block_size ({self.lcm_block_size})"
         )
-        if aligned_token_len == 0:
-            return tuple([] for _ in self.kv_cache_groups)
-
-        num_chunks_per_group = [
-            aligned_token_len // g.kv_cache_spec.block_size
-            for g in self.kv_cache_groups
-        ]
-
-        # Fast path: single group or full attn groups or uniform block_sizes
-        if all(
-            isinstance(spec, FullAttentionSpec)
-            or spec.block_size == self.lcm_block_size
-            for spec, _, _ in self.attention_groups
-        ):
-            return tuple([True] * n for n in num_chunks_per_group)
-
-        n_segments = aligned_token_len // self.lcm_block_size
-        dummy_hashes: list[BlockHash] = [_DUMMY_BLOCK_HASH] * (
-            self.lcm_block_size // self.hash_block_size
-        )
-        template_masks, _ = self.find_longest_cache_hit(
-            dummy_hashes,
-            max_length=self.lcm_block_size,
-            cached_block_pool=ExternalCachedBlockPool(),
-        )
-        return tuple(
-            list(template_masks[g]) * n_segments
-            for g in range(len(self.kv_cache_groups))
-        )
+        masks: list[list[bool] | None] = []
+        for g_idx, g in enumerate(self.kv_cache_groups):
+            spec = _unwrap_spec(g.kv_cache_spec)
+            end_chunk = aligned_token_len // spec.block_size
+            start_chunk = min(end_chunk, max(0, cdiv(start_token, spec.block_size)))
+            manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
+            assert manager_cls is not None
+            use_eagle = g_idx in self.eagle_group_ids
+            mask = manager_cls.reachable_block_mask(
+                start_block=start_chunk,
+                end_block=end_chunk,
+                alignment_tokens=self.lcm_block_size,
+                kv_cache_spec=spec,
+                use_eagle=use_eagle,
+                retention_interval=retention_interval,
+                num_prompt_tokens=num_prompt_tokens,
+            )
+            if mask is not None:
+                assert len(mask) == end_chunk - start_chunk
+            masks.append(mask)
+        return tuple(masks)
 
     def block_hashes_for_spec(
-        self, block_hashes: list[BlockHash], spec: KVCacheSpec
-    ) -> BlockHashList:
-        if spec.block_size == self.hash_block_size:
-            return block_hashes
-        return BlockHashListWithBlockSize(
+        self, block_hashes: Sequence[BlockHash], spec: KVCacheSpec
+    ) -> Sequence[BlockHash]:
+        return chunk_hashes_for_block_size(
             block_hashes, self.hash_block_size, spec.block_size
         )
 
     def _find_hit_blocks(
         self,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash],
         max_length: int,
         cached_block_pool: ExternalCachedBlockPool,
         *,
@@ -230,8 +275,8 @@ class MooncakeStoreCoordinator:
         if len(self.attention_groups) == 1:
             spec, group_ids, manager_cls = self.attention_groups[0]
             hashes = self.block_hashes_for_spec(block_hashes, spec)
-            hit_blocks = manager_cls.find_longest_cache_hit(
-                block_hashes=hashes,
+            hit_blocks, hit_length = manager_cls.find_longest_cache_hit(
+                block_hashes=hashes,  # type: ignore[arg-type]
                 max_length=max_length,
                 kv_cache_group_ids=group_ids,
                 block_pool=cast(BlockPool, cached_block_pool),
@@ -243,11 +288,12 @@ class MooncakeStoreCoordinator:
             blocks_by_group: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
             for gid, blks in zip(group_ids, hit_blocks, strict=True):
                 blocks_by_group[gid] = blks
-            return tuple(blocks_by_group), len(hit_blocks[0]) * spec.block_size
+            return tuple(blocks_by_group), hit_length
 
         num_groups = len(self.kv_cache_groups)
         hit_length = max_length
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
+        hit_length_by_group: list[int] = [0] * num_groups
 
         is_simple_hybrid = len(self.attention_groups) == 2 and isinstance(
             self.attention_groups[0][0], FullAttentionSpec
@@ -258,10 +304,11 @@ class MooncakeStoreCoordinator:
             curr_hit_length = hit_length
 
             for idx, (spec, group_ids, manager_cls) in enumerate(self.attention_groups):
-                cached = hit_blocks_by_group[group_ids[0]]
+                first_group_id = group_ids[0]
+                cached = hit_blocks_by_group[first_group_id]
                 if isinstance(spec, FullAttentionSpec) and cached is not None:
-                    curr_hit_length = (
-                        curr_hit_length // spec.block_size * spec.block_size
+                    curr_hit_length = min(
+                        curr_hit_length, hit_length_by_group[first_group_id]
                     )
                     continue
 
@@ -270,8 +317,8 @@ class MooncakeStoreCoordinator:
                 if drop_eagle_block:
                     _max_length = min(curr_hit_length + spec.block_size, max_length)
                 hashes = self.block_hashes_for_spec(block_hashes, spec)
-                hit_blocks = manager_cls.find_longest_cache_hit(
-                    block_hashes=hashes,
+                hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
+                    block_hashes=hashes,  # type: ignore[arg-type]
                     max_length=_max_length,
                     kv_cache_group_ids=group_ids,
                     block_pool=cast(BlockPool, cached_block_pool),
@@ -279,7 +326,6 @@ class MooncakeStoreCoordinator:
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self.lcm_block_size,
                 )
-                _new_hit_length = len(hit_blocks[0]) * spec.block_size
                 if drop_eagle_block:
                     eagle_verified.add(idx)
                 elif _new_hit_length < curr_hit_length:
@@ -287,6 +333,7 @@ class MooncakeStoreCoordinator:
                 curr_hit_length = _new_hit_length
                 for gid, blocks in zip(group_ids, hit_blocks, strict=True):
                     hit_blocks_by_group[gid] = blocks
+                    hit_length_by_group[gid] = _new_hit_length
 
             if curr_hit_length >= hit_length:
                 break
@@ -303,6 +350,7 @@ class MooncakeStoreCoordinator:
                 full_blks = hit_blocks_by_group[gid]
                 assert full_blks is not None
                 del full_blks[num_blocks:]
+                hit_length_by_group[gid] = hit_length
 
         return (
             tuple(blks if blks is not None else [] for blks in hit_blocks_by_group),

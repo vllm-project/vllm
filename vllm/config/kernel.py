@@ -133,6 +133,8 @@ MoEBackend = Literal[
     "humming",
     "triton_unfused",
     "aiter",
+    "flydsl",
+    "hpc",
     "emulation",
 ]
 
@@ -140,9 +142,12 @@ LinearBackend = Literal[
     "auto",
     "cutlass",
     "flashinfer_cutlass",
+    "flashinfer_cutedsl",
     "flashinfer_trtllm",
     "flashinfer_cudnn",
+    "flashinfer_b12x",
     "marlin",
+    "humming",
     "triton",
     "deep_gemm",
     "torch",
@@ -152,6 +157,8 @@ LinearBackend = Literal[
     "conch",
     "exllama",
     "emulation",
+    "xpu",
+    "xpu_woq",
 ]
 
 
@@ -167,6 +174,9 @@ class KernelConfig:
 
     enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
     """If True, run FlashInfer autotuning during kernel warmup."""
+
+    enable_cutedsl_warmup: bool = True
+    """If True, run CuTeDSL compile warmup during kernel warmup."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
@@ -185,6 +195,8 @@ class KernelConfig:
     - "humming": Use Humming Mixed Precision kernels
     - "triton_unfused": Use Triton unfused MoE kernels
     - "aiter": Use AMD AITer kernels (ROCm only)
+    - "flydsl": Use AMD FlyDSL kernels (ROCm only)
+    - "hpc": Use HPC kernels (FP8 and Hopper only)
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and
                    running QDQ on activations.
     """
@@ -195,8 +207,10 @@ class KernelConfig:
     - "auto": Automatically select the best backend based on model and hardware
     - "cutlass": Use CUTLASS-based kernels
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
+    - "flashinfer_cutedsl": Use FlashInfer with CuTe-DSL kernels (NVFP4, MXFP8)
     - "flashinfer_trtllm": Use FlashInfer with TensorRT-LLM kernels
     - "flashinfer_cudnn": Use FlashInfer with cuDNN kernels
+    - "flashinfer_b12x": Use FlashInfer b12x CuteDSL NVFP4 GEMM (SM120+)
     - "marlin": Use Marlin kernels
     - "triton": Use Triton-based kernels
     - "deep_gemm": Use DeepGEMM kernels
@@ -206,7 +220,10 @@ class KernelConfig:
     - "fbgemm": Use FBGEMM kernels
     - "conch": Use Conch mixed-precision kernels
     - "exllama": Use Exllama mixed-precision kernels
-    - "emulation": Use slow dequant-to-BF16 emulation (for testing only)"""
+    - "emulation": Use slow dequant-to-BF16 emulation (for testing only)
+    - "xpu": Use XPU kernels
+    - "xpu_woq": Use XPU kernels for weight-only quantization (e.g. W8A16)
+    """
 
     @field_validator("moe_backend", mode="before")
     @classmethod
@@ -229,6 +246,7 @@ class KernelConfig:
         Any future fields that don't affect compilation should be excluded.
         """
         ignored_factors = {
+            "enable_cutedsl_warmup",
             "enable_flashinfer_autotune",
             "ir_op_priority",  # handled separately below
         }
@@ -236,7 +254,11 @@ class KernelConfig:
         factors["ir_op_priority"] = self.ir_op_priority.compute_hash()
         return hash_factors(factors)
 
-    @field_validator("enable_flashinfer_autotune", mode="wrap")
+    @field_validator(
+        "enable_flashinfer_autotune",
+        "enable_cutedsl_warmup",
+        mode="wrap",
+    )
     @classmethod
     def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
         """Skip validation if the value is `None` when initialization is delayed."""

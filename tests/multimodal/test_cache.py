@@ -32,6 +32,8 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.processing import PromptInsertion
 from vllm.utils.mem_constants import GiB_bytes, MiB_bytes
 
+from ..utils import create_new_process_for_each_test
+
 pytestmark = pytest.mark.cpu_test
 
 
@@ -559,6 +561,7 @@ _SLEEP_VISION_PROMPT = (
 )
 
 
+@create_new_process_for_each_test()
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="sleep mode regression requires a CUDA GPU",

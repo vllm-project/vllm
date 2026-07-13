@@ -36,6 +36,9 @@ from vllm.distributed import (
     get_eplb_group,
     tensor_model_parallel_all_gather,
 )
+from vllm.distributed.device_communicators.all_reduce_utils import (
+    gpu_p2p_access_check,
+)
 from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
 from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
 from vllm.forward_context import set_forward_context
@@ -105,6 +108,8 @@ if has_deep_ep():
 
 if has_nixl_ep():
     BACKENDS += ["nixl_ep"]
+
+DEEPEP_BACKENDS = {"deepep_high_throughput", "deepep_low_latency"}
 
 QUANT_METHODS = [
     None,
@@ -414,6 +419,22 @@ def generate_valid_test_configs(
             print(f"Skipping invalid config {config} - {reason}")
 
     return configs
+
+
+@functools.cache
+def visible_devices_have_peer_access(world_size: int) -> bool:
+    if not current_platform.is_cuda():
+        return True
+
+    try:
+        return all(
+            gpu_p2p_access_check(src, dst)
+            for src in range(world_size)
+            for dst in range(world_size)
+            if src != dst
+        )
+    except RuntimeError:
+        return False
 
 
 # TODO: break this up into sections
@@ -1285,6 +1306,9 @@ def _test_body_eplb(
     expert_weights = [list(eplb_moe_layer.get_expert_weights())]
 
     expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
+    assert vllm_config.parallel_config.eplb_config.communicator is not None, (
+        "EPLB communicator backend must be set by ParallelConfig"
+    )
     communicator = create_eplb_communicator(
         group_coordinator=get_eplb_group(),
         backend=vllm_config.parallel_config.eplb_config.communicator,
@@ -1329,6 +1353,9 @@ def _test_body_eplb(
     eplb_moe_layer.router.eplb_state.should_record_tensor = torch.ones(
         (), dtype=torch.bool, device=device
     )
+    eplb_moe_layer.router.eplb_state.num_unpadded_tokens_tensors = [
+        torch.tensor(0, dtype=torch.int32, device=device)
+    ]
 
     # Get "after" output with rearranged weights and EPLB routing
     with set_forward_context(
@@ -1796,17 +1823,17 @@ def test_moe_layer(
     if enable_eplb and not use_ep:
         pytest.skip("EPLB requires EP.")
 
+    if backend in DEEPEP_BACKENDS and not visible_devices_have_peer_access(world_size):
+        pytest.skip("DeepEP backends require peer access between visible GPUs.")
+
     verbosity = pytestconfig.getoption("verbose")
 
     if os.environ.get("VLLM_LOGGING_LEVEL") is None:
         monkeypatch.setenv("VLLM_LOGGING_LEVEL", "ERROR")
 
-    # TODO
-    # VLLM_FLASHINFER_MOE_BACKEND=latency
-    # VLLM_USE_FLASHINFER_MOE_FP16=1
-    # VLLM_USE_FLASHINFER_MOE_FP8
-    # VLLM_USE_FLASHINFER_MOE_FP4
-    # VLLM_USE_FLASHINFER_MOE_INT4
+    # TODO: cover FlashInfer MoE backends via moe_backend, e.g.
+    # moe_backend=flashinfer_trtllm / flashinfer_cutlass / flashinfer_cutedsl
+    # (BF16, FP8 and NVFP4 paths), and VLLM_USE_FLASHINFER_MOE_INT4=1.
 
     parallel_config = ParallelConfig(
         pipeline_parallel_size=1,

@@ -161,6 +161,15 @@ class ResponsesRequest(OpenAIBaseModel):
     previous_response_id: str | None = None
     prompt: ResponsePrompt | None = None
     reasoning: Reasoning | None = None
+    include_reasoning: bool = Field(
+        default=True,
+        description=(
+            "Whether to include reasoning content in the response. "
+            "When false, reasoning tokens are still generated but "
+            "excluded from the output. This reduces network traffic "
+            "without affecting model inference."
+        ),
+    )
     service_tier: Literal["auto", "default", "flex", "scale", "priority"] = "auto"
     store: bool | None = True
     stream: bool | None = False
@@ -275,6 +284,12 @@ class ResponsesRequest(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
+    )
+    ec_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "ECTransfer parameters used for encoder-cache disaggregated serving."
+        ),
     )
     chat_template_kwargs: dict[str, Any] | None = Field(
         default=None,
@@ -400,6 +415,8 @@ class ResponsesRequest(OpenAIBaseModel):
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
             extra_args["kv_transfer_params"] = self.kv_transfer_params
+        if self.ec_transfer_params:
+            extra_args["ec_transfer_params"] = self.ec_transfer_params
 
         return SamplingParams.from_optional(
             temperature=temperature,
@@ -525,23 +542,30 @@ class ResponsesRequest(OpenAIBaseModel):
                     processed_input.append(item)
 
             elif item_type == "message" and item.get("role") == "assistant":
+                content = item.get("content")
+                if not isinstance(content, list):
+                    # String content is a valid EasyInputMessageParam,
+                    # do not coerce it to ResponseOutputMessage
+                    processed_input.append(item)
+                    continue
+
+                original_item = item
                 item = dict(item)
                 if "id" not in item:
                     item["id"] = f"msg_{random_uuid()}"
                 if "status" not in item:
                     item["status"] = "completed"
                 # ResponseOutputText requires annotations
-                if isinstance(item.get("content"), list):
-                    new_content = []
-                    for c in item["content"]:
-                        if (
-                            isinstance(c, dict)
-                            and c.get("type") == "output_text"
-                            and "annotations" not in c
-                        ):
-                            c = {**c, "annotations": []}
-                        new_content.append(c)
-                    item["content"] = new_content
+                new_content = []
+                for c in content:
+                    if (
+                        isinstance(c, dict)
+                        and c.get("type") == "output_text"
+                        and "annotations" not in c
+                    ):
+                        c = {**c, "annotations": []}
+                    new_content.append(c)
+                item["content"] = new_content
                 try:
                     processed_input.append(ResponseOutputMessage(**item))
                 except ValidationError:
@@ -549,7 +573,7 @@ class ResponsesRequest(OpenAIBaseModel):
                         "Failed to parse assistant message to ResponseOutputMessage, "
                         "leaving for Pydantic validation"
                     )
-                    processed_input.append(item)
+                    processed_input.append(original_item)
 
             else:
                 processed_input.append(item)
@@ -585,10 +609,19 @@ class ResponsesRequest(OpenAIBaseModel):
                 )
         elif is_named_tool_choice and tools is not None:
             tool_name = tool_choice.get("name")
-            tool_names = {
-                t.get("name") if isinstance(t, dict) else getattr(t, "name", None)
-                for t in tools
-            }
+            tool_names = set()
+            for tool in tools:
+                if isinstance(tool, dict):
+                    if tool.get("type") == "namespace":
+                        namespace = tool.get("name")
+                        for namespaced_tool in tool.get("tools", []):
+                            namespaced_name = namespaced_tool.get("name")
+                            tool_names.add(namespaced_name)
+                            tool_names.add(f"{namespace}__{namespaced_name}")
+                    else:
+                        tool_names.add(tool.get("name"))
+                else:
+                    tool_names.add(getattr(tool, "name", None))
             if not tool_name or tool_name not in tool_names:
                 raise VLLMValidationError(
                     "Tool choice 'function' not found in 'tools' parameter.",
@@ -650,6 +683,9 @@ class ResponsesResponse(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
+    ec_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="ECTransfer parameters."
+    )
 
     # --8<-- [start:responses-response-extra-params]
     # These are populated when enable_response_messages is set to True
@@ -695,6 +731,7 @@ class ResponsesResponse(OpenAIBaseModel):
         input_messages: ResponseInputOutputMessage | None = None,
         output_messages: ResponseInputOutputMessage | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
+        ec_transfer_params: dict[str, Any] | None = None,
     ) -> "ResponsesResponse":
         incomplete_details: IncompleteDetails | None = None
         if status == "incomplete":
@@ -733,6 +770,7 @@ class ResponsesResponse(OpenAIBaseModel):
             user=request.user,
             usage=usage,
             kv_transfer_params=kv_transfer_params,
+            ec_transfer_params=ec_transfer_params,
         )
 
 

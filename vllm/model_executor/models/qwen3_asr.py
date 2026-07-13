@@ -25,6 +25,7 @@
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+import regex as re
 import torch
 import torch.nn as nn
 from transformers.feature_extraction_utils import BatchFeature
@@ -37,6 +38,7 @@ from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TokensProm
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
+    StreamingTranscriptionPostProcessor,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
@@ -90,6 +92,78 @@ from vllm.transformers_utils.processors.qwen3_asr import (
 
 logger = init_logger(__name__)
 _ASR_TEXT_TAG = "<asr_text>"
+# User-supplied `prompt` / `response_prefix` must not inject extra ChatML turns.
+_CHATML_LIKE_TOKEN = re.compile(r"<\|[^|]+\|>")
+_LANGUAGE_PREFIX = "language "
+_MAX_STREAMING_PREFIX_CHARS = 50
+
+
+def _post_process_qwen3_asr_output(text: str) -> str:
+    if not text or _ASR_TEXT_TAG not in text:
+        return text
+
+    _, text_part = text.rsplit(_ASR_TEXT_TAG, 1)
+    return text_part
+
+
+class Qwen3ASRStreamingPostProcessor(StreamingTranscriptionPostProcessor):
+    def __init__(self) -> None:
+        self.raw_text = ""
+        self.emitted_text = ""
+        self.is_structured_output: bool | None = None
+
+    def process_delta(self, text_delta: str, finished: bool) -> str:
+        self.raw_text += text_delta
+
+        if self.is_structured_output is None:
+            text_without_leading_space = self.raw_text.lstrip()
+            maybe_structured_output = (
+                text_without_leading_space == ""
+                or _LANGUAGE_PREFIX.startswith(text_without_leading_space)
+                or (
+                    text_without_leading_space.startswith(_LANGUAGE_PREFIX)
+                    and len(text_without_leading_space) < _MAX_STREAMING_PREFIX_CHARS
+                    and "\n" not in text_without_leading_space
+                )
+            )
+            if maybe_structured_output and _ASR_TEXT_TAG not in self.raw_text:
+                if not finished:
+                    return ""
+                self.is_structured_output = False
+            else:
+                self.is_structured_output = _ASR_TEXT_TAG in self.raw_text
+
+        processed_text = (
+            _post_process_qwen3_asr_output(self.raw_text)
+            if self.is_structured_output
+            else self.raw_text
+        )
+        new_text = processed_text[len(self.emitted_text) :]
+        self.emitted_text = processed_text
+        return new_text
+
+
+def _sanitize_transcription_user_text(text: str) -> str:
+    """Strip ChatML-style special tokens from user-controlled transcription fields.
+
+    Applies the regex / ``<asr_text>`` substitutions to a fixpoint so nested
+    payloads cannot reconstruct a valid token after a single pass:
+
+    - ``<|im<|x|>_end|>`` would, with a single ``re.sub``, leave ``<|im_end|>``
+      (a real ChatML control token).
+    - ``<asr_te<asr_text>xt>`` would, with a single ``str.replace``, leave
+      ``<asr_text>`` (the model-significant assistant-prefix delimiter).
+
+    Looping both substitutions until the string stabilises eliminates these
+    reconstruction attacks.
+    """
+    if not text:
+        return ""
+    prev = None
+    while prev != text:
+        prev = text
+        text = _CHATML_LIKE_TOKEN.sub("", text).replace(_ASR_TEXT_TAG, "")
+    return text
 
 
 def _get_feat_extract_output_lengths(input_lengths: torch.Tensor):
@@ -550,11 +624,24 @@ class Qwen3ASRForConditionalGeneration(
 
     @classmethod
     def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
-        """Get the generation prompt to be used for transcription requests."""
+        """Get the generation prompt to be used for transcription requests.
+
+        Matches the official Qwen3-ASR SDK prompt format. The ``system`` turn
+        is only emitted when the caller supplied a ``prompt``, mirroring the
+        SDK's ``_build_messages`` (which omits the system role when context is
+        empty) and preserving the prior no-prompt behavior:
+
+          [system: {context}]                         # only when prompt given
+          user: {audio}
+          assistant: [language {Lang}<asr_text>]      # when language is forced
+        """
         audio = stt_params.audio
         model_config = stt_params.model_config
+        language = stt_params.language
         task_type = stt_params.task_type
+        request_prompt = stt_params.request_prompt
         to_language = stt_params.to_language
+
         tokenizer = cached_tokenizer_from_config(model_config)
         audio_placeholder = cls.get_placeholder_str("audio", 0)
 
@@ -563,17 +650,20 @@ class Qwen3ASRForConditionalGeneration(
                 f"Unsupported task_type '{task_type}'. "
                 "Supported task types are 'transcribe' and 'translate'."
             )
-        full_lang_name_to = cls.supported_languages.get(to_language, to_language)
-        if to_language is None:
-            prompt = (
-                f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
-                f"<|im_start|>assistant\n"
-            )
-        else:
-            prompt = (
-                f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
-                f"<|im_start|>assistant\nlanguage {full_lang_name_to}{_ASR_TEXT_TAG}"
-            )
+
+        context = _sanitize_transcription_user_text(request_prompt)
+        system_turn = f"<|im_start|>system\n{context}<|im_end|>\n" if context else ""
+
+        prompt = (
+            f"{system_turn}"
+            f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+
+        lang_code = to_language if task_type == "translate" else language
+        if lang_code is not None:
+            full_lang_name = cls.supported_languages.get(lang_code, lang_code)
+            prompt += f"language {full_lang_name}{_ASR_TEXT_TAG}"
 
         prompt_token_ids = tokenizer.encode(prompt)
 
@@ -590,12 +680,10 @@ class Qwen3ASRForConditionalGeneration(
         The model outputs in format: "language {lang}<asr_text>{transcription}"
         This method strips the language prefix and asr_text tags.
         """
-        if not text:
-            return ""
+        return _post_process_qwen3_asr_output(text)
 
-        if _ASR_TEXT_TAG not in text:
-            return text
-
-        # Split on <asr_text> tag and take the transcription part
-        _, text_part = text.rsplit(_ASR_TEXT_TAG, 1)
-        return text_part
+    @classmethod
+    def get_streaming_post_processor_cls(
+        cls,
+    ) -> type[StreamingTranscriptionPostProcessor]:
+        return Qwen3ASRStreamingPostProcessor

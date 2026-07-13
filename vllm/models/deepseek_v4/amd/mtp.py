@@ -42,7 +42,6 @@ from vllm.models.deepseek_v4.common.ops import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.import_utils import has_tilelang
 
 from .model import DeepseekV4DecoderLayer
 
@@ -86,6 +85,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             bias=False,
             return_bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.e_proj",
         )
         self.h_proj = ReplicatedLinear(
             config.hidden_size,
@@ -93,6 +93,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             bias=False,
             return_bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.h_proj",
         )
 
         self.hc_eps = config.hc_eps
@@ -122,7 +123,6 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         )
 
         self.hc_head_op = HCHeadOp()
-        self.has_tilelang = has_tilelang()
 
     def forward(
         self,
@@ -155,7 +155,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         hidden_states, residual, post_mix, res_mix = self.mtp_block(
             positions=positions, x=hidden_states, input_ids=None
         )
-        if self.has_tilelang:
+        if self.mtp_block.use_fused_mhc:
             hidden_states = self.mtp_block.hc_post(
                 hidden_states, residual, post_mix, res_mix
             )

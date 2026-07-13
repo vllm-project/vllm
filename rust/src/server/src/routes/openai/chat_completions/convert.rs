@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use itertools::Itertools as _;
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart,
@@ -13,26 +16,36 @@ use crate::routes::openai::utils::structured_outputs::convert_from_response_form
 use crate::routes::openai::utils::types::{
     ChatMessage, ContentPart, MessageContent, Tool, ToolChoice, ToolChoiceValue,
 };
-use crate::utils::{ResolvedRequestContext, convert_logit_bias, merge_kv_transfer_params};
+use crate::utils::{
+    ResolvedRequestContext, convert_logit_bias, merge_ec_transfer_params, merge_kv_transfer_params,
+};
 
 /// Lowered chat request plus the public response metadata carried by every SSE
 /// chunk.
 #[derive(Debug, Clone, PartialEq)]
-pub struct PreparedRequest {
+pub(super) struct PreparedRequest {
     /// Stable OpenAI-style request ID, reused as the external chat request ID.
     pub request_id: String,
     /// Public model ID echoed back to the client.
     pub response_model: String,
+    /// Public response rendering options for route-layer helpers.
+    pub options: ResponseOptions,
+    /// Lowered chat request for `vllm-chat`.
+    pub chat_request: ChatRequest,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(super) struct ResponseOptions {
     /// Whether the caller asked for the final streamed usage chunk.
     pub include_usage: bool,
+    /// Whether every streamed chunk should carry cumulative usage.
+    pub include_continuous_usage: bool,
     /// Whether the caller requested output logprobs on chat choices.
     pub requested_logprobs: bool,
     /// Whether the caller requested top-level prompt logprobs.
     pub include_prompt_logprobs: bool,
     /// Whether to include reasoning content in OpenAI responses.
     pub include_reasoning: bool,
-    /// Lowered chat request for `vllm-chat`.
-    pub chat_request: ChatRequest,
     /// Last assistant-role message content to echo back when `echo=true`.
     pub echo: Option<String>,
     /// Whether to include token IDs alongside generated text.
@@ -46,7 +59,7 @@ pub struct PreparedRequest {
 ///
 /// `lora_resolution.model_names` must be non-empty; the first entry is used as
 /// the base `model` field in responses when no LoRA adapter is selected.
-pub(crate) fn prepare_chat_request(
+pub(super) fn prepare_chat_request(
     request: ChatCompletionRequest,
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
@@ -76,6 +89,12 @@ pub(crate) fn prepare_chat_request(
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
         .unwrap_or(false);
+    let include_continuous_usage = include_usage
+        && request
+            .stream_options
+            .as_ref()
+            .and_then(|options| options.continuous_usage_stats)
+            .unwrap_or(false);
     let requested_logprobs = request.logprobs;
 
     // Auto-enable prompt logprobs for non-streaming echo, matching Python vLLM's
@@ -101,12 +120,14 @@ pub(crate) fn prepare_chat_request(
             seed: request.seed,
             max_tokens: request.max_completion_tokens,
             min_tokens: request.min_tokens,
+            thinking_token_budget: request.thinking_token_budget,
             logprobs: request.logprobs.then_some(top_logprobs),
             prompt_logprobs,
             min_p: request.min_p,
             frequency_penalty: request.frequency_penalty,
             presence_penalty: request.presence_penalty,
             repetition_penalty: request.repetition_penalty,
+            repetition_detection: request.repetition_detection,
             stop_token_ids: request.stop_token_ids,
             ignore_eos: request.ignore_eos,
             logit_bias: convert_logit_bias(request.logit_bias)?,
@@ -116,7 +137,7 @@ pub(crate) fn prepare_chat_request(
             structured_outputs,
             skip_reading_prefix_cache: None,
             vllm_xargs: merge_kv_transfer_params(
-                request.vllm_xargs,
+                merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),
                 request.kv_transfer_params.as_ref(),
             ),
         },
@@ -128,6 +149,7 @@ pub(crate) fn prepare_chat_request(
         },
         tools: convert_tools(request.tools)?,
         tool_choice: convert_tool_choice(request.tool_choice.as_ref())?,
+        parallel_tool_calls: request.parallel_tool_calls.unwrap_or(true),
         decode_options: vllm_text::output::TextDecodeOptions {
             skip_special_tokens: request.skip_special_tokens,
             include_stop_str_in_output: request.include_stop_str_in_output,
@@ -146,14 +168,17 @@ pub(crate) fn prepare_chat_request(
     Ok(PreparedRequest {
         request_id,
         response_model,
-        include_usage,
-        requested_logprobs,
-        include_prompt_logprobs,
-        include_reasoning,
+        options: ResponseOptions {
+            include_usage,
+            include_continuous_usage,
+            requested_logprobs,
+            include_prompt_logprobs,
+            include_reasoning,
+            echo,
+            return_token_ids: request.return_token_ids.unwrap_or(false),
+            return_tokens_as_token_ids: request.return_tokens_as_token_ids.unwrap_or(false),
+        },
         chat_request,
-        echo,
-        return_token_ids: request.return_token_ids.unwrap_or(false),
-        return_tokens_as_token_ids: request.return_tokens_as_token_ids.unwrap_or(false),
     })
 }
 pub(crate) fn normalize_generation_prompt_mode(
@@ -270,7 +295,10 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
                     detail: image_url.detail,
                     uuid,
                 }),
-                _ => bail_invalid_request!("Only text and image_url content parts are supported."),
+                ContentPart::VideoUrl { video_url, uuid } => Ok(ChatContentPart::VideoUrl {
+                    video_url: video_url.url,
+                    uuid,
+                }),
             })
             .try_collect()
             .map(ChatContent::Parts),
@@ -342,6 +370,13 @@ fn convert_tool_choice(tool_choice: Option<&ToolChoice>) -> Result<ChatToolChoic
     match tool_choice {
         None | Some(ToolChoice::Value(ToolChoiceValue::Auto)) => Ok(ChatToolChoice::Auto),
         Some(ToolChoice::Value(ToolChoiceValue::None)) => Ok(ChatToolChoice::None),
+        Some(ToolChoice::Value(ToolChoiceValue::Required)) => Ok(ChatToolChoice::Required),
+        Some(ToolChoice::Function {
+            tool_type,
+            function,
+        }) if tool_type == "function" => Ok(ChatToolChoice::Function {
+            name: function.name.clone(),
+        }),
         _ => bail_invalid_request!("tool_choice={:?} is not supported yet.", tool_choice),
     }
 }
@@ -367,8 +402,8 @@ mod tests {
         AssistantRole, ChatCompletionMessage, ChatCompletionRequest,
     };
     use crate::routes::openai::utils::types::{
-        ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, MessageContent, Tool,
-        ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
+        ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, MessageContent,
+        StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
     };
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
@@ -393,6 +428,33 @@ mod tests {
             stream: true,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn prepare_chat_request_maps_parallel_tool_calls() {
+        let mut request = base_request();
+        request.parallel_tool_calls = Some(false);
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert!(!prepared.chat_request.parallel_tool_calls);
+    }
+
+    #[test]
+    fn prepare_chat_request_defaults_parallel_tool_calls_to_true() {
+        let prepared = prepare_chat_request(
+            base_request(),
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert!(prepared.chat_request.parallel_tool_calls);
     }
 
     #[test]
@@ -449,6 +511,46 @@ mod tests {
     }
 
     #[test]
+    fn prepare_chat_request_maps_stream_usage_and_token_format_options() {
+        let mut request = base_request();
+        request.return_tokens_as_token_ids = Some(true);
+        request.stream_options = Some(StreamOptions {
+            include_usage: Some(true),
+            continuous_usage_stats: Some(true),
+        });
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert!(prepared.options.include_usage);
+        assert!(prepared.options.include_continuous_usage);
+        assert!(prepared.options.return_tokens_as_token_ids);
+    }
+
+    #[test]
+    fn prepare_chat_request_gates_continuous_usage_on_include_usage() {
+        let mut request = base_request();
+        request.stream_options = Some(StreamOptions {
+            include_usage: None,
+            continuous_usage_stats: Some(true),
+        });
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert!(!prepared.options.include_usage);
+        assert!(!prepared.options.include_continuous_usage);
+    }
+
+    #[test]
     fn prepare_chat_request_keeps_optional_sampling_fields_unset() {
         let prepared = prepare_chat_request(
             base_request(),
@@ -497,7 +599,7 @@ mod tests {
         )
         .expect("request is valid");
 
-        assert!(!prepared.include_reasoning);
+        assert!(!prepared.options.include_reasoning);
     }
 
     #[test]
@@ -526,6 +628,31 @@ mod tests {
             ..VllmSamplingParams::default()
         };
         assert_eq!(prepared.chat_request.sampling_params, expected);
+    }
+
+    #[test]
+    fn prepare_chat_request_passes_through_thinking_token_budget() {
+        let prepare = |budget: Option<i64>| {
+            prepare_chat_request(
+                ChatCompletionRequest {
+                    thinking_token_budget: budget,
+                    ..base_request()
+                },
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .expect("request is valid")
+            .chat_request
+            .sampling_params
+            .thinking_token_budget
+        };
+
+        // The convert layer forwards the raw value verbatim (including the `-1`
+        // "unlimited" sentinel); normalization/validation happens during
+        // lowering (see `vllm_text::lower`).
+        assert_eq!(prepare(Some(64)), Some(64));
+        assert_eq!(prepare(Some(-1)), Some(-1));
+        assert_eq!(prepare(None), None);
     }
 
     #[test]
@@ -653,28 +780,34 @@ mod tests {
     }
 
     #[test]
-    fn prepare_chat_request_rejects_video_content_parts() {
+    fn prepare_chat_request_accepts_video_content_parts() {
         let request = ChatCompletionRequest {
             messages: vec![ChatMessage::User {
                 content: MessageContent::Parts(vec![ContentPart::VideoUrl {
                     video_url: VideoUrl {
                         url: "https://example.com/video.mp4".to_string(),
                     },
+                    uuid: Some("video-uuid".to_string()),
                 }]),
                 name: None,
             }],
             ..base_request()
         };
 
-        let error = prepare_chat_request(
+        let prepared = prepare_chat_request(
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
-        .unwrap_err();
+        .expect("request is valid");
 
-        expect!["Only text and image_url content parts are supported."]
-            .assert_eq(&error.to_error_response().error.message);
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::user(vec![ChatContentPart::VideoUrl {
+                video_url: "https://example.com/video.mp4".to_string(),
+                uuid: Some("video-uuid".to_string()),
+            }])]
+        );
     }
 
     #[test]
@@ -711,7 +844,7 @@ mod tests {
         let message = ChatCompletionMessage {
             role: AssistantRole,
             content: Some("answer".to_string()),
-            tool_calls: None,
+            tool_calls: Vec::new(),
             reasoning: Some("inner".to_string()),
         };
         let message_json = serde_json::to_value(message).expect("message serializes");
@@ -852,6 +985,74 @@ mod tests {
     }
 
     #[test]
+    fn prepare_chat_request_lowers_required_tool_choice() {
+        let request = ChatCompletionRequest {
+            tools: Some(vec![Tool {
+                tool_type: "function".to_string(),
+                function: Function {
+                    name: "get_weather".to_string(),
+                    description: Some("Get weather".to_string()),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    }),
+                    strict: None,
+                },
+            }]),
+            tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Required)),
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::Required);
+    }
+
+    #[test]
+    fn prepare_chat_request_lowers_named_function_tool_choice() {
+        let request = ChatCompletionRequest {
+            tools: Some(vec![Tool {
+                tool_type: "function".to_string(),
+                function: Function {
+                    name: "get_weather".to_string(),
+                    description: Some("Get weather".to_string()),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    }),
+                    strict: None,
+                },
+            }]),
+            tool_choice: Some(ToolChoice::Function {
+                tool_type: "function".to_string(),
+                function: crate::routes::openai::utils::types::FunctionChoice {
+                    name: "get_weather".to_string(),
+                },
+            }),
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.tool_choice,
+            ChatToolChoice::Function {
+                name: "get_weather".to_string(),
+            }
+        );
+    }
+
+    #[test]
     fn prepare_chat_request_lowers_logprobs_fields() {
         let request = ChatCompletionRequest {
             stream: false,
@@ -867,8 +1068,8 @@ mod tests {
         )
         .expect("request is valid");
 
-        assert!(prepared.requested_logprobs);
-        assert!(prepared.include_prompt_logprobs);
+        assert!(prepared.options.requested_logprobs);
+        assert!(prepared.options.include_prompt_logprobs);
         assert_eq!(prepared.chat_request.sampling_params.logprobs, Some(0));
         assert_eq!(
             prepared.chat_request.sampling_params.prompt_logprobs,
@@ -894,7 +1095,7 @@ mod tests {
 
         assert_eq!(prepared.chat_request.sampling_params.logprobs, Some(3));
         assert_eq!(prepared.chat_request.sampling_params.prompt_logprobs, None);
-        assert!(!prepared.include_prompt_logprobs);
+        assert!(!prepared.options.include_prompt_logprobs);
     }
 
     #[test]
