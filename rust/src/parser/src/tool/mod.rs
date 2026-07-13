@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Streaming tool parsers for chat completions.
 
 #[macro_use]
@@ -14,8 +17,6 @@ mod parameters;
 mod qwen_coder;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_utils;
-use crate::utils;
-
 use std::collections::{BTreeMap, btree_map};
 
 pub use deepseek_dsml::{DeepSeekV4ToolParser, DeepSeekV32ToolParser};
@@ -34,6 +35,8 @@ pub use qwen_coder::Qwen3CoderToolParser;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use xgrammar_structural_tag::Model as StructuralTagModel;
+
+use crate::utils;
 
 /// One function-style tool made available to the model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
