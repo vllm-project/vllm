@@ -457,11 +457,13 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         ]
         if (weight_key, activation_key) not in SUPPORTED_W_A:
             return False
-        # CK MXFP4 MoE kernels are only supported on gfx950.
         if weight_key == kMxfp4Static:
-            from vllm.platforms.rocm import on_gfx950
+            import vllm.envs as envs
+            from vllm.platforms.rocm import on_gfx950, on_gfx1250
 
-            if not on_gfx950():
+            if not on_gfx950() and not (
+                envs.VLLM_ROCM_AITER_FUSED_MOE_TRITON_GEMM_A4W4 and on_gfx1250()
+            ):
                 return False
         return True
 

@@ -276,7 +276,6 @@ def _rocm_aiter_fused_moe_impl(
     activation = ActivationType(activation_method)
     quant_type = QuantType(quant_method)
 
-    m_tokens = hidden_states.shape[0]
     use_triton_a4w4 = (
         envs.VLLM_ROCM_AITER_FUSED_MOE_TRITON_GEMM_A4W4
         and quant_type == QuantType.per_1x32
@@ -285,7 +284,6 @@ def _rocm_aiter_fused_moe_impl(
         and num_local_tokens is None
         and a1_scale is None
         and a2_scale is None
-        and m_tokens >= envs.VLLM_ROCM_AITER_TRITON_MOE_MIN_TOKENS
     )
     if use_triton_a4w4:
         return _rocm_aiter_fused_moe_triton_gemm_a4w4(

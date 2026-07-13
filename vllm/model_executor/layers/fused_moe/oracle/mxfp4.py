@@ -969,6 +969,22 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         if w2_bias is not None:
             w2_bias = w2_bias.data.to(torch.float32)
 
+        import vllm.envs as envs
+
+        if envs.VLLM_ROCM_AITER_FUSED_MOE_TRITON_GEMM_A4W4:
+            # Triton moe_gemm_a4w4 path (e.g. gfx1250): the CK e8m0_shuffle /
+            # shuffle_weights below are the wrong layout for the Triton kernel,
+            # which consumes native [E, 2*inter, hidden/2] uint8 weights with
+            # unshuffled scales and maps layout internally. Return untransformed.
+            return (
+                w13_weight,
+                w2_weight,
+                w13_weight_scale,
+                w2_weight_scale,
+                w13_bias,
+                w2_bias,
+            )
+
         # e8m0_shuffle on weight scales (GFX950 swizzle layout)
         from aiter.utility.fp4_utils import e8m0_shuffle
 
