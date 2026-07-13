@@ -329,15 +329,6 @@ class FusedMoEExperts(ABC):
     def g2_alphas(self) -> torch.Tensor | None:
         return self.quant_config.g2_alphas
 
-    @staticmethod
-    def supports_lora() -> bool:
-        """Return True if this expert impl natively handles LoRA.
-
-        LoRA-aware experts should mix in LoRAExpertsMixin, which flips this
-        to True and provides the per-forward LoRA state plumbing.
-        """
-        return False
-
     def supports_packed_ue8m0_act_scales(self) -> bool:
         """
         A flag indicating whether or not this class can process packed ue8m0
@@ -835,13 +826,6 @@ class FusedMoEKernelModularImpl:
             apply_router_weight_on_input,
         )
 
-        # Stash the original unquantized hidden states on the LoRA context
-        # so apply_w13_lora sees correct-magnitude activations instead of
-        # the potentially quantized values produced by _prepare().
-        lora_ctx = getattr(self.fused_experts, "_lora_context", None)
-        if lora_ctx is not None:
-            lora_ctx.original_hidden_states = hidden_states
-
         fused_out = self._fused_experts(
             in_dtype=hidden_states.dtype,
             a1q=a1q,
@@ -858,9 +842,6 @@ class FusedMoEKernelModularImpl:
             expert_tokens_meta=expert_tokens_meta,
             output_alias=output,
         )
-
-        if lora_ctx is not None:
-            lora_ctx.original_hidden_states = None
 
         return self._finalize(
             output,
@@ -900,9 +881,6 @@ class FusedMoEKernel:
     @property
     def moe_config(self) -> FusedMoEConfig:
         return self.fused_experts.moe_config
-
-    def supports_lora(self) -> bool:
-        return self.fused_experts.supports_lora()
 
     def output_is_reduced(self) -> bool:
         """

@@ -154,8 +154,8 @@ class RoutedExperts(PluggableLayer):
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
-        # Used by FusedMoEWithLoRA to swap the underlying quant method to
-        # FusedMoEModularMethod after construction.
+        # Swaps the underlying quant method after construction (e.g. elastic
+        # EP restaging).
         self.quant_method = quant_method
 
     def _get_quant_method(

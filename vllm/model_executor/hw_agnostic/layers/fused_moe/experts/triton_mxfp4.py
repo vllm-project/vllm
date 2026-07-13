@@ -5,8 +5,7 @@
 
 Defines the ``OAITritonMxfp4Experts`` modular fused-MoE expert: BF16
 activations × MXFP4 W4A16 weights, with activation and topk-sum kept
-outside ``matmul_ogs`` so LoRA deltas can be injected between the two
-GEMMs.
+outside ``matmul_ogs``.
 
 Module-level setup installs monkey-patches against ``triton_kernels`` so
 its routing kernels compile for non-power-of-2 top_k.
@@ -19,9 +18,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.hw_agnostic.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
-)
-from vllm.model_executor.hw_agnostic.layers.fused_moe.experts.lora_experts_mixin import (  # noqa: E501
-    LoRAExpertsMixin,
 )
 from vllm.model_executor.hw_agnostic.layers.fused_moe.topk_weight_and_reduce import (  # noqa: E501
     TopKWeightAndReduceNoOP,
@@ -597,8 +593,7 @@ def remap_topk_to_local(
 ) -> torch.Tensor:
     """Fused global->local expert-id mapping over a topk_ids tensor.
 
-    Returns a NEW int64 tensor (callers may keep the original ``topk_ids``
-    as ``global_topk_ids``).
+    Returns a NEW int64 tensor.
     """
     out = torch.empty_like(topk_ids, dtype=torch.int64)
     n = topk_ids.numel()
@@ -608,12 +603,11 @@ def remap_topk_to_local(
     return out
 
 
-class OAITritonMxfp4Experts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
+class OAITritonMxfp4Experts(mk.FusedMoEExpertsModular):
     """Modular MXFP4 expert built on ``triton_kernels.matmul_ogs``.
 
-    Keeps the activation and topk-sum outside ``matmul_ogs`` so LoRA deltas
-    can be added between the w13 GEMM and the activation, and between the
-    w2 GEMM and the reduce step.
+    Keeps the activation and topk-sum outside ``matmul_ogs`` so the reduce
+    step can skip invalid (``-1``) expert slots.
     """
 
     @property
@@ -718,7 +712,6 @@ class OAITritonMxfp4Experts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         if quant_config is None:
             quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
-        global_topk_ids = topk_ids
         if expert_map is not None:
             # Preserve -1 (invalid / non-local slots, e.g. from EP dispatch):
             # ``make_routing_data`` treats -1 as the skip sentinel.
@@ -772,33 +765,7 @@ class OAITritonMxfp4Experts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             y=intermediate_cache1,
         )
 
-        # Gather into expert-sorted order so apply_w13_lora can add the LoRA
-        # delta in-place before activation.
         act_input = intermediate_cache1.view(-1, N)[gather_indx.dst_indx]
-
-        sorted_token_ids_lora = None
-        expert_ids_lora = None
-        num_tokens_post_padded_lora = None
-        token_lora_mapping = None
-        lora_context = self._lora_context
-        if lora_context is not None:
-            (
-                sorted_token_ids_lora,
-                expert_ids_lora,
-                num_tokens_post_padded_lora,
-                token_lora_mapping,
-            ) = self.apply_w13_lora(
-                lora_context,
-                y=act_input,
-                x=hidden_states,
-                topk_ids=global_topk_ids,
-                topk_weights=topk_weights,
-                expert_map=expert_map,
-                w1=w1,
-                w2=w2,
-                num_tokens=M,
-                top_k_num=topk,
-            )
 
         self.activation(
             activation,
@@ -820,22 +787,6 @@ class OAITritonMxfp4Experts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             gammas=None if apply_router_weight_on_input else gammas,
             y=intermediate_cache3,
         )
-
-        if lora_context is not None:
-            self.apply_w2_lora(
-                lora_context,
-                y=intermediate_cache3.view(-1, topk, K),
-                x=intermediate_cache2,
-                topk_weights=topk_weights,
-                sorted_token_ids_lora=sorted_token_ids_lora,
-                expert_ids_lora=expert_ids_lora,
-                num_tokens_post_padded_lora=num_tokens_post_padded_lora,
-                token_lora_mapping=token_lora_mapping,
-                num_tokens=M,
-                w1=w1,
-                w2=w2,
-                top_k_num=topk,
-            )
 
         # matmul_ogs leaves -1 slots unwritten; masked sum skips them.
         masked_moe_sum(intermediate_cache3.view(-1, topk, K), topk_ids, output)

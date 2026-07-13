@@ -20,8 +20,8 @@ def _quantize_input(
     quant_config: FusedMoEQuantConfig,
     defer_input_quant: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    # ``defer_input_quant=True`` is used by experts kernels that fuse
-    # input-quant with the GEMM (e.g. LoRA + DP/EP all2all path).
+    # ``defer_input_quant=True`` is used by experts kernels that expect
+    # unquantized activations (e.g. the MXFP4 W4A16 path).
     if defer_input_quant:
         return a1, None
 

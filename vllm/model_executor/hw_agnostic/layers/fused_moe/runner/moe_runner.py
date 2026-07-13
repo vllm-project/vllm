@@ -209,8 +209,8 @@ def _moe_forward_shared_fake(
 
 
 # Opaque-body custom ops: torch.compile sees them as a single boundary,
-# preserving the LoRA dual-stream and shared-experts overlap schedules.
-# The shared ``vllm_hw_agnostic`` namespace also ensures the op body's
+# preserving the shared-experts overlap schedule. The shared
+# ``vllm_hw_agnostic`` namespace also ensures the op body's
 # ``isinstance(layer, MoERunnerInterface)`` check resolves against this
 # class, not the hw-specific one.
 direct_register_custom_op(
@@ -313,8 +313,8 @@ class MoERunner(MoERunnerInterface):
         return self.gate is not None
 
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
-        # Used by FusedMoEWithLoRA after construction; delegates to the
-        # RoutedExperts wrapper.
+        # Swaps the underlying quant method after construction (e.g. elastic
+        # EP restaging); delegates to the RoutedExperts wrapper.
         self.routed_experts._replace_quant_method(quant_method)
 
     def _maybe_fuse_gate_weights(self):

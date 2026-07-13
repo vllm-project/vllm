@@ -740,7 +740,6 @@ class FusedMoEConfig:
     moe_backend: MoEBackend = "auto"
     max_num_tokens: int = SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP
     has_bias: bool = False
-    is_lora_enabled: bool = False
 
     # Clamp limit threaded through to the silu+clamp fused activation.
     swiglu_limit: float | None = None
