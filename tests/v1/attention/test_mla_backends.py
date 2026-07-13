@@ -8,6 +8,9 @@ Known Issues:
   test_backend_correctness[small_prefill], but passes when run alone.
 """
 
+import sys
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -32,6 +35,7 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 from vllm.v1.attention.backends.mla import flashmla as flashmla_module
+from vllm.v1.attention.backends.mla import tokenspeed_mla as tokenspeed_mla_module
 from vllm.v1.attention.backends.mla.prefill import (
     MLAPrefillBackendEnum,
     get_mla_prefill_backend,
@@ -691,6 +695,100 @@ def test_mock_mla_dcp_fp8_decode_gathers_quantized_query(
         num_heads * impl.dcp_world_size,
         kv_lora_rank + qk_rope_head_dim,
     )
+
+
+def test_tokenspeed_mla_dcp_single_token_decode_contract(monkeypatch):
+    decode_call = None
+    num_decodes = 2
+    tokens_per_decode = 1
+    num_decode_tokens = num_decodes * tokens_per_decode
+    dcp_world_size = 2
+    dcp_rank = 1
+    num_heads = 128
+    kv_lora_rank = 512
+    qk_rope_head_dim = 64
+    head_size = kv_lora_rank + qk_rope_head_dim
+    block_size = 64
+    num_blocks = 4
+    max_seq_len = 24
+
+    def fake_decode(**kwargs):
+        nonlocal decode_call
+        decode_call = kwargs
+        q = kwargs["query"]
+        out = torch.empty(
+            q.shape[0],
+            q.shape[1],
+            q.shape[2],
+            kv_lora_rank,
+            dtype=torch.bfloat16,
+        )
+        lse = torch.empty(q.shape[0], q.shape[1], q.shape[2], dtype=torch.float32)
+        return out, lse
+
+    monkeypatch.setitem(
+        sys.modules,
+        "tokenspeed_mla",
+        SimpleNamespace(tokenspeed_mla_decode=fake_decode),
+    )
+
+    impl = object.__new__(tokenspeed_mla_module.TokenspeedMLAImpl)
+    impl.dcp_world_size = dcp_world_size
+    impl.dcp_rank = dcp_rank
+    impl.cp_kv_cache_interleave_size = 1
+    impl.need_to_return_lse_for_decode = True
+    impl.kv_lora_rank = kv_lora_rank
+    impl.qk_rope_head_dim = qk_rope_head_dim
+    impl.num_heads = num_heads
+    impl.scale = 1.0
+    impl.softmax_scale = 1.0
+    impl.output_scale = 1.0
+    impl._workspace_buffer = torch.empty(1, dtype=torch.int8)
+
+    metadata = SimpleNamespace(
+        num_decodes=num_decodes,
+        num_decode_tokens=num_decode_tokens,
+        max_seq_len=max_seq_len,
+        decode=SimpleNamespace(
+            block_table=torch.empty((num_decodes, 1), dtype=torch.int32),
+            seq_lens=torch.tensor([16, max_seq_len], dtype=torch.int32),
+            dcp_tot_seq_lens=torch.tensor([16, max_seq_len], dtype=torch.int32),
+        ),
+    )
+    q = torch.empty(num_decode_tokens, num_heads, head_size, dtype=torch.float8_e4m3fn)
+    kv_cache = torch.empty(
+        num_blocks,
+        block_size,
+        head_size,
+        dtype=torch.float8_e4m3fn,
+    )
+
+    out, lse = impl.forward_mqa(
+        q,
+        kv_cache,
+        metadata,
+        SimpleNamespace(_q_scale_float=2.0, _k_scale_float=3.0),
+    )
+
+    assert out.shape == (num_decode_tokens, num_heads, kv_lora_rank)
+    assert lse is not None
+    assert lse.shape == (num_decode_tokens, num_heads)
+
+    assert decode_call is not None
+    assert decode_call["query"].shape == (
+        num_decodes,
+        tokens_per_decode,
+        num_heads,
+        head_size,
+    )
+    torch.testing.assert_close(decode_call["seq_lens"], metadata.decode.seq_lens)
+    torch.testing.assert_close(decode_call["block_tables"], metadata.decode.block_table)
+    torch.testing.assert_close(
+        decode_call["causal_seqs"], metadata.decode.dcp_tot_seq_lens
+    )
+    assert decode_call["return_lse"] is True
+    assert decode_call["cp_world"] == dcp_world_size
+    assert decode_call["cp_rank"] == dcp_rank
 
 
 @pytest.mark.parametrize("is_fp8_kvcache", [False, True], ids=["bf16", "fp8"])
