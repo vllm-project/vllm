@@ -70,6 +70,28 @@ report_docker_usage() {
   docker system df || true
 }
 
+clear_ci_orchestration_env() {
+  unset -v \
+    VLLM_TEST_GROUP_NAME \
+    VLLM_CI_REQUIRE_PERSISTENT_HF_CACHE \
+    VLLM_CI_ARTIFACT_STEP \
+    VLLM_TEST_CACHE \
+    VLLM_CI_EXECUTION_MODE \
+    VLLM_CI_WORKSPACE \
+    VLLM_CI_REQUIRE_WORKSPACE_MOUNT \
+    VLLM_TEST_COMMANDS \
+    VLLM_CI_BRANCH \
+    VLLM_CI_BASE_IMAGE \
+    VLLM_CI_FALLBACK_IMAGE \
+    VLLM_CI_DOCKER_DISABLED \
+    VLLM_CI_ARTIFACT_GLOB \
+    VLLM_CI_ARTIFACT_CHECKSUM_GLOB \
+    VLLM_CI_EXPECTED_GPU_COUNT \
+    VLLM_CI_USE_ARTIFACTS \
+    VLLM_CI_RESULTS_ROOT \
+    VLLM_ALLOW_DEPRECATED_BEAM_SEARCH
+}
+
 cleanup_network() {
   local max_nodes=${NUM_NODES:-2}
   for node in $(seq 0 $((max_nodes - 1))); do
@@ -667,6 +689,8 @@ if is_native_runtime; then
 
   echo "Native test commands: $commands"
   run_native_preflight || exit 1
+  # Keep AMD CI orchestration variables out of vLLM's runtime environment.
+  clear_ci_orchestration_env
   /bin/bash -o pipefail -c "${commands}"
   handle_pytest_exit "$?"
 fi
@@ -773,25 +797,27 @@ fi
 
 echo "Final commands: $commands"
 
-# The ROCm test image often ships /vllm-workspace without .git (artifact tarball unpack).
-# tests/standalone_tests/python_only_compile.sh uses merge-base(HEAD, origin/main) for
-# wheels.vllm.ai; compute on the agent (full git checkout) and pass into the container.
-vllm_standalone_merge_base=""
-checkout="${BUILDKITE_BUILD_CHECKOUT_PATH:-}"
-if [[ -z "${checkout}" || ! -d "${checkout}" ]]; then
-  checkout="."
+standalone_merge_base_env=()
+if [[ "$commands" == *python_only_compile.sh* ]]; then
+  # The ROCm test image often ships /vllm-workspace without .git. Resolve the
+  # wheels.vllm.ai commit from the agent checkout for this test only.
+  vllm_standalone_merge_base=""
+  checkout="${BUILDKITE_BUILD_CHECKOUT_PATH:-}"
+  if [[ -z "${checkout}" || ! -d "${checkout}" ]]; then
+    checkout="."
+  fi
+  # Pass safe.directory per-command because Buildkite uses mixed user IDs.
+  if git -c "safe.directory=${checkout}" -C "${checkout}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    vllm_standalone_merge_base="$(
+      git -c "safe.directory=${checkout}" -C "${checkout}" merge-base HEAD origin/main 2>/dev/null || true
+    )"
+  fi
+  if [[ -z "${vllm_standalone_merge_base}" ]]; then
+    vllm_standalone_merge_base="${BUILDKITE_COMMIT:-}"
+  fi
+  echo "INFO: passing CI_STANDALONE_MERGE_BASE into container: ${vllm_standalone_merge_base}"
+  standalone_merge_base_env=(-e "CI_STANDALONE_MERGE_BASE=${vllm_standalone_merge_base}")
 fi
-# Pass safe.directory per-command (-c) because buildkite runs will always fail
-# the next check on git 2.35.2+ due to mixed uses of root and buildkite-agent/uids.
-if git -c "safe.directory=${checkout}" -C "${checkout}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  vllm_standalone_merge_base="$(
-    git -c "safe.directory=${checkout}" -C "${checkout}" merge-base HEAD origin/main 2>/dev/null || true
-  )"
-fi
-if [[ -z "${vllm_standalone_merge_base}" ]]; then
-  vllm_standalone_merge_base="${BUILDKITE_COMMIT:-}"
-fi
-echo "INFO: passing VLLM_STANDALONE_MERGE_BASE into container: ${vllm_standalone_merge_base}"
 
 MYPYTHONPATH="/vllm-workspace"
 
@@ -822,6 +848,7 @@ else
 fi
 
 # --- Route: multi-node vs single-node ---
+clear_ci_orchestration_env
 if is_multi_node "$commands"; then
   echo "--- Multi-node job detected"
   export DCKR_VER=$(docker --version | sed 's/Docker version \(.*\), build .*/\1/')
@@ -922,7 +949,7 @@ else
     -e "VLLM_CACHE_ROOT=${CONTAINER_CACHE_ROOT}/vllm" \
     -e "XDG_CACHE_HOME=${CONTAINER_CACHE_ROOT}/xdg" \
     -e "PYTORCH_ROCM_ARCH=" \
-    -e "VLLM_STANDALONE_MERGE_BASE=${vllm_standalone_merge_base}" \
+    "${standalone_merge_base_env[@]}" \
     --name "${container_name}" \
     "${image_name}" \
     /bin/bash -c "${CONTAINER_PREFLIGHT} && ${commands}"
