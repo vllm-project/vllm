@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! TLS tests: `build_server_config` unit checks plus end-to-end OpenSSL handshakes
 //! through the production listener/connection path, with a trivial router since TLS
 //! terminates below the app.
