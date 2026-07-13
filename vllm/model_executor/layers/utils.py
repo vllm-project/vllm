@@ -245,12 +245,18 @@ def dispatch_cpu_unquantized_gemm(
         ):
             with contextlib.suppress(Exception):
                 # prepack conv weight
-                layer.weight.data = ops.causal_conv1d_weight_pack(
+                unpacked = (
                     layer.weight.view(
                         layer.weight.size(0),
                         layer.weight.size(2),
                     )
+                    .contiguous()
+                    .clone()
                 )
+                # Stash the un-packed (dim, width) weight so the speculative-decode
+                # GDN path (which uses torch conv, not the AMX kernel) can use it.
+                layer._cpu_unpacked_conv_weight = unpacked
+                layer.weight.data = ops.causal_conv1d_weight_pack(unpacked)
         layer.cpu_linear = lambda x, weight, bias: torch.nn.functional.linear(
             x, weight, bias
         )
