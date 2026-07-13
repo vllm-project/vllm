@@ -721,11 +721,17 @@ mod tests {
             request_id: String::new(),
             prompt_token_ids: vec![],
             prompt_logprobs: None,
+            prompt_token_id_logprobs: None,
             token_ids: vec![],
             logprobs,
             finish_reason,
             usage: TokenUsage::default(),
             kv_transfer_params: None,
+            ec_transfer_params: None,
+            sampling_mask: None,
+            spec_decode_metrics: None,
+            weight_versions: None,
+            routed_experts: None,
         }
     }
 
