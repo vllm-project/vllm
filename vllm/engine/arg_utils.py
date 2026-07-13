@@ -1465,6 +1465,9 @@ class EngineArgs:
             "--prefill-schedule-interval",
             **scheduler_kwargs["prefill_schedule_interval"],
         )
+        # Only applicable to data-parallel deployments (data-parallel-size > 1);
+        # a no-op otherwise since the delayer is only constructed by the DP
+        # engine core.
         scheduler_group.add_argument(
             "--enable-prefill-delayer",
             **scheduler_kwargs["enable_prefill_delayer"],

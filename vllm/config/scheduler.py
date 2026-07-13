@@ -155,7 +155,7 @@ class SchedulerConfig:
     once every N engine steps, aligned across DP ranks, to better balance
     per-step forward-pass times."""
 
-    enable_prefill_delayer: bool = False
+    enable_prefill_delayer: bool = True
     """For data-parallel deployments, enable the content-aware PrefillDelayer:
     delay admitting new prefills on a rank until sibling DP ranks are also
     ready, so dense prefills fire together and reduce per-step padding waste.
