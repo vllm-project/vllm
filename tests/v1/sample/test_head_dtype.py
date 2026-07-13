@@ -19,9 +19,15 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 
 
 class _FakeLmHead:
-    def __init__(self, weight: torch.Tensor, quantized: bool = False):
+    def __init__(
+        self,
+        weight: torch.Tensor,
+        quantized: bool = False,
+        shard_indices: object | None = None,
+    ):
         self.weight = weight
         self.quant_method = object() if quantized else UnquantizedEmbeddingMethod()
+        self.shard_indices = shard_indices
 
 
 def _build_processor(vocab_size: int) -> LogitsProcessor:
@@ -84,6 +90,38 @@ def test_fp32_head_rejects_quantized_lm_head(default_vllm_config):
 
     with pytest.raises(ValueError, match="unquantized"):
         lp._get_logits(torch.randn(4, 16, dtype=torch.bfloat16), lm_head, None)
+
+
+def test_get_top_tokens_honors_head_dtype(default_vllm_config):
+    # The spec-decode local-argmax path (get_top_tokens) must run the lm_head
+    # in head_dtype too, not just _get_logits.
+    import types
+    from unittest import mock
+
+    vocab_size, hidden_size = 64, 16
+    lp = _build_processor(vocab_size)
+    lp.head_dtype = torch.float32
+
+    hidden_states = torch.randn(4, hidden_size, dtype=torch.bfloat16)
+    weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16)
+    lm_head = _FakeLmHead(
+        weight,
+        shard_indices=types.SimpleNamespace(
+            num_org_vocab_padding=0, org_vocab_start_index=0
+        ),
+    )
+
+    with mock.patch(
+        "vllm.model_executor.layers.logits_processor."
+        "get_tensor_model_parallel_world_size",
+        return_value=1,
+    ):
+        top = lp.get_top_tokens(lm_head, hidden_states, None)
+
+    expected = torch.nn.functional.linear(hidden_states.float(), weight.float()).argmax(
+        dim=-1
+    )
+    assert torch.equal(top, expected)
 
 
 def test_fp32_head_rejected_with_lora(default_vllm_config):
