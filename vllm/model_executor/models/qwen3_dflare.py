@@ -1,0 +1,738 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from collections.abc import Iterable
+
+import torch
+import torch.nn.functional as F
+from torch import nn
+from transformers import Qwen3Config
+
+from vllm import _custom_ops as ops
+from vllm.compilation.decorators import support_torch_compile
+from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
+from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    maybe_remap_kv_scale_name,
+)
+from vllm.multimodal.inputs import NestedTensors
+from vllm.transformers_utils.config import set_default_rope_theta
+from vllm.v1.attention.backend import AttentionType
+
+from .qwen3 import Qwen3ForCausalLM
+from .qwen3_dflash import (
+    DFlashQwen3ForCausalLM,
+    _resolve_layer_attention,
+)
+from .utils import (
+    AutoWeightsLoader,
+    get_draft_quant_config,
+    maybe_prefix,
+    process_eagle_weight,
+)
+
+logger = init_logger(__name__)
+
+
+class DFlareQwen3Attention(nn.Module):
+    """Attention for DFlare speculative decoding.
+
+    Compared to DFlash, DFlare has separate KV projections for context
+    (target hidden states → cache) and draft query tokens:
+
+    - ``k_proj`` / ``v_proj``: used in ``forward()`` for draft query tokens.
+    - ``k_proj_target`` / ``v_proj_target``: used during
+      ``precompute_and_store_context_kv`` to project per-layer fused target
+      hidden states into the KV cache.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        rope_parameters: dict,
+        max_position: int = 4096 * 32,
+        head_dim: int | None = None,
+        rms_norm_eps: float = 1e-06,
+        attention_bias: bool = False,
+        add_swa_attention_sink_bias: bool = False,
+        sliding_window: int | None = None,
+        causal: bool = False,
+        cache_config: "CacheConfig | None" = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+        attn_type: str = AttentionType.DECODER,
+    ) -> None:
+        super().__init__()
+        self.layer_name = prefix
+        self.hidden_size = hidden_size
+        tp_size = get_tensor_model_parallel_world_size()
+        self.total_num_heads = num_heads
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
+        self.total_num_kv_heads = num_kv_heads
+        if self.total_num_kv_heads >= tp_size:
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            assert tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        self.head_dim = head_dim or hidden_size // self.total_num_heads
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        self.scaling = self.head_dim ** -0.5
+
+        # Draft query projections
+        self.q_proj = ColumnParallelLinear(
+            hidden_size,
+            self.total_num_heads * self.head_dim,
+            bias=attention_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.q_proj",
+        )
+        self.k_proj = ColumnParallelLinear(
+            hidden_size,
+            self.total_num_kv_heads * self.head_dim,
+            bias=attention_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.k_proj",
+        )
+        self.v_proj = ColumnParallelLinear(
+            hidden_size,
+            self.total_num_kv_heads * self.head_dim,
+            bias=attention_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.v_proj",
+        )
+
+        # Target context projections (heterogeneous KV — used only in
+        # precompute_and_store_context_kv, not in forward())
+        self.k_proj_target = ColumnParallelLinear(
+            hidden_size,
+            self.total_num_kv_heads * self.head_dim,
+            bias=attention_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.k_proj_target",
+        )
+        self.v_proj_target = ColumnParallelLinear(
+            hidden_size,
+            self.total_num_kv_heads * self.head_dim,
+            bias=attention_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.v_proj_target",
+        )
+
+        self.o_proj = RowParallelLinear(
+            self.total_num_heads * self.head_dim,
+            hidden_size,
+            bias=attention_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+        )
+
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            max_position=max_position,
+            rope_parameters=rope_parameters,
+        )
+
+        self.attention_sink_bias = (
+            torch.nn.Parameter(torch.empty(self.num_heads), requires_grad=False)
+            if add_swa_attention_sink_bias
+            else None
+        )
+
+        self.sliding_window = sliding_window
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            per_layer_sliding_window=sliding_window,
+            prefix=f"{prefix}.attn",
+            attn_type=attn_type,
+            sinks=self.attention_sink_bias,
+        )
+        self.causal = causal
+        self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+        self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        """Forward for draft query tokens only.
+
+        Context K/V are pre-inserted into the KV cache by
+        ``precompute_and_store_context_kv`` using ``k_proj_target`` /
+        ``v_proj_target``.  This method only projects draft query tokens
+        with ``q_proj`` / ``k_proj`` / ``v_proj``.
+        """
+        q, _ = self.q_proj(hidden_states)
+        k, _ = self.k_proj(hidden_states)
+        v, _ = self.v_proj(hidden_states)
+
+        q_shape, k_shape = q.shape, k.shape
+        q = self.q_norm(
+            q.view(*q_shape[:-1], q_shape[-1] // self.head_dim, self.head_dim)
+        ).view(q_shape)
+        k = self.k_norm(
+            k.view(*k_shape[:-1], k_shape[-1] // self.head_dim, self.head_dim)
+        ).view(k_shape)
+
+        q, k = self.rotary_emb(positions, q, k)
+
+        attn_output = self.attn(q, k, v)
+        output, _ = self.o_proj(attn_output)
+        return output
+
+
+class DFlareQwen3DecoderLayer(nn.Module):
+    """Same as DFlashQwen3DecoderLayer but uses DFlareQwen3Attention."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        *,
+        config: Qwen3Config,
+        layer_idx: int,
+        cache_config: "CacheConfig | None" = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        set_default_rope_theta(config, default_theta=1000000)
+        attn_type = AttentionType.DECODER
+
+        dflare_config = getattr(config, "dflash_config", None) or {}
+        add_swa_attention_sink_bias = dflare_config.get(
+            "attention_sink_bias",
+            getattr(config, "add_swa_attention_sink_bias", False),
+        )
+
+        sliding_window, causal = _resolve_layer_attention(config, layer_idx)
+
+        self.self_attn = DFlareQwen3Attention(
+            hidden_size=self.hidden_size,
+            num_heads=config.num_attention_heads,
+            max_position=config.max_position_embeddings,
+            num_kv_heads=config.num_key_value_heads,
+            rms_norm_eps=config.rms_norm_eps,
+            attention_bias=getattr(config, "attention_bias", False),
+            add_swa_attention_sink_bias=add_swa_attention_sink_bias,
+            sliding_window=sliding_window,
+            causal=causal,
+            head_dim=getattr(config, "head_dim", None),
+            cache_config=cache_config,
+            quant_config=quant_config,
+            rope_parameters=config.rope_parameters,
+            prefix=f"{prefix}.self_attn",
+            attn_type=attn_type,
+        )
+
+        from .qwen2 import Qwen2MLP as Qwen3MLP
+
+        self.mlp = Qwen3MLP(
+            hidden_size=self.hidden_size,
+            intermediate_size=config.intermediate_size,
+            hidden_act=config.hidden_act,
+            quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
+        )
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if residual is not None:
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        else:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+
+        hidden_states = self.self_attn(
+            positions=positions,
+            hidden_states=hidden_states,
+        )
+
+        hidden_states, residual = self.post_attention_layernorm(
+            hidden_states, residual
+        )
+        hidden_states = self.mlp(hidden_states)
+        return hidden_states, residual
+
+
+@support_torch_compile
+class DFlareQwen3Model(nn.Module):
+    """DFlare draft model.
+
+    Replaces DFlash's single ``fc`` (ReplicatedLinear) with per-layer
+    adaptive fusion:
+
+    - ``layer_fusion_weights``: [D, T] learnable matrix (softmax-normalised).
+    - ``hidden_norm``: RMSNorm applied to target hidden states before fusion.
+    - ``norm``: final output RMSNorm.
+
+    Context K/V are projected with ``k_proj_target`` / ``v_proj_target``
+    (heterogeneous projections) instead of the shared ``k_proj`` / ``v_proj``.
+    """
+
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        start_layer_id: int = 0,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        self.vocab_size = self.config.vocab_size
+        self.quant_config = get_draft_quant_config(vllm_config)
+
+        drafter_config = getattr(self.config, "dflash_config", {})
+
+        current_vllm_config = get_current_vllm_config()
+
+        self.embed_tokens = VocabParallelEmbedding(
+            self.config.vocab_size,
+            self.config.hidden_size,
+            prefix=maybe_prefix(prefix, "embed_tokens"),
+        )
+
+        self.mask_token_id = drafter_config.get("mask_token_id")
+        self.mask_embedding = nn.Parameter(
+            torch.zeros(
+                self.config.hidden_size, dtype=vllm_config.model_config.dtype
+            ),
+            requires_grad=False,
+        )
+        self.has_separate_mask_embedding = False
+
+        self.layers = nn.ModuleList(
+            [
+                DFlareQwen3DecoderLayer(
+                    current_vllm_config,
+                    config=self.config,
+                    layer_idx=layer_idx,
+                    cache_config=current_vllm_config.cache_config,
+                    quant_config=self.quant_config,
+                    prefix=maybe_prefix(
+                        prefix, f"layers.{layer_idx + start_layer_id}"
+                    ),
+                )
+                for layer_idx in range(self.config.num_hidden_layers)
+            ]
+        )
+
+        # ★ Layer-wise adaptive fusion (replaces DFlash's self.fc)
+        T = len(drafter_config.get("target_layer_ids", []))
+        D = self.config.num_hidden_layers
+        self.layer_fusion_weights = nn.Parameter(torch.zeros(D, T))
+        self.hidden_norm = RMSNorm(
+            self.config.hidden_size,
+            eps=self.config.rms_norm_eps,
+        )
+        self.norm = RMSNorm(
+            self.config.hidden_size,
+            eps=self.config.rms_norm_eps,
+        )
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        embeds = self.embed_tokens(input_ids)
+        if self.has_separate_mask_embedding and self.mask_token_id is not None:
+            is_mask = (input_ids == self.mask_token_id).unsqueeze(-1)
+            embeds = torch.where(
+                is_mask, self.mask_embedding.to(embeds.dtype), embeds
+            )
+        return embeds
+
+    def _build_context_kv_buffers(
+        self,
+        layers_attn: list[nn.Module],
+    ) -> None:
+        """Build fused weight buffers for ``precompute_and_store_context_kv``.
+
+        Stacks ``k_proj_target`` / ``v_proj_target`` from all attention
+        layers.  Each layer's context input is different (per-layer fused
+        hidden state), so the forward uses ``bmm`` instead of DFlash's
+        single ``F.linear``.
+        """
+        self._hidden_norm_weight = self.hidden_norm.weight.data
+
+        # Stack target KV projection weights: [D, out_features, in_features]
+        k_target = torch.stack(
+            [a.k_proj_target.weight for a in layers_attn]
+        )
+        v_target = torch.stack(
+            [a.v_proj_target.weight for a in layers_attn]
+        )
+        self._k_target = k_target  # [D, kv_size, hidden_size]
+        self._v_target = v_target  # [D, kv_size, hidden_size]
+
+        # K-norm weights: [D, head_dim]
+        self._k_norm_weights = torch.stack(
+            [a.k_norm.weight.data for a in layers_attn], dim=0
+        ).contiguous()
+
+    def _build_fused_kv_buffers(self) -> None:
+        """Called after weight loading.  Aliases per-layer buffers used by
+        ``precompute_and_store_context_kv``."""
+        layers_attn = [layer.self_attn for layer in self.layers]
+        attn0 = layers_attn[0]
+
+        self._build_context_kv_buffers(layers_attn)
+
+        # RoPE parameters
+        self._rope_head_size = attn0.rotary_emb.head_size
+        self._rope_cos_sin_cache = attn0.rotary_emb.cos_sin_cache
+        self._rope_is_neox = attn0.rotary_emb.is_neox_style
+        for attn in layers_attn[1:]:
+            assert (
+                attn.rotary_emb.head_size == self._rope_head_size
+                and attn.rotary_emb.is_neox_style == self._rope_is_neox
+            ), (
+                "All layers must have the same RoPE parameters "
+                "for DFlare precomputation"
+            )
+
+        # Layer metadata
+        self._num_attn_layers = len(layers_attn)
+        self._kv_size = attn0.kv_size
+        self._head_dim = attn0.head_dim
+        self._num_kv_heads = attn0.num_kv_heads
+        self._rms_norm_eps = attn0.q_norm.variance_epsilon
+        for attn in layers_attn[1:]:
+            assert (
+                attn.kv_size == self._kv_size
+                and attn.head_dim == self._head_dim
+                and attn.num_kv_heads == self._num_kv_heads
+                and attn.q_norm.variance_epsilon == self._rms_norm_eps
+            ), (
+                "All layers must have the same attn config "
+                "for DFlare precomputation"
+            )
+
+        self._attn_layers = [layer.self_attn.attn for layer in self.layers]
+
+    def _project_context_kv(
+        self,
+        context_states: torch.Tensor,
+        num_ctx: int,
+        num_layers: int,
+        num_kv_heads: int,
+        head_dim: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Project per-layer context states into K/V with ``bmm``.
+
+        Args:
+            context_states: [D, N, H] — per-draft-layer fused target states.
+
+        Returns:
+            all_k, all_v: each [D, N, nkv, hd].
+        """
+        # context_states: [D, N, H]
+        # self._k_target: [D, kv_size, H]  → transpose → [D, H, kv_size]
+        all_k = torch.bmm(
+            context_states, self._k_target.transpose(1, 2)
+        )  # [D, N, kv_size]
+        all_v = torch.bmm(
+            context_states, self._v_target.transpose(1, 2)
+        )  # [D, N, kv_size]
+
+        all_k = all_k.view(num_layers, num_ctx, num_kv_heads, head_dim)
+        all_v = all_v.view(num_layers, num_ctx, num_kv_heads, head_dim)
+        return all_k, all_v
+
+    def _normalize_context_k(self, all_k: torch.Tensor) -> torch.Tensor:
+        all_k_normed = torch.empty_like(all_k)
+        ops.rms_norm(
+            all_k_normed,
+            all_k,
+            self._k_norm_weights,
+            self._rms_norm_eps,
+        )
+        return all_k_normed
+
+    def precompute_and_store_context_kv(
+        self,
+        context_states: torch.Tensor,
+        context_positions: torch.Tensor,
+        context_slot_mapping: (
+            torch.Tensor | list[torch.Tensor | None] | None
+        ) = None,
+    ) -> None:
+        """Precompute K/V from per-layer fused context states.
+
+        Uses ``k_proj_target`` / ``v_proj_target`` (heterogeneous
+        projections).  Unlike DFlash, each draft layer receives its own
+        fused context signal.
+        """
+        if not hasattr(self, "_num_attn_layers"):
+            logger.warning_once(
+                "DFlare buffer initialization was skipped. If dummy weights "
+                "are not in use, this may indicate an error in weight loading."
+            )
+            self._build_fused_kv_buffers()
+
+        num_layers = self._num_attn_layers
+        num_ctx = context_states.shape[0]  # for single-layer fallback
+        L = num_layers
+        kv = self._kv_size
+        hd = self._head_dim
+        nkv = self._num_kv_heads
+
+        # context_states: [N, D, H] — permute to [D, N, H] for bmm
+        ctx = context_states.permute(1, 0, 2)  # [D, N, H]
+        N = ctx.shape[1]
+
+        all_k, all_v = self._project_context_kv(ctx, N, L, nkv, hd)
+
+        all_k_normed = self._normalize_context_k(all_k)
+
+        # Fused RoPE: [D * N, kv]
+        all_k_flat = all_k_normed.view(L * N, kv)
+        positions_repeated = context_positions.repeat(L)
+        cos_sin_cache = self._rope_cos_sin_cache
+        if cos_sin_cache.dtype != all_k_flat.dtype:
+            cos_sin_cache = cos_sin_cache.to(dtype=all_k_flat.dtype)
+        ops.rotary_embedding(
+            positions_repeated,
+            all_k_flat,
+            None,
+            self._rope_head_size,
+            cos_sin_cache,
+            self._rope_is_neox,
+        )
+
+        if context_slot_mapping is None:
+            return
+
+        all_k_final = all_k_flat.view(L, N, nkv, hd)
+        per_layer = isinstance(context_slot_mapping, (list, tuple))
+        for i in range(L):
+            slot_mapping = (
+                context_slot_mapping[i] if per_layer else context_slot_mapping
+            )
+            if slot_mapping is None:
+                continue
+            attn = self._attn_layers[i]
+            kv_cache = attn.kv_cache
+            attn.impl.do_kv_cache_update(
+                attn,
+                all_k_final[i],
+                all_v[i],
+                kv_cache,
+                slot_mapping,
+            )
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        input_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if input_embeds is None:
+            input_embeds = self.embed_input_ids(input_ids)
+
+        hidden_states = input_embeds
+        residual = None
+        for layer in self.layers:
+            hidden_states, residual = layer(
+                positions=positions,
+                hidden_states=hidden_states,
+                residual=residual,
+            )
+        hidden_states, _ = self.norm(hidden_states, residual)
+        return hidden_states
+
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> set[str]:
+        stacked_params_mapping = [
+            (".gate_up_proj", ".gate_proj", 0),
+            (".gate_up_proj", ".up_proj", 1),
+        ]
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+        tp_rank = get_tensor_model_parallel_rank()
+        tp_size = get_tensor_model_parallel_world_size()
+
+        for name, loaded_weight in weights:
+            if "midlayer." in name:
+                name = name.replace("midlayer.", "layers.0.")
+            if "scale" in name:
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
+            if "attention_sink_bias" in name:
+                if name not in params_dict:
+                    continue
+                param = params_dict[name]
+                heads_per_rank = loaded_weight.shape[0] // tp_size
+                head_start = tp_rank * heads_per_rank
+                narrow_weight = loaded_weight.narrow(
+                    0, head_start, heads_per_rank
+                )
+                param.data.copy_(narrow_weight)
+                loaded_params.add(name)
+                continue
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                param = params_dict[name]
+                weight_loader = getattr(
+                    param, "weight_loader", default_weight_loader
+                )
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
+
+
+class Qwen3DFlareForCausalLM(DFlashQwen3ForCausalLM):
+    """DFlare draft model for Qwen3 architecture.
+
+    Inherits most of the DFlash infrastructure (LM head, logits processor,
+    draft/target vocab mapping, mask embedding, weight loading patterns).
+
+    Overrides:
+    - ``combine_hidden_states``: per-layer adaptive fusion instead of single fc.
+    - ``load_weights``: handles the extra ``k_proj_target`` / ``v_proj_target``
+      and ``layer_fusion_weights`` weights not present in DFlash.
+    """
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        nn.Module.__init__(self)
+        self.draft_model_config = vllm_config.speculative_config.draft_model_config
+        self.config = self.draft_model_config.hf_config
+        if getattr(self.config, "draft_vocab_size", None) is None:
+            self.config.draft_vocab_size = getattr(self.config, "vocab_size", None)
+        target_layer_num = vllm_config.model_config.get_num_layers(
+            vllm_config.parallel_config
+        )
+        self.model = DFlareQwen3Model(
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+            start_layer_id=target_layer_num,
+        )
+
+        logit_scale = getattr(self.config, "logit_scale", 1.0)
+        self.lm_head = ParallelLMHead(
+            self.config.draft_vocab_size,
+            self.config.hidden_size,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
+        self.logits_processor = LogitsProcessor(
+            self.config.draft_vocab_size, scale=logit_scale
+        )
+        target_vocab_size = vllm_config.model_config.get_vocab_size()
+        if self.config.draft_vocab_size != target_vocab_size:
+            self.draft_id_to_target_id = nn.Parameter(
+                torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
+                requires_grad=False,
+            )
+        else:
+            self.draft_id_to_target_id = None
+
+    def combine_hidden_states(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        """Per-layer adaptive fusion of target hidden states.
+
+        Args:
+            hidden_states: [N, T * H] — concatenated target hidden states
+                from ``target_layer_ids``.
+
+        Returns:
+            [N, D, H] — one fused representation per draft layer.
+        """
+        T = len(self.dflare_config["target_layer_ids"])
+        D = self.config.num_hidden_layers
+        h = hidden_states.view(-1, T, self.config.hidden_size)  # [N, T, H]
+        h_normed = self.model.hidden_norm(h)  # RMSNorm over hidden_size
+        alpha = F.softmax(self.model.layer_fusion_weights, dim=-1)  # [D, T]
+        fused = torch.einsum("dt,ntH->ndH", alpha, h_normed)  # [N, D, H]
+        return fused
+
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ):
+        model_weights = {}
+        includes_draft_id_mapping = False
+        includes_embed_tokens = False
+        for name, loaded_weight in weights:
+            assert "mask_hidden" not in name, (
+                "DFlare embeds masked slots via mask_token_id (optionally "
+                "overridden by a mask_embedding.pt file); it should not ship "
+                "a mask_hidden weight."
+            )
+            if "t2d" in name:
+                continue
+            if "d2t" in name:
+                name = name.replace("d2t", "draft_id_to_target_id")
+                includes_draft_id_mapping = True
+            elif "lm_head" not in name:
+                name = "model." + name
+            if "embed_tokens" in name:
+                includes_embed_tokens = True
+            model_weights[name] = loaded_weight
+            process_eagle_weight(self, name)
+
+        mask_embedding = self._read_mask_embedding()
+        if mask_embedding is not None:
+            model_weights["model.mask_embedding"] = mask_embedding
+            self.model.has_separate_mask_embedding = True
+
+        skip_substrs = []
+        if not includes_draft_id_mapping:
+            skip_substrs.append("draft_id_to_target_id")
+        if not includes_embed_tokens:
+            skip_substrs.append("embed_tokens")
+        if not self.model.has_separate_mask_embedding:
+            skip_substrs.append("mask_embedding")
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=None,
+            skip_substrs=skip_substrs,
+        )
+        loader.load_weights(model_weights.items())
+        self.model._build_fused_kv_buffers()
+
+    @property
+    def dflare_config(self):
+        return getattr(self.config, "dflash_config", None) or {}

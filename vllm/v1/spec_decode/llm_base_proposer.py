@@ -30,6 +30,7 @@ from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausal
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.laguna_dflash import DFlashLagunaForCausalLM
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.model_executor.models.qwen3_dflare import Qwen3DFlareForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.qwen3_eagle3 import Eagle3Qwen3ForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -533,6 +534,7 @@ class SpecDecodeBaseProposer:
                     Eagle3LlamaForCausalLM,
                     Eagle3DeepseekV2ForCausalLM,
                     DFlashQwen3ForCausalLM,
+                    Qwen3DFlareForCausalLM,
                     Eagle3Qwen3ForCausalLM,
                     DFlashLagunaForCausalLM,
                 ),
