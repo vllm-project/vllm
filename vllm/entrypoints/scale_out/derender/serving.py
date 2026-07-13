@@ -276,6 +276,10 @@ class ServingDerender(BaseServing):
             return self.create_error_response(exc)
         except ValueError as exc:
             return self.create_error_response(str(exc))
+        except (KeyError, IndexError) as exc:
+            return self.create_error_response(
+                f"invalid stream_state: detokenization failed ({exc!r})"
+            )
 
         logger.debug(
             "derender_chat_stream request_id=%s model=%s delta_tokens=%d",
@@ -313,6 +317,10 @@ class ServingDerender(BaseServing):
             )
         except ValueError as exc:
             return self.create_error_response(str(exc))
+        except (KeyError, IndexError) as exc:
+            return self.create_error_response(
+                f"invalid stream_state: detokenization failed ({exc!r})"
+            )
 
         logger.debug(
             "derender_completion_stream request_id=%s model=%s delta_tokens=%d",

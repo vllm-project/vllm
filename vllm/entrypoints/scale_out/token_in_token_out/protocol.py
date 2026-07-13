@@ -364,11 +364,22 @@ class DerenderStreamState(BaseModel):
     number of chunks.
     """
 
-    prefix_offset: int = 0
+    prefix_offset: int = Field(default=0, ge=0)
     """Prefix offset into ``prev_tokens`` for incremental detokenization."""
 
-    read_offset: int = 0
+    read_offset: int = Field(default=0, ge=0)
     """Read offset into ``prev_tokens`` for incremental detokenization."""
+
+    @field_validator("prev_tokens")
+    @classmethod
+    def _bound_prev_tokens(cls, v: list[str]) -> list[str]:
+        # INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET is small (5) and the trimmed
+        # window is O(offset). A generous limit rejects unusually large or malformed
+        # payloads without restricting legitimate multi-byte sequences.
+        limit = 1024
+        if len(v) > limit:
+            raise ValueError(f"prev_tokens length ({len(v)}) exceeds maximum ({limit})")
+        return v
 
     role_sent: bool = False
     """True once the initial ``role: "assistant"`` delta has been emitted.
