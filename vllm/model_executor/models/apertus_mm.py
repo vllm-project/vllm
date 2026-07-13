@@ -4,8 +4,8 @@
 Multimodal Apertus Pipeline optimized for native vLLM asynchronous execution.
 
 Architecture Contract:
-1. Processor (CPU): Deterministic tensor creation, dynamic batch padding,
-   and dummy token injection. Zero neural network inference is executed here.
+1. Processor (CPU): Deterministic per-item tensor creation and dummy token
+   injection. Zero neural network inference is executed here.
 2. Worker (GPU): Native Emu3.5/WavTokenizer execution and O(1) boolean mask
    ID substitution.
 """
@@ -141,17 +141,13 @@ class ApertusMultiModalProcessor(BaseMultiModalProcessor[ApertusProcessingInfo])
         hf_inputs: object,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        """Routes batched tensors and metadata directly to the GPU Worker's
-        embed_multimodal kwargs.
-        """
+        """Routes per-item tensors to the GPU Worker's embed_multimodal kwargs."""
         # The first argument of batched() is the MODALITY
         # ("image"/"audio"), not the field name -- the engine looks items up
         # by modality during profiling and scheduling.
         return {
             "pixel_values": MultiModalFieldConfig.batched("image"),
-            "image_sizes": MultiModalFieldConfig.batched("image"),
             "audio_values": MultiModalFieldConfig.batched("audio"),
-            "audio_lengths": MultiModalFieldConfig.batched("audio"),
         }
 
     def _get_prompt_updates(self, *args: Any, **kwargs: Any) -> Sequence[PromptUpdate]:
@@ -175,23 +171,22 @@ class ApertusMultiModalProcessor(BaseMultiModalProcessor[ApertusProcessingInfo])
         num_images = inputs.mm_data_items.get_count("image", strict=False)
         num_audios = inputs.mm_data_items.get_count("audio", strict=False)
 
-        mm_kwargs: dict[str, torch.Tensor] = {}
+        mm_kwargs: dict[str, Any] = {}
         mm_counts: dict[str, int] = {}
 
-        # 1. Vision Preprocessing (Mathematical Layout & Padding Only)
+        # 1. Vision Preprocessing (Mathematical Layout Only)
         if num_images > 0:
             with timing_ctx.record("preprocess_apertus_images"):
                 images = inputs.mm_data_items.get_items(
                     "image", ImageProcessorItems
                 ).get_all()
-                pixel_values, image_layouts, image_sizes = [], [], []
+                pixel_values, image_layouts = [], []
 
                 for img in images:
                     tensor, h_tok, w_tok = (
                         self.image_tokenizer.preprocess_image_to_tensor(img)
                     )
                     pixel_values.append(tensor)
-                    image_sizes.append(torch.tensor([h_tok, w_tok], dtype=torch.long))
 
                     rows = [dummy_img_token * w_tok for _ in range(h_tok)]
                     imgstr = self.image_tokenizer.eol_token.join(rows)
@@ -202,19 +197,7 @@ class ApertusMultiModalProcessor(BaseMultiModalProcessor[ApertusProcessingInfo])
                     )
                     image_layouts.append(layout)
 
-                # Dynamic Batching: Pad variable resolution images to Max(H, W)
-                # in the batch
-                max_h = max(t.shape[1] for t in pixel_values)
-                max_w = max(t.shape[2] for t in pixel_values)
-                padded_pixels = [
-                    torch.nn.functional.pad(
-                        t, (0, max_w - t.shape[2], 0, max_h - t.shape[1])
-                    )
-                    for t in pixel_values
-                ]
-
-                mm_kwargs["pixel_values"] = torch.stack(padded_pixels)
-                mm_kwargs["image_sizes"] = torch.stack(image_sizes)
+                mm_kwargs["pixel_values"] = pixel_values
                 mm_counts["image"] = len(image_layouts)
 
                 # Use instant replacement
@@ -223,22 +206,19 @@ class ApertusMultiModalProcessor(BaseMultiModalProcessor[ApertusProcessingInfo])
                         self.image_tokenizer.image_placeholder, layout, 1
                     )
 
-        # 2. Audio Preprocessing (Mathematical Layout & Padding Only)
+        # 2. Audio Preprocessing (Mathematical Layout Only)
         if num_audios > 0:
             with timing_ctx.record("preprocess_apertus_audios"):
                 audios = inputs.mm_data_items.get_items(
                     "audio", AudioProcessorItems
                 ).get_all()
-                audio_values, audio_layouts, audio_lengths = [], [], []
+                audio_values, audio_layouts = [], []
 
                 for audio in audios:
                     tensor, num_tok = self.audio_tokenizer.preprocess_audio_to_tensor(
                         audio
                     )
                     audio_values.append(tensor.squeeze(0))
-                    audio_lengths.append(
-                        torch.tensor(tensor.shape[-1], dtype=torch.long)
-                    )
 
                     layout = (
                         f"{self.audio_tokenizer.audio_start_token}"
@@ -247,15 +227,7 @@ class ApertusMultiModalProcessor(BaseMultiModalProcessor[ApertusProcessingInfo])
                     )
                     audio_layouts.append(layout)
 
-                # Dynamic Batching: Pad variable length audio sequences
-                max_len = max(t.shape[-1] for t in audio_values)
-                padded_audio = [
-                    torch.nn.functional.pad(t, (0, max_len - t.shape[-1]))
-                    for t in audio_values
-                ]
-
-                mm_kwargs["audio_values"] = torch.stack(padded_audio)
-                mm_kwargs["audio_lengths"] = torch.stack(audio_lengths)
+                mm_kwargs["audio_values"] = audio_values
                 mm_counts["audio"] = len(audio_layouts)
 
                 for layout in audio_layouts:
@@ -473,10 +445,8 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
     def embed_multimodal(
         self,
         *,
-        pixel_values: torch.Tensor | None = None,
-        image_sizes: torch.Tensor | None = None,
-        audio_values: torch.Tensor | None = None,
-        audio_lengths: torch.Tensor | None = None,
+        pixel_values: torch.Tensor | list[torch.Tensor] | None = None,
+        audio_values: torch.Tensor | list[torch.Tensor] | None = None,
         **kwargs: object,
     ) -> MultiModalEmbeddings:
         """Executes encoders on GPU natively and returns the embeddings of
@@ -490,38 +460,30 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
             device = torch.device("cuda")
 
         # 1. GPU Vision Execution & Embedding Retrieval
-        if (
-            pixel_values is not None
-            and self.vision_tower is not None
-            and image_sizes is not None
-        ):
-            # Move pixel_values to the same device and dtype as vision_tower parameters
+        if pixel_values is not None and self.vision_tower is not None:
             try:
                 target_device = next(self.vision_tower.parameters()).device
                 target_dtype = next(self.vision_tower.parameters()).dtype
             except StopIteration:
-                target_device = pixel_values.device
+                target_device = device
                 target_dtype = torch.bfloat16
 
-            pixel_values = pixel_values.to(device=target_device, dtype=target_dtype)
-
-            with torch.inference_mode():
-                _, _, info = self.vision_tower.encode(pixel_values)
-                # Recover 2D grid shape based on the padded Max H/W of the batch
-                max_h_tok = pixel_values.shape[2] // self.image_tokenizer.ds_factor
-                max_w_tok = pixel_values.shape[3] // self.image_tokenizer.ds_factor
-                img_codes = info[2].view(pixel_values.shape[0], max_h_tok, max_w_tok)
+            image_items = (
+                list(pixel_values.unbind(0))
+                if isinstance(pixel_values, torch.Tensor)
+                else pixel_values
+            )
 
             valid_codes_embeds = []
 
-            for i, size in enumerate(image_sizes):
-                h_tok, w_tok = size.tolist()
-                # Emu3.5-VisionTokenizer is a fully convolutional network that
-                # preserves spatial layout. Because padding was added at the
-                # right/bottom during CPU data prep, we slice the top-left
-                # [:h_tok, :w_tok] active region. This completely discards the
-                # padded margins and recovers the original grid.
-                valid_codes_i = img_codes[i, :h_tok, :w_tok].flatten()
+            for image in image_items:
+                image = image.unsqueeze(0).to(device=target_device, dtype=target_dtype)
+                with torch.inference_mode():
+                    _, _, info = self.vision_tower.encode(image)
+
+                h_tok = image.shape[2] // self.image_tokenizer.ds_factor
+                w_tok = image.shape[3] // self.image_tokenizer.ds_factor
+                valid_codes_i = info[2].view(h_tok, w_tok).flatten()
 
                 # Convert codebook indices to the language model vocabulary space
                 llm_img_ids_i = valid_codes_i.to(torch.long) + self.image_token_offset
@@ -533,27 +495,30 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
             return valid_codes_embeds
 
         # 2. GPU Audio Execution & Embedding Retrieval
-        if (
-            audio_values is not None
-            and self.audio_tower is not None
-            and audio_lengths is not None
-        ):
-            audio_values = audio_values.to(device=device)
+        if audio_values is not None and self.audio_tower is not None:
+            try:
+                target_device = next(self.audio_tower.parameters()).device
+                target_dtype = next(self.audio_tower.parameters()).dtype
+            except StopIteration:
+                target_device = device
+                target_dtype = torch.bfloat16
 
-            with torch.inference_mode():
-                audio_codes = self.audio_tower.encode_audio(audio_values)
-            if audio_codes.dim() == 3:
-                audio_codes = audio_codes.squeeze(1)  # [B, Max_Tokens]
+            audio_items = (
+                list(audio_values.unbind(0))
+                if isinstance(audio_values, torch.Tensor)
+                else audio_values
+            )
 
             valid_codes_embeds = []
 
-            for i, length in enumerate(audio_lengths):
-                # Calculate the exact number of valid tokens (1 token per 600
-                # audio samples)
-                num_tok = (length.item() + 600 - 1) // 600
-
-                # Slice the active region to discard padded audio frames at the end
-                valid_codes_i = audio_codes[i, :num_tok]
+            for audio in audio_items:
+                with torch.inference_mode():
+                    valid_codes_i = self.audio_tower.encode_audio(
+                        audio.unsqueeze(0).to(
+                            device=target_device,
+                            dtype=target_dtype,
+                        )
+                    ).squeeze(0)
 
                 # Convert WavTokenizer codes to language model vocabulary space
                 llm_audio_ids_i = valid_codes_i.to(torch.long) + self.audio_token_offset
