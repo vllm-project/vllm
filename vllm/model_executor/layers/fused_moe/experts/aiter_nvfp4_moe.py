@@ -101,6 +101,9 @@ class AiterNvfp4Experts(mk.FusedMoEExpertsModular):
         if not is_supported:
             return is_supported, reason
 
+        if moe_config.in_dtype != torch.bfloat16:
+            return False, "kernel only supports bfloat16 activations"
+
         if not current_platform.is_rocm() or not on_gfx950():
             return False, "kernel available only on AMD gfx950 devices for now"
 
@@ -260,7 +263,7 @@ class AiterNvfp4Experts(mk.FusedMoEExpertsModular):
             act="silu",
             w1_scale=self.w1_scale_val,
             global_scale=self.w1_global_scale,
-            sorted_weights=(sorted_weights if apply_router_weight_on_input else None),
+            sorted_weights=None,
             use_async_copy=True,
             k_batch=stage1_params.get("k_batch", 1),
             waves_per_eu=stage1_params.get("waves_per_eu", 3),
