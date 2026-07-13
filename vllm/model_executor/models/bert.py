@@ -370,11 +370,17 @@ class BertModel(nn.Module, SupportsQuant):
     packed_modules_mapping = {"qkv_proj": ["query", "key", "value"]}
 
     hf_to_vllm_mapper = WeightsMapper(
+        # Original google-bert checkpoints use the legacy `gamma`/`beta`
+        # LayerNorm names; rename to vLLM's `weight`/`bias`.
+        orig_to_new_substr={
+            "LayerNorm.gamma": "LayerNorm.weight",
+            "LayerNorm.beta": "LayerNorm.bias",
+        },
         orig_to_new_stacked={
             ".self.query": (".self.qkv_proj", "q"),
             ".self.key": (".self.qkv_proj", "k"),
             ".self.value": (".self.qkv_proj", "v"),
-        }
+        },
     )
 
     def __init__(
@@ -893,15 +899,25 @@ class BertForMaskedLM(nn.Module):
     is_pooling_model = True
 
     # Map the HF ``cls.predictions.*`` checkpoint names onto our ``mlm_head.*``
-    # submodule. ``cls.predictions.bias`` is tied to ``decoder.bias`` in HF, so
-    # the bias is loaded from ``decoder.bias`` and the duplicate is skipped in
-    # ``load_weights``.
+    # submodule. Order matters: the ``None`` (drop) rules and the more specific
+    # names are listed before the broader ``cls.predictions.decoder`` rule so
+    # that substring replacement doesn't rewrite them first.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
-            "cls.predictions.transform.dense": "mlm_head.dense",
+            # Next-sentence-prediction head: not part of masked LM.
+            "cls.seq_relationship": None,
+            # Some checkpoints ship an explicit (tied) decoder bias; we load the
+            # canonical ``cls.predictions.bias`` instead, so drop the duplicate.
+            "cls.predictions.decoder.bias": None,
+            # Legacy LayerNorm affine names in the MLM head transform.
+            "cls.predictions.transform.LayerNorm.gamma": "mlm_head.layer_norm.weight",
+            "cls.predictions.transform.LayerNorm.beta": "mlm_head.layer_norm.bias",
             "cls.predictions.transform.LayerNorm": "mlm_head.layer_norm",
+            "cls.predictions.transform.dense": "mlm_head.dense",
             "cls.predictions.decoder": "mlm_head.decoder",
-        },
+            # In HF ``cls.predictions.bias`` *is* the decoder bias.
+            "cls.predictions.bias": "mlm_head.decoder.bias",
+        }
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -927,8 +943,19 @@ class BertForMaskedLM(nn.Module):
         return self.bert.embed_input_ids(input_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self, skip_prefixes=["cls.predictions.bias"])
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loader = AutoWeightsLoader(self)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+        # The MLM decoder shares its weight with the input embeddings. When the
+        # checkpoint relies on `tie_word_embeddings` (e.g. google-bert/*) it
+        # doesn't ship an explicit decoder weight, so tie it here. Copy the
+        # first `vocab_size` rows since VocabParallelEmbedding may pad the vocab.
+        if "mlm_head.decoder.weight" not in loaded:
+            emb = self.bert.embeddings.word_embeddings.weight
+            decoder = self.mlm_head.decoder.weight
+            decoder.data.copy_(emb.data[: decoder.shape[0]])
+            loaded.add("mlm_head.decoder.weight")
+        return loaded
 
     def forward(
         self,
