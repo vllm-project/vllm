@@ -26,6 +26,10 @@ from vllm.distributed.weight_transfer import (
     WeightTransferEngineFactory,
     WeightTransferTrainerFactory,
 )
+from vllm.distributed.weight_transfer.base import (
+    WeightTransferInitRequest,
+    WeightTransferUpdateRequest,
+)
 from vllm.distributed.weight_transfer.ipc_engine import (
     IPCWeightTransferEngine,
     IPCWeightTransferInitInfo,
@@ -1224,8 +1228,6 @@ def test_ipc_receive_weights_missing_gpu_uuid_raises():
         engine.receive_weights(update_info)
 
 
-
-
 class RecordingClient:
     """A fake VLLMWeightSyncClient that records the order of calls."""
 
@@ -1282,6 +1284,24 @@ class TestTrainerClients:
 
     def test_ray_client_is_protocol(self):
         assert isinstance(RayVLLMWeightSyncClient(MagicMock()), VLLMWeightSyncClient)
+
+    def test_ray_client_sends_typed_requests(self, monkeypatch):
+        """Ray client must hand the actor typed Request objects, not raw dicts."""
+        import ray
+
+        monkeypatch.setattr(ray, "get", lambda refs: None)
+        handle = MagicMock()
+        client = RayVLLMWeightSyncClient(handle)
+
+        client.init_weight_transfer_engine({"master_addr": "x"})
+        (init_req,), _ = handle.init_weight_transfer_engine.remote.call_args
+        assert isinstance(init_req, WeightTransferInitRequest)
+        assert init_req.init_info == {"master_addr": "x"}
+
+        client.update_weights({"names": ["w"]})
+        (update_req,), _ = handle.update_weights.remote.call_args
+        assert isinstance(update_req, WeightTransferUpdateRequest)
+        assert update_req.update_info == {"names": ["w"]}
 
     def test_http_client_pickles_ipc_handles_for_json(self, monkeypatch):
         """HTTP update_weights must encode raw ipc_handles as a base64 pickle."""

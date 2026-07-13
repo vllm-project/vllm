@@ -1059,7 +1059,7 @@ class AsyncLLM(EngineClient):
         return EngineDeadError()
 
     async def init_weight_transfer_engine(
-        self, request: WeightTransferInitRequest | dict
+        self, request: WeightTransferInitRequest
     ) -> None:
         """
         Initialize weight transfer for RL training.
@@ -1067,31 +1067,23 @@ class AsyncLLM(EngineClient):
         Args:
             request: Weight transfer initialization request with backend-specific info
         """
-        init_info_dict = (
-            request["init_info"] if isinstance(request, dict) else request.init_info
-        )
-
         await self.collective_rpc(
-            "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
+            "init_weight_transfer_engine", kwargs={"init_info": request.init_info}
         )
 
     async def start_weight_update(self) -> None:
         """Start a new weight update."""
         await self.collective_rpc("start_weight_update")
 
-    async def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
+    async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
         """
         Batched weight update for RL training.
 
         Args:
             request: Weight update request with backend-specific update info
         """
-        update_info_dict = (
-            request["update_info"] if isinstance(request, dict) else request.update_info
-        )
-
         await self.collective_rpc(
-            "update_weights", kwargs={"update_info": update_info_dict}
+            "update_weights", kwargs={"update_info": request.update_info}
         )
 
     async def finish_weight_update(self) -> None:

@@ -13,6 +13,11 @@ importable without those packages installed.
 
 from typing import TYPE_CHECKING, Any
 
+from vllm.distributed.weight_transfer.base import (
+    WeightTransferInitRequest,
+    WeightTransferUpdateRequest,
+)
+
 if TYPE_CHECKING:
     from ray.actor import ActorHandle
 
@@ -89,12 +94,8 @@ class RayVLLMWeightSyncClient:
     def init_weight_transfer_engine(self, init_info: dict[str, Any]) -> None:
         import ray
 
-        ray.get(
-            [
-                h.init_weight_transfer_engine.remote({"init_info": init_info})
-                for h in self.handles
-            ]
-        )
+        request = WeightTransferInitRequest(init_info=init_info)
+        ray.get([h.init_weight_transfer_engine.remote(request) for h in self.handles])
 
     def start_weight_update(self) -> None:
         import ray
@@ -104,12 +105,8 @@ class RayVLLMWeightSyncClient:
     def update_weights(self, update_info: dict[str, Any]) -> None:
         import ray
 
-        ray.get(
-            [
-                h.update_weights.remote({"update_info": update_info})
-                for h in self.handles
-            ]
-        )
+        request = WeightTransferUpdateRequest(update_info=update_info)
+        ray.get([h.update_weights.remote(request) for h in self.handles])
 
     def finish_weight_update(self) -> None:
         import ray
