@@ -509,9 +509,9 @@ class FusedMoE(PluggableLayer):
 
         w13_scale = getattr(self, "w13_weight_scale", None)
         w2_scale = getattr(self, "w2_weight_scale", None)
-        if w13_scale is not None and (
-            w13_scale.dim() != 1 or w13_scale.size(0) != self.local_num_experts
-        ):
+        # Accept scales of any rank (1D per-tensor, 2D FP8 per-expert,
+        # 3D MXFP4 block scales) as long as the first dim == num_experts.
+        if w13_scale is not None and w13_scale.size(0) != self.local_num_experts:
             w13_scale = None
             w2_scale = None
 

@@ -295,6 +295,50 @@ def test_overflow_raises():
         provider.prepare(_topk([0, 1, 2, 3]))
 
 
+# -- Multi-dimensional scales (MXFP4 block scales) --
+
+
+@pytest.mark.parametrize("num_experts", NUM_EXPERTS)
+def test_mxfp4_block_scales(num_experts: int):
+    """3D block scales ([E, out_dim, in_blocks]) are stored and copied correctly.
+
+    MXFP4 uses per-expert block scales of shape [E, output_dim, input_blocks].
+    Unlike 1D per-tensor scales, these have rank 3. The CachedWeightProvider
+    must preserve the scale dimensions through cache eviction.
+    """
+    capacity = min(4, num_experts)
+    block_size = 32
+    w13, w2 = _make_weights(num_experts, torch.bfloat16)
+    # 3D block scales: [E, O, K//block_size]
+    w13_s = torch.rand(num_experts, 2 * INTERMEDIATE,
+                       HIDDEN // block_size, dtype=torch.float32)
+    w2_s = torch.rand(num_experts, HIDDEN,
+                      INTERMEDIATE // block_size, dtype=torch.float32)
+
+    provider = CachedWeightProvider(
+        capacity=capacity,
+        w13_weight=w13,
+        w2_weight=w2,
+        w13_scale=w13_s,
+        w2_scale=w2_s,
+    )
+
+    assert provider._buf_w13_scale is not None
+    assert provider._buf_w2_scale is not None
+    assert provider._buf_w13_scale.shape == (capacity, *w13_s.shape[1:])
+    assert provider._buf_w2_scale.shape == (capacity, *w2_s.shape[1:])
+
+    # Cache miss copies scales along with weights
+    expert_ids = list(range(capacity))
+    result = provider.prepare(_topk(expert_ids))
+    for eid in expert_ids:
+        slot = provider._lru[eid][0]
+        torch.testing.assert_close(
+            result.w1_scale[slot].cpu(), w13_s[eid])
+        torch.testing.assert_close(
+            result.w2_scale[slot].cpu(), w2_s[eid])
+
+
 # -- CPU pinned memory --
 
 
