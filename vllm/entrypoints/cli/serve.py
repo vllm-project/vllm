@@ -328,6 +328,10 @@ def run_multi_api_server(args: argparse.Namespace):
             coordinator.get_stats_publish_address() if coordinator else None
         )
 
+        paged_shm_server = maybe_start_paged_shm_server(
+            vllm_config.model_config.multimodal_config
+        )
+
         if rust_frontend_path:
             if parallel_config.local_engines_only:
                 expected_engine_start_index = parallel_config.data_parallel_rank
@@ -368,10 +372,6 @@ def run_multi_api_server(args: argparse.Namespace):
                 )
                 addresses.inputs = actual_inputs
                 addresses.outputs = actual_outputs
-
-    paged_shm_server = maybe_start_paged_shm_server(
-        vllm_config.model_config.multimodal_config
-    )
 
     # Wait for API servers.
     try:

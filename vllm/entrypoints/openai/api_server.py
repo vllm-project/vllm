@@ -787,14 +787,14 @@ async def run_server_worker(
         args,
         client_config=client_config,
     ) as engine_client:
+        paged_shm_server = maybe_start_paged_shm_server(
+            engine_client.model_config.multimodal_config
+        )
+
         shutdown_task = await build_and_serve(
             engine_client, listen_address, sock, args, **uvicorn_kwargs
         )
     # NB: Await server shutdown only after the backend context is exited
-
-    paged_shm_server = maybe_start_paged_shm_server(
-        engine_client.model_config.multimodal_config
-    )
 
     try:
         await shutdown_task

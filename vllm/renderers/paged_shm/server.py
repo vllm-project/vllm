@@ -280,7 +280,6 @@ class PagedShmServerProc:
 def maybe_start_paged_shm_server(
     multimodal_config: MultiModalConfig | None,
 ) -> PagedShmServerProc | None:
-
     if multimodal_config is None:
         return None
 

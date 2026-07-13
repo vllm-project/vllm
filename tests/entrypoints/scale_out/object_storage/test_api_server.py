@@ -27,6 +27,8 @@ def server():
             f"{1024 * 1024 * 1024}",  # 1G
             "--paged-shm-block-size",
             f"{1024 * 10244}",  # 1M
+            "--max-model-len",
+            "1024",
         ],
         env_dict={"VLLM_SERVER_DEV_MODE": "1"},
     ) as remote_server:
