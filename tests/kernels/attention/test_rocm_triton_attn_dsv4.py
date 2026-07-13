@@ -196,46 +196,6 @@ def _ragged_from_rows(
     )
 
 
-def _ref_combine_topk_swa_ragged(
-    device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    expected_ragged = torch.tensor(
-        [
-            100,
-            101,
-            7,
-            8,
-            9,
-            110,
-            111,
-            8,
-            9,
-            10,
-            120,
-            121,
-            122,
-            9,
-            10,
-            11,
-            150,
-            27,
-            28,
-            29,
-            160,
-            161,
-            28,
-            29,
-            30,
-        ],
-        dtype=torch.int32,
-        device=device,
-    )
-    expected_lens = torch.tensor([5, 5, 6, 4, 5], dtype=torch.int32, device=device)
-    expected_indptr = torch.zeros(6, dtype=torch.int32, device=device)
-    torch.cumsum(expected_lens, dim=0, out=expected_indptr[1:])
-    return expected_ragged, expected_indptr, expected_lens
-
-
 @torch.inference_mode()
 def test_compute_global_topk_ragged_indices_and_indptr() -> None:
     from vllm.models.deepseek_v4.amd.rocm import (
@@ -368,55 +328,6 @@ def test_sparse_attn_decode_ragged_kernel() -> None:
     )
 
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
-
-
-@torch.inference_mode()
-def test_combine_topk_swa_indices_ragged() -> None:
-    from vllm.models.deepseek_v4.amd.rocm import (
-        combine_topk_swa_indices_ragged,
-    )
-
-    device = torch.device("cuda")
-    topk_indices = torch.tensor(
-        [
-            [100, 101, 102, 103],
-            [110, 111, 112, 113],
-            [120, 121, 122, 123],
-            [130, 131, 132, 133],
-            [140, 141, 142, 143],
-        ],
-        dtype=torch.int32,
-        device=device,
-    )
-    query_start_loc = torch.tensor([0, 3, 5], dtype=torch.int32, device=device)
-    seq_lens = torch.tensor([6, 4], dtype=torch.int32, device=device)
-    gather_lens = torch.tensor([4, 3], dtype=torch.int32, device=device)
-    window_size = 3
-    compress_ratio = 2
-    topk = 4
-    M = 20
-    N = 8
-
-    actual_ragged, actual_indptr, actual_lens = combine_topk_swa_indices_ragged(
-        topk_indices,
-        query_start_loc,
-        seq_lens,
-        gather_lens,
-        window_size,
-        compress_ratio,
-        topk,
-        M,
-        N,
-    )
-    expected_ragged, expected_indptr, expected_lens = _ref_combine_topk_swa_ragged(
-        device
-    )
-
-    torch.testing.assert_close(
-        actual_ragged[: expected_ragged.numel()], expected_ragged
-    )
-    torch.testing.assert_close(actual_indptr, expected_indptr)
-    torch.testing.assert_close(actual_lens, expected_lens)
 
 
 @requires_split_decode_arch

@@ -245,7 +245,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             lora_unquantized_hidden_states = hidden_states
             hidden_states, a1q_scale = moe_kernel_quantize_input(
                 hidden_states,
-                self.a1_scale or self.a1_gscale,
+                self.a1_scale,
                 self.quant_dtype,
                 self.per_act_token_quant,
                 self.block_shape,
@@ -332,12 +332,23 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         else:
             lora_x = hidden_states
 
+        # TODO: The fallback to self.a1_scale was added for deferred static
+        # activation quantization in https://github.com/vllm-project/vllm/pull/40857.
+        # Activation emulation relies solely on `a1q_scale` output of
+        # `moe_kernel_quantize_input` - this should be adapted to
+        # always solely rely on `a1q_scale`.
+        input_scale = (
+            a1q_scale
+            if self.quantization_emulation
+            else (a1q_scale if a1q_scale is not None else self.a1_scale)
+        )
+
         def _base_w13_fn():
             invoke_fused_moe_triton_kernel(
                 hidden_states,
                 w1,
                 intermediate_cache1,
-                a1q_scale if a1q_scale is not None else self.a1_scale,
+                input_scale,
                 self.w1_scale,
                 None,  # topk_weights
                 sorted_token_ids,

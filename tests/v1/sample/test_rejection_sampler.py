@@ -1150,3 +1150,36 @@ def test_synthetic_all_rejected(all_greedy: bool):
     for row in result:
         assert row[0] != PLACEHOLDER_TOKEN_ID
         assert (row[1:] == PLACEHOLDER_TOKEN_ID).all()
+
+
+def test_placeholder_draft_token_rejected_random(rejection_sampler):
+    """A placeholder draft id (-1) must be rejected in non-greedy sampling
+    without indexing the probability tensors by the invalid id.
+    """
+    vocab_size = 100
+    spec_tokens = [[1, vocab_size - 1, PLACEHOLDER_TOKEN_ID]]
+    output_tokens = [[1, vocab_size - 1, 7, 9]]
+
+    temperature = torch.ones(1, dtype=torch.float32, device=DEVICE_TYPE)
+    metadata = create_sampling_metadata(
+        all_greedy=False,
+        temperature=temperature,
+        generators={0: torch.Generator(device=DEVICE_TYPE).manual_seed(0)},
+    )
+    logits = create_logits_tensor(output_tokens, vocab_size=vocab_size)
+    bonus_token_tensor = torch.tensor([output_tokens[0][-1]], device=logits.device)
+    spec_decode_metadata = create_spec_decode_metadata(spec_tokens, logits)
+
+    mock_sampler_output(rejection_sampler, bonus_token_tensor)
+    output = rejection_sampler(
+        spec_decode_metadata,
+        draft_probs=None,
+        logits=logits,
+        sampling_metadata=metadata,
+    )
+    sampled = output.sampled_token_ids
+
+    assert sampled[0, 0].item() == 1
+    assert sampled[0, 1].item() == vocab_size - 1
+    recovered = sampled[0, 2].item()
+    assert 0 <= recovered < vocab_size

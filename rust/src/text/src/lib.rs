@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Shared text-generation support used by chat and future raw completions.
 //!
 //! This crate intentionally stays below chat semantics:
@@ -7,7 +10,7 @@
 use std::mem::take;
 
 pub use backend::{DynTextBackend, SamplingHints, SamplingLimits, TextBackend};
-pub use error::{Error, LogprobsError, OutOfVocabError, Result};
+pub use error::{Error, LogprobsError, Result, TokenIdsError};
 use futures::Stream;
 pub use lower::{
     PreparedTextRequest, lower_sampling_params, lower_text_request, resolve_max_tokens,
@@ -131,6 +134,10 @@ impl TextLlm {
         mut request: TextRequest,
     ) -> Result<(TextRequest, GenerateOutputStream)> {
         request.validate()?;
+
+        if request.arrival_time.is_none() {
+            request.arrival_time = Some(vllm_llm::current_unix_timestamp_secs());
+        }
 
         let tokenizer = self.backend.tokenizer();
         let prompt_token_ids = match take(&mut request.prompt) {
