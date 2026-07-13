@@ -19,7 +19,7 @@ from vllm.tool_parsers import ToolParser, ToolParserManager
 def default_tokenizer() -> TokenizerLike:
     """Override module-scoped default_tokenizer because gigachat tests
     mutate the tokenizer via ``add_tokens``."""
-    return AutoTokenizer.from_pretrained("gpt2")
+    return AutoTokenizer.from_pretrained("openai-community/gpt2")
 
 
 MSG_SEP_TOKEN = "<|message_sep|>\n\n"

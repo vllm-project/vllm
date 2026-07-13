@@ -280,9 +280,12 @@ class MultiprocExecutor(Executor):
                 logger.debug("MultiprocWorkerMonitor: shutdown already initiated")
                 return
             _self.is_failed = True
-            proc_name = next(h.proc.name for h in workers if h.proc.sentinel == died[0])
+            proc = next(h.proc for h in workers if h.proc.sentinel == died[0])
             logger.error(
-                "Worker proc %s died unexpectedly, shutting down executor.", proc_name
+                "Worker proc %s died unexpectedly (exit code: %s), "
+                "shutting down executor.",
+                proc.name,
+                proc.exitcode,
             )
             _self.shutdown()
             callback = _self.failure_callback
@@ -396,9 +399,7 @@ class MultiprocExecutor(Executor):
             return responses[0] if output_rank is not None else responses
 
         future = FutureWrapper(
-            self.futures_queue,
-            get_response=get_response,
-            aggregate=aggregate,
+            self.futures_queue, get_response=get_response, aggregate=aggregate
         )
 
         return future if non_block else future.result()
@@ -429,7 +430,9 @@ class MultiprocExecutor(Executor):
             "[shutdown] Executor: waiting for worker exit count=%d",
             initial_count,
         )
-        if wait_for_termination(active_procs(), 4):
+        if wait_for_termination(
+            active_procs(), timeout=envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS
+        ):
             logger.info_once("[shutdown] Executor: all workers exited gracefully")
             return
 
@@ -826,6 +829,16 @@ class WorkerProc:
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
+        # Publish the logical-to-physical mapping early so topology helpers
+        # work before init_device (needed by set_worker_net_device below).
+        assigned_physical_gpu_ids = kwargs[
+            "vllm_config"
+        ].parallel_config.assigned_physical_gpu_ids
+        if assigned_physical_gpu_ids is not None:
+            from vllm.platforms.interface import set_assigned_physical_gpu_ids
+
+            set_assigned_physical_gpu_ids(assigned_physical_gpu_ids)
+
         # Set net device env vars for the worker if VLLM_GPU_NIC_PCIE_MAPPING is set
         set_worker_net_device(kwargs.get("local_rank", 0), kwargs["vllm_config"])
 
@@ -929,7 +942,11 @@ class WorkerProc:
         converted to a FAILURE response.
         """
         if isinstance(output, AsyncModelRunnerOutput):
-            output = output.get_output()
+            try:
+                output = output.get_output()
+            except Exception as e:
+                logger.exception("Error getting async model runner output")
+                output = e
 
         if isinstance(output, Exception):
             result = (WorkerProc.ResponseStatus.FAILURE, str(output))
@@ -980,6 +997,9 @@ class WorkerProc:
                     func = partial(cloudpickle.loads(method), self.worker)
 
                 output = func(*args, **kwargs)
+
+                if output_rank is None or self.rank == output_rank:
+                    self.handle_output(output)
             except Exception as e:
                 # Notes have been introduced in python 3.11
                 if hasattr(e, "add_note"):
@@ -989,10 +1009,6 @@ class WorkerProc:
                 # string, only for logging purpose.
                 if output_rank is None or self.rank == output_rank:
                     self.handle_output(e)
-                continue
-
-            if output_rank is None or self.rank == output_rank:
-                self.handle_output(output)
 
     @staticmethod
     def setup_proc_title_and_log_prefix(enable_ep: bool) -> None:

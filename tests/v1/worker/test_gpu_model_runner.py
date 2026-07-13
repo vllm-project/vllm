@@ -7,7 +7,6 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
 
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
 from vllm.config import (
@@ -19,13 +18,16 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.reasoning import ReasoningConfig
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
-from vllm.distributed.weight_transfer.base import SparseWeightPatch
+from vllm.lora.layers import LoRAMappingType
+from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
@@ -44,6 +46,9 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.worker.gpu.lora_utils import LoraState
+from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
+from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import select_common_block_size
@@ -79,12 +84,12 @@ def initialize_kv_cache(runner: GPUModelRunner):
         max_model_len=runner.max_model_len,
         max_num_batched_tokens=runner.max_num_tokens,
         device=runner.device,
-        pin_memory=runner.pin_memory,
         vocab_size=runner.model_config.get_vocab_size(),
         block_sizes=[kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size],
         kernel_block_sizes=[
             kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
         ],
+        max_num_blocks_per_req=[NUM_BLOCKS],
     )
     runner.initialize_attn_backend(kv_cache_config)
 
@@ -252,6 +257,31 @@ def test_select_common_block_size_uses_largest_shared_int():
     assert selected_size == 64
 
 
+def test_reasoning_config_without_custom_logitsprocs_does_not_need_output_token_ids(
+    dist_init,
+):
+    vllm_config = get_vllm_config()
+    assert vllm_config.model_config.logits_processors is None
+    reasoning_config = ReasoningConfig(
+        reasoning_start_str="<think>", reasoning_end_str="</think>"
+    )
+    reasoning_config._reasoning_start_token_ids = [1]
+    reasoning_config._reasoning_end_token_ids = [2]
+    vllm_config.reasoning_config = reasoning_config
+
+    with set_current_vllm_config(vllm_config):
+        model_config = vllm_config.model_config
+        num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
+        head_size = model_config.get_head_size()
+        vllm_config.compilation_config.static_forward_context["layer.0"] = Attention(
+            num_heads, head_size, 0.1
+        )
+        runner = GPUModelRunner(vllm_config, torch.device("cpu"))
+
+    assert runner.input_batch.thinking_budget_state_holder is not None
+    assert runner.input_batch.logitsprocs_need_output_token_ids is False
+
+
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     ("world_size", "is_last_rank", "expected_calls"),
@@ -312,6 +342,79 @@ def test_select_common_block_size_no_valid_option():
 
     with pytest.raises(ValueError):
         select_common_block_size(48, [backend_a, backend_b])
+
+
+def test_set_active_mm_loras_builds_tower_and_connector_mappings():
+    model = Mock()
+    model.get_num_mm_encoder_tokens.side_effect = lambda num_embeds: num_embeds + 1
+    model.get_mm_mapping.return_value = SimpleNamespace(connector=True)
+    model.get_num_mm_connector_tokens.side_effect = lambda num_tokens: num_tokens + 10
+
+    lora_manager = Mock()
+    lora_manager.supports_tower_connector_lora.return_value = True
+
+    encoder_cache = EncoderCache()
+    encoder_cache.mm_features["req-with-lora"] = [
+        MultiModalFeatureSpec(
+            data=None,
+            modality="image",
+            identifier="img-0",
+            mm_position=PlaceholderRange(offset=0, length=2),
+        ),
+        MultiModalFeatureSpec(
+            data=None,
+            modality="image",
+            identifier="img-1",
+            mm_position=PlaceholderRange(offset=2, length=3),
+        ),
+    ]
+    encoder_cache.mm_features["req-no-lora"] = [
+        MultiModalFeatureSpec(
+            data=None,
+            modality="image",
+            identifier="img-2",
+            mm_position=PlaceholderRange(offset=0, length=1),
+        )
+    ]
+
+    lora_state = LoraState(max_num_reqs=4)
+    lora_request = LoRARequest("vision-lora", 7, "/tmp/vision-lora")
+    lora_state.add_request("req-with-lora", 0, lora_request)
+    lora_state.add_request("req-no-lora", 1, None)
+
+    set_active_mm_loras(
+        model=model,
+        lora_manager=lora_manager,
+        encoder_cache=encoder_cache,
+        req_id_to_index={
+            "req-with-lora": 0,
+            "req-no-lora": 1,
+        },
+        lora_state=lora_state,
+        scheduled_encoder_inputs={
+            "req-with-lora": [1, 0],
+            "req-no-lora": [0],
+            "missing-req": [0],
+        },
+    )
+
+    assert lora_manager.set_active_adapters.call_count == 2
+
+    tower_requests, tower_mapping = lora_manager.set_active_adapters.call_args_list[
+        0
+    ].args
+    assert tower_requests == {lora_request}
+    assert tower_mapping.type is LoRAMappingType.TOWER
+    assert tower_mapping.prompt_mapping == (7, 7, 0)
+    assert tower_mapping.index_mapping == (7, 7, 7, 7, 7, 7, 7, 0, 0)
+
+    connector_requests, connector_mapping = (
+        lora_manager.set_active_adapters.call_args_list[1].args
+    )
+    assert connector_requests == {lora_request}
+    assert connector_mapping.type is LoRAMappingType.CONNECTOR
+    assert connector_mapping.prompt_mapping == (7, 7, 0)
+    assert connector_mapping.index_mapping == ((7,) * 14 + (7,) * 13 + (0,) * 12)
 
 
 def test_update_states_new_request(model_runner, dist_init):
@@ -692,9 +795,10 @@ def test_kv_cache_stride_order(monkeypatch, model_runner):
     )
 
     # TODO mla test
-    default_stride = tuple(range(5))
+    default_stride = tuple(range(len(expected_kv_cache_shape)))
+    non_default_stride = (*default_stride[1:], default_stride[0])
     # Permutation that gets you back to expected kv shape
-    for test_stride in ((1, 4, 0, 2, 3), (0, 1, 2, 3, 4)):
+    for test_stride in (non_default_stride, default_stride):
 
         def rnd_stride_order(
             include_num_layers_dimension: bool = False, test_stride=test_stride
@@ -786,71 +890,26 @@ def test_sample_passes_reordered_draft_probs_to_rejection_sampler():
     assert torch.equal(passed_draft_probs, expected_draft_probs)
 
 
-def test_apply_sparse_weight_patches_updates_only_selected_entries():
-    class DummyModel(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.weight = nn.Parameter(torch.zeros(6, dtype=torch.float32))
-
+def test_invalid_draft_suffixes_remain_rejected_in_metadata():
     runner = object.__new__(GPUModelRunner)
-    runner.model = DummyModel()
-
-    runner.apply_sparse_weight_patches(
-        [
-            SparseWeightPatch(
-                name="weight",
-                indices=torch.tensor([1, 4], dtype=torch.int32),
-                values=torch.tensor([3.5, -2.0], dtype=torch.float32),
-            )
-        ]
+    runner.device = torch.device("cpu")
+    runner.arange_np = np.arange(64, dtype=np.int64)
+    runner._arange_scratch = np.empty(64, dtype=np.int64)
+    # Placeholder (-1) drafts are kept in input_ids (clamped to 0 only at the
+    # embedding boundary). For num_draft_tokens=[2, 1, 2] the draft positions
+    # are [1, 2, 4, 6, 7], so the gather carries the -1s straight into the
+    # rejection-sampling metadata.
+    runner.input_ids = SimpleNamespace(
+        gpu=torch.tensor([99, 10, -1, 99, 12, 99, 13, -1], dtype=torch.int32),
     )
 
-    expected = torch.tensor([0.0, 3.5, 0.0, 0.0, -2.0, 0.0], dtype=torch.float32)
-    assert torch.equal(runner.get_model().weight.data, expected)
+    metadata = GPUModelRunner._calc_spec_decode_metadata(
+        runner,
+        np.array([2, 1, 2], dtype=np.int32),
+        np.array([3, 5, 8], dtype=np.int32),
+    )
 
-
-def test_apply_sparse_weight_patches_rejects_mismatched_lengths():
-    class DummyModel(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.weight = nn.Parameter(torch.zeros(4, dtype=torch.float32))
-
-    runner = object.__new__(GPUModelRunner)
-    runner.model = DummyModel()
-
-    with pytest.raises(ValueError, match="matching lengths"):
-        runner.apply_sparse_weight_patches(
-            [
-                SparseWeightPatch(
-                    name="weight",
-                    indices=torch.tensor([1, 2], dtype=torch.int32),
-                    values=torch.tensor([1.0], dtype=torch.float32),
-                )
-            ]
-        )
-
-
-def test_apply_sparse_weight_patches_rejects_non_contiguous_param():
-    class DummyModel(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.weight = nn.Parameter(
-                torch.arange(12, dtype=torch.float32).view(3, 4).t()
-            )
-
-    runner = object.__new__(GPUModelRunner)
-    runner.model = DummyModel()
-
-    with pytest.raises(NotImplementedError, match="contiguous params"):
-        runner.apply_sparse_weight_patches(
-            [
-                SparseWeightPatch(
-                    name="weight",
-                    indices=torch.tensor([1], dtype=torch.int32),
-                    values=torch.tensor([1.0], dtype=torch.float32),
-                )
-            ]
-        )
+    assert metadata.draft_token_ids.tolist() == [10, -1, 12, 13, -1]
 
 
 def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order(default_vllm_config):
@@ -1242,9 +1301,10 @@ def test_hybrid_attention_mamba_tensor_shapes():
             actual_kv = vllm_ctx[layer].kv_cache[kernel_block, :]
             expected = attn_blocks_constant[i]
 
-            # Check K and V separately
-            assert torch.equal(actual_kv[0], expected)
-            assert torch.equal(actual_kv[1], expected)
+            # Packed layout: (num_kv_heads, block_size, 2*head_size). Every
+            # head in the block was filled with the same constant.
+            for head_idx in range(actual_kv.shape[0]):
+                assert torch.equal(actual_kv[head_idx], expected)
 
     for layer in [layer_2, layer_3, layer_4, layer_5]:
         for i, kv_block in enumerate(kv_blocks_for_mamba):
@@ -1326,7 +1386,6 @@ def test_input_batch_with_kernel_block_sizes():
     max_model_len = 512
     max_num_batched_tokens = 512
     device = torch.device(DEVICE_TYPE)
-    pin_memory = False
     vocab_size = 50272
 
     # Test with different kernel block sizes
@@ -1338,10 +1397,10 @@ def test_input_batch_with_kernel_block_sizes():
         max_model_len=max_model_len,
         max_num_batched_tokens=max_num_batched_tokens,
         device=device,
-        pin_memory=pin_memory,
         vocab_size=vocab_size,
         block_sizes=block_sizes,
         kernel_block_sizes=kernel_block_sizes,
+        max_num_blocks_per_req=[16, 8],
     )
 
     # Verify that block tables were created with kernel block sizes
@@ -1399,10 +1458,10 @@ def test_hybrid_cache_integration(default_vllm_config, dist_init):
         max_model_len=runner.max_model_len,
         max_num_batched_tokens=runner.max_num_tokens,
         device=runner.device,
-        pin_memory=runner.pin_memory,
         vocab_size=runner.model_config.get_vocab_size(),
         block_sizes=[kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size],
         kernel_block_sizes=[16],
+        max_num_blocks_per_req=[NUM_BLOCKS],
     )  # Use kernel block size
 
     runner.initialize_attn_backend(kv_cache_config)

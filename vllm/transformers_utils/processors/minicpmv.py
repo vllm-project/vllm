@@ -56,9 +56,9 @@ class MiniCPMVProcessor(ProcessorMixin):
     image_processor_class = "AutoImageProcessor"
     tokenizer_class = "AutoTokenizer"
 
-    def __init__(self, image_processor=None, tokenizer=None):
+    def __init__(self, image_processor=None, tokenizer=None, version=None):
         super().__init__(image_processor, tokenizer)
-        self.version = image_processor.version
+        self.version = version
 
     def __call__(
         self,
@@ -95,7 +95,7 @@ class MiniCPMVProcessor(ProcessorMixin):
     def batch_decode(self, *args, **kwargs):
         """
         This method forwards all its arguments to LlamaTokenizerFast's
-        [`~PreTrainedTokenizer.batch_decode`]. Please refer to the
+        [`~PythonBackend.batch_decode`]. Please refer to the
         docstring of this method for more information.
         """
         output_ids = args[0]
@@ -128,7 +128,7 @@ class MiniCPMVProcessor(ProcessorMixin):
     def decode(self, *args, **kwargs):
         """
         This method forwards all its arguments to LlamaTokenizerFast's
-        [`~PreTrainedTokenizer.decode`]. Please refer to the docstring
+        [`~PythonBackend.decode`]. Please refer to the docstring
         of this method for more information.
         """
         result = args[0]
@@ -156,7 +156,7 @@ class MiniCPMVProcessor(ProcessorMixin):
 
     def _convert(self, input_str, max_inp_length: int | None = None):
         add_bos = getattr(self.tokenizer, "add_bos_token", False)
-        if self.version == 2.5 or add_bos:
+        if self.version == (2, 5) or add_bos:
             input_ids = self.tokenizer.encode(input_str)
         else:
             bos_id = getattr(

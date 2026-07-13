@@ -16,6 +16,7 @@ from vllm.model_executor.kernels.linear import (
 )
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
+    FusedMoEExpertsModular,
     FusedMoEMethodBase,
     FusedMoEQuantConfig,
     FusedMoeWeightScaleSupported,
@@ -24,6 +25,7 @@ from vllm.model_executor.layers.fused_moe import (
     UnquantizedFusedMoEMethod,
 )
 from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+    WNA16MoEBackend,
     convert_to_wna16_moe_kernel_format,
     make_wna16_moe_kernel,
     select_wna16_moe_backend,
@@ -241,7 +243,9 @@ class AutoGPTQConfig(QuantizationConfig):
         if isinstance(layer, RoutedExperts):
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
-            if not check_moe_marlin_supports_layer(layer, self.group_size):
+            if not check_moe_marlin_supports_layer(
+                layer, self.group_size, allow_tile_padding=not self.desc_act
+            ):
                 logger.warning_once(
                     f"Layer '{prefix}' is not supported by GPTQMoeMarlin. "
                     "Falling back to Moe WNA16 kernels."
@@ -640,8 +644,11 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_g_idx_sort_indices", w2_g_idx_sort_indices)
         set_weight_attrs(w2_g_idx_sort_indices, extra_weight_attrs)
 
-        device = layer.w13_qweight.device
-        layer.workspace = marlin_make_workspace_new(device, 4)
+        if self.experts_cls is not None and issubclass(
+            self.experts_cls, FusedMoEExpertsModular
+        ):
+            device = layer.w13_qweight.device
+            layer.workspace = marlin_make_workspace_new(device, 4)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1
@@ -651,22 +658,7 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
                 "W8A8-INT8 is not supported by marlin kernel."
             )
 
-        (
-            w13,
-            w2,
-            w13_scale,
-            w2_scale,
-            w13_g_idx,
-            w2_g_idx,
-            w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices,
-            _w13_qzeros,
-            _w2_qzeros,
-            w13_input_global_scale,
-            w2_input_global_scale,
-            w13_bias,
-            w2_bias,
-        ) = convert_to_wna16_moe_kernel_format(
+        converted = convert_to_wna16_moe_kernel_format(
             backend=self.wna16_moe_backend,
             layer=layer,
             quant_config=self.quant_config,
@@ -681,6 +673,28 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             w2_bias=getattr(layer, "w2_bias", None),
         )
 
+        if converted is None:
+            # Backend rewrote the layer's params in place (e.g. Humming).
+            self._setup_kernel(layer)
+            return
+
+        (
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            w13_g_idx,
+            w2_g_idx,
+            w13_g_idx_sort_indices,
+            w2_g_idx_sort_indices,
+            w13_qzeros,
+            w2_qzeros,
+            w13_input_global_scale,
+            w2_input_global_scale,
+            w13_bias,
+            w2_bias,
+        ) = converted
+
         replace_parameter(layer, "w13_qweight", w13)
         replace_parameter(layer, "w2_qweight", w2)
         replace_parameter(layer, "w13_scales", w13_scale)
@@ -689,6 +703,10 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, "w2_g_idx", w2_g_idx)
         replace_parameter(layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices)
         replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
+        if w13_qzeros is not None:
+            replace_parameter(layer, "w13_qzeros", w13_qzeros)
+        if w2_qzeros is not None:
+            replace_parameter(layer, "w2_qzeros", w2_qzeros)
         if w13_input_global_scale is not None:
             if hasattr(layer, "w13_input_global_scale"):
                 replace_parameter(
@@ -722,6 +740,10 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
                     "w2_bias", torch.nn.Parameter(w2_bias, requires_grad=False)
                 )
 
+        # The modular kernel reads w13_weight/w2_weight; marlin keeps *_qweight.
+        layer.w13_weight = layer.w13_qweight
+        layer.w2_weight = layer.w2_qweight
+
         self._setup_kernel(layer)
 
     def _setup_kernel(self, layer: RoutedExperts) -> None:
@@ -732,30 +754,40 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
+            backend=self.wna16_moe_backend,
+            layer=layer,
             is_k_full=self.is_k_full,
-            w13_g_idx=layer.w13_g_idx,
-            w2_g_idx=layer.w2_g_idx,
-            w13_g_idx_sort_indices=layer.w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices=layer.w2_g_idx_sort_indices,
+            w13_g_idx=getattr(layer, "w13_g_idx", None),
+            w2_g_idx=getattr(layer, "w2_g_idx", None),
+            w13_g_idx_sort_indices=getattr(layer, "w13_g_idx_sort_indices", None),
+            w2_g_idx_sort_indices=getattr(layer, "w2_g_idx_sort_indices", None),
             routing_tables=layer._expert_routing_tables(),
         )
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
+        if self.wna16_moe_backend == WNA16MoEBackend.HUMMING:
+            from vllm.model_executor.layers.quantization.utils.humming_utils import (
+                get_humming_moe_quant_config,
+            )
+
+            return get_humming_moe_quant_config(layer)
+
         from vllm.model_executor.layers.fused_moe.config import (
             gptq_marlin_moe_quant_config,
         )
 
+        # CPU fused_experts_cpu requires zero points even for symmetric quant
+        use_zp = (
+            not self.quant_config.is_sym
+            or self.wna16_moe_backend == WNA16MoEBackend.CPU
+        )
         return gptq_marlin_moe_quant_config(
             w1_scale=layer.w13_scales,
             w2_scale=layer.w2_scales,
             weight_bits=self.quant_config.weight_bits,
             group_size=self.quant_config.group_size,
-            w1_zp=getattr(layer, "w13_qzeros", None)
-            if not self.quant_config.is_sym
-            else None,
-            w2_zp=getattr(layer, "w2_qzeros", None)
-            if not self.quant_config.is_sym
-            else None,
+            w1_zp=getattr(layer, "w13_qzeros", None) if use_zp else None,
+            w2_zp=getattr(layer, "w2_qzeros", None) if use_zp else None,
             w1_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
         )
@@ -783,8 +815,8 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             hidden_states=x,
-            w1=layer.w13_qweight,
-            w2=layer.w2_qweight,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=layer.activation,
@@ -793,4 +825,28 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             expert_map=layer.expert_map,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+        )
+
+    def apply_monolithic(
+        self,
+        layer: RoutedExperts,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert self.is_monolithic
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply_monolithic(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            router_logits=router_logits,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            num_expert_group=layer.num_expert_group,
+            topk_group=layer.topk_group,
+            e_score_correction_bias=layer.e_score_correction_bias,
+            routed_scaling_factor=layer.routed_scaling_factor,
         )

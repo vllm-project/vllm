@@ -12,16 +12,13 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cudagraph_utils import (
-    AttentionStatePair,
     BatchExecutionDescriptor,
     get_uniform_token_count,
 )
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
-    DecodeSpeculatorCudaGraphManager,
-    PrefillSpeculatorCudaGraphManager,
+    SpeculatorCudaGraphManager,
 )
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
@@ -48,8 +45,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
             )
 
-        self.prefill_cudagraph_manager: PrefillSpeculatorCudaGraphManager | None = None
-        self.decode_cudagraph_manager: DecodeSpeculatorCudaGraphManager | None = None
+        self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
+        self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
 
     @property
     def advance_draft_positions(self) -> bool:
@@ -61,19 +58,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         """
         return True
 
-    @property
-    def model_returns_tuple(self) -> bool:
-        """
-        Whether the draft model's forward() returns a tuple.
-
-        True: returns (last_hidden_states, hidden_states) — Eagle, Gemma4 MTP.
-        False: returns a single tensor used for both — standard MTP (DeepSeek).
-        """
-        return True
-
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         # Initialize cudagraph manager for draft prefill (draft position 0).
-        self.prefill_cudagraph_manager = PrefillSpeculatorCudaGraphManager(
+        self.prefill_cudagraph_manager = SpeculatorCudaGraphManager(
             self.vllm_config,
             self.device,
             cudagraph_mode,
@@ -87,17 +74,14 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             cudagraph_mode = CUDAGraphMode.NONE
 
         # Initialize cudagraph manager for draft decodes (draft positions > 0).
-        self.decode_cudagraph_manager = DecodeSpeculatorCudaGraphManager(
+        self.decode_cudagraph_manager = SpeculatorCudaGraphManager(
             self.vllm_config,
             self.device,
             cudagraph_mode,
             decode_query_len=1,
         )
 
-    def capture(
-        self,
-        attn_states: dict[BatchExecutionDescriptor, AttentionStatePair],
-    ) -> None:
+    def capture(self) -> None:
         logger.info("Capturing model for speculator...")
         # Reset indices to zeros to prevent stale values from prior
         # dummy runs to cause out-of-bounds indexing during capture.
@@ -108,12 +92,19 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         # For FULL graphs, the entire routine is recorded as one graph.
         # For PIECEWISE, only the model's compiled regions are captured
         # and the rest (compute_logits, gumbel_sample) runs eagerly.
+        # Draft prefill reuses the target model's attention metadata at
+        # runtime, so capture builds its dummy metadata through the target
+        # model runner's builders and buffers.
         assert self.prefill_cudagraph_manager is not None
         if self.prefill_cudagraph_manager.use_breakable_cg:
             self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
         self.prefill_cudagraph_manager.capture(
             self._prefill,
-            attn_states,
+            self.model_state,
+            self.target_input_buffers,
+            self.block_tables,
+            self.target_attn_groups,
+            self.kv_cache_config,
             progress_bar_desc="Capturing prefill CUDA graphs",
         )
 
@@ -224,6 +215,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             need_eager=is_profile,
         )
 
+        self._prepare_eplb_forward(input_batch.num_tokens)
+
         if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Replay the full graph for draft prefill.
             assert self.prefill_cudagraph_manager is not None
@@ -279,34 +272,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         return self.draft_tokens[:num_reqs]
 
-    def sample_draft(
-        self,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-        idx_mapping: torch.Tensor,
-        temperature: torch.Tensor,
-        seeds: torch.Tensor,
-        draft_step: torch.Tensor,
-        draft_logits: torch.Tensor | None,
-    ) -> torch.Tensor:
-        logits = self.model.compute_logits(hidden_states)
-        if draft_logits is not None:
-            # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
-            # used for draft and target sampling.
-            return gumbel_sample(
-                logits,
-                idx_mapping,
-                temperature,
-                seeds,
-                positions + 1,
-                apply_temperature=True,
-                output_processed_logits=draft_logits,
-                output_processed_logits_col=draft_step,
-                use_fp64=self.use_fp64_gumbel,
-            )
-        else:
-            return logits.argmax(dim=-1)
-
     @torch.inference_mode()
     def _run_model(
         self,
@@ -357,7 +322,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             else:
                 # Eager (NONE): call the raw model directly.
                 ret_hidden_states = self.model(**model_inputs)
-        if self.model_returns_tuple:
+        # Some MTP models declare a single-tensor contract but return
+        # (logits_hidden, feedback_hidden) for final-norm correctness.
+        if isinstance(ret_hidden_states, tuple):
             last_hidden_states, hidden_states = ret_hidden_states
         else:
             last_hidden_states = ret_hidden_states
@@ -397,7 +364,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.current_draft_step,
             self.draft_logits,
         )
-        self.hidden_states[:num_reqs] = hidden_states[last_token_indices]
+        if last_hidden_states is hidden_states:
+            self.hidden_states[:num_reqs] = sample_hidden_states
+        else:
+            self.hidden_states[:num_reqs] = hidden_states[last_token_indices]
         self.input_buffers.positions[:num_reqs] = positions
 
     def _multi_step_decode(
@@ -458,6 +428,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> None:
+        self._prepare_eplb_forward(num_reqs)
+
         idx_mapping = self.idx_mapping[:num_reqs]
         positions = self.input_buffers.positions[:num_reqs]
         # Run the draft model forward pass.

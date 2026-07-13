@@ -4,6 +4,7 @@
 
 import copy
 import json as json_mod
+import math
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
@@ -384,12 +385,31 @@ class SamplingParams(
         repetition_detection: RepetitionDetectionParams | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
-            # Convert token_id to integer
-            # Clamp the bias between -100 and 100 per OpenAI API spec
-            logit_bias = {
-                int(token): min(100.0, max(-100.0, bias))
-                for token, bias in logit_bias.items()
-            }
+            # Fast path uses a dict comprehension; on failure we iterate once
+            # to identify the exact offending entry for the error message.
+            try:
+                logit_bias = {
+                    int(token): min(100.0, max(-100.0, bias))
+                    for token, bias in logit_bias.items()
+                }
+            except (ValueError, TypeError):
+                invalid_keys = []
+                converted_logit_bias = {}
+                for token, bias in logit_bias.items():
+                    try:
+                        token_id = int(token)
+                    except (ValueError, TypeError):
+                        invalid_keys.append(token)
+                        continue
+                    converted_logit_bias[token_id] = min(100.0, max(-100.0, bias))
+                if invalid_keys:
+                    raise VLLMValidationError(
+                        f"logit_bias contains key(s) that cannot be "
+                        f"converted to integer token IDs: {invalid_keys!r}",
+                        parameter="logit_bias",
+                        value=invalid_keys,
+                    ) from None
+                logit_bias = converted_logit_bias
 
         return SamplingParams(
             n=1 if n is None else n,
@@ -503,14 +523,31 @@ class SamplingParams(
             raise ValueError(
                 f"frequency_penalty must be in [-2, 2], got {self.frequency_penalty}."
             )
+        if not math.isfinite(self.repetition_penalty):
+            raise ValueError(
+                "repetition_penalty must be a finite number, "
+                f"got {self.repetition_penalty}."
+            )
         if self.repetition_penalty <= 0.0:
             raise ValueError(
                 "repetition_penalty must be greater than zero, got "
                 f"{self.repetition_penalty}."
             )
+        if not math.isfinite(self.temperature):
+            raise VLLMValidationError(
+                f"temperature must be a finite number, got {self.temperature}.",
+                parameter="temperature",
+                value=self.temperature,
+            )
         if self.temperature < 0.0:
             raise VLLMValidationError(
                 f"temperature must be non-negative, got {self.temperature}.",
+                parameter="temperature",
+                value=self.temperature,
+            )
+        if self.temperature > 2.0:
+            raise VLLMValidationError(
+                f"temperature must be in [0, 2], got {self.temperature}.",
                 parameter="temperature",
                 value=self.temperature,
             )
@@ -708,7 +745,10 @@ class SamplingParams(
         self._validate_logits_processors(model_config)
         self._validate_allowed_token_ids(tokenizer)
         self._validate_spec_decode(speculative_config)
-        self._validate_structured_outputs(structured_outputs_config, tokenizer)
+        self._validate_diffusion(model_config)
+        self._validate_structured_outputs(
+            model_config, structured_outputs_config, tokenizer
+        )
 
     def _validate_logprobs(self, model_config: ModelConfig) -> None:
         max_logprobs = model_config.max_logprobs
@@ -839,13 +879,48 @@ class SamplingParams(
                 "are not yet supported with speculative decoding."
             )
 
+    def _validate_diffusion(self, model_config: ModelConfig) -> None:
+        if not model_config.is_diffusion:
+            return
+
+        # Diffusion models denoise a whole canvas per step with a fixed
+        # temperature schedule, so per-request sampling parameters are not
+        # supported. Penalties are ignored by the sampler with a warning.
+        if (
+            self.temperature != 1.0
+            or self.min_p > _SAMPLING_EPS
+            or self.seed is not None
+            or self.min_tokens > 0
+            or self.logit_bias
+            or self.bad_words
+            or self.allowed_token_ids
+        ):
+            raise ValueError(
+                "The temperature, min_p, seed, min_tokens, logit_bias, "
+                "bad_words, and allowed_token_ids sampling parameters "
+                "are not yet supported with diffusion models."
+            )
+
     def _validate_structured_outputs(
         self,
+        model_config: ModelConfig,
         structured_outputs_config: StructuredOutputsConfig | None,
         tokenizer: TokenizerLike | None,
     ) -> None:
         if structured_outputs_config is None or self.structured_outputs is None:
             return
+
+        if model_config.is_diffusion:
+            # Diffusion LLMs denoise a whole canvas of tokens in parallel
+            # rather than sampling left-to-right, which the grammar FSM
+            # requires. Without this check, requests fail mid-generation
+            # with an FSM rejection (HTTP 500). See issue #45436.
+            raise ValueError(
+                "Structured outputs are not yet supported for diffusion "
+                "language models. Remove the structured output constraint "
+                "(e.g. `response_format`, `structured_outputs`) from the "
+                "request."
+            )
 
         if tokenizer is None:
             raise ValueError(
@@ -886,6 +961,18 @@ class SamplingParams(
             and self.structured_outputs.grammar.strip() == ""
         ):
             raise ValueError("structured_outputs.grammar cannot be an empty string")
+        # Reject empty string json schema early to avoid engine-side crashes
+        if (
+            isinstance(self.structured_outputs.json, str)
+            and self.structured_outputs.json.strip() == ""
+        ):
+            raise ValueError("structured_outputs.json cannot be an empty string")
+        # Reject json_object=False early to avoid engine-side crashes
+        if self.structured_outputs.json_object is False:
+            raise ValueError(
+                "structured_outputs.json_object must be True if set; omit "
+                "structured_outputs to disable structured outputs"
+            )
 
         from vllm.v1.structured_output.backend_guidance import (
             has_guidance_unsupported_json_features,
@@ -1036,3 +1123,4 @@ class BeamSearchParams(
     temperature: float = 0.0
     length_penalty: float = 1.0
     include_stop_str_in_output: bool = False
+    structured_outputs: StructuredOutputsParams | None = None

@@ -13,6 +13,7 @@ from compressed_tensors.quantization import (
 )
 from compressed_tensors.transform import TransformConfig
 
+from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -37,7 +38,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsMoEMethod,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    WNA16_SUPPORTED_BITS,
     CompressedTensorsScheme,
     CompressedTensorsW4A4Fp4,
     CompressedTensorsW4A4Mxfp4,
@@ -210,7 +210,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             )
         return None
 
-    def _add_fused_moe_to_target_scheme_map(self):
+    def _add_fused_moe_to_target_scheme_map(self):  # XXXXXXXXXXXXXXXXXXXXXX
         """
         Helper function to update target_scheme_map
         since linear layers get fused into FusedMoE
@@ -219,10 +219,10 @@ class CompressedTensorsConfig(QuantizationConfig):
         """
         if (
             "Linear" not in self.target_scheme_map
-            or "FusedMoE" in self.target_scheme_map
+            or "RoutedExperts" in self.target_scheme_map
         ):
             return
-        self.target_scheme_map["FusedMoE"] = self.target_scheme_map["Linear"]
+        self.target_scheme_map["RoutedExperts"] = self.target_scheme_map["Linear"]
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "CompressedTensorsConfig":
@@ -396,7 +396,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     )
             return supported
         else:
-            return False
+            return not match_exact
 
     @staticmethod
     def _is_nvfp4_format(quant_args: QuantizationArgs):
@@ -680,14 +680,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             and output_quant.num_bits == 8
             and not output_quant.dynamic
         )
-        # Static int8-activation layers, plus sub-byte weight-only layers (e.g.
-        # 2-bit lm_head) that marlin-backed WNA16 cannot serve. Standard 4/8-bit
-        # weight-only (no activations) falls through to WNA16.
-        is_subbyte_weight_only = weight_quant.num_bits not in WNA16_SUPPORTED_BITS
-        needs_wNa8o8 = is_intN_weight and (
-            (is_static_int8_in and is_static_int8_out) or is_subbyte_weight_only
-        )
-        return needs_wNa8o8
+        return is_intN_weight and (is_static_int8_in and is_static_int8_out)
 
     def _get_scheme_from_parts(
         self,
@@ -740,10 +733,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                 quant_format=format,
             )
 
-        if (
-            self._is_wNa16_group_channel(weight_quant, input_quant)
-            and (format == CompressionFormat.pack_quantized.value)
-            and (weight_quant.num_bits in WNA16_SUPPORTED_BITS)
+        if self._is_wNa16_group_channel(weight_quant, input_quant) and (
+            format == CompressionFormat.pack_quantized.value
         ):
             return CompressedTensorsWNA16(
                 num_bits=weight_quant.num_bits,
@@ -757,9 +748,18 @@ class CompressedTensorsConfig(QuantizationConfig):
         act_quant_format = is_activation_quantization_format(format)
         if act_quant_format:
             if self._is_fp8_w8a8(weight_quant, input_quant):
-                is_fp8_w8a8_supported = self._check_scheme_supported(
-                    CompressedTensorsW8A8Fp8.get_min_capability(), error=False
-                )
+                if current_platform.is_xpu():
+                    # On XPU, --linear-backend xpu opts into W8A8 FP8
+                    # linear kernel; otherwise default to W8A16.
+                    config = get_current_vllm_config_or_none()
+                    is_fp8_w8a8_supported = (
+                        config is not None
+                        and config.kernel_config.linear_backend == "xpu"
+                    )
+                else:
+                    is_fp8_w8a8_supported = self._check_scheme_supported(
+                        CompressedTensorsW8A8Fp8.get_min_capability(), error=False
+                    )
                 if is_fp8_w8a8_supported:
                     return CompressedTensorsW8A8Fp8(
                         weight_quant=weight_quant,
@@ -983,7 +983,7 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         type_ = kv_cache_scheme.get("type")
         num_bits = kv_cache_scheme.get("num_bits")
 
-        if type_ != "float" and num_bits != 8:
+        if type_ != "float" or num_bits != 8:
             raise NotImplementedError(
                 "Currently supported kv cache quantization is "
                 "num_bits=8, type=float, however "

@@ -77,9 +77,9 @@ def make_fused_moe_layer(
         intermediate_size=test_config.intermediate_size,
         prefix=f"dummy_layer_{layer_idx}",
         activation="silu",
-        is_act_and_mul=True,
         params_dtype=test_config.weight_dtype,
     )
+    re = fml.routed_experts
 
     device = torch.device(f"cuda:{rank}")
 
@@ -92,12 +92,12 @@ def make_fused_moe_layer(
         tensor_device=device,
     )
 
-    assert isinstance(fml.w13_weight.data, torch.Tensor)
-    assert isinstance(fml.w2_weight.data, torch.Tensor)
-    fml.w13_weight.data = fml.w13_weight.data.to(device=device)
-    fml.w2_weight.data = fml.w2_weight.data.to(device=device)
-    w13_weight = fml.w13_weight.data
-    w2_weight = fml.w2_weight.data
+    assert isinstance(re.w13_weight.data, torch.Tensor)
+    assert isinstance(re.w2_weight.data, torch.Tensor)
+    re.w13_weight.data = re.w13_weight.data.to(device=device)
+    re.w2_weight.data = re.w2_weight.data.to(device=device)
+    w13_weight = re.w13_weight.data
+    w2_weight = re.w2_weight.data
     assert w13_weight.size(0) == test_config.num_local_experts
     for i in range(test_config.num_local_experts):
         g_i = rank * test_config.num_local_experts + i
@@ -172,10 +172,10 @@ def make_fused_moe_layer(
         assert not w2_weight_scale_inv.is_contiguous()
 
     # Add scales to the parameter list
-    fml.w13_weight_scale_inv = torch.nn.Parameter(
+    re.w13_weight_scale_inv = torch.nn.Parameter(
         w13_weight_scale_inv, requires_grad=False
     )
-    fml.w2_weight_scale_inv = torch.nn.Parameter(
+    re.w2_weight_scale_inv = torch.nn.Parameter(
         w2_weight_scale_inv, requires_grad=False
     )
 

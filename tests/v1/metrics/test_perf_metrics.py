@@ -28,6 +28,7 @@ from vllm.v1.metrics.perf import (
     ExecutionContext,
     FfnMetrics,
     InvalidComponent,
+    MLAAttentionMetrics,
     ModelMetrics,
     ParsedArgs,
     UnembedMetrics,
@@ -1021,3 +1022,317 @@ def test_quantized_model_metrics_aggregation():
 
     assert total_flops > 0
     assert total_flops == sum(breakdown.values())
+
+
+#### MLA Attention Tests ####
+
+
+def test_mla_config_parser():
+    """Test MLAConfigParser extracts MLA-specific fields from DeepseekV3Config."""
+    hf_config = DeepseekV3Config(
+        hidden_size=7168,
+        num_attention_heads=128,
+        num_hidden_layers=61,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        q_lora_rank=1536,
+    )
+    vllm_config = create_mock_vllm_config(hf_config)
+
+    parser_chain = MLAAttentionMetrics.get_parser()
+    result = parser_chain.parse(vllm_config)
+
+    assert result.kv_lora_rank == 512
+    assert result.qk_nope_head_dim == 128
+    assert result.qk_rope_head_dim == 64
+    assert result.v_head_dim == 128
+    assert result.q_lora_rank == 1536
+    assert result.num_attention_heads == 128
+    assert result.hidden_size == 7168
+
+
+def test_mla_attention_metrics_decode():
+    """Test MLA decode metrics use compressed KV cache, not standard head_dim."""
+    hf_config = DeepseekV3Config(
+        hidden_size=7168,
+        num_attention_heads=128,
+        num_hidden_layers=1,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        q_lora_rank=1536,
+    )
+    vllm_config = create_mock_vllm_config(hf_config)
+    metrics = MLAAttentionMetrics.from_vllm_config(vllm_config)
+
+    # Single decode token with 1024 context
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=1, context_len=1024, is_prefill=False
+    )
+
+    write_breakdown = metrics.get_write_bytes_breakdown(ctx, per_gpu=False)
+
+    # KV cache write should be 1 * (512 + 64) * cache_byte_size * 1 layer
+    # = 576 * 2 = 1152 bytes (for bfloat16 cache)
+    kv_compressed_dim = 512 + 64  # kv_lora_rank + qk_rope_head_dim
+    expected_kv_cache_write = 1 * kv_compressed_dim * 2 * 1  # T * dim * bytes * L
+    assert write_breakdown["kv_cache"] == expected_kv_cache_write
+
+    # Verify read bytes include compressed KV cache reads for context
+    read_breakdown = metrics.get_read_bytes_breakdown(ctx, per_gpu=False)
+    assert "attn_input" in read_breakdown
+    assert read_breakdown["attn_input"] > 0
+
+
+def test_mla_attention_metrics_prefill():
+    """Test MLA prefill metrics account for low-rank Q and KV projections."""
+    hf_config = DeepseekV3Config(
+        hidden_size=7168,
+        num_attention_heads=128,
+        num_hidden_layers=1,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        q_lora_rank=1536,
+    )
+    vllm_config = create_mock_vllm_config(hf_config)
+    metrics = MLAAttentionMetrics.from_vllm_config(vllm_config)
+
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=2048, context_len=2048, is_prefill=True
+    )
+
+    flops_breakdown = metrics.get_num_flops_breakdown(ctx, per_gpu=False)
+
+    # Should have two-stage Q projection (q_a and q_b)
+    assert "q_a_proj" in flops_breakdown
+    assert "q_b_proj" in flops_breakdown
+    assert "q_proj" not in flops_breakdown  # Since q_lora_rank is not None
+
+    # Should have KV projections
+    assert "kv_a_proj" in flops_breakdown
+    assert "kv_b_proj" in flops_breakdown
+
+    # Should have attention and output
+    assert "attn_qk" in flops_breakdown
+    assert "attn_av" in flops_breakdown
+    assert "out_proj" in flops_breakdown
+
+    # Verify q_a_proj: 2 * T * D * q_lora_rank * L
+    expected_q_a = 2 * 2048 * 7168 * 1536 * 1
+    assert flops_breakdown["q_a_proj"] == expected_q_a
+
+    # Verify kv_a_proj: 2 * T * D * (kv_lora_rank + qk_rope_head_dim) * L
+    expected_kv_a = 2 * 2048 * 7168 * (512 + 64) * 1
+    assert flops_breakdown["kv_a_proj"] == expected_kv_a
+
+
+def test_mla_kv_cache_vs_standard_attention():
+    """Test MLA KV cache writes are dramatically smaller than standard MHA."""
+    # MLA config (DeepSeek-V3 style)
+    mla_config = DeepseekV3Config(
+        hidden_size=7168,
+        num_attention_heads=128,
+        num_hidden_layers=1,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+    )
+    mla_vllm_config = create_mock_vllm_config(mla_config)
+    mla_metrics = MLAAttentionMetrics.from_vllm_config(mla_vllm_config)
+
+    # Standard MHA config with same num_heads and head_dim
+    standard_config = Qwen3Config(
+        hidden_size=7168,
+        num_attention_heads=128,
+        num_key_value_heads=128,  # MHA: same as num_heads
+        num_hidden_layers=1,
+        head_dim=128,
+    )
+    standard_vllm_config = create_mock_vllm_config(standard_config)
+    standard_metrics = AttentionMetrics.from_vllm_config(standard_vllm_config)
+
+    # Compare KV cache write for 100 tokens
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=100, context_len=100, is_prefill=True
+    )
+
+    mla_write = mla_metrics.get_write_bytes_breakdown(ctx, per_gpu=False)
+    standard_write = standard_metrics.get_write_bytes_breakdown(ctx, per_gpu=False)
+
+    # MLA: T * (kv_lora_rank + qk_rope_head_dim) * cache_bytes * L
+    # = 100 * 576 * 2 * 1 = 115,200
+    mla_kv_cache = mla_write["kv_cache"]
+
+    # Standard: 2 * T * num_kv_heads * head_dim * cache_bytes * L
+    # = 2 * 100 * 128 * 128 * 2 * 1 = 6,553,600
+    standard_kv_cache = standard_write["kv_cache"]
+
+    # MLA KV cache should be dramatically smaller (about 57x)
+    assert mla_kv_cache < standard_kv_cache
+    ratio = standard_kv_cache / mla_kv_cache
+    assert ratio > 50  # Should be ~56.9x
+
+
+def test_mla_per_gpu_with_tensor_parallelism():
+    """Test MLA metrics with tensor parallelism."""
+    hf_config = DeepseekV3Config(
+        hidden_size=7168,
+        num_attention_heads=128,
+        num_hidden_layers=8,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        q_lora_rank=1536,
+    )
+
+    # Test with TP=8
+    vllm_config = create_mock_vllm_config(hf_config, tensor_parallel_size=8)
+    metrics = MLAAttentionMetrics.from_vllm_config(vllm_config)
+
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=64, context_len=1024, is_prefill=True
+    )
+
+    global_flops = metrics.get_num_flops(ctx, per_gpu=False)
+    per_gpu_flops = metrics.get_num_flops(ctx, per_gpu=True)
+
+    # Both should be positive
+    assert global_flops > 0
+    assert per_gpu_flops > 0
+    # Global should exceed per-GPU
+    assert global_flops > per_gpu_flops
+
+
+def test_mla_per_gpu_with_pipeline_parallelism():
+    """Test MLA metrics with pipeline parallelism."""
+    hf_config = DeepseekV3Config(
+        hidden_size=7168,
+        num_attention_heads=128,
+        num_hidden_layers=16,  # Divisible by PP
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        q_lora_rank=1536,
+    )
+
+    vllm_config = create_mock_vllm_config(hf_config, pipeline_parallel_size=4)
+    metrics = MLAAttentionMetrics.from_vllm_config(vllm_config)
+
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=1, context_len=512, is_prefill=False
+    )
+
+    global_flops = metrics.get_num_flops(ctx, per_gpu=False)
+    per_gpu_flops = metrics.get_num_flops(ctx, per_gpu=True)
+
+    # With PP=4, layers are divided by 4
+    assert global_flops == 4 * per_gpu_flops
+
+
+def test_mla_model_metrics_excludes_standard_attention():
+    """Test that ModelMetrics uses MLAAttentionMetrics, not AttentionMetrics,
+    for DeepSeek MLA models."""
+    hf_config = DeepseekV3Config(
+        hidden_size=7168,
+        num_attention_heads=128,
+        num_hidden_layers=4,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        q_lora_rank=1536,
+    )
+    vllm_config = create_mock_vllm_config(hf_config)
+    model_metrics = ModelMetrics(vllm_config)
+
+    # Should have MLAAttentionMetrics but NOT standard AttentionMetrics
+    component_types = [m.component_type() for m in model_metrics.metrics]
+    assert "mla_attn" in component_types
+    assert "attn" not in component_types
+
+    # Should still have FFN and unembed
+    assert "ffn" in component_types
+    assert "unembed" in component_types
+
+    # Breakdowns should work end-to-end
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=100, context_len=512, is_prefill=True
+    )
+    total_flops = model_metrics.get_num_flops(ctx)
+    breakdown = model_metrics.get_num_flops_breakdown(ctx)
+    assert total_flops == sum(breakdown.values())
+    assert total_flops > 0
+
+    # Verify MLA-specific keys in breakdown
+    assert any(k.startswith("mla_attn.") for k in breakdown)
+    assert not any(k.startswith("attn.") for k in breakdown)
+
+
+def test_standard_attention_still_works_for_non_mla():
+    """Regression test: non-MLA models still use standard AttentionMetrics."""
+    hf_config = Qwen3Config(
+        hidden_size=2048,
+        num_attention_heads=16,
+        num_hidden_layers=12,
+        vocab_size=32000,
+        intermediate_size=8192,
+    )
+    vllm_config = create_mock_vllm_config(hf_config)
+    model_metrics = ModelMetrics(vllm_config)
+
+    component_types = [m.component_type() for m in model_metrics.metrics]
+    assert "attn" in component_types
+    assert "mla_attn" not in component_types
+
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=100, context_len=512, is_prefill=True
+    )
+    total_flops = model_metrics.get_num_flops(ctx)
+    assert total_flops > 0
+
+
+def test_mla_attention_scaling_with_layers():
+    """Test that MLA attention metrics scale proportionally with layers."""
+    base_config = DeepseekV3Config(
+        hidden_size=7168,
+        num_attention_heads=128,
+        num_hidden_layers=8,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        q_lora_rank=1536,
+    )
+    double_config = DeepseekV3Config(
+        hidden_size=7168,
+        num_attention_heads=128,
+        num_hidden_layers=16,  # Double layers
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        q_lora_rank=1536,
+    )
+
+    base_vllm = create_mock_vllm_config(base_config)
+    double_vllm = create_mock_vllm_config(double_config)
+
+    base_metrics = MLAAttentionMetrics.from_vllm_config(base_vllm)
+    double_metrics = MLAAttentionMetrics.from_vllm_config(double_vllm)
+
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=100, context_len=512, is_prefill=True
+    )
+
+    # All metrics should double with double layers
+    assert double_metrics.get_num_flops(ctx) == 2 * base_metrics.get_num_flops(ctx)
+    assert double_metrics.get_read_bytes(ctx) == 2 * base_metrics.get_read_bytes(ctx)
+    assert double_metrics.get_write_bytes(ctx) == 2 * base_metrics.get_write_bytes(ctx)
