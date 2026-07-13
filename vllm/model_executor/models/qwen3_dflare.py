@@ -623,7 +623,7 @@ class DFlareQwen3Model(nn.Module):
         return loaded_params
 
 
-class Qwen3DFlareForCausalLM(DFlashQwen3ForCausalLM):
+class DFlareQwen3ForCausalLM(DFlashQwen3ForCausalLM):
     """DFlare draft model for Qwen3 architecture.
 
     Inherits most of the DFlash infrastructure (LM head, logits processor,

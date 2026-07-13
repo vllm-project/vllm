@@ -72,6 +72,13 @@ class EAGLEConfig(PretrainedConfig):
                 else f"DFlash{arch}"
                 for arch in self.model.architectures
             ]
+        elif method == "dflare":
+            kwargs["architectures"] = [
+                arch
+                if arch.startswith("DFlare") or arch.endswith("DFlare") or "DFlare" in arch
+                else f"Dflare{arch}"
+                for arch in self.model.architectures
+            ]
         else:
             raise ValueError(
                 f"Invalid method {method}. Supported methods are "
