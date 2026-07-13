@@ -128,6 +128,10 @@ PRIVACY_FILTER_PROMPTS = [
 ]
 
 
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="Workspace growth allocation issue on ROCm. See https://github.com/vllm-project/vllm/issues/48510",
+)
 @pytest.mark.parametrize("model", ["openai/privacy-filter"])
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @torch.inference_mode
