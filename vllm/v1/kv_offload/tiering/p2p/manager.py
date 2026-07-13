@@ -41,25 +41,27 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Bind hosts that are not usable as a peer identity: a wildcard binds the
-# control socket to every interface but is not routable, and a loopback is
-# not unique across hosts. When the socket binds to one of these, the
-# advertised identity (NIXL agent name + the address peers dial back) is
-# resolved to a routable node IP instead. An explicit non-wildcard host is
-# always kept verbatim.
-_NON_ROUTABLE_BIND_HOSTS = frozenset(
-    {"", "0.0.0.0", "::", "localhost", "127.0.0.1", "::1"}
-)
+# Bind hosts that are not usable as a peer identity: a loopback is not
+# unique across hosts, and the empty string binds every interface. When the
+# socket binds to one of these, the advertised identity (NIXL agent name +
+# the address peers dial back) is resolved to a routable node IP instead. An
+# explicit routable host is always kept verbatim.
+_NON_ROUTABLE_BIND_HOSTS = frozenset({"", "localhost", "127.0.0.1", "::1"})
+
+# Wildcard bind hosts bind every interface but are not routable as a peer
+# identity, so they are rejected outright rather than resolved.
+_WILDCARD_BIND_HOSTS = frozenset({"0.0.0.0", "::"})
 
 
 def _resolve_advertise_host(bind_host: str) -> str:
     """Map a control-socket bind host to a routable peer identity.
 
-    The bind host may be a wildcard (``0.0.0.0``/``::``) so the socket
-    listens on all interfaces, or a loopback. Neither is usable as the
-    identity that peers dial back and that NIXL uses as the agent name, so
-    those resolve to a routable node IP (honoring ``VLLM_HOST_IP``). Any
-    explicit host is returned unchanged.
+    The bind host may be a loopback (or the empty string, which binds all
+    interfaces), which is not usable as the identity that peers dial back
+    and that NIXL uses as the agent name, so those resolve to a routable
+    node IP (honoring ``VLLM_HOST_IP``). Any explicit host is returned
+    unchanged. Wildcards (``0.0.0.0``/``::``) are rejected before reaching
+    here.
     """
     if bind_host in _NON_ROUTABLE_BIND_HOSTS:
         return get_ip()
@@ -160,7 +162,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             host: Address the ZMQ control socket binds to. Defaults to
                 ``VLLM_P2P_SIDE_CHANNEL_HOST`` (``localhost``) when not
                 set; must be overridden to the node IP for cross-host P2P
-                so remote peers can reach the socket.
+                so remote peers can reach the socket. Wildcards
+                (``0.0.0.0``/``::``) are rejected: they bind every
+                interface but are not routable as a peer identity.
             port: Base port for the ZMQ control socket. Must be
                 reachable from peers. Defaults to
                 ``VLLM_P2P_SIDE_CHANNEL_PORT`` (``5710``) when not set.
@@ -181,6 +185,14 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         super().__init__(offloading_spec, primary_kv_view, tier_type)
         if host is None:
             host = envs.VLLM_P2P_SIDE_CHANNEL_HOST
+        if host in _WILDCARD_BIND_HOSTS:
+            raise ValueError(
+                f"{host!r} is not a supported P2P side-channel host: a "
+                "wildcard binds every interface but is not routable as a "
+                "peer identity. Set VLLM_P2P_SIDE_CHANNEL_HOST (or the tier "
+                "`host` config) to a routable node IP, or leave it at the "
+                "localhost default."
+            )
         if port is None:
             port = envs.VLLM_P2P_SIDE_CHANNEL_PORT
         # One control socket per DP replica: offset the base by the global
@@ -189,12 +201,12 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         dp_index = offloading_spec.vllm_config.parallel_config.data_parallel_index
         port = int(port) + dp_index
         # The socket binds to ``host`` (the ``localhost`` default listens on
-        # loopback only; a wildcard or node IP listens more broadly), but the
-        # advertised identity — used as the NIXL agent name and as the address
-        # peers dial back — must be unique and routable. Resolve a node IP when
-        # ``host`` is a wildcard/loopback so two peers sharing a non-routable
-        # bind host don't both claim ``<host>:<port>`` and collide (NIXL
-        # rejects a remote agent whose name equals the local).
+        # loopback only; a node IP listens more broadly), but the advertised
+        # identity — used as the NIXL agent name and as the address peers dial
+        # back — must be unique and routable. Resolve a node IP when ``host``
+        # is a loopback so two peers sharing a non-routable bind host don't
+        # both claim ``<host>:<port>`` and collide (NIXL rejects a remote
+        # agent whose name equals the local).
         advertise_host = _resolve_advertise_host(host)
         self._local_id = f"{advertise_host}:{port}"
 

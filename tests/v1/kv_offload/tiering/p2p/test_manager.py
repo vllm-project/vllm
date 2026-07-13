@@ -1460,10 +1460,8 @@ class TestBindHostPortDefaults:
         mgr = self._construct(monkeypatch, dp_index=1, host="192.0.2.5", port=6000)
         assert mgr._local_id == "192.0.2.5:6001"
 
-    @pytest.mark.parametrize(
-        "bind_host", ["", "0.0.0.0", "::", "localhost", "127.0.0.1", "::1"]
-    )
-    def test_wildcard_or_loopback_resolves_to_node_ip(self, monkeypatch, bind_host):
+    @pytest.mark.parametrize("bind_host", ["", "localhost", "127.0.0.1", "::1"])
+    def test_loopback_resolves_to_node_ip(self, monkeypatch, bind_host):
         # None of these are usable as a peer identity, so all resolve to the
         # routable node IP while the port is preserved.
         mgr = self._construct(monkeypatch, host=bind_host, port=5710)
@@ -1473,11 +1471,18 @@ class TestBindHostPortDefaults:
         mgr = self._construct(monkeypatch, host="192.0.2.5", port=5710)
         assert mgr._local_id == "192.0.2.5:5710"
 
+    @pytest.mark.parametrize("bind_host", ["0.0.0.0", "::"])
+    def test_wildcard_bind_host_rejected(self, monkeypatch, bind_host):
+        # Wildcards bind every interface but are not routable as a peer
+        # identity, so they are rejected rather than silently resolved.
+        with pytest.raises(ValueError, match="is not a supported"):
+            self._construct(monkeypatch, host=bind_host, port=5710)
+
     def test_bind_host_decoupled_from_identity(self, monkeypatch):
-        # The wildcard is what the socket actually binds to, but both the ZMQ
+        # The loopback is what the socket actually binds to, but both the ZMQ
         # peer identity and the NIXL agent name use the resolved routable IP.
-        mgr = self._construct(monkeypatch, host="0.0.0.0", port=5710)
-        assert mgr._test_calls["zmq_host"] == "0.0.0.0"
+        mgr = self._construct(monkeypatch, host="127.0.0.1", port=5710)
+        assert mgr._test_calls["zmq_host"] == "127.0.0.1"
         assert mgr._test_calls["zmq_port"] == 5710
         assert mgr._test_calls["zmq_id"] == "203.0.113.9:5710"
         assert mgr._test_calls["nixl_name"] == "203.0.113.9:5710"
