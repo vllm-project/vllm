@@ -469,6 +469,7 @@ def make_nvfp4_moe_quant_config(
     a2_scale: torch.Tensor,
     swiglu_limit: float | None = None,
     layer: torch.nn.Module | None = None,
+    per_token_activation: bool = False,
 ) -> FusedMoEQuantConfig:
     if backend == NvFp4MoeBackend.HUMMING:
         from vllm.model_executor.layers.fused_moe import RoutedExperts
@@ -519,6 +520,7 @@ def make_nvfp4_moe_quant_config(
             )
         ),
         gemm1_clamp_limit=swiglu_limit,
+        nvfp4_per_token_activation=per_token_activation,
     )
 
 

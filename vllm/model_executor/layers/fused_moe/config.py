@@ -261,6 +261,10 @@ class FusedMoEQuantConfig:
 
     mx_alignment: int = 0
 
+    # NVFP4: quantize activations with a per-token (not static per-tensor)
+    # global scale at runtime, via the FlashInfer TRTLLM per_token_scale input.
+    nvfp4_per_token_activation: bool = False
+
     def __post_init__(self):
         assert not self.per_act_token_quant or self.block_shape is None, (
             "illegal quantization"
@@ -511,6 +515,7 @@ class FusedMoEQuantConfig:
         gemm1_alpha: float | None = None,
         gemm1_beta: float | None = None,
         gemm1_clamp_limit: float | None = None,
+        nvfp4_per_token_activation: bool = False,
     ) -> "FusedMoEQuantConfig":
         """
         General builder function for a FusedMoEQuantConfig.
@@ -582,6 +587,7 @@ class FusedMoEQuantConfig:
             gemm1_alpha=gemm1_alpha,
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=gemm1_clamp_limit,
+            nvfp4_per_token_activation=nvfp4_per_token_activation,
         )
         assert quant_config.per_act_token_quant == per_act_token_quant
         assert quant_config.per_out_ch_quant == per_out_ch_quant
@@ -815,6 +821,7 @@ def nvfp4_moe_quant_config(
     w2_bias: torch.Tensor | None = None,
     is_scale_swizzled: bool = True,
     gemm1_clamp_limit: float | None = None,
+    nvfp4_per_token_activation: bool = False,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for mxfp4 activations and nvp4 weights.
@@ -834,6 +841,7 @@ def nvfp4_moe_quant_config(
         block_shape=None,
         is_scale_swizzled=is_scale_swizzled,
         gemm1_clamp_limit=gemm1_clamp_limit,
+        nvfp4_per_token_activation=nvfp4_per_token_activation,
     )
 
 
