@@ -6627,8 +6627,9 @@ class GPUModelRunner(
         # because encoder graph capture is opt-in.
         try:
             set_cudagraph_capturing_enabled(True)
-            with self._freeze_gc(), graph_capture(
-                device=self.device, graph_capture_context=cap_ctx
+            with (
+                self._freeze_gc(),
+                graph_capture(device=self.device, graph_capture_context=cap_ctx),
             ):
                 torch.accelerator.synchronize()
                 torch.accelerator.empty_cache()
