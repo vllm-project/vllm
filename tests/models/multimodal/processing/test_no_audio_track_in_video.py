@@ -16,6 +16,8 @@ context then wraps in a confusing `ValueError`.
 
 Without the fix, this test raises `ValueError: Failed to apply
 Qwen3OmniMoeProcessor on data=... with kwargs={'use_audio_in_video': True, ...}`.
+With the fix, a clear `ValueError` is raised instead, naming the actual
+mismatch rather than an opaque wrapped `StopIteration`.
 """
 
 import numpy as np
@@ -36,9 +38,8 @@ MODELS = [
 def test_use_audio_in_video_without_audio_track(model_id: str) -> None:
     """
     A video with no audio track, combined with `use_audio_in_video=True`,
-    must not crash. There is nothing to interleave, so the processor should
-    fall back to `use_audio_in_video=False` for this call rather than
-    forwarding a mismatched request to the underlying HF processor.
+    must raise a clear `ValueError` naming the mismatch, rather than an
+    opaque `StopIteration`-derived error from the underlying HF processor.
     """
     ctx = build_model_context(
         model_id,
@@ -53,11 +54,9 @@ def test_use_audio_in_video_without_audio_track(model_id: str) -> None:
     # No "audio" key at all: this is the "video has no audio track" case.
     mm_data = {"video": [video]}
 
-    # Should not raise.
-    result = processor(
-        [video_token_id],
-        mm_items=processor.info.parse_mm_data(mm_data),
-        hf_processor_mm_kwargs={"use_audio_in_video": True},
-    )
-
-    assert "prompt_token_ids" in result
+    with pytest.raises(ValueError, match="doesn't have audio track"):
+        processor(
+            [video_token_id],
+            mm_items=processor.info.parse_mm_data(mm_data),
+            hf_processor_mm_kwargs={"use_audio_in_video": True},
+        )
