@@ -898,6 +898,21 @@ def w8a8_triton_block_scaled_mm(
     block_size: list[int],
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
+    """This function performs matrix multiplication with block-wise
+    quantization.
+    It takes two input tensors `A` and `B` with scales `As` and `Bs`.
+    The output is returned in the specified `output_dtype`.
+    Args:
+        A: The input tensor, e.g., activation.
+        B: The input tensor, e.g., weight.
+        As: The per-token-group quantization scale for `A`.
+        Bs: The per-block quantization scale for `B`.
+        block_size: The block size for per-block quantization. It should
+        be 2-dim, e.g., [128, 128].
+        output_dytpe: The dtype of the returned tensor.
+    Returns:
+        torch.Tensor: The result of matmul.
+    """
     # TODO (JPVILLAM): Retest and fix, naive impl for now
     import os as _os
 
