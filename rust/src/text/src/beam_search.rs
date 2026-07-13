@@ -7,6 +7,10 @@ use vllm_llm::{FinishReason, GenerateOutputStreamExt, GenerateRequest};
 
 use crate::error::Result;
 
+/// Maximum beam width to prevent resource exhaustion from
+/// a single API call spawning excessive concurrent engine requests.
+const MAX_BEAM_WIDTH: u32 = 16;
+
 /// One beam in the beam search.
 #[derive(Debug, Clone)]
 pub struct BeamSearchSequence {
@@ -107,12 +111,68 @@ fn should_terminate_beam(eos_token_id: Option<u32>, token_id: u32, ignore_eos: b
     eos_token_id.is_some_and(|eos| token_id == eos) && !ignore_eos
 }
 
+/// Process one engine output for a single active beam at one search step.
+///
+/// Returns beam candidates (non-EOS tokens to explore next) and any newly
+/// completed EOS sequences.
+fn process_beam_output(
+    output: &vllm_llm::CollectedGenerateOutput,
+    current_seq: &BeamSearchSequence,
+    parent_seq: usize,
+    params: &BeamSearchParams,
+) -> (Vec<BeamCandidate>, Vec<BeamSearchSequence>) {
+    let mut candidates = Vec::new();
+    let mut completed = Vec::new();
+
+    if let Some(logprobs) = &output.logprobs {
+        if let Some(position) = logprobs.positions.first() {
+            let mut seen_token_ids: BTreeSet<u32> = BTreeSet::new();
+            for entry in &position.entries {
+                if !seen_token_ids.insert(entry.token_id) {
+                    continue;
+                }
+                let candidate_logprob = current_seq.cum_logprob + entry.logprob;
+
+                if should_terminate_beam(
+                    params.eos_token_id,
+                    entry.token_id,
+                    params.ignore_eos,
+                ) {
+                    let mut tokens = current_seq.tokens.clone();
+                    if params.include_stop_str_in_output {
+                        tokens.push(entry.token_id);
+                    }
+                    let mut logprobs_stack = current_seq.logprobs.clone();
+                    logprobs_stack.push(position.entries.clone());
+                    completed.push(BeamSearchSequence {
+                        tokens,
+                        cum_logprob: candidate_logprob,
+                        logprobs: logprobs_stack,
+                        finish_reason: Some(FinishReason::stop_eos()),
+                        stop_reason: Some(entry.token_id),
+                        lora_request: current_seq.lora_request.clone(),
+                    });
+                } else {
+                    candidates.push(BeamCandidate {
+                        cum_logprob: candidate_logprob,
+                        token_id: entry.token_id,
+                        parent_seq,
+                        logprobs: position.entries.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    (candidates, completed)
+}
+
 pub(crate) async fn run_beam_search(
     llm: &vllm_llm::Llm,
     prompt_token_ids: Vec<u32>,
     params: BeamSearchParams,
 ) -> Result<BeamSearchOutput> {
-    let beam_width = params.beam_width.max(1) as usize;
+    let beam_width = params.beam_width.max(1).min(MAX_BEAM_WIDTH) as usize;
     let logprobs_num = 2 * beam_width;
 
     let mut active: Vec<BeamSearchSequence> = vec![BeamSearchSequence {
@@ -171,51 +231,15 @@ pub(crate) async fn run_beam_search(
 
         for (i, result) in results.into_iter().enumerate() {
             let output = result?;
-            let current_seq = &active[i];
 
             if matches!(output.finish_reason, FinishReason::Error) {
                 return Err(crate::error::Error::BeamSearchEngineError);
             }
 
-            if let Some(logprobs) = &output.logprobs {
-                if let Some(position) = logprobs.positions.first() {
-                    let mut seen_token_ids: BTreeSet<u32> = BTreeSet::new();
-                    for entry in &position.entries {
-                        if !seen_token_ids.insert(entry.token_id) {
-                            continue;
-                        }
-                        let candidate_logprob = current_seq.cum_logprob + entry.logprob;
-
-                        if should_terminate_beam(
-                            params.eos_token_id,
-                            entry.token_id,
-                            params.ignore_eos,
-                        ) {
-                            let mut tokens = current_seq.tokens.clone();
-                            if params.include_stop_str_in_output {
-                                tokens.push(entry.token_id);
-                            }
-                            let mut logprobs = current_seq.logprobs.clone();
-                            logprobs.push(position.entries.clone());
-                            completed.push(BeamSearchSequence {
-                                tokens,
-                                cum_logprob: candidate_logprob,
-                                logprobs,
-                                finish_reason: Some(FinishReason::stop_eos()),
-                                stop_reason: Some(entry.token_id),
-                                lora_request: current_seq.lora_request.clone(),
-                            });
-                        } else {
-                            candidates.push(BeamCandidate {
-                                cum_logprob: candidate_logprob,
-                                token_id: entry.token_id,
-                                parent_seq: i,
-                                logprobs: position.entries.clone(),
-                            });
-                        }
-                    }
-                }
-            }
+            let (step_candidates, step_completed) =
+                process_beam_output(&output, &active[i], i, &params);
+            candidates.extend(step_candidates);
+            completed.extend(step_completed);
         }
 
         if candidates.is_empty() {
@@ -277,7 +301,10 @@ pub(crate) async fn run_beam_search(
 mod tests {
     use std::collections::BTreeSet;
 
-    use vllm_engine_core_client::protocol::logprobs::TokenLogprob;
+    use vllm_engine_core_client::protocol::logprobs::{
+        Logprobs, PositionLogprobs, TokenLogprob,
+    };
+    use vllm_llm::{CollectedGenerateOutput, FinishReason, TokenUsage};
     use super::*;
 
     fn make_token_logprob(token_id: u32, logprob: f32) -> TokenLogprob {
@@ -465,7 +492,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn params_beam_width_clamped_to_one() {
+    fn params_beam_width_clamped_to_min() {
         let params = BeamSearchParams {
             request_id: "test".into(),
             beam_width: 0,
@@ -481,7 +508,30 @@ mod tests {
             priority: 0,
             data_parallel_rank: None,
         };
-        assert_eq!(params.beam_width.max(1) as usize, 1);
+        assert_eq!(params.beam_width.max(1).min(MAX_BEAM_WIDTH) as usize, 1);
+    }
+
+    #[test]
+    fn params_beam_width_clamped_to_max() {
+        let params = BeamSearchParams {
+            request_id: "test".into(),
+            beam_width: 100_000,
+            max_tokens: 10,
+            temperature: 1.0,
+            length_penalty: 1.0,
+            ignore_eos: false,
+            include_stop_str_in_output: false,
+            eos_token_id: None,
+            extra_eos_token_ids: BTreeSet::new(),
+            lora_request: None,
+            cache_salt: None,
+            priority: 0,
+            data_parallel_rank: None,
+        };
+        assert_eq!(
+            params.beam_width.max(1).min(MAX_BEAM_WIDTH) as usize,
+            MAX_BEAM_WIDTH as usize
+        );
     }
 
     #[test]
@@ -632,5 +682,338 @@ mod tests {
 
         assert!((score_without - score_with).abs() < 1e-6,
             "including EOS should not change the score since EOS subtracts 1 from length");
+    }
+
+    // -----------------------------------------------------------------------
+    // process_beam_output — per-step engine result processing
+    // -----------------------------------------------------------------------
+
+    fn make_logprobs(entries: Vec<(u32, f32)>) -> Logprobs {
+        Logprobs {
+            positions: vec![PositionLogprobs {
+                entries: entries
+                    .into_iter()
+                    .map(|(token_id, logprob)| TokenLogprob {
+                        token_id,
+                        logprob,
+                        rank: 1,
+                    })
+                    .collect(),
+            }],
+        }
+    }
+
+    fn make_collected_output(
+        logprobs: Option<Logprobs>,
+        finish_reason: FinishReason,
+    ) -> CollectedGenerateOutput {
+        CollectedGenerateOutput {
+            request_id: String::new(),
+            prompt_token_ids: vec![],
+            prompt_logprobs: None,
+            token_ids: vec![],
+            logprobs,
+            finish_reason,
+            usage: TokenUsage::default(),
+            kv_transfer_params: None,
+        }
+    }
+
+    fn make_params(
+        eos_token_id: Option<u32>,
+        ignore_eos: bool,
+        include_stop_str_in_output: bool,
+    ) -> BeamSearchParams {
+        BeamSearchParams {
+            request_id: "test".into(),
+            beam_width: 2,
+            max_tokens: 10,
+            temperature: 1.0,
+            length_penalty: 1.0,
+            ignore_eos,
+            include_stop_str_in_output,
+            eos_token_id,
+            extra_eos_token_ids: BTreeSet::from([151643]),
+            lora_request: None,
+            cache_salt: None,
+            priority: 0,
+            data_parallel_rank: None,
+        }
+    }
+
+    fn empty_seq(tokens: Vec<u32>, cum_logprob: f32) -> BeamSearchSequence {
+        BeamSearchSequence {
+            tokens,
+            cum_logprob,
+            logprobs: vec![],
+            finish_reason: None,
+            stop_reason: None,
+            lora_request: None,
+        }
+    }
+
+    #[test]
+    fn process_beam_output_normal_tokens_become_candidates() {
+        let seq = empty_seq(vec![1, 2], -0.5);
+        let output = make_collected_output(
+            Some(make_logprobs(vec![(10, -0.3), (20, -0.8)])),
+            FinishReason::Length,
+        );
+        let params = make_params(Some(99), false, false);
+
+        let (candidates, completed) = process_beam_output(&output, &seq, 0, &params);
+
+        assert!(completed.is_empty());
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].token_id, 10);
+        assert_eq!(candidates[0].parent_seq, 0);
+        assert!((candidates[0].cum_logprob - (-0.8)).abs() < 1e-6);
+        assert_eq!(candidates[1].token_id, 20);
+        assert!((candidates[1].cum_logprob - (-1.3)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn process_beam_output_eos_becomes_completed() {
+        let seq = empty_seq(vec![1, 2], -0.5);
+        let output = make_collected_output(
+            Some(make_logprobs(vec![(99, -1.5)])),
+            FinishReason::Length,
+        );
+        let params = make_params(Some(99), false, false);
+
+        let (candidates, completed) = process_beam_output(&output, &seq, 0, &params);
+
+        assert!(candidates.is_empty());
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].finish_reason, Some(FinishReason::stop_eos()));
+        assert_eq!(completed[0].stop_reason, Some(99));
+        assert!((completed[0].cum_logprob - (-2.0)).abs() < 1e-6);
+        assert_eq!(completed[0].tokens, vec![1, 2]);
+    }
+
+    #[test]
+    fn process_beam_output_ignore_eos_keeps_eos_as_candidate() {
+        let seq = empty_seq(vec![1, 2], -0.5);
+        let output = make_collected_output(
+            Some(make_logprobs(vec![(99, -1.5)])),
+            FinishReason::Length,
+        );
+        let params = make_params(Some(99), true, false);
+
+        let (candidates, completed) = process_beam_output(&output, &seq, 0, &params);
+
+        assert!(completed.is_empty());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].token_id, 99);
+    }
+
+    #[test]
+    fn process_beam_output_include_stop_str_in_output_appends_eos() {
+        let seq = empty_seq(vec![1, 2], -0.5);
+        let output = make_collected_output(
+            Some(make_logprobs(vec![(99, -1.0)])),
+            FinishReason::Length,
+        );
+        let params = make_params(Some(99), false, true);
+
+        let (_, completed) = process_beam_output(&output, &seq, 0, &params);
+
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].tokens, vec![1, 2, 99]);
+    }
+
+    #[test]
+    fn process_beam_output_dedup_skips_duplicate_entries() {
+        let seq = empty_seq(vec![1], -0.1);
+        let output = make_collected_output(
+            Some(make_logprobs(vec![(10, -0.3), (10, -0.7), (20, -1.0)])),
+            FinishReason::Length,
+        );
+        let params = make_params(Some(99), false, false);
+
+        let (candidates, completed) = process_beam_output(&output, &seq, 0, &params);
+
+        assert!(completed.is_empty());
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].token_id, 10);
+        assert_eq!(candidates[1].token_id, 20);
+    }
+
+    #[test]
+    fn process_beam_output_none_logprobs_returns_empty() {
+        let seq = empty_seq(vec![1], -0.1);
+        let output = make_collected_output(None, FinishReason::Length);
+        let params = make_params(Some(99), false, false);
+
+        let (candidates, completed) = process_beam_output(&output, &seq, 0, &params);
+
+        assert!(candidates.is_empty());
+        assert!(completed.is_empty());
+    }
+
+    #[test]
+    fn process_beam_output_empty_entries_returns_empty() {
+        let seq = empty_seq(vec![1], -0.1);
+        let output = make_collected_output(Some(make_logprobs(vec![])), FinishReason::Length);
+        let params = make_params(Some(99), false, false);
+
+        let (candidates, completed) = process_beam_output(&output, &seq, 0, &params);
+
+        assert!(candidates.is_empty());
+        assert!(completed.is_empty());
+    }
+
+    #[test]
+    fn process_beam_output_extra_eos_is_candidate_not_completed() {
+        let seq = empty_seq(vec![1, 2], -0.5);
+        let output = make_collected_output(
+            Some(make_logprobs(vec![(151643, -1.0)])),
+            FinishReason::Length,
+        );
+        let params = make_params(Some(99), false, false);
+
+        let (candidates, completed) = process_beam_output(&output, &seq, 0, &params);
+
+        assert!(completed.is_empty());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].token_id, 151643);
+    }
+
+    // -----------------------------------------------------------------------
+    // Full multi-step beam search simulation (integration test)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn beam_search_full_algorithm_two_steps_with_eos() {
+        // Simulates a complete beam_width=2, max_tokens=2 run.
+        // Prompt: [1], cum_logprob = 0.0
+        //
+        // Step 1 engine output for the single beam:
+        //   10: -0.3, 20: -0.8, 99(eos): -2.0
+        //   → EOS → completed: tokens=[1], cum=-2.0
+        //   → Candidates: 10(-0.3), 20(-0.8) → both top-2 → active
+        //
+        // Step 2:
+        //   Beam [1,10], cum=-0.3:
+        //     30: -1.0, 99(eos): -2.0
+        //     → EOS → completed: tokens=[1,10], cum=-2.3
+        //     → Candidate: 30 cum=-1.3
+        //   Beam [1,20], cum=-0.8:
+        //     40: -0.3, 50: -0.8
+        //     → Candidates: 40 cum=-1.1, 50 cum=-1.6
+        //
+        // All step 2 candidates sorted: 40(-1.1) > 30(-1.3) > 50(-1.6)
+        // Top 2: 40(parent 1 → [1,20,40]) and 30(parent 0 → [1,10,30])
+        // Remaining active → completed (Length):
+        //   [1,20,40] cum=-1.1, score=-1.1/3=-0.367
+        //   [1,10,30] cum=-1.3, score=-1.3/3=-0.433
+        //
+        // Final ranking by score (lp=1.0, higher is better):
+        // 1. [1,20,40]: -0.367
+        // 2. [1,10,30]: -0.433
+        // 3. [1,10] EOS: -1.15
+        // 4. [1] EOS:    -2.0
+
+        let eos = Some(99u32);
+        let length_penalty = 1.0;
+
+        // Initial prompt beam
+        let prompt = empty_seq(vec![1], 0.0);
+        let active = vec![prompt];
+        let mut completed: Vec<BeamSearchSequence> = vec![];
+        let beam_width: usize = 2;
+
+        // --- Step 1 ---
+        let output1 = make_collected_output(
+            Some(make_logprobs(vec![(10, -0.3), (20, -0.8), (99, -2.0)])),
+            FinishReason::Length,
+        );
+        let params = make_params(eos, false, false);
+        let (step1_candidates, step1_completed) =
+            process_beam_output(&output1, &active[0], 0, &params);
+        completed.extend(step1_completed);
+
+        let mut sorted: Vec<_> = step1_candidates;
+        sorted.sort_by(|a, b| b.cum_logprob.total_cmp(&a.cum_logprob));
+        let mut next_active: Vec<BeamSearchSequence> = vec![];
+        for candidate in sorted.into_iter().take(beam_width) {
+            let mut tokens = vec![1];
+            tokens.push(candidate.token_id);
+            next_active.push(BeamSearchSequence {
+                tokens,
+                cum_logprob: candidate.cum_logprob,
+                logprobs: vec![candidate.logprobs],
+                finish_reason: None,
+                stop_reason: None,
+                lora_request: None,
+            });
+        }
+
+        assert_eq!(next_active.len(), 2);
+        assert_eq!(next_active[0].tokens, vec![1, 10]);
+        assert!((next_active[0].cum_logprob - (-0.3)).abs() < 1e-6);
+        assert_eq!(next_active[1].tokens, vec![1, 20]);
+        assert!((next_active[1].cum_logprob - (-0.8)).abs() < 1e-6);
+
+        // --- Step 2: beam [1,10] ---
+        let output2a = make_collected_output(
+            Some(make_logprobs(vec![(30, -1.0), (99, -2.0)])),
+            FinishReason::Length,
+        );
+        let (step2_a_cands, step2_a_completed) =
+            process_beam_output(&output2a, &next_active[0], 0, &params);
+        completed.extend(step2_a_completed);
+
+        // --- Step 2: beam [1,20] ---
+        let output2b = make_collected_output(
+            Some(make_logprobs(vec![(40, -0.3), (50, -0.8)])),
+            FinishReason::Length,
+        );
+        let (step2_b_cands, step2_b_completed) =
+            process_beam_output(&output2b, &next_active[1], 1, &params);
+        completed.extend(step2_b_completed);
+
+        // Combine and select top beam_width
+        let mut all_cands = step2_a_cands;
+        all_cands.extend(step2_b_cands);
+        all_cands.sort_by(|a, b| b.cum_logprob.total_cmp(&a.cum_logprob));
+
+        let mut step2_active: Vec<BeamSearchSequence> = vec![];
+        for candidate in all_cands.into_iter().take(beam_width) {
+            let parent = &next_active[candidate.parent_seq];
+            let mut tokens = parent.tokens.clone();
+            tokens.push(candidate.token_id);
+            step2_active.push(BeamSearchSequence {
+                tokens,
+                cum_logprob: candidate.cum_logprob,
+                logprobs: vec![],
+                finish_reason: None,
+                stop_reason: None,
+                lora_request: None,
+            });
+        }
+
+        // Step 2 active → completed (Length)
+        for mut seq in step2_active {
+            seq.finish_reason = Some(FinishReason::Length);
+            completed.push(seq);
+        }
+
+        // --- Final ranking ---
+        completed.sort_by(|a, b| {
+            let score_a =
+                get_beam_search_score(&a.tokens, a.cum_logprob, eos, length_penalty);
+            let score_b =
+                get_beam_search_score(&b.tokens, b.cum_logprob, eos, length_penalty);
+            score_b.total_cmp(&score_a)
+        });
+
+        let best: Vec<_> = completed.into_iter().take(beam_width).collect();
+
+        assert_eq!(best.len(), 2);
+        assert_eq!(best[0].tokens, vec![1, 20, 40]);
+        assert!((best[0].cum_logprob - (-1.1)).abs() < 1e-6);
+        assert_eq!(best[1].tokens, vec![1, 10, 30]);
+        assert!((best[1].cum_logprob - (-1.3)).abs() < 1e-6);
     }
 }

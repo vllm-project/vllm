@@ -122,7 +122,7 @@ pub struct SamplingParams {
     /// When `use_beam_search` is true, this is the beam width.
     pub n: Option<u32>,
     /// Length penalty for beam search scoring.
-    /// > 1.0 penalizes longer sequences; < 1.0 favors longer sequences.
+    /// > 1.0 favors longer sequences; < 1.0 penalizes longer sequences.
     pub length_penalty: Option<f32>,
     /// Additional request parameters for custom extensions.
     pub vllm_xargs: Option<HashMap<String, Value>>,
