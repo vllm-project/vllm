@@ -168,3 +168,42 @@ def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
     ):
         if config_dict.get(key) is not None:
             pre_trained_config[key] = config_dict[key]
+
+
+@register_speculator("dflare")
+def update_dflare(config_dict: dict, pre_trained_config: dict) -> None:
+    """
+    Apply DFlare specific configuration transformations to the ``dict``
+    used to construct the Transformers PreTrainedConfig.
+
+    DFlare extends DFlash with per-layer adaptive fusion and heterogeneous
+    KV projections.
+
+    DFlare specific fields:
+    - draft_vocab_size: Size of the draft model's vocabulary
+    - target_hidden_size: Hidden size of the target model
+    - mask_token_id (required): Token ID used for parallel drafting mask
+        placeholders
+    - aux_hidden_state_layer_ids (required): Layer indices from the target
+        model whose intermediate hidden states are used as context for the
+        DFlare drafter. Mapped to both eagle_aux_hidden_state_layer_ids
+        (for gpu_model_runner) and dflash_config.target_layer_ids (for the
+        DFlare model, using DFlare's i-1 layer semantics like DFlash).
+    """
+    pre_trained_config["architectures"] = ["Qwen3DFlareModel"]
+    pre_trained_config["draft_vocab_size"] = config_dict.get("draft_vocab_size")
+    if config_dict.get("target_hidden_size") is not None:
+        pre_trained_config["target_hidden_size"] = config_dict["target_hidden_size"]
+
+    aux_layer_ids = config_dict["aux_hidden_state_layer_ids"]
+    pre_trained_config["eagle_aux_hidden_state_layer_ids"] = aux_layer_ids
+
+    # DFlare uses i-1 layer indexing, consistent with DFlash / DSpark
+    pre_trained_config["dflash_config"] = {
+        "mask_token_id": config_dict["mask_token_id"],
+        "target_layer_ids": [i - 1 for i in aux_layer_ids],
+    }
+    # Enable causal masking in SWA for vllm-project/speculators models
+    pre_trained_config["dflash_config"]["causal"] = not config_dict.get(
+        "sliding_window_non_causal", True
+    )
