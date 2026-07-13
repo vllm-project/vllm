@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Roundtrip tests for the real chat-template and output-processor pairing.
 //!
 //! The invariant under test is that a structured assistant message rendered as history can be
