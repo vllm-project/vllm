@@ -7,6 +7,7 @@ from typing import Any
 import torch
 
 import vllm.envs as envs
+from vllm.build_profile import get_build_profile_metadata
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -18,9 +19,21 @@ logger = init_logger(__name__)
 # consistent behavior (similar to IS_AITER_FOUND in _aiter_ops.py).
 _ROCM_FLASH_ATTN_AVAILABLE = False
 
-if current_platform.is_cuda():
+if current_platform.is_cuda() and get_build_profile_metadata().profile == "rwkv":
+
+    def _rwkv_profile_flash_attention_unavailable(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError(
+            "FlashAttention is unavailable in the RWKV build profile. "
+            "Install a full build of vLLM to use an attention backend."
+        )
+
+    reshape_and_cache_flash = _rwkv_profile_flash_attention_unavailable
+    flash_attn_varlen_func = _rwkv_profile_flash_attention_unavailable
+    compile_flash_attn_varlen_func_from_specs = None
+    get_scheduler_metadata = _rwkv_profile_flash_attention_unavailable
+elif current_platform.is_cuda():
     from vllm._custom_ops import reshape_and_cache_flash
-    from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
+    from vllm.vllm_flash_attn import (  # type: ignore[attr-defined,assignment]
         compile_flash_attn_varlen_func_from_specs,
         flash_attn_varlen_func,
         get_scheduler_metadata,

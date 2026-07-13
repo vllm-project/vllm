@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from enum import IntEnum
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 import torch
 
@@ -19,16 +19,7 @@ logger = init_logger(__name__)
 
 current_platform.import_kernels()
 
-if TYPE_CHECKING:
-
-    def register_fake(fn):
-        return lambda name: fn
-else:
-    try:
-        from torch.library import register_fake
-    except ImportError:
-        from torch.library import impl_abstract as register_fake
-
+from vllm import rwkv7_custom_ops  # noqa: E402, F401
 
 # scaled_fp4_quant functional + out variant for torch.compile buffer management
 

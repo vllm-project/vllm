@@ -116,9 +116,6 @@ markers = [
 [tool.ty.src]
 respect-ignore-files = true
 
-[tool.ty.environment]
-python = "./.venv"
-
 [tool.typos.files]
 # these files may be written in non english words
 extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*", "tests/tokenizers_/*",
@@ -128,6 +125,7 @@ extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*", "tests/tokenizer
     "tests/entrypoints/speech_to_text/transcription/test_transcription_validation.py",
     "docs/governance/process.md", "docs/assets/contributing/vllm_bench_serve_timeline.html", 
     "tests/v1/engine/test_fast_incdec_prefix_err.py", ".git/*", "csrc/cpu/sgl-kernels/*",
+    "vllm/tokenizers/assets/rwkv_vocab_v20230424.txt",
     "rust/src/chat/src/renderer/deepseek_v32/fixtures/*",
     "rust/src/parser/src/tool/gemma4.rs", "rust/src/parser/src/unified/gemma4.rs",
     "rust/src/text/src/output/decoded.rs",

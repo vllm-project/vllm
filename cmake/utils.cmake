@@ -571,6 +571,8 @@ function (define_extension_target MOD_NAME)
     "DESTINATION;LANGUAGE;USE_SABI"
     "SOURCES;ARCHITECTURES;COMPILE_FLAGS;INCLUDE_DIRECTORIES;LIBRARIES")
 
+  set_property(GLOBAL APPEND PROPERTY VLLM_EXTENSION_TARGETS ${MOD_NAME})
+
   # Add hipify preprocessing step when building with HIP/ROCm.
   if (ARG_LANGUAGE STREQUAL "HIP")
     hipify_sources_target(ARG_SOURCES ${MOD_NAME} "${ARG_SOURCES}")

@@ -1,0 +1,60 @@
+# Dense RWKV7 raw .pth inference and OpenAI-compatible text serving on CUDA.
+# Install this file first, then build with:
+#   VLLM_BUILD_PROFILE=rwkv uv pip install --no-deps --no-build-isolation -e .
+#
+# NVML bindings are intentionally not listed: vLLM owns a vendored copy at
+# vllm/third_party/pynvml.py. FlashInfer, attention/MLA/MoE, multimodal,
+# quantized-loader, speculative-decoding, Ray, and training dependencies are
+# outside this profile.
+
+torch==2.11.0
+
+# Core configuration, model loading, tokenizer, and process runtime.
+regex
+cachetools
+psutil
+numpy
+requests>=2.26.0
+tqdm
+blake3
+py-cpuinfo
+transformers>=5.5.3
+tokenizers>=0.21.1
+safetensors>=0.6.2
+protobuf>=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*
+typing_extensions>=4.10
+filelock>=3.16.1
+pyyaml
+cloudpickle
+packaging>=24.2
+jinja2>=3.1.6
+# The OpenAI entrypoint eagerly imports multimodal serialization/registry
+# modules even for text-only models. Keep only Pillow from that stack.
+pillow
+
+# OpenAI-compatible chat/completions server and metrics.
+fastapi[standard]>=0.133.0,<0.137.0
+starlette>=1.0.1
+aiohttp>=3.13.3
+openai>=2.0.0
+# Eagerly imported by the shared OnlineRenderer/parser graph.
+openai-harmony>=0.0.3
+# Used by the eagerly loaded OpenAI/RWKV tool-call parser.
+partial-json-parser
+pydantic>=2.12.0
+prometheus_client>=0.18.0
+prometheus-fastapi-instrumentator>=8.0.0
+pyzmq>=25.0.0
+msgspec
+watchfiles
+python-json-logger
+setproctitle
+pybase64
+cbor2
+
+# Source build and first-use rapid-sampler JIT.
+cmake>=3.26.1
+ninja
+setuptools>=77.0.3,<81.0.0
+setuptools-scm>=8.0
+wheel

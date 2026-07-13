@@ -18,7 +18,6 @@ import torch
 from packaging.version import Version, parse
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
-from setuptools_rust.build import build_rust
 from setuptools_scm import get_version
 from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
 
@@ -33,6 +32,15 @@ def load_module_from_path(module_name, path):
 
 ROOT_DIR = Path(__file__).parent
 logger = logging.getLogger(__name__)
+build_profiles = load_module_from_path(
+    "build_profiles", ROOT_DIR / "tools" / "build_profiles.py"
+)
+VLLM_BUILD_PROFILE = build_profiles.resolve_build_profile()
+
+if VLLM_BUILD_PROFILE == "full":
+    from setuptools_rust.build import build_rust
+else:
+    build_rust = object
 
 PRECOMPILED_RUST_FRONTEND_PATH = ROOT_DIR / "vllm" / "vllm-rs"
 # setuptools-rust installs PyO3 artifacts as `<module>.<ext-suffix>`, where the
@@ -42,8 +50,12 @@ PRECOMPILED_RUST_EXTENSION_MEMBER_REGEX = re.compile(r"vllm/_rust_[^/]*\.so$")
 # cannot import envs directly because it depends on vllm,
 #  which is not installed yet
 envs = load_module_from_path("envs", os.path.join(ROOT_DIR, "vllm", "envs.py"))
-rust_build = load_module_from_path(
-    "rust_build", os.path.join(ROOT_DIR, "tools", "build_rust.py")
+rust_build = (
+    load_module_from_path(
+        "rust_build", os.path.join(ROOT_DIR, "tools", "build_rust.py")
+    )
+    if VLLM_BUILD_PROFILE == "full"
+    else None
 )
 
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
@@ -52,6 +64,13 @@ USE_PRECOMPILED_EXTENSIONS = envs.VLLM_USE_PRECOMPILED
 USE_PRECOMPILED_RUST_FRONTEND = (
     envs.VLLM_USE_PRECOMPILED or envs.VLLM_USE_PRECOMPILED_RUST
 )
+if VLLM_BUILD_PROFILE == "rwkv" and (
+    USE_PRECOMPILED_EXTENSIONS or USE_PRECOMPILED_RUST_FRONTEND
+):
+    raise ValueError(
+        "VLLM_BUILD_PROFILE='rwkv' requires a source build; precompiled full "
+        "extensions cannot be relabeled as an RWKV artifact"
+    )
 
 
 def should_require_rust_frontend() -> bool:
@@ -64,6 +83,8 @@ def get_precompiled_rust_extension_paths() -> list[Path]:
 
 
 def get_missing_precompiled_rust_extension_modules() -> list[str]:
+    if rust_build is None:
+        return []
     present = {
         path.name.split(".", 1)[0] for path in get_precompiled_rust_extension_paths()
     }
@@ -183,13 +204,24 @@ def bundle_tcmalloc(build_lib: str) -> None:
 
 class CMakeExtension(Extension):
     def __init__(self, name: str, cmake_lists_dir: str = ".", **kwa) -> None:
-        super().__init__(name, sources=[], py_limited_api=not is_freethreaded(), **kwa)
+        py_limited_api = not is_freethreaded()
+        if VLLM_BUILD_PROFILE == "rwkv" and name == "vllm._rapid_sampling":
+            # sampling.cpp includes torch/extension.h, which requires the full
+            # Python C API and cannot be compiled with Py_LIMITED_API.
+            py_limited_api = False
+        super().__init__(name, sources=[], py_limited_api=py_limited_api, **kwa)
         self.cmake_lists_dir = os.path.abspath(cmake_lists_dir)
 
 
 class cmake_build_ext(build_ext):
     # A dict of extension directories that have been configured.
     did_config: dict[str, bool] = {}
+
+    def finalize_options(self) -> None:
+        super().finalize_options()
+        self.build_temp = build_profiles.profile_build_temp(
+            self.build_temp, VLLM_BUILD_PROFILE
+        )
 
     #
     # Determine number of compilation jobs and optionally nvcc compile threads.
@@ -252,6 +284,12 @@ class cmake_build_ext(build_ext):
         cmake_args = [
             "-DCMAKE_BUILD_TYPE={}".format(cfg),
             "-DVLLM_TARGET_DEVICE={}".format(VLLM_TARGET_DEVICE),
+            "-DVLLM_BUILD_PROFILE={}".format(VLLM_BUILD_PROFILE),
+            # setup.py always configures immediately before building. Disable
+            # Ninja's redundant regeneration rule because Torch's CUDA CMake
+            # package rewrites detect_cuda_version.cc on every configure,
+            # which can otherwise cause a regeneration loop after FetchContent.
+            "-DCMAKE_SUPPRESS_REGENERATION=ON",
         ]
 
         verbose = envs.VERBOSE
@@ -380,6 +418,25 @@ class cmake_build_ext(build_ext):
             ]
             subprocess.check_call(install_args, cwd=self.build_temp)
 
+        manifest = Path(self.build_temp) / "vllm_build_profile.json"
+        if not manifest.is_file():
+            raise RuntimeError(
+                f"CMake did not generate build profile manifest: {manifest}"
+            )
+        first_extension_path = Path(
+            self.get_ext_fullpath(self.extensions[0].name)
+        ).absolute()
+        package_dir = first_extension_path.parent
+        while package_dir.name != "vllm" and package_dir != package_dir.parent:
+            package_dir = package_dir.parent
+        if package_dir.name != "vllm":
+            raise RuntimeError(
+                f"Cannot locate vllm package directory from {first_extension_path}"
+            )
+        shutil.copy2(manifest, package_dir / "_build_profile.json")
+        if getattr(self, "editable_mode", False):
+            shutil.copy2(manifest, ROOT_DIR / "vllm" / "_build_profile.json")
+
     def run(self):
         # First, run the standard build_ext command to compile the extensions
         super().run()
@@ -387,6 +444,9 @@ class cmake_build_ext(build_ext):
         # bundle tcmalloc into CPU wheels for best OOB perf
         if should_bundle_tcmalloc():
             bundle_tcmalloc(self.build_lib)
+
+        if VLLM_BUILD_PROFILE == "rwkv":
+            return
 
         # copy vllm/vllm_flash_attn/**/*.py from self.build_lib to current
         # directory so that they can be included in the editable build
@@ -789,6 +849,7 @@ class precompiled_wheel_utils:
                             "vllm/cumem_allocator.abi3.so",
                             "vllm/spinloop.abi3.so",
                             "vllm/fs_io_C.abi3.so",
+                            "vllm/rwkv7_ops.abi3.so",
                             # ROCm-specific libraries
                             "vllm/_rocm_C.abi3.so",
                         }
@@ -1055,6 +1116,10 @@ def get_vllm_version() -> str:
     else:
         raise RuntimeError("Unknown runtime environment")
 
+    if VLLM_BUILD_PROFILE == "rwkv":
+        profile_separator = "+" if "+" not in version else "."
+        version += f"{profile_separator}rwkv"
+
     return version
 
 
@@ -1077,7 +1142,9 @@ def get_requirements() -> list[str]:
                 resolved_requirements.append(line)
         return resolved_requirements
 
-    if _no_device():
+    if VLLM_BUILD_PROFILE == "rwkv":
+        requirements = _read_requirements("rwkv.txt")
+    elif _no_device():
         requirements = _read_requirements("common.txt")
     elif _is_cuda():
         requirements = _read_requirements("cuda.txt")
@@ -1178,6 +1245,18 @@ if _build_custom_ops():
     if _is_cuda() or _is_hip():
         ext_modules.append(CMakeExtension(name="vllm._C_stable_libtorch"))
         ext_modules.append(CMakeExtension(name="vllm._moe_C_stable_libtorch"))
+    if _is_cuda():
+        ext_modules.append(CMakeExtension(name="vllm._rapid_sampling"))
+        ext_modules.append(CMakeExtension(name="vllm.rwkv7_ops"))
+
+if VLLM_BUILD_PROFILE == "rwkv":
+    if not _is_cuda():
+        raise ValueError("VLLM_BUILD_PROFILE='rwkv' requires VLLM_TARGET_DEVICE='cuda'")
+    selected_names = build_profiles.select_extension_names(
+        (extension.name for extension in ext_modules), VLLM_BUILD_PROFILE
+    )
+    extensions_by_name = {extension.name: extension for extension in ext_modules}
+    ext_modules = [extensions_by_name[name] for name in selected_names]
 
 package_data = {
     "vllm": [
@@ -1185,9 +1264,12 @@ package_data = {
         "libs/*.so*",
         "model_executor/layers/fused_moe/configs/*.json",
         "model_executor/layers/quantization/utils/configs/*.json",
+        "tokenizers/assets/*.txt",
         "entrypoints/serve/instrumentator/static/*.js",
         "entrypoints/serve/instrumentator/static/*.css",
         "distributed/kv_transfer/kv_connector/v1/hf3fs/utils/*.cpp",
+        "v1/sample/ops/rapid_sampling/*.cpp",
+        "v1/sample/ops/rapid_sampling/*.cu",
         # DeepGEMM JIT include headers (vendored via cmake)
         "third_party/deep_gemm/include/**/*.cuh",
         "third_party/deep_gemm/include/**/*.h",
@@ -1242,7 +1324,7 @@ else:
         if USE_PRECOMPILED_EXTENSIONS
         else cmake_build_ext,
     }
-if (
+if VLLM_BUILD_PROFILE == "full" and (
     USE_PRECOMPILED_RUST_FRONTEND
     or PRECOMPILED_RUST_FRONTEND_PATH.exists()
     or has_precompiled_rust_extensions()
@@ -1251,15 +1333,16 @@ if (
 
 # Rust artifacts, built via setuptools-rust and installed into the package
 # directory alongside the Python modules.
-rust_extensions = rust_build.rust_extensions(
-    optional=not should_require_rust_frontend()
-)
+rust_setup_args = {}
+if rust_build is not None:
+    rust_setup_args["rust_extensions"] = rust_build.rust_extensions(
+        optional=not should_require_rust_frontend()
+    )
 
 setup(
     # static metadata should rather go in pyproject.toml
     version=get_vllm_version(),
     ext_modules=ext_modules,
-    rust_extensions=rust_extensions,
     install_requires=get_requirements(),
     extras_require={
         # AMD Zen CPU optimizations via zentorch
@@ -1300,4 +1383,5 @@ setup(
     },
     cmdclass=cmdclass,
     package_data=package_data,
+    **rust_setup_args,
 )

@@ -141,8 +141,8 @@ class GuidanceBackend(StructuredOutputBackend):
 
 @dataclass
 class GuidanceGrammar(StructuredOutputGrammar):
-    ll_matcher: llguidance.LLMatcher
-    ll_tokenizer: llguidance.LLTokenizer
+    ll_matcher: "llguidance.LLMatcher"
+    ll_tokenizer: "llguidance.LLTokenizer"
     vocab_size: int
     printed_error: bool = False
     terminated: bool = False
@@ -291,7 +291,8 @@ def serialize_guidance_grammar(
 
 
 def validate_guidance_grammar(
-    sampling_params: SamplingParams, tokenizer: llguidance.LLTokenizer | None = None
+    sampling_params: SamplingParams,
+    tokenizer: "llguidance.LLTokenizer | None" = None,
 ) -> None:
     # if structured output is not enabled, there is nothing to validate
     if sampling_params.structured_outputs is None:

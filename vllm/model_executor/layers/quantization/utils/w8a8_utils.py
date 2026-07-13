@@ -5,11 +5,17 @@
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.build_profile import get_build_profile_metadata
 from vllm.platforms import current_platform
 
 
+def _stable_cutlass_ops_available() -> bool:
+    metadata = get_build_profile_metadata()
+    return metadata.profile != "rwkv" or metadata.has_target("_C_stable_libtorch")
+
+
 def cutlass_fp8_supported() -> bool:
-    if not current_platform.is_cuda():
+    if not current_platform.is_cuda() or not _stable_cutlass_ops_available():
         return False
 
     capability_tuple = current_platform.get_device_capability()
@@ -19,7 +25,7 @@ def cutlass_fp8_supported() -> bool:
 
 
 def cutlass_block_fp8_supported() -> bool:
-    if not current_platform.is_cuda():
+    if not current_platform.is_cuda() or not _stable_cutlass_ops_available():
         return False
 
     capability_tuple = current_platform.get_device_capability()
@@ -29,7 +35,7 @@ def cutlass_block_fp8_supported() -> bool:
 
 
 def cutlass_group_gemm_supported() -> bool:
-    if not current_platform.is_cuda():
+    if not current_platform.is_cuda() or not _stable_cutlass_ops_available():
         return False
 
     capability_tuple = current_platform.get_device_capability()

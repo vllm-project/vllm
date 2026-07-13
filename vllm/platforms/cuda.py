@@ -19,17 +19,23 @@ from torch.distributed import PrefixStore, ProcessGroup
 from torch.distributed.distributed_c10d import is_nccl_available
 from typing_extensions import ParamSpec
 
-# import custom ops, trigger op registration
-import vllm._C_stable_libtorch  # noqa
+from vllm.build_profile import get_build_profile_metadata
+
+# Import custom ops and trigger registration. Legacy/full artifacts keep the
+# original mandatory import; a reduced artifact declares exactly which native
+# targets exist in its immutable manifest.
+_build_profile = get_build_profile_metadata()
+if _build_profile.profile == "full" or _build_profile.has_target("_C_stable_libtorch"):
+    import vllm._C_stable_libtorch  # noqa
 
 with contextlib.suppress(ImportError):
     import vllm._qutlass_C  # noqa
-import vllm.envs as envs
-from vllm.logger import init_logger
-from vllm.utils.import_utils import import_pynvml
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
+import vllm.envs as envs  # noqa: E402
+from vllm.logger import init_logger  # noqa: E402
+from vllm.utils.import_utils import import_pynvml  # noqa: E402
+from vllm.v1.attention.backends.registry import AttentionBackendEnum  # noqa: E402
 
-from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
+from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl  # noqa: E402
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -220,14 +226,21 @@ class CudaPlatformBase(Platform):
     @classmethod
     def import_kernels(cls) -> None:
         """Import CUDA kernel extensions (_C_stable_libtorch, optional _qutlass_C)."""
-        try:
-            import vllm._C_stable_libtorch  # noqa: F401
-        except ImportError as e:
-            logger.warning_once("Failed to import from vllm._C_stable_libtorch: %r", e)
+        if _build_profile.profile == "full" or _build_profile.has_target(
+            "_C_stable_libtorch"
+        ):
+            try:
+                import vllm._C_stable_libtorch  # noqa: F401
+            except ImportError as e:
+                logger.warning_once(
+                    "Failed to import from vllm._C_stable_libtorch: %r", e
+                )
         with contextlib.suppress(ImportError):
             import vllm._moe_C_stable_libtorch  # noqa: F401
         with contextlib.suppress(ImportError):
             import vllm._qutlass_C  # noqa: F401
+        with contextlib.suppress(ImportError):
+            import vllm.rwkv7_ops  # noqa: F401
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
