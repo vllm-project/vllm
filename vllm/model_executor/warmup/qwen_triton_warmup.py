@@ -274,7 +274,9 @@ def _warm_causal_conv1d_fwd_kernel(
 def _warm_fused_post_conv_kernel(
     device: torch.device, config: _QwenGDNWarmupConfig
 ) -> None:
-    from vllm.third_party.flash_linear_attention.ops import fused_post_conv_prep
+    from vllm.third_party.flash_linear_attention.ops.fused_gdn_prefill_post_conv import (  # noqa: E501
+        fused_post_conv_prep,
+    )
 
     qkv_dim = 2 * config.h * config.k + config.hv * config.v
     for length in _FLA_POST_CONV_WARMUP_LENGTHS:
