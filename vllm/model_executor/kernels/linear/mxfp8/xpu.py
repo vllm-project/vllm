@@ -28,9 +28,9 @@ class XPUMxFp8LinearKernel(Mxfp8LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Keep weight as [N, K] and scale as [N, K//32] (checkpoint layout).
+        # Transpose at runtime in apply_weights, matching block FP8 pattern.
         weight_scale = layer.weight_scale.view(torch.float8_e8m0fnu)
-        weight_scale = weight_scale.t().contiguous()
-        replace_parameter(layer, "weight", layer.weight.t())
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
     def apply_weights(
@@ -41,11 +41,13 @@ class XPUMxFp8LinearKernel(Mxfp8LinearKernel):
     ) -> torch.Tensor:
         out_dtype = x.dtype
         x_fp8, x_scale = quant_mxfp8(x)
+        # Weight is [N, K]. Use .t() to create a [K, N] view.
+        # Scale is [N, K//32]. Transpose to [K//32, N] for oneDNN.
         return torch.ops._xpu_C.fp8_gemm(
             x_fp8,
-            layer.weight,
+            layer.weight.t(),
             out_dtype,
             x_scale,
-            layer.weight_scale,
+            layer.weight_scale.t().contiguous(),
             bias,
         )
