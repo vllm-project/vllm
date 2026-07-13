@@ -9,7 +9,6 @@ from typing import ClassVar
 
 import numpy as np
 import torch
-
 from flashinfer import (
     BatchDecodeWithPagedKVCacheWrapper,
     BatchPrefillWithPagedKVCacheWrapper,
