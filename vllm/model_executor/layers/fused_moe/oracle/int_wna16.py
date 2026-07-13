@@ -106,8 +106,6 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
         return [WNA16MoEBackend.CPU]
     if current_platform.is_xpu():
         return [WNA16MoEBackend.XPU]
-    #    if current_platform.is_rocm():
-    #        return [WNA16MoEBackend.EMULATION]
 
     _AVAILABLE_BACKENDS = [
         WNA16MoEBackend.FLASHINFER_TRTLLM,
@@ -268,8 +266,7 @@ def make_wna16_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts],
-    # backend: WNA16MoEBackend = WNA16MoEBackend.MARLIN,
-    backend: WNA16MoEBackend = WNA16MoEBackend.EMULATION,
+    backend: WNA16MoEBackend = WNA16MoEBackend.MARLIN,
     layer: torch.nn.Module | None = None,
     is_k_full: bool = False,
     w13_g_idx: torch.Tensor | None = None,
