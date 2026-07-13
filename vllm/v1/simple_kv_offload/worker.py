@@ -7,9 +7,12 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    TransferStats,
+)
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import PIN_MEMORY
-from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
+from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend, DmaCopyEvent
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
@@ -46,9 +49,9 @@ class SimpleCPUOffloadWorker:
 
         self._backend = DmaCopyBackend()
 
-        # Ordered (event_idx, Event). Events pre-allocated on main thread.
-        self._load_events: list[tuple[int, torch.Event]] = []
-        self._store_events: list[tuple[int, torch.Event]] = []
+        # Ordered per-op timing/completion events.
+        self._load_events: list[DmaCopyEvent] = []
+        self._store_events: list[DmaCopyEvent] = []
         # High-water marks: highest event_idx completed per stream.
         # When the event list is empty, the hwm covers all prior events.
         self._load_hwm: int = -1
@@ -66,6 +69,9 @@ class SimpleCPUOffloadWorker:
         self._pending_store_event_indices: set[int] = set()
         # Completed store events to report via build_connector_worker_meta
         self._completed_store_events: dict[int, int] = {}
+        # DMA transfer byte/time stats since the last build_connector_worker_meta
+        # call (poll-and-reset, see build_connector_worker_meta).
+        self._transfer_stats = TransferStats()
 
     def register_kv_caches(
         self,
@@ -267,13 +273,15 @@ class SimpleCPUOffloadWorker:
         return None, finished_recving or None
 
     def build_connector_worker_meta(self) -> SimpleCPUOffloadWorkerMetadata | None:
-        """Return completed store events since the last call."""
-        if not self._completed_store_events:
+        """Return completed store events and transfer stats since the last call."""
+        if not self._completed_store_events and self._transfer_stats.is_empty():
             return None
         meta = SimpleCPUOffloadWorkerMetadata(
             completed_store_events=self._completed_store_events,
+            transfer_stats=self._transfer_stats,
         )
         self._completed_store_events = {}
+        self._transfer_stats = TransferStats()
         return meta
 
     def handle_preemptions(
@@ -284,16 +292,36 @@ class SimpleCPUOffloadWorker:
             return
         self._flush_and_sync_all()
 
+    def _record_copy_event(self, ev: DmaCopyEvent) -> None:
+        """Record a completed op's DMA-only elapsed time into transfer stats.
+
+        `start_event` is recorded after the store-stream wait (see
+        `_copy_loop`), so the elapsed time here covers only the submitted
+        DMA itself, excluding both host NumPy prep and any compute-done
+        barrier wait.
+        """
+        if ev.num_bytes == 0:
+            # Empty batch: an event was still recorded to keep event_idx
+            # accounting contiguous, but there was no DMA to report.
+            return
+        seconds = ev.start_event.elapsed_time(ev.end_event) / 1000.0
+        stats = self._transfer_stats.store if ev.is_store else self._transfer_stats.load
+        stats.record(ev.num_bytes, seconds)
+
     def _flush_and_sync_all(self) -> None:
         """Synchronize all in-flight transfer events."""
-        for event_idx, event in self._load_events:
-            event.synchronize()
-            self._load_hwm = event_idx
+        for ev in self._load_events:
+            ev.end_event.synchronize()
+            self._record_copy_event(ev)
+            ev.release()
+            self._load_hwm = ev.event_idx
         self._load_events.clear()
 
-        for event_idx, event in self._store_events:
-            event.synchronize()
-            self._store_hwm = event_idx
+        for ev in self._store_events:
+            ev.end_event.synchronize()
+            self._record_copy_event(ev)
+            ev.release()
+            self._store_hwm = ev.event_idx
         self._store_events.clear()
 
     def _poll_stream_events(self, is_store: bool) -> int:
@@ -301,10 +329,12 @@ class SimpleCPUOffloadWorker:
         events = self._store_events if is_store else self._load_events
         hwm = self._store_hwm if is_store else self._load_hwm
         while events:
-            event_idx, event = events[0]
-            if not event.query():
+            ev = events[0]
+            if not ev.end_event.query():
                 break
-            hwm = event_idx
+            hwm = ev.event_idx
+            self._record_copy_event(ev)
+            ev.release()
             events.pop(0)
         if is_store:
             self._store_hwm = hwm
