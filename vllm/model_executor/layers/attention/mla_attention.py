@@ -188,6 +188,7 @@ return curr_o @ W_O
 """
 
 import functools
+import math
 from abc import abstractmethod
 from dataclasses import dataclass
 from enum import Enum
@@ -1424,6 +1425,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         scheduler_config = vllm_config.scheduler_config
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
+        parallel_config = vllm_config.parallel_config
 
         chunked_prefill_workspace_size = min(
             # Try for 8 full length request or at least 4 pages per-request
@@ -1448,7 +1450,49 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             scheduler_config.max_num_seqs * cache_config.block_size,
         )
 
+        # When DCP > 1 the workspace tensor is sliced across dcp_world_size
+        # ranks (see __init__'s `+ workspace_size // dcp_world_size`
+        # allgather slot), and downstream asserts in __init__ and build()
+        # require the workspace size and per-step `max_context_chunk` to be
+        # divisible by dcp_world_size. The `max(..., max_num_seqs *
+        # block_size)` clamp above can re-introduce a value that is not
+        # divisible by dcp_world_size for some shapes, so round down here
+        # to keep both asserts unreachable. This rounds by at most
+        # dcp_world_size - 1 slots (<= 0.05% of a 64k workspace).
+        dcp_world_size = parallel_config.decode_context_parallel_size
+        if dcp_world_size > 1:
+            chunked_prefill_workspace_size = round_down(
+                chunked_prefill_workspace_size, dcp_world_size
+            )
+
         return chunked_prefill_workspace_size
+
+    @staticmethod
+    def _align_max_context_chunk_for_dcp(
+        max_context_chunk: int,
+        *,
+        dcp_world_size: int,
+        page_size: int | None,
+    ) -> int:
+        """Round `max_context_chunk` to satisfy the per-step DCP assert.
+
+        When DCP > 1 the chunk is split evenly across DCP ranks (see the
+        `assert max_context_chunk % self.dcp_world_size == 0` later in
+        `MLACommonMetadataBuilder.build`). The
+        `chunked_prefill_workspace_size // num_prefills_with_context_cpu`
+        floor-divide and the optional page-size round-down upstream can
+        land on a value that is not divisible by `dcp_world_size`. Round
+        down to the LCM of `page_size` and `dcp_world_size` (or just
+        `dcp_world_size` when there is no page-size constraint, e.g. when
+        `aot_schedule` is False on non-CUDA platforms) so both alignments
+        hold simultaneously.
+        """
+        if dcp_world_size <= 1:
+            return max_context_chunk
+        align = dcp_world_size
+        if page_size is not None:
+            align = math.lcm(page_size, dcp_world_size)
+        return round_down(max_context_chunk, align)
 
     @staticmethod
     def determine_prefill_query_data_type(
@@ -1690,6 +1734,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 # cannot handle `context_chunk_starts` that are not aligned
                 # to page_size
                 max_context_chunk = round_down(max_context_chunk, self.page_size)
+
+                max_context_chunk = self._align_max_context_chunk_for_dcp(
+                    max_context_chunk,
+                    dcp_world_size=self.dcp_world_size,
+                    page_size=self.page_size if self.aot_schedule else None,
+                )
 
                 assert max_context_chunk > 0
                 num_chunks = cdiv(max_context_len_cpu, max_context_chunk)
