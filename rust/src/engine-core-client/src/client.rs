@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -512,6 +515,7 @@ impl EngineCoreClient {
 
         Ok(EngineCoreOutputStream::new(
             request_id,
+            engine_id.engine_index().unwrap_or(0),
             self.abort_tx.clone(),
             rx,
         ))

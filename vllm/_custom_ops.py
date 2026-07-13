@@ -235,6 +235,37 @@ def rms_norm(
     torch.ops._C.rms_norm(out, input, weight, epsilon)
 
 
+# LongCat n-gram embedding index kernel (see csrc/.../ngram_embedding_kernels.cu).
+def ngram_compute_n_gram_ids(
+    ne_n: int,
+    ne_k: int,
+    ne_weights: torch.Tensor,
+    ne_mods: torch.Tensor,
+    exclusive_ne_embedder_size_sums: torch.Tensor,
+    exclusive_req_len_sums: torch.Tensor,
+    ne_token_table: torch.Tensor,
+    row_indices: torch.Tensor,
+    column_starts: torch.Tensor,
+    n_gram_ids: torch.Tensor,
+) -> None:
+    """Compute concatenated (offset) n-gram ids for a ragged prefill batch.
+
+    Writes ``n_gram_ids`` of shape ``[token_num, (ne_n-1)*ne_k]``.
+    """
+    torch.ops._C.ngram_compute_n_gram_ids(
+        ne_n,
+        ne_k,
+        ne_weights,
+        ne_mods,
+        exclusive_ne_embedder_size_sums,
+        exclusive_req_len_sums,
+        ne_token_table,
+        row_indices,
+        column_starts,
+        n_gram_ids,
+    )
+
+
 def fused_add_rms_norm(
     input: torch.Tensor,
     residual: torch.Tensor,
@@ -2244,6 +2275,7 @@ def topk_sigmoid(
     gating_output: torch.Tensor,
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
+    routed_scaling_factor: float = 1.0,
 ) -> None:
     torch.ops._moe_C.topk_sigmoid(
         topk_weights,
@@ -2252,6 +2284,7 @@ def topk_sigmoid(
         gating_output,
         renormalize,
         e_score_correction_bias,
+        routed_scaling_factor,
     )
 
 
@@ -2483,6 +2516,7 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     q_out: torch.Tensor | None = None,
     index_q_out: torch.Tensor | None = None,
     kv_cache_dtype: str = "auto",
+    skip_index_branch: bool = False,
 ) -> None:
     """Fused MiniMax-M3 attention pre-processing (in-place).
 
@@ -2504,6 +2538,11 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     instead of in place — folding the de-interleave into this kernel's store so
     callers skip a separate ``.contiguous()`` copy before the SM100 sparse
     attention's flat TMA descriptor.
+
+    When ``skip_index_branch`` is true, sparse rows still keep their packed
+    ``[index_q | index_k]`` tail, but the kernel only processes the main q/k/v
+    branches and main KV cache. This is used by MiniMax-M3 index-topk reuse
+    layers that consume top-k block ids selected by an earlier sparse layer.
     """
     torch.ops._C.fused_minimax_m3_qknorm_rope_kv_insert(
         qkv,
@@ -2526,6 +2565,7 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
         q_out,
         index_q_out,
         kv_cache_dtype,
+        skip_index_branch,
     )
 
 
@@ -2974,6 +3014,24 @@ if hasattr(torch.ops._C, "fused_experts_cpu"):
         return torch.empty_like(hidden_states)
 
 
+if hasattr(torch.ops._C, "dynamic_4bit_int_moe"):
+
+    @register_fake("_C::dynamic_4bit_int_moe")
+    def dynamic_4bit_int_moe_fake(
+        x: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        w13_packed: torch.Tensor,
+        w2_packed: torch.Tensor,
+        hidden_size: int,
+        intermediate_size: int,
+        group_size: int,
+        apply_router_weight_on_input: bool,
+        activation_kind: int,
+    ) -> torch.Tensor:
+        return x.new_empty((x.size(0), hidden_size))
+
+
 def fused_experts_cpu(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -3187,6 +3245,40 @@ def fused_sigmoid_gating_delta_rule_update_cpu(
         b,
         initial_state_source,
         initial_state_indices,
+        cu_seqlens,
+        use_qk_l2norm_in_kernel,
+        softplus_beta,
+        softplus_threshold,
+    )
+
+
+def fused_sigmoid_gating_delta_rule_update_spec_cpu(
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    initial_state_source: torch.Tensor,
+    spec_state_indices: torch.Tensor,
+    num_accepted_tokens: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    use_qk_l2norm_in_kernel: bool,
+    softplus_beta: float = 1.0,
+    softplus_threshold: float = 20.0,
+) -> torch.Tensor:
+    return torch.ops._C.fused_sigmoid_gating_delta_rule_update_spec_cpu(
+        A_log,
+        dt_bias,
+        q,
+        k,
+        v,
+        a,
+        b,
+        initial_state_source,
+        spec_state_indices,
+        num_accepted_tokens,
         cu_seqlens,
         use_qk_l2norm_in_kernel,
         softplus_beta,

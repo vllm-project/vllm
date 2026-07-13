@@ -26,6 +26,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionDefinition,
     LegacyStructuralTagResponseFormat,
     OpenAIBaseModel,
+    PerRequestTimingMetrics,
     StreamOptions,
     StructuralTagResponseFormat,
     ToolCall,
@@ -133,6 +134,10 @@ class ChatCompletionResponse(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
+    ec_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="ECTransfer parameters."
+    )
+    metrics: PerRequestTimingMetrics | None = None
 
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
@@ -160,6 +165,7 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     # Rendered prompt text from chat templating (only set when
     # ``return_prompt_text=True`` on the request); only sent on the first chunk.
     prompt_text: str | None = None
+    metrics: PerRequestTimingMetrics | None = None
 
 
 class ChatCompletionToolsParam(OpenAIBaseModel):
@@ -436,6 +442,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
         description="KVTransfer parameters used for disaggregated serving.",
     )
 
+    ec_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "ECTransfer parameters used for encoder-cache disaggregated serving."
+        ),
+    )
+
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
         description=(
@@ -662,6 +675,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
+        if self.ec_transfer_params:
+            # Pass in ec_transfer_params via extra_args
+            extra_args["ec_transfer_params"] = self.ec_transfer_params
         return SamplingParams.from_optional(
             n=self.n,
             presence_penalty=self.presence_penalty,
@@ -1000,8 +1016,8 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     response_format: Any | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: str | list[str] | None = Field(default_factory=list)
-    temperature: float | None = 0.7
-    top_p: float | None = 1.0
+    temperature: float | None = None
+    top_p: float | None = None
     user: str | None = None
     tool_choice: Literal["none"] | None = "none"
     include_reasoning: bool = True
@@ -1010,8 +1026,8 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     best_of: int | None = None
     use_beam_search: bool = False
     top_k: int | None = None
-    min_p: float | None = 0.0
-    repetition_penalty: float | None = 1.0
+    min_p: float | None = None
+    repetition_penalty: float | None = None
     length_penalty: float | None = 1.0
     early_stopping: bool = False
     structured_outputs: StructuredOutputsParams | None = None
