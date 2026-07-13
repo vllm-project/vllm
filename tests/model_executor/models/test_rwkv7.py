@@ -1672,7 +1672,8 @@ def test_rwkv7_model_state_keeps_decode_and_resident_prefill_slots_separate():
     assert state.elapsed.tolist()[:2] == [10, 20]
 
 
-def test_rwkv7_model_state_rejects_partial_live_decode_wave():
+@pytest.mark.parametrize("scheduled_slot", [0, 1])
+def test_rwkv7_model_state_rejects_partial_live_decode_wave(scheduled_slot: int):
     state = _new_rwkv7_model_state(max_num_reqs=4)
     state.add_request(0, _new_request("req-0"))
     state.add_request(1, _new_request("req-1"))
@@ -1686,31 +1687,7 @@ def test_rwkv7_model_state_rejects_partial_live_decode_wave():
 
     input_batch = _rwkv7_input_batch(
         state,
-        idx_mapping_np=np.array([0], dtype=np.int32),
-        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
-        is_prefilling_np=np.array([False], dtype=np.bool_),
-    )
-
-    with pytest.raises(RuntimeError, match="all live decode rows"):
-        state.prepare_inputs(input_batch, req_states=None)
-    assert len(state.decode_req_slots) == 2
-    assert state.req_slot_to_row[:2] == [0, 1]
-
-
-def test_rwkv7_model_state_does_not_park_unscheduled_decode_rows():
-    state = _new_rwkv7_model_state(max_num_reqs=4)
-    state.add_request(0, _new_request("req-0"))
-    state.add_request(1, _new_request("req-1"))
-    decode_batch = _rwkv7_input_batch(
-        state,
-        idx_mapping_np=np.array([0, 1], dtype=np.int32),
-        query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
-        is_prefilling_np=np.array([False, False], dtype=np.bool_),
-    )
-    state.prepare_inputs(decode_batch, req_states=None)
-    input_batch = _rwkv7_input_batch(
-        state,
-        idx_mapping_np=np.array([1], dtype=np.int32),
+        idx_mapping_np=np.array([scheduled_slot], dtype=np.int32),
         query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
         is_prefilling_np=np.array([False], dtype=np.bool_),
     )
@@ -2436,7 +2413,12 @@ def test_rwkv7_vllm_forward_uses_dense_decode_input_view_for_contiguous_rows(
     assert elapsed.tolist() == [3, 3]
 
 
-def test_rwkv7_vllm_forward_rejects_permuted_decode_rows(monkeypatch):
+@pytest.mark.parametrize(
+    "decode_rows", [[1, 0], [2, 0]], ids=["permuted-prefix", "non-prefix"]
+)
+def test_rwkv7_vllm_forward_rejects_noncontiguous_decode_rows(
+    monkeypatch, decode_rows: list[int]
+):
     monkeypatch.setattr(rwkv7, "DTYPE", torch.float32)
     monkeypatch.setattr(rwkv7, "CUDA_DEVICE", torch.device("cpu"))
 
@@ -2452,9 +2434,10 @@ def test_rwkv7_vllm_forward_rejects_permuted_decode_rows(monkeypatch):
             "pure decode must not run prefill path"
         ),
     )
-    shift_state = torch.zeros((1, 2, 2, 3), dtype=torch.float32)
-    wkv_state = torch.zeros((1, 2, 1, 1, 1), dtype=torch.float32)
-    elapsed = torch.zeros((2,), dtype=torch.int32)
+    num_rows = max(decode_rows) + 1
+    shift_state = torch.zeros((1, 2, num_rows, 3), dtype=torch.float32)
+    wkv_state = torch.zeros((1, num_rows, 1, 1, 1), dtype=torch.float32)
+    elapsed = torch.zeros((num_rows,), dtype=torch.int32)
 
     with pytest.raises(RuntimeError, match="contiguous prefix rows"):
         RWKV7ForCausalLM.forward(
@@ -2462,19 +2445,19 @@ def test_rwkv7_vllm_forward_rejects_permuted_decode_rows(monkeypatch):
             torch.tensor([10, 20], dtype=torch.int64),
             positions=None,
             query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
-            idx_mapping=torch.tensor([1, 0], dtype=torch.int32),
+            idx_mapping=torch.tensor(decode_rows, dtype=torch.int32),
             shift_state=shift_state,
             wkv_state=wkv_state,
             elapsed=elapsed,
             rwkv_decode_batch_size=2,
-            rwkv_decode_rows=[1, 0],
+            rwkv_decode_rows=decode_rows,
             rwkv_decode_token_positions=[0, 1],
         )
 
     assert seen_tokens == []
     assert torch.count_nonzero(shift_state) == 0
     assert torch.count_nonzero(wkv_state) == 0
-    assert elapsed.tolist() == [0, 0]
+    assert torch.count_nonzero(elapsed) == 0
 
 
 def test_rwkv7_vllm_forward_uses_slot_indices_for_permuted_decode_rows(
@@ -2545,36 +2528,6 @@ def test_rwkv7_vllm_forward_uses_slot_indices_for_permuted_decode_rows(
     assert torch.count_nonzero(wkv_state[:, 1]) == 0
     assert torch.all(wkv_state[:, 2] == 2)
     assert elapsed.tolist() == [3, 0, 3]
-
-
-def test_rwkv7_vllm_forward_rejects_non_prefix_decode_rows_before_gather(
-    monkeypatch,
-):
-    monkeypatch.setattr(rwkv7, "DTYPE", torch.float32)
-    monkeypatch.setattr(rwkv7, "CUDA_DEVICE", torch.device("cpu"))
-
-    def forward_tokens(tokens, state):
-        return tokens.to(torch.float32).expand(tokens.shape[0], 3)
-
-    model = _new_rwkv7_forward_test_model(
-        forward_tokens=forward_tokens,
-        forward_all_hidden=lambda *args: pytest.fail("decode must stay T=1"),
-    )
-
-    with pytest.raises(RuntimeError, match="contiguous prefix rows"):
-        RWKV7ForCausalLM.forward(
-            model,
-            torch.tensor([10, 20], dtype=torch.int64),
-            positions=None,
-            query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
-            idx_mapping=torch.tensor([2, 0], dtype=torch.int32),
-            shift_state=torch.zeros((1, 2, 3, 3), dtype=torch.float32),
-            wkv_state=torch.zeros((1, 3, 1, 1, 1), dtype=torch.float32),
-            elapsed=torch.zeros((3,), dtype=torch.int32),
-            rwkv_decode_batch_size=2,
-            rwkv_decode_rows=[2, 0],
-            rwkv_decode_token_positions=[0, 1],
-        )
 
 
 def test_rwkv7_vllm_forward_uses_grouped_singleton_prefill(

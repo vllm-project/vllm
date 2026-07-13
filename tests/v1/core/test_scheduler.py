@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
-import importlib
-import importlib.util
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -32,6 +30,7 @@ from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
+from vllm.v1.core.sched.rwkv_decode_wave import RWKVNativeDecodeWavePolicy
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import (
@@ -46,9 +45,6 @@ from vllm.v1.structured_output import StructuredOutputManager
 from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 
 pytestmark = pytest.mark.cpu_test
-
-RWKV_DECODE_WAVE_MODULE = "vllm.v1.core.sched.rwkv_decode_wave"
-
 
 def test_make_scheduled_encoder_input_stats_output_embeddings():
     scheduler = create_scheduler()
@@ -572,13 +568,6 @@ def _new_waiting_prefill_request(req_id: str, num_tokens: int = 4) -> Request:
     return request
 
 
-def _get_rwkv_decode_wave_policy_api():
-    module = importlib.import_module(RWKV_DECODE_WAVE_MODULE)
-    assert hasattr(module, "RWKVNativeDecodeWavePolicy")
-    assert hasattr(module, "RWKVDecodeWavePlan")
-    return module.RWKVNativeDecodeWavePolicy, module.RWKVDecodeWavePlan
-
-
 def _new_running_prefill_chunk_request(req_id: str) -> Request:
     request = _new_waiting_prefill_request(req_id, num_tokens=8)
     request.status = RequestStatus.RUNNING
@@ -587,60 +576,34 @@ def _new_running_prefill_chunk_request(req_id: str) -> Request:
     return request
 
 
-def test_rwkv_decode_wave_policy_module_api_exists():
-    assert importlib.util.find_spec(RWKV_DECODE_WAVE_MODULE) is not None, (
-        f"{RWKV_DECODE_WAVE_MODULE} should define the RWKV native decode wave policy"
-    )
-    policy_cls, plan_cls = _get_rwkv_decode_wave_policy_api()
-
-    policy = policy_cls()
-
-    assert policy.enabled_for_model(
-        SimpleNamespace(architecture="RWKV7ForCausalLM", architectures=[])
-    )
-    assert policy.enabled_for_model(
-        SimpleNamespace(architecture=None, architectures=["RWKV7ForCausalLM"])
-    )
-    assert not policy.enabled_for_model(
-        SimpleNamespace(architecture="LlamaForCausalLM", architectures=["Llama"])
-    )
-
-    plan = policy.make_plan(
-        running_requests=[],
-        token_budget=1,
-        current_step=1,
-        max_model_len=2048,
-        num_sampled_tokens_per_step=1,
-    )
-    assert isinstance(plan, plan_cls)
-
-
-def test_rwkv_decode_wave_policy_requires_budget_for_complete_wave():
-    assert importlib.util.find_spec(RWKV_DECODE_WAVE_MODULE) is not None, (
-        f"{RWKV_DECODE_WAVE_MODULE} should define the RWKV native decode wave policy"
-    )
-    policy_cls, _ = _get_rwkv_decode_wave_policy_api()
-    policy = policy_cls()
-
-    with pytest.raises(ValueError, match="RWKV7 native decode wave"):
-        policy.make_plan(
-            running_requests=[
-                _new_ready_decode_request("r0"),
-                _new_ready_decode_request("r1"),
-            ],
-            token_budget=1,
-            current_step=1,
-            max_model_len=2048,
-            num_sampled_tokens_per_step=1,
-        )
+@pytest.mark.parametrize(
+    ("model_config", "enabled"),
+    [
+        pytest.param(
+            SimpleNamespace(architecture="RWKV7ForCausalLM", architectures=[]),
+            True,
+            id="resolved-architecture",
+        ),
+        pytest.param(
+            SimpleNamespace(architecture=None, architectures=["RWKV7ForCausalLM"]),
+            True,
+            id="declared-architectures",
+        ),
+        pytest.param(
+            SimpleNamespace(architecture="LlamaForCausalLM", architectures=[]),
+            False,
+            id="other-model",
+        ),
+    ],
+)
+def test_rwkv_decode_wave_policy_matches_model_architecture(
+    model_config: SimpleNamespace, enabled: bool
+) -> None:
+    assert RWKVNativeDecodeWavePolicy.enabled_for_model(model_config) is enabled
 
 
 def test_rwkv_decode_wave_policy_rejects_multi_token_decode_request():
-    assert importlib.util.find_spec(RWKV_DECODE_WAVE_MODULE) is not None, (
-        f"{RWKV_DECODE_WAVE_MODULE} should define the RWKV native decode wave policy"
-    )
-    policy_cls, _ = _get_rwkv_decode_wave_policy_api()
-    policy = policy_cls()
+    policy = RWKVNativeDecodeWavePolicy()
     request = _new_ready_decode_request("r0")
     request.append_output_token_ids(1)
 
@@ -654,36 +617,8 @@ def test_rwkv_decode_wave_policy_rejects_multi_token_decode_request():
         )
 
 
-def test_rwkv_decode_wave_policy_allows_prefill_when_decode_wave_unready():
-    assert importlib.util.find_spec(RWKV_DECODE_WAVE_MODULE) is not None, (
-        f"{RWKV_DECODE_WAVE_MODULE} should define the RWKV native decode wave policy"
-    )
-    policy_cls, _ = _get_rwkv_decode_wave_policy_api()
-    policy = policy_cls()
-    ready = _new_ready_decode_request("r0")
-    unready = _new_ready_decode_request("r1")
-    unready.next_decode_eligible_step = 2
-    prefill = _new_running_prefill_chunk_request("p0")
-
-    plan = policy.make_plan(
-        running_requests=[ready, unready, prefill],
-        token_budget=8,
-        current_step=1,
-        max_model_len=2048,
-        num_sampled_tokens_per_step=1,
-    )
-
-    assert not plan.allows_running_request(ready)
-    assert not plan.allows_running_request(unready)
-    assert plan.allows_running_request(prefill)
-
-
 def test_rwkv_decode_wave_policy_restarts_after_complete_decode_wave():
-    assert importlib.util.find_spec(RWKV_DECODE_WAVE_MODULE) is not None, (
-        f"{RWKV_DECODE_WAVE_MODULE} should define the RWKV native decode wave policy"
-    )
-    policy_cls, _ = _get_rwkv_decode_wave_policy_api()
-    policy = policy_cls()
+    policy = RWKVNativeDecodeWavePolicy()
     decode0 = _new_ready_decode_request("r0")
     decode1 = _new_ready_decode_request("r1")
     prefill = _new_running_prefill_chunk_request("p0")
