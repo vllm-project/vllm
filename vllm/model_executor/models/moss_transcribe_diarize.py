@@ -78,39 +78,26 @@ DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT = (
 )
 
 
-def _find_timestamp(
-    text: str, position: int, stop: int
-) -> tuple[float, int, int] | None:
-    while position < stop:
-        position = text.find("[", position, stop)
-        if position == -1:
-            return None
-        marker_end = text.find("]", position + 1, stop)
-        if marker_end == -1:
-            return None
-        marker = text[position + 1 : marker_end]
-        if marker and marker.count(".") <= 1 and marker.replace(".", "").isdigit():
-            return float(marker), position, marker_end + 1
-        position += 1
-    return None
+def _parse_timestamp(marker: str) -> float | None:
+    if (
+        not marker
+        or not marker.isascii()
+        or marker.count(".") > 1
+        or not marker.replace(".", "").isdigit()
+    ):
+        return None
+    return float(marker)
 
 
-def _find_diarized_header(
-    text: str, position: int
-) -> tuple[float, str, int, int] | None:
-    while (timestamp := _find_timestamp(text, position, len(text))) is not None:
-        start, header_start, speaker_start = timestamp
-        if speaker_start >= len(text) or text[speaker_start] != "[":
-            position = speaker_start
-            continue
-        speaker_end = text.find("]", speaker_start + 1)
-        if speaker_end == -1:
-            return None
-        speaker = text[speaker_start + 1 : speaker_end]
-        if len(speaker) >= 2 and speaker[0] == "S" and speaker[1:].isdigit():
-            return start, speaker, header_start, speaker_end + 1
-        position = speaker_end + 1
-    return None
+def _parse_speaker(speaker: str) -> str | None:
+    if (
+        len(speaker) < 2
+        or speaker[0] != "S"
+        or not speaker[1:].isascii()
+        or not speaker[1:].isdigit()
+    ):
+        return None
+    return speaker
 
 
 class MossTranscribeDiarizeAudioInputs(TensorSchema):
@@ -672,37 +659,134 @@ class MossTranscribeDiarizeForConditionalGeneration(
     @classmethod
     def parse_diarized_transcript(cls, text: str) -> list[DiarizedTranscriptionSegment]:
         """Parse MOSS's canonical ``[start][Sxx]text[end]`` transcript."""
+        seek_start, read_start, expect_speaker = range(3)
+        read_speaker, read_text, read_end, after_end = range(3, 7)
         segments: list[DiarizedTranscriptionSegment] = []
-        position = 0
+        state = seek_start
+        token: list[str] = []
+        segment_text: list[str] = []
+        pending_whitespace: list[str] = []
+        start: float | None = None
+        end: float | None = None
+        speaker: str | None = None
+        end_marker = ""
 
-        while (header := _find_diarized_header(text, position)) is not None:
-            start, speaker, _, text_start = header
-            next_header = _find_diarized_header(text, text_start)
-            segment_end = next_header[2] if next_header is not None else len(text)
+        def reset() -> None:
+            nonlocal state, start, end, speaker, end_marker
+            state = seek_start
+            token.clear()
+            segment_text.clear()
+            pending_whitespace.clear()
+            start = None
+            end = None
+            speaker = None
+            end_marker = ""
 
-            last_timestamp = None
-            marker_position = text_start
-            while timestamp := _find_timestamp(text, marker_position, segment_end):
-                last_timestamp = timestamp
-                marker_position = timestamp[2]
-
-            if last_timestamp is not None:
-                end, text_end, _ = last_timestamp
-                segment_text = text[text_start:text_end].strip()
-                if segment_text and end >= start:
+        def emit_segment() -> None:
+            if start is not None and end is not None and speaker is not None:
+                parsed_text = "".join(segment_text).strip()
+                if parsed_text:
                     segments.append(
                         DiarizedTranscriptionSegment(
                             start=start,
                             end=end,
                             speaker=speaker,
-                            text=segment_text,
+                            text=parsed_text,
                         )
                     )
+            reset()
 
-            if next_header is None:
-                break
-            position = next_header[2]
+        for char in text:
+            if state == seek_start:
+                if char == "[":
+                    token.clear()
+                    state = read_start
+            elif state == read_start:
+                if char == "]":
+                    start = _parse_timestamp("".join(token))
+                    token.clear()
+                    if start is None:
+                        reset()
+                    else:
+                        state = expect_speaker
+                elif "0" <= char <= "9" or char == ".":
+                    token.append(char)
+                    if len(token) > 32:
+                        reset()
+                else:
+                    reset()
+                    if char == "[":
+                        state = read_start
+            elif state == expect_speaker:
+                if char == "[":
+                    token.clear()
+                    state = read_speaker
+                elif not char.isspace():
+                    reset()
+            elif state == read_speaker:
+                if char == "]":
+                    speaker = _parse_speaker("".join(token))
+                    token.clear()
+                    if speaker is None:
+                        reset()
+                    else:
+                        segment_text.clear()
+                        state = read_text
+                elif char == "S" or "0" <= char <= "9":
+                    token.append(char)
+                    if len(token) > 16:
+                        reset()
+                else:
+                    reset()
+                    if char == "[":
+                        state = read_start
+            elif state == read_text:
+                if char == "[":
+                    token.clear()
+                    state = read_end
+                else:
+                    segment_text.append(char)
+            elif state == read_end:
+                if char == "]":
+                    parsed_end = _parse_timestamp("".join(token))
+                    if (
+                        parsed_end is not None
+                        and start is not None
+                        and parsed_end >= start
+                    ):
+                        end = parsed_end
+                        end_marker = "".join(token)
+                        pending_whitespace.clear()
+                        state = after_end
+                    else:
+                        segment_text.extend(("[", *token, "]"))
+                        state = read_text
+                    token.clear()
+                elif "0" <= char <= "9" or char == ".":
+                    token.append(char)
+                    if len(token) > 32:
+                        segment_text.append("[")
+                        segment_text.extend(token)
+                        token.clear()
+                        state = read_text
+                else:
+                    segment_text.extend(("[", *token, char))
+                    token.clear()
+                    state = read_text
+            elif char == "[":
+                emit_segment()
+                state = read_start
+            elif char.isspace():
+                pending_whitespace.append(char)
+            else:
+                segment_text.extend(("[", end_marker, "]", *pending_whitespace, char))
+                pending_whitespace.clear()
+                end = None
+                end_marker = ""
+                state = read_text
 
+        if state == after_end:
+            emit_segment()
         return segments
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:

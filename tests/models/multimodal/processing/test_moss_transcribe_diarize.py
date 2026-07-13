@@ -8,15 +8,15 @@ from vllm.model_executor.models.moss_transcribe_diarize import (
 
 def test_parse_diarized_transcript_preserves_moss_segments():
     segments = MossTranscribeDiarizeForConditionalGeneration.parse_diarized_transcript(
-        "[0.48][S01]Hello.[2.80][S02]Hi, how are you?[6.10]"
+        "[0.48][S01]Welcome[1.66][12.26][S02]Ready[13.81]"
     )
 
     assert [
         (segment.start, segment.end, segment.speaker, segment.text)
         for segment in segments
     ] == [
-        (0.48, 2.8, "S01", "Hello."),
-        (2.8, 6.1, "S02", "Hi, how are you?"),
+        (0.48, 1.66, "S01", "Welcome"),
+        (12.26, 13.81, "S02", "Ready"),
     ]
 
 
@@ -37,3 +37,42 @@ def test_parse_diarized_transcript_ignores_whitespace_between_segments():
         (0.0, 1.0, "Hello"),
         (2.0, 3.0, "Hi"),
     ]
+
+
+def test_parse_diarized_transcript_ignores_noise_before_a_segment():
+    segments = MossTranscribeDiarizeForConditionalGeneration.parse_diarized_transcript(
+        "noise [bad][0.1][S01]Hello[0.9]"
+    )
+
+    assert [(segment.start, segment.end, segment.text) for segment in segments] == [
+        (0.1, 0.9, "Hello"),
+    ]
+
+
+def test_parse_diarized_transcript_preserves_timestamps_before_the_end():
+    segments = MossTranscribeDiarizeForConditionalGeneration.parse_diarized_transcript(
+        "[2][S01]The earlier timestamp is [1] not the end[3]"
+    )
+
+    assert [segment.text for segment in segments] == [
+        "The earlier timestamp is [1] not the end",
+    ]
+
+
+def test_parse_diarized_transcript_skips_empty_and_incomplete_segments():
+    segments = MossTranscribeDiarizeForConditionalGeneration.parse_diarized_transcript(
+        "[0][S01]Complete[1][2][S02][3][4][S03]Incomplete"
+    )
+
+    assert [(segment.speaker, segment.text) for segment in segments] == [
+        ("S01", "Complete"),
+    ]
+
+
+def test_parse_diarized_transcript_preserves_overlong_timestamp_markers():
+    marker = f"[{'1' * 33}]"
+    segments = MossTranscribeDiarizeForConditionalGeneration.parse_diarized_transcript(
+        f"[0][S01]Value {marker}[1]"
+    )
+
+    assert [segment.text for segment in segments] == [f"Value {marker}"]
