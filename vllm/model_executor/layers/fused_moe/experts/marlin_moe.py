@@ -832,6 +832,7 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
             alpha: float = 1.0,
             beta: float = 0.0,
             topk_ids: torch.Tensor | None = None,
+            expert_map: torch.Tensor | None = None,
         ) -> None:
             # act_input  = intermediate_cache1 (M*topk, 2N for gated)
             # act_output = intermediate_cache2 (M*topk, N)
@@ -869,6 +870,7 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
                 alpha=alpha,
                 beta=beta,
                 topk_ids=topk_ids,
+                expert_map=expert_map,
             )
             lora_state["cache2"] = act_output
 
