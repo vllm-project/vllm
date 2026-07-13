@@ -64,7 +64,7 @@ class XgrammarBackend(StructuredOutputBackend):
             )
         self.compiler = xgr.GrammarCompiler(
             tokenizer_info,
-            max_threads=8,
+            max_threads=vllm.envs.VLLM_XGRAMMAR_MAX_THREADS,
             cache_enabled=True,
             cache_limit_bytes=vllm.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024,
         )

@@ -28,6 +28,7 @@ from vllm.v1.metrics.stats import (
     SchedulerStats,
 )
 from vllm.v1.metrics.utils import create_metric_per_engine
+from vllm.v1.request import RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
 logger = init_logger(__name__)
@@ -35,6 +36,12 @@ logger = init_logger(__name__)
 # User-facing reason labels for waiting request breakdown
 WAITING_REASON_CAPACITY = "capacity"
 WAITING_REASON_DEFERRED = "deferred"
+DEFERRED_WAIT_REASON_GRAMMAR = "grammar"
+DEFERRED_WAIT_REASON_REMOTE_KV = "remote_kv"
+DEFERRED_WAIT_STATUS_LABELS = {
+    RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR: DEFERRED_WAIT_REASON_GRAMMAR,
+    RequestStatus.WAITING_FOR_REMOTE_KVS: DEFERRED_WAIT_REASON_REMOTE_KV,
+}
 
 PerEngineStatLoggerFactory = Callable[[VllmConfig, int], "StatLoggerBase"]
 AggregateStatLoggerFactory = type["AggregateStatLoggerBase"]
@@ -892,6 +899,31 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             histogram_queue_time_request, per_engine_labelvalues
         )
 
+        histogram_deferred_time_request = self._histogram_cls(
+            name="vllm:request_deferred_time_seconds",
+            documentation=(
+                "Histogram of time spent in deferred waiting states, by reason. "
+                "Reason labels: 'grammar' = waiting for structured output "
+                "grammar compilation; 'remote_kv' = waiting for remote KV transfer."
+            ),
+            buckets=request_latency_buckets,
+            labelnames=labelnames + ["reason"],
+        )
+        self.histogram_deferred_time_request: dict[
+            RequestStatus, dict[int, Histogram]
+        ] = {}
+        for deferred_status, deferred_reason in DEFERRED_WAIT_STATUS_LABELS.items():
+            per_engine_labelvalues_with_reason = {
+                idx: labelvalues + [deferred_reason]
+                for idx, labelvalues in per_engine_labelvalues.items()
+            }
+            self.histogram_deferred_time_request[deferred_status] = (
+                create_metric_per_engine(
+                    histogram_deferred_time_request,
+                    per_engine_labelvalues_with_reason,
+                )
+            )
+
         histogram_inference_time_request = self._histogram_cls(
             name="vllm:request_inference_time_seconds",
             documentation="Histogram of time spent in RUNNING phase for request.",
@@ -1083,6 +1115,15 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.gauge_waiting_by_reason[WAITING_REASON_DEFERRED][engine_idx].set(
                 scheduler_stats.num_skipped_waiting_reqs
             )
+            for (
+                status,
+                deferred_wait_times,
+            ) in scheduler_stats.deferred_wait_times.items():
+                histograms = self.histogram_deferred_time_request.get(status)
+                if histograms is None:
+                    continue
+                for deferred_wait_time in deferred_wait_times:
+                    histograms[engine_idx].observe(deferred_wait_time)
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
 
             self.counter_prefix_cache_queries[engine_idx].inc(

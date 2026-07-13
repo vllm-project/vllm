@@ -175,6 +175,7 @@ class SchedulerStats:
 
     num_waiting_reqs: int = 0  # length of the "waiting" request queue
     num_skipped_waiting_reqs: int = 0  # length of the "skipped waiting" queue
+    deferred_wait_times: dict[Any, list[float]] = field(default_factory=dict)
 
     # These are used for internal DP load-balancing.
     step_counter: int = 0
