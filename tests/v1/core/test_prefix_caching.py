@@ -1975,6 +1975,80 @@ def test_reset_prefix_cache():
     assert all([blk.block_hash is None for blk in manager.block_pool.blocks])
 
 
+def test_queue_informed_lru_is_lazy_read_only_and_temporary(monkeypatch):
+    block_size = 16
+    waiting_requests: list[Request] = []
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, 4),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        log_stats=True,
+        waiting_requests=waiting_requests,
+        max_waiting_requests=2,
+    )
+
+    cached_req = make_request("cached", list(range(32)), block_size, sha256)
+    assert manager.allocate_slots(cached_req, 32) is not None
+    manager.free(cached_req)
+
+    queued_req = make_request(
+        "waiting", list(range(32)) + [100] * 16, block_size, sha256
+    )
+    waiting_requests.append(queued_req)
+    stats_before = copy.deepcopy(manager.prefix_cache_stats)
+    queue_before = manager.block_pool.free_block_queue.get_all_free_blocks()
+    ref_cnts_before = [block.ref_cnt for block in manager.block_pool.blocks]
+
+    assert manager._get_retained_block_ids() == {1, 2}
+    assert manager.prefix_cache_stats == stats_before
+    assert manager.block_pool.free_block_queue.get_all_free_blocks() == queue_before
+    assert [block.ref_cnt for block in manager.block_pool.blocks] == ref_cnts_before
+
+    retention_queries = 0
+    get_retained_block_ids = manager._get_retained_block_ids
+
+    def count_retention_queries() -> set[int]:
+        nonlocal retention_queries
+        retention_queries += 1
+        return get_retained_block_ids()
+
+    monkeypatch.setattr(
+        manager,
+        "_get_retained_block_ids",
+        count_retention_queries,
+    )
+
+    hit_req = make_request("hit", list(range(32)) + [100] * 16, block_size, sha256)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(hit_req)
+    blocks = manager.allocate_slots(
+        hit_req,
+        16,
+        num_new_computed_tokens=num_computed_tokens,
+        new_computed_blocks=computed_blocks,
+    )
+    assert blocks is not None and blocks.get_block_ids() == ([3],)
+    assert retention_queries == 0
+    manager.free(hit_req)
+
+    evicting_req = make_request("evicting", [201] * 16, block_size, sha256)
+    blocks = manager.allocate_slots(evicting_req, 16)
+    assert blocks is not None and blocks.get_block_ids() == ([3],)
+    assert retention_queries == 1
+    manager.free(evicting_req)
+
+    retained_head_req = make_request("retained-head", [202] * 16, block_size, sha256)
+    blocks = manager.allocate_slots(retained_head_req, 16)
+    assert blocks is not None and blocks.get_block_ids() == ([3],)
+    assert retention_queries == 2
+
+    waiting_requests.clear()
+    fallback_req = make_request("fallback", [203] * 16, block_size, sha256)
+    blocks = manager.allocate_slots(fallback_req, 16)
+    assert blocks is not None and blocks.get_block_ids() == ([2],)
+    assert retention_queries == 3
+
+
 def test_prefix_cache_stats_disabled():
     """Test that prefix_cache_stats is None when log_stats is False."""
     block_size = 16

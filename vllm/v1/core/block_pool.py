@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 from vllm.distributed.kv_events import (
@@ -28,6 +28,19 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+class RetainedBlockIds:
+    """Lazily resolve block IDs retained for one allocation."""
+
+    def __init__(self, get_block_ids: Callable[[], set[int]]) -> None:
+        self._get_block_ids = get_block_ids
+        self._block_ids: set[int] | None = None
+
+    def get(self) -> set[int]:
+        if self._block_ids is None:
+            self._block_ids = self._get_block_ids()
+        return self._block_ids
 
 
 class BlockHashToBlockMap:
@@ -644,13 +657,19 @@ class BlockPool:
             # `num_tokens` only applies to the first (primary) insertion.
             self._insert_block_hash(block_hash, dst_block, num_tokens=num_tokens)
 
-    def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
+    def get_new_blocks(
+        self,
+        num_blocks: int,
+        retained_block_ids: RetainedBlockIds | None = None,
+    ) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
 
-        Note that we do not check block cache in this function.
+        Cached blocks are considered only for eviction ordering; this function
+        does not perform prefix-cache lookup or record a cache hit.
 
         Args:
             num_blocks: The number of blocks to allocate.
+            retained_block_ids: Block IDs to retain if cached eviction is needed.
 
         Returns:
             A list of new block.
@@ -658,7 +677,13 @@ class BlockPool:
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
-        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+        retained = None
+        if retained_block_ids is not None and self._allocation_will_evict_cached_block(
+            num_blocks
+        ):
+            retained = retained_block_ids.get()
+
+        ret = self.free_block_queue.popleft_n(num_blocks, retained)
 
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
@@ -675,6 +700,14 @@ class BlockPool:
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
         return ret
+
+    def _allocation_will_evict_cached_block(self, num_blocks: int) -> bool:
+        for idx, block in enumerate(self.free_block_queue.iter_blocks_after(None)):
+            if idx == num_blocks:
+                break
+            if block.block_hash is not None:
+                return True
+        return False
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
         """
