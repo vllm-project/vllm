@@ -138,12 +138,24 @@ def _rebuild_arena_tensor(arena_name, slot_idx, nbytes, dtype_str, shape):
 
 The rebuilt tensor *is* the shared memory — no deserialize on any rank.
 
-**Slot lifecycle.** The rebuilt tensor is consumed (H2D'd) while the worker executes
-that step, so the reader must not release the slot at unpickle time. Releases are
-deferred and flushed at the reader's **next `dequeue`**: the worker loop is strictly
-sequential (dequeue step N → execute → dequeue step N+1), so by the next dequeue the
-previous step's H2D has completed. The writer requires all readers' done flags before
-reusing a slot.
+**Slot lifecycle.** The rebuilt tensor is the *source* of an async H2D (`x.to(device,
+non_blocking=True)`) while the worker executes that step, so the reader must not release
+the slot at unpickle time. Releases are deferred to the reader's **next `dequeue`** and
+gated on H2D completion. On the pinned fast path (§2.4) the H2D is a true async DMA that
+can outlive `execute_model` — under `--async-scheduling` no device sync covers it — so a
+step-count deferral alone is *not* sufficient: the writer could reclaim the slot while
+the DMA is still reading it. At `flush_releases` the reader records a CUDA event on the
+compute stream (ordered after the previous step's H2D) and only sets its done flag for a
+slot once that event has completed (non-blocking `event.query()`; a slot not yet done
+simply waits one more dequeue). When the mapping is *not* pinned, `cudaMemcpyAsync` from
+pageable host memory stages the copy synchronously before returning, so the slot is
+released immediately. The writer requires all readers' done flags before reusing a slot,
+so a slot is never overwritten while any reader's DMA is in flight.
+
+> Assumes the multimodal H2D is issued on the worker's current/default compute stream
+> (true today: mm inputs are copied eagerly, outside the decode CUDA graph). If a future
+> vLLM issues that copy on a dedicated side stream, the event must be recorded at the
+> copy site rather than at `flush_releases`.
 
 ### 2.4 Pinning — the zero-copy trap
 
@@ -194,10 +206,10 @@ use), after which every H2D from the arena is a **pinned-memory DMA** (~10 ms fo
 
 ## 5. Limitations and future work
 
-- **Slot release granularity**: releases are flushed at the reader's next dequeue. A
-  CUDA-event-based release would close the theoretical reuse window under extreme
-  multi-image bursts deeper than the slot count (today such bursts safely fall back to
-  pickle when the arena is exhausted).
+- **Slot release granularity**: releases are gated on a per-slot CUDA event recorded
+  after the consuming H2D (§2.3), which closes the async-DMA reuse window on the pinned
+  path. Bursts deeper than the slot count still safely fall back to pickle when the arena
+  is exhausted.
 - **Fallback observability**: arena exhaustion / oversize fallbacks are rate-limited
   log lines today; a counter metric would be better.
 - **Scope**: the arena activates only when every queue reader is node-local. Remote
