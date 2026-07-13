@@ -81,6 +81,8 @@ vllm serve <model> \
 
 Each entry in `secondary_tiers` is a dict with a required `type` field plus tier-specific fields.
 
+The filesystem and object-store tiers can publish hash-only `BlockStored` KV events for blocks they successfully store, tagged with a stable per-tier `medium` (`FS` for the filesystem tier, `OBJ` for the object-store tier). Set `enable_kv_events: true` in the tier's entry to opt in; events are published only when KV cache events are also enabled globally via `--kv-events-config`.
+
 ### Filesystem (FS)
 
 The filesystem tier (`type: "fs"`) writes blocks to a directory on local storage.
@@ -91,6 +93,7 @@ The filesystem tier (`type: "fs"`) writes blocks to a directory on local storage
 | `root_dir` | yes | — | Base directory; vLLM creates subdirectories beneath it (see [On-Disk Layout](#on-disk-layout)). |
 | `n_read_threads` | no | `16` | Read-priority I/O threads (load path). |
 | `n_write_threads` | no | `16` | Write-priority I/O threads (store path). |
+| `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `FS`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
 
 Each thread group prefers its own queue but pulls from the other when its primary queue is empty, so a write-heavy or read-heavy burst won't leave the off-priority queue waiting. Size the totals to your storage's effective concurrency.
 
@@ -119,6 +122,31 @@ To enable KV cache sharing between multiple vLLM instances using the same `root_
 ```bash
 PYTHONHASHSEED=0 vllm serve ...
 ```
+
+### Object Store (OBJ)
+
+The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object store through the NIXL OBJ backend.
+
+| Key | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `type` | yes | — | Must be `obj`. |
+| `store_config` | yes | — | Object store connection parameters (see below). |
+| `prefix` | no | `""` | Key prefix prepended to all object keys. |
+| `io_threads` | no | `4` | Number of NIXL OBJ backend I/O threads. |
+| `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `OBJ`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
+
+`store_config` fields:
+
+| Key | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `bucket` | yes | — | Bucket name. |
+| `endpoint_override` | yes | — | Object store endpoint host; the URL scheme is set separately via `scheme`. |
+| `scheme` | no | `http` | `http` or `https`. |
+| `access_key`, `secret_key`, `session_token` | no | `""` | Explicit credentials. When left empty, the NIXL OBJ plugin falls back to the AWS SDK default credential provider chain (IAM roles, environment variables, credential files), which enables workload-identity auth on Kubernetes. |
+| `region` | no | `""` | Bucket region, if the endpoint requires one. |
+| `ca_bundle` | no | `""` | CA bundle path for TLS verification. |
+
+Object keys follow the same run-configuration digest scheme as the filesystem tier (see [On-Disk Layout](#on-disk-layout)) and are stored under the optional `prefix`. The [Cross-Process Sharing](#cross-process-sharing) requirement (`PYTHONHASHSEED`) applies to shared buckets as well, so instances sharing a bucket produce identical keys for identical content. At startup the tier probes object store connectivity and fails fast with a configuration error if the bucket is unreachable.
 
 ### P2P (Including P/D)
 
