@@ -1835,8 +1835,11 @@ __global__ void check_g_idx_bounds_kernel(const int* __restrict__ g_idx,
 
 bool check_g_idx_in_bounds(const int* g_idx, int n, int upper_bound) {
   int* d_flag = nullptr;
-  cudaMalloc(&d_flag, sizeof(int));
-  cudaMemset(d_flag, 0, sizeof(int));
+  if (cudaMalloc(&d_flag, sizeof(int)) != cudaSuccess) return false;
+  if (cudaMemset(d_flag, 0, sizeof(int)) != cudaSuccess) {
+    cudaFree(d_flag);
+    return false;
+  }
 
   const int threads = 256;
   const int blocks = (n + threads - 1) / threads;
@@ -1845,9 +1848,11 @@ bool check_g_idx_in_bounds(const int* g_idx, int n, int upper_bound) {
       g_idx, n, upper_bound, d_flag);
 
   int h_flag = 0;
-  cudaMemcpyAsync(&h_flag, d_flag, sizeof(int), cudaMemcpyDeviceToHost, stream);
-  cudaStreamSynchronize(stream);
+  cudaError_t cpy_err = cudaMemcpyAsync(&h_flag, d_flag, sizeof(int),
+                                        cudaMemcpyDeviceToHost, stream);
+  cudaError_t sync_err = cudaStreamSynchronize(stream);
   cudaFree(d_flag);
+  if (cpy_err != cudaSuccess || sync_err != cudaSuccess) return false;
   return h_flag == 0;
 }
 
@@ -1870,10 +1875,16 @@ torch::stable::Tensor gptq_gemm(torch::stable::Tensor a,
   STD_TORCH_CHECK(groups > 0,
                   "gptq_gemm: groups (b_gptq_qzeros.size(0)) must be > 0");
 
+  STD_TORCH_CHECK(b_gptq_scales.size(0) >= groups,
+                  "gptq_gemm: b_gptq_scales.size(0) (", b_gptq_scales.size(0),
+                  ") must be >= groups (", groups, ")");
+
   bool has_g_idx = b_g_idx.device().type() != torch::stable::DeviceType::Meta &&
                    b_g_idx.numel() > 0;
   if (has_g_idx) {
     int64_t size_k = a.size(1);
+    STD_TORCH_CHECK(b_g_idx.numel() >= size_k, "gptq_gemm: g_idx length (",
+                    b_g_idx.numel(), ") must be >= size_k (", size_k, ")");
     int upper_bound =
         use_exllama ? static_cast<int>(size_k) : static_cast<int>(groups);
     STD_TORCH_CHECK(vllm::gptq::check_g_idx_in_bounds(

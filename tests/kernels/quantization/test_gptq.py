@@ -137,3 +137,50 @@ def test_gptq_gemm_g_idx_oob_permutation():
 
     with pytest.raises(RuntimeError, match="gptq_gemm"):
         torch.ops._C.gptq_gemm(a, weight, zeros, scales, g_idx, True, True, bit)
+
+
+def test_gptq_gemm_scales_fewer_rows_than_groups():
+    """b_gptq_scales with fewer rows than groups must raise."""
+    size_k = 4096
+    size_n = 6144
+    groups = 32
+    bit = 4
+
+    a = torch.rand((8, size_k), device="cuda", dtype=torch.float16)
+    weight = torch.randint(
+        0,
+        2**31 - 1,
+        (size_k * bit // 32, size_n),
+        device="cuda",
+        dtype=torch.int32,
+    )
+    zeros = torch.zeros((groups, size_n // 8), device="cuda", dtype=torch.int32)
+    scales = torch.rand((groups - 1, size_n), device="cuda", dtype=torch.float16)
+    idx = torch.empty((0,), device="cuda", dtype=torch.int32)
+
+    with pytest.raises(RuntimeError, match="gptq_gemm"):
+        torch.ops._C.gptq_gemm(a, weight, zeros, scales, idx, True, True, bit)
+
+
+def test_gptq_gemm_g_idx_too_short():
+    """g_idx shorter than size_k must raise."""
+    size_k = 4096
+    size_n = 6144
+    groups = 32
+    bit = 4
+
+    a = torch.rand((8, size_k), device="cuda", dtype=torch.float16)
+    weight = torch.randint(
+        0,
+        2**31 - 1,
+        (size_k * bit // 32, size_n),
+        device="cuda",
+        dtype=torch.int32,
+    )
+    zeros = torch.zeros((groups, size_n // 8), device="cuda", dtype=torch.int32)
+    scales = torch.rand((groups, size_n), device="cuda", dtype=torch.float16)
+
+    g_idx = torch.zeros(size_k // 2, device="cuda", dtype=torch.int32)
+
+    with pytest.raises(RuntimeError, match="gptq_gemm"):
+        torch.ops._C.gptq_gemm(a, weight, zeros, scales, g_idx, False, True, bit)
