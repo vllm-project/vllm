@@ -60,6 +60,7 @@ from .vision import (
     run_dp_sharded_mrope_vision_model,
 )
 
+
 class Cosmos3EdgeVisionEncoder(Siglip2VisionTransformer):
     """Adapts Cosmos (T, H, W) metadata to vLLM packed SigLIP2."""
 
@@ -102,6 +103,7 @@ class Cosmos3EdgeVisionEncoder(Siglip2VisionTransformer):
             max_seqlen=max_seqlen,
         )[0]
 
+
 def patch_merging_by_param(
     image_embeds: torch.Tensor,
     grid_thw: torch.Tensor,
@@ -139,9 +141,7 @@ def patch_merging_by_param(
         )
         media_embeds = media_embeds.permute(0, 1, 3, 2, 4, 5).contiguous()
         merged_embeds.append(
-            media_embeds.view(
-                -1, merge_size * merge_size * hidden_size
-            )
+            media_embeds.view(-1, merge_size * merge_size * hidden_size)
         )
 
     if current_idx != image_embeds.shape[0]:
@@ -150,10 +150,9 @@ def patch_merging_by_param(
             f"got {image_embeds.shape[0]}, expected {current_idx}."
         )
     if not merged_embeds:
-        return image_embeds.new_empty(
-            (0, merge_size * merge_size * hidden_size)
-        )
+        return image_embeds.new_empty((0, merge_size * merge_size * hidden_size))
     return torch.cat(merged_embeds, dim=0)
+
 
 class Cosmos3EdgePatchMerger(nn.Module):
     """
@@ -176,7 +175,7 @@ class Cosmos3EdgePatchMerger(nn.Module):
         super().__init__()
         use_data_parallel = is_vit_use_data_parallel()
         self.spatial_merge_size = spatial_merge_size
-        self.hidden_size = input_hidden_size * (spatial_merge_size ** 2)
+        self.hidden_size = input_hidden_size * (spatial_merge_size**2)
         self.input_hidden_size = input_hidden_size
         self.out_hidden_size = out_hidden_size
         self.use_postshuffle_norm = use_postshuffle_norm
@@ -254,12 +253,8 @@ class Cosmos3EdgeVisionModel(nn.Module):
         pixel_values: torch.Tensor,
         grid_thw: torch.Tensor | list[list[int]],
     ) -> torch.Tensor:
-        grid_thw = torch.as_tensor(
-            grid_thw, dtype=torch.int64, device="cpu"
-        )
-        image_embeds = self.encoder(
-            pixel_values.type(self.dtype), grid_thw=grid_thw
-        )
+        grid_thw = torch.as_tensor(grid_thw, dtype=torch.int64, device="cpu")
+        image_embeds = self.encoder(pixel_values.type(self.dtype), grid_thw=grid_thw)
         image_embeds = patch_merging_by_param(
             image_embeds,
             grid_thw,
@@ -347,9 +342,7 @@ class Cosmos3EdgeAttention(NemotronHAttention):
         **kwargs,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split(
-            [self.q_size, self.kv_size, self.kv_size], dim=-1
-        )
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -370,12 +363,8 @@ class Cosmos3EdgeAttentionDecoderLayer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        get_layer_config = getattr(
-            config, "get_nemotron_h_config_for_layer", None
-        )
-        layer_config = (
-            get_layer_config(layer_idx) if get_layer_config else config
-        )
+        get_layer_config = getattr(config, "get_nemotron_h_config_for_layer", None)
+        layer_config = get_layer_config(layer_idx) if get_layer_config else config
         self.mixer = Cosmos3EdgeAttention(
             layer_config,
             layer_idx,
@@ -384,9 +373,7 @@ class Cosmos3EdgeAttentionDecoderLayer(nn.Module):
             quant_config,
             prefix=f"{prefix}.mixer",
         )
-        self.norm = RMSNorm(
-            config.hidden_size, eps=config.layer_norm_epsilon
-        )
+        self.norm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
     def forward(
         self,
@@ -400,9 +387,7 @@ class Cosmos3EdgeAttentionDecoderLayer(nn.Module):
             hidden_states = self.norm(hidden_states)
         else:
             hidden_states, residual = self.norm(hidden_states, residual)
-        hidden_states = self.mixer(
-            positions=positions, hidden_states=hidden_states
-        )
+        hidden_states = self.mixer(positions=positions, hidden_states=hidden_states)
         return hidden_states, residual
 
 
@@ -479,10 +464,9 @@ class Cosmos3EdgeForCausalLM(nn.Module):
             inputs_embeds=inputs_embeds,
         )
 
-    def compute_logits(
-        self, hidden_states: torch.Tensor
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
+
 
 def _cosmos3_edge_diffusers_weight_map():
     """Map shared Diffusers transformer tensors to reasoner weight names."""
@@ -504,30 +488,21 @@ def _cosmos3_edge_diffusers_weight_map():
         physical_prefix = rf"^layers\.{physical_idx}"
         attention_prefix = f"model.language_model.layers.{attention_idx}"
         mlp_prefix = f"model.language_model.layers.{mlp_idx}"
-        mappings[
-            regex.compile(
-                physical_prefix + r"\.input_layernorm\.weight\Z"
-            )
-        ] = f"{attention_prefix}.norm.weight"
+        mappings[regex.compile(physical_prefix + r"\.input_layernorm\.weight\Z")] = (
+            f"{attention_prefix}.norm.weight"
+        )
         for source_name, target_name in attention_names.items():
             mappings[
                 regex.compile(
-                    physical_prefix
-                    + rf"\.self_attn\.{source_name}\.weight\Z"
+                    physical_prefix + rf"\.self_attn\.{source_name}\.weight\Z"
                 )
             ] = f"{attention_prefix}.mixer.{target_name}.weight"
         mappings[
-            regex.compile(
-                physical_prefix
-                + r"\.post_attention_layernorm\.weight\Z"
-            )
+            regex.compile(physical_prefix + r"\.post_attention_layernorm\.weight\Z")
         ] = f"{mlp_prefix}.norm.weight"
         for projection_name in ("up_proj", "down_proj"):
             mappings[
-                regex.compile(
-                    physical_prefix
-                    + rf"\.mlp\.{projection_name}\.weight\Z"
-                )
+                regex.compile(physical_prefix + rf"\.mlp\.{projection_name}\.weight\Z")
             ] = f"{mlp_prefix}.mixer.{projection_name}.weight"
     return mappings
 
@@ -624,9 +599,7 @@ class Cosmos3EdgeForConditionalGeneration(
                     model_or_path=vllm_config.model_config.model,
                     revision=vllm_config.model_config.revision,
                     prefix="",
-                    allow_patterns_overrides=[
-                        "vision_encoder/*.safetensors"
-                    ],
+                    allow_patterns_overrides=["vision_encoder/*.safetensors"],
                 )
             ]
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
@@ -648,6 +621,7 @@ class Cosmos3EdgeForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
+
     def _get_image_features(
         self,
         pixel_values: torch.Tensor,
@@ -655,9 +629,7 @@ class Cosmos3EdgeForConditionalGeneration(
     ) -> tuple[torch.Tensor, ...]:
         """Run the complete vision tower and split by media item."""
         image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
-        sizes = (
-            grid_thw.prod(-1) // self.visual.spatial_merge_size**2
-        ).tolist()
+        sizes = (grid_thw.prod(-1) // self.visual.spatial_merge_size**2).tolist()
         return image_embeds.split(sizes)
 
     def _parse_and_validate_image_input(
@@ -741,9 +713,7 @@ class Cosmos3EdgeForConditionalGeneration(
             sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
             return video_embeds.split(sizes)
 
-        pixel_values_videos = video_input["pixel_values_videos"].type(
-            self.visual.dtype
-        )
+        pixel_values_videos = video_input["pixel_values_videos"].type(self.visual.dtype)
         if self.use_data_parallel:
             return run_dp_sharded_mrope_vision_model(
                 self.visual, pixel_values_videos, grid_thw.tolist(), rope_type="rope_3d"

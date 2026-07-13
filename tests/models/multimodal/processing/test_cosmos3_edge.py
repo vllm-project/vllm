@@ -55,9 +55,7 @@ def _assert_image_outputs(processor, processed, num_images: int) -> None:
     )
 
     image_token_id = processor.info.get_hf_processor().image_token_id
-    assert processed["prompt_token_ids"].count(image_token_id) == sum(
-        expected_tokens
-    )
+    assert processed["prompt_token_ids"].count(image_token_id) == sum(expected_tokens)
 
 
 def _assert_video_outputs(processor, processed) -> None:

@@ -118,9 +118,7 @@ class Cosmos3EdgeConfig(PretrainedConfig):
 
         # Qwen3-VL processing and M-RoPE read these attributes from the
         # vision config, while this checkpoint stores them in projector config.
-        self.vision_config.spatial_merge_size = (
-            self.projector_config.spatial_merge_size
-        )
+        self.vision_config.spatial_merge_size = self.projector_config.spatial_merge_size
         self.vision_config.temporal_patch_size = 1
         self.vision_config.out_hidden_size = self.projector_config.out_hidden_size
 
