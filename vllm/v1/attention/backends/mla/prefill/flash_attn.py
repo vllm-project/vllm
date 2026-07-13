@@ -124,9 +124,8 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
             q_dtype=dtype,
             max_seqlen_q=shape_probe.max_seqlen_q,
             max_seqlen_k=shape_probe.max_seqlen_k,
-            softmax_scale=(
-                mla_dims.qk_nope_head_dim + mla_dims.qk_rope_head_dim
-            ) ** -0.5,
+            softmax_scale=(mla_dims.qk_nope_head_dim + mla_dims.qk_rope_head_dim)
+            ** -0.5,
             causal=causal,
             fa_version=fa_version,
             v_stride=(
@@ -205,13 +204,11 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
                     (
                         _FA4MLAPrefillShapeProbe(
                             1,
-                            FA4_MLA_PREFILL_VERY_LONG_K_BLOCKS
-                            * FA4_MLA_PREFILL_K_TILE,
+                            FA4_MLA_PREFILL_VERY_LONG_K_BLOCKS * FA4_MLA_PREFILL_K_TILE,
                         ),
                         _FA4MLAPrefillShapeProbe(
                             FA4_MLA_PREFILL_Q_TILE + 1,
-                            FA4_MLA_PREFILL_VERY_LONG_K_BLOCKS
-                            * FA4_MLA_PREFILL_K_TILE,
+                            FA4_MLA_PREFILL_VERY_LONG_K_BLOCKS * FA4_MLA_PREFILL_K_TILE,
                         ),
                     )
                 )

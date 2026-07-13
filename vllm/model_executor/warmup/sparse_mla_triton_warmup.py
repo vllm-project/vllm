@@ -100,14 +100,10 @@ def sparse_mla_triton_warmup(worker: "Worker") -> None:
             _compile_sparse_swa_prefill_metadata_kernel(vllm_config)
             _compile_prefill_chunk_metadata_kernel(vllm_config)
             _compile_combine_topk_swa_indices_kernel(vllm_config)
-        elif _has_attention_backend(
-            runner, _GENERIC_SPARSE_MLA_BACKENDS
-        ):
+        elif _has_attention_backend(runner, _GENERIC_SPARSE_MLA_BACKENDS):
             _compile_sparse_swa_prefill_metadata_kernel(vllm_config)
             _compile_prefill_chunk_metadata_kernel(vllm_config)
-        elif _has_attention_backend(
-            runner, _INDEXER_PREFILL_CHUNK_METADATA_BACKENDS
-        ):
+        elif _has_attention_backend(runner, _INDEXER_PREFILL_CHUNK_METADATA_BACKENDS):
             _compile_prefill_chunk_metadata_kernel(vllm_config)
 
     except Exception:

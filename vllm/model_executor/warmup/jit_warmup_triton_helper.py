@@ -36,17 +36,17 @@ class TritonWarmupTensor:
 
 @dataclass(frozen=True)
 class TritonPointerInputVariant:
-    # Named pointer offset variant for compile-only Triton warmup.
-    offsets: tuple[tuple[str, bool], ...]
+    # Named pointer-alignment variant for compile-only Triton warmup.
+    alignments: tuple[tuple[str, bool], ...]
 
     @classmethod
-    def from_offsets(cls, **offsets: bool) -> "TritonPointerInputVariant":
-        return cls(tuple(offsets.items()))
+    def from_alignment(cls, **aligned: bool) -> "TritonPointerInputVariant":
+        return cls(tuple(aligned.items()))
 
     def is_aligned(self, name: str) -> bool:
-        for offset_name, offset in self.offsets:
-            if offset_name == name:
-                return not offset
+        for alignment_name, aligned in self.alignments:
+            if alignment_name == name:
+                return aligned
         raise KeyError(f"Unknown Triton pointer input variant: {name}")
 
     def pointer(

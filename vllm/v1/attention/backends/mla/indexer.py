@@ -195,16 +195,16 @@ class DeepseekV32IndexerPrefillChunkMetadata:
 
 
 _BUILD_PREFILL_CHUNK_METADATA_INPUT_VARIANTS = (
-    TritonPointerInputVariant.from_offsets(uncompressed_seq_lens=False),
-    TritonPointerInputVariant.from_offsets(uncompressed_seq_lens=True),
+    TritonPointerInputVariant.from_alignment(uncompressed_seq_lens=True),
+    TritonPointerInputVariant.from_alignment(uncompressed_seq_lens=False),
 )
 
 
 class BuildPrefillChunkMetadataKernel(
-    VllmJitKernel[
-        "BuildPrefillChunkMetadataKernel.CompileKey"
-    ]
+    VllmJitKernel["BuildPrefillChunkMetadataKernel.CompileKey"]
 ):
+    BLOCK_SIZE = 1024
+
     @dataclass(frozen=True)
     class CompileKey:
         query_slice_start: int
@@ -333,7 +333,7 @@ class BuildPrefillChunkMetadataKernel(
             DCP_RANK=dcp_rank,
             DCP_WORLD=dcp_world,
             DCP_INTERLEAVE=dcp_interleave,
-            BLOCK_SIZE=1024,
+            BLOCK_SIZE=self.BLOCK_SIZE,
             COMPRESS_RATIO=list(compress_ratios),
             input_variant=_BUILD_PREFILL_CHUNK_METADATA_INPUT_VARIANTS,
         )
@@ -391,9 +391,10 @@ class BuildPrefillChunkMetadataKernel(
             DCP_RANK,
             DCP_WORLD,
             DCP_INTERLEAVE,
-            BLOCK_SIZE=_BUILD_PREFILL_CHUNK_METADATA_BLOCK_SIZE,
+            BLOCK_SIZE=self.BLOCK_SIZE,
             COMPRESS_RATIO=COMPRESS_RATIO,
         )
+
 
 _BUILD_PREFILL_CHUNK_METADATA_KERNEL = BuildPrefillChunkMetadataKernel()
 

@@ -282,9 +282,7 @@ class DeepseekSparseSWAMetadata:
 
 
 class ComputePrefillMetadataKernel(
-    VllmJitKernel[
-        "ComputePrefillMetadataKernel.CompileKey"
-    ]
+    VllmJitKernel["ComputePrefillMetadataKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
@@ -313,7 +311,9 @@ class ComputePrefillMetadataKernel(
 
         seq_len = tl.load(seq_lens_ptr + num_decodes + safe_offset, mask=mask)
         qsl_start = tl.load(query_start_loc_ptr + num_decodes + safe_offset, mask=mask)
-        qsl_end = tl.load(query_start_loc_ptr + num_decodes + safe_offset + 1, mask=mask)
+        qsl_end = tl.load(
+            query_start_loc_ptr + num_decodes + safe_offset + 1, mask=mask
+        )
 
         query_len = qsl_end - qsl_start
         prefix_len = seq_len - query_len
@@ -377,6 +377,7 @@ class ComputePrefillMetadataKernel(
             window_size,
             BLOCK_SIZE=compile_key.BLOCK_SIZE,
         )
+
 
 _COMPUTE_PREFILL_METADATA_KERNEL = ComputePrefillMetadataKernel()
 
@@ -679,7 +680,6 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             result["prefill_max_num_batched_tokens"] = self.max_num_batched_tokens
 
         return result
-
 
 
 @triton.jit(do_not_specialize=["token_offset"])
