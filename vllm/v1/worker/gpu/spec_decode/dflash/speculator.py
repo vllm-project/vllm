@@ -313,7 +313,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             realized_prefix_ids = anchor_token_ids
 
         gru_hidden = self.model.init_domino_state(realized_prefix_ids)
-        correction_start = prefix_len + 1
+        correction_start = prefix_len
 
         for step in range(prefix_len, self.num_speculative_steps):
             base_step_logits = base_logits[:, step, :]
