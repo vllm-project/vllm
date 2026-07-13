@@ -7,7 +7,9 @@ from typing import TYPE_CHECKING
 import torch
 from torch import nn
 
+from vllm.distributed.layer_parallel_config import get_layer_parallel_config
 from vllm.distributed.parallel_state import (
+    get_attention_tp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     get_tp_group,
@@ -287,6 +289,34 @@ direct_register_custom_op(
 )
 
 
+def _resolve_qk_norm_sharding(
+    prefix: str,
+    num_kv_head_replicas: int,
+    tp_world: int,
+    tp_rank: int,
+) -> tuple[int, int, bool]:
+    """Resolve a qk-norm's weight sharding from the per-layer parallel resolver.
+
+    Mirrors ``QKVParallelLinear``: an attention qk-norm under TPA shards its
+    weight over the attention-TP group, folded by ``num_kv_head_replicas`` for a
+    replicated-KV k_norm (weight sharded by KV-head count, not attn-TP size). A
+    non-attention prefix, or the no-TPA case, resolves to the global TP world.
+
+    Returns ``(weight_shard_world, weight_shard_rank, tpa_active)``. ``tpa_active``
+    is True iff the resolver returned an attention-TP policy for ``prefix`` — the
+    signal that the variance reduction must run over the attention-TP subgroup
+    rather than the global TP group.
+    """
+    lpc = get_layer_parallel_config(None, prefix)
+    eff_size = lpc.tp_size or tp_world
+    eff_rank = tp_rank if lpc.tp_rank is None else lpc.tp_rank
+    return (
+        eff_size // num_kv_head_replicas,
+        eff_rank // num_kv_head_replicas,
+        lpc.tp_size is not None,
+    )
+
+
 @CustomOp.register("minimax_text01_rmsnorm_tp")
 class MiniMaxText01RMSNormTP(CustomOp):
     def __init__(
@@ -294,6 +324,8 @@ class MiniMaxText01RMSNormTP(CustomOp):
         hidden_size: int,
         eps: float = 1e-6,
         *,
+        prefix: str = "",
+        num_kv_head_replicas: int = 1,
         weight_shard_world_size: int | None = None,
         weight_shard_rank: int | None = None,
         reduce_group: "GroupCoordinator | None" = None,
@@ -301,6 +333,30 @@ class MiniMaxText01RMSNormTP(CustomOp):
         super().__init__()
         self.tp_world = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
+
+        # Resolver-native sharding. When the caller passes no explicit
+        # shard/reduce parameters, derive them from the per-layer parallel
+        # resolver, mirroring ``QKVParallelLinear``: an attention qk-norm under
+        # TPA shards its weight and reduces its variance over the attention-TP
+        # group, folded by ``num_kv_head_replicas`` for a replicated-KV k_norm
+        # (weight is sharded by KV-head count, not attn-TP size). Non-attention
+        # prefixes and the no-TPA case resolve to the global TP world, so the
+        # derived values are bit-identical to the pre-resolver behavior.
+        if (
+            weight_shard_world_size is None
+            and weight_shard_rank is None
+            and reduce_group is None
+        ):
+            weight_shard_world_size, weight_shard_rank, tpa_active = (
+                _resolve_qk_norm_sharding(
+                    prefix, num_kv_head_replicas, self.tp_world, self.tp_rank
+                )
+            )
+            if tpa_active:
+                # TPA active for this attention layer: reduce over the attn-TP
+                # subgroup. Off-TPA falls through to the global TP group below.
+                reduce_group = get_attention_tp_group()
+
         self.weight_shard_world = weight_shard_world_size or self.tp_world
         self.weight_shard_rank = (
             self.tp_rank if weight_shard_rank is None else weight_shard_rank

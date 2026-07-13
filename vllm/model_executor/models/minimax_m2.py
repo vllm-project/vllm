@@ -34,9 +34,7 @@ from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
-    get_attention_tp_group,
     get_pp_group,
-    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.distributed.layer_parallel_config import get_layer_parallel_config
@@ -158,12 +156,8 @@ class MiniMaxM2Attention(nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
         layer_parallel_config = get_layer_parallel_config(self, prefix)
         attn_tp_size = layer_parallel_config.tp_size or tp_size
-        attn_tp_rank = layer_parallel_config.tp_rank
-        if attn_tp_rank is None:
-            attn_tp_rank = tp_rank
         self.total_num_heads = num_heads
         assert self.total_num_heads % attn_tp_size == 0
         self.total_num_kv_heads = num_kv_heads
@@ -222,33 +216,22 @@ class MiniMaxM2Attention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-        attn_tp_group = get_attention_tp_group()
+        # The qk-norms self-resolve their attention-TP sharding + reduce group
+        # from the per-layer parallel resolver (see MiniMaxText01RMSNormTP). The
+        # replicated-KV k_norm case is handled by passing the KV replica factor
+        # that qkv_proj already computed, so this call is identical whether or
+        # not KV heads are replicated across the attention-TP group.
         self.q_norm = MiniMaxText01RMSNormTP(
             self.head_dim * self.total_num_heads,
             eps=rms_norm_eps,
-            weight_shard_world_size=attn_tp_size,
-            weight_shard_rank=attn_tp_rank,
-            reduce_group=attn_tp_group,
+            prefix=f"{prefix}.q_norm",
         )
-        if self.total_num_kv_heads >= attn_tp_size:
-            self.k_norm = MiniMaxText01RMSNormTP(
-                self.head_dim * self.total_num_kv_heads,
-                eps=rms_norm_eps,
-                weight_shard_world_size=attn_tp_size,
-                weight_shard_rank=attn_tp_rank,
-                reduce_group=attn_tp_group,
-            )
-        else:
-            # KV heads are replicated across TP ranks; shard k_norm weight by
-            # total_num_kv_heads rather than tp_size to avoid incorrect sharding.
-            num_kv_head_replicas = attn_tp_size // self.total_num_kv_heads
-            self.k_norm = MiniMaxText01RMSNormTP(
-                self.head_dim * self.total_num_kv_heads,
-                eps=rms_norm_eps,
-                weight_shard_world_size=self.total_num_kv_heads,
-                weight_shard_rank=attn_tp_rank // num_kv_head_replicas,
-                reduce_group=attn_tp_group,
-            )
+        self.k_norm = MiniMaxText01RMSNormTP(
+            self.head_dim * self.total_num_kv_heads,
+            eps=rms_norm_eps,
+            prefix=f"{prefix}.k_norm",
+            num_kv_head_replicas=self.qkv_proj.num_kv_head_replicas,
+        )
 
     def forward(
         self,
