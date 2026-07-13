@@ -38,7 +38,6 @@ from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     PackedvLLMParameter,
 )
-from vllm.utils.humming import CompressedTensorsInputSchema
 
 logger = init_logger(__name__)
 
@@ -161,7 +160,6 @@ class CompressedTensorsWNA4Int(CompressedTensorsScheme):
 
         input_quant_config = self._build_input_quant_config()
         if input_quant_config is not None:
-            assert isinstance(input_quant_config, CompressedTensorsInputSchema)
             layer._humming_input_quant_config = input_quant_config
 
         # --- weight parameters ---
