@@ -68,6 +68,8 @@ class Sampler(nn.Module):
         self.pin_memory = PIN_MEMORY
         self.logprobs_mode = logprobs_mode
         self.use_fp64_gumbel = use_fp64_gumbel
+        self.chinese_mask = None
+        self.custom_chinese_masks = {}
 
     def forward(
         self,
@@ -119,16 +121,18 @@ class Sampler(nn.Module):
 
         if num_logprobs is None:
             logprobs_tensors = logprob_token_ids_tensors
-        elif num_logprobs == -1:
-            # Return the full unsorted and unranked logprobs.
-            logprobs_tensors = LogprobsTensors(
-                torch.empty(0), raw_logprobs, torch.empty(0)
-            )
         else:
-            # Gather the logprobs and ranks of the topk and sampled token.
-            logprobs_tensors = self.gather_logprobs(
-                raw_logprobs, num_logprobs, token_ids=sampled
-            )
+            assert raw_logprobs is not None
+            if num_logprobs == -1:
+                # Return the full unsorted and unranked logprobs.
+                logprobs_tensors = LogprobsTensors(
+                    torch.empty(0), raw_logprobs, torch.empty(0)
+                )
+            else:
+                # Gather the logprobs and ranks of the topk and sampled token.
+                logprobs_tensors = self.gather_logprobs(
+                    raw_logprobs, num_logprobs, token_ids=sampled
+                )
 
         # If we have both num_logprobs and logprob_token_ids, prefer
         # logprob_token_ids as it's more specific
@@ -417,6 +421,141 @@ class Sampler(nn.Module):
                 predict_bonus_token,
                 sampling_metadata.spec_token_ids,
             )
+
+        # Apply Monolingual Reasoning Constraints (stateless vectorized masking)
+        if sampling_metadata.monolingual_drift_mask is not None and any(
+            sampling_metadata.monolingual_drift_mask
+        ):
+            device = logits.device
+            batch_size = logits.shape[0]
+
+            # Create a boolean tensor for batch items currently thinking
+            is_thinking_cpu = [False] * batch_size
+            think_token_ids = sampling_metadata.think_token_ids
+            end_think_token_ids = sampling_metadata.end_think_token_ids
+            for i in range(batch_size):
+                if (
+                    i < len(sampling_metadata.monolingual_drift_mask)
+                    and sampling_metadata.monolingual_drift_mask[i]
+                ):
+                    think_id = (
+                        think_token_ids[i] if think_token_ids is not None else 151648
+                    )
+                    end_think_id = (
+                        end_think_token_ids[i]
+                        if end_think_token_ids is not None
+                        else 151649
+                    )
+
+                    tokens = output_token_ids[i] if i < len(output_token_ids) else []
+
+                    is_thinking = True  # Default to True
+                    for t in reversed(tokens):
+                        if t == end_think_id:
+                            is_thinking = False
+                            break
+                        if t == think_id:
+                            is_thinking = True
+                            break
+                    is_thinking_cpu[i] = is_thinking
+
+            is_thinking_tensor = torch.tensor(
+                is_thinking_cpu, dtype=torch.bool, device=device
+            )
+
+            if is_thinking_tensor.any():
+                # Check if any request uses a custom path
+                has_custom_paths = False
+                chinese_token_ids_paths = sampling_metadata.chinese_token_ids_paths
+                if chinese_token_ids_paths is not None:
+                    for idx in range(batch_size):
+                        if is_thinking_cpu[idx] and chinese_token_ids_paths[idx]:
+                            has_custom_paths = True
+                            break
+
+                # Retrieve default mask
+                default_mask = getattr(self, "chinese_mask", None)
+
+                # Retrieve biases and shape to [batch_size, 1]
+                biases = sampling_metadata.monolingual_drift_biases
+                if biases is not None:
+                    bias_tensor = torch.tensor(
+                        biases, dtype=logits.dtype, device=device
+                    ).unsqueeze(1)
+                else:
+                    bias_tensor = torch.full(
+                        (batch_size, 1), -100.0, dtype=logits.dtype, device=device
+                    )
+
+                if not has_custom_paths:
+                    # Fast broadcast path
+                    if default_mask is not None:
+                        batch_mask = is_thinking_tensor.unsqueeze(
+                            1
+                        ) & default_mask.unsqueeze(0)
+                        logits = torch.where(batch_mask, logits + bias_tensor, logits)
+                else:
+                    # Per-request custom mask path
+                    batch_mask = torch.zeros(
+                        (batch_size, logits.shape[-1]), dtype=torch.bool, device=device
+                    )
+                    for idx in range(batch_size):
+                        if is_thinking_cpu[idx]:
+                            path = (
+                                chinese_token_ids_paths[idx]
+                                if chinese_token_ids_paths is not None
+                                else None
+                            )
+                            if path:
+                                import os
+
+                                resolved = os.path.realpath(path)
+                                allowed_dir = os.environ.get(
+                                    "VLLM_CHINESE_TOKEN_IDS_DIR"
+                                )
+                                if allowed_dir:
+                                    allowed_dir = os.path.realpath(allowed_dir)
+                                else:
+                                    allowed_dir = os.path.realpath(os.getcwd())
+                                try:
+                                    common = os.path.commonpath([allowed_dir, resolved])
+                                    is_inside = os.path.normcase(
+                                        common
+                                    ) == os.path.normcase(allowed_dir)
+                                except ValueError:
+                                    is_inside = False
+                                if not is_inside or not resolved.endswith(".json"):
+                                    raise ValueError(
+                                        "Unsafe or unauthorized JSON file "
+                                        f"path: {path}."
+                                    )
+                                if path not in self.custom_chinese_masks:
+                                    try:
+                                        import json
+
+                                        with open(resolved, encoding="utf-8") as f:
+                                            data = json.load(f)
+                                            ids = data.get("chinese_token_ids", [])
+                                        mask = torch.zeros(
+                                            logits.shape[-1],
+                                            dtype=torch.bool,
+                                            device=device,
+                                        )
+                                        token_ids_tensor = torch.tensor(
+                                            ids, dtype=torch.long, device=device
+                                        )
+                                        mask[token_ids_tensor] = True
+                                        self.custom_chinese_masks[path] = mask
+                                    except Exception:
+                                        self.custom_chinese_masks[path] = default_mask
+                                req_mask = self.custom_chinese_masks[path]
+                            else:
+                                req_mask = default_mask
+
+                            if req_mask is not None:
+                                batch_mask[idx] = req_mask
+                    logits = torch.where(batch_mask, logits + bias_tensor, logits)
+
         return logits
 
     @staticmethod
