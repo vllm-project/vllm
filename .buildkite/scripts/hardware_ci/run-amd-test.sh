@@ -346,6 +346,7 @@ prepare_native_workspace() {
 
 initialize_native_environment() {
   local job_id="${BUILDKITE_JOB_ID:-${BUILDKITE_PARALLEL_JOB:-local}}"
+  local job_id_suffix=""
   local native_root=""
   local hf_mount=""
 
@@ -355,8 +356,11 @@ initialize_native_environment() {
   fi
 
   job_id="${job_id//[^A-Za-z0-9_.-]/_}"
+  job_id_suffix="${job_id##*-}"
+  job_id_suffix="${job_id_suffix:0:12}"
   native_root="/tmp/vllm-native-${job_id}"
-  : "${TMPDIR:=${native_root}/tmp}"
+  TMPDIR="/tmp/vllm-${job_id_suffix}/tmp"
+  VLLM_RPC_BASE_PATH="/tmp"
   : "${TORCHINDUCTOR_CACHE_DIR:=${native_root}/cache/torchinductor}"
   : "${TRITON_CACHE_DIR:=${native_root}/cache/triton}"
   : "${VLLM_CACHE_ROOT:=${native_root}/cache/vllm}"
@@ -364,7 +368,8 @@ initialize_native_environment() {
   : "${HF_HOME:=/home/buildkite-agent/huggingface}"
   : "${HF_HUB_DOWNLOAD_TIMEOUT:=300}"
   : "${HF_HUB_ETAG_TIMEOUT:=60}"
-  export TMPDIR TORCHINDUCTOR_CACHE_DIR TRITON_CACHE_DIR VLLM_CACHE_ROOT XDG_CACHE_HOME
+  export TMPDIR VLLM_RPC_BASE_PATH
+  export TORCHINDUCTOR_CACHE_DIR TRITON_CACHE_DIR VLLM_CACHE_ROOT XDG_CACHE_HOME
   export HF_HOME HF_HUB_DOWNLOAD_TIMEOUT HF_HUB_ETAG_TIMEOUT
   export PYTORCH_ROCM_ARCH=""
 
