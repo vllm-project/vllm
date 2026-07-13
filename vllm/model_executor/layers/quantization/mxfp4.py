@@ -796,10 +796,23 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     ) -> torch.Tensor:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
+
+        provider = getattr(layer, "expert_weight_provider", None)
+        if provider is not None:
+            result = provider.prepare(topk_ids)
+            w1 = result.w1
+            w2 = result.w2
+            topk_ids = result.topk_ids
+            global_num_experts = provider.capacity
+        else:
+            w1 = layer.w13_weight
+            w2 = layer.w2_weight
+            global_num_experts = layer.global_num_experts
+
         return self.moe_kernel.apply(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
+            w1=w1,
+            w2=w2,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=layer.activation,
