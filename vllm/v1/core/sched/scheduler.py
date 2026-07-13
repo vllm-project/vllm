@@ -474,6 +474,11 @@ class Scheduler(SchedulerInterface):
             throttle_prefills and not self.prefill_capacity_bound
         ) and any(not r.is_prefill_chunk for r in self.running)
 
+        # Blocks promised to in-flight async KV loads. Loop-invariant: async
+        # loads are never RUNNING, so allocations below neither change this sum
+        # nor need to exclude themselves from it.
+        async_load_reserved = self._inflight_prefill_reserved_blocks()
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -573,7 +578,7 @@ class Scheduler(SchedulerInterface):
                         request,
                         num_new_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens,
-                        reserved_blocks=self._inflight_prefill_reserved_blocks(request),
+                        reserved_blocks=async_load_reserved,
                     )
 
                     if new_blocks is not None:
@@ -932,7 +937,9 @@ class Scheduler(SchedulerInterface):
                         for i in encoder_inputs_to_schedule
                     )
 
-                reserved_blocks = self._inflight_prefill_reserved_blocks(request)
+                reserved_blocks = self._inflight_prefill_reserved_blocks(
+                    request, include_chunked_prefill=load_kv_async
+                )
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
@@ -2477,19 +2484,29 @@ class Scheduler(SchedulerInterface):
             apply_admission_cap=True,
         )
 
-    def _inflight_prefill_reserved_blocks(self, exclude: Request | None = None) -> int:
-        """Num blocks in-flight prefills still need to finish (their reservation).
+    def _inflight_prefill_reserved_blocks(
+        self, exclude: Request | None = None, include_chunked_prefill: bool = False
+    ) -> int:
+        """Num free blocks to set aside for in-flight prefills to finish.
 
-        Every admission and running allocation must fit within (free - this
-        reservation) so ordinary work cannot consume capacity a parked async
-        KV load or a running chunked prefill is relying on to complete.
-        `exclude` lets a request spend its own reservation.
+        By default only counts async KV loads (parked for their transfer, or
+        landed and holding blocks until scheduled), which make no forward
+        progress and cannot be preempted; every allocation must leave them
+        room to finish. Zero when no KV connector is in use.
+
+        Args:
+            exclude: Request allowed to spend its own reservation.
+            include_chunked_prefill: Also count in-progress chunked prefills.
+                Used when admitting an async load, which once parked cannot be
+                preempted and so must not squeeze out prefills already making
+                progress.
         """
 
         return sum(
             self._request_remaining_blocks(req)
             for req in self._inflight_prefills
             if req is not exclude
+            and (include_chunked_prefill or req.status != RequestStatus.RUNNING)
         )
 
     def _update_waiting_for_remote_kv(self, request: Request) -> None:
