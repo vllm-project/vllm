@@ -113,6 +113,49 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         """Restore weight updates to the engine's default target model."""
         self.model = self._default_model
         self.model_config = self._default_model_config
+        self._model_handles_weight_update = False
+
+    def _abort_model_weight_update(self) -> None:
+        abort_weight_update = getattr(self.model, "abort_weight_update", None)
+        if callable(abort_weight_update):
+            abort_weight_update()
+
+    def _reset_model_weight_update_state(self) -> None:
+        self._model_handles_weight_update = False
+
+    def _start_checkpoint_weight_update(self) -> bool:
+        start_model_update = getattr(self.model, "start_weight_update", None)
+        if callable(start_model_update):
+            self._model_handles_weight_update = bool(start_model_update())
+
+        if self._model_handles_weight_update:
+            if self.parallel_config.world_size != 1:
+                self._abort_model_weight_update()
+                self._reset_model_weight_update_state()
+                raise NotImplementedError(
+                    f"{self.model.__class__.__name__} checkpoint-format weight "
+                    "updates currently require TP=1 and PP=1"
+                )
+            return True
+
+        return False
+
+    def _finish_checkpoint_weight_update(self) -> None:
+        finish_succeeded = False
+        try:
+            if self._model_handles_weight_update:
+                self.model.finish_weight_update()
+            else:
+                from vllm.model_executor.model_loader.reload import (
+                    finalize_layerwise_reload,
+                )
+
+                finalize_layerwise_reload(self.model, self.model_config)
+            finish_succeeded = True
+        finally:
+            if not finish_succeeded and self._model_handles_weight_update:
+                self._abort_model_weight_update()
+            self._reset_model_weight_update_state()
 
     def parse_init_info(self, init_dict: dict[str, Any]) -> TInitInfo:
         """

@@ -231,6 +231,62 @@ class TestNCCLEngineParsing:
         assert update_info.shapes == [[100, 100], [50]]
 
 
+class _ModelHandledWeightUpdate(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.start_calls = 0
+        self.finish_calls = 0
+        self.abort_calls = 0
+
+    def start_weight_update(self) -> bool:
+        self.start_calls += 1
+        return True
+
+    def finish_weight_update(self) -> None:
+        self.finish_calls += 1
+
+    def abort_weight_update(self) -> None:
+        self.abort_calls += 1
+
+
+@pytest.mark.parametrize(
+    ("engine_cls", "backend"),
+    [
+        (NCCLWeightTransferEngine, "nccl"),
+        (IPCWeightTransferEngine, "ipc"),
+    ],
+)
+def test_dense_engines_use_model_checkpoint_update_hooks(engine_cls, backend):
+    config = WeightTransferConfig(backend=backend)
+    model = _ModelHandledWeightUpdate()
+    engine = engine_cls(config, create_mock_vllm_config(), "cpu", model)
+
+    engine.start_weight_update()
+    assert model.start_calls == 1
+    assert engine._model_handles_weight_update is True
+
+    engine.finish_weight_update()
+    assert model.finish_calls == 1
+    assert engine._model_handles_weight_update is False
+
+
+def test_model_handled_checkpoint_update_aborts_when_distributed():
+    config = WeightTransferConfig(backend="nccl")
+    model = _ModelHandledWeightUpdate()
+    engine = NCCLWeightTransferEngine(
+        config,
+        create_mock_vllm_config(world_size=2),
+        "cpu",
+        model,
+    )
+
+    with pytest.raises(NotImplementedError, match="require TP=1 and PP=1"):
+        engine.start_weight_update()
+
+    assert model.abort_calls == 1
+    assert engine._model_handles_weight_update is False
+
+
 # --- Unit Tests: Engine Registry ---
 
 
