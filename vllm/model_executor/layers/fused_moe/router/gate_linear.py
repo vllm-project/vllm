@@ -14,7 +14,8 @@ from vllm.utils.torch_utils import direct_register_custom_op
 class GateLinear(ReplicatedLinear):
     """MoE gate linear layer with multi-tier GEMM dispatch:
 
-    1. cuteDSL ll_bf16_gemm (SM90+, M<=16, bf16 in, fp32 out, any dims)
+    1. cuteDSL ll_bf16_gemm (SM90+, M<=16, bf16 in, fp32 out,
+       K divisible by 8)
     2. DSV3 specialized kernel (SM90+, M<=_dsv3_max_batch,
        H=7168 E=256/384, H=6144 E=256)
     3. fp32 specialized kernel (SM90+, bf16/fp32 in, fp32 out,
