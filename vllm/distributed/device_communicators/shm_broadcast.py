@@ -470,11 +470,13 @@ def _reduce_tensor(tensor: torch.Tensor):
 # Slot lifecycle: single writer, n_reader readers, per-slot metadata
 # [written_flag, reader0_done, ..., readerN_done] (same protocol as
 # ShmRingBuffer). A reader does NOT release the slot when the tensor is
-# rebuilt — the tensor is still consumed (HtoD copy) while the worker
-# executes that step. Instead releases are deferred and flushed at the
-# reader's NEXT `dequeue` call: the worker loop is sequential, so by then the
-# previous step (and its pageable-source HtoD, which completes staging before
-# `cudaMemcpyAsync` returns) has finished.
+# rebuilt — the tensor is the SOURCE of an async H2D copy while the worker
+# executes that step. Releases are deferred to the reader's NEXT `dequeue`,
+# and on the pinned fast path are further gated on a CUDA event recorded
+# after that H2D: because the source is cudaHostRegister-pinned the H2D is a
+# true async DMA that can outlive execute_model (async scheduling issues no
+# covering device sync), so releasing on step count alone could let the writer
+# overwrite bytes the GPU has not finished reading. See flush_releases.
 #
 # The writer NEVER blocks on the arena: if no slot is free (or the tensor is
 # larger than a slot), it falls back to the default pickle path for that
@@ -528,6 +530,10 @@ class ShmTensorArena:
         # slots whose tensors were handed out by THIS reader and not yet
         # released (flushed at the next dequeue).
         self._pending_release: list[int] = []
+        # slots whose release is gated on an H2D-completion CUDA event: each
+        # entry is (event, [slot_idx, ...]). Only populated on the pinned fast
+        # path, where the source-side DMA is asynchronous (see flush_releases).
+        self._deferred_releases: list[tuple[torch.cuda.Event, list[int]]] = []
 
         if name is None:
             self.is_creator = True
@@ -649,14 +655,61 @@ class ShmTensorArena:
         self._pending_release.append(idx)
         return t
 
-    def flush_releases(self):
-        if not self._pending_release:
-            return
-        for idx in self._pending_release:
+    def _mark_released(self, idxs: list[int]):
+        """Set THIS reader's done flag on the given slots; a slot becomes
+        reusable once every reader has done so."""
+        for idx in idxs:
             with self._meta(idx) as meta:
                 meta[1 + self.reader_rank] = 1
         memory_fence()
-        self._pending_release.clear()
+
+    def _record_release_event(self):
+        """Record a CUDA event on the current (compute) stream, or return None
+        if this process has no usable CUDA context. Called from flush_releases,
+        which runs after the previous step's H2D was enqueued on that same
+        stream, so the event is ordered strictly after that H2D."""
+        try:
+            event = torch.cuda.Event()
+            event.record()
+            return event
+        except Exception:
+            return None
+
+    def flush_releases(self):
+        # Retire event-gated releases whose H2D has completed. query() is
+        # non-blocking: by the time we are back here the event is virtually
+        # always already done, so this keeps the reader off the critical path;
+        # a not-yet-complete slot simply waits one more dequeue.
+        if self._deferred_releases:
+            still_pending = []
+            for event, idxs in self._deferred_releases:
+                if event.query():
+                    self._mark_released(idxs)
+                else:
+                    still_pending.append((event, idxs))
+            self._deferred_releases = still_pending
+
+        if not self._pending_release:
+            return
+        idxs = self._pending_release
+        self._pending_release = []
+
+        # Correctness hazard: on the pinned fast path the tensor is the SOURCE
+        # of a non_blocking H2D (`x.to(device, non_blocking=True)`), a true
+        # async DMA whose bytes may still be in flight after execute_model
+        # returns (async scheduling issues no covering device sync). Releasing
+        # the slot now would let the writer overwrite bytes the GPU has not yet
+        # read. Gate the release on a CUDA event recorded here — after that H2D
+        # on the same stream — and only free the slot once the event fires.
+        #
+        # When the mapping is NOT pinned (or there is no CUDA context here),
+        # `cudaMemcpyAsync` from pageable host memory stages the copy
+        # synchronously before returning, so the slot is already safe to reuse.
+        event = self._record_release_event() if self._pinned else None
+        if event is None:
+            self._mark_released(idxs)
+        else:
+            self._deferred_releases.append((event, idxs))
 
     def __del__(self):
         if hasattr(self, "shared_memory"):
@@ -1182,9 +1235,10 @@ class MessageQueue:
     ):
         """Read from message queue with optional timeout (in seconds)"""
         if self._is_local_reader:
-            # Release arena slots consumed by the PREVIOUS message: the worker
-            # loop is sequential, so the previous step (incl. its HtoD of any
-            # zero-copy tensors) has completed by the time we dequeue again.
+            # Retire arena slots consumed by earlier messages. flush_releases
+            # gates each slot on the completion of its zero-copy tensor's H2D
+            # (a CUDA event on the pinned path), so a slot is never freed for
+            # writer reuse while its async DMA is still in flight.
             arena = getattr(self, "tensor_arena", None)
             if arena is not None:
                 arena.flush_releases()
