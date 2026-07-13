@@ -100,6 +100,81 @@ def test_fused_sigmoid_gating_delta_rule_update_non_spec(
     )
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_spec_decoding_zero_accepted_tokens_reads_first_slot(
+    dtype: torch.dtype,
+) -> None:
+    """A zero entry in num_accepted_tokens (stale or padded batch row) must
+    read the state at slot 0 of ssm_state_indices, exactly like an entry of
+    1, instead of indexing out of bounds (issue #41190 hardening)."""
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+    num_reqs, num_k_heads, num_v_heads = 2, 16, 32
+    head_k_dim = head_v_dim = 128
+    num_speculative_tokens = 3
+    num_tokens = num_reqs * (num_speculative_tokens + 1)
+    total_entries = num_tokens * 2
+
+    query = torch.rand(1, num_tokens, num_k_heads, head_k_dim, dtype=dtype)
+    key = torch.rand(1, num_tokens, num_k_heads, head_k_dim, dtype=dtype)
+    value = torch.rand(1, num_tokens, num_v_heads, head_v_dim, dtype=dtype)
+    A_log = torch.rand(num_v_heads, dtype=dtype)
+    dt_bias = torch.rand(num_v_heads, dtype=dtype)
+    a = torch.rand(num_tokens, num_v_heads, dtype=dtype)
+    b = torch.rand(num_tokens, num_v_heads, dtype=dtype)
+    ssm_state = torch.rand(
+        total_entries, num_v_heads, head_k_dim, head_v_dim, dtype=dtype
+    )
+    state_indices = torch.randperm(total_entries, dtype=torch.int32)[:num_tokens].view(
+        num_reqs, num_speculative_tokens + 1
+    )
+    cu_seqlens = torch.arange(
+        0, num_tokens + 1, num_speculative_tokens + 1, dtype=torch.int32
+    )
+    beta = b.sigmoid()
+    g = -A_log.float().exp() * F.softplus(a.float() + dt_bias)
+
+    def run_gating(num_accepted_tokens: torch.Tensor):
+        return fused_sigmoid_gating_delta_rule_update(
+            A_log=A_log,
+            a=a,
+            b=b,
+            dt_bias=dt_bias,
+            q=query,
+            k=key,
+            v=value,
+            initial_state=ssm_state.clone(),
+            inplace_final_state=True,
+            ssm_state_indices=state_indices,
+            cu_seqlens=cu_seqlens,
+            num_accepted_tokens=num_accepted_tokens,
+            use_qk_l2norm_in_kernel=True,
+        )
+
+    def run_recurrent(num_accepted_tokens: torch.Tensor):
+        return fused_recurrent_gated_delta_rule(
+            q=query,
+            k=key,
+            v=value,
+            g=g.unsqueeze(0),
+            beta=beta.unsqueeze(0),
+            initial_state=ssm_state.clone(),
+            inplace_final_state=True,
+            ssm_state_indices=state_indices,
+            cu_seqlens=cu_seqlens,
+            num_accepted_tokens=num_accepted_tokens,
+            use_qk_l2norm_in_kernel=True,
+        )
+
+    zeros = torch.zeros(num_reqs, dtype=torch.int32)
+    ones = torch.ones(num_reqs, dtype=torch.int32)
+    for run in (run_gating, run_recurrent):
+        out_zero, state_zero = run(zeros)
+        out_one, state_one = run(ones)
+        torch.testing.assert_close(out_zero, out_one, atol=0, rtol=0)
+        torch.testing.assert_close(state_zero, state_one, atol=0, rtol=0)
+
+
 @pytest.mark.parametrize("tp_size", [1])
 @pytest.mark.parametrize("num_reqs", [1, 2, 4])
 @pytest.mark.parametrize("num_k_heads", [16])

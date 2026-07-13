@@ -103,7 +103,11 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     if USE_INITIAL_STATE:
         if IS_CONTINUOUS_BATCHING:
             if IS_SPEC_DECODING:
-                i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
+                # Clamp so a zero (stale or padded batch row) entry in
+                # num_accepted_tokens cannot index outside this request's
+                # row of ssm_state_indices; matches the clamp in the align
+                # kernel in vllm/v1/worker/mamba_utils.py.
+                i_t = tl.maximum(tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1, 0)
             else:
                 i_t = 0
             # Load state index and check for invalid entries
