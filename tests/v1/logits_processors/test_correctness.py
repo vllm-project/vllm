@@ -162,6 +162,7 @@ def _generate_fake_sampling_metadata(
         frequency_penalties=create_penalty_tensor(batch_size, 0.0, device),
         presence_penalties=create_penalty_tensor(batch_size, 0.0, device),
         repetition_penalties=create_penalty_tensor(batch_size, 1.0, device),
+        penalty_decays=create_penalty_tensor(batch_size, 0.996, device),
         no_penalties=True,
         allowed_token_ids_mask=None,
         bad_words_token_ids={},

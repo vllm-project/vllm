@@ -91,13 +91,44 @@ class SamplingStates:
             return
         apply_min_p(logits, expanded_idx_mapping, self.min_p.gpu)
 
+    def get_temperatures(
+        self,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+        *,
+        scalar_if_uniform: bool = False,
+    ) -> torch.Tensor | float:
+        if scalar_if_uniform:
+            values = self.temperature.np[idx_mapping_np]
+            if values.size > 0 and np.all(values == values[0]):
+                return float(values[0])
+        return self.temperature.gpu[expanded_idx_mapping]
+
     def get_top_k_top_p(
-        self, expanded_idx_mapping: torch.Tensor, idx_mapping_np: np.ndarray
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        do_top_k = np.any(self.top_k.np[idx_mapping_np] != self.vocab_size)
-        do_top_p = np.any(self.top_p.np[idx_mapping_np] != 1.0)
-        top_k = self.top_k.gpu[expanded_idx_mapping] if do_top_k else None
-        top_p = self.top_p.gpu[expanded_idx_mapping] if do_top_p else None
+        self,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+        *,
+        scalar_if_uniform: bool = False,
+    ) -> tuple[torch.Tensor | int | None, torch.Tensor | float | None]:
+        top_k_values = self.top_k.np[idx_mapping_np]
+        top_p_values = self.top_p.np[idx_mapping_np]
+        do_top_k = np.any(top_k_values != self.vocab_size)
+        do_top_p = np.any(top_p_values != 1.0)
+        if do_top_k:
+            if scalar_if_uniform and np.all(top_k_values == top_k_values[0]):
+                top_k = int(top_k_values[0])
+            else:
+                top_k = self.top_k.gpu[expanded_idx_mapping]
+        else:
+            top_k = None
+        if do_top_p:
+            if scalar_if_uniform and np.all(top_p_values == top_p_values[0]):
+                top_p = float(top_p_values[0])
+            else:
+                top_p = self.top_p.gpu[expanded_idx_mapping]
+        else:
+            top_p = None
         return top_k, top_p
 
     def apply_top_k_top_p(
@@ -113,6 +144,9 @@ class SamplingStates:
 
     def any_greedy(self, idx_mapping_np: np.ndarray) -> bool:
         return bool(np.any(self.temperature.np[idx_mapping_np] == 0.0))
+
+    def any_min_p(self, idx_mapping_np: np.ndarray) -> bool:
+        return bool(np.any(self.min_p.np[idx_mapping_np] != 0.0))
 
     def any_explicit_seed(self, idx_mapping_np: np.ndarray) -> bool:
         return bool(np.any(self.seeds_set[idx_mapping_np]))

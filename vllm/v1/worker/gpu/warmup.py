@@ -25,6 +25,11 @@ from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 logger = init_logger(__name__)
 
 
+def should_skip_v2_kernel_warmup(model_runner: object) -> bool:
+    model_state = getattr(model_runner, "model_state", None)
+    return model_state.__class__.__name__ == "RWKV7ModelState"
+
+
 def run_mixed_prefill_decode_warmup(
     model_runner: GPUModelRunner,
     worker_execute_model: Callable[[SchedulerOutput], Any],
@@ -211,14 +216,21 @@ def warmup_kernels(
     decode_block_deltas = [
         d - p for d, p in zip(decode_block_counts, prefill_block_counts)
     ]
-    max_blocks_per_req = sum(decode_block_counts)
+    if num_kv_cache_groups == 0:
+        max_reqs_by_kv_cache = model_runner.scheduler_config.max_num_seqs
+    else:
+        max_blocks_per_req = sum(decode_block_counts)
+        # Reserve block 0 (null block) and ensure we have enough blocks.
+        max_reqs_by_kv_cache = max(
+            1,
+            (model_runner.kv_cache_config.num_blocks - 1) // max_blocks_per_req,
+        )
 
     num_reqs = min(
         model_runner.scheduler_config.max_num_seqs,
         model_runner.scheduler_config.max_num_batched_tokens
         // max(prompt_len, decode_query_len),
-        # Reserve block 0 (null block) and ensure we have enough blocks.
-        max(1, (model_runner.kv_cache_config.num_blocks - 1) // max_blocks_per_req),
+        max_reqs_by_kv_cache,
     )
 
     req_ids = [f"_warmup_{i}_" for i in range(num_reqs)]
@@ -228,7 +240,9 @@ def warmup_kernels(
         sampling_params = None
         pooling_params = PoolingParams()
     else:
-        sampling_params = SamplingParams.for_sampler_warmup()
+        sampling_params = SamplingParams.for_sampler_warmup(
+            use_rapid_sampler=envs.VLLM_USE_RAPID_SAMPLER
+        )
         pooling_params = None
 
     # Assign distinct block IDs per request per group. 0 null block, start from 1.

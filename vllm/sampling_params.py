@@ -8,7 +8,7 @@ import math
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import msgspec
 from pydantic import BeforeValidator
@@ -26,6 +26,7 @@ logger = init_logger(__name__)
 
 _SAMPLING_EPS = 1e-5
 _MAX_TEMP = 1e-2
+RAPID_PENALTY_DECAY_DEFAULT = 0.996
 
 MAX_LOGPROB_TOKEN_IDS = 128
 """Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
@@ -160,6 +161,22 @@ class RepetitionDetectionParams:
     detection. Must be >= 2. Example: 3 for detecting a phrase repeated
     3 times. Must be used together with max_pattern_size."""
 
+    mode: Literal["consecutive", "occurrence"] = "consecutive"
+    """Detection mode.
+
+    - "consecutive" detects tail patterns repeated back-to-back.
+    - "occurrence" detects the tail N-gram when it has occurred min_count
+      times anywhere in the output token stream.
+    """
+
+    occurrence_rules: list[tuple[int, int]] | None = None
+    """Optional occurrence-mode rules as ``(ngram_size, min_count)`` pairs.
+
+    This allows shorter N-grams to require higher counts while preserving
+    the stricter long N-gram rule. When set, these rules replace
+    min_pattern_size/max_pattern_size/min_count for occurrence mode.
+    """
+
     def __post_init__(self):
         if (
             self.max_pattern_size < 0
@@ -177,6 +194,30 @@ class RepetitionDetectionParams:
                 "in engine output. If you do not wish to detect repetitive "
                 "patterns, set max_pattern_size to 0."
             )
+        if self.mode not in ("consecutive", "occurrence"):
+            raise ValueError(
+                f"mode must be either 'consecutive' or 'occurrence', got {self.mode!r}."
+            )
+        if self.occurrence_rules is not None:
+            if self.mode != "occurrence":
+                raise ValueError(
+                    "occurrence_rules can only be used with mode='occurrence'."
+                )
+            normalized_rules = []
+            for ngram_size, min_count in self.occurrence_rules:
+                if ngram_size <= 0:
+                    raise ValueError(
+                        "occurrence rule ngram_size must be positive, "
+                        f"got {ngram_size}."
+                    )
+                if min_count < 2:
+                    raise ValueError(
+                        f"occurrence rule min_count must be >= 2, got {min_count}."
+                    )
+                normalized_rules.append((int(ngram_size), int(min_count)))
+            if not normalized_rules:
+                raise ValueError("occurrence_rules must contain at least one rule.")
+            self.occurrence_rules = normalized_rules
 
 
 class RequestOutputKind(Enum):
@@ -233,6 +274,8 @@ class SamplingParams(
     """Penalizes new tokens based on whether they appear in the prompt and the
     generated text so far. Values > 1 encourage the model to use new tokens,
     while values < 1 encourage the model to repeat tokens."""
+    penalty_decay: float = RAPID_PENALTY_DECAY_DEFAULT
+    """Decay factor for rapid-sampling's per-token penalty state."""
     temperature: float = 1.0
     """Controls the randomness of the sampling. Lower values make the model
     more deterministic, while higher values make the model more random. Zero
@@ -358,6 +401,7 @@ class SamplingParams(
         presence_penalty: float | None = 0.0,
         frequency_penalty: float | None = 0.0,
         repetition_penalty: float | None = 1.0,
+        penalty_decay: float | None = RAPID_PENALTY_DECAY_DEFAULT,
         temperature: float | None = 1.0,
         top_p: float | None = 1.0,
         top_k: int = 0,
@@ -419,6 +463,9 @@ class SamplingParams(
             repetition_penalty=1.0
             if repetition_penalty is None
             else repetition_penalty,
+            penalty_decay=RAPID_PENALTY_DECAY_DEFAULT
+            if penalty_decay is None
+            else penalty_decay,
             temperature=1.0 if temperature is None else temperature,
             top_p=1.0 if top_p is None else top_p,
             top_k=top_k,
@@ -534,6 +581,28 @@ class SamplingParams(
             raise ValueError(
                 "repetition_penalty must be greater than zero, got "
                 f"{self.repetition_penalty}."
+            )
+        if not math.isfinite(self.penalty_decay):
+            raise VLLMValidationError(
+                f"penalty_decay must be a finite number, got {self.penalty_decay}.",
+                parameter="penalty_decay",
+                value=self.penalty_decay,
+            )
+        if not 0.0 <= self.penalty_decay <= 1.0:
+            raise VLLMValidationError(
+                f"penalty_decay must be in [0, 1], got {self.penalty_decay}.",
+                parameter="penalty_decay",
+                value=self.penalty_decay,
+            )
+        if (
+            self.penalty_decay != RAPID_PENALTY_DECAY_DEFAULT
+            and not envs.VLLM_USE_RAPID_SAMPLER
+        ):
+            raise VLLMValidationError(
+                "penalty_decay is only supported when rapid-sampling is enabled. "
+                "Set VLLM_USE_RAPID_SAMPLER=1 to use it.",
+                parameter="penalty_decay",
+                value=self.penalty_decay,
             )
         if not math.isfinite(self.temperature):
             raise VLLMValidationError(
@@ -1070,6 +1139,7 @@ class SamplingParams(
             f"presence_penalty={self.presence_penalty}, "
             f"frequency_penalty={self.frequency_penalty}, "
             f"repetition_penalty={self.repetition_penalty}, "
+            f"penalty_decay={self.penalty_decay}, "
             f"temperature={self.temperature}, "
             f"top_p={self.top_p}, "
             f"top_k={self.top_k}, "
@@ -1093,21 +1163,28 @@ class SamplingParams(
         )
 
     @staticmethod
-    def for_sampler_warmup() -> "SamplingParams":
+    def for_sampler_warmup(
+        *, use_rapid_sampler: bool | None = None
+    ) -> "SamplingParams":
         """Set parameters to exercise all sampler logic."""
+        use_rapid_sampler = (
+            envs.VLLM_USE_RAPID_SAMPLER
+            if use_rapid_sampler is None
+            else use_rapid_sampler
+        )
         return SamplingParams(
             temperature=0.9,
             top_p=0.9,
             top_k=50,
-            min_p=0.1,
-            frequency_penalty=0.5,
+            min_p=0.0 if use_rapid_sampler else 0.1,
+            frequency_penalty=0.0 if use_rapid_sampler else 0.5,
             presence_penalty=0.5,
             repetition_penalty=1.2,
             min_tokens=2,
             logit_bias={0: -1.0, 1: 0.5},
             _bad_words_token_ids=[[0], [1, 2]],
-            logprobs=5,
-            prompt_logprobs=1,
+            logprobs=None if use_rapid_sampler else 5,
+            prompt_logprobs=None if use_rapid_sampler else 1,
         )
 
 

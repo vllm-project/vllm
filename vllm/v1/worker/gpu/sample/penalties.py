@@ -3,7 +3,7 @@
 import numpy as np
 import torch
 
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import RAPID_PENALTY_DECAY_DEFAULT, SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -22,11 +22,14 @@ class PenaltiesState:
         self.repetition_penalty = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.frequency_penalty = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.presence_penalty = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
+        self.penalty_decay = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.use_penalty = np.zeros(max_num_reqs, dtype=bool)
 
         # Initialize repetition penalty manually because 0 is an invalid value for it.
         self.repetition_penalty.np.fill(1.0)
         self.repetition_penalty.copy_to_uva()
+        self.penalty_decay.np.fill(RAPID_PENALTY_DECAY_DEFAULT)
+        self.penalty_decay.copy_to_uva()
 
         # Statistics for penalties.
         self.prompt_bin_mask = torch.zeros(
@@ -47,6 +50,7 @@ class PenaltiesState:
         self.repetition_penalty.np[req_idx] = sampling_params.repetition_penalty
         self.frequency_penalty.np[req_idx] = sampling_params.frequency_penalty
         self.presence_penalty.np[req_idx] = sampling_params.presence_penalty
+        self.penalty_decay.np[req_idx] = sampling_params.penalty_decay
 
         do_penalty = use_penalty(sampling_params)
         self.use_penalty[req_idx] = do_penalty
@@ -77,6 +81,49 @@ class PenaltiesState:
         self.repetition_penalty.copy_to_uva()
         self.frequency_penalty.copy_to_uva()
         self.presence_penalty.copy_to_uva()
+        self.penalty_decay.copy_to_uva()
+
+    def any_frequency_penalty(self, idx_mapping_np: np.ndarray) -> bool:
+        return bool(np.any(self.frequency_penalty.np[idx_mapping_np] != 0.0))
+
+    def use_rapid_penalty(self, idx_mapping_np: np.ndarray) -> bool:
+        return bool(
+            np.any(self.presence_penalty.np[idx_mapping_np] != 0.0)
+            or np.any(self.repetition_penalty.np[idx_mapping_np] != 1.0)
+            or np.any(
+                self.penalty_decay.np[idx_mapping_np] != RAPID_PENALTY_DECAY_DEFAULT
+            )
+        )
+
+    def rapid_penalty_params(
+        self,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray | None = None,
+        *,
+        scalar_if_uniform: bool = False,
+    ) -> tuple[torch.Tensor | float, torch.Tensor | float, torch.Tensor | float]:
+        if scalar_if_uniform:
+            if idx_mapping_np is None:
+                raise ValueError("idx_mapping_np is required for scalar_if_uniform")
+            presence_values = self.presence_penalty.np[idx_mapping_np]
+            repetition_values = self.repetition_penalty.np[idx_mapping_np]
+            decay_values = self.penalty_decay.np[idx_mapping_np]
+            if (
+                presence_values.size > 0
+                and np.all(presence_values == presence_values[0])
+                and np.all(repetition_values == repetition_values[0])
+                and np.all(decay_values == decay_values[0])
+            ):
+                return (
+                    float(presence_values[0]),
+                    float(repetition_values[0]),
+                    float(decay_values[0]),
+                )
+        return (
+            self.presence_penalty.gpu[expanded_idx_mapping],
+            self.repetition_penalty.gpu[expanded_idx_mapping],
+            self.penalty_decay.gpu[expanded_idx_mapping],
+        )
 
     def apply_penalties(
         self,

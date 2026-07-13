@@ -107,6 +107,81 @@ class TestCheckSequenceRepetition:
         )
         assert check_sequence_repetition(token_ids, params)
 
+    def test_occurrence_mode_detects_non_consecutive_ngram_count(self):
+        """Occurrence mode stops when the tail N-gram reaches min_count."""
+        repeated_ngram = list(range(16))
+        token_ids = []
+        for i in range(5):
+            token_ids.extend(repeated_ngram)
+            token_ids.append(1000 + i)
+        token_ids.extend(repeated_ngram)
+        params = RepetitionDetectionParams(
+            max_pattern_size=16,
+            min_pattern_size=16,
+            min_count=6,
+            mode="occurrence",
+        )
+        assert check_sequence_repetition(token_ids, params)
+
+    def test_occurrence_mode_ignores_count_below_threshold(self):
+        """Occurrence mode preserves output before the sixth 16-gram."""
+        repeated_ngram = list(range(16))
+        token_ids = []
+        for i in range(4):
+            token_ids.extend(repeated_ngram)
+            token_ids.append(1000 + i)
+        token_ids.extend(repeated_ngram)
+        params = RepetitionDetectionParams(
+            max_pattern_size=16,
+            min_pattern_size=16,
+            min_count=6,
+            mode="occurrence",
+        )
+        assert not check_sequence_repetition(token_ids, params)
+
+    def test_occurrence_mode_allows_overlapping_ngrams(self):
+        """Occurrence mode uses sliding N-grams, matching rollout fallback."""
+        token_ids = [7] * 21
+        params = RepetitionDetectionParams(
+            max_pattern_size=16,
+            min_pattern_size=16,
+            min_count=6,
+            mode="occurrence",
+        )
+        assert check_sequence_repetition(token_ids, params)
+
+    def test_occurrence_rules_detect_short_ngram_with_higher_threshold(self):
+        """Occurrence rules allow short N-grams only at severe repeat counts."""
+        ngram = [11, 12, 13, 14]
+        params = RepetitionDetectionParams(
+            mode="occurrence",
+            occurrence_rules=[(4, 20)],
+        )
+
+        assert not check_sequence_repetition(ngram * 19, params)
+        assert check_sequence_repetition(ngram * 20, params)
+
+    def test_occurrence_rules_keep_eight_gram_below_threshold(self):
+        """The rollout-calibrated 8-gram rule fires on the tenth occurrence."""
+        ngram = list(range(8))
+        params = RepetitionDetectionParams(
+            mode="occurrence",
+            occurrence_rules=[(8, 10)],
+        )
+
+        assert not check_sequence_repetition(ngram * 9, params)
+        assert check_sequence_repetition(ngram * 10, params)
+
+    def test_occurrence_rules_require_occurrence_mode(self):
+        with pytest.raises(ValueError):
+            RepetitionDetectionParams(
+                max_pattern_size=8,
+                min_pattern_size=8,
+                min_count=10,
+                mode="consecutive",
+                occurrence_rules=[(8, 10)],
+            )
+
 
 # ============================================================================
 # INTEGRATION TESTS - check_stop with repetition detection
@@ -288,3 +363,65 @@ class TestRepetitionDetectionIntegration:
         )
         request.append_output_token_ids([10, 20, 10, 20, 10, 20])
         assert not check_stop(request, max_model_len=1024)
+
+    def test_occurrence_mode_stops_generation_incrementally(self):
+        """Occurrence mode uses request-local counts in check_stop."""
+        params = SamplingParams(
+            max_tokens=200,
+            repetition_detection=RepetitionDetectionParams(
+                max_pattern_size=16,
+                min_pattern_size=16,
+                min_count=6,
+                mode="occurrence",
+            ),
+        )
+        request = Request(
+            request_id="test",
+            prompt_token_ids=[1],
+            sampling_params=params,
+            pooling_params=None,
+        )
+        repeated_ngram = list(range(16))
+
+        for i in range(5):
+            request.append_output_token_ids(repeated_ngram + [1000 + i])
+            assert not check_stop(request, max_model_len=1024)
+
+        request.append_output_token_ids(repeated_ngram)
+        assert check_stop(request, max_model_len=1024)
+        assert request.status == RequestStatus.FINISHED_REPETITION
+        assert request.stop_reason == "repetition_detected"
+        assert (
+            request.repetition_ngram_next_start[16]
+            == len(request.output_token_ids) - 16 + 1
+        )
+
+    def test_occurrence_rules_stop_generation_incrementally(self):
+        """Occurrence rules share request-local counts across decode steps."""
+        params = SamplingParams(
+            max_tokens=200,
+            repetition_detection=RepetitionDetectionParams(
+                mode="occurrence",
+                occurrence_rules=[(8, 10), (4, 20)],
+            ),
+        )
+        request = Request(
+            request_id="test",
+            prompt_token_ids=[1],
+            sampling_params=params,
+            pooling_params=None,
+        )
+        repeated_ngram = list(range(8))
+
+        for _ in range(9):
+            request.append_output_token_ids(repeated_ngram)
+            assert not check_stop(request, max_model_len=1024)
+
+        request.append_output_token_ids(repeated_ngram)
+        assert check_stop(request, max_model_len=1024)
+        assert request.status == RequestStatus.FINISHED_REPETITION
+        assert request.stop_reason == "repetition_detected"
+        assert (
+            request.repetition_ngram_next_start[8]
+            == len(request.output_token_ids) - 8 + 1
+        )

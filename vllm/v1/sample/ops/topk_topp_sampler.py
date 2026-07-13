@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
+import secrets
+from typing import cast
 
 import torch
 import torch.nn as nn
@@ -10,12 +13,41 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.model import LogprobsMode
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.sampling_params import RAPID_PENALTY_DECAY_DEFAULT
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
     from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
 
 logger = init_logger(__name__)
+
+_RAPID_SAMPLER_MODULE = None
+_RAPID_SAMPLER_STATES: dict[tuple[int, int], torch.Tensor] = {}
+_RAPID_PENALTY_INDEX_STATS = {
+    "indexed_calls": 0,
+    "indexed_rows": 0,
+    "indexed_vocab_elements": 0,
+}
+
+
+def reset_rapid_penalty_index_stats() -> None:
+    for key in _RAPID_PENALTY_INDEX_STATS:
+        _RAPID_PENALTY_INDEX_STATS[key] = 0
+
+
+def get_rapid_penalty_index_stats() -> dict[str, int]:
+    return dict(_RAPID_PENALTY_INDEX_STATS)
+
+
+def _record_rapid_penalty_index_stats(
+    *,
+    rows: int,
+    vocab_size: int,
+) -> None:
+    elements = rows * vocab_size
+    _RAPID_PENALTY_INDEX_STATS["indexed_calls"] += 1
+    _RAPID_PENALTY_INDEX_STATS["indexed_rows"] += rows
+    _RAPID_PENALTY_INDEX_STATS["indexed_vocab_elements"] += elements
 
 
 def flashinfer_sampler_supported() -> bool:
@@ -67,6 +99,58 @@ def flashinfer_sampler_supported() -> bool:
     return False
 
 
+def rapid_sampler_supported() -> bool:
+    """Decide whether the rapid-sampling CUDA sampler can be used."""
+    if not current_platform.is_cuda():
+        return False
+    if not envs.VLLM_USE_RAPID_SAMPLER:
+        return False
+
+    capability = current_platform.get_device_capability()
+    if capability is None or capability.major < 7:
+        unsupported_reason = (
+            "missing CUDA capability"
+            if capability is None
+            else f"unsupported compute capability {capability.as_version_str()}"
+        )
+        message = f"Rapid top-p/top-k sampling unavailable: {unsupported_reason}."
+        if envs.is_set("VLLM_USE_RAPID_SAMPLER"):
+            raise RuntimeError(
+                f"{message} Unset VLLM_USE_RAPID_SAMPLER=1 to use another sampler."
+            )
+        logger.warning_once("%s Falling back to the native sampler.", message)
+        return False
+
+    try:
+        _load_rapid_sampler_module()
+    except ImportError as exc:
+        message = "Rapid top-p/top-k sampling native extension is unavailable."
+        if envs.is_set("VLLM_USE_RAPID_SAMPLER"):
+            raise RuntimeError(
+                f"{message} Build vllm._rapid_sampling or unset "
+                "VLLM_USE_RAPID_SAMPLER=1."
+            ) from exc
+        logger.warning_once(
+            "%s Falling back to the native sampler.",
+            message,
+        )
+        return False
+
+    logger.info_once("Using rapid-sampling for top-p & top-k sampling.")
+    return True
+
+
+def rapid_sample_input_supported(logits: torch.Tensor) -> bool:
+    vocab_size = logits.shape[-1]
+    return (
+        logits.is_cuda
+        and logits.dtype == torch.float32
+        and vocab_size > 0
+        and vocab_size <= 1048576
+        and vocab_size % 4 == 0
+    )
+
+
 class TopKTopPSampler(nn.Module):
     """
     Module that performs optional top-k and top-p filtering followed by
@@ -84,15 +168,19 @@ class TopKTopPSampler(nn.Module):
         self.logprobs_mode = logprobs_mode
         self.use_fp64_gumbel = use_fp64_gumbel
         if current_platform.is_cuda():
-            # FlashInfer doesn't expose post-top-k/top-p logits/logprobs,
-            # so it can't be used when the configured mode requires them.
-            can_use_flashinfer = (
-                logprobs_mode not in ("processed_logits", "processed_logprobs")
-                and flashinfer_sampler_supported()
+            # Optimized samplers don't expose post-top-k/top-p logits/logprobs,
+            # so they can't be used when the configured mode requires them.
+            can_use_optimized = logprobs_mode not in (
+                "processed_logits",
+                "processed_logprobs",
             )
-            self.forward = (
-                self.forward_cuda if can_use_flashinfer else self.forward_native
-            )
+            can_use_rapid = can_use_optimized and rapid_sampler_supported()
+            if can_use_rapid:
+                self.forward = self.forward_rapid_cuda
+            elif can_use_optimized and flashinfer_sampler_supported():
+                self.forward = self.forward_cuda
+            else:
+                self.forward = self.forward_native
         elif current_platform.is_cpu():
             arch = current_platform.get_cpu_architecture()
             # Fall back to native implementation for POWERPC and RISCV.
@@ -172,6 +260,28 @@ class TopKTopPSampler(nn.Module):
         # In flex_attn/triton_attn fp32 inference, logits can be non-contiguous
         # because of slicing operation in logits_processor.
         return flashinfer_sample(logits.contiguous(), k, p, generators), None
+
+    def forward_rapid_cuda(
+        self,
+        logits: torch.Tensor,
+        generators: dict[int, torch.Generator],
+        k: torch.Tensor | None,
+        p: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Rapid-sampling implementation for top-k and top-p sampling."""
+        if generators:
+            return self.forward_native(logits, generators, k, p)
+        if self.use_fp64_gumbel:
+            return self.forward_native(logits, generators, k, p)
+        scalar_top_k = _rapid_scalar(k, logits.shape[-1])
+        scalar_top_p = _rapid_scalar(p, 1.0)
+        if scalar_top_k is None or scalar_top_p is None:
+            return self.forward_native(logits, generators, k, p)
+        if not rapid_sample_input_supported(logits):
+            return self.forward_native(logits, generators, k, p)
+        if self.logprobs_mode in ("processed_logits", "processed_logprobs"):
+            return self.forward_native(logits, generators, k, p)
+        return rapid_sample(logits, scalar_top_k, scalar_top_p), None
 
     def forward_cpu(
         self,
@@ -466,6 +576,189 @@ def random_sample(
         for i, generator in generators.items():
             q[i].exponential_(generator=generator)
     return sample_with_exponential_noise(probs, q)
+
+
+def _load_rapid_sampler_module():
+    global _RAPID_SAMPLER_MODULE
+    if _RAPID_SAMPLER_MODULE is None:
+        try:
+            _RAPID_SAMPLER_MODULE = importlib.import_module("vllm._rapid_sampling")
+        except ImportError:
+            _RAPID_SAMPLER_MODULE = False
+    if _RAPID_SAMPLER_MODULE is False:
+        raise ImportError("vllm._rapid_sampling is not installed")
+    return _RAPID_SAMPLER_MODULE
+
+
+def _rapid_vector(
+    value: torch.Tensor | int | float | None,
+    batch_size: int,
+    default,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
+    if value is None:
+        return torch.full((batch_size,), default, dtype=dtype, device=device)
+    if isinstance(value, (int, float)):
+        return torch.full((batch_size,), value, dtype=dtype, device=device)
+    tensor = cast(torch.Tensor, value)
+    if tensor.numel() == 1 and batch_size != 1:
+        tensor = tensor.expand(batch_size)
+    assert tensor.shape == (batch_size,), (
+        f"rapid sampler parameter must have shape ({batch_size},), "
+        f"got {tuple(tensor.shape)}"
+    )
+    return tensor.to(device=device, dtype=dtype).contiguous()
+
+
+def _rapid_scalar(value: torch.Tensor | int | float | None, default):
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return value
+    if value.numel() != 1:
+        return None
+    return value.reshape(-1)[0].item()
+
+
+def _rapid_states(module, logits: torch.Tensor) -> torch.Tensor:
+    batch_size = logits.shape[0] if logits.dim() >= 2 else 1
+    device_idx = logits.device.index
+    if device_idx is None:
+        device_idx = torch.accelerator.current_device_index()
+    key = (device_idx, batch_size)
+    states = _RAPID_SAMPLER_STATES.get(key)
+    if states is None or states.device != logits.device:
+        seed = secrets.randbits(63)
+        with torch.accelerator.device_index(device_idx):
+            states = module.setup_rand(seed, batch_size)
+        _RAPID_SAMPLER_STATES[key] = states
+    return states
+
+
+def rapid_sample(
+    logits: torch.Tensor,
+    k: torch.Tensor | int | None,
+    p: torch.Tensor | float | None,
+    temperatures: torch.Tensor | float | None = None,
+    penalties: torch.Tensor | None = None,
+    presence_penalties: torch.Tensor | None = None,
+    repetition_penalties: torch.Tensor | None = None,
+    penalty_decays: torch.Tensor | None = None,
+    penalty_indices: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Sample from logits using the rapid-sampling CUDA extension."""
+    assert rapid_sample_input_supported(logits)
+    assert logits.dtype == torch.float32
+
+    logits = logits.contiguous()
+    batch_size = logits.shape[0] if logits.dim() >= 2 else 1
+    vocab_size = logits.shape[-1]
+    if penalties is None:
+        scalar_temperature = _rapid_scalar(temperatures, 1.0)
+        scalar_top_k = _rapid_scalar(k, vocab_size)
+        scalar_top_p = _rapid_scalar(p, 1.0)
+        if scalar_temperature is None or scalar_top_k is None or scalar_top_p is None:
+            raise RuntimeError(
+                "rapid-sampling without penalties only supports uniform scalar "
+                "temperature/top_k/top_p. Use the native sampler for mixed "
+                "per-request sampling parameters."
+            )
+        module = _load_rapid_sampler_module()
+        states = _rapid_states(module, logits)
+        return module.batch_sampling_temperature_topk_topp(
+            logits,
+            states,
+            float(scalar_temperature),
+            int(scalar_top_k),
+            float(scalar_top_p),
+        ).view(-1)
+
+    module = _load_rapid_sampler_module()
+    states = _rapid_states(module, logits)
+
+    if penalties is not None:
+        assert penalties.device == logits.device and penalties.dtype == torch.float32
+        assert (
+            penalties.is_contiguous()
+            and penalties.dim() == 2
+            and penalties.shape[1] == vocab_size
+        )
+        scalar_temperature = _rapid_scalar(temperatures, 1.0)
+        scalar_top_k = _rapid_scalar(k, vocab_size)
+        scalar_top_p = _rapid_scalar(p, 1.0)
+        scalar_presence_penalty = _rapid_scalar(presence_penalties, 0.0)
+        scalar_repetition_penalty = _rapid_scalar(repetition_penalties, 1.0)
+        scalar_penalty_decay = _rapid_scalar(
+            penalty_decays, RAPID_PENALTY_DECAY_DEFAULT
+        )
+        if any(
+            value is None
+            for value in (
+                scalar_temperature,
+                scalar_top_k,
+                scalar_top_p,
+                scalar_presence_penalty,
+                scalar_repetition_penalty,
+                scalar_penalty_decay,
+            )
+        ):
+            raise RuntimeError(
+                "rapid-sampling with penalties only supports uniform scalar "
+                "temperature/top_k/top_p/presence_penalty/"
+                "repetition_penalty/penalty_decay."
+            )
+
+        if penalty_indices is not None:
+            penalty_indices = _rapid_vector(
+                penalty_indices, batch_size, 0, torch.int32, logits.device
+            )
+            indexed_sampler = getattr(
+                module,
+                "batch_sampling_repetition_temperature_topk_topp_indexed",
+                None,
+            )
+            if indexed_sampler is None:
+                raise RuntimeError(
+                    "rapid-sampling indexed penalty kernel is unavailable; "
+                    "refusing the legacy gather/scatter path."
+                )
+            _record_rapid_penalty_index_stats(
+                rows=batch_size,
+                vocab_size=vocab_size,
+            )
+            return indexed_sampler(
+                logits,
+                penalties,
+                penalty_indices,
+                states,
+                float(scalar_presence_penalty),
+                float(scalar_repetition_penalty),
+                float(scalar_penalty_decay),
+                float(scalar_temperature),
+                int(scalar_top_k),
+                float(scalar_top_p),
+            ).view(-1)
+
+        assert penalties.shape[0] == batch_size
+
+        return module.batch_sampling_repetition_temperature_topk_topp(
+            logits,
+            penalties,
+            states,
+            float(scalar_presence_penalty),
+            float(scalar_repetition_penalty),
+            float(scalar_penalty_decay),
+            float(scalar_temperature),
+            int(scalar_top_k),
+            float(scalar_top_p),
+        ).view(-1)
+
+    raise RuntimeError(
+        "rapid-sampling without penalties only supports uniform scalar "
+        "temperature/top_k/top_p. Use the native sampler for mixed per-request "
+        "sampling parameters."
+    )
 
 
 def flashinfer_sample(

@@ -6,6 +6,7 @@ from torch import Generator
 
 from tests.utils import large_gpu_mark
 from vllm.platforms import current_platform
+from vllm.sampling_params import RAPID_PENALTY_DECAY_DEFAULT, SamplingParams
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.sample.ops.topk_topp_sampler import (
@@ -42,6 +43,16 @@ def _flashinfer_topk_topp_supported() -> bool:
 
 
 FLASHINFER_TOPK_TOPP_SUPPORTED = _flashinfer_topk_topp_supported()
+
+
+def _rapid_sampler_platform_supported() -> bool:
+    if not current_platform.is_cuda():
+        return False
+    capability = current_platform.get_device_capability()
+    return capability is not None and capability.major >= 7
+
+
+RAPID_SAMPLER_PLATFORM_SUPPORTED = _rapid_sampler_platform_supported()
 
 
 def _seed_default_generator(seed: int) -> None:
@@ -131,6 +142,893 @@ def test_random_sample_uses_fp64_exponential_race_when_requested():
     actual = random_sample(probs.clone(), {}, use_fp64_gumbel=True)
 
     assert torch.equal(actual, expected)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="Rapid sampler is a CUDA-only backend.",
+)
+def test_rapid_sample_rejects_per_request_topk_topp_without_penalties():
+    from vllm.v1.sample.ops.topk_topp_sampler import rapid_sample
+
+    torch.set_default_device(DEVICE_TYPE)
+    vocab_size = 8
+    num_reqs = 65
+    logits = torch.full(
+        (num_reqs, vocab_size), -20.0, dtype=torch.float32, device=DEVICE_TYPE
+    )
+    logits[0, 0] = 2.0
+    logits[0, 1] = 1.0
+    logits[1:, 2] = 2.0
+    logits[1:, 3] = 1.9
+
+    top_k = torch.full((num_reqs,), vocab_size, dtype=torch.int32, device=DEVICE_TYPE)
+    top_k[0] = 2
+    top_p = torch.zeros(num_reqs, dtype=torch.float32, device=DEVICE_TYPE)
+    top_p[0] = 0.9
+
+    with pytest.raises(RuntimeError, match="uniform scalar"):
+        rapid_sample(logits, top_k, top_p)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="Rapid sampler is a CUDA-only backend.",
+)
+def test_rapid_sampler_falls_back_for_per_request_topk_topp(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    torch.set_default_device(DEVICE_TYPE)
+    monkeypatch.setenv("VLLM_USE_RAPID_SAMPLER", "1")
+    monkeypatch.setattr(topk_topp_sampler, "rapid_sampler_supported", lambda: True)
+    vocab_size = 16
+    num_reqs = 32
+    generator = Generator(device=DEVICE_TYPE).manual_seed(7)
+    logits = torch.randn(
+        (num_reqs, vocab_size),
+        dtype=torch.float32,
+        device=DEVICE_TYPE,
+        generator=generator,
+    )
+    top_k = torch.tensor([1, 2, 3, 4, 16, 16, 16, 16] * 4, device=DEVICE_TYPE)
+    top_k = top_k.to(torch.int32)
+    top_p = torch.tensor([1.0, 1.0, 1.0, 1.0, 0.2, 0.4, 0.7, 1.0] * 4)
+    top_p = top_p.to(device=DEVICE_TYPE, dtype=torch.float32)
+    called = False
+
+    def native(_self, logits, generators, k, p):
+        nonlocal called
+        called = True
+        return (
+            torch.zeros(logits.shape[0], dtype=torch.int32, device=logits.device),
+            None,
+        )
+
+    monkeypatch.setattr(topk_topp_sampler.TopKTopPSampler, "forward_native", native)
+
+    sampler = topk_topp_sampler.TopKTopPSampler()
+
+    tokens, processed = sampler(logits.clone(), {}, top_k, top_p)
+
+    assert called
+    assert processed is None
+    assert torch.equal(
+        tokens, torch.zeros(num_reqs, dtype=torch.int32, device=logits.device)
+    )
+
+
+@pytest.mark.skipif(
+    not RAPID_SAMPLER_PLATFORM_SUPPORTED,
+    reason="Rapid sampler requires CUDA compute capability >= 7.",
+)
+def test_rapid_sampler_backend_enabled_by_default(monkeypatch: pytest.MonkeyPatch):
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    monkeypatch.delenv("VLLM_USE_RAPID_SAMPLER", raising=False)
+    monkeypatch.setattr(topk_topp_sampler, "_RAPID_SAMPLER_MODULE", None)
+    monkeypatch.setattr(
+        topk_topp_sampler, "_load_rapid_sampler_module", lambda: object()
+    )
+
+    assert topk_topp_sampler.rapid_sampler_supported()
+
+
+def test_rapid_sampler_default_falls_back_for_unsupported_cuda_capability(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    class MockCapability:
+        major = 6
+
+        @staticmethod
+        def as_version_str():
+            return "6.0"
+
+    class MockPlatform:
+        @staticmethod
+        def is_cuda():
+            return True
+
+        @staticmethod
+        def get_device_capability():
+            return MockCapability()
+
+    monkeypatch.delenv("VLLM_USE_RAPID_SAMPLER", raising=False)
+    monkeypatch.setattr(topk_topp_sampler, "current_platform", MockPlatform())
+
+    assert not topk_topp_sampler.rapid_sampler_supported()
+
+
+def test_rapid_sampler_env_opt_in_rejects_unsupported_cuda_capability(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    class MockCapability:
+        major = 6
+
+        @staticmethod
+        def as_version_str():
+            return "6.0"
+
+    class MockPlatform:
+        @staticmethod
+        def is_cuda():
+            return True
+
+        @staticmethod
+        def get_device_capability():
+            return MockCapability()
+
+    monkeypatch.setenv("VLLM_USE_RAPID_SAMPLER", "1")
+    monkeypatch.setattr(topk_topp_sampler, "current_platform", MockPlatform())
+
+    with pytest.raises(RuntimeError, match="unsupported compute capability 6.0"):
+        topk_topp_sampler.rapid_sampler_supported()
+
+
+@pytest.mark.skipif(
+    not RAPID_SAMPLER_PLATFORM_SUPPORTED,
+    reason="Rapid sampler requires CUDA compute capability >= 7.",
+)
+def test_rapid_sampler_backend_enabled_by_env(monkeypatch: pytest.MonkeyPatch):
+    from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
+
+    monkeypatch.setenv("VLLM_USE_RAPID_SAMPLER", "1")
+    sampler = TopKTopPSampler()
+
+    assert sampler.forward.__name__ == "forward_rapid_cuda"
+
+    vocab_size = 8
+    num_reqs = 65
+    logits = torch.full(
+        (num_reqs, vocab_size), -20.0, dtype=torch.float32, device=DEVICE_TYPE
+    )
+    logits[0, 0] = 2.0
+    logits[0, 1] = 1.0
+    logits[1:, 2] = 2.0
+    logits[1:, 3] = 1.9
+    top_k = vocab_size
+    top_p = 0.0
+
+    tokens, processed = sampler(logits, {}, top_k, top_p)
+
+    assert processed is None
+    assert int(tokens[0]) == 0
+    assert torch.equal(tokens[1:], torch.full_like(tokens[1:], 2))
+
+
+@pytest.mark.skipif(
+    not RAPID_SAMPLER_PLATFORM_SUPPORTED,
+    reason="Rapid sampler requires CUDA compute capability >= 7.",
+)
+def test_rapid_sampler_falls_back_for_per_request_generators(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    monkeypatch.setenv("VLLM_USE_RAPID_SAMPLER", "1")
+    monkeypatch.setattr(topk_topp_sampler, "rapid_sampler_supported", lambda: True)
+
+    sampler = topk_topp_sampler.TopKTopPSampler()
+    logits = torch.randn(2, 8, dtype=torch.float32, device=DEVICE_TYPE)
+    top_k = torch.full((2,), 2, dtype=torch.int32, device=DEVICE_TYPE)
+    generators = {0: torch.Generator(device=DEVICE_TYPE).manual_seed(0)}
+
+    called = False
+
+    def native(_self, logits, generators, k, p):
+        nonlocal called
+        called = True
+        assert generators
+        return (
+            torch.ones(logits.shape[0], dtype=torch.int32, device=logits.device),
+            None,
+        )
+
+    monkeypatch.setattr(topk_topp_sampler.TopKTopPSampler, "forward_native", native)
+
+    tokens, processed = sampler(logits, generators, top_k, None)
+
+    assert called
+    assert processed is None
+    assert torch.equal(
+        tokens, torch.ones(2, dtype=torch.int32, device=logits.device)
+    )
+
+
+@pytest.mark.skipif(
+    not RAPID_SAMPLER_PLATFORM_SUPPORTED,
+    reason="Rapid sampler requires CUDA compute capability >= 7.",
+)
+def test_rapid_sampler_handles_unfiltered_sampling_without_native_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    def fake_rapid_sample(logits, k, p):
+        assert k == logits.shape[-1]
+        assert p == pytest.approx(1.0)
+        return torch.full(
+            (logits.shape[0],), 4, dtype=torch.int32, device=logits.device
+        )
+
+    monkeypatch.setenv("VLLM_USE_RAPID_SAMPLER", "1")
+    monkeypatch.setattr(topk_topp_sampler, "rapid_sampler_supported", lambda: True)
+    monkeypatch.setattr(topk_topp_sampler, "rapid_sample", fake_rapid_sample)
+    monkeypatch.setattr(
+        topk_topp_sampler.TopKTopPSampler,
+        "forward_native",
+        lambda *args, **kwargs: pytest.fail("native fallback is forbidden"),
+    )
+
+    sampler = topk_topp_sampler.TopKTopPSampler()
+    logits = torch.randn(2, 8, dtype=torch.float32, device=DEVICE_TYPE)
+
+    tokens, processed = sampler(logits, {}, None, None)
+
+    assert torch.equal(tokens, torch.full_like(tokens, 4))
+    assert processed is None
+
+
+@pytest.mark.skipif(
+    not RAPID_SAMPLER_PLATFORM_SUPPORTED,
+    reason="Rapid sampler requires CUDA compute capability >= 7.",
+)
+def test_rapid_sampler_falls_back_for_combined_topk_topp(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    monkeypatch.setenv("VLLM_USE_RAPID_SAMPLER", "1")
+    monkeypatch.setattr(topk_topp_sampler, "rapid_sampler_supported", lambda: True)
+
+    called = False
+
+    def native(_self, logits, generators, k, p):
+        nonlocal called
+        called = True
+        return torch.full(
+            (logits.shape[0],), 2, dtype=torch.int32, device=logits.device
+        ), None
+
+    monkeypatch.setattr(topk_topp_sampler.TopKTopPSampler, "forward_native", native)
+
+    sampler = topk_topp_sampler.TopKTopPSampler()
+    logits = torch.randn(2, 8, dtype=torch.float32, device=DEVICE_TYPE)
+    top_k = torch.tensor([2, 8], dtype=torch.int32, device=DEVICE_TYPE)
+    top_p = torch.tensor([0.5, 0.5], dtype=torch.float32, device=DEVICE_TYPE)
+
+    tokens, processed = sampler(logits, {}, top_k, top_p)
+
+    assert called
+    assert processed is None
+    assert torch.equal(
+        tokens, torch.full((2,), 2, dtype=torch.int32, device=logits.device)
+    )
+
+
+def test_penalty_decay_requires_rapid_sampler(monkeypatch: pytest.MonkeyPatch):
+    from vllm import sampling_params
+
+    assert SamplingParams().penalty_decay == RAPID_PENALTY_DECAY_DEFAULT
+
+    monkeypatch.setattr(
+        sampling_params.envs,
+        "VLLM_USE_RAPID_SAMPLER",
+        False,
+    )
+
+    with pytest.raises(ValueError, match="rapid-sampling"):
+        SamplingParams(penalty_decay=0.95)
+
+
+def test_rapid_sample_uses_scalar_kernel_for_single_value_params(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    captured = {}
+
+    class FakeRapidModule:
+        @staticmethod
+        def batch_sampling_temperature_topk_topp(
+            logits,
+            states,
+            temperature,
+            top_k,
+            top_p,
+        ):
+            captured["logits"] = logits
+            captured["states"] = states
+            captured["temperature"] = temperature
+            captured["top_k"] = top_k
+            captured["top_p"] = top_p
+            return torch.tensor([1, 2], dtype=torch.int32)
+
+        @staticmethod
+        def batch_sampling_temperature_topk_topp_per_request(*args, **kwargs):
+            pytest.fail("homogeneous rapid params should use the scalar API")
+
+    fake_states = torch.empty(2, dtype=torch.uint8)
+    logits = torch.randn(2, 8, dtype=torch.float32)
+    top_k = 3
+    top_p = 0.28
+    temperatures = 1.0
+
+    monkeypatch.setattr(
+        topk_topp_sampler,
+        "rapid_sample_input_supported",
+        lambda logits: True,
+    )
+    monkeypatch.setattr(
+        topk_topp_sampler,
+        "_load_rapid_sampler_module",
+        lambda: FakeRapidModule(),
+    )
+    monkeypatch.setattr(
+        topk_topp_sampler,
+        "_rapid_states",
+        lambda module, logits: fake_states,
+    )
+
+    out = topk_topp_sampler.rapid_sample(
+        logits,
+        top_k,
+        top_p,
+        temperatures=temperatures,
+    )
+
+    assert torch.equal(out, torch.tensor([1, 2], dtype=torch.int32))
+    assert captured["logits"] is logits
+    assert captured["states"] is fake_states
+    assert captured["temperature"] == 1.0
+    assert captured["top_k"] == 3
+    assert captured["top_p"] == pytest.approx(0.28)
+
+
+def test_rapid_sample_rejects_vector_tensor_params_without_penalties(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    class FakeRapidModule:
+        @staticmethod
+        def batch_sampling_temperature_topk_topp(
+            logits,
+            states,
+            temperature,
+            top_k,
+            top_p,
+        ):
+            pytest.fail("vector tensor params should not call rapid CUDA")
+
+    logits = torch.randn(2, 8, dtype=torch.float32)
+    top_k = torch.tensor([3, 3], dtype=torch.int32)
+    top_p = torch.tensor([0.28, 0.28], dtype=torch.float32)
+    temperatures = torch.tensor([1.0, 1.0], dtype=torch.float32)
+
+    monkeypatch.setattr(
+        topk_topp_sampler,
+        "rapid_sample_input_supported",
+        lambda logits: True,
+    )
+    monkeypatch.setattr(
+        topk_topp_sampler,
+        "_load_rapid_sampler_module",
+        lambda: FakeRapidModule(),
+    )
+
+    with pytest.raises(RuntimeError, match="uniform scalar"):
+        topk_topp_sampler.rapid_sample(
+            logits,
+            top_k,
+            top_p,
+            temperatures=temperatures,
+        )
+
+
+def test_rapid_sampler_falls_back_for_mixed_params(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    monkeypatch.setenv("VLLM_USE_RAPID_SAMPLER", "1")
+    monkeypatch.setattr(topk_topp_sampler, "rapid_sampler_supported", lambda: True)
+    monkeypatch.setattr(
+        topk_topp_sampler,
+        "rapid_sample",
+        lambda *args, **kwargs: pytest.fail("mixed params should use native"),
+    )
+    called = False
+
+    def native(_self, logits, generators, k, p):
+        nonlocal called
+        called = True
+        return torch.zeros(logits.shape[0], dtype=torch.int32), None
+
+    monkeypatch.setattr(topk_topp_sampler.TopKTopPSampler, "forward_native", native)
+
+    sampler = topk_topp_sampler.TopKTopPSampler()
+    logits = torch.randn(2, 8, dtype=torch.float32)
+    top_k = torch.tensor([3, 4], dtype=torch.int32)
+    top_p = torch.tensor([0.28, 0.9], dtype=torch.float32)
+
+    tokens, processed = sampler.forward_rapid_cuda(logits, {}, top_k, top_p)
+
+    assert called
+    assert processed is None
+    assert torch.equal(tokens, torch.zeros(2, dtype=torch.int32))
+
+
+def test_rapid_sampler_falls_back_for_uniform_tensor_params(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    monkeypatch.setenv("VLLM_USE_RAPID_SAMPLER", "1")
+    monkeypatch.setattr(topk_topp_sampler, "rapid_sampler_supported", lambda: True)
+    monkeypatch.setattr(
+        topk_topp_sampler,
+        "rapid_sample",
+        lambda *args, **kwargs: pytest.fail("uniform tensor params should use native"),
+    )
+    monkeypatch.setattr(
+        topk_topp_sampler,
+        "rapid_sample_input_supported",
+        lambda logits: True,
+    )
+    called = False
+
+    def native(_self, logits, generators, k, p):
+        nonlocal called
+        called = True
+        return torch.zeros(logits.shape[0], dtype=torch.int32), None
+
+    monkeypatch.setattr(topk_topp_sampler.TopKTopPSampler, "forward_native", native)
+
+    sampler = topk_topp_sampler.TopKTopPSampler()
+    logits = torch.tensor(
+        [
+            [0.0, 9.0, 1.0, 2.0],
+            [3.0, 2.0, 1.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+    top_k = torch.tensor([1, 1], dtype=torch.int32)
+    top_p = torch.tensor([1.0, 1.0], dtype=torch.float32)
+
+    tokens, processed = sampler.forward_rapid_cuda(logits, {}, top_k, top_p)
+
+    assert called
+    assert processed is None
+    assert torch.equal(tokens, torch.zeros(2, dtype=torch.int32))
+
+
+def test_rapid_sample_passes_indexed_penalties_to_indexed_kernel(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    captured = {}
+
+    class FakeRapidModule:
+        @staticmethod
+        def batch_sampling_repetition_temperature_topk_topp(
+            *args,
+            **kwargs,
+        ):
+            pytest.fail("indexed penalties should use the indexed CUDA API")
+
+        @staticmethod
+        def batch_sampling_repetition_temperature_topk_topp_indexed(
+            logits,
+            penalties,
+            penalty_indices,
+            states,
+            presence_penalty,
+            repetition_penalty,
+            penalty_decay,
+            temperature,
+            top_k,
+            top_p,
+        ):
+            captured["logits"] = logits
+            captured["penalties"] = penalties
+            captured["penalty_indices"] = penalty_indices
+            captured["penalties_before"] = penalties.clone()
+            captured["states"] = states
+            captured["presence_penalty"] = presence_penalty
+            captured["repetition_penalty"] = repetition_penalty
+            captured["penalty_decay"] = penalty_decay
+            captured["temperature"] = temperature
+            captured["top_k"] = top_k
+            captured["top_p"] = top_p
+            penalty_rows = penalty_indices.to(torch.long)
+            penalties[penalty_rows[0], 4] = 9.0
+            penalties[penalty_rows[1], 5] = 10.0
+            return torch.tensor([4, 5], dtype=torch.int32)
+
+    fake_states = torch.empty(2, dtype=torch.uint8)
+    logits = torch.randn(2, 8, dtype=torch.float32)
+    penalties = torch.zeros(4, 8, dtype=torch.float32)
+    penalty_index_storage = torch.tensor([3, 0, 1, 0], dtype=torch.int32)
+    penalty_indices = penalty_index_storage[::2]
+    assert not penalty_indices.is_contiguous()
+    presence_penalties = 0.3
+    repetition_penalties = 0.1
+    penalty_decays = 0.95
+    temperatures = 0.7
+
+    monkeypatch.setattr(
+        topk_topp_sampler,
+        "rapid_sample_input_supported",
+        lambda logits: True,
+    )
+    monkeypatch.setattr(
+        topk_topp_sampler,
+        "_load_rapid_sampler_module",
+        lambda: FakeRapidModule(),
+    )
+    monkeypatch.setattr(
+        topk_topp_sampler,
+        "_rapid_states",
+        lambda module, logits: fake_states,
+    )
+
+    topk_topp_sampler.reset_rapid_penalty_index_stats()
+
+    out = topk_topp_sampler.rapid_sample(
+        logits,
+        None,
+        None,
+        temperatures=temperatures,
+        penalties=penalties,
+        presence_penalties=presence_penalties,
+        repetition_penalties=repetition_penalties,
+        penalty_decays=penalty_decays,
+        penalty_indices=penalty_indices,
+    )
+
+    assert torch.equal(out, torch.tensor([4, 5], dtype=torch.int32))
+    assert captured["penalties"].shape == (4, 8)
+    assert captured["penalty_indices"].is_contiguous()
+    assert torch.equal(
+        captured["penalty_indices"], torch.tensor([3, 1], dtype=torch.int32)
+    )
+    assert torch.equal(captured["penalties_before"], torch.zeros(4, 8))
+    assert penalties[3, 4] == 9.0
+    assert penalties[1, 5] == 10.0
+    assert torch.count_nonzero(penalties[[0, 2]]) == 0
+    assert captured["presence_penalty"] == pytest.approx(0.3)
+    assert captured["repetition_penalty"] == pytest.approx(0.1)
+    assert captured["penalty_decay"] == pytest.approx(0.95)
+    assert captured["temperature"] == pytest.approx(0.7)
+    assert captured["top_k"] == 8
+    assert captured["top_p"] == pytest.approx(1.0)
+    assert topk_topp_sampler.get_rapid_penalty_index_stats() == {
+        "indexed_calls": 1,
+        "indexed_rows": 2,
+        "indexed_vocab_elements": 16,
+    }
+
+
+def test_rapid_sample_requires_indexed_penalty_kernel(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    class FakeRapidModule:
+        @staticmethod
+        def batch_sampling_repetition_temperature_topk_topp(*args, **kwargs):
+            pytest.fail("indexed penalties must not use the contiguous kernel")
+
+    logits = torch.randn(2, 8, dtype=torch.float32)
+    penalties = torch.zeros(4, 8, dtype=torch.float32)
+    penalty_indices = torch.tensor([3, 1], dtype=torch.int32)
+
+    monkeypatch.setattr(
+        topk_topp_sampler,
+        "rapid_sample_input_supported",
+        lambda logits: True,
+    )
+    monkeypatch.setattr(
+        topk_topp_sampler,
+        "_load_rapid_sampler_module",
+        lambda: FakeRapidModule(),
+    )
+    monkeypatch.setattr(
+        topk_topp_sampler,
+        "_rapid_states",
+        lambda module, logits: torch.empty(2, dtype=torch.uint8),
+    )
+
+    with pytest.raises(RuntimeError, match="indexed penalty kernel"):
+        topk_topp_sampler.rapid_sample(
+            logits,
+            None,
+            None,
+            penalties=penalties,
+            penalty_indices=penalty_indices,
+        )
+
+
+def test_rapid_sample_rejects_mixed_penalty_params(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    class FakeRapidModule:
+        @staticmethod
+        def batch_sampling_repetition_temperature_topk_topp(*args, **kwargs):
+            pytest.fail("mixed penalty params should not call rapid CUDA")
+
+    fake_states = torch.empty(2, dtype=torch.uint8)
+    logits = torch.randn(2, 8, dtype=torch.float32)
+    penalties = torch.zeros(4, 8, dtype=torch.float32)
+    penalty_indices = torch.tensor([3, 1], dtype=torch.int32)
+    presence_penalties = torch.tensor([0.3, 0.4], dtype=torch.float32)
+    repetition_penalties = torch.tensor([0.1, 0.1], dtype=torch.float32)
+    penalty_decays = torch.tensor([0.95, 0.95], dtype=torch.float32)
+
+    monkeypatch.setattr(
+        topk_topp_sampler,
+        "rapid_sample_input_supported",
+        lambda logits: True,
+    )
+    monkeypatch.setattr(
+        topk_topp_sampler,
+        "_load_rapid_sampler_module",
+        lambda: FakeRapidModule(),
+    )
+    monkeypatch.setattr(
+        topk_topp_sampler,
+        "_rapid_states",
+        lambda module, logits: fake_states,
+    )
+
+    with pytest.raises(
+        RuntimeError, match="with penalties only supports uniform scalar"
+    ):
+        topk_topp_sampler.rapid_sample(
+            logits,
+            None,
+            None,
+            penalties=penalties,
+            presence_penalties=presence_penalties,
+            repetition_penalties=repetition_penalties,
+            penalty_decays=penalty_decays,
+            penalty_indices=penalty_indices,
+        )
+
+
+@pytest.mark.skipif(
+    not RAPID_SAMPLER_PLATFORM_SUPPORTED,
+    reason="Rapid sampler requires CUDA compute capability >= 7.",
+)
+def test_rapid_sample_indexed_penalty_identity_matches_contiguous():
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    batch_size = 3
+    vocab_size = 8
+    expected = torch.tensor([1, 4, 6], dtype=torch.int32, device=DEVICE_TYPE)
+    logits = torch.full(
+        (batch_size, vocab_size),
+        -10.0,
+        dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+    logits[torch.arange(batch_size, device=DEVICE_TYPE), expected.long()] = 10.0
+    contiguous_penalties = torch.zeros_like(logits)
+    indexed_penalties = contiguous_penalties.clone()
+    penalty_indices = torch.arange(batch_size, dtype=torch.int32, device=DEVICE_TYPE)
+
+    kwargs = {
+        "presence_penalties": 0.5,
+        "repetition_penalties": 0.1,
+        "penalty_decays": 0.9,
+    }
+    contiguous = topk_topp_sampler.rapid_sample(
+        logits,
+        None,
+        0.0,
+        penalties=contiguous_penalties,
+        **kwargs,
+    )
+    indexed = topk_topp_sampler.rapid_sample(
+        logits,
+        None,
+        0.0,
+        penalties=indexed_penalties,
+        penalty_indices=penalty_indices,
+        **kwargs,
+    )
+
+    assert torch.equal(contiguous, expected)
+    assert torch.equal(indexed, contiguous)
+    assert torch.allclose(indexed_penalties, contiguous_penalties)
+
+
+@pytest.mark.skipif(
+    not RAPID_SAMPLER_PLATFORM_SUPPORTED,
+    reason="Rapid sampler requires CUDA compute capability >= 7.",
+)
+def test_rapid_sample_updates_indexed_penalties():
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    topk_topp_sampler.reset_rapid_penalty_index_stats()
+    logits = torch.full((2, 8), -10.0, dtype=torch.float32, device=DEVICE_TYPE)
+    logits[0, 2] = 10.0
+    logits[1, 5] = 10.0
+    penalties = torch.zeros(4, 8, dtype=torch.float32, device=DEVICE_TYPE)
+    penalty_index_storage = torch.tensor(
+        [3, 0, 1, 0], dtype=torch.int32, device=DEVICE_TYPE
+    )
+    penalty_indices = penalty_index_storage[::2]
+    assert not penalty_indices.is_contiguous()
+    presence_penalties = 0.5
+    repetition_penalties = 0.1
+    penalty_decays = 0.9
+    top_p = 0.0
+
+    first = topk_topp_sampler.rapid_sample(
+        logits,
+        None,
+        top_p,
+        penalties=penalties,
+        presence_penalties=presence_penalties,
+        repetition_penalties=repetition_penalties,
+        penalty_decays=penalty_decays,
+        penalty_indices=penalty_indices,
+    )
+    second = topk_topp_sampler.rapid_sample(
+        logits,
+        None,
+        top_p,
+        penalties=penalties,
+        presence_penalties=presence_penalties,
+        repetition_penalties=repetition_penalties,
+        penalty_decays=penalty_decays,
+        penalty_indices=penalty_indices,
+    )
+
+    assert torch.equal(
+        first, torch.tensor([2, 5], dtype=torch.int32, device=DEVICE_TYPE)
+    )
+    assert torch.equal(
+        second, torch.tensor([2, 5], dtype=torch.int32, device=DEVICE_TYPE)
+    )
+    assert torch.allclose(penalties[3, 2], torch.tensor(0.55, device=DEVICE_TYPE))
+    assert torch.allclose(penalties[1, 5], torch.tensor(0.55, device=DEVICE_TYPE))
+    assert torch.count_nonzero(penalties[[0, 2]]) == 0
+    assert topk_topp_sampler.get_rapid_penalty_index_stats() == {
+        "indexed_calls": 2,
+        "indexed_rows": 4,
+        "indexed_vocab_elements": 32,
+    }
+
+
+@pytest.mark.skipif(
+    not RAPID_SAMPLER_PLATFORM_SUPPORTED,
+    reason="Rapid sampler requires CUDA compute capability >= 7.",
+)
+def test_rapid_sample_reference_example_respects_top_p_support():
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    batch_size = 4
+    vocab_size = 32
+    logits = torch.rand(
+        batch_size,
+        vocab_size,
+        dtype=torch.float32,
+        device=DEVICE_TYPE,
+        generator=Generator(device=DEVICE_TYPE).manual_seed(42),
+    )
+    top_k = -1
+    top_p = 0.5
+
+    samples = topk_topp_sampler.rapid_sample(logits, top_k, top_p)
+    top_k_tensor = torch.full(
+        (batch_size,), vocab_size, dtype=torch.int32, device=DEVICE_TYPE
+    )
+    top_p_tensor = torch.full(
+        (batch_size,), top_p, dtype=torch.float32, device=DEVICE_TYPE
+    )
+    masked_logits = apply_top_k_top_p_pytorch(
+        logits.clone(), top_k_tensor, top_p_tensor
+    )
+    sampled_logits = masked_logits.gather(1, samples.long().unsqueeze(1)).view(-1)
+
+    assert torch.isfinite(sampled_logits).all()
+
+
+@pytest.mark.skipif(
+    not RAPID_SAMPLER_PLATFORM_SUPPORTED,
+    reason="Rapid sampler requires CUDA compute capability >= 7.",
+)
+def test_rapid_sample_reads_last_step_from_3d_logits():
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    batch_size = 3
+    time_steps = 2
+    vocab_size = 16
+    logits = torch.full(
+        (batch_size, time_steps, vocab_size),
+        -20.0,
+        dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+    logits[:, 0, 0] = 20.0
+    expected = torch.tensor([4, 7, 11], dtype=torch.int32, device=DEVICE_TYPE)
+    logits[torch.arange(batch_size, device=DEVICE_TYPE), time_steps - 1, expected] = (
+        20.0
+    )
+
+    samples = topk_topp_sampler.rapid_sample(logits, None, 0.0)
+
+    assert torch.equal(samples, expected)
+
+
+@pytest.mark.skipif(
+    not RAPID_SAMPLER_PLATFORM_SUPPORTED,
+    reason="Rapid sampler requires CUDA compute capability >= 7.",
+)
+def test_rapid_sample_softmax_distribution_g_test():
+    scipy_stats = pytest.importorskip("scipy.stats")
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    batch_size = 2048
+    repeats = 16
+    probs = torch.tensor(
+        [0.25, 0.20, 0.15, 0.12, 0.10, 0.08, 0.06, 0.04],
+        dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+    logits = probs.log().expand(batch_size, -1).contiguous()
+    module = topk_topp_sampler._load_rapid_sampler_module()
+    states = module.setup_rand(1, batch_size)
+    counts = torch.zeros(probs.shape[0], dtype=torch.int64, device=DEVICE_TYPE)
+    ones = torch.ones(batch_size, dtype=torch.int64, device=DEVICE_TYPE)
+
+    for _ in range(repeats):
+        samples = module.batch_sampling_temperature_topk_topp(
+            logits, states, 1.0, -1, 1.0
+        )
+        assert torch.all(samples >= 0)
+        assert torch.all(samples < probs.shape[0])
+        counts.index_add_(0, samples.long(), ones)
+
+    expected = probs.double() * counts.sum()
+    _, p_value = scipy_stats.power_divergence(
+        counts.cpu().numpy(),
+        f_exp=expected.cpu().numpy(),
+        lambda_="log-likelihood",
+    )
+
+    assert p_value >= 1e-4
 
 
 def test_topk_impl_equivalence():

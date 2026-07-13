@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
+    VLLM_USE_RAPID_SAMPLER: bool = True
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
@@ -122,6 +123,7 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
+    VLLM_RWKV7_WKV_MODE: str = "fp16"
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
@@ -846,6 +848,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
         if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ
         else True
     ),
+    # Whether to use the rapid-sampling CUDA top-k / top-p sampler.
+    # Enabled by default when the packaged extension and hardware are
+    # available. Unsupported inputs fall back to the native sampler; set to 0
+    # to opt out explicitly.
+    "VLLM_USE_RAPID_SAMPLER": lambda: (
+        bool(int(os.environ["VLLM_USE_RAPID_SAMPLER"]))
+        if "VLLM_USE_RAPID_SAMPLER" in os.environ
+        else True
+    ),
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
     # (CPU backend only) CPU key-value cache space.
@@ -1166,6 +1177,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE", "1"))
     ),
+    # RWKV7 execution profile: fp16 throughput or fp32io16 high precision.
+    "VLLM_RWKV7_WKV_MODE": lambda: os.getenv("VLLM_RWKV7_WKV_MODE", "fp16"),
     # Disable pynccl (using torch.distributed instead)
     "VLLM_DISABLE_PYNCCL": lambda: (
         os.getenv("VLLM_DISABLE_PYNCCL", "False").lower() in ("true", "1")

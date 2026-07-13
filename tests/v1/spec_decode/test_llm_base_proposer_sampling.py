@@ -32,6 +32,7 @@ def _make_sampling_metadata(batch_size: int) -> SamplingMetadata:
         frequency_penalties=torch.empty(0, device=DEVICE_TYPE),
         presence_penalties=torch.empty(0, device=DEVICE_TYPE),
         repetition_penalties=torch.empty(0, device=DEVICE_TYPE),
+        penalty_decays=torch.empty(0, device=DEVICE_TYPE),
         output_token_ids=[[] for _ in range(batch_size)],
         spec_token_ids=[[] for _ in range(batch_size)],
         allowed_token_ids_mask=None,
