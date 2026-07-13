@@ -14,10 +14,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
-    KVConnectorRole,
-    MooncakeConnector,
     MooncakeConnectorScheduler,
     MooncakeConnectorWorker,
     MooncakeXferMetadata,
@@ -33,8 +30,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 
-from .test_mooncake_connector import patch_worker_dependencies
-from .utils import create_request, create_vllm_config
+from .utils import create_request
 
 
 def noop_shutdown():
@@ -71,18 +67,68 @@ def make_hybrid_gdn_kv_cache_config(block_size: int) -> KVCacheConfig:
 
 
 def make_hybrid_gdn_scheduler(kv_role: str) -> MooncakeConnectorScheduler:
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector",
-        kv_role=kv_role,
+    block_size = 16
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=block_size),
+        kv_transfer_config=SimpleNamespace(kv_role=kv_role),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
     )
-    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
     return MooncakeConnectorScheduler(
         vllm_config=vllm_config,
         engine_id="test-engine",
-        kv_cache_config=make_hybrid_gdn_kv_cache_config(
-            vllm_config.cache_config.block_size
-        ),
+        kv_cache_config=make_hybrid_gdn_kv_cache_config(block_size),
     )
+
+
+def make_hybrid_gdn_worker(kv_role: str = "kv_producer") -> MooncakeConnectorWorker:
+    kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=16)
+    worker = object.__new__(MooncakeConnectorWorker)
+    worker.vllm_config = SimpleNamespace(speculative_config=None)
+    worker.model_config = SimpleNamespace(
+        get_total_num_hidden_layers=lambda: 2,
+    )
+    worker.use_mla = False
+    worker.tp_rank = 0
+    worker.tp_size = 1
+    worker.is_kv_producer = kv_role == "kv_producer"
+    worker.is_kv_consumer = kv_role == "kv_consumer"
+    worker.engine = SimpleNamespace(batch_register_memory=lambda *_: 0)
+    worker.transfer_topo = SimpleNamespace(
+        get_transfer_cache_regions=lambda cache, layer_spec: [cache],
+        virtually_split_kv_in_blocks=False,
+        local_replicates_kv_cache=False,
+    )
+    worker.block_len_per_layer = []
+    worker.kv_block_len_per_layer = []
+    worker.registered_layer_names = []
+    worker.registered_layer_indices = []
+    worker.registered_group_indices = []
+    worker.registered_layer_aliases = []
+    worker.registered_layer_index_aliases = []
+    worker.registered_logical_group_indices = []
+    worker.registered_alias_group_indices = []
+    worker.seen_base_addresses = []
+    worker.kv_caches_base_addr = []
+    worker.device_kv_caches = {}
+    worker.kv_cache_config = kv_cache_config
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker._layer_specs = {
+        layer_name: group.kv_cache_spec
+        for group in kv_cache_config.kv_cache_groups
+        for layer_name in group.layer_names
+    }
+    worker._layer_group_indices = {
+        layer_name: group_index
+        for group_index, group in enumerate(kv_cache_config.kv_cache_groups)
+        for layer_name in group.layer_names
+    }
+    worker._layer_logical_group_indices = {
+        layer_name: [group_index]
+        for group_index, group in enumerate(kv_cache_config.kv_cache_groups)
+        for layer_name in group.layer_names
+    }
+    worker.shutdown = noop_shutdown
+    return worker
 
 
 @pytest.mark.cpu_test
@@ -120,28 +166,41 @@ def test_hybrid_gdn_remote_decode_truncates_prefill_once():
     assert request.prompt_token_ids == original_tokens[:-1]
 
 
-def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
-    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector",
-        kv_role="kv_consumer",
+def test_register_kv_caches_emits_fa_and_gdn_regions():
+    worker = make_hybrid_gdn_worker(kv_role="kv_consumer")
+    fa_cache = torch.empty((2, 2, 11), dtype=torch.float16)
+    gdn_conv_state = torch.empty((2, 22), dtype=torch.float16)
+    gdn_ssm_state = torch.empty((2, 4), dtype=torch.float16)
+
+    worker.register_kv_caches(
+        {
+            "model.layers.0.self_attn": fa_cache,
+            "model.layers.1.linear_attn": (gdn_conv_state, gdn_ssm_state),
+        }
     )
-    kv_cache_config = make_hybrid_gdn_kv_cache_config(
-        vllm_config.cache_config.block_size
-    )
 
-    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
-        connector = MooncakeConnector(
-            vllm_config,
-            KVConnectorRole.WORKER,
-            kv_cache_config,
-        )
-        worker = connector.connector_worker
+    assert worker.kv_cache_config.has_mamba_layers is True
+    assert worker.registered_layer_names == [
+        "model.layers.0.self_attn",
+        "model.layers.1.linear_attn",
+    ]
+    assert worker.registered_group_indices == [0, 1]
+    assert worker.kv_caches_base_addr == [
+        fa_cache.data_ptr(),
+        gdn_conv_state.data_ptr(),
+    ]
 
-        fa_cache = torch.empty((2, 2, 11), dtype=torch.float16)
-        gdn_conv_state = torch.empty((2, 22), dtype=torch.float16)
-        gdn_ssm_state = torch.empty((2, 4), dtype=torch.float16)
 
+def test_register_kv_caches_deduplicates_shared_backing_memory():
+    worker = make_hybrid_gdn_worker(kv_role="kv_consumer")
+    backing = torch.empty((4, 64), dtype=torch.float16)
+    fa_cache = backing[:2, :16]
+    gdn_conv_state = backing[:3]
+    gdn_ssm_state = torch.empty((3, 4), dtype=torch.float16)
+
+    with patch.object(
+        worker.engine, "batch_register_memory", return_value=0
+    ) as batch_register_memory:
         worker.register_kv_caches(
             {
                 "model.layers.0.self_attn": fa_cache,
@@ -149,182 +208,109 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
             }
         )
 
-        assert worker.transfer_topo.is_mamba is True
-        assert worker.registered_layer_names == [
-            "model.layers.0.self_attn",
-            "model.layers.1.linear_attn",
-        ]
-        assert worker.registered_group_indices == [0, 1]
-        assert worker.kv_caches_base_addr == [
-            fa_cache.data_ptr(),
-            gdn_conv_state.data_ptr(),
-        ]
-
-        worker.shutdown()
-        worker.shutdown = noop_shutdown
-        connector.connector_worker = None
+    assert worker.kv_caches_base_addr == [
+        fa_cache.data_ptr(),
+        gdn_conv_state.data_ptr(),
+    ]
+    batch_register_memory.assert_called_once()
+    registered_ptrs, registered_lens = batch_register_memory.call_args[0]
+    assert registered_ptrs == [backing.data_ptr()]
+    assert registered_lens == [backing.untyped_storage().nbytes()]
 
 
-def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
-    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector",
-        kv_role="kv_consumer",
-    )
-    kv_cache_config = make_hybrid_gdn_kv_cache_config(
-        vllm_config.cache_config.block_size
-    )
+def test_hybrid_gdn_transfer_params_preserve_group_identity():
+    worker = make_hybrid_gdn_worker(kv_role="kv_producer")
+    block_len = 0x100
+    transfer_id = "xfer-hybrid-gdn"
 
-    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
-        connector = MooncakeConnector(
-            vllm_config,
-            KVConnectorRole.WORKER,
-            kv_cache_config,
+    async def build_transfer_params():
+        send_meta = SendBlockMeta(
+            p_req_id="p-hybrid-gdn",
+            transfer_id=transfer_id,
+            local_block_ids=[
+                [10, 11],
+                [NULL_BLOCK_ID, 4],
+            ],
+            ready=asyncio.Event(),
         )
-        worker = connector.connector_worker
-
-        backing = torch.empty((4, 64), dtype=torch.float16)
-        fa_cache = backing[:2, :16]
-        gdn_conv_state = backing[:3]
-        gdn_ssm_state = torch.empty((3, 4), dtype=torch.float16)
-
-        with patch.object(
-            worker.engine, "batch_register_memory", return_value=0
-        ) as batch_register_memory:
-            worker.register_kv_caches(
-                {
-                    "model.layers.0.self_attn": fa_cache,
-                    "model.layers.1.linear_attn": (gdn_conv_state, gdn_ssm_state),
-                }
-            )
-
-        assert worker.kv_caches_base_addr == [
-            fa_cache.data_ptr(),
-            gdn_conv_state.data_ptr(),
-        ]
-        batch_register_memory.assert_called_once()
-        registered_ptrs, registered_lens = batch_register_memory.call_args[0]
-        assert registered_ptrs == [backing.data_ptr()]
-        assert registered_lens == [backing.untyped_storage().nbytes()]
-
-        worker.shutdown()
-        worker.shutdown = noop_shutdown
-        connector.connector_worker = None
-
-
-def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
-    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector",
-        kv_role="kv_producer",
-    )
-    kv_cache_config = make_hybrid_gdn_kv_cache_config(
-        vllm_config.cache_config.block_size
-    )
-
-    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
-        connector = MooncakeConnector(
-            vllm_config,
-            KVConnectorRole.WORKER,
-            kv_cache_config,
+        return await worker._build_transfer_params(
+            [("d-hybrid-gdn", send_meta)],
+            xfer_meta,
+            local_regions,
+            remote_regions,
         )
-        worker = connector.connector_worker
 
-        block_len = 0x100
-        transfer_id = "xfer-hybrid-gdn"
-
-        async def build_transfer_params():
-            send_meta = SendBlockMeta(
-                p_req_id="p-hybrid-gdn",
-                transfer_id=transfer_id,
-                local_block_ids=[
-                    [10, 11],
-                    [NULL_BLOCK_ID, 4],
+    xfer_meta = MooncakeXferMetadata(
+        remote_hostname="consumer-host",
+        remote_port=54321,
+        remote_tp_size=1,
+        remote_tp_rank=0,
+        req_blocks={
+            "d-hybrid-gdn": (
+                transfer_id,
+                [
+                    [30, 31],
+                    [NULL_BLOCK_ID, 7],
                 ],
-                ready=asyncio.Event(),
             )
-            return await worker._build_transfer_params(
-                [("d-hybrid-gdn", send_meta)],
-                xfer_meta,
-                local_regions,
-                remote_regions,
-            )
+        },
+        kv_caches_base_addr=[],
+        block_lens=[],
+        kv_block_lens=[],
+    )
 
-        xfer_meta = MooncakeXferMetadata(
-            remote_hostname="consumer-host",
-            remote_port=54321,
-            remote_tp_size=1,
-            remote_tp_rank=0,
-            req_blocks={
-                "d-hybrid-gdn": (
-                    transfer_id,
-                    [
-                        [30, 31],
-                        [NULL_BLOCK_ID, 7],
-                    ],
-                )
-            },
-            kv_caches_base_addr=[],
-            block_lens=[],
-            kv_block_lens=[],
-        )
+    local_regions = [
+        TransferRegion(
+            layer_name="model.layers.1.linear_attn",
+            layer_index=1,
+            base_addr=0x5000,
+            block_len=block_len,
+            kv_block_len=block_len,
+            group_index=1,
+        ),
+        TransferRegion(
+            layer_name="model.layers.0.self_attn",
+            layer_index=0,
+            base_addr=0x1000,
+            block_len=block_len,
+            kv_block_len=block_len,
+            group_index=0,
+        ),
+    ]
+    remote_regions = [
+        TransferRegion(
+            layer_name="model.layers.1.linear_attn",
+            layer_index=1,
+            base_addr=0x6000,
+            block_len=block_len,
+            kv_block_len=block_len,
+            group_index=1,
+        ),
+        TransferRegion(
+            layer_name="model.layers.0.self_attn",
+            layer_index=0,
+            base_addr=0x2000,
+            block_len=block_len,
+            kv_block_len=block_len,
+            group_index=0,
+        ),
+    ]
 
-        local_regions = [
-            TransferRegion(
-                layer_name="model.layers.1.linear_attn",
-                layer_index=1,
-                base_addr=0x5000,
-                block_len=block_len,
-                kv_block_len=block_len,
-                group_index=1,
-            ),
-            TransferRegion(
-                layer_name="model.layers.0.self_attn",
-                layer_index=0,
-                base_addr=0x1000,
-                block_len=block_len,
-                kv_block_len=block_len,
-                group_index=0,
-            ),
-        ]
-        remote_regions = [
-            TransferRegion(
-                layer_name="model.layers.1.linear_attn",
-                layer_index=1,
-                base_addr=0x6000,
-                block_len=block_len,
-                kv_block_len=block_len,
-                group_index=1,
-            ),
-            TransferRegion(
-                layer_name="model.layers.0.self_attn",
-                layer_index=0,
-                base_addr=0x2000,
-                block_len=block_len,
-                kv_block_len=block_len,
-                group_index=0,
-            ),
-        ]
+    src_ptrs, dst_ptrs, lengths, err_reqs, err_msg = asyncio.run(
+        build_transfer_params()
+    )
 
-        src_ptrs, dst_ptrs, lengths, err_reqs, err_msg = asyncio.run(
-            build_transfer_params()
-        )
-
-        assert err_reqs == []
-        assert err_msg is None
-        assert src_ptrs == [
-            0x5000 + 4 * block_len,
-            0x1000 + 10 * block_len,
-        ]
-        assert dst_ptrs == [
-            0x6000 + 7 * block_len,
-            0x2000 + 30 * block_len,
-        ]
-        assert lengths == [block_len, 2 * block_len]
-
-        worker.shutdown()
-        worker.shutdown = noop_shutdown
-        connector.connector_worker = None
+    assert err_reqs == []
+    assert err_msg is None
+    assert src_ptrs == [
+        0x5000 + 4 * block_len,
+        0x1000 + 10 * block_len,
+    ]
+    assert dst_ptrs == [
+        0x6000 + 7 * block_len,
+        0x2000 + 30 * block_len,
+    ]
+    assert lengths == [block_len, 2 * block_len]
 
 
 def test_logical_to_kernel_block_ids_expands_fa_not_gdn():
@@ -339,48 +325,26 @@ def test_logical_to_kernel_block_ids_expands_fa_not_gdn():
     assert kernel_block_ids == [list(range(34, 51)), [2]]
 
 
-def test_hybrid_gdn_splits_fa_regions_but_keeps_gdn_state_whole(
-    monkeypatch,
-):
-    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector",
-        kv_role="kv_producer",
+def test_hybrid_gdn_splits_fa_regions_but_keeps_gdn_state_whole():
+    worker = make_hybrid_gdn_worker(kv_role="kv_producer")
+    worker.transfer_topo = SimpleNamespace(virtually_split_kv_in_blocks=True)
+    regions = worker._get_transfer_regions(
+        base_addrs=[0x1000, 0x2000],
+        block_lens=[0x100, 0x100],
+        kv_block_lens=[0x40, 0x100],
+        layer_names=[
+            "model.layers.0.self_attn",
+            "model.layers.1.linear_attn",
+        ],
+        layer_indices=[0, 1],
+        group_indices=[0, 1],
     )
-    kv_cache_config = make_hybrid_gdn_kv_cache_config(
-        vllm_config.cache_config.block_size
-    )
 
-    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
-        connector = MooncakeConnector(
-            vllm_config,
-            KVConnectorRole.WORKER,
-            kv_cache_config,
-        )
-        worker = connector.connector_worker
-
-        worker.transfer_topo = SimpleNamespace(virtually_split_kv_in_blocks=True)
-        regions = worker._get_transfer_regions(
-            base_addrs=[0x1000, 0x2000],
-            block_lens=[0x100, 0x100],
-            kv_block_lens=[0x40, 0x100],
-            layer_names=[
-                "model.layers.0.self_attn",
-                "model.layers.1.linear_attn",
-            ],
-            layer_indices=[0, 1],
-            group_indices=[0, 1],
-        )
-
-        assert [
-            (region.group_index, region.base_addr, region.kv_block_len)
-            for region in regions
-        ] == [
-            (0, 0x1000, 0x40),
-            (0, 0x1040, 0x40),
-            (1, 0x2000, 0x100),
-        ]
-
-        worker.shutdown()
-        worker.shutdown = noop_shutdown
-        connector.connector_worker = None
+    assert [
+        (region.group_index, region.base_addr, region.kv_block_len)
+        for region in regions
+    ] == [
+        (0, 0x1000, 0x40),
+        (0, 0x1040, 0x40),
+        (1, 0x2000, 0x100),
+    ]
