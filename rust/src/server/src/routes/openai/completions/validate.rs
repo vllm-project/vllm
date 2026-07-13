@@ -55,6 +55,13 @@ pub(super) fn validate_request_compat(
             );
         }
 
+        if request.use_beam_search {
+            bail_invalid_request!(
+                param = "prompt_logprobs",
+                "`prompt_logprobs` are not supported with beam search."
+            );
+        }
+
         if prompt_logprobs < 0 && prompt_logprobs != -1 {
             bail_invalid_request!(
                 param = "prompt_logprobs",

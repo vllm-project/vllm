@@ -46,6 +46,13 @@ pub(super) fn validate_request_compat(
                 "prompt_logprobs are not available when stream=true."
             );
         }
+
+        if request.use_beam_search {
+            bail_invalid_request!(
+                param = "prompt_logprobs",
+                "`prompt_logprobs` are not supported with beam search."
+            );
+        }
     }
 
     if let Some(tools) = request.tools.as_ref() {
@@ -72,6 +79,20 @@ pub(super) fn validate_request_compat(
         bail_invalid_request!(
             param = "structured_outputs",
             "Structured outputs are not currently supported with beam search."
+        );
+    }
+
+    if request.use_beam_search && request.tools.is_some() {
+        bail_invalid_request!(
+            param = "tools",
+            "Tools are not currently supported with beam search."
+        );
+    }
+
+    if request.use_beam_search && request.include_reasoning {
+        bail_invalid_request!(
+            param = "include_reasoning",
+            "include_reasoning is not currently supported with beam search."
         );
     }
 

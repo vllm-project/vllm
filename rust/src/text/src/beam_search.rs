@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use tracing::warn;
 use vllm_engine_core_client::protocol::logprobs::TokenLogprob;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
@@ -173,6 +174,12 @@ pub(crate) async fn run_beam_search(
     params: BeamSearchParams,
 ) -> Result<BeamSearchOutput> {
     let beam_width = params.beam_width.max(1).min(MAX_BEAM_WIDTH) as usize;
+    if params.beam_width > MAX_BEAM_WIDTH {
+        warn!(
+            "beam_width {} exceeds MAX_BEAM_WIDTH, clamping to {MAX_BEAM_WIDTH}",
+            params.beam_width
+        );
+    }
     let logprobs_num = 2 * beam_width;
 
     let mut active: Vec<BeamSearchSequence> = vec![BeamSearchSequence {
