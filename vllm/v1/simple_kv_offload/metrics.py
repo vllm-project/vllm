@@ -33,7 +33,9 @@ def get_simple_cpu_metric_definitions() -> dict[str, OffloadingMetricMetadata]:
             "0.0 and 1.0 (1.0 = 100% used).",
         ),
         SimpleCPUMetricName.PENDING_LOADS: OffloadingGaugeMetadata(
-            documentation="Number of requests with an outstanding CPU-to-GPU load.",
+            documentation="Number of requests with an outstanding CPU-to-GPU "
+            "load, including abandoned loads still draining after a cache "
+            "reset.",
         ),
         SimpleCPUMetricName.PENDING_STORES: OffloadingGaugeMetadata(
             documentation="Number of in-flight GPU-to-CPU store events, "

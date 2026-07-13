@@ -823,7 +823,16 @@ class SimpleCPUOffloadScheduler:
         # _load_event_to_reqs is a subset view (only requests whose load has
         # already been dispatched to the worker) of _reqs_to_load -- counting
         # it separately would double-count the same outstanding loads.
-        stats.set_gauge(SimpleCPUMetricName.PENDING_LOADS, len(self._reqs_to_load))
+        # _abandoned_reqs_to_load holds in-flight loads that reset() moved out
+        # of _reqs_to_load while their DMA is still draining (see reset());
+        # _reqs_to_load and _abandoned_reqs_to_load are disjoint (reset() pops
+        # a request from the former before inserting it into the latter, and
+        # _cleanup_load_request() pops from whichever one currently holds it),
+        # so summing them counts each outstanding load exactly once.
+        stats.set_gauge(
+            SimpleCPUMetricName.PENDING_LOADS,
+            len(self._reqs_to_load) + len(self._abandoned_reqs_to_load),
+        )
         # Event-level count, matching has_pending_stores(): the eager-mode
         # _reqs_to_store/_store_event_to_reqs/_in_flight_store_gpu_blocks maps
         # are per-request views of the same in-flight store events, so they

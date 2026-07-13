@@ -44,6 +44,7 @@ from .test_scheduler import (
     make_request,
     make_scheduler,
     make_scheduler_output,
+    simulate_load_completion,
     simulate_store_completion,
 )
 
@@ -336,6 +337,81 @@ def test_scheduler_gauges_reflect_pending_store_and_load():
 
     values_load = sched.get_stats().data[_StatsKey.DATA]
     assert values_load[SimpleCPUMetricName.PENDING_LOADS][()] == 1
+
+
+def test_pending_loads_gauge_survives_reset_while_load_drains():
+    """Regression test: reset() moves an in-flight load (load_event already
+    assigned) from _reqs_to_load into _abandoned_reqs_to_load, but its DMA is
+    still physically draining -- pending_loads must not drop to 0 until the
+    worker actually reports completion."""
+    fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+
+    num_blocks = 2
+
+    # Store blocks to CPU so a later request can hit them.
+    req = make_request(num_blocks=num_blocks)
+    kv_blocks = _alloc_and_register(fix, req, num_blocks)
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+    block_ids = kv_blocks.get_block_ids()
+    sched_out = make_scheduler_output(
+        {req.request_id: num_blocks * BLOCK_SIZE},
+        new_reqs={req.request_id: block_ids},
+    )
+    meta = sched.build_connector_meta(sched_out)
+    simulate_store_completion(sched, meta.store_event)
+
+    # Dispatch a load -- CPU cache hit for req2.
+    req2 = Request(
+        request_id="req-pending-loads-reset",
+        prompt_token_ids=req.prompt_token_ids,
+        sampling_params=req.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=req._block_hasher,
+    )
+    hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
+    assert hit_tokens > 0
+    assert is_async is True
+
+    gpu_blocks2 = gpu_pool.get_new_blocks(num_blocks)
+    kv_blocks2 = KVCacheBlocks(blocks=(gpu_blocks2,))
+    sched.update_state_after_alloc(req2, kv_blocks2, num_external_tokens=hit_tokens)
+    block_ids2 = kv_blocks2.get_block_ids()
+    sched_out2 = make_scheduler_output(
+        {req2.request_id: 1},
+        new_reqs={req2.request_id: block_ids2},
+    )
+    meta2 = sched.build_connector_meta(sched_out2)
+    assert meta2.load_event >= 0, "Expected a load event to be assigned"
+
+    values = sched.get_stats().data[_StatsKey.DATA]
+    assert values[SimpleCPUMetricName.PENDING_LOADS][()] == 1
+    pending_stores_before = values[SimpleCPUMetricName.PENDING_STORES][()]
+
+    # reset() abandons the in-flight load (DMA still draining) rather than
+    # dropping it: it must return False and move the request into
+    # _abandoned_reqs_to_load, not silently discard it.
+    assert sched.reset() is False
+    assert len(sched._reqs_to_load) == 0
+    assert req2.request_id in sched._abandoned_reqs_to_load
+
+    values_during_reset = sched.get_stats().data[_StatsKey.DATA]
+    # Regression: pre-fix this read 0 because pending_loads only counted
+    # _reqs_to_load, which reset() had just emptied.
+    assert values_during_reset[SimpleCPUMetricName.PENDING_LOADS][()] == 1
+    assert (
+        values_during_reset[SimpleCPUMetricName.PENDING_STORES][()]
+        == pending_stores_before
+    )
+
+    # Worker reports the drained load finished -> gauge drops to 0, no
+    # negative or stale values.
+    simulate_load_completion(sched, {req2.request_id})
+    values_after = sched.get_stats().data[_StatsKey.DATA]
+    assert values_after[SimpleCPUMetricName.PENDING_LOADS][()] == 0
+    assert values_after[SimpleCPUMetricName.PENDING_STORES][()] == pending_stores_before
 
 
 # ---------------------------------------------------------------------------

@@ -92,7 +92,7 @@ The deprecated `vllm:kv_offload_total_bytes`/`vllm:kv_offload_total_time`/`vllm:
 | `vllm:simple_cpu_offload_free_blocks` | Free CPU KV cache blocks. |
 | `vllm:simple_cpu_offload_used_blocks` | Used CPU KV cache blocks. |
 | `vllm:simple_cpu_offload_usage_perc` | Fraction of CPU KV cache blocks in use, between `0.0` and `1.0` (`1.0` = 100% used). |
-| `vllm:simple_cpu_offload_pending_loads` | Requests with an outstanding CPU-to-GPU load. |
+| `vllm:simple_cpu_offload_pending_loads` | Requests with an outstanding CPU-to-GPU load, including abandoned loads still draining after a cache reset. |
 | `vllm:simple_cpu_offload_pending_stores` | In-flight GPU-to-CPU store events, including abandoned ones still draining. |
 
 These metrics are observability only; they do not change offload behavior or improve performance on their own. The copy path (`cuMemcpyBatchAsync`/`hipMemcpyBatchAsync`) is supported on both CUDA and ROCm.
