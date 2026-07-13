@@ -180,6 +180,9 @@ class CPUExpertsFp8(mk.FusedMoEExpertsMonolithic):
             # selections entirely (instead of masking them to weight 0 and
             # still running their GEMMs), saving ~world_size x of expert
             # compute per rank.
+            # Only this local-skip path needs to mask padding rows: it drops
+            # rows by topk_ids == -1, and padding rows carry arbitrary router
+            # output that could otherwise route to a real local expert.
             topk_ids = _mask_padding_topk_ids(topk_ids)
             return fused_experts_cpu_local_skip(
                 hidden_states,

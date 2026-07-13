@@ -752,7 +752,7 @@ def _dp_shm_group_name_worker(
         _report_worker_failure(rank, err_q, err)
 
 
-def _moe_no_ep_parallel_config_worker(
+def _moe_parallel_config_worker(
     rank,
     world_size,
     tp_size,
@@ -763,63 +763,7 @@ def _moe_no_ep_parallel_config_worker(
     err_q,
 ):
     try:
-        os.environ.setdefault("VLLM_DIST_IDENT", f"test_cpu_moe_no_ep_{port}")
-        _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
-
-        from vllm.config.parallel import ParallelConfig
-        from vllm.distributed.parallel_state import (
-            get_dp_group,
-            get_tp_group,
-        )
-        from vllm.model_executor.layers.fused_moe.config import (
-            FusedMoEParallelConfig,
-        )
-
-        dp_rank = rank // tp_size
-        expected_tp_ranks = list(range(dp_rank * tp_size, (dp_rank + 1) * tp_size))
-
-        assert get_tp_group().ranks == expected_tp_ranks
-        assert get_dp_group().rank_in_group == dp_rank
-
-        parallel_config = ParallelConfig(
-            tensor_parallel_size=tp_size,
-            data_parallel_size=dp_size,
-            data_parallel_rank=dp_rank,
-            enable_expert_parallel=False,
-        )
-        moe_parallel_config = FusedMoEParallelConfig.make(
-            tp_size_=tp_size,
-            pcp_size_=1,
-            dp_size_=dp_size,
-            sp_size_=1,
-            vllm_parallel_config=parallel_config,
-        )
-
-        assert moe_parallel_config.tp_size == world_size
-        assert moe_parallel_config.tp_rank == rank
-        assert moe_parallel_config.dp_size == dp_size
-        assert moe_parallel_config.dp_rank == dp_rank
-        assert moe_parallel_config.ep_size == 1
-        assert moe_parallel_config.ep_rank == 0
-        assert not moe_parallel_config.use_ep
-
-        dist.barrier()
-    except Exception as err:
-        _report_worker_failure(rank, err_q, err)
-
-
-def _moe_ep_parallel_config_worker(
-    rank,
-    world_size,
-    tp_size,
-    dp_size,
-    port,
-    dp_port,
-    params,
-    err_q,
-):
-    try:
-        os.environ.setdefault("VLLM_DIST_IDENT", f"test_cpu_moe_ep_config_{port}")
+        os.environ.setdefault("VLLM_DIST_IDENT", f"test_cpu_moe_config_{port}")
         _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
 
         from vllm.config.parallel import ParallelConfig
@@ -842,27 +786,47 @@ def _moe_ep_parallel_config_worker(
         assert get_dp_group().rank_in_group == dp_rank
         assert get_ep_group().ranks == list(range(world_size))
 
-        parallel_config = ParallelConfig(
+        no_ep_parallel_config = ParallelConfig(
+            tensor_parallel_size=tp_size,
+            data_parallel_size=dp_size,
+            data_parallel_rank=dp_rank,
+            enable_expert_parallel=False,
+        )
+        no_ep_moe_config = FusedMoEParallelConfig.make(
+            tp_size_=tp_size,
+            pcp_size_=1,
+            dp_size_=dp_size,
+            sp_size_=1,
+            vllm_parallel_config=no_ep_parallel_config,
+        )
+        assert no_ep_moe_config.tp_size == world_size
+        assert no_ep_moe_config.tp_rank == rank
+        assert no_ep_moe_config.dp_size == dp_size
+        assert no_ep_moe_config.dp_rank == dp_rank
+        assert no_ep_moe_config.ep_size == 1
+        assert no_ep_moe_config.ep_rank == 0
+        assert not no_ep_moe_config.use_ep
+
+        ep_parallel_config = ParallelConfig(
             tensor_parallel_size=tp_size,
             data_parallel_size=dp_size,
             data_parallel_rank=dp_rank,
             enable_expert_parallel=True,
         )
-        moe_parallel_config = FusedMoEParallelConfig.make(
+        ep_moe_config = FusedMoEParallelConfig.make(
             tp_size_=tp_size,
             pcp_size_=1,
             dp_size_=dp_size,
             sp_size_=1,
-            vllm_parallel_config=parallel_config,
+            vllm_parallel_config=ep_parallel_config,
         )
-
-        assert moe_parallel_config.tp_size == 1
-        assert moe_parallel_config.tp_rank == 0
-        assert moe_parallel_config.dp_size == dp_size
-        assert moe_parallel_config.dp_rank == dp_rank
-        assert moe_parallel_config.ep_size == world_size
-        assert moe_parallel_config.ep_rank == rank
-        assert moe_parallel_config.use_ep
+        assert ep_moe_config.tp_size == 1
+        assert ep_moe_config.tp_rank == 0
+        assert ep_moe_config.dp_size == dp_size
+        assert ep_moe_config.dp_rank == dp_rank
+        assert ep_moe_config.ep_size == world_size
+        assert ep_moe_config.ep_rank == rank
+        assert ep_moe_config.use_ep
 
         dist.barrier()
     except Exception as err:
@@ -1063,20 +1027,9 @@ def test_cpu_dp_group_ranks_share_shm_group_name():
 
 
 @pytest.mark.distributed
-def test_cpu_moe_ep_tp2_dp3_parallel_config():
+def test_cpu_moe_tp2_dp3_parallel_config():
     _spawn_workers(
-        _moe_ep_parallel_config_worker,
-        world_size=6,
-        tp_size=2,
-        dp_size=3,
-        params=None,
-    )
-
-
-@pytest.mark.distributed
-def test_cpu_moe_no_ep_tp2_dp3_parallel_config():
-    _spawn_workers(
-        _moe_no_ep_parallel_config_worker,
+        _moe_parallel_config_worker,
         world_size=6,
         tp_size=2,
         dp_size=3,

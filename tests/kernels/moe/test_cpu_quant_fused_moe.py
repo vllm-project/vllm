@@ -484,6 +484,66 @@ def test_w8a16_block_fp8_cpu_fused_moe_expert_parallel(
     torch.testing.assert_close(ref_out.bfloat16(), summed, atol=1e-2, rtol=1e-2)
 
 
+def _run_fp8_ep_apply_over_ranks(
+    a: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w1_s: torch.Tensor,
+    w2_s: torch.Tensor,
+    router_logits: torch.Tensor,
+    N: int,
+    E: int,
+    topk: int,
+    num_ranks: int,
+) -> torch.Tensor:
+    """Run CPUExpertsFp8.apply() once per EP rank and sum the outputs."""
+    moe_parallel_config = FusedMoEParallelConfig.make_no_parallel()
+    M, K = a.shape[0], a.shape[1]
+    summed = torch.zeros(M, K, dtype=torch.bfloat16)
+    for rank in range(num_ranks):
+        local_num_experts, expert_map, _ = determine_expert_map(
+            ep_size=num_ranks,
+            ep_rank=rank,
+            global_num_experts=E,
+        )
+        assert expert_map is not None
+
+        local_experts = _get_local_expert_slice(expert_map, local_num_experts)
+        moe_config = FusedMoEConfig(
+            num_experts=E,
+            experts_per_token=topk,
+            hidden_dim=K,
+            intermediate_size=N,
+            num_local_experts=local_num_experts,
+            num_logical_experts=E,
+            moe_parallel_config=moe_parallel_config,
+            activation=MoEActivation.SILU,
+            in_dtype=torch.bfloat16,
+            device="cpu",
+            routing_method=RoutingMethodType.Default,
+        )
+        quant_config = FusedMoEQuantConfig.make(
+            torch.float8_e4m3fn,
+            block_shape=BLOCK_SIZE,
+            w1_scale=w1_s[local_experts].contiguous(),
+            w2_scale=w2_s[local_experts].contiguous(),
+        )
+        experts = CPUExpertsFp8(moe_config, quant_config)
+        out = experts.apply(
+            hidden_states=a.clone(),
+            w1=_prepack_experts(w1[local_experts].contiguous()),
+            w2=_prepack_experts(w2[local_experts].contiguous()),
+            router_logits=router_logits,
+            activation=MoEActivation.SILU,
+            global_num_experts=E,
+            expert_map=expert_map,
+            a1q_scale=None,
+            apply_router_weight_on_input=False,
+        )
+        summed += out
+    return summed
+
+
 @pytest.mark.parametrize(
     "M,N,K,E,topk,num_ranks",
     [
@@ -520,57 +580,9 @@ def test_w8a16_block_fp8_cpu_fused_moe_expert_parallel_apply(
         a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, BLOCK_SIZE
     )
 
-    moe_parallel_config = FusedMoEParallelConfig.make_no_parallel()
-
-    summed = torch.zeros(M, K, dtype=torch.bfloat16)
-    for rank in range(num_ranks):
-        local_num_experts, expert_map, _ = determine_expert_map(
-            ep_size=num_ranks,
-            ep_rank=rank,
-            global_num_experts=E,
-        )
-        assert expert_map is not None
-
-        local_experts = _get_local_expert_slice(expert_map, local_num_experts)
-
-        w1_local = _prepack_experts(w1[local_experts].contiguous())
-        w2_local = _prepack_experts(w2[local_experts].contiguous())
-        w1_s_local = w1_s[local_experts].contiguous()
-        w2_s_local = w2_s[local_experts].contiguous()
-
-        moe_config = FusedMoEConfig(
-            num_experts=E,
-            experts_per_token=topk,
-            hidden_dim=K,
-            intermediate_size=N,
-            num_local_experts=local_num_experts,
-            num_logical_experts=E,
-            moe_parallel_config=moe_parallel_config,
-            activation=MoEActivation.SILU,
-            in_dtype=torch.bfloat16,
-            device="cpu",
-            routing_method=RoutingMethodType.Default,
-        )
-        quant_config = FusedMoEQuantConfig.make(
-            torch.float8_e4m3fn,
-            block_shape=BLOCK_SIZE,
-            w1_scale=w1_s_local,
-            w2_scale=w2_s_local,
-        )
-        experts = CPUExpertsFp8(moe_config, quant_config)
-
-        out = experts.apply(
-            hidden_states=a.clone(),
-            w1=w1_local,
-            w2=w2_local,
-            router_logits=router_logits,
-            activation=MoEActivation.SILU,
-            global_num_experts=E,
-            expert_map=expert_map,
-            a1q_scale=None,
-            apply_router_weight_on_input=False,
-        )
-        summed += out
+    summed = _run_fp8_ep_apply_over_ranks(
+        a, w1, w2, w1_s, w2_s, router_logits, N, E, topk, num_ranks
+    )
 
     torch.testing.assert_close(ref_out.bfloat16(), summed, atol=1e-2, rtol=1e-2)
 
@@ -598,51 +610,11 @@ def test_w8a16_block_fp8_cpu_ep_apply_masks_forward_padding(seed):
 
     is_padding = torch.zeros(M, dtype=torch.bool)
     is_padding[-padded_rows:] = True
-    moe_parallel_config = FusedMoEParallelConfig.make_no_parallel()
 
-    summed = torch.zeros(M, K, dtype=torch.bfloat16)
     with set_forward_context(None, VllmConfig(), is_padding=is_padding):
-        for rank in range(num_ranks):
-            local_num_experts, expert_map, _ = determine_expert_map(
-                ep_size=num_ranks,
-                ep_rank=rank,
-                global_num_experts=E,
-            )
-            assert expert_map is not None
-
-            local_experts = _get_local_expert_slice(expert_map, local_num_experts)
-            moe_config = FusedMoEConfig(
-                num_experts=E,
-                experts_per_token=topk,
-                hidden_dim=K,
-                intermediate_size=N,
-                num_local_experts=local_num_experts,
-                num_logical_experts=E,
-                moe_parallel_config=moe_parallel_config,
-                activation=MoEActivation.SILU,
-                in_dtype=torch.bfloat16,
-                device="cpu",
-                routing_method=RoutingMethodType.Default,
-            )
-            quant_config = FusedMoEQuantConfig.make(
-                torch.float8_e4m3fn,
-                block_shape=BLOCK_SIZE,
-                w1_scale=w1_s[local_experts].contiguous(),
-                w2_scale=w2_s[local_experts].contiguous(),
-            )
-            experts = CPUExpertsFp8(moe_config, quant_config)
-            out = experts.apply(
-                hidden_states=a.clone(),
-                w1=_prepack_experts(w1[local_experts].contiguous()),
-                w2=_prepack_experts(w2[local_experts].contiguous()),
-                router_logits=router_logits,
-                activation=MoEActivation.SILU,
-                global_num_experts=E,
-                expert_map=expert_map,
-                a1q_scale=None,
-                apply_router_weight_on_input=False,
-            )
-            summed += out
+        summed = _run_fp8_ep_apply_over_ranks(
+            a, w1, w2, w1_s, w2_s, router_logits, N, E, topk, num_ranks
+        )
 
     torch.testing.assert_close(ref_out.bfloat16(), summed, atol=1e-2, rtol=1e-2)
     torch.testing.assert_close(
