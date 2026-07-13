@@ -52,9 +52,7 @@ class PEFTHelper:
 
     def __post_init__(self):
         if self.r <= 0:
-            raise ValueError(
-                f"LoRA rank `r` must be a positive integer, got {self.r}."
-            )
+            raise ValueError(f"LoRA rank `r` must be a positive integer, got {self.r}.")
         if self.use_rslora:
             logger.info_once("Loading LoRA weights trained with rsLoRA.")
             self.vllm_lora_scaling_factor = self.lora_alpha / math.sqrt(self.r)
