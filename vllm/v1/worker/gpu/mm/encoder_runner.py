@@ -70,7 +70,7 @@ class EncoderRunner:
         prefill_lens: np.ndarray,
         num_computed_tokens: np.ndarray,
         draft_lookahead: int = 0,
-    ) -> tuple[list[torch.Tensor], torch.Tensor]:
+    ) -> tuple[list[torch.Tensor], torch.Tensor, list[str]]:
         if draft_lookahead:
             num_computed_tokens = num_computed_tokens + draft_lookahead
 
@@ -85,13 +85,14 @@ class EncoderRunner:
             is_decode = num_computed_tokens >= prefill_lens
             if is_decode.all():
                 # All decode requests, so no need to gather any embeddings.
-                return [], is_mm_embed
+                return [], is_mm_embed, []
             exclude_embeddings = is_decode.tolist()
 
         query_start = num_computed_tokens.tolist()
         query_end = (num_computed_tokens + num_scheduled_tokens).tolist()
 
         mm_embeds: list[torch.Tensor] = []
+        mm_embed_modalities: list[str] = []
         for i, req_id in enumerate(req_ids):
             if exclude_embeddings is not None and exclude_embeddings[i]:
                 continue
@@ -141,8 +142,9 @@ class EncoderRunner:
                     True if is_embed is None else is_embed
                 )
                 mm_embeds.append(mm_embeds_item)
+                mm_embed_modalities.append(mm_feature.modality)
 
-        return mm_embeds, is_mm_embed
+        return mm_embeds, is_mm_embed, mm_embed_modalities
 
     @torch.inference_mode()
     def get_inputs_embeds(
@@ -150,9 +152,13 @@ class EncoderRunner:
         input_ids: torch.Tensor,
         mm_embeds: list[torch.Tensor],
         is_mm_embed: torch.Tensor,
+        embedding_modalities: list[str] | None = None,
     ) -> torch.Tensor:
         x = self.model.embed_input_ids(
-            input_ids, multimodal_embeddings=mm_embeds, is_multimodal=is_mm_embed
+            input_ids,
+            multimodal_embeddings=mm_embeds,
+            is_multimodal=is_mm_embed,
+            embedding_modalities=embedding_modalities,
         )
         # Copy to the pre-allocated buffer for CUDA graphs.
         self.inputs_embeds[: x.shape[0]] = x

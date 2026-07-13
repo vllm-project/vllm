@@ -167,18 +167,15 @@ def merge_interleaved_embeddings(
     is_video: torch.Tensor,
     is_audio: torch.Tensor,
     is_multimodal: torch.Tensor,
-    num_video: int,
-    num_audio: int,
-    embedding_modalities: Sequence[str] | None = None,
+    embedding_modalities: Sequence[str],
 ) -> torch.Tensor:
     """
     Merge embeddings for interleaved audio-in-video sequences.
 
     When use_audio_in_video=True, video and audio tokens are interleaved in
     the token sequence, but embeddings are provided as separate contiguous
-    tensors (video first, then audio). This function reorders video and audio
-    embeddings to match sequence position order and scatters them efficiently.
-    It also supports image embeddings in the same interleaved request.
+    tensors. This function scatters each modality by its explicit label and
+    also supports image embeddings in the same interleaved request.
 
     Args:
         inputs_embeds: The input embeddings tensor to merge into.
@@ -186,9 +183,8 @@ def merge_interleaved_embeddings(
         is_video: Boolean mask for video token positions.
         is_audio: Boolean mask for audio token positions.
         is_multimodal: Boolean mask for all multimodal token positions.
-        num_video: Total count of video tokens.
-        num_audio: Total count of audio tokens.
-        embedding_modalities: Modality for each embedding tensor.
+        embedding_modalities: Modality for each embedding tensor. Must have the
+            same length as multimodal_embeddings.
 
     Returns:
         The merged inputs_embeds tensor with multimodal embeddings scattered
@@ -214,10 +210,12 @@ def merge_interleaved_embeddings(
     # video and audio positions, the remaining multimodal positions are images.
     is_image = is_multimodal & ~is_video & ~is_audio
 
-    if embedding_modalities is None or len(embedding_modalities) != len(
-        multimodal_embeddings
-    ):
-        raise ValueError("Embedding modalities must match multimodal_embeddings length")
+    if len(embedding_modalities) != len(multimodal_embeddings):
+        raise ValueError(
+            "Embedding modalities must match multimodal_embeddings length "
+            f"(got {len(embedding_modalities)} modalities for "
+            f"{len(multimodal_embeddings)} embeddings)"
+        )
 
     video_embeds = [
         embedding
@@ -1480,6 +1478,11 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         num_audio = is_audio.sum().item()
 
         if check_interleaved_audio_video(is_video, is_audio, num_video, num_audio):
+            if embedding_modalities is None:
+                raise ValueError(
+                    "embedding_modalities is required for interleaved "
+                    "audio-in-video embedding merge"
+                )
             inputs_embeds = self._embed_text_input_ids(
                 input_ids,
                 self.get_language_model().embed_input_ids,
@@ -1491,9 +1494,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 is_video,
                 is_audio,
                 is_multimodal,
-                num_video,
-                num_audio,
-                embedding_modalities=embedding_modalities,
+                embedding_modalities,
             )
 
         # Default: standard merge (no interleaving), same as parent class

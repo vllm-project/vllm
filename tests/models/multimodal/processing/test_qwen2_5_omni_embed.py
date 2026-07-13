@@ -116,6 +116,24 @@ class TestCheckInterleavedAudioVideo:
             is_video, is_audio, is_video.sum().item(), is_audio.sum().item()
         )
 
+    def test_multi_video_with_boundary_tokens(self):
+        """Two interleaved videos separated by boundary tokens → still True.
+
+        use_audio_in_video expands each video into a local V/A span bounded by
+        non-pad tokens. A global density check would fail across those gaps.
+        """
+        # [text][V A V A][text boundary][V A V A]
+        first_ids, _ = make_interleaved_seq([2, 2], [2, 2], text_prefix=1)
+        second_ids, _ = make_interleaved_seq([2, 2], [2, 2], text_prefix=0)
+        boundary = torch.tensor([TEXT_TOKEN_ID, TEXT_TOKEN_ID])
+        input_ids = torch.cat([first_ids, boundary, second_ids])
+        is_multimodal = (input_ids == VIDEO_TOKEN_ID) | (input_ids == AUDIO_TOKEN_ID)
+        is_video = is_multimodal & (input_ids == VIDEO_TOKEN_ID)
+        is_audio = is_multimodal & (input_ids == AUDIO_TOKEN_ID)
+        assert check_interleaved_audio_video(
+            is_video, is_audio, is_video.sum().item(), is_audio.sum().item()
+        )
+
     def test_batched_non_interleaved_no_false_positive(self):
         """
         Regression test for https://github.com/vllm-project/vllm/issues/35394.
@@ -378,8 +396,6 @@ class TestMergeInterleavedEmbeddings:
             is_video,
             is_audio,
             is_multimodal,
-            num_video,
-            num_audio,
             embedding_modalities=("video", "audio"),
         )
 
@@ -387,6 +403,64 @@ class TestMergeInterleavedEmbeddings:
         audio_pos = is_audio.nonzero(as_tuple=True)[0]
         assert result[video_pos].allclose(torch.full((num_video, hidden), 30.0))
         assert result[audio_pos].allclose(torch.full((num_audio, hidden), 10.0))
+
+    def test_image_and_video_mixed(self):
+        """Image embeddings must not be misclassified as video."""
+        hidden = 4
+        # [text][I I][V A V A]
+        tokens = (
+            [TEXT_TOKEN_ID] * 2
+            + [IMAGE_TOKEN_ID] * 2
+            + [VIDEO_TOKEN_ID, AUDIO_TOKEN_ID, VIDEO_TOKEN_ID, AUDIO_TOKEN_ID]
+        )
+        input_ids = torch.tensor(tokens)
+        is_multimodal = (
+            (input_ids == IMAGE_TOKEN_ID)
+            | (input_ids == VIDEO_TOKEN_ID)
+            | (input_ids == AUDIO_TOKEN_ID)
+        )
+        is_video = is_multimodal & (input_ids == VIDEO_TOKEN_ID)
+        is_audio = is_multimodal & (input_ids == AUDIO_TOKEN_ID)
+        is_image = is_multimodal & (input_ids == IMAGE_TOKEN_ID)
+
+        inputs_embeds = torch.zeros(len(input_ids), hidden)
+        mm_embeds = [
+            torch.full((2, hidden), 20.0),  # image
+            torch.full((2, hidden), 30.0),  # video
+            torch.full((2, hidden), 10.0),  # audio
+        ]
+        result = merge_interleaved_embeddings(
+            inputs_embeds,
+            mm_embeds,
+            is_video,
+            is_audio,
+            is_multimodal,
+            embedding_modalities=("image", "video", "audio"),
+        )
+        assert result[is_image.nonzero(as_tuple=True)[0]].allclose(
+            torch.full((2, hidden), 20.0)
+        )
+        assert result[is_video.nonzero(as_tuple=True)[0]].allclose(
+            torch.full((2, hidden), 30.0)
+        )
+        assert result[is_audio.nonzero(as_tuple=True)[0]].allclose(
+            torch.full((2, hidden), 10.0)
+        )
+
+    def test_modalities_length_mismatch_raises(self):
+        hidden = 2
+        input_ids, is_multimodal = make_interleaved_seq([2], [2])
+        is_video = is_multimodal & (input_ids == VIDEO_TOKEN_ID)
+        is_audio = is_multimodal & (input_ids == AUDIO_TOKEN_ID)
+        with pytest.raises(ValueError, match="must match multimodal_embeddings length"):
+            merge_interleaved_embeddings(
+                torch.zeros(len(input_ids), hidden),
+                [torch.zeros(2, hidden), torch.zeros(2, hidden)],
+                is_video,
+                is_audio,
+                is_multimodal,
+                embedding_modalities=("video",),
+            )
 
 
 if __name__ == "__main__":

@@ -775,11 +775,13 @@ class DiffusionGemmaModelState(ModelState):
         super().__init__(vllm_config, model, encoder_cache, device)
 
         # Per-step MM data produced by get_mm_embeddings and consumed by
-        # prepare_inputs.  Stored as raw (mm_embeds, is_mm_embed) so that
-        # prepare_inputs can call embed_input_ids directly into the
-        # persistent _inputs_embeds_buf, avoiding the intermediate copy
-        # through encoder_runner.inputs_embeds.
-        self._pending_mm_embeds: tuple[list[torch.Tensor], torch.Tensor] | None = None
+        # prepare_inputs.  Stored as raw (mm_embeds, is_mm_embed,
+        # embedding_modalities) so that prepare_inputs can call
+        # embed_input_ids directly into the persistent _inputs_embeds_buf,
+        # avoiding the intermediate copy through encoder_runner.inputs_embeds.
+        self._pending_mm_embeds: (
+            tuple[list[torch.Tensor], torch.Tensor, list[str]] | None
+        ) = None
 
         diffusion_config = vllm_config.diffusion_config
         canvas_length = diffusion_config.canvas_length if diffusion_config else 32
@@ -888,7 +890,9 @@ class DiffusionGemmaModelState(ModelState):
             encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
             self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
 
-        mm_embeds, is_mm_embed = self.gather_mm_embeddings(input_batch)
+        mm_embeds, is_mm_embed, mm_embed_modalities = self.gather_mm_embeddings(
+            input_batch
+        )
 
         if not mm_embeds:
             # No MM tokens in this batch (e.g. all-decode step).
@@ -899,7 +903,7 @@ class DiffusionGemmaModelState(ModelState):
         # Stash raw MM ingredients for prepare_inputs to merge directly
         # into the persistent buffer, avoiding the intermediate copy
         # through encoder_runner.inputs_embeds.
-        self._pending_mm_embeds = (mm_embeds, is_mm_embed)
+        self._pending_mm_embeds = (mm_embeds, is_mm_embed, mm_embed_modalities)
         return None
 
     def _apply_self_conditioning(
@@ -939,13 +943,14 @@ class DiffusionGemmaModelState(ModelState):
         # otherwise embed input_ids as text-only.
         input_ids = input_batch.input_ids[:num_tokens]
         if self._pending_mm_embeds is not None:
-            mm_embeds, is_mm_embed = self._pending_mm_embeds
+            mm_embeds, is_mm_embed, mm_embed_modalities = self._pending_mm_embeds
             self._pending_mm_embeds = None
             inputs_embeds[:num_tokens].copy_(
                 self.model.embed_input_ids(
                     input_ids,
                     multimodal_embeddings=mm_embeds,
                     is_multimodal=is_mm_embed,
+                    embedding_modalities=mm_embed_modalities,
                 )
             )
         else:

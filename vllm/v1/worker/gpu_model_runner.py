@@ -5196,11 +5196,13 @@ class GPUModelRunner(
                         target_hidden_states = hidden_states[:total_num_tokens]
 
             if self.supports_mm_inputs and self.drafter.supports_mm_inputs:
-                mm_embeds, is_mm_embed, _ = self._gather_mm_embeddings(
-                    scheduler_output,
-                    shift_computed_tokens=1,
+                mm_embeds, is_mm_embed, mm_embed_modalities = (
+                    self._gather_mm_embeddings(
+                        scheduler_output,
+                        shift_computed_tokens=1,
+                    )
                 )
-                mm_embed_inputs = (mm_embeds, is_mm_embed)
+                mm_embed_inputs = (mm_embeds, is_mm_embed, mm_embed_modalities)
             else:
                 mm_embed_inputs = None
 

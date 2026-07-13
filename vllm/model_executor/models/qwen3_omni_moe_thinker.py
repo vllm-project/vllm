@@ -1914,15 +1914,18 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             self._set_deepstack_input_embeds(deepstack_input_embeds)
 
         if is_interleaved:
+            if embedding_modalities is None:
+                raise ValueError(
+                    "embedding_modalities is required for interleaved "
+                    "audio-in-video embedding merge"
+                )
             return merge_interleaved_embeddings(
                 inputs_embeds,
                 multimodal_embeddings,
                 is_video,
                 is_audio,
                 is_multimodal,
-                num_video,
-                num_audio,
-                embedding_modalities=embedding_modalities,
+                embedding_modalities,
             )
 
         # Default: standard merge (no interleaving), same as parent class.

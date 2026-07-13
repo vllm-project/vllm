@@ -79,7 +79,9 @@ class DefaultModelState(ModelState):
             # Cache the encoder outputs by mm_hash
             self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
 
-        mm_embeds, is_mm_embed = super().gather_mm_embeddings(input_batch)
+        mm_embeds, is_mm_embed, mm_embed_modalities = super().gather_mm_embeddings(
+            input_batch
+        )
         if self.mm_pruner is not None and mm_embeds:
             # EVS: recompute mrope positions for pruned media.
             mm_embeds = self.mm_pruner.recompute(mm_embeds, input_batch, req_states)
@@ -90,20 +92,23 @@ class DefaultModelState(ModelState):
         # input_batch.input_ids may be padded for CUDA graphs.
         input_ids_unpadded = input_batch.input_ids[: input_batch.num_tokens]
         inputs_embeds = self.encoder_runner.get_inputs_embeds(
-            input_ids_unpadded, mm_embeds, is_mm_embed
+            input_ids_unpadded,
+            mm_embeds,
+            is_mm_embed,
+            embedding_modalities=mm_embed_modalities,
         )
         return inputs_embeds[: input_batch.num_tokens_after_padding]
 
     def gather_mm_embeddings(
         self, input_batch: InputBatch, draft_lookahead: int = 0
-    ) -> tuple[list[torch.Tensor], torch.Tensor]:
-        mm_embeds, is_mm_embed = super().gather_mm_embeddings(
+    ) -> tuple[list[torch.Tensor], torch.Tensor, list[str]]:
+        mm_embeds, is_mm_embed, mm_embed_modalities = super().gather_mm_embeddings(
             input_batch, draft_lookahead
         )
         if self.mm_pruner is not None:
             # EVS: strip the appended mrope-position channels.
             mm_embeds = self.mm_pruner.strip(mm_embeds)
-        return mm_embeds, is_mm_embed
+        return mm_embeds, is_mm_embed, mm_embed_modalities
 
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState

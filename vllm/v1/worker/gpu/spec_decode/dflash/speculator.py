@@ -274,7 +274,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
-        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor, list[str]] | None = None,
         is_profile: bool = False,
     ) -> torch.Tensor:
         num_reqs = input_batch.num_reqs
