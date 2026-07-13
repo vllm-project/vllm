@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused MoE utilities for GPTQ."""
 
+import math
 from collections.abc import Callable
 
 import torch
@@ -312,6 +313,12 @@ def fused_marlin_moe(
     assert num_bits in [4, 8]
     assert topk_weights.dtype == torch.float32
 
+    if global_num_experts == -1:
+        global_num_experts = E
+    else:
+        # Set M to estimated valid tokens per rank
+        M = math.ceil(M * E / global_num_experts)
+
     # M block size selection logic
     # TODO: tune this further for specific models
     for block_size_m in [8, 16, 32, 48, 64]:
@@ -321,8 +328,6 @@ def fused_marlin_moe(
     if input_dtype is not None and input_dtype.itemsize == 1:
         block_size_m = max(block_size_m, 16)
 
-    if global_num_experts == -1:
-        global_num_experts = E
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids,
         block_size_m,
