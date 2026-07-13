@@ -12,7 +12,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from ....conftest import ImageTestAssets
 from ...utils import build_model_context
 
-MODEL_ID = "nvidia/Cosmos3-Edge-Reasoner"
+MODEL_ID = "nvidia/Cosmos3-Edge"
 IMAGE_PLACEHOLDER = "<|vision_start|><|image_pad|><|vision_end|>"
 VIDEO_PLACEHOLDER = "<|vision_start|><|video_pad|><|vision_end|>"
 LOCAL_MODEL_PATH = os.getenv("COSMOS3_EDGE_MODEL_PATH")

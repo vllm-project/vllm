@@ -3,7 +3,6 @@
 
 from collections.abc import Iterable
 
-import regex
 import torch
 import torch.nn as nn
 from transformers import ProcessorMixin
@@ -17,7 +16,6 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -159,14 +157,15 @@ class Cosmos3EdgePatchMerger(nn.Module):
     Projector: LayerNorm -> Linear -> GELU -> Linear
 
     Reads config from projector_config (not vision_config).
-    input_hidden_size * spatial_merge_size² -> merger_intermedia -> out_hidden_size
+    input_hidden_size * spatial_merge_size² -> merger_intermediate_size
+    -> out_hidden_size
     """
 
     def __init__(
         self,
         input_hidden_size: int,
         out_hidden_size: int,
-        merger_intermedia: int,
+        merger_intermediate_size: int,
         spatial_merge_size: int = 2,
         use_postshuffle_norm: bool = False,
         quant_config=None,
@@ -185,7 +184,7 @@ class Cosmos3EdgePatchMerger(nn.Module):
 
         self.linear_fc1 = ColumnParallelLinear(
             self.hidden_size,
-            merger_intermedia,
+            merger_intermediate_size,
             bias=True,
             quant_config=quant_config,
             prefix=f"{prefix}.linear_fc1",
@@ -193,7 +192,7 @@ class Cosmos3EdgePatchMerger(nn.Module):
         )
         self.act_fn = nn.GELU()
         self.linear_fc2 = RowParallelLinear(
-            merger_intermedia,
+            merger_intermediate_size,
             out_hidden_size,
             bias=True,
             quant_config=quant_config,
@@ -235,7 +234,7 @@ class Cosmos3EdgeVisionModel(nn.Module):
         self.projector = Cosmos3EdgePatchMerger(
             input_hidden_size=projector_config.input_hidden_size,
             out_hidden_size=projector_config.out_hidden_size,
-            merger_intermedia=projector_config.merger_intermedia,
+            merger_intermediate_size=projector_config.merger_intermediate_size,
             spatial_merge_size=self.spatial_merge_size,
             use_postshuffle_norm=getattr(
                 projector_config, "use_postshuffle_norm", False
@@ -268,34 +267,9 @@ class Cosmos3EdgeVisionModel(nn.Module):
         return self.projector(image_embeds)
 
 
-# =============================================================================
-# Processing Info and Processor
-# =============================================================================
-
-
 class Cosmos3EdgeProcessingInfo(Qwen3VLProcessingInfo):
-    """Processing info for Cosmos3 Edge.
-
-    The Siglip2VisionConfig does not have spatial_merge_size,
-    temporal_patch_size, or out_hidden_size — those live in projector_config.
-    We patch them onto vision_config so the Qwen3VL processing base class works.
-    """
-
     def get_hf_config(self):
-        config = self.ctx.get_hf_config()
-        vision_config = config.vision_config
-        projector_config = config.projector_config
-
-        # Patch attributes the Qwen3VL base class expects on vision_config
-        if not hasattr(vision_config, "spatial_merge_size"):
-            vision_config.spatial_merge_size = projector_config.spatial_merge_size
-        if not hasattr(vision_config, "out_hidden_size"):
-            vision_config.out_hidden_size = projector_config.out_hidden_size
-        # SigLIP2 uses temporal_factor=1 (no temporal grouping); grid_t = num_frames
-        if not hasattr(vision_config, "temporal_patch_size"):
-            vision_config.temporal_patch_size = 1
-
-        return config
+        return self.ctx.get_hf_config()
 
     def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
         return self.ctx.get_hf_processor(**kwargs)
@@ -468,48 +442,40 @@ class Cosmos3EdgeForCausalLM(nn.Module):
         return self.logits_processor(self.lm_head, hidden_states)
 
 
-def _cosmos3_edge_diffusers_weight_map():
-    """Map shared Diffusers transformer tensors to reasoner weight names."""
+def _cosmos3_edge_diffusers_prefix_map() -> dict[str, str]:
+    """Map Diffusers blocks to interleaved Nemotron-H layers.
+
+    The checkpoint stores attention and MLP in one ``layers.N`` block, while
+    the Nemotron-H model represents them as separate decoder layers. Therefore,
+    checkpoint block ``N`` maps its attention to layer ``2N`` and its MLP to
+    layer ``2N + 1``.
+    """
     mappings = {
-        regex.compile(
-            r"^embed_tokens\.weight\Z"
-        ): "model.language_model.embeddings.weight",
-        regex.compile(r"^norm\.weight\Z"): "model.language_model.norm_f.weight",
-    }
-    attention_names = {
-        "to_q": "q_proj",
-        "to_k": "k_proj",
-        "to_v": "v_proj",
-        "to_out": "o_proj",
+        "embed_tokens.": "language_model.model.embed_tokens.",
+        "norm.": "language_model.model.norm_f.",
     }
     for physical_idx in range(28):
         attention_idx = 2 * physical_idx
         mlp_idx = attention_idx + 1
-        physical_prefix = rf"^layers\.{physical_idx}"
-        attention_prefix = f"model.language_model.layers.{attention_idx}"
-        mlp_prefix = f"model.language_model.layers.{mlp_idx}"
-        mappings[regex.compile(physical_prefix + r"\.input_layernorm\.weight\Z")] = (
-            f"{attention_prefix}.norm.weight"
+        source_prefix = f"layers.{physical_idx}"
+        attention_prefix = f"language_model.model.layers.{attention_idx}"
+        mlp_prefix = f"language_model.model.layers.{mlp_idx}"
+        mappings.update(
+            {
+                f"{source_prefix}.input_layernorm.": f"{attention_prefix}.norm.",
+                f"{source_prefix}.self_attn.qkv_proj.": (
+                    f"{attention_prefix}.mixer.qkv_proj."
+                ),
+                f"{source_prefix}.self_attn.o_proj.": (
+                    f"{attention_prefix}.mixer.o_proj."
+                ),
+                f"{source_prefix}.post_attention_layernorm.": (f"{mlp_prefix}.norm."),
+                f"{source_prefix}.mlp.": f"{mlp_prefix}.mixer.",
+            }
         )
-        for source_name, target_name in attention_names.items():
-            mappings[
-                regex.compile(
-                    physical_prefix + rf"\.self_attn\.{source_name}\.weight\Z"
-                )
-            ] = f"{attention_prefix}.mixer.{target_name}.weight"
-        mappings[
-            regex.compile(physical_prefix + r"\.post_attention_layernorm\.weight\Z")
-        ] = f"{mlp_prefix}.norm.weight"
-        for projection_name in ("up_proj", "down_proj"):
-            mappings[
-                regex.compile(physical_prefix + rf"\.mlp\.{projection_name}\.weight\Z")
-            ] = f"{mlp_prefix}.mixer.{projection_name}.weight"
     return mappings
 
 
-# =============================================================================
-# Main Model Class
-# =============================================================================
 @MULTIMODAL_REGISTRY.register_processor(
     Cosmos3EdgeMultiModalProcessor,
     info=Cosmos3EdgeProcessingInfo,
@@ -530,21 +496,16 @@ class Cosmos3EdgeForConditionalGeneration(
     """
 
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_regex=_cosmos3_edge_diffusers_weight_map(),
         orig_to_new_stacked={
             ".self_attn.q_proj": (".self_attn.qkv_proj", "q"),
             ".self_attn.k_proj": (".self_attn.qkv_proj", "k"),
             ".self_attn.v_proj": (".self_attn.qkv_proj", "v"),
-            ".mixer.q_proj": (".mixer.qkv_proj", "q"),
-            ".mixer.k_proj": (".mixer.qkv_proj", "k"),
-            ".mixer.v_proj": (".mixer.qkv_proj", "v"),
         },
         orig_to_new_prefix={
+            **_cosmos3_edge_diffusers_prefix_map(),
             "proj_in.": None,
             "proj_out.": None,
             "time_embedder.": None,
-            "audio_proj_in.": None,
-            "audio_proj_out.": None,
             "action_proj_in.": None,
             "action_proj_out.": None,
             "audio_modality_embed": None,
@@ -562,7 +523,10 @@ class Cosmos3EdgeForConditionalGeneration(
             ".to_add_out.": None,
             ".norm_added_q.": None,
             ".norm_added_k.": None,
-            "A_log": "A",
+            ".self_attn.to_q.": ".self_attn.q_proj.",
+            ".self_attn.to_k.": ".self_attn.k_proj.",
+            ".self_attn.to_v.": ".self_attn.v_proj.",
+            ".self_attn.to_out.": ".self_attn.o_proj.",
             "language_model.embeddings": "language_model.embed_tokens",
         },
     )
@@ -570,6 +534,10 @@ class Cosmos3EdgeForConditionalGeneration(
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
     }
+
+    # Cosmos3 Edge unified Diffusers checkpoints store reasoner weights across
+    # transformer/ and vision_encoder/. Match both while excluding VAE weights.
+    allow_patterns_overrides = ["[tv]*er/*.safetensors"]
 
     supports_encoder_tp_data = True
 
@@ -590,18 +558,6 @@ class Cosmos3EdgeForConditionalGeneration(
 
         self.config = config
         self.multimodal_config = multimodal_config
-        if "Cosmos3EdgeForConditionalGeneration" in (
-            getattr(config, "architectures", None) or ()
-        ):
-            self.allow_patterns_overrides = ["transformer/*.safetensors"]
-            self.secondary_weights = [
-                DefaultModelLoader.Source(
-                    model_or_path=vllm_config.model_config.model,
-                    revision=vllm_config.model_config.revision,
-                    prefix="",
-                    allow_patterns_overrides=["vision_encoder/*.safetensors"],
-                )
-            ]
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):

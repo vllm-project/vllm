@@ -811,7 +811,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         min_transformers_version="4.57",
     ),
     "Cosmos3EdgeForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/Cosmos3-Edge-Reasoner",
+        "nvidia/Cosmos3-Edge",
         max_model_len=4096,
         is_available_online=False,
     ),

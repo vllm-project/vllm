@@ -24,6 +24,7 @@ class Cosmos3EdgeTextConfig(NemotronHConfig):
 
     model_type = "cosmos3_edge_text"
     has_no_defaults_at_init = True
+    ignore_keys_at_rope_validation = {"mrope_section", "mrope_interleaved"}
 
     def __init__(
         self,
@@ -50,14 +51,14 @@ class Cosmos3EdgeTextConfig(NemotronHConfig):
 
 
 class Cosmos3EdgeProjectorConfig(PretrainedConfig):
-    model_type = "qwen3_style_projector"
+    model_type = "cosmos3_edge_projector"
 
     def __init__(
         self,
         input_hidden_size: int = 1024,
         use_postshuffle_norm: bool = False,
         spatial_merge_size: int = 2,
-        merger_intermedia: int = 11520,
+        merger_intermediate_size: int = 11520,
         out_hidden_size: int = 1024,
         **kwargs,
     ) -> None:
@@ -65,8 +66,12 @@ class Cosmos3EdgeProjectorConfig(PretrainedConfig):
         self.input_hidden_size = input_hidden_size
         self.use_postshuffle_norm = use_postshuffle_norm
         self.spatial_merge_size = spatial_merge_size
-        self.merger_intermedia = merger_intermedia
+        self.merger_intermediate_size = merger_intermediate_size
         self.out_hidden_size = out_hidden_size
+
+
+class Cosmos3EdgeVisionConfig(Siglip2VisionConfig):
+    model_type = "cosmos3_edge_vision"
 
 
 class Cosmos3EdgeConfig(PretrainedConfig):
@@ -74,7 +79,7 @@ class Cosmos3EdgeConfig(PretrainedConfig):
     keys_to_ignore_at_inference = ["past_key_values"]
     has_no_defaults_at_init = True
     sub_configs = {
-        "vision_config": Siglip2VisionConfig,
+        "vision_config": Cosmos3EdgeVisionConfig,
         "projector_config": Cosmos3EdgeProjectorConfig,
         "text_config": Cosmos3EdgeTextConfig,
     }
@@ -82,7 +87,7 @@ class Cosmos3EdgeConfig(PretrainedConfig):
     def __init__(
         self,
         text_config: Cosmos3EdgeTextConfig | dict | None = None,
-        vision_config: Siglip2VisionConfig | dict | None = None,
+        vision_config: Cosmos3EdgeVisionConfig | dict | None = None,
         projector_config: Cosmos3EdgeProjectorConfig | dict | None = None,
         image_token_id: int = 19,
         video_token_id: int = 18,
@@ -106,7 +111,7 @@ class Cosmos3EdgeConfig(PretrainedConfig):
         _normalize_mrope_parameters(self.text_config)
 
         self.vision_config = (
-            Siglip2VisionConfig(**vision_config)
+            Cosmos3EdgeVisionConfig(**vision_config)
             if isinstance(vision_config, dict)
             else vision_config
         )
@@ -137,4 +142,5 @@ __all__ = [
     "Cosmos3EdgeConfig",
     "Cosmos3EdgeProjectorConfig",
     "Cosmos3EdgeTextConfig",
+    "Cosmos3EdgeVisionConfig",
 ]
