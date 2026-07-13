@@ -113,7 +113,9 @@ def _shared_experts_are_fp4(config, layer_idx: int | None = None) -> bool:
     ``layer_idx=None`` resolves the model-wide default (global scheme), used by
     the main-model weight loader / mapper callers that operate per-model.
     """
-    quant_cfg = getattr(config, "quantization_config", None) or {}
+    quant_cfg = getattr(config, "quantization_config", None)
+    if quant_cfg is None:
+        return False
     if layer_idx is None:
         base = None
     elif layer_idx >= config.num_hidden_layers:
@@ -678,22 +680,33 @@ class DeepseekV4Model(nn.Module):
         # Pre-compute expert mapping ONCE.
         expert_mapping = self.get_expert_mapping()
 
-        fuse_shared = _fuse_shared_experts_enabled(self.config)
+        # Use each MoE's own per-layer fusion decision (computed with its prefix
+        # at init) as the single source of truth, so the redirect below cannot
+        # diverge from how the module was built if per-layer quantization ever
+        # mixes fused and non-fused layers.
+        fuse_by_layer = {
+            extract_layer_index(mod_name): mod.fuse_shared_experts
+            for mod_name, mod in self.named_modules()
+            if isinstance(mod, DeepseekV4MoE)
+        }
         n_routed = self.config.n_routed_experts
         # The redirect below maps the single shared-expert tensor group to one
         # appended slot; multiple shared experts would need per-expert slicing
         # (see deepseek_v2.py). DeepSeek-V4 has n_shared_experts == 1.
-        assert not fuse_shared or self.config.n_shared_experts == 1, (
-            "deepseek-v4 fused shared-expert loading supports only "
-            f"n_shared_experts == 1, got {self.config.n_shared_experts}"
-        )
+        if any(fuse_by_layer.values()) and self.config.n_shared_experts != 1:
+            raise NotImplementedError(
+                "deepseek-v4 fused shared-expert loading supports only "
+                f"n_shared_experts == 1, got {self.config.n_shared_experts}"
+            )
 
         for name, loaded_weight in weights:
             # Shared-expert fusion: redirect ``.ffn.shared_experts.w{1,2,3}``
             # into appended routed-expert slot ``.ffn.experts.{n_routed}``
             # so the MXFP4-quantized shared expert loads through the routed
             # expert loader (grouped GEMM). Single shared expert only.
-            if fuse_shared and ".ffn.shared_experts.w" in name:
+            if ".ffn.shared_experts.w" in name and fuse_by_layer.get(
+                extract_layer_index(name), False
+            ):
                 name = name.replace(
                     ".ffn.shared_experts.w",
                     f".ffn.experts.{n_routed}.w",
