@@ -63,14 +63,16 @@ class ECConnectorFactory:
         connector_name = ec_transfer_config.ec_connector
         if connector_name is None:
             raise ValueError("EC connect must not be None")
+        connector_module_path = ec_transfer_config.ec_connector_module_path
+        if connector_module_path is not None and not connector_module_path:
+            raise ValueError("ec_connector_module_path cannot be an empty string.")
+        if connector_module_path:
+            connector_module = importlib.import_module(connector_module_path)
+            connector_cls = getattr(connector_module, connector_name)
         elif connector_name in cls._registry:
             connector_cls = cls._registry[connector_name]()
         else:
-            connector_module_path = ec_transfer_config.ec_connector_module_path
-            if connector_module_path is None:
-                raise ValueError(f"Unsupported connector type: {connector_name}")
-            connector_module = importlib.import_module(connector_module_path)
-            connector_cls = getattr(connector_module, connector_name)
+            raise ValueError(f"Unsupported connector type: {connector_name}")
         return connector_cls
 
 
@@ -82,4 +84,10 @@ ECConnectorFactory.register_connector(
     "ECExampleConnector",
     "vllm.distributed.ec_transfer.ec_connector.example_connector",
     "ECExampleConnector",
+)
+
+ECConnectorFactory.register_connector(
+    "MooncakeStoreECConnector",
+    "vllm.distributed.ec_transfer.ec_connector.mooncake_store_hidden",
+    "MooncakeStoreECConnector",
 )
