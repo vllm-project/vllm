@@ -3,7 +3,6 @@
 
 import importlib
 import secrets
-from typing import cast
 
 import torch
 import torch.nn as nn
@@ -601,7 +600,7 @@ def _rapid_vector(
         return torch.full((batch_size,), default, dtype=dtype, device=device)
     if isinstance(value, (int, float)):
         return torch.full((batch_size,), value, dtype=dtype, device=device)
-    tensor = cast(torch.Tensor, value)
+    tensor = value
     if tensor.numel() == 1 and batch_size != 1:
         tensor = tensor.expand(batch_size)
     assert tensor.shape == (batch_size,), (
