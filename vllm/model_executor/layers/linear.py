@@ -11,6 +11,7 @@ from torch.nn.parameter import Parameter
 from typing_extensions import TypeIs
 
 import vllm.envs as envs
+from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -254,6 +255,8 @@ class LinearBase(PluggableLayer):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        tp_rank: int | None = None,
+        tp_size: int | None = None,
     ):
         super().__init__()
 
@@ -277,8 +280,17 @@ class LinearBase(PluggableLayer):
             raise ValueError("All linear layers should support quant method.")
         self.return_bias = return_bias
         self.disable_tp = disable_tp
-        self.tp_rank = get_tensor_model_parallel_rank() if not disable_tp else 0
-        self.tp_size = get_tensor_model_parallel_world_size() if not disable_tp else 1
+        if disable_tp:
+            self.tp_rank, self.tp_size = 0, 1
+        else:
+            self.tp_rank = (
+                tp_rank if tp_rank is not None else get_tensor_model_parallel_rank()
+            )
+            self.tp_size = (
+                tp_size
+                if tp_size is not None
+                else get_tensor_model_parallel_world_size()
+            )
 
     def update_param_tp_status(self):
         for param in self.parameters():
@@ -416,6 +428,11 @@ class ColumnParallelLinear(LinearBase):
                         (e.g. model.layers.0.qkv_proj)
         return_bias: If true, return bias together with outputs in forward pass.
         disable_tp: If true, weights matrix won't be sharded through tp rank.
+        tp_rank: Override the tensor-parallel rank used for sharding. Defaults to
+            the global TP rank. Used to shard at a coarser granularity than one
+            shard per rank (see ``DCPGroupColumnParallelLinear``).
+        tp_size: Override the tensor-parallel world size used for sharding.
+            Defaults to the global TP world size.
     """
 
     # --8<-- [end:column_parallel_linear]
@@ -433,10 +450,21 @@ class ColumnParallelLinear(LinearBase):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        tp_rank: int | None = None,
+        tp_size: int | None = None,
     ):
         # Divide the weight matrix along the last dimension.
-        self.tp_rank = get_tensor_model_parallel_rank() if not disable_tp else 0
-        self.tp_size = get_tensor_model_parallel_world_size() if not disable_tp else 1
+        if disable_tp:
+            self.tp_rank, self.tp_size = 0, 1
+        else:
+            self.tp_rank = (
+                tp_rank if tp_rank is not None else get_tensor_model_parallel_rank()
+            )
+            self.tp_size = (
+                tp_size
+                if tp_size is not None
+                else get_tensor_model_parallel_world_size()
+            )
         self.input_size_per_partition = input_size
         self.output_size_per_partition = divide(output_size, self.tp_size)
         self.output_partition_sizes = [self.output_size_per_partition]
@@ -456,6 +484,8 @@ class ColumnParallelLinear(LinearBase):
             prefix,
             return_bias=return_bias,
             disable_tp=disable_tp,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
         )
 
         self._maybe_allow_fp8_block_shape_mismatch()
@@ -575,6 +605,112 @@ class ColumnParallelLinear(LinearBase):
         s += f", tp_size={self.tp_size}"
         s += f", gather_output={self.gather_output}"
         return s
+
+
+class DCPGroupColumnParallelLinear(ColumnParallelLinear):
+    """Column-parallel linear whose weight is sharded across DCP groups.
+
+    With Decode Context Parallelism (DCP) the KV cache is sharded across a DCP
+    group, so MLA decode must attend the group's full head set. This layer shards
+    its output across DCP *groups* (effective tp size ``tp_size //
+    dcp_world_size``) rather than across every rank, so each rank in a group
+    holds the whole group's heads.
+
+    :meth:`forward` returns only this rank's tp shard, exactly matching
+    :class:`ColumnParallelLinear`, making this a drop-in replacement.
+    :meth:`forward_replicated` returns the group's full head set, which lets MLA
+    query replication (qrep) skip the decode query all-gather.
+
+    It is an ordinary column-parallel layer with coarser shard coordinates, so
+    standard (and quantized) weight loading applies unchanged. At
+    ``dcp_world_size == 1`` the group size is 1 and both forwards coincide.
+    """
+
+    def __init__(self, *args, **kwargs):
+        dcp_world_size = (
+            get_current_vllm_config().parallel_config.decode_context_parallel_size
+        )
+        rank = get_tensor_model_parallel_rank()
+        world_size = get_tensor_model_parallel_world_size()
+        self.group_size = max(dcp_world_size, 1)
+        self.rank_in_group = rank % self.group_size
+        # qrep only decides whether callers use forward_replicated(); the weight
+        # is sharded per DCP group either way.
+        self.qrep_active = bool(envs.VLLM_DCP_Q_REPLICATE) and self.group_size > 1
+        super().__init__(
+            *args,
+            **kwargs,
+            tp_rank=rank // self.group_size,
+            tp_size=world_size // self.group_size,
+        )
+
+        # This rank's own tp shard of the group's output.
+        local_size = self.output_size_per_partition // self.group_size
+        start = self.rank_in_group * local_size
+        self._local_shard = slice(start, start + local_size)
+        self._is_unquantized = isinstance(self.quant_method, UnquantizedLinearMethod)
+        if self.group_size > 1 and not self._is_unquantized:
+            # Quantized weights are repacked/swizzled by the quant method, so the
+            # group weight cannot be row-sliced at runtime. build_local_weight()
+            # derives a dequantized local weight once, after loading.
+            self.register_buffer("_local_weight", None, persistent=False)
+
+    def build_local_weight(self, act_dtype: torch.dtype) -> None:
+        """Derive the dequantized local weight :meth:`forward` uses.
+
+        Only needed for quantized layers (unquantized row-slices ``weight``).
+        Must run after weight loading; MLAAttention.process_weights_after_loading
+        drives this for the MLA projections.
+        """
+        if self.group_size == 1 or self._is_unquantized:
+            return
+
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            get_and_maybe_dequant_weights,
+        )
+
+        # [out, in] dequantized group weight; clone this rank's rows so the
+        # (group_size x larger) dequantized group weight can be freed.
+        weight = get_and_maybe_dequant_weights(self, out_dtype=act_dtype)
+        self._local_weight = weight[self._local_shard].clone()
+
+    def _local_view(self, out: torch.Tensor) -> torch.Tensor:
+        """Slice this rank's tp head shard from a group-heads output.
+
+        ``out`` is head-shaped, i.e. ``(..., group_heads, head_dim)``.
+        """
+        if self.group_size == 1:
+            return out
+        n = out.shape[-2] // self.group_size
+        start = self.rank_in_group * n
+        return out[..., start : start + n, :].contiguous()
+
+    def forward_replicated(self, input_):
+        """Project to the DCP group's full head set (replicated within a group)."""
+        return super().forward(input_)
+
+    def forward(self, input_):
+        """Project to this rank's own tp shard, as ColumnParallelLinear would."""
+        if self.group_size == 1:
+            return super().forward(input_)
+
+        weight = (
+            self.weight[self._local_shard]
+            if self._is_unquantized
+            else self._local_weight
+        )
+        assert weight is not None, (
+            "build_local_weight() must run before forward() on a quantized "
+            f"{type(self).__name__} ({self.prefix})"
+        )
+        bias = self.bias[self._local_shard] if self.bias is not None else None
+        output = torch.nn.functional.linear(
+            input_, weight, None if self.skip_bias_add else bias
+        )
+
+        if not self.return_bias:
+            return output
+        return output, (bias if self.skip_bias_add else None)
 
 
 class MergedColumnParallelLinear(ColumnParallelLinear):

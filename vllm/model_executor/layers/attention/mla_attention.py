@@ -211,7 +211,6 @@ from vllm.config import (
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import (
     get_dcp_group,
-    get_tensor_model_parallel_rank,
     is_global_first_rank,
 )
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -362,6 +361,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         kv_lora_rank: int,
         kv_b_proj: ColumnParallelLinear,
         dcp_q_replicate: bool = False,
+        q_proj: torch.nn.Module | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -381,20 +381,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.kv_lora_rank = kv_lora_rank
         self.kv_b_proj = kv_b_proj
         self.dcp_q_replicate = dcp_q_replicate
+        # Held so their dequantized local weights can be built post-load.
+        self.q_proj = q_proj
         self.W_UK_T_dcp_qrep: torch.Tensor | None = None
         self.head_size = kv_lora_rank + qk_rope_head_dim
         self.layer_name = prefix
         self.indexer = indexer
-        self.dcp_qrep_local_head_offset = 0
-        dcp_world_size = 1
-        if self.dcp_q_replicate:
-            dcp_world_size = (
-                get_current_vllm_config().parallel_config.decode_context_parallel_size
-            )
-            self.dcp_qrep_local_head_offset = (
-                get_tensor_model_parallel_rank() % dcp_world_size
-            ) * self.num_heads
-        self.kv_b_proj_num_heads = self.num_heads * dcp_world_size
+        # kv_b_proj's weight is sharded per DCP group, so it holds the group's
+        # heads; this rank's own heads start at dcp_qrep_local_head_offset.
+        self.kv_b_proj_num_heads = self.num_heads * getattr(kv_b_proj, "group_size", 1)
+        self.dcp_qrep_local_head_offset = (
+            getattr(kv_b_proj, "rank_in_group", 0) * self.num_heads
+        )
 
         self.num_kv_heads = 1
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
@@ -473,7 +471,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             extra_impl_args["topk_indices_buffer"] = topk_indices_buffer
 
         impl_cls = cast(type[MLAAttentionImpl], self.attn_backend.get_impl_cls())
-        self.impl = impl_cls(  # type: ignore[assignment,call-arg]  # impl_cls always returns an MLAAttentionImpl subclass
+        self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an MLAAttentionImpl subclass
             num_heads=self.num_heads,
             head_size=self.head_size,
             scale=self.scale,
@@ -492,9 +490,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             qk_head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
             v_head_dim=self.v_head_dim,
             kv_b_proj=kv_b_proj,
-            dcp_q_replicate=self.dcp_q_replicate,
-            kv_b_proj_num_heads=self.kv_b_proj_num_heads,
-            dcp_qrep_local_head_offset=self.dcp_qrep_local_head_offset,
             indexer=indexer,
             **extra_impl_args,
         )
@@ -683,7 +678,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             _ = torch.empty(
                 (
                     self.chunked_prefill_workspace_size,
-                    self.kv_b_proj_num_heads,
+                    self.num_heads,
                     self.qk_nope_head_dim + self.v_head_dim,
                 ),
                 device=k_c_normed.device,
@@ -905,6 +900,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         return output_padded
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
+        # Runs after every quant method has repacked its weights, so DCP-group
+        # sharded projections can now derive their dequantized local weights.
+        for proj in (self.q_proj, self.kv_b_proj):
+            build_local_weight = getattr(proj, "build_local_weight", None)
+            if build_local_weight is not None:
+                build_local_weight(act_dtype)
+
         # we currently do not have quantized bmm's which are needed for
         # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
         # the bmm's in 16-bit, the extra memory overhead of this is fairly low
@@ -944,10 +946,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
 
         W_UK_dcp_qrep = None
-        if self.dcp_q_replicate:
-            W_UK_dcp_qrep, _ = kv_b_proj_weight.split(
-                [self.qk_nope_head_dim, self.v_head_dim], dim=-1
-            )
+        if self.kv_b_proj_num_heads != self.num_heads:
+            # kv_b_proj holds the DCP group's heads: keep the group W_UK for the
+            # qrep decode BMM, and slice this rank's heads for everything else.
+            if self.dcp_q_replicate:
+                W_UK_dcp_qrep, _ = kv_b_proj_weight.split(
+                    [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+                )
             kv_b_proj_weight = kv_b_proj_weight[
                 :,
                 self.dcp_qrep_local_head_offset : self.dcp_qrep_local_head_offset
@@ -2086,9 +2091,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         # DSV3.2 MLA Specific Arguments
         indexer: object | None = None,
         q_pad_num_heads: int | None = None,
-        dcp_q_replicate: bool = False,
-        kv_b_proj_num_heads: int | None = None,
-        dcp_qrep_local_head_offset: int = 0,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not supported for MLA")
@@ -2106,9 +2108,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj
-        self.dcp_q_replicate = dcp_q_replicate
-        self.kv_b_proj_num_heads = kv_b_proj_num_heads or num_heads
-        self.dcp_qrep_local_head_offset = dcp_qrep_local_head_offset
         self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads
         self.supports_quant_query_input = True
@@ -2129,21 +2128,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.cp_kv_cache_interleave_size: int = (
             get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
         )
-
-    def _kv_b_proj_local_heads(self, kv_c_normed: torch.Tensor) -> torch.Tensor:
-        kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
-            -1,
-            self.kv_b_proj_num_heads,
-            self.qk_nope_head_dim + self.v_head_dim,
-        )
-        if self.dcp_q_replicate:
-            kv_nope = kv_nope[
-                :,
-                self.dcp_qrep_local_head_offset : self.dcp_qrep_local_head_offset
-                + self.num_heads,
-                :,
-            ]
-        return kv_nope
 
     def _concat_k_nope_k_pe(
         self, k_nope: torch.Tensor, k_pe: torch.Tensor
@@ -2242,7 +2226,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 kv_c_normed = kv_c_normed.to(self.kv_b_proj.weight.dtype)
 
             k_pe = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
-            kv_nope = self._kv_b_proj_local_heads(kv_c_normed)
+            kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
+                -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
+            )
 
             # To Do: Use epilogue of kv_b_proj to generate fp8 kv_nope.
             if use_fp8_prefill:
@@ -2386,7 +2372,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             ) and kv_b_proj_w_dtype != torch.uint8:
                 kv_c_normed = kv_c_normed.to(kv_b_proj_w_dtype)
 
-            kv_nope = self._kv_b_proj_local_heads(kv_c_normed)
+            kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
+                -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
+            )
             if use_fp8_prefill:
                 kv_nope = kv_nope.to(prefill_metadata.q_data_type)
                 k_pe = k_pe.to(prefill_metadata.q_data_type)
@@ -2449,7 +2437,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             "Fused FP8 output is only wired for the non-chunked-context path"
         )
 
-        kv_nope = self._kv_b_proj_local_heads(kv_c_normed)
+        kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
+            -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
+        )
         k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
