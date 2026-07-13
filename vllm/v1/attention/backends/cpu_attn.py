@@ -433,32 +433,11 @@ class CPUAttentionBackendImpl(AttentionImpl):
 
 @functools.lru_cache(maxsize=1)
 def _riscv_supports_rvv() -> bool:
-    """Whether the C++ RVV attention path is usable.
-
-    The kernel in csrc/cpu/cpu_attn_rvv.hpp uses VLEN-agnostic RVVI()
-    macros and supports VLEN=128 and VLEN=256.  CMake auto-detects the
-    largest zvl<N>b from /proc/cpuinfo and passes it via -mrvv-vector-bits.
-    The RVV path is compiled whenever __riscv_v_min_vlen is defined, so
-    we check that at least one supported zvl<N>b is advertised.
-    """
-    # The C++ compile-time check is the ground truth: it knows which
-    # VLEN the binary was actually compiled for.  The cpuinfo check
-    # below is only a fast-path shortcut.
+    """Whether the loaded C++ extension supports RVV attention."""
     try:
-        import torch
-
-        if torch.ops._C.cpu_attn_has_isa("rvv"):
-            return True
-    except Exception:
-        pass
-
-    # Fallback: check /proc/cpuinfo for zvl128b/zvl256b.
-    try:
-        with open("/proc/cpuinfo") as f:
-            cpuinfo = f.read()
-    except OSError:
+        return torch.ops._C.cpu_attn_has_isa("rvv")
+    except (AttributeError, RuntimeError):
         return False
-    return any(f"zvl{n}b" in cpuinfo for n in (128, 256))
 
 
 def _get_attn_isa(

@@ -9,7 +9,10 @@ import torch
 
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.attention.backends.cpu_attn import _get_attn_isa
+from vllm.v1.attention.backends.cpu_attn import (
+    _get_attn_isa,
+    _riscv_supports_rvv,
+)
 
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
@@ -61,6 +64,44 @@ def get_attn_isa(
         dtype if dtype is not None else torch.bfloat16,
         block_size if block_size else 32,
     )
+
+
+@pytest.fixture
+def clear_riscv_support_cache():
+    _riscv_supports_rvv.cache_clear()
+    yield
+    _riscv_supports_rvv.cache_clear()
+
+
+@pytest.mark.parametrize("native_result", [True, False])
+def test_riscv_rvv_support_uses_native_result(
+    monkeypatch, clear_riscv_support_cache, native_result
+):
+    monkeypatch.setattr(torch.ops._C, "cpu_attn_has_isa", lambda isa: native_result)
+
+    assert _riscv_supports_rvv() is native_result
+
+
+def test_riscv_rvv_support_fails_closed(monkeypatch, clear_riscv_support_cache):
+    def unavailable(isa):
+        raise RuntimeError("native capability probe unavailable")
+
+    monkeypatch.setattr(torch.ops._C, "cpu_attn_has_isa", unavailable)
+
+    assert not _riscv_supports_rvv()
+
+
+def test_riscv_native_false_selects_scalar_attention(
+    monkeypatch, clear_riscv_support_cache
+):
+    monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: False)
+    monkeypatch.setattr(torch.cpu, "_is_avx512_supported", lambda: False)
+    monkeypatch.setattr(
+        current_platform, "get_cpu_architecture", lambda: CpuArchEnum.RISCV
+    )
+    monkeypatch.setattr(torch.ops._C, "cpu_attn_has_isa", lambda isa: False)
+
+    assert _get_attn_isa(torch.float32, 32) == "vec"
 
 
 # rand number generation takes too much time, cache rand tensors
