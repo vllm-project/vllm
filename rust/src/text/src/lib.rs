@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Shared text-generation support used by chat and future raw completions.
 //!
 //! This crate intentionally stays below chat semantics:
