@@ -94,6 +94,37 @@ profiler. The profiler will underestimate available KV cache headroom by the
 expert weight footprint (a safe margin, not a hazard), but exact
 `gpu-memory-utilization`-based sizing will be off.
 
+## MXFP4 support
+
+The expert cache supports MXFP4 (Microscaling FP4) expert weights, used by
+DeepSeek V4 Flash and PRO. MXFP4 block scales (shape `[E, output_dim, input_blocks]`)
+are handled natively — the `CachedWeightProvider` slices on dimension 0 regardless
+of tensor rank.
+
+### Monolithic kernel limitation
+
+DeepSeek V4's default MXFP4 MoE kernel is **monolithic**: it performs expert
+routing internally and expects `global_num_experts = total_experts`. The expert
+cache remaps expert IDs to slot indices, which is incompatible with monolithic
+routing.
+
+When `--moe-expert-cache-size N > 0` is used with MXFP4, the backend automatically
+re-selects with `prefer_modular=True` to obtain a modular kernel class that accepts
+externally-provided `topk_ids`. For TRITON this selects `OAITritonExperts`; for
+FLASHINFER TRTLLM this selects `TrtLlmMxfp4ExpertsModular`.
+
+If no modular backend is available (e.g. MARLIN), a clear error is raised:
+```
+ValueError: --moe-expert-cache-size=N requires a modular MXFP4 MoE kernel,
+but backend ... only provides monolithic kernels.
+```
+
+### 3D scale tensors
+
+MXFP4 stores per-expert block scales as 3D tensors:
+`[num_experts, output_dim, input_dim // block_size]`. The cache copies these
+alongside weight tensors on a per-expert basis, preserving the full shape.
+
 ## Tests
 
 ```bash
