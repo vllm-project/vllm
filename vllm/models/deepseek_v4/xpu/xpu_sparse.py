@@ -94,6 +94,9 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
             fused_inv_rope_fp8_quant,
         )
 
+        hidden_dim = o.shape[-1] * (self.n_local_heads // self.n_local_groups)
+        wo_a_raw_weight = cast(torch.Tensor, self.wo_a.weight)
+
         o_fp8, o_scale = fused_inv_rope_fp8_quant(
             o,
             positions,
@@ -105,11 +108,16 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
             tma_aligned_scales=False,
         )
 
-        hidden_dim = o_fp8.shape[-1]
-        wo_a_raw_weight = cast(torch.Tensor, self.wo_a.weight)
-        wo_a_weight = torch.reshape(
-            wo_a_raw_weight, (self.n_local_groups, self.o_lora_rank, hidden_dim)
-        ).transpose(1, 2)
+        # Weight is [N_total, K] where N_total = groups * o_lora_rank.
+        # Reshape to [groups, o_lora_rank, K] then transpose to [groups, K, N]
+        # and make contiguous for BMM.
+        wo_a_weight = (
+            torch.reshape(
+                wo_a_raw_weight, (self.n_local_groups, self.o_lora_rank, hidden_dim)
+            )
+            .transpose(1, 2)
+            .contiguous()
+        )
 
         scale_attr = (
             "weight_scale_inv"
@@ -122,6 +130,7 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
             hidden_dim // self.BLOCK_FP8_SIZE,
         )
         if wo_a_raw_scale.shape == block_fp8_scale_shape:
+            # Block FP8 (ModelOpt): scale is [groups*N_blk, K_blk] float32
             wo_a_scale = torch.reshape(
                 wo_a_raw_scale,
                 (
@@ -132,6 +141,8 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
             )
             wo_a_scale = wo_a_scale.transpose(1, 2).contiguous()
         else:
+            # MXFP8: scale is [N_total, K//32] e8m0.
+            # Reshape to [groups, N, K//32] then transpose to [groups, K//32, N]
             wo_a_scale = (
                 torch.reshape(
                     wo_a_raw_scale, (self.n_local_groups, self.o_lora_rank, -1)
@@ -150,6 +161,7 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
             wo_a_scale,
             None,
         )
+
         return self.wo_b(z.transpose(0, 1).flatten(1))
 
     def forward_mqa(
