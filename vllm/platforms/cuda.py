@@ -695,7 +695,10 @@ class CudaPlatformBase(Platform):
             rms_norm = ["oink"] + default
 
         return IrOpPriorityConfig.with_default(
-            default, rms_norm=rms_norm, fused_add_rms_norm=rms_norm
+            default,
+            rms_norm=rms_norm,
+            fused_add_rms_norm=rms_norm,
+            gelu_and_mul_sparse=["triton", "native"],
         )
 
     @classmethod
