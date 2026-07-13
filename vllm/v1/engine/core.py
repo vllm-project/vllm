@@ -1763,7 +1763,6 @@ class DPEngineCoreProc(EngineCoreProc):
 
         scheduler_config = vllm_config.scheduler_config
         self.prefill_schedule_interval = scheduler_config.prefill_schedule_interval
-        self.enable_prefill_delayer = scheduler_config.enable_prefill_delayer
 
         # Content-aware prefill alignment. Constructed after super().__init__
         # (which sets self.dp_group via _init_data_parallel). Its decision is
@@ -1804,7 +1803,7 @@ class DPEngineCoreProc(EngineCoreProc):
         # Construct after super().__init__ so self.scheduler exists. The delayer
         # holds no distributed state; its cross-DP signal rides the per-step
         # sync_dp_state collective (see _has_global_unfinished_reqs).
-        if self.enable_prefill_delayer:
+        if scheduler_config.enable_prefill_delayer:
             self._prefill_delayer = PrefillDelayer(
                 dp_size=self.dp_size,
                 max_delay_passes=scheduler_config.prefill_delayer_max_delay_passes,
