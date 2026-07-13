@@ -47,7 +47,7 @@ class INCWna16Scheme(INCScheme):
                 is_ark_available, ark_error, _, _ = get_ark_state()
                 if is_ark_available:
                     return INCLinearMethod(INCARKLinearMethod(layer_config))
-                if layer_config.bits == 2:
+                elif layer_config.bits == 2:
                     raise NotImplementedError(
                         "INC int2 on XPU requires the ARK backend. "
                         f"Layer: {prefix}. "
