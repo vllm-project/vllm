@@ -6,7 +6,12 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
+from vllm.v1.worker.gpu.buffer_utils import (
+    FusedStagedWriter,
+    StagedWriteTensor,
+    UvaBackedTensor,
+    _load_ptr,
+)
 
 
 class BlockTables:
@@ -52,6 +57,12 @@ class BlockTables:
             (self.num_kv_cache_groups, self.max_num_reqs),
             dtype=torch.int32,
         )
+        self.fused_writer: FusedStagedWriter | None = None
+        if self.num_kv_cache_groups > 1:
+            # Only the multi-group path uses the fused writer.
+            self.fused_writer = FusedStagedWriter(
+                self.device, self.num_kv_cache_groups * self.max_num_reqs
+            )
 
         # Block tables used for model's forward pass.
         # num_kv_cache_groups x [max_num_reqs, max_num_blocks]
@@ -109,10 +120,15 @@ class BlockTables:
             self.num_blocks.np[i, req_index] = start + len(block_ids)
 
     def apply_staged_writes(self) -> None:
-        # TODO(woosuk): This can be inefficient since it launches one kernel per
-        # block table. Implement a kernel to handle all block tables at once.
-        for block_table in self.block_tables:
-            block_table.apply_write()
+        if self.num_kv_cache_groups == 1:
+            # Single group: write directly, skipping the per-write group lookup.
+            self.block_tables[0].apply_write()
+        else:
+            # Multiple groups: apply all block tables with one fused kernel.
+            assert self.fused_writer is not None
+            self.fused_writer.apply(
+                self.block_tables, self.block_table_ptrs, self.block_table_strides
+            )
         self.num_blocks.copy_to_uva()
 
     def gather_block_tables(
@@ -283,10 +299,3 @@ def _compute_slot_mappings_kernel(
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
 
         tl.store(slot_mapping_ptr + offset, slot_ids, mask=offset < end_idx)
-
-
-@triton.jit
-def _load_ptr(ptr_to_ptr, elem_dtype):
-    ptr = tl.load(ptr_to_ptr)
-    ptr = tl.cast(ptr, tl.pointer_type(elem_dtype))
-    return tl.multiple_of(ptr, 16)

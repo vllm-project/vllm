@@ -2,17 +2,16 @@
 # for more info about CODEOWNERS file
 
 # This lists cover the "core" components of vLLM that require careful review
-/vllm/compilation @zou3519 @youkaichao @ProExpertProg @BoyuanFeng @vadiklyutiy
-/vllm/distributed/kv_transfer @NickLucche @ApostaC @orozery @xuechendi
+/vllm/compilation @zou3519 @youkaichao @ProExpertProg @BoyuanFeng
+/vllm/distributed/kv_transfer @NickLucche @ApostaC @orozery @xuechendi @ivanium
 /vllm/lora @jeejeelee
 /vllm/model_executor/layers/attention @LucasWilkinson @MatthewBonanni
 /vllm/model_executor/layers/fused_moe @mgoin @pavanimajety @zyongye
 /vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety @zyongye
 /vllm/model_executor/layers/mamba @tdoublep @tomeras91
-/vllm/model_executor/layers/mamba/gdn_linear_attn.py @tdoublep @ZJY0516 @vadiklyutiy
-/vllm/model_executor/layers/rotary_embedding.py @vadiklyutiy
+/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py @tdoublep @ZJY0516 @vadiklyutiy
 /vllm/model_executor/model_loader @22quinn
-/vllm/model_executor/layers/batch_invariant.py @yewentao256 
+/vllm/model_executor/layers/batch_invariant.py @yewentao256
 /vllm/ir @ProExpertProg
 /vllm/kernels/ @ProExpertProg @tjtanaa
 /vllm/kernels/helion @ProExpertProg @zou3519
@@ -23,8 +22,13 @@
 
 # Any change to the VllmConfig changes can have a large user-facing impact,
 # so spam a lot of people
-/vllm/config @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor @yewentao256 @ProExpertProg
-/vllm/config/cache.py @heheda12345
+/vllm/config @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @yewentao256 @ProExpertProg
+/vllm/config/cache.py @heheda12345 @ivanium
+
+# Config utils
+/vllm/config/utils.py @hmellor
+/vllm/engine/arg_utils.py @hmellor
+/vllm/utils/argparse_utils.py
 
 # Entrypoints
 /vllm/entrypoints/anthropic @mgoin @DarkLight1337
@@ -34,10 +38,11 @@
 /vllm/entrypoints/speech_to_text/realtime @njhill
 /vllm/entrypoints/speech_to_text @NickLucche
 /vllm/entrypoints/pooling @noooop
-/vllm/entrypoints/sagemaker @DarkLight1337
+/vllm/entrypoints/serve/sagemaker @DarkLight1337
 /vllm/entrypoints/serve @njhill
 /vllm/entrypoints/*.py @njhill
 /vllm/entrypoints/chat_utils.py @DarkLight1337
+/vllm/entrypoints/offline_utils.py @DarkLight1337
 /vllm/entrypoints/llm.py @DarkLight1337
 
 # Rust Frontend
@@ -62,19 +67,20 @@
 /vllm/v1/attention/backends/flashinfer.py @mgoin @pavanimajety @vadiklyutiy
 /vllm/v1/attention/backends/triton_attn.py @tdoublep
 /vllm/v1/attention/backends/gdn_attn.py @ZJY0516 @vadiklyutiy
-/vllm/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery
+/vllm/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery @ivanium
 /vllm/v1/sample @22quinn @houseroad @njhill
 /vllm/v1/spec_decode @benchislett @luccafong @MatthewBonanni
 /vllm/v1/structured_output @mgoin @russellb @aarnphm @benchislett
-/vllm/v1/kv_cache_interface.py @heheda12345
+/vllm/v1/kv_cache_interface.py @heheda12345 @ivanium
 /vllm/v1/kv_offload @ApostaC @orozery
+/vllm/v1/simple_kv_offload @ivanium
 /vllm/v1/engine @njhill
 /vllm/v1/executor @njhill
 /vllm/v1/worker @njhill
-/vllm/v1/worker/kv_connector_model_runner_mixin.py @orozery @NickLucche
+/vllm/v1/worker/kv_connector_model_runner_mixin.py @orozery @NickLucche @ivanium
 
 # Model runner V2
-/vllm/v1/worker/gpu @WoosukKwon @njhill
+/vllm/v1/worker/gpu @WoosukKwon @njhill @yewentao256
 /vllm/v1/worker/gpu/kv_connector.py @orozery
 
 # CI & building
@@ -98,13 +104,14 @@
 /tests/test_inputs.py @DarkLight1337 @ywang96
 /tests/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb @aarnphm
 /tests/v1/structured_output @mgoin @russellb @aarnphm
-/tests/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery
+/tests/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery @ivanium
 /tests/weight_loading @mgoin @youkaichao @yewentao256
 /tests/lora @jeejeelee
 /tests/models/language/generation/test_hybrid.py @tdoublep @tomeras91
 /tests/v1/kv_connector/nixl_integration @NickLucche
-/tests/v1/kv_connector @ApostaC @orozery
+/tests/v1/kv_connector @ApostaC @orozery @ivanium
 /tests/v1/kv_offload @ApostaC @orozery
+/tests/v1/simple_kv_offload @ivanium
 /tests/v1/determinism @yewentao256
 /tests/reasoning @aarnphm @chaunceyjiang @sfeng33 @bbrowning
 /tests/tool_parsers @aarnphm @chaunceyjiang @sfeng33 @bbrowning
@@ -112,17 +119,7 @@
 
 # Transformers modeling backend
 /vllm/model_executor/models/transformers @hmellor
-/tests/models/test_transformers.py @hmellor
-
-# Observability
-/vllm/config/observability.py @markmc
-/vllm/v1/metrics @markmc
-/tests/v1/metrics @markmc
-/vllm/tracing.py @markmc
-/tests/v1/tracing/test_tracing.py @markmc
-/vllm/config/kv_events.py @markmc
-/vllm/distributed/kv_events.py @markmc
-/tests/distributed/test_events.py @markmc
+/tests/models/transformers @hmellor
 
 # Docs
 /docs/mkdocs @hmellor
