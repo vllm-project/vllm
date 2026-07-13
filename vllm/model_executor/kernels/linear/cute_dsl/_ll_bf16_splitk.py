@@ -158,14 +158,15 @@ class LLBf16SplitK:
         coord_ktile = coord_tensor[None, None, 0, k_tile]
         num_vec = pred_flat.shape[0]
         num_mn = pred_flat.shape[1]
-        for v in cutlass.range(num_vec, unroll_full=True):
-            for j in cutlass.range(num_mn, unroll_full=True):
+        for v in cutlass.range_constexpr(num_vec):
+            # pred_flat is (K_VEC, M/N) for one K_TILE.
+            for j in cutlass.range_constexpr(num_mn):
                 pred_flat[v, j] = cute.elem_less(
                     coord_ktile[(0, v), j], (dim_limit, K_total)
                 )
 
     def _make_pred(self, tXcX, k_tile, dim_limit, K_total):
-        # Flat storage plus a zero-stride stage mode broadcasts predicates.
+        # pred_flat is (K_VEC, M/N); pred is (K_VEC, M/N, STAGE).
         num_vec = tXcX.shape[0][1]
         num_mn = cute.size(tXcX, mode=[1])
         pred_flat = cute.make_rmem_tensor(

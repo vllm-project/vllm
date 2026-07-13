@@ -103,18 +103,18 @@ class LLBf16Dotprod:
         num_tiles: cutlass.Constexpr,
         align_bytes: cutlass.Constexpr,
     ):
-        for tile in cutlass.range(num_tiles, unroll_full=True):
+        for tile in cutlass.range_constexpr(num_tiles):
             bt = tB[None, tile]
             br = cute.make_rmem_tensor_like(bt)
             cute.autovec_copy(bt, br)
             br_f32 = br.load().to(cutlass.Float32)
 
-            for m in cutlass.range(M, unroll_full=True):
+            for m in cutlass.range_constexpr(M):
                 at = tA[m, None, tile]
                 ar = cute.make_rmem_tensor_like(at)
                 cute.autovec_copy(at, ar)
                 vec_width: cutlass.Constexpr = cute.size(ar)
-                for v in cutlass.range(vec_width, unroll_full=True):
+                for v in cutlass.range_constexpr(vec_width):
                     acc[m] = acc[m] + ar[v].to(cutlass.Float32) * br_f32[v]
 
     def _make_thread_vector_slice(
@@ -125,7 +125,7 @@ class LLBf16Dotprod:
         n_idx: cutlass.Int32,
         bs: cutlass.Constexpr,
     ):
-        # Thread tidx owns one lane of each bs-sized K stripe.
+        # (M/N, K_TILE, K_LANE, K_VEC); tidx selects K_LANE.
         tA = cute.logical_divide(gA_vec, (None, (None, bs)))
         tB = cute.logical_divide(gB_vec, (None, (None, bs)))
         return tA[None, (None, (tidx, None))], tB[n_idx, (None, (tidx, None))]
