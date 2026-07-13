@@ -1764,8 +1764,7 @@ class DPEngineCoreProc(EngineCoreProc):
         scheduler_config = vllm_config.scheduler_config
         self.prefill_schedule_interval = scheduler_config.prefill_schedule_interval
 
-        # Content-aware prefill alignment. Constructed after super().__init__
-        # (which sets self.dp_group via _init_data_parallel). Its decision is
+        # Content-aware prefill alignment/throttling. Its decision is
         # refreshed once per busy-loop iteration in lockstep across ranks.
         self._prefill_delayer: PrefillDelayer | None = None
 
@@ -1800,10 +1799,8 @@ class DPEngineCoreProc(EngineCoreProc):
             tensor_queue=tensor_queue,
         )
 
-        # Construct after super().__init__ so self.scheduler exists. The delayer
-        # holds no distributed state; its cross-DP signal rides the per-step
-        # sync_dp_state collective (see _has_global_unfinished_reqs).
         if scheduler_config.enable_prefill_delayer:
+            # Needs to run after _init_data_parallel sets self.dp_size
             self._prefill_delayer = PrefillDelayer(
                 dp_size=self.dp_size,
                 max_delay_passes=scheduler_config.prefill_delayer_max_delay_passes,
