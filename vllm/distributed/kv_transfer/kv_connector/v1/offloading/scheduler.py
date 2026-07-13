@@ -366,8 +366,6 @@ class OffloadingConnectorScheduler:
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
     ):
-        self.vllm_config = vllm_config
-        self.kv_cache_config = kv_cache_config
         self.config = SchedulerOffloadConfig.from_spec(
             spec, vllm_config, kv_cache_config
         )

@@ -100,7 +100,6 @@ def _make_worker(kv_cache_config: KVCacheConfig):
 
     worker = OffloadingConnectorWorker(
         spec=spec,
-        vllm_config=MagicMock(),
         kv_cache_config=kv_cache_config,
     )
     worker.worker = MagicMock()

@@ -5,7 +5,6 @@ from dataclasses import replace
 
 import torch
 
-from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
@@ -41,11 +40,9 @@ class OffloadingConnectorWorker:
     def __init__(
         self,
         spec: OffloadingSpec,
-        vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
     ):
         self.spec = spec
-        self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.worker: OffloadingWorker | None = None
 
