@@ -26,14 +26,16 @@ from vllm.distributed.parallel_state import (
 from vllm.lora.layers import LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.platforms import current_platform
+from vllm.platforms.interface import Platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.attention.backend import MultipleOf
+from vllm.v1.attention.backend import AttentionBackend, MultipleOf
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
@@ -342,6 +344,61 @@ def test_select_common_block_size_no_valid_option():
 
     with pytest.raises(ValueError):
         select_common_block_size(48, [backend_a, backend_b])
+
+
+def _make_vllm_config_with_backend(
+    backend_cls, block_size: int | None
+) -> SimpleNamespace:
+    class _FakeLayer(AttentionLayerBase):
+        def get_attn_backend(self):
+            return backend_cls
+
+        def get_kv_cache_spec(self, vllm_config):
+            return None
+
+    return SimpleNamespace(
+        cache_config=CacheConfig(block_size=block_size),
+        model_config=SimpleNamespace(is_hybrid=False),
+        compilation_config=SimpleNamespace(
+            static_forward_context={"layers.0.attn": _FakeLayer()}
+        ),
+    )
+
+
+def test_update_block_size_for_backend_rejects_incompatible_user_block_size():
+    # FlashAttention-style backend: kernel block size must be a multiple of 16.
+    class _StrictMultipleBackend(AttentionBackend):
+        @staticmethod
+        def get_name():
+            return "STRICT_MULTIPLE"
+
+        @staticmethod
+        def get_supported_kernel_block_sizes():
+            return [MultipleOf(16)]
+
+    # --block-size 1 is listed as a CLI choice but is not a multiple of 16,
+    # so it must be rejected before any model loading occurs, not silently
+    # passed through to fail deep inside select_common_block_size() later.
+    vllm_config = _make_vllm_config_with_backend(_StrictMultipleBackend, 1)
+
+    with pytest.raises(ValueError, match="STRICT_MULTIPLE"):
+        Platform.update_block_size_for_backend(vllm_config)
+
+
+def test_update_block_size_for_backend_accepts_compatible_user_block_size():
+    class _StrictMultipleBackend(AttentionBackend):
+        @staticmethod
+        def get_name():
+            return "STRICT_MULTIPLE"
+
+        @staticmethod
+        def get_supported_kernel_block_sizes():
+            return [MultipleOf(16)]
+
+    vllm_config = _make_vllm_config_with_backend(_StrictMultipleBackend, 16)
+
+    Platform.update_block_size_for_backend(vllm_config)
+    assert vllm_config.cache_config.block_size == 16
 
 
 def test_set_active_mm_loras_builds_tower_and_connector_mappings():
