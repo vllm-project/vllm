@@ -101,10 +101,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         scale: float,
         qk_nope_head_dim: int,
         qk_rope_head_dim: int,
-        v_head_dim: int,
         q_lora_rank: int | None,
-        kv_lora_rank: int,
-        o_lora_rank: int | None,
         mla_modules: DeepseekV4MLAModules,
         window_size: int,
         compress_ratio: int | None,
@@ -132,7 +129,6 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             )
 
         self.q_lora_rank = q_lora_rank
-        self.kv_lora_rank = kv_lora_rank
         self.window_size = window_size
         self.compress_ratio = compress_ratio if compress_ratio is not None else 1
         self.prefix = prefix
@@ -184,8 +180,6 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             scale=self.scale,
             qk_nope_head_dim=self.nope_head_dim,
             qk_rope_head_dim=self.rope_head_dim,
-            q_lora_rank=self.q_lora_rank,
-            kv_lora_rank=self.kv_lora_rank,
             compress_ratio=self.compress_ratio,
             window_size=self.window_size,
             head_bytes=head_bytes,
@@ -416,8 +410,6 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         scale: float,
         qk_nope_head_dim: int,
         qk_rope_head_dim: int,
-        q_lora_rank: int | None,
-        kv_lora_rank: int,
         compress_ratio: int,
         window_size: int,
         head_bytes: int,
@@ -438,8 +430,6 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         self.window_size = window_size
         self.head_bytes = head_bytes
         self.compress_ratio = compress_ratio
-        self.q_lora_rank = q_lora_rank
-        self.kv_lora_rank = kv_lora_rank
         self.nope_head_dim = qk_nope_head_dim
         self.rope_head_dim = qk_rope_head_dim
         self.indexer = indexer
