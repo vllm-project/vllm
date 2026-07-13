@@ -15,6 +15,7 @@ endif()
 #
 set(ENABLE_X86_ISA $ENV{VLLM_CPU_X86})
 set(ENABLE_ARM_BF16 $ENV{VLLM_CPU_ARM_BF16})
+set(ENABLE_ARM_I8MM $ENV{VLLM_CPU_ARM_I8MM})
 set(ENABLE_RVV_BF16 $ENV{VLLM_CPU_RVV_BF16})
 
 include_directories("${CMAKE_SOURCE_DIR}/csrc")
@@ -96,12 +97,14 @@ if (MACOSX_FOUND AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
     set(ENABLE_NUMA OFF)
     check_sysctl(hw.optional.neon ASIMD_FOUND)
     check_sysctl(hw.optional.arm.FEAT_BF16 ARM_BF16_FOUND)
+    check_sysctl(hw.optional.arm.FEAT_I8MM ARM_I8MM_FOUND)
 else()
     find_isa(${CPUINFO} "Power11" POWER11_FOUND)
     find_isa(${CPUINFO} "POWER10" POWER10_FOUND)
     find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
     find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
     find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND) # Check for ARM BF16 support
+    find_isa(${CPUINFO} "i8mm" ARM_I8MM_FOUND) # Check for ARM I8MM support
     find_isa(${CPUINFO} "S390" S390_FOUND)
     find_isa(${CPUINFO} "zvfhmin" RVV_FP16_FOUND) # Check for RISC-V Vector FP16 support
     find_isa(${CPUINFO} "zvfbfmin" RVV_BF16_FOUND) # Check for RISC-V Vector BF16 support
@@ -110,6 +113,11 @@ else()
     if (ENABLE_ARM_BF16)
         set(ARM_BF16_FOUND ON)
         message(STATUS "ARM BF16 support enabled via VLLM_CPU_ARM_BF16 environment variable")
+    endif()
+    if (ENABLE_ARM_I8MM)
+        set(ARM_I8MM_FOUND ON)
+        message(STATUS
+            "ARM I8MM support enabled via VLLM_CPU_ARM_I8MM environment variable")
     endif()
     # Some kernels (e.g. Bianbu on Spacemit X100) do not report zvfbfmin
     # in /proc/cpuinfo despite hardware support. VLLM_CPU_RVV_BF16=1
@@ -165,6 +173,11 @@ elseif (ASIMD_FOUND)
     else()
         message(WARNING "BF16 functionality is not available")
         set(MARCH_FLAGS "-march=armv8.2-a+dotprod+fp16")  
+    endif()
+    if(ARM_I8MM_FOUND)
+        message(STATUS "I8MM extension detected")
+        string(APPEND MARCH_FLAGS "+i8mm")
+        add_compile_definitions(ARM_I8MM_SUPPORT)
     endif()
     list(APPEND CXX_COMPILE_FLAGS ${MARCH_FLAGS})     
 elseif (S390_FOUND)
@@ -446,8 +459,13 @@ if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
         "csrc/cpu/shm.cpp"
         "csrc/cpu/activation_lut_bf16.cpp"
         "csrc/cpu/cpu_tanhf_neon.hpp"
-        "csrc/cpu/cpu_fused_moe.cpp"
         ${VLLM_EXT_SRC})
+    if (ARM_BF16_FOUND)
+        set(VLLM_EXT_SRC "csrc/cpu/cpu_fused_moe.cpp" ${VLLM_EXT_SRC})
+        if (ARM_I8MM_FOUND)
+            set(VLLM_EXT_SRC "csrc/cpu/cpu_fused_moe_int8.cpp" ${VLLM_EXT_SRC})
+        endif()
+    endif()
 endif()
 
 if (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)	

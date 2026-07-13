@@ -3668,6 +3668,15 @@ def cpu_prepack_moe_weight(
     return output
 
 
+def cpu_prepack_moe_weight_int8(
+    weight: torch.Tensor,
+    isa: str,
+) -> torch.Tensor:
+    output = torch.empty_like(weight)
+    torch.ops._C.prepack_moe_weight_int8(weight, output, isa)
+    return output
+
+
 def cpu_fused_moe(
     input: torch.Tensor,
     w13: torch.Tensor,
@@ -3686,6 +3695,39 @@ def cpu_fused_moe(
         input,
         w13,
         w2,
+        w13_bias,
+        w2_bias,
+        topk_weights,
+        topk_ids,
+        skip_weighted,
+        act,
+        isa,
+    )
+    return output
+
+
+def cpu_fused_moe_int8(
+    input: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_bias: torch.Tensor | None,
+    w2_bias: torch.Tensor | None,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    act: str,
+    isa: str,
+    skip_weighted: bool = False,
+) -> torch.Tensor:
+    output = torch.empty_like(input)
+    torch.ops._C.cpu_fused_moe_int8(
+        output,
+        input,
+        w13,
+        w2,
+        w13_scale,
+        w2_scale,
         w13_bias,
         w2_bias,
         topk_weights,
