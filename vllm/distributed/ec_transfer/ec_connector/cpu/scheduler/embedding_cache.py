@@ -31,6 +31,12 @@ class CacheEntry:
     def evictable(self) -> bool:
         return self._pin_count == 0
 
+    def mark_ready(self):
+        self._pin_count = 0
+
+    def pin(self):
+        self._pin_count += 1
+
 
 class EmbeddingCache:
     """Fixed-size block cache with FIFO eviction.
@@ -90,7 +96,7 @@ class EmbeddingCache:
             assert entry._pin_count == -1, (
                 f"EmbeddingCache: mark_ready on already-ready entry {key!r}"
             )
-            entry._pin_count = 0
+            entry.mark_ready()
             self._entries_free_list[key] = None
             self._evictable_block_count += len(entry.block_ids)
 
@@ -98,13 +104,11 @@ class EmbeddingCache:
         """Pin an entry (prevent eviction)."""
         with self._lock:
             entry = self._entries[key]
-            assert entry._pin_count >= 0, (
-                f"EmbeddingCache: pin of not-ready entry {key!r}"
-            )
-            if entry._pin_count == 0:
+            assert entry.ready, f"EmbeddingCache: pin of not-ready entry {key!r}"
+            if entry.evictable:
                 del self._entries_free_list[key]
                 self._evictable_block_count -= len(entry.block_ids)
-            entry._pin_count += 1
+            entry.pin()
 
     def unpin(self, key: str) -> None:
         """Unpin an entry. Asserts currently pinned."""
