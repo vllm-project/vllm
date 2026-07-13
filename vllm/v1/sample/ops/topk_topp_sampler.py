@@ -753,13 +753,6 @@ def rapid_sample(
             float(scalar_top_p),
         ).view(-1)
 
-    raise RuntimeError(
-        "rapid-sampling without penalties only supports uniform scalar "
-        "temperature/top_k/top_p. Use the native sampler for mixed per-request "
-        "sampling parameters."
-    )
-
-
 def flashinfer_sample(
     logits: torch.Tensor,
     k: torch.Tensor | None,
