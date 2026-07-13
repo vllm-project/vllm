@@ -240,9 +240,6 @@ class PagedShmStorage:
         return output_tensor
 
     def close(self):
-        if hasattr(self, "_shm"):
-            self._shm.close()
-
         if self.is_pinned and hasattr(self, "_shm_tensor"):
             from vllm.v1.simple_kv_offload.cuda_mem_ops import unpin_tensor
 
@@ -253,6 +250,9 @@ class PagedShmStorage:
 
         if hasattr(self, "_shm_np"):
             del self._shm_np
+
+        if hasattr(self, "_shm"):
+            self._shm.close()
 
     def unlink(self):
         if self._created and hasattr(self, "_shm"):
