@@ -1810,6 +1810,7 @@ class MoRIIOConnectorWorker:
             )
             # (engine_id, dp_rank, tp_rank_or_None); tp_rank is None on the legacy
             # path so _moriio_handshake falls back to its _remote_tp_rank mapping.
+            targets: list[tuple[Any, int, int | None]]
             if flexible:
                 targets = [
                     (self.get_engine_name_with_dp_tp(remote_engine_id, dp, tp), dp, tp)

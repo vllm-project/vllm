@@ -117,8 +117,7 @@ def build_decode_workers(cfg: PDConfig) -> list:
             for r in range(cfg.d_tp)
         ]
     return [
-        make_decode_worker(world_size=1, tp_rank=0, dp_rank=d)
-        for d in range(cfg.d_dp)
+        make_decode_worker(world_size=1, tp_rank=0, dp_rank=d) for d in range(cfg.d_dp)
     ]
 
 
@@ -132,9 +131,7 @@ def prefill_target_multiset(cfg: PDConfig, rounds: int) -> Counter:
     for _ in range(rounds):
         for owner_dp in range(cfg.p_dp):
             for worker in workers:
-                meta = make_meta(
-                    p_tp=cfg.p_tp, p_dp=cfg.p_dp, remote_dp_rank=owner_dp
-                )
+                meta = make_meta(p_tp=cfg.p_tp, p_dp=cfg.p_dp, remote_dp_rank=owner_dp)
                 chosen_tp, _flexible = worker._resolve_read_source(meta)
                 target = get_port_offset(owner_dp, chosen_tp, cfg.p_tp)
                 assert 0 <= target < cfg.n_prefill_gpus
@@ -194,9 +191,7 @@ def test_flexible_round_robin_is_deterministic_uniform_and_staggered() -> None:
     assert Counter(seq) == Counter({t: 8 for t in range(8)})
 
     first_pick = [
-        make_decode_worker(
-            world_size=1, tp_rank=0, dp_rank=d
-        )._next_flex_tp_rank(8)
+        make_decode_worker(world_size=1, tp_rank=0, dp_rank=d)._next_flex_tp_rank(8)
         for d in range(8)
     ]
     assert sorted(first_pick) == list(range(8))
