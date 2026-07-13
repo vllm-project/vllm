@@ -4,17 +4,6 @@
 from typing import TYPE_CHECKING
 
 import torch
-from compressed_tensors.quantization.lifecycle.forward_helpers import (
-    _quantize as ct_quantize,
-)
-from compressed_tensors.quantization.quant_args import (
-    QuantizationArgs,
-    QuantizationType,
-)
-from compressed_tensors.quantization.utils.helpers import (
-    calculate_qparams,
-    calculate_range,
-)
 from torch.nn import Module
 
 if TYPE_CHECKING:
@@ -43,6 +32,10 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
 )
+from vllm.model_executor.layers.quantization.online.quant_utils import (
+    _quantize_fp8,
+    _symmetric_fp8_scale,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     create_fp8_quant_key,
@@ -64,13 +57,6 @@ from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
-# Symmetric FP8 (E4M3) quant args. The scale/range/quantize math is delegated to
-# compressed-tensors so online quant stays numerically identical to the offline
-# export; only ``type``/``num_bits``/``symmetric`` are consulted.
-_FP8_QUANT_ARGS = QuantizationArgs(
-    num_bits=8, type=QuantizationType.FLOAT, symmetric=True
-)
-
 
 def _quantize_fp8_symmetric(
     x: torch.Tensor,
@@ -79,26 +65,15 @@ def _quantize_fp8_symmetric(
     """Symmetric FP8 weight quant shared by the block/channel helpers,
     bit-identical to compressed-tensors' offline export.
 
-    Reduces ``x`` over ``reduce_dims`` (keepdim so the scale broadcasts back) and
-    reuses compressed-tensors for every numeric step: ``calculate_qparams`` for
-    the bf16 per-group scale, ``calculate_range`` for the e4m3 clamp, and
-    ``ct_quantize`` to scale/clamp/cast. Returns ``(qweight, scale)`` with the
-    scale in ``x``'s dtype.
+    Reduces ``x`` over ``reduce_dims`` (keepdim so the scale broadcasts back)
+    and applies the ported CT scale/quantize math. Returns ``(qweight, scale)``
+    with the scale in ``x``'s dtype.
     """
     fp8_dtype = current_platform.fp8_dtype()
     min_vals = x.amin(dim=reduce_dims, keepdim=True)
     max_vals = x.amax(dim=reduce_dims, keepdim=True)
-    scale, _ = calculate_qparams(min_vals, max_vals, _FP8_QUANT_ARGS)
-    q_min, q_max = calculate_range(_FP8_QUANT_ARGS, x.device)
-    q = ct_quantize(
-        x=x,
-        scale=scale,
-        zero_point=None,
-        q_min=q_min,
-        q_max=q_max,
-        args=_FP8_QUANT_ARGS,
-        dtype=fp8_dtype,
-    )
+    scale = _symmetric_fp8_scale(min_vals, max_vals)
+    q = _quantize_fp8(x, scale, fp8_dtype)
     return q, scale
 
 

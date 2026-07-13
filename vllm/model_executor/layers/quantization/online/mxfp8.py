@@ -6,15 +6,6 @@
 from typing import TYPE_CHECKING
 
 import torch
-from compressed_tensors.quantization.lifecycle.forward_helpers import (
-    _quantize as ct_quantize,
-)
-from compressed_tensors.quantization.quant_args import (
-    QuantizationArgs,
-    QuantizationType,
-    round_to_quantized_type_dtype,
-)
-from compressed_tensors.quantization.utils.mxfp_utils import generate_mx_scales
 from torch.nn import Module
 
 if TYPE_CHECKING:
@@ -35,21 +26,16 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
 )
+from vllm.model_executor.layers.quantization.online.quant_utils import (
+    _generate_mx_scales,
+    _quantize_fp8,
+    _round_to_uint8,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_VALUE_DTYPE,
 )
 from vllm.model_executor.utils import replace_parameter
-
-# Symmetric FP8 (E4M3) quant args for ``ct_quantize`` (only ``type``/``num_bits``
-# are consulted).
-_MXFP8_QUANT_ARGS = QuantizationArgs(
-    num_bits=8, type=QuantizationType.FLOAT, symmetric=True
-)
-
-# E4M3 representable range used as the MXFP8 element clamp.
-_MXFP8_E4M3_MIN = -448.0
-_MXFP8_E4M3_MAX = 448.0
 
 
 def _quantize_mxfp8(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -57,11 +43,10 @@ def _quantize_mxfp8(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
     FlashInfer's ``mxfp8_quantize`` picks the E8M0 exponent via
     ``ceil(log2(amax / 448))``, which disagrees with compressed-tensors on the
-    For exact bytes we reuse compressed-tensors:
-    ``generate_mx_scales`` + ``round_to_quantized_type_dtype`` for the E8M0 byte
-    (in bf16, matching the offline observer), then ``ct_quantize`` to scale/clamp/
-    cast. Returns ``(qweight[N, K] fp8_e4m3, scale[N, K // 32] uint8)`` in the
-    non-swizzled layout.
+    ``amax = 1.75 * 2**f`` boundary. For exact bytes we use the ported
+    compressed-tensors math in ``quant_utils``.
+    Returns ``(qweight[N, K] fp8_e4m3, scale[N, K // 32] uint8)``
+    in the non-swizzled layout.
     """
     assert weight.dim() == 2
     weight = weight.to(torch.bfloat16)
@@ -70,23 +55,13 @@ def _quantize_mxfp8(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     groups = weight.view(n, k // MXFP8_BLOCK_SIZE, MXFP8_BLOCK_SIZE)
 
     amax = groups.abs().amax(dim=2)  # [N, K//32] bf16
-    scale = generate_mx_scales(amax, num_bits=8)
-    scale_byte = round_to_quantized_type_dtype(
-        scale, torch.uint8, cast_to_original_dtype=False
-    )
+    scale = _generate_mx_scales(amax, num_bits=8)
+    scale_byte = _round_to_uint8(scale)
 
     scale_f = torch.exp2(scale_byte.to(torch.int32).to(torch.float32) - 127.0).to(
         torch.bfloat16
     )
-    q = ct_quantize(
-        x=groups,
-        scale=scale_f.unsqueeze(-1),
-        zero_point=None,
-        q_min=_MXFP8_E4M3_MIN,
-        q_max=_MXFP8_E4M3_MAX,
-        args=_MXFP8_QUANT_ARGS,
-        dtype=MXFP8_VALUE_DTYPE,
-    )
+    q = _quantize_fp8(groups, scale_f.unsqueeze(-1), MXFP8_VALUE_DTYPE)
     return q.reshape(n, k).contiguous(), scale_byte.contiguous()
 
 
