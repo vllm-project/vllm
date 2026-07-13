@@ -53,17 +53,17 @@ class CacheConfig:
     """Whether block_size was explicitly provided. Derived automatically."""
     user_specified_mamba_block_size: bool = field(default=False, init=False)
     """Whether mamba_block_size was explicitly provided. Derived automatically."""
-    hash_block_size: int | None = Field(default=None, gt=0)
-    """Block size (in tokens) used for computing Request's block_hashes.
+    prefix_match_unit: int | None = Field(default=None, gt=0)
+    """The finest token boundary (in tokens) a prefix-cache hit can land on.
 
-    This can be set to a finer granularity than the physical KV cache block
-    sizes (e.g. 8) as long as every KV cache group's `block_size` is divisible
-    by it. This enables prefix-caching keys to be computed at the finest common
-    granularity and then merged for larger physical block sizes.
+    Prefix-cache keys are computed every `prefix_match_unit` tokens. It can
+    be set finer than the physical KV cache block sizes (e.g. 32 vs a
+    1024-token hybrid-model block) as long as every KV cache group's
+    `block_size` is divisible by it, enabling cache hits at boundaries
+    inside a physical block. It controls matching granularity only, not how
+    often states are stored.
 
-    This config is not static default. If left unspecified, vLLM will choose a
-    default based on the resolved KV cache groups (typically the smallest KV
-    cache block size when there are multiple groups).
+    This equals to the `hash_block_size` used throughout the KV cache code.
     """
     gpu_memory_utilization: float = Field(default=0.92, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
@@ -161,13 +161,11 @@ class CacheConfig:
     """Per-DP-engine maximum concurrency at max_model_len tokens."""
 
     kv_sharing_fast_prefill: bool = False
-    """This feature is work in progress and no prefill optimization takes place
-    with this flag enabled currently.
-
-    In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
+    """In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
     some layers can skip tokens corresponding to prefill. This flag enables
     attention metadata for eligible layers to be overridden with metadata
     necessary for implementing this optimization in some models (e.g. Gemma3n)
+    NOTE: KV cache sharing is not supported for MRv2 (v2 model runner).
     """
 
     kv_cache_memory_bytes: int | None = None
@@ -205,12 +203,13 @@ class CacheConfig:
         ignored_factors = {
             # Runtime/derived knobs that don't affect compiled graph shape
             "gpu_memory_utilization",
+            "kv_cache_memory_bytes",
             "is_attention_free",
             "num_gpu_blocks_override",
             "enable_prefix_caching",
             "prefix_caching_hash_algo",
             # Prefix-caching implementation detail (doesn't affect compiled graph).
-            "hash_block_size",
+            "prefix_match_unit",
             "mamba_page_size_padded",
             "skip_page_size_padded",
             "user_specified_block_size",
