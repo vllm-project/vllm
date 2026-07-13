@@ -31,7 +31,7 @@ from vllm.multimodal.video import (
     VideoTargetMetadata,
     get_video_loader_backend_for_processor,
 )
-from vllm.multimodal.video_decoders import resolve_video_backend_kwargs
+from vllm.multimodal.video_decoders import decode_video, resolve_video_backend_kwargs
 from vllm.platforms import current_platform
 from vllm.transformers_utils.processor import get_video_processor_cls_name_from_config
 
@@ -112,6 +112,28 @@ def test_video_backend_rejects_options_for_another_decoder():
         ValueError, match="num_ffmpeg_threads is not supported by the 'pyav' backend"
     ):
         resolve_video_backend_kwargs("pyav", {"num_ffmpeg_threads": 2})
+
+
+@pytest.mark.parametrize(
+    ("backend", "error"),
+    [
+        ("pyav", AssertionError),
+        (PYNVVIDEOCODEC_VIDEO_BACKEND, ValueError),
+    ],
+)
+def test_video_decoder_spec_validates_frame_recovery(
+    backend: str, error: type[Exception]
+):
+    with pytest.raises(error, match="frame_recovery is not supported"):
+        decode_video(
+            backend,
+            loader_cls=None,
+            data=b"",
+            target=VideoTargetMetadata(-1, -1, 300),
+            sampling_kwargs={},
+            backend_kwargs={},
+            frame_recovery=True,
+        )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")

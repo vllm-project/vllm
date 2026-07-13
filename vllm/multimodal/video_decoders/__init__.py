@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any, Literal
+
+import numpy.typing as npt
 
 from .base import VideoSourceMetadata, VideoTargetMetadata, check_frame_pixel_limit
 from .deepstream import DeepStreamVideoBackendMixin, decode_deepstream
@@ -23,19 +27,87 @@ VideoDecoderBackend = Literal[
     "opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"
 ]
 
-_BACKEND_OPTION_DEFAULTS: dict[str, dict[str, Any]] = {
-    "opencv": {},
-    "pyav": {},
-    "torchcodec": {
-        "num_ffmpeg_threads": 0,
-        "seek_mode": "exact",
-    },
-    "pynvvideocodec": {},
-    "deepstream": {
-        "pool_size": None,
-        "timeout_sec": 120.0,
-    },
+VideoDecodeResult = tuple[
+    npt.NDArray,
+    VideoSourceMetadata,
+    list[int],
+    list[int],
+]
+VideoDecoder = Callable[..., VideoDecodeResult]
+
+
+@dataclass(frozen=True)
+class VideoDecoderSpec:
+    decoder: VideoDecoder
+    option_defaults: dict[str, Any] = field(default_factory=dict)
+    supports_frame_recovery: bool = False
+    frame_recovery_error: type[Exception] = AssertionError
+
+    def validate_frame_recovery(self, enabled: bool, backend: str) -> None:
+        if enabled and not self.supports_frame_recovery:
+            raise self.frame_recovery_error(
+                f"frame_recovery is not supported by the {backend!r} backend"
+            )
+
+    def decode(
+        self,
+        backend: str,
+        loader_cls,
+        data: bytes,
+        target: VideoTargetMetadata,
+        sampling_kwargs: dict[str, Any],
+        backend_kwargs: dict[str, Any],
+        *,
+        frame_recovery: bool,
+    ) -> VideoDecodeResult:
+        self.validate_frame_recovery(frame_recovery, backend)
+        decoder_kwargs = dict(backend_kwargs)
+        if self.supports_frame_recovery:
+            decoder_kwargs["frame_recovery"] = frame_recovery
+        return self.decoder(
+            loader_cls,
+            data,
+            target,
+            sampling_kwargs,
+            **decoder_kwargs,
+        )
+
+
+_VIDEO_DECODER_SPECS: dict[str, VideoDecoderSpec] = {
+    "opencv": VideoDecoderSpec(
+        decoder=decode_opencv,
+        supports_frame_recovery=True,
+    ),
+    "pyav": VideoDecoderSpec(decoder=decode_pyav),
+    "torchcodec": VideoDecoderSpec(
+        decoder=decode_torchcodec,
+        option_defaults={
+            "num_ffmpeg_threads": 0,
+            "seek_mode": "exact",
+        },
+    ),
+    PYNVVIDEOCODEC_VIDEO_BACKEND: VideoDecoderSpec(
+        decoder=decode_pynvvideocodec,
+        frame_recovery_error=ValueError,
+    ),
+    "deepstream": VideoDecoderSpec(
+        decoder=decode_deepstream,
+        option_defaults={
+            "pool_size": None,
+            "timeout_sec": 120.0,
+        },
+    ),
 }
+
+
+def _get_video_decoder_spec(backend: str) -> VideoDecoderSpec:
+    try:
+        return _VIDEO_DECODER_SPECS[backend]
+    except KeyError:
+        valid = ", ".join(repr(name) for name in _VIDEO_DECODER_SPECS)
+        raise ValueError(
+            f"Unknown video codec backend {backend!r}; valid options: {valid}."
+        ) from None
 
 
 def resolve_video_backend_kwargs(
@@ -43,18 +115,15 @@ def resolve_video_backend_kwargs(
     kwargs: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Split frame-sampling kwargs from options owned by a decoder backend."""
-    try:
-        defaults = _BACKEND_OPTION_DEFAULTS[backend]
-    except KeyError:
-        valid = ", ".join(repr(name) for name in _BACKEND_OPTION_DEFAULTS)
-        raise ValueError(
-            f"Unknown video codec backend {backend!r}; valid options: {valid}."
-        ) from None
+    spec = _get_video_decoder_spec(backend)
+    defaults = spec.option_defaults
 
     sampling_kwargs = dict(kwargs)
     backend_kwargs = dict(defaults)
     backend_option_names = {
-        name for options in _BACKEND_OPTION_DEFAULTS.values() for name in options
+        name
+        for decoder_spec in _VIDEO_DECODER_SPECS.values()
+        for name in decoder_spec.option_defaults
     }
     misplaced = (sampling_kwargs.keys() & backend_option_names) - defaults.keys()
     if misplaced:
@@ -79,33 +148,14 @@ def decode_video(
     frame_recovery: bool,
 ):
     """Decode a sampled video using the selected codec implementation."""
-    if backend == "opencv":
-        return decode_opencv(
-            loader_cls,
-            data,
-            target,
-            sampling_kwargs,
-            frame_recovery=frame_recovery,
-        )
-
-    if backend == PYNVVIDEOCODEC_VIDEO_BACKEND and frame_recovery:
-        raise ValueError(
-            "frame_recovery is not supported for "
-            f"`{PYNVVIDEOCODEC_VIDEO_BACKEND}` backend"
-        )
-    assert not frame_recovery, "frame_recovery is only available for `opencv` backend"
-    decoders = {
-        "pyav": decode_pyav,
-        "torchcodec": decode_torchcodec,
-        "pynvvideocodec": decode_pynvvideocodec,
-        "deepstream": decode_deepstream,
-    }
-    return decoders[backend](
+    return _get_video_decoder_spec(backend).decode(
+        backend,
         loader_cls,
         data,
         target,
         sampling_kwargs,
-        **backend_kwargs,
+        backend_kwargs,
+        frame_recovery=frame_recovery,
     )
 
 

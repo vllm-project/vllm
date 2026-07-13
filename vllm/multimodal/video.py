@@ -10,18 +10,6 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.multimodal.video_decoders import (
-    PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES as PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
-)
-from vllm.multimodal.video_decoders import (
-    PYNVVIDEOCODEC_DECODER_CACHE_SIZE as PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
-)
-from vllm.multimodal.video_decoders import (
-    PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES as PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
-)
-from vllm.multimodal.video_decoders import (
-    PYNVVIDEOCODEC_MAX_RETAINED_DECODERS as PYNVVIDEOCODEC_MAX_RETAINED_DECODERS,
-)
-from vllm.multimodal.video_decoders import (
     PYNVVIDEOCODEC_VIDEO_BACKEND,
     DeepStreamVideoBackendMixin,
     OpenCVVideoBackendMixin,
