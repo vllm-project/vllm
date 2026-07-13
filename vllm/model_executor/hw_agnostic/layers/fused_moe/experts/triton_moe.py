@@ -16,9 +16,6 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.fused_moe import (
     invoke_fused_moe_triton_kernel,
     try_get_optimal_moe_config,
 )
-from vllm.model_executor.hw_agnostic.layers.fused_moe.topk_weight_and_reduce import (  # noqa: E501
-    TopKWeightAndReduceNoOP,
-)
 from vllm.model_executor.hw_agnostic.layers.fused_moe.utils import (
     _resize_cache,
     moe_kernel_quantize_input,
@@ -42,9 +39,6 @@ class TritonExperts(mk.FusedMoEExpertsModular):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
-
-    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        return TopKWeightAndReduceNoOP()
 
     def activation(
         self,

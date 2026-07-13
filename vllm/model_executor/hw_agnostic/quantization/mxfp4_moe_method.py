@@ -7,20 +7,17 @@ from __future__ import annotations
 
 import torch
 
-from vllm.model_executor.hw_agnostic.layers.fused_moe.all2all_utils import (
-    maybe_make_prepare_finalize,
-)
 from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     mxfp4_w4a16_moe_quant_config,
 )
+from vllm.model_executor.hw_agnostic.layers.fused_moe.fused_moe_forward import (
+    fused_moe_forward,
+)
 from vllm.model_executor.hw_agnostic.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
-)
-from vllm.model_executor.hw_agnostic.layers.fused_moe.modular_kernel import (
-    FusedMoEKernel,
 )
 from vllm.model_executor.hw_agnostic.layers.fused_moe.routed_experts import (
     RoutedExperts,
@@ -314,11 +311,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
-        prepare_finalize = maybe_make_prepare_finalize(self.moe)
-        experts = self.experts_cls(
+        self.experts = self.experts_cls(
             moe_config=self.moe, quant_config=self.moe_quant_config
         )
-        self.moe_kernel = FusedMoEKernel(prepare_finalize, experts)
 
     def get_fused_moe_quant_config(
         self,
@@ -345,8 +340,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        assert self.moe_kernel is not None
-        return self.moe_kernel.apply(
+        assert self.experts is not None
+        return fused_moe_forward(
+            self.experts,
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -356,6 +352,4 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            shared_experts=shared_experts,
-            shared_experts_input=shared_experts_input,
         )

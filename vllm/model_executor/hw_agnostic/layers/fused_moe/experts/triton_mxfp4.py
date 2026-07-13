@@ -19,9 +19,6 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.activation import MoEActiv
 from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
 )
-from vllm.model_executor.hw_agnostic.layers.fused_moe.topk_weight_and_reduce import (  # noqa: E501
-    TopKWeightAndReduceNoOP,
-)
 from vllm.model_executor.hw_agnostic.layers.fused_moe.utils import (
     _resize_cache,
     swiglu_limit_func,
@@ -646,10 +643,6 @@ class OAITritonMxfp4Experts(mk.FusedMoEExpertsModular):
         topk = topk_ids.size(1)
 
         return E, M, N, K, topk
-
-    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        # Weights and the topk reduce are handled inside apply().
-        return TopKWeightAndReduceNoOP()
 
     def workspace_shapes(
         self,

@@ -396,10 +396,10 @@ class MoERunner(MoERunnerInterface):
 
     @property
     def _fused_output_is_reduced(self) -> bool:
-        return (
-            self._quant_method.moe_kernel is not None
-            and self._quant_method.moe_kernel.output_is_reduced()
-        )
+        # The AllGather/ReduceScatter combine leaves per-rank partials, so the
+        # fused output is never pre-reduced; the final TP/EP all-reduce is done
+        # in _maybe_reduce_final_output.
+        return False
 
     def _maybe_reduce_shared_expert_output(
         self,
@@ -435,7 +435,7 @@ class MoERunner(MoERunnerInterface):
         """
         # We don't need to reduce the final output if:
         # - We are not running with TP or DP
-        # - The MK already reduced the fused output itself.
+        # - The fused output was already reduced (never, on this transport).
         if (
             not self.moe_config.is_sequence_parallel
             and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
@@ -667,8 +667,8 @@ class MoERunner(MoERunnerInterface):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # DP/EP dispatch is handled inside the modular prepare/finalize
-        # (``naive_dp_ep``); the runner only drives PCP dispatch here.
+        # DP/EP dispatch is handled inside ``fused_moe_forward``; the runner
+        # only drives PCP dispatch here.
         if self.moe_config.pcp_size > 1:
             hidden_states = get_pcp_group().all_gather(
                 hidden_states,
@@ -686,8 +686,8 @@ class MoERunner(MoERunnerInterface):
         shared_output: torch.Tensor | None,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor | None, torch.Tensor]:
-        # DP/EP combine is handled inside the modular prepare/finalize
-        # (``naive_dp_ep``); the runner only drives PCP combine here.
+        # DP/EP combine is handled inside ``fused_moe_forward``; the runner
+        # only drives PCP combine here.
         if self.moe_config.pcp_size > 1:
             hidden_states = get_pcp_group().reduce_scatter(
                 hidden_states,
@@ -752,8 +752,9 @@ class MoERunner(MoERunnerInterface):
             )
 
     def maybe_init_modular_kernel(self) -> None:
-        # Quant methods build their modular kernel during
-        # process_weights_after_loading; no late init needed.
+        # Framework hook (see MoERunnerInterface). Quant methods build their
+        # experts kernel during process_weights_after_loading, so there is no
+        # late init to do here.
         return None
 
     #

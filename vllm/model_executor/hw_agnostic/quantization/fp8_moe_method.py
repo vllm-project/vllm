@@ -7,18 +7,17 @@ from __future__ import annotations
 
 import torch
 
-import vllm.model_executor.hw_agnostic.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.model_executor.hw_agnostic.layers.fused_moe.all2all_utils import (
-    maybe_make_prepare_finalize,
-)
 from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.hw_agnostic.layers.fused_moe.experts.triton_moe import (
     TritonExperts,
+)
+from vllm.model_executor.hw_agnostic.layers.fused_moe.fused_moe_forward import (
+    fused_moe_forward,
 )
 from vllm.model_executor.hw_agnostic.layers.fused_moe.fused_moe_method_base import (  # noqa: E501
     FusedMoEMethodBase,
@@ -201,11 +200,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config is not None:
-            prepare_finalize = maybe_make_prepare_finalize(self.moe)
-            experts = self.experts_cls(
+            self.experts = self.experts_cls(
                 moe_config=self.moe, quant_config=self.moe_quant_config
             )
-            self.moe_kernel = mk.FusedMoEKernel(prepare_finalize, experts)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         w13 = layer.w13_weight
@@ -267,8 +264,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        assert self.moe_kernel is not None
-        return self.moe_kernel.apply(
+        assert self.experts is not None
+        return fused_moe_forward(
+            self.experts,
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -278,8 +276,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            shared_experts=shared_experts,
-            shared_experts_input=shared_experts_input,
         )
 
 

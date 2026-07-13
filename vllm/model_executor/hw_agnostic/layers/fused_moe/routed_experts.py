@@ -746,7 +746,7 @@ class RoutedExperts(PluggableLayer):
         shared_experts: "SharedExperts | None" = None,
         shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Run routed experts via the quant method's modular kernel.
+        """Run routed experts via the quant method's fused MoE forward.
 
         Args:
             x: Input tensor after any transforms

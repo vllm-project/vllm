@@ -6,12 +6,14 @@ from typing import TYPE_CHECKING
 
 import torch
 
-import vllm.model_executor.hw_agnostic.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+)
+from vllm.model_executor.hw_agnostic.layers.fused_moe.modular_kernel import (
+    FusedMoEExpertsModular,
 )
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
@@ -33,15 +35,15 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     Concrete subclasses in this tree: ``UnquantizedFusedMoEMethod`` and
     ``Fp8MoEMethod`` (offline + ``Fp8OnlineMoEMethod`` online variant).
-    Subclasses build their modular kernel in
-    ``process_weights_after_loading`` and expose ``apply``.
+    Subclasses build their experts kernel in
+    ``process_weights_after_loading`` and run it via ``fused_moe_forward``.
     """
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__()
         self.moe: FusedMoEConfig = moe
         self.moe_quant_config: FusedMoEQuantConfig | None = None
-        self.moe_kernel: mk.FusedMoEKernel | None = None
+        self.experts: FusedMoEExpertsModular | None = None
 
     @abstractmethod
     def create_weights(
@@ -72,8 +74,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     @property
     def topk_indices_dtype(self) -> torch.dtype | None:
-        if self.moe_kernel is not None:
-            return self.moe_kernel.prepare_finalize.topk_indices_dtype()
+        # The AllGather/ReduceScatter transport places no dtype constraint on
+        # topk_ids; the router keeps its native dtype.
         return None
 
     @property

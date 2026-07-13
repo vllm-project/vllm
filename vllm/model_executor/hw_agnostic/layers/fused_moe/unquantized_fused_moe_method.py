@@ -7,9 +7,6 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.hw_agnostic.custom_op import CustomOp
-from vllm.model_executor.hw_agnostic.layers.fused_moe.all2all_utils import (
-    maybe_make_prepare_finalize,
-)
 from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEConfig,
@@ -19,11 +16,11 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
 from vllm.model_executor.hw_agnostic.layers.fused_moe.experts.triton_moe import (
     TritonExperts,
 )
+from vllm.model_executor.hw_agnostic.layers.fused_moe.fused_moe_forward import (
+    fused_moe_forward,
+)
 from vllm.model_executor.hw_agnostic.layers.fused_moe.fused_moe_method_base import (  # noqa: E501
     FusedMoEMethodBase,
-)
-from vllm.model_executor.hw_agnostic.layers.fused_moe.modular_kernel import (
-    FusedMoEKernel,
 )
 from vllm.model_executor.hw_agnostic.layers.fused_moe.runner.shared_experts import (  # noqa: E501
     SharedExperts,
@@ -111,13 +108,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         w13: torch.Tensor,
         w2: torch.Tensor,
     ) -> None:
-        # ``moe_kernel`` is initialized to None in FusedMoEMethodBase. On
-        # the first call we replace the parameter normally; on subsequent
-        # calls (e.g. RL weight updates that re-trigger
+        # ``experts`` is initialized to None in FusedMoEMethodBase. On the
+        # first call we replace the parameter normally; on subsequent calls
+        # (e.g. RL weight updates that re-trigger
         # process_weights_after_loading) the kernel is already built and
         # CUDA graphs may have captured parameter addresses, so we copy
         # data into the existing storage instead of re-registering.
-        is_weight_update = self.moe_kernel is not None  # type: ignore[has-type]
+        is_weight_update = self.experts is not None  # type: ignore[has-type]
         replace_parameter(
             layer, "w13_weight", w13.contiguous(), prefer_copy=is_weight_update
         )
@@ -128,14 +125,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         if not is_weight_update:
             self.moe_quant_config = self.get_fused_moe_quant_config(layer)
             assert self.moe_quant_config is not None
-            assert self.experts_cls is not None
-            prepare_finalize = maybe_make_prepare_finalize(self.moe)
-            assert prepare_finalize is not None
-            experts = self.experts_cls(
+            self.experts = self.experts_cls(
                 moe_config=self.moe,
                 quant_config=self.moe_quant_config,
             )
-            self.moe_kernel = FusedMoEKernel(prepare_finalize, experts)
 
     def process_weights_after_loading(self, layer: "RoutedExperts") -> None:
         super().process_weights_after_loading(layer)
@@ -180,17 +173,16 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        assert self.moe_kernel is not None
-        return self.moe_kernel.apply(
+        assert self.experts is not None
+        return fused_moe_forward(
+            self.experts,
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=layer.activation,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
-            shared_experts=shared_experts,
-            shared_experts_input=shared_experts_input,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
         )
