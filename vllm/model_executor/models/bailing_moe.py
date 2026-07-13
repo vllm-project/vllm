@@ -41,7 +41,10 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -127,7 +130,12 @@ class BailingAttention(nn.Module):
             prefix=f"{prefix}.dense",
         )
 
-        rotary_dim = getattr(config, "rotary_dim", self.head_dim)
+        rotary_dim = getattr(config, "rotary_dim", None)
+        if rotary_dim is None:
+            partial_rotary_factor = getattr(config, "partial_rotary_factor", 1.0)
+            rotary_dim = int(self.head_dim * partial_rotary_factor)
+        if rotary_dim is None:
+            rotary_dim = self.head_dim
         config.rope_parameters["partial_rotary_factor"] = rotary_dim / self.head_dim
 
         self.rotary_emb = get_rope(
@@ -461,7 +469,7 @@ class BailingMoeModel(nn.Module):
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return FusedMoE.make_expert_params_mapping(
+        return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",

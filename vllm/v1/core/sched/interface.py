@@ -9,6 +9,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorBase
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.engine import EngineCoreOutputs
@@ -41,6 +42,7 @@ class SchedulerInterface(ABC):
         kv_cache_config: "KVCacheConfig",
         structured_output_manager: "StructuredOutputManager",
         block_size: int,
+        hash_block_size: int,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
@@ -48,7 +50,7 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def schedule(self) -> "SchedulerOutput":
+    def schedule(self, throttle_prefills: bool = False) -> "SchedulerOutput":
         """Schedule the requests to process in this scheduling step.
 
         The scheduling decision is made at the iteration level. Each scheduling
@@ -66,6 +68,12 @@ class SchedulerInterface(ABC):
         Additionally, the scheduler also returns useful data about each request
         or the batch as a whole. The model runner will use this information in
         preparing inputs to the model.
+
+        Args:
+            throttle_prefills: DP prefill balancing. When True (set by the DP
+                engine core on non-cadence-aligned steps), new prefill compute is
+                deferred to a later step so prefills stay aligned across DP ranks;
+                automatically overridden when the rank is saturated.
 
         Returns:
             A SchedulerOutput object containing information about the scheduled
@@ -240,4 +248,7 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     def get_kv_connector(self) -> "KVConnectorBase_V1 | None":
+        return None
+
+    def get_ec_connector(self) -> "ECConnectorBase | None":
         return None

@@ -19,7 +19,7 @@
 import math
 from collections.abc import Iterable, Mapping
 from itertools import tee
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 import torch
 from torch import nn
@@ -40,7 +40,9 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention import MMEncoderAttention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -50,7 +52,10 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.utils import initialize_model
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    maybe_remap_moe_expert_param_name,
+)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -73,6 +78,7 @@ from .interfaces import (
     MixtureOfExperts,
     MultiModalEmbeddings,
     SupportsEagle3,
+    SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
@@ -100,7 +106,7 @@ class Llama4ImagePatchInputs(TensorSchema):
 
     patches_per_image: Annotated[torch.Tensor, TensorShape("batch_size")]
     """
-    The number of total patches for each image in the batch.
+    The number of chunked image tiles for each image in the batch.
     
     This is used to split the embeddings which has the first two dimensions
     flattened just like `pixel_values`.
@@ -726,6 +732,7 @@ class Llama4ForConditionalGeneration(
     SupportsMultiModal,
     SupportsPP,
     MixtureOfExperts,
+    SupportsEncoderCudaGraph,
     SupportsEagle3,
     SupportsLoRA,
 ):
@@ -805,17 +812,6 @@ class Llama4ForConditionalGeneration(
         )
         return self.language_model.get_eagle3_default_aux_hidden_state_layers()
 
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ):
-        self.language_model.set_eplb_state(
-            expert_load_view, logical_to_physical_map, logical_replica_count
-        )
-        self.expert_weights = self.language_model.expert_weights
-
     def update_physical_experts_metadata(
         self, num_physical_experts: int, num_local_physical_experts: int
     ):
@@ -823,10 +819,165 @@ class Llama4ForConditionalGeneration(
             num_physical_experts, num_local_physical_experts
         )
 
+    def get_image_patches_per_chunk(self) -> int:
+        return Mllama4ProcessingInfo.get_patch_per_chunk(self.config.vision_config)
+
+    def encode_image_chunks(
+        self,
+        pixel_values: torch.Tensor,
+        *,
+        use_data_parallel: bool,
+    ) -> torch.Tensor:
+        if use_data_parallel:
+            vision_embeddings = run_dp_sharded_vision_model(
+                pixel_values, self.vision_model
+            )
+        else:
+            vision_embeddings = self.vision_model(pixel_values)
+
+        return self.multi_modal_projector(vision_embeddings)
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphConfig,
+        )
+
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=["pixel_values"],
+            out_hidden_size=self.config.text_config.hidden_size,
+        )
+
+    def get_input_modality(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> str:
+        return "image"
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config: VllmConfig,
+    ) -> tuple[int, int]:
+        min_budget = self.get_image_patches_per_chunk()
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            self.vllm_config.model_config.max_model_len,
+        )
+        return (min_budget, max_budget)
+
+    def get_encoder_cudagraph_item_specs(
+        self,
+        mm_kwargs: dict[str, Any],
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
+
+        patches_per_chunk = self.get_image_patches_per_chunk()
+        return [
+            EncoderItemSpec(
+                input_size=num_chunks,
+                output_tokens=num_chunks * patches_per_chunk,
+            )
+            for num_chunks in mm_kwargs["patches_per_image"].tolist()
+        ]
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        pixel_values = mm_kwargs["pixel_values"]
+        patches_per_image = mm_kwargs["patches_per_image"]
+
+        if len(indices) == 0:
+            return {
+                "pixel_values": pixel_values[:0],
+                "patches_per_image": patches_per_image[:0],
+            }
+
+        cum_chunks = [0]
+        for num_chunks in patches_per_image.tolist():
+            cum_chunks.append(cum_chunks[-1] + num_chunks)
+
+        selected_pixel_values = torch.cat(
+            [pixel_values[cum_chunks[i] : cum_chunks[i + 1]] for i in indices],
+            dim=0,
+        )
+
+        return {
+            "pixel_values": selected_pixel_values,
+            "patches_per_image": patches_per_image[indices],
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphCaptureInputs,
+        )
+
+        vision_config = self.config.vision_config
+        patches_per_chunk = self.get_image_patches_per_chunk()
+        chunks_per_capture = max(
+            1, (token_budget + patches_per_chunk - 1) // patches_per_chunk
+        )
+        dummy_pixel_values = torch.randn(
+            chunks_per_capture,
+            vision_config.num_channels,
+            vision_config.image_size,
+            vision_config.image_size,
+            device=device,
+            dtype=dtype,
+        )
+
+        return EncoderCudaGraphCaptureInputs(
+            values={"pixel_values": dummy_pixel_values},
+        )
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphReplayBuffers,
+        )
+
+        return EncoderCudaGraphReplayBuffers(
+            values={"pixel_values": mm_kwargs["pixel_values"]},
+        )
+
+    def encoder_cudagraph_forward(
+        self,
+        inputs: dict[str, torch.Tensor],
+        path: str = "default",
+    ) -> torch.Tensor:
+        return self.encode_image_chunks(
+            inputs["pixel_values"],
+            use_data_parallel=False,
+        ).flatten(0, 1)
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        path: str = "default",
+    ) -> torch.Tensor:
+        return self.encode_image_chunks(
+            mm_kwargs["pixel_values"],
+            use_data_parallel=False,
+        ).flatten(0, 1)
+
     def _parse_and_validate_image_input(
         self, **kwargs: object
     ) -> Llama4ImagePatchInputs | None:
-        # num_images, 1, num_chunks, channel, image_size, image_size
+        # total_num_chunks, channel, image_size, image_size
         pixel_values = kwargs.pop("pixel_values", None)
         if pixel_values is None:
             return None
@@ -848,15 +999,10 @@ class Llama4ForConditionalGeneration(
         pixel_values = image_input["pixel_values"]
         patches_per_image = image_input["patches_per_image"].tolist()
 
-        # shard image input
-        if self.use_data_parallel:
-            vision_embeddings_flat = run_dp_sharded_vision_model(
-                pixel_values, self.vision_model
-            )
-        else:
-            vision_embeddings_flat = self.vision_model(pixel_values)
-
-        vision_embeddings_flat = self.multi_modal_projector(vision_embeddings_flat)
+        vision_embeddings_flat = self.encode_image_chunks(
+            pixel_values,
+            use_data_parallel=self.use_data_parallel,
+        )
 
         return [
             img.flatten(0, 1)
@@ -978,65 +1124,6 @@ class Llama4ForConditionalGeneration(
 
         return name
 
-    def _separate_and_rename_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> tuple[list[tuple[str, torch.Tensor]], list[tuple[str, torch.Tensor]]]:
-        """Rename weights and separate them into language_model and other
-        weights."""
-        language_model_weights = []
-        other_weights = []
-
-        for name, weight in weights:
-            renamed = self._rename_weight_for_modelopt_checkpoint(name)
-
-            attr = renamed.split(".", 1)[0]
-            if isinstance(getattr(self, attr), StageMissingLayer):
-                continue
-
-            if renamed.startswith("language_model."):
-                language_model_weights.append((renamed, weight))
-            else:
-                other_weights.append((renamed, weight))
-
-        return language_model_weights, other_weights
-
-    def _handle_expert_scale_broadcasting(
-        self, weights: list[tuple[str, torch.Tensor]], params_dict: dict
-    ) -> tuple[list[tuple[str, torch.Tensor]], set[str]]:
-        """Handle expert scale parameters that need broadcasting.
-
-        ModelOpt checkpoints use a single value tensor scalar for BMM style
-        experts, vLLM expects the scale to be broadcasted across all experts.
-        """
-        regular_weights = []
-        expert_scale_weights = []
-        updated_params = set()
-
-        for name, weight in weights:
-            # Check if this is an expert scale parameter that needs broadcasting
-            if (
-                "feed_forward.experts." in name
-                and "scale" in name
-                and ".shared_expert" not in name
-            ):
-                if name in params_dict:
-                    param = params_dict[name]
-                    if (
-                        hasattr(param, "data")
-                        and param.data.numel() > 1
-                        and weight.numel() == 1
-                    ):
-                        # Broadcast single value to all experts
-                        param.data.fill_(weight.item())
-                        updated_params.add(name)
-                        continue
-
-                expert_scale_weights.append((name, weight))
-            else:
-                regular_weights.append((name, weight))
-
-        return regular_weights, expert_scale_weights, updated_params
-
     def _load_other_weights(
         self,
         other_weights: Iterable[tuple[str, torch.Tensor]],
@@ -1072,7 +1159,7 @@ class Llama4ForConditionalGeneration(
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        return FusedMoE.make_expert_params_mapping(
+        return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
@@ -1097,19 +1184,67 @@ class Llama4ForConditionalGeneration(
         params_dict = dict(self.named_parameters())
         updated_params: set[str] = set()
 
-        # Separate and rename weights
-        language_model_weights, other_weights = self._separate_and_rename_weights(
-            weights
-        )
+        # Stream thelanguage-model weights straight into
+        # AutoWeightsLoader so each tensor is loaded and released as we iterate,
+        # instead of materializing the whole checkpoint in host memory first.
+        # Only the small vision/projector and scalar expert-scale groups are
+        # buffered.
+        other_weights: list[tuple[str, torch.Tensor]] = []
+        expert_scale_weights: list[tuple[str, torch.Tensor]] = []
 
-        # Handle expert scale parameters
-        regular_weights, expert_scale_weights, updated_params_from_experts = (
-            self._handle_expert_scale_broadcasting(language_model_weights, params_dict)
-        )
-        updated_params.update(updated_params_from_experts)
+        def regular_language_model_weights() -> Iterable[tuple[str, torch.Tensor]]:
+            """Rename weights and separate them into language_model and other
+            weights.
+
+            Yields the (large) language_model weights for streaming; the small
+            groups (vision/projector and scalar expert scales) are buffered into
+            the lists above.
+            """
+            for name, weight in weights:
+                renamed = self._rename_weight_for_modelopt_checkpoint(name)
+
+                attr = renamed.split(".", 1)[0]
+                if isinstance(getattr(self, attr), StageMissingLayer):
+                    continue
+
+                if not renamed.startswith("language_model."):
+                    other_weights.append((renamed, weight))
+                    continue
+
+                # Handle expert scale parameters that need broadcasting.
+                # ModelOpt checkpoints use a single value tensor scalar for BMM
+                # style experts, vLLM expects the scale to be broadcasted across
+                # all experts.
+                if (
+                    "feed_forward.experts." in renamed
+                    and "scale" in renamed
+                    and ".shared_expert" not in renamed
+                ):
+                    renamed = maybe_remap_moe_expert_param_name(renamed, params_dict)
+                    if renamed in params_dict:
+                        param = params_dict[renamed]
+                        if (
+                            hasattr(param, "data")
+                            and param.data.numel() > 1
+                            and weight.numel() == 1
+                        ):
+                            # Broadcast single value to all experts
+                            param.data.fill_(weight.item())
+                            updated_params.add(renamed)
+                            continue
+
+                    expert_scale_weights.append((renamed, weight))
+                    continue
+
+                yield renamed, weight
 
         loader = AutoWeightsLoader(self)
-        loaded_language_model_params = loader.load_weights(regular_weights)
+        # AutoWeightsLoader consumes its input lazily and runs to exhaustion,
+        # so other_weights / expert_scale_weights are fully populated as a side
+        # effect by the time this returns.
+        loaded_language_model_params = loader.load_weights(
+            regular_language_model_weights()
+        )
         assert loaded_language_model_params is not None
         updated_params.update(loaded_language_model_params)
 

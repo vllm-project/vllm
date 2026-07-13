@@ -42,6 +42,7 @@ When using the vLLM HTTP server, the same functionality is available via:
 
 - `POST /pause?mode=keep` - Pause generation
 - `POST /resume` - Resume generation
+- `POST /abort_requests` - Abort in-flight requests without pausing the scheduler (send `{}` to abort all, or `{"request_ids": [...]}`)
 
 !!! note "Data Parallelism"
     When using data parallelism with vLLM's **internal load balancer** (i.e. `data_parallel_backend="ray"`), pause and resume are handled automatically across all DP ranks -- a single call is sufficient. When using an **external load balancer** (i.e. multiple independent vLLM instances behind a proxy), you must send pause and resume requests to **every** engine instance individually before and after the weight update.
@@ -60,4 +61,4 @@ The key insight is that requests paused with `mode="keep"` will produce tokens f
 
 ## Example
 
-The [async RLHF example](../examples/rl/rlhf_async_new_apis.md) demonstrates this pattern with `vllm.AsyncLLMEngine`, NCCL weight transfer, and mid-flight pause/resume with validation.
+The [async RLHF example](../../examples/rl/rlhf_async_new_apis.py) demonstrates this pattern with `vllm.AsyncLLMEngine`, NCCL weight transfer, and mid-flight pause/resume with validation.
