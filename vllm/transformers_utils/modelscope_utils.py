@@ -3,7 +3,10 @@
 
 from functools import cache
 import importlib.util
+import os
+import tempfile
 import warnings
+from pathlib import Path
 
 import vllm.envs as envs
 
@@ -17,6 +20,25 @@ def modelscope_is_available() -> bool:
 
 def should_use_modelscope() -> bool:
     return envs.VLLM_USE_MODELSCOPE and modelscope_is_available()
+
+
+def configure_modelscope_runtime() -> None:
+    proxy_hosts = "modelscope.cn,.modelscope.cn,www.modelscope.cn"
+    for key in ("NO_PROXY", "no_proxy"):
+        current = os.environ.get(key)
+        if not current:
+            os.environ[key] = proxy_hosts
+            continue
+        if proxy_hosts in current:
+            continue
+        os.environ[key] = f"{current},{proxy_hosts}"
+
+    cache_root = Path(tempfile.gettempdir()) / "modelscope"
+    os.environ.setdefault("MODELSCOPE_CACHE", str(cache_root))
+    os.environ.setdefault(
+        "MODELSCOPE_CREDENTIALS_PATH",
+        str(cache_root / "credentials"),
+    )
 
 
 def warn_modelscope_fallback(context: str) -> None:

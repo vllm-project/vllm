@@ -45,6 +45,7 @@ from vllm.model_executor.model_loader.ep_weight_filter import (
 )
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
+from vllm.transformers_utils.modelscope_utils import configure_modelscope_runtime
 from vllm.transformers_utils.repo_utils import hf_api, hf_fs
 from vllm.utils.import_utils import PlaceholderModule
 
@@ -163,6 +164,7 @@ def maybe_download_from_modelscope(
     Returns the path to the downloaded model, or None if the model is not
     downloaded from ModelScope."""
     if envs.VLLM_USE_MODELSCOPE:
+        configure_modelscope_runtime()
         # download model from ModelScope hub,
         # lazy import so that modelscope is not required for normal use.
         # pylint: disable=C.

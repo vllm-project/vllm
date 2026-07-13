@@ -5,6 +5,7 @@ import warnings
 
 from vllm import envs
 from vllm.transformers_utils.modelscope_utils import (
+    configure_modelscope_runtime,
     modelscope_is_available,
     warn_modelscope_fallback,
 )
@@ -13,6 +14,7 @@ if envs.VLLM_USE_MODELSCOPE:
     if not modelscope_is_available():
         warn_modelscope_fallback("vllm.transformers_utils")
     else:
+        configure_modelscope_runtime()
         try:
             # Patch here, before each import happens.
             import modelscope

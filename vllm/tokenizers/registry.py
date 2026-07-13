@@ -11,6 +11,7 @@ from typing_extensions import TypeVar, assert_never
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.transformers_utils.modelscope_utils import configure_modelscope_runtime
 from vllm.transformers_utils.config import _maybe_register_hf_config, get_config
 from vllm.transformers_utils.repo_utils import (
     any_pattern_in_repo_files,
@@ -98,6 +99,7 @@ def resolve_tokenizer_args(
     download_dir: str | None = kwargs.get("download_dir")
 
     if envs.VLLM_USE_MODELSCOPE:
+        configure_modelscope_runtime()
         # download model from ModelScope hub,
         # lazy import so that modelscope is not required for normal use.
         from modelscope.hub.snapshot_download import snapshot_download

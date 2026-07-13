@@ -12,6 +12,7 @@ from transformers import PretrainedConfig
 from vllm import envs
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
+from vllm.transformers_utils.modelscope_utils import configure_modelscope_runtime
 
 # being imported for _all_lora_classes below
 from vllm.lora.layers import (
@@ -342,6 +343,7 @@ def get_adapter_absolute_path(lora_path: str) -> str:
 
     # If the path does not exist locally.
     if envs.VLLM_USE_MODELSCOPE:
+        configure_modelscope_runtime()
         # If using ModelScope, we assume the path is a ModelScope repo.
         from modelscope.hub.snapshot_download import InvalidParameter, snapshot_download
         from requests import HTTPError
