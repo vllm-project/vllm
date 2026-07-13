@@ -186,6 +186,14 @@ class KVCacheBlockCopy(NamedTuple):
     dst_block_id: int
 
 
+@dataclass(frozen=True, slots=True)
+class FreeKVCacheBlockQueueCursor:
+    queue_id: int
+    generation: int
+    queue_index: int
+    block: KVCacheBlock
+
+
 class FreeKVCacheBlockQueue:
     """This class organizes a list of KVCacheBlock objects to a doubly linked
     list of free blocks. We implement this class instead of using Python
@@ -209,6 +217,8 @@ class FreeKVCacheBlockQueue:
     """
 
     def __init__(self, blocks: list[KVCacheBlock]) -> None:
+        self.queue_id = id(self)
+        self.generation = 0
         self.num_free_blocks = len(blocks)
 
         # Initialize doubly links of consecutive blocks
@@ -419,37 +429,51 @@ class FreeKVCacheBlockQueue:
 
     def iter_blocks_after(
         self,
-        cursor: KVCacheBlock | None,
-    ) -> Iterator[KVCacheBlock]:
+        cursor: FreeKVCacheBlockQueueCursor | None,
+    ) -> Iterator[tuple[FreeKVCacheBlockQueueCursor, KVCacheBlock]]:
         """Iterate free blocks in eviction order after the cursor."""
-        if cursor is None:
+        if (
+            cursor is None
+            or cursor.queue_id != self.queue_id
+            or cursor.generation != self.generation
+            or cursor.queue_index != 0
+        ):
             curr_block = self.fake_free_list_head.next_free_block
         else:
-            curr_block = cursor.next_free_block
+            curr_block = cursor.block.next_free_block
 
         while curr_block is not None and curr_block is not self.fake_free_list_tail:
-            yield curr_block
+            next_cursor = FreeKVCacheBlockQueueCursor(
+                queue_id=self.queue_id,
+                generation=self.generation,
+                queue_index=0,
+                block=curr_block,
+            )
+            yield next_cursor, curr_block
             curr_block = curr_block.next_free_block
 
 
 class PriorityAwareFreeKVCacheBlockQueue:
-    """Free block queue ordered by unhashed-first, then priority and LRU.
+    """Free block queue with four priority buckets and per-bucket LRU."""
 
-    Unhashed blocks are always popped before hashed cached blocks, matching
-    the base queue behavior. Hashed blocks are bucketed by retention priority;
-    higher numeric priority values are popped first, and each bucket preserves
-    LRU order.
-    """
+    NUM_PRIORITY_BUCKETS = 4
+    HIGH_PRIORITY_CACHE_FRACTION = 0.25
 
     def __init__(self, blocks: list[KVCacheBlock]) -> None:
-        from sortedcontainers import SortedDict
-
+        self.queue_id = id(self)
+        self.generation = 0
         self.unhashed_queue = FreeKVCacheBlockQueue(blocks)
         self._num_free_blocks = len(blocks)
-        self.priority_to_queue: SortedDict[int, FreeKVCacheBlockQueue] = SortedDict()
-        self.block_id_to_priority: dict[int, int | None] = {
+        self.priority_queues = [
+            FreeKVCacheBlockQueue([]) for _ in range(self.NUM_PRIORITY_BUCKETS)
+        ]
+        self.high_priority_cache_limit = max(
+            1, int(len(blocks) * self.HIGH_PRIORITY_CACHE_FRACTION)
+        )
+        self.block_id_to_bucket: dict[int, int | None] = {
             block.block_id: None for block in blocks
         }
+        self.block_id_to_last_priority_bucket: dict[int, int] = {}
 
     @property
     def num_free_blocks(self) -> int:
@@ -471,34 +495,29 @@ class PriorityAwareFreeKVCacheBlockQueue:
         if num_unhashed > 0:
             unhashed_blocks = self.unhashed_queue.popleft_n(num_unhashed)
             for block in unhashed_blocks:
-                del self.block_id_to_priority[block.block_id]
+                del self.block_id_to_bucket[block.block_id]
             ret.extend(unhashed_blocks)
 
         while len(ret) < n:
-            priority = self._peek_max_priority()
-            queue = self.priority_to_queue[priority]
+            bucket = self._get_next_eviction_bucket()
+            queue = self.priority_queues[bucket]
             num_blocks = min(n - len(ret), queue.num_free_blocks)
             blocks = queue.popleft_n(num_blocks)
             for block in blocks:
-                del self.block_id_to_priority[block.block_id]
+                del self.block_id_to_bucket[block.block_id]
             ret.extend(blocks)
-            if queue.num_free_blocks == 0:
-                del self.priority_to_queue[priority]
 
         self._num_free_blocks -= n
         return ret
 
     def remove(self, block: KVCacheBlock) -> None:
-        priority = self.block_id_to_priority.pop(block.block_id, None)
-        if priority is None:
+        bucket = self.block_id_to_bucket.pop(block.block_id, None)
+        if bucket is None:
             self.unhashed_queue.remove(block)
             self._num_free_blocks -= 1
             return
 
-        queue = self.priority_to_queue[priority]
-        queue.remove(block)
-        if queue.num_free_blocks == 0:
-            del self.priority_to_queue[priority]
+        self.priority_queues[bucket].remove(block)
         self._num_free_blocks -= 1
 
     def append(self, block: KVCacheBlock) -> None:
@@ -511,7 +530,7 @@ class PriorityAwareFreeKVCacheBlockQueue:
         hashed_blocks = [block for block in blocks if block.block_hash is not None]
         self.unhashed_queue.prepend_n(unhashed_blocks)
         for block in unhashed_blocks:
-            self.block_id_to_priority[block.block_id] = None
+            self.block_id_to_bucket[block.block_id] = None
         self._num_free_blocks += len(unhashed_blocks)
         self.append_n(hashed_blocks)
 
@@ -522,64 +541,108 @@ class PriorityAwareFreeKVCacheBlockQueue:
         hashed_blocks = [block for block in blocks if block.block_hash is not None]
         self.unhashed_queue.append_n(unhashed_blocks)
         for block in unhashed_blocks:
-            self.block_id_to_priority[block.block_id] = None
+            self.block_id_to_bucket[block.block_id] = None
         self._num_free_blocks += len(unhashed_blocks)
         for block in hashed_blocks:
-            priority = self._get_block_priority(block)
-            queue = self.priority_to_queue.get(priority)
-            if queue is None:
-                queue = FreeKVCacheBlockQueue([])
-                self.priority_to_queue[priority] = queue
-            queue.append(block)
-            self.block_id_to_priority[block.block_id] = priority
+            bucket = self._get_admission_bucket(block)
+            last_bucket = self.block_id_to_last_priority_bucket.get(block.block_id)
+            if last_bucket is not None and last_bucket != bucket:
+                self.generation += 1
+            self.priority_queues[bucket].append(block)
+            self.block_id_to_bucket[block.block_id] = bucket
+            self.block_id_to_last_priority_bucket[block.block_id] = bucket
             self._num_free_blocks += 1
 
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         blocks = self.unhashed_queue.get_all_free_blocks()
-        for priority in reversed(self.priority_to_queue):
-            blocks.extend(self.priority_to_queue[priority].get_all_free_blocks())
+        blocks.extend(self._iter_priority_blocks())
         return blocks
 
     def iter_blocks_after(
         self,
-        cursor: KVCacheBlock | None,
-    ) -> Iterator[KVCacheBlock]:
+        cursor: FreeKVCacheBlockQueueCursor | None,
+    ) -> Iterator[tuple[FreeKVCacheBlockQueueCursor, KVCacheBlock]]:
         """Iterate free blocks in eviction order after the cursor."""
+        start_queue_index = 0
+        start_block: KVCacheBlock | None = None
+        if self._is_valid_cursor(cursor):
+            assert cursor is not None
+            start_queue_index = cursor.queue_index
+            start_block = cursor.block
 
-        if cursor is None:
-            yield from self.unhashed_queue.iter_blocks_after(None)
-            yield from self._iter_priority_blocks(None)
-            return
-
-        cursor_priority = self.block_id_to_priority.get(cursor.block_id)
-        if cursor_priority is None:
-            if cursor.block_id not in self.block_id_to_priority:
-                return
-            yield from self.unhashed_queue.iter_blocks_after(cursor)
-            yield from self._iter_priority_blocks(None)
-            return
-
-        yield from self.priority_to_queue[cursor_priority].iter_blocks_after(cursor)
-        yield from self._iter_priority_blocks(cursor_priority)
-
-    def _iter_priority_blocks(
-        self,
-        priority: int | None,
-    ) -> Iterator[KVCacheBlock]:
-        for queue_priority in reversed(self.priority_to_queue):
-            if priority is None or queue_priority < priority:
-                yield from self.priority_to_queue[queue_priority].iter_blocks_after(
-                    None
+        for queue_index in range(start_queue_index, self.NUM_PRIORITY_BUCKETS + 1):
+            queue = self._get_queue(queue_index)
+            queue_cursor = start_block if queue_index == start_queue_index else None
+            curr_block = (
+                queue.fake_free_list_head.next_free_block
+                if queue_cursor is None
+                else queue_cursor.next_free_block
+            )
+            while (
+                curr_block is not None and curr_block is not queue.fake_free_list_tail
+            ):
+                next_cursor = FreeKVCacheBlockQueueCursor(
+                    queue_id=self.queue_id,
+                    generation=self.generation,
+                    queue_index=queue_index,
+                    block=curr_block,
                 )
+                yield next_cursor, curr_block
+                curr_block = curr_block.next_free_block
 
-    @staticmethod
-    def _get_block_priority(block: KVCacheBlock) -> int:
-        return block.retention_priority if block.retention_priority is not None else 0
+    def _iter_priority_blocks(self) -> Iterator[KVCacheBlock]:
+        for bucket in range(self.NUM_PRIORITY_BUCKETS - 1, 0, -1):
+            yield from self.priority_queues[bucket].get_all_free_blocks()
+        yield from self.priority_queues[0].get_all_free_blocks()
 
-    def _peek_max_priority(self) -> int:
-        if self.priority_to_queue:
-            return self.priority_to_queue.peekitem(-1)[0]
+    def _get_next_eviction_bucket(self) -> int:
+        for bucket in range(self.NUM_PRIORITY_BUCKETS - 1, -1, -1):
+            if self.priority_queues[bucket].num_free_blocks > 0:
+                return bucket
         raise ValueError("No free blocks available")
+
+    def _get_admission_bucket(self, block: KVCacheBlock) -> int:
+        bucket = self._get_priority_bucket(block)
+        if (
+            bucket == 0
+            and self.priority_queues[0].num_free_blocks
+            >= self.high_priority_cache_limit
+        ):
+            return 1
+        return bucket
+
+    def _is_valid_cursor(
+        self,
+        cursor: FreeKVCacheBlockQueueCursor | None,
+    ) -> bool:
+        if (
+            cursor is None
+            or cursor.queue_id != self.queue_id
+            or cursor.generation != self.generation
+            or not 0 <= cursor.queue_index <= self.NUM_PRIORITY_BUCKETS
+        ):
+            return False
+        expected_queue_index = self._get_block_queue_index(cursor.block)
+        return expected_queue_index == cursor.queue_index
+
+    def _get_block_queue_index(self, block: KVCacheBlock) -> int | None:
+        if block.block_id not in self.block_id_to_bucket:
+            return None
+        bucket = self.block_id_to_bucket[block.block_id]
+        return 0 if bucket is None else self.NUM_PRIORITY_BUCKETS - bucket
+
+    def _get_queue(self, queue_index: int) -> FreeKVCacheBlockQueue:
+        if queue_index == 0:
+            return self.unhashed_queue
+        bucket = self.NUM_PRIORITY_BUCKETS - queue_index
+        return self.priority_queues[bucket]
+
+    @classmethod
+    def _get_priority_bucket(cls, block: KVCacheBlock) -> int:
+        priority = block.retention_priority
+        if priority is None:
+            return cls.NUM_PRIORITY_BUCKETS - 1
+        return min(max(priority, 0), cls.NUM_PRIORITY_BUCKETS - 1)
 
 
 def need_extra_keys(request: Request) -> bool:

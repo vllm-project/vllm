@@ -2067,8 +2067,8 @@ def test_priority_aware_eviction_prefers_low_priority_blocks():
     )
     high_priority, low_priority, medium_priority = pool.get_new_blocks(3)
     _set_cached_block(pool, high_priority, b"high", retention_priority=0)
-    _set_cached_block(pool, low_priority, b"low", retention_priority=10)
-    _set_cached_block(pool, medium_priority, b"medium", retention_priority=5)
+    _set_cached_block(pool, low_priority, b"low", retention_priority=3)
+    _set_cached_block(pool, medium_priority, b"medium", retention_priority=2)
 
     pool.free_blocks([high_priority, low_priority, medium_priority])
 
@@ -2093,6 +2093,75 @@ def test_priority_aware_eviction_preserves_lru_within_priority():
     pool.free_blocks([first, second, third])
 
     assert pool.get_new_blocks(1)[0] is first
+
+
+def test_priority_aware_eviction_limits_high_priority_cache():
+    pool = BlockPool(
+        num_gpu_blocks=9,
+        enable_caching=True,
+        hash_block_size=16,
+        kv_cache_eviction_policy="priority-aware",
+    )
+    blocks = pool.get_new_blocks(8)
+    for index, block in enumerate(blocks):
+        retention_priority = 0 if index < 3 else 3
+        _set_cached_block(
+            pool,
+            block,
+            f"block-{index}".encode(),
+            retention_priority=retention_priority,
+        )
+    pool.free_blocks(blocks)
+
+    assert pool.get_new_blocks(1)[0] is blocks[3]
+    assert pool.get_new_blocks(4) == blocks[4:8]
+    assert pool.get_new_blocks(1)[0] is blocks[2]
+    assert pool.get_new_blocks(1)[0] is blocks[0]
+
+
+def test_priority_aware_cursor_resumes_in_constant_time_order():
+    pool = BlockPool(
+        num_gpu_blocks=5,
+        enable_caching=True,
+        hash_block_size=16,
+        kv_cache_eviction_policy="priority-aware",
+    )
+    blocks = pool.get_new_blocks(4)
+    for index, block in enumerate(blocks):
+        _set_cached_block(
+            pool,
+            block,
+            f"cursor-{index}".encode(),
+            retention_priority=3 - index,
+        )
+    pool.free_blocks(blocks)
+
+    iterator = pool.free_block_queue.iter_blocks_after(None)
+    cursor, first = next(iterator)
+    assert first is blocks[0]
+
+    resumed = [block for _, block in pool.free_block_queue.iter_blocks_after(cursor)]
+    assert resumed == blocks[1:]
+
+
+def test_priority_aware_cursor_resets_after_cross_bucket_move():
+    pool = BlockPool(
+        num_gpu_blocks=3,
+        enable_caching=True,
+        hash_block_size=16,
+        kv_cache_eviction_policy="priority-aware",
+    )
+    first, second = pool.get_new_blocks(2)
+    _set_cached_block(pool, first, b"first", retention_priority=3)
+    _set_cached_block(pool, second, b"second", retention_priority=3)
+    pool.free_blocks([first, second])
+
+    cursor, cursor_block = next(pool.free_block_queue.iter_blocks_after(None))
+    pool.touch([cursor_block], retention_priority=0)
+    pool.free_blocks([cursor_block])
+
+    resumed = [block for _, block in pool.free_block_queue.iter_blocks_after(cursor)]
+    assert resumed == [second, first]
 
 
 def test_priority_aware_eviction_keeps_existing_lru_on_priority_ties():
@@ -2146,6 +2215,22 @@ def test_touch_upgrades_retention_priority():
     pool.free_blocks([shared_block])
 
     assert pool.get_new_blocks(1)[0] is low_priority_block
+
+
+def test_move_block_hashes_preserves_retention_priority():
+    pool = BlockPool(
+        num_gpu_blocks=3,
+        enable_caching=True,
+        hash_block_size=16,
+        kv_cache_eviction_policy="priority-aware",
+    )
+    source_block, destination_block = pool.get_new_blocks(2)
+    _set_cached_block(pool, source_block, b"source", retention_priority=1)
+
+    pool.move_block_hashes(source_block, destination_block)
+
+    assert source_block.retention_priority is None
+    assert destination_block.retention_priority == 1
 
 
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])

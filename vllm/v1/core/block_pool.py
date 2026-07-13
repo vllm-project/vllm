@@ -641,7 +641,8 @@ class BlockPool:
                 block_hash_with_group_id
             )
         self.cached_block_hash_to_block.insert(block_hash_with_group_id, block)
-@staticmethod
+
+    @staticmethod
     def _update_retention_priority(
         block: KVCacheBlock,
         retention_priority: int,
@@ -650,7 +651,6 @@ class BlockPool:
             block.retention_priority = retention_priority
         else:
             block.retention_priority = min(block.retention_priority, retention_priority)
-
 
     def move_block_hashes(
         self,
@@ -666,9 +666,16 @@ class BlockPool:
         assert dst_block.block_hash is None
         assert dst_block.block_id not in self.cached_block_hashes_by_block
         num_tokens = src_block.block_hash_num_tokens
+        retention_priority = src_block.retention_priority
+        assert retention_priority is not None
         for block_hash in self._remove_cached_block_hashes(src_block):
             # `num_tokens` only applies to the first (primary) insertion.
-            self._insert_block_hash(block_hash, dst_block, num_tokens=num_tokens)
+            self._insert_block_hash(
+                block_hash,
+                dst_block,
+                num_tokens=num_tokens,
+                retention_priority=retention_priority,
+            )
 
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
