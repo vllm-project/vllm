@@ -49,6 +49,15 @@ class RejectionSampler:
     ):
         self.sampler = sampler
         self.num_speculative_steps = spec_config.num_speculative_tokens
+        self.mask_pruned_tokens = (
+            spec_config.method == "dspark"
+            and spec_config.confidence_based_verification not in ("none", "off")
+            and (
+                spec_config.dspark_confidence_threshold > 0.0
+                or spec_config.dspark_budget_frac < 1.0
+                or spec_config.dspark_sps_curve is not None
+            )
+        )
         rejection_sample_method = spec_config.rejection_sample_method
         self.use_block_verification: bool = False
         self.synthetic_conditional_rates: torch.Tensor | None = None
@@ -109,9 +118,10 @@ class RejectionSampler:
         num_nans = get_num_nans(logits) if self.sampler.compute_nans else None
 
         draft_sampled = input_batch.input_ids[input_batch.logits_indices]
-        draft_sampled.masked_fill_(
-            input_batch.is_padding[input_batch.logits_indices], -1
-        )
+        if self.mask_pruned_tokens:
+            draft_sampled.masked_fill_(
+                input_batch.is_padding[input_batch.logits_indices], -1
+            )
         pos = input_batch.positions[input_batch.logits_indices]
         processed_logits = self.sampler.apply_sampling_params(
             logits,

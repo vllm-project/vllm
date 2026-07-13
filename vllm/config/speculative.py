@@ -247,46 +247,13 @@ class SpeculativeConfig:
     otherwise falls back to masking, and ``"mask"`` always masks pruned
     verification tokens."""
 
-    dspark_confidence_temperature: float = 1.0
-    """Temperature applied to the DSpark confidence-head logits before the
-    survival-probability computation. The released heads can emit saturated
-    logits whose sigmoids round to exact 0/1 in fp32; exact zeros remove
-    tokens from the capacity allocator's candidate set entirely. A
-    temperature > 1 desaturates the logits (order-preserving) so every token
-    stays a candidate with a usable ranking. A stopgap until checkpoints ship
-    Sequential-Temperature-Scaling-calibrated heads."""
-
     dspark_online_sts: bool = True
-    """Calibrate the DSpark confidence head online with per-position
-    temperatures (the paper's Sequential Temperature Scaling, fitted at
-    serving time): per draft position, track binned empirical conditional
-    acceptance from the rejection sampler's outcomes (exponentially decayed)
-    and fit the temperature minimizing the calibration error. Order
-    preserving; identity until outcomes accumulate. Only active together
-    with confidence-based verification."""
+    """Calibrate DSpark confidence logits online with Sequential Temperature
+    Scaling."""
 
     dspark_sps_curve: list[tuple[int, float]] | str | None = None
-    """Profiled engine step-rate curve for the DSpark hardware-aware prefix
-    scheduler, as ``(batch_num_tokens, steps_per_sec)`` breakpoints with
-    strictly increasing token counts (linearly interpolated, clamped at the
-    ends, applied independently of the running request count), or the string
-    ``"auto"`` to profile a step-rate surface at engine init: after CUDA
-    graph capture, real warmup decode steps (wall clock, so worker-side host
-    prep and the draft step are included) are timed over a (request count,
-    admitted drafts per request) grid with capacities forced through the
-    enforcement mode's real pruning path, and rank 0's measurements are
-    broadcast so all TP ranks build the identical table. When set,
-    verification lengths are chosen by maximizing expected throughput
-    ``tau * SPS(R, B)`` (DSpark Algorithm 1) instead of spending the whole
-    ``dspark_budget_frac`` budget; the budget still acts as an upper bound
-    on total admissions. Only the curve's shape matters, so any consistent
-    rate unit works."""
-
-    dspark_sps_overhead_ms: float = 0.0
-    """Constant per-step overhead in milliseconds added to the step times
-    measured by ``dspark_sps_curve="auto"``, covering costs the init-time
-    profiling cannot see (scheduler/IPC above the worker). Flattens the
-    curve, making the theta-argmax verify more aggressively as it grows."""
+    """DSpark ``(verification tokens, steps/sec)`` breakpoints, or ``"auto"``
+    to measure them during warmup."""
 
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
@@ -1258,16 +1225,6 @@ class SpeculativeConfig:
         if not 0.0 < self.dspark_budget_frac <= 1.0:
             raise ValueError(
                 f"dspark_budget_frac must be in (0, 1], got {self.dspark_budget_frac}."
-            )
-        if self.dspark_confidence_temperature <= 0.0:
-            raise ValueError(
-                "dspark_confidence_temperature must be > 0, got "
-                f"{self.dspark_confidence_temperature}."
-            )
-        if self.dspark_sps_overhead_ms < 0.0:
-            raise ValueError(
-                "dspark_sps_overhead_ms must be >= 0, got "
-                f"{self.dspark_sps_overhead_ms}."
             )
         if isinstance(self.dspark_sps_curve, str):
             if self.dspark_sps_curve != "auto":

@@ -1,15 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Confidence-based verification for DSpark speculative decoding.
-
-The draft model's confidence head predicts each draft token's acceptance
-probability; tokens unlikely to be accepted are pruned from target
-verification. The hardware-aware prefix scheduler is a CPU algorithm over
-R x k confidence scalars, exactly as in the paper: each draft step
-D2H-copies its confidence logits asynchronously, and the host computes
-per-request verify capacities from the copy staged one step earlier — so
-allocation never blocks on the GPU and never runs inside a captured graph.
-"""
+"""Confidence-based verification for DSpark speculative decoding."""
 
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
@@ -59,15 +50,7 @@ def _rewrite_compact_batch_kernel(
     SPEC_BLOCK: tl.constexpr,
     NUM_NEW_SAMPLED_TOKENS: tl.constexpr = 1,
 ):
-    """Rebuild the verifier batch for capacity-compacted shapes in one pass.
-
-    One program per request derives everything from the packed host meta
-    (new query_start_loc / cu_num_logits) and persistent request state:
-    positions, seq_lens, logits_indices, the expanded logit->slot mappings,
-    and the query token ids themselves (bonus token + admitted drafts).
-    Prompt tokens of prefilling rows are written separately by
-    prepare_prefill_inputs. The extra trailing program pads seq_lens and
-    query_start_loc for full-CUDA-graph replay."""
+    """Rebuild the compact verifier batch, one program per request."""
     req_idx = tl.program_id(0)
     num_reqs = tl.num_programs(0) - 1
     if req_idx == num_reqs:
@@ -179,17 +162,10 @@ def allocate_draft_token_capacity(
     sps_row: np.ndarray | None = None,
     min_survival: float = 0.0,
 ) -> np.ndarray:
-    """DSpark Algorithm 1: greedy global admission by prefix-survival score.
+    """Allocate prefixes globally by survival score (DSpark Algorithm 1).
 
-    With an SPS row (steps/s indexed by verify-batch tokens for the current
-    request count R), admission stops at the count maximizing expected
-    throughput theta = tau * SPS(R + k), where tau = R + sum of admitted
-    scores (one bonus token per request). Zero-survival tokens are never
-    candidates, and ``budget_frac`` caps total admissions. The paper breaks
-    at the first theta decline; scanning to the global argmax is never worse
-    under its noted jagged step-rate curves.
-
-    With ``min_survival`` > 0, per-position thresholding is used instead.
+    An SPS curve chooses the admission count maximizing expected accepted
+    tokens per step. ``min_survival`` selects threshold mode instead.
     """
     num_reqs, num_steps = survival.shape
     if min_survival > 0.0:
@@ -232,15 +208,11 @@ def build_sps_table(
     max_num_reqs: int,
     max_batch_tokens: int,
 ) -> np.ndarray:
-    """Densify (batch_num_tokens, steps_per_sec) breakpoints into a
-    (max_num_reqs + 1, max_batch_tokens + 1) lookup table indexed by
-    (running request count, verify batch token count), linearly interpolated
-    and clamped at the ends. An explicit 1D curve is request-count
-    independent, so it is replicated across rows."""
+    """Interpolate SPS breakpoints by verification batch size."""
     xs = np.array([b for b, _ in sps_curve], dtype=np.float64)
     ys = np.array([s for _, s in sps_curve], dtype=np.float64)
     row = np.interp(np.arange(max_batch_tokens + 1), xs, ys)
-    return np.broadcast_to(row, (max_num_reqs + 1, max_batch_tokens + 1)).copy()
+    return np.broadcast_to(row, (max_num_reqs + 1, row.size)).copy()
 
 
 def build_sps_table_2d(
@@ -248,22 +220,23 @@ def build_sps_table_2d(
     max_num_reqs: int,
     max_batch_tokens: int,
 ) -> np.ndarray:
-    """Densify per-request-count (batch_num_tokens, steps_per_sec) curves
-    into a (max_num_reqs + 1, max_batch_tokens + 1) lookup table. Each
-    measured request count's curve is interpolated over tokens, then rows
-    between measured request counts are interpolated column-wise."""
-    token_range = np.arange(max_batch_tokens + 1)
+    """Interpolate SPS over request count and verification batch size."""
+    token_counts = np.arange(max_batch_tokens + 1)
     measured_reqs = sorted(sps_grid)
-    rows = np.empty((len(measured_reqs), max_batch_tokens + 1), dtype=np.float64)
+    measured_rows = np.empty(
+        (len(measured_reqs), max_batch_tokens + 1), dtype=np.float64
+    )
     for i, num_reqs in enumerate(measured_reqs):
         curve = sorted(sps_grid[num_reqs])
         xs = np.array([b for b, _ in curve], dtype=np.float64)
         ys = np.array([s for _, s in curve], dtype=np.float64)
-        rows[i] = np.interp(token_range, xs, ys)
+        measured_rows[i] = np.interp(token_counts, xs, ys)
+
     table = np.empty((max_num_reqs + 1, max_batch_tokens + 1), dtype=np.float64)
-    for col in range(max_batch_tokens + 1):
-        table[:, col] = np.interp(
-            np.arange(max_num_reqs + 1), measured_reqs, rows[:, col]
+    req_counts = np.arange(max_num_reqs + 1)
+    for token_count in token_counts:
+        table[:, token_count] = np.interp(
+            req_counts, measured_reqs, measured_rows[:, token_count]
         )
     return table
 
@@ -276,7 +249,6 @@ class ConfidenceManager:
         device: torch.device,
         speculative_config: "SpeculativeConfig",
     ):
-        self.max_num_tokens = max_num_tokens
         self.device = device
         self.req_states = req_states
         self.num_speculative_steps = req_states.num_speculative_steps
@@ -290,7 +262,6 @@ class ConfidenceManager:
 
         self.min_survival_probability = speculative_config.dspark_confidence_threshold
         self.capacity_budget_frac = speculative_config.dspark_budget_frac
-        self.confidence_temperature = speculative_config.dspark_confidence_temperature
         sps_curve = speculative_config.dspark_sps_curve
         self.wants_auto_sps_curve = sps_curve == "auto"
         max_batch_tokens = req_states.max_num_reqs * (1 + self.num_speculative_steps)
@@ -305,8 +276,7 @@ class ConfidenceManager:
         if speculative_config.dspark_online_sts:
             self.online_sts = DSparkOnlineSTS(self.num_speculative_steps)
 
-        # Two fixed D2H slots: consume the pending slot before staging into
-        # the other, leaving the consumed confidences alive for next-step STS.
+        # Two D2H slots preserve the prior confidences needed by STS.
         shape = (2, req_states.max_num_reqs)
         self._confidence_logits_cpu = torch.empty(
             (*shape, self.num_speculative_steps),
@@ -323,7 +293,6 @@ class ConfidenceManager:
         self._staged_idx: int | None = None
         self._last_idx: int | None = None
         self._next_idx = 0
-        # Profiling hook (warmup): cap every allocated capacity.
         self.forced_capacity: int | None = None
 
     def add_request(self, req_idx: int) -> None:
@@ -350,7 +319,7 @@ class ConfidenceManager:
         warmup_iters: int = 3,
         timed_chunks: int = 5,
     ) -> None:
-        """Profile the request-count/token-count step-rate surface."""
+        """Profile step rate by request count and verification batch size."""
         import time
 
         from vllm import SamplingParams
@@ -434,13 +403,11 @@ class ConfidenceManager:
             tp_group.broadcast(timings, src=0)
         step_ms = timings.cpu().tolist()
 
-        assert model_runner.speculative_config is not None
-        overhead = model_runner.speculative_config.dspark_sps_overhead_ms
         ms_iter = iter(step_ms)
         sps_grid = {
             num_reqs: [
-                (num_reqs * (1 + k), 1000.0 / (next(ms_iter) + overhead))
-                for k in draft_counts
+                (num_reqs * (1 + capacity), 1000.0 / next(ms_iter))
+                for capacity in draft_counts
             ]
             for num_reqs in req_counts
         }
@@ -458,9 +425,7 @@ class ConfidenceManager:
         num_sampled: torch.Tensor,
         input_batch: "InputBatch",
     ) -> None:
-        """Stage this draft step's confidence logits (and the step's sampler
-        outcomes, which verify the previous step's drafts) for host-side
-        allocation two dispatches later."""
+        """Stage confidence logits and sampler outcomes for host allocation."""
         num_reqs = input_batch.num_reqs
         num_bonus = self._get_num_bonus_tokens(input_batch)
         num_verified_np = (np.diff(input_batch.cu_num_logits_np) - num_bonus).astype(
@@ -503,12 +468,7 @@ class ConfidenceManager:
         raise NotImplementedError
 
     def _update_staged_confidences(self, idx: int) -> None:
-        """Consume the previous staged copy (fixed offset): update the
-        online calibration with its outcomes and fill draft_token_capacity_np
-        from its confidences via the paper's Algorithm 1 — all on the host."""
-        # Fixed offset guarantees the copy landed a full step ago; this is a
-        # defensive no-op wait, not a stall (measured via the admit-all
-        # ablation and VLLM_GPU_SYNC_CHECK).
+        """Consume one staged slot and update request capacities."""
         with gpu_sync_allowed():
             self._copy_events[idx].synchronize()
 
@@ -520,8 +480,7 @@ class ConfidenceManager:
         )
         prev_idx = self._last_idx
         if self.online_sts is not None and prev_idx is not None:
-            # This entry's outcomes verify the previous entry's drafts; join
-            # the two by req_id (requests may have finished in between).
+            # Outcomes in this slot verify confidences from the prior slot.
             prev_ids = self._req_ids[prev_idx]
             prev_row = {req_id: i for i, req_id in enumerate(prev_ids)}
             rows = np.array(
@@ -537,7 +496,7 @@ class ConfidenceManager:
                 )
         self._last_idx = idx
 
-        temperatures: np.ndarray | float = self.confidence_temperature
+        temperatures: np.ndarray | float = 1.0
         if self.online_sts is not None:
             temperatures = self.online_sts.temperatures
         survival = compute_prefix_survival(confidence_logits_np, temperatures)
@@ -595,7 +554,7 @@ class ConfidenceManager:
         self,
         input_batch: "InputBatch",
         draft_tokens: dict[str, list[int]],
-    ) -> "InputBatch":
+    ) -> None:
         raise NotImplementedError
 
 
@@ -609,9 +568,7 @@ class VarlenConfidenceManager(ConfidenceManager):
     ):
         super().__init__(max_num_tokens, req_states, device, speculative_config)
         self.varlen_spec_decode = True
-        # Persistent buffers for the single-kernel batch rewrite: one packed
-        # H2D upload (query_start_loc | cu_num_logits) and preallocated
-        # outputs, so a compacted step costs one copy and one kernel.
+        # Persistent inputs and outputs for the fused batch rewrite.
         max_num_reqs = req_states.max_num_reqs
         max_num_logits = max_num_reqs * (1 + self.num_speculative_steps)
         self._meta_np = np.empty(2 * (max_num_reqs + 1), dtype=np.int32)
@@ -680,8 +637,7 @@ class VarlenConfidenceManager(ConfidenceManager):
         )
 
     def warmup(self, input_buffers: "InputBuffers") -> None:
-        # The fused rewrite kernel has fixed constexprs, so one launch on a
-        # minimal synthetic layout JIT-compiles its only variant.
+        # JIT-compile the fused rewrite kernel.
         query_len = 1 + self.num_speculative_steps
         self._meta_np[:4] = [0, query_len, 0, query_len]
         async_copy_to_gpu(self._meta_np[:4], out=self._meta[:4])
@@ -722,8 +678,7 @@ class VarlenConfidenceManager(ConfidenceManager):
         input_batch.num_draft_tokens_per_req = num_draft_tokens_per_req
         input_batch.num_draft_tokens = int(num_draft_tokens_per_req.sum())
 
-        # Pack the new layout into one host buffer and upload it once; the
-        # fused kernel derives everything else from persistent request state.
+        # Upload query and logits offsets together.
         meta = self._meta_np[: 2 * (num_reqs + 1)]
         query_start_loc_np = meta[: num_reqs + 1]
         cu_num_logits_np = meta[num_reqs + 1 :]
@@ -783,12 +738,12 @@ class VarlenConfidenceManager(ConfidenceManager):
         self,
         input_batch: "InputBatch",
         draft_tokens: dict[str, list[int]],
-    ) -> "InputBatch":
+    ) -> None:
         if (
             input_batch.num_draft_tokens == 0
             or input_batch.num_draft_tokens_per_req is None
         ):
-            return input_batch
+            return
 
         num_bonus_tokens = self._get_num_bonus_tokens(input_batch)
         num_draft_tokens_per_req = self._planned_draft_tokens_per_req
@@ -809,9 +764,6 @@ class VarlenConfidenceManager(ConfidenceManager):
                 num_draft_tokens_per_req,
                 num_bonus_tokens,
             )
-        if input_batch.max_req_tokens is None:
-            input_batch.max_req_tokens = int(input_batch.num_scheduled_tokens.max())
-        return input_batch
 
 
 class MaskedConfidenceManager(ConfidenceManager):
@@ -860,12 +812,12 @@ class MaskedConfidenceManager(ConfidenceManager):
         self,
         input_batch: "InputBatch",
         draft_tokens: dict[str, list[int]],
-    ) -> "InputBatch":
+    ) -> None:
         if (
             input_batch.num_draft_tokens == 0
             or input_batch.num_draft_tokens_per_req is None
         ):
-            return input_batch
+            return
 
         num_bonus_tokens = self._get_num_bonus_tokens(input_batch)
         if self._prepare_forward_skip_mask(input_batch, num_bonus_tokens, draft_tokens):
@@ -873,7 +825,6 @@ class MaskedConfidenceManager(ConfidenceManager):
                 input_batch.is_padding[: input_batch.num_tokens],
                 0,
             )
-        return input_batch
 
 
 def make_confidence_manager(

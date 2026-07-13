@@ -222,8 +222,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             vocab_size=self.vocab_size,
             device=self.device,
         )
-        # Constructed in init_attn_backend, once the final verification mode
-        # is known (varlen requires full CUDA graph support).
         self.spec_decode_confidence_manager: ConfidenceManager | None = None
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
@@ -449,9 +447,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
             self.kv_cache_config, self.vllm_config, self.device
         )
-        if (
-            self.speculator is not None
-            and self.speculator.use_confidence_based_verification
+        if self.speculator is not None and getattr(
+            self.speculator, "use_confidence_based_verification", False
         ):
             assert self.speculative_config is not None
             self.spec_decode_confidence_manager = make_confidence_manager(
@@ -884,12 +881,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
     def prepare_inputs(
-        self,
-        scheduler_output: SchedulerOutput,
-        batch_desc: BatchExecutionDescriptor,
+        self, scheduler_output: SchedulerOutput, batch_desc: BatchExecutionDescriptor
     ) -> InputBatch:
         num_tokens = scheduler_output.total_num_scheduled_tokens
         num_tokens_after_padding = batch_desc.num_tokens
+        assert num_tokens > 0
+        uses_padding_mask = (
+            envs.VLLM_MOE_SKIP_PADDING
+            or self.spec_decode_confidence_manager is not None
+        )
         num_tokens_per_req = scheduler_output.num_scheduled_tokens
         num_reqs = len(num_tokens_per_req)
 
@@ -937,8 +937,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 idx_mapping, total_num_logits, cu_num_logits, max_expand_len
             )
 
-        assert num_tokens > 0
-
         # Get query_start_loc.
         # num_reqs_padded is None for PIECEWISE graphs (no request padding needed)
         num_reqs_padded = batch_desc.num_reqs or num_reqs
@@ -974,8 +972,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             query_start_loc,
             self.req_states.num_computed_tokens.gpu,
             self.input_buffers.positions,
-            self.input_buffers.is_padding,
             self.input_buffers.seq_lens,
+            is_padding=self.input_buffers.is_padding if uses_padding_mask else None,
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
 
@@ -1050,9 +1048,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_req_tokens=batch_desc.max_req_tokens,
         )
         if self.spec_decode_confidence_manager is not None:
-            input_batch = self.spec_decode_confidence_manager.trim_batch(
-                input_batch, draft_tokens
-            )
+            self.spec_decode_confidence_manager.trim_batch(input_batch, draft_tokens)
         if self.use_dcp:
             # Prepare dcp local seq_lens.
             prepare_dcp_local_seq_lens(
@@ -1066,18 +1062,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens[
                 : input_batch.num_reqs_after_padding
             ]
-        num_tokens = input_batch.num_tokens
-        num_tokens_after_padding = input_batch.num_tokens_after_padding
-        assert 0 < num_tokens <= num_tokens_after_padding, (
-            f"Batch has {num_tokens} tokens after trimming but was dispatched "
-            f"for {num_tokens_after_padding}"
-        )
-        if envs.VLLM_MOE_SKIP_PADDING:
+        if uses_padding_mask:
             # Mark trailing cudagraph-padding rows so kernels can skip work for
             # them when supported.
-            self.input_buffers.is_padding[num_tokens:num_tokens_after_padding].fill_(
-                True
-            )
+            self.input_buffers.is_padding[
+                input_batch.num_tokens : num_tokens_after_padding
+            ].fill_(True)
         return input_batch
 
     def prepare_attn(
@@ -1095,7 +1085,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
             input_batch.positions,
             num_tokens_padded=input_batch.num_tokens_after_padding,
-            is_padding=input_batch.is_padding,
+            is_padding=(
+                input_batch.is_padding
+                if envs.VLLM_MOE_SKIP_PADDING
+                or self.spec_decode_confidence_manager is not None
+                else None
+            ),
         )
         return block_tables, slot_mappings
 
@@ -1200,9 +1195,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_toks = scheduler_output.total_num_scheduled_tokens
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
         uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
-        # Bound each request when selecting a varlen verification graph.
         max_req_tokens = max_query_len
-        skip_compiled = False
         manager = self.spec_decode_confidence_manager
 
         num_active_loras = 0
@@ -1212,6 +1205,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.lora_config, self.lora_state, req_ids, dummy_run
             )
 
+        skip_compiled = False
         if self.is_encoder_decoder and scheduler_output.scheduled_encoder_inputs:
             # Encoder-decoder models such as Whisper should run eager/non-compiled
             # when encoder inputs are scheduled, because this step updates
@@ -1364,6 +1358,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Update the EPLB meta.
         self.eplb.prepare_forward(self.model_config, input_batch.num_tokens)
+
+        if self.spec_decode_confidence_manager is not None:
+            self.spec_decode_confidence_manager.wait_for_staged_copy()
 
         # Run model.
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
@@ -1537,8 +1534,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if self.speculator is not None:
             assert self.sampler is not None
-            if self.spec_decode_confidence_manager is not None:
-                self.spec_decode_confidence_manager.wait_for_staged_copy()
             # Let the target override the hidden state fed to the drafter
             # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
             # target returns a persistent buffer sized at max_num_batched_tokens;

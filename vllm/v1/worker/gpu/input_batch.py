@@ -128,9 +128,9 @@ class InputBatch:
             num_scheduled_tokens = np.ones(num_reqs, dtype=np.int32)
             remaining = num_tokens - num_reqs
             for i in range(num_reqs - 1, -1, -1):
-                num_tokens_for_req = min(remaining, max_req_tokens - 1)
-                num_scheduled_tokens[i] += num_tokens_for_req
-                remaining -= num_tokens_for_req
+                added = min(remaining, max_req_tokens - 1)
+                num_scheduled_tokens[i] += added
+                remaining -= added
                 if remaining == 0:
                     break
         assert int(num_scheduled_tokens.sum()) == num_tokens
@@ -160,7 +160,7 @@ class InputBatch:
         input_buffers.is_padding[:num_tokens].fill_(True)
         is_padding = input_buffers.is_padding[:num_tokens]
 
-        logits_indices = torch.clamp(query_start_loc[1:] - 1, min=0)
+        logits_indices = query_start_loc[1:] - 1
         cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
         cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
         # Dummy: seq_len == query_len (fresh-prefill shape).
@@ -269,6 +269,7 @@ def _prepare_pos_seq_lens_kernel(
     query_start_loc_ptr,
     num_computed_tokens_ptr,
     max_num_reqs,
+    CLEAR_PADDING: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     req_id = tl.program_id(0)
@@ -296,7 +297,8 @@ def _prepare_pos_seq_lens_kernel(
         mask = block < query_len
         pos = num_computed_tokens + block
         tl.store(pos_ptr + start + block, pos, mask=mask)
-        tl.store(is_padding_ptr + start + block, False, mask=mask)
+        if CLEAR_PADDING:
+            tl.store(is_padding_ptr + start + block, False, mask=mask)
 
 
 def prepare_pos_seq_lens(
@@ -304,20 +306,21 @@ def prepare_pos_seq_lens(
     query_start_loc: torch.Tensor,
     num_computed_tokens: torch.Tensor,
     pos: torch.Tensor,
-    is_padding: torch.Tensor,
     seq_lens: torch.Tensor,
+    is_padding: torch.Tensor | None = None,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
     # NOTE(woosuk): We do +1 because the last thread block is used
     # to pad unused seq_lens as 0 for full CUDA graphs.
     _prepare_pos_seq_lens_kernel[(num_reqs + 1,)](
         pos,
-        is_padding,
+        is_padding if is_padding is not None else pos,
         seq_lens,
         idx_mapping,
         query_start_loc,
         num_computed_tokens,
         seq_lens.shape[0],
+        CLEAR_PADDING=is_padding is not None,
         BLOCK_SIZE=1024,
     )
 

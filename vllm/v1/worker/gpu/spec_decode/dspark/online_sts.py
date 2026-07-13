@@ -4,33 +4,10 @@ import numpy as np
 
 
 class DSparkOnlineSTS:
-    """Online Sequential Temperature Scaling for the DSpark capacity scheduler.
+    """Online Sequential Temperature Scaling for DSpark confidences.
 
-    The paper (Section 3.2.1) calibrates each position's conditional survival
-    probability with a per-position temperature chosen to minimize the
-    Expected Calibration Error of the cumulative product on a validation set
-    — an order-preserving transform. This is the serving-time analogue: per
-    position it maintains binned empirical conditional acceptance
-    P(accept_k | prefix accepted, position verified) from the rejection
-    sampler's own outcomes (exponential decay), and each update fits the
-    temperature that minimizes the trial-weighted ECE of
-    sigmoid(logit / T_k) against those bins. Fitting each conditional
-    directly is the chain-rule equivalent of the paper's sequential
-    cumulative-product fit, with censored online observations instead of a
-    held-out set.
-
-    Observations are censored by capacity (unverified positions yield no
-    trials); under light load the theta-argmax verifies every candidate,
-    which is where the observation mass comes from. Data-starved positions
-    blend toward a temperature fitted on all positions pooled (head
-    miscalibration is strongly shared across positions, and pruned tails
-    would otherwise freeze at the raw head's bias); with no observations at
-    all the calibration is the identity, so cold-start behaves like the raw
-    confidence head.
-
-    Runs entirely on the host from the confidence manager's staged confidence
-    copies and the sampler outcomes that ride along with them, so TP-rank
-    agreement is plain deterministic numpy on identical inputs.
+    Per-position temperatures minimize binned calibration error. Sparse
+    positions blend toward a pooled fit; cold start is the identity.
     """
 
     DECAY = 0.999
@@ -108,18 +85,13 @@ class DSparkOnlineSTS:
         self.bin_hits *= self.DECAY
         self.bin_hits += np.bincount(cell[hit], minlength=num_cells).reshape(shape)
 
-        # Per-position 1D grid search: T_k minimizing trial-weighted ECE of
+        # Per-position grid search: T_k minimizing trial-weighted ECE of
         # sigmoid(mid_b / T) against the empirical bin acceptance.
         emp = self.bin_hits / np.maximum(self.bin_trials, 1e-6)
         err = np.abs(self._grid_probs[:, None, :] - emp[None])  # [T, steps, bins]
         ece = (err * self.bin_trials[None]).sum(-1)  # [T, steps]
         log_t = self._log_temp_grid[ece.argmin(0)]
-        # Deep positions are censored by capacity (pruned tails yield no
-        # trials), so data-starved positions blend toward a temperature
-        # fitted on all positions pooled rather than toward the raw head:
-        # miscalibration is strongly shared across positions, and defaulting
-        # to identity would freeze the raw head's tail bias exactly where
-        # admission decisions bite.
+        # Blend data-starved positions toward a pooled fit.
         pooled_trials = self.bin_trials.sum(0)
         pooled_emp = self.bin_hits.sum(0) / np.maximum(pooled_trials, 1e-6)
         pooled_err = np.abs(self._grid_probs - pooled_emp[None])  # [T, bins]

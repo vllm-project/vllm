@@ -157,11 +157,6 @@ class DefaultModelState(ModelState):
             max_seq_len = self.max_model_len
         else:
             max_seq_len = seq_lens_cpu_upper_bound[:num_reqs].max().item()
-        is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)
-        if num_reqs != input_batch.num_reqs:
-            padded_is_prefilling = torch.zeros(num_reqs, dtype=torch.bool)
-            padded_is_prefilling[: input_batch.num_reqs] = is_prefilling
-            is_prefilling = padded_is_prefilling
         req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None
         if (
             self.supports_mm_inputs
@@ -191,7 +186,5 @@ class DefaultModelState(ModelState):
             mm_req_doc_ranges=req_doc_ranges,
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
-            is_prefilling=is_prefilling,
-            max_req_tokens=input_batch.max_req_tokens or 0,
         )
         return attn_metadata

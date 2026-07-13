@@ -40,7 +40,6 @@ def _spec_config(**overrides: Any) -> SimpleNamespace:
     config = SimpleNamespace(
         dspark_confidence_threshold=0.0,
         dspark_budget_frac=1.0,
-        dspark_confidence_temperature=1.0,
         dspark_sps_curve=None,
         dspark_online_sts=False,
     )
@@ -95,8 +94,8 @@ def test_prepare_pos_seq_lens_clears_active_padding():
         torch.tensor([0, 2, 5], dtype=torch.int32, device=device),
         torch.zeros(2, dtype=torch.int32, device=device),
         torch.empty(7, dtype=torch.int64, device=device),
-        is_padding,
         torch.empty(4, dtype=torch.int32, device=device),
+        is_padding=is_padding,
     )
 
     assert is_padding.cpu().tolist() == [False] * 5 + [True] * 2
@@ -515,34 +514,12 @@ def test_capacity_cudagraph_dispatch_filters_by_max_query_len():
         num_tokens=16,
         num_reqs=None,
     )
-    manager._candidates = {
-        (11, 0): [
-            regular_desc,
-            full_capacity_desc,
-            piecewise_desc,
-        ]
-    }
+    manager._candidates = {(11, 0): [regular_desc, full_capacity_desc, piecewise_desc]}
 
-    desc = CudaGraphManager.dispatch(
-        manager,
-        num_reqs=4,
-        num_tokens=11,
-        uniform_token_count=None,
-        num_active_loras=0,
-        max_req_tokens=6,
-    )
-
+    desc = manager.dispatch(4, 11, None, 0, max_req_tokens=6)
     assert desc is full_capacity_desc
 
-    desc = CudaGraphManager.dispatch(
-        manager,
-        num_reqs=4,
-        num_tokens=11,
-        uniform_token_count=None,
-        num_active_loras=0,
-        max_req_tokens=7,
-    )
-
+    desc = manager.dispatch(4, 11, None, 0, max_req_tokens=7)
     assert desc is piecewise_desc
 
     manager._candidates[(15, 0)] = [
@@ -550,25 +527,10 @@ def test_capacity_cudagraph_dispatch_filters_by_max_query_len():
         full_capacity_desc,
         piecewise_desc,
     ]
-    desc = CudaGraphManager.dispatch(
-        manager,
-        num_reqs=4,
-        num_tokens=15,
-        uniform_token_count=None,
-        num_active_loras=0,
-        max_req_tokens=6,
-    )
-
+    desc = manager.dispatch(4, 15, None, 0, max_req_tokens=6)
     assert desc is full_capacity_desc
 
-    desc = CudaGraphManager.dispatch(
-        manager,
-        num_reqs=4,
-        num_tokens=11,
-        uniform_token_count=6,
-        num_active_loras=0,
-    )
-
+    desc = manager.dispatch(4, 11, 6, 0)
     assert desc is regular_desc
 
 

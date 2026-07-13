@@ -240,7 +240,7 @@ def _compute_local_logits_stats_kernel(
             other=float("-inf"),
         ).to(tl.float32)
         value, idx = tl.max(target_logits, axis=0, return_indices=True)
-        token_id = tl.minimum(block_idx * BLOCK_SIZE + idx, vocab_size - 1)
+        token_id = block_idx * BLOCK_SIZE + idx
         tl.store(
             target_local_argmax_ptr
             + logit_idx * target_local_argmax_stride
@@ -789,7 +789,7 @@ def _resample_kernel(
         APPLY_TEMPERATURE=False,
         USE_FP64=USE_FP64,
     )
-    token_id = tl.minimum(block_idx * BLOCK_SIZE + idx, vocab_size - 1)
+    token_id = block_idx * BLOCK_SIZE + idx
     tl.store(
         resampled_local_argmax_ptr
         + req_idx * resampled_local_argmax_stride

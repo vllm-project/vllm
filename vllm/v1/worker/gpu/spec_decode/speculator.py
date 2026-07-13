@@ -27,11 +27,6 @@ logger = init_logger(__name__)
 
 
 class BaseSpeculator(ABC):
-    # Draft-token capacity: speculators with a confidence head (see
-    # DSparkSpeculator) expose per-position confidence logits that the
-    # confidence manager consumes for host-side allocation.
-    use_confidence_based_verification: bool = False
-
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         pass

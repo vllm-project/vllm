@@ -9,6 +9,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
@@ -134,7 +135,17 @@ class DeepseekV4FlashMLAMetadata(AttentionMetadata):
 class DeepseekV4FlashMLAMetadataBuilder(
     AttentionMetadataBuilder[DeepseekV4FlashMLAMetadata]
 ):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> AttentionCGSupport:
+        if current_platform.is_cuda() and current_platform.is_device_capability_family(
+            100
+        ):
+            return AttentionCGSupport.ALWAYS
+        return AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(
         self,
