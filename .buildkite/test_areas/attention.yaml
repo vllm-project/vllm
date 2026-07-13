@@ -12,7 +12,8 @@ steps:
     - vllm/v1/attention
     - tests/v1/attention
   commands:
-    - pytest -v -s v1/attention
+    - pytest -v -s v1/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 2
   mirror:
     amd:
       device: mi325_1
@@ -38,4 +39,5 @@ steps:
     - vllm/v1/attention
     - tests/v1/attention
   commands:
-    - pytest -v -s v1/attention
+    - pytest -v -s v1/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 2

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Applies xgrammar structural-tag constraints for strict tool calling.
 
 use thiserror_ext::AsReport;

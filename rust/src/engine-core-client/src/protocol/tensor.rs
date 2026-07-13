@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use bytemuck::allocation::pod_collect_to_vec;
 use enum_as_inner::EnumAsInner;
 use half::{bf16, f16};
