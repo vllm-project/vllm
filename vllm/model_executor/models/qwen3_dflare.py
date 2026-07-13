@@ -10,7 +10,7 @@ from transformers import Qwen3Config
 
 from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -215,7 +215,7 @@ class DFlareQwen3DecoderLayer(nn.Module):
         *,
         config: Qwen3Config,
         layer_idx: int,
-        cache_config: "CacheConfig | None" = None,
+        cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -481,7 +481,6 @@ class DFlareQwen3Model(nn.Module):
             self._build_fused_kv_buffers()
 
         num_layers = self._num_attn_layers
-        num_ctx = context_states.shape[0]  # for single-layer fallback
         L = num_layers
         kv = self._kv_size
         hd = self._head_dim
@@ -653,7 +652,6 @@ class DFlareQwen3ForCausalLM(DFlashQwen3ForCausalLM):
             [N, D, H] — one fused representation per draft layer.
         """
         T = len(self.dflare_config["target_layer_ids"])
-        D = self.config.num_hidden_layers
         h = hidden_states.view(-1, T, self.config.hidden_size)  # [N, T, H]
         h_normed = self.model.hidden_norm(h)  # RMSNorm over hidden_size
         alpha = F.softmax(self.model.layer_fusion_weights, dim=-1)  # [D, T]

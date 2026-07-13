@@ -2160,6 +2160,7 @@ class VllmConfig:
                 "mtp",
                 "dflash",
                 "dspark",
+                "dflare",
             ):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
@@ -2168,7 +2169,7 @@ class VllmConfig:
             # own speculators.
             if (
                 speculative_config.parallel_drafting
-                and speculative_config.method not in ("dflash", "dspark")
+                and speculative_config.method not in ("dflash", "dspark", "dflare")
             ):
                 unsupported.append("parallel drafting for EAGLE speculative decoding")
 

@@ -26,8 +26,7 @@ class DFlareSpeculator(DFlashSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
-        # ★ Per-layer fused context states [max_num_tokens, D, H].
-        # DFlash has a single shared hidden_states [max_num_tokens, H];
+        # Per-layer fused context states [max_num_tokens, D, H].
         # DFlare needs a distinct fused representation per draft layer.
         D = self.draft_model_config.hf_config.num_hidden_layers
         self.per_layer_hidden_states = torch.zeros(
@@ -69,7 +68,7 @@ class DFlareSpeculator(DFlashSpeculator):
             max_seq_len + self.num_query_per_req, self.max_model_len
         )
 
-        # ★ Per-layer fusion: [N, T*H] → [N, D, H]
+        # Per-layer fusion: [N, T*H] → [N, D, H]
         if aux_hidden_states:
             hidden_states = self.model.combine_hidden_states(
                 torch.cat(aux_hidden_states, dim=-1)
