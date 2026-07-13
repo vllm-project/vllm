@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import AsyncGenerator
+from contextlib import _AsyncGeneratorContextManager
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException, Response, UploadFile
@@ -56,10 +57,14 @@ class ServingObjectStorage:
     async def download(self, uuid: str) -> StreamingResponse:
         """Stream the object identified by the given UUID."""
 
+        cm: _AsyncGeneratorContextManager | None = None
         try:
             cm = self.client.get_iterator_numpy(uuid)
             it = await cm.__aenter__()
         except RuntimeError as e:
+            if cm is not None:
+                await cm.__aexit__(None, None, None)
+
             # Map server-side "not found" errors to 404
             if "not found" in str(e).lower():
                 raise HTTPException(
