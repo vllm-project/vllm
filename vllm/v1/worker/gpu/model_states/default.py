@@ -125,6 +125,8 @@ class DefaultModelState(ModelState):
         if self.supports_mm_inputs:
             inputs_embeds = self.encoder_runner.inputs_embeds[:num_tokens]
             model_inputs["inputs_embeds"] = inputs_embeds
+            if not self.model.requires_raw_input_tokens:
+                model_inputs["input_ids"] = None
         if self.rope_state is not None:
             model_inputs["positions"] = self.rope_state.get_positions(num_tokens)
         return model_inputs
