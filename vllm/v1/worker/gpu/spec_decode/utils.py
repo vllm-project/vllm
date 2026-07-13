@@ -7,6 +7,26 @@ from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
+# Salt added to the Philox offsets used for draft-token Gumbel noise.
+# Positions are bounded by max_model_len, so this puts the draft stream in a
+# range disjoint from the target-side offsets.
+DRAFT_GUMBEL_POS_OFFSET = 1 << 30
+
+
+def draft_gumbel_pos(positions: torch.Tensor) -> torch.Tensor:
+    """Philox offsets for the draft Gumbel noise, given draft-row positions.
+
+    The rejection sampler keys both the acceptance uniform and the
+    recovery/bonus Gumbel noise for the token at position P by Philox offset
+    P (see _rejection_kernel and gumbel_block_argmax). If the draft's
+    proposal for position P used the same offset, the recovery draw would
+    reuse the exact noise vector that selected the rejected draft token,
+    biasing rejection sampling. Key the proposal for position P by
+    P + DRAFT_GUMBEL_POS_OFFSET instead, keeping the streams disjoint.
+    """
+    # Parenthesized so the constant folds and this is a single tensor add.
+    return positions + (1 + DRAFT_GUMBEL_POS_OFFSET)
+
 
 class DraftTokensHandler:
     def __init__(self, device: torch.device | None = None):
