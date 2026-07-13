@@ -9,24 +9,20 @@ have a new prefill ready ("mixed" state), those prefill-sized batches inflate
 work for every rank. This delays prefills on a rank until sibling ranks are also
 ready, so dense prefills fire together (balanced) rather than straggling.
 
-Mechanism (per scheduler step):
-  1. Each rank reports its local state via one CPU MAX all_reduce:
-       (local_prefillable, not local_prefillable).
-  2. Derive a 3-way status across ranks:
-       - "all"   -> every rank has a new prefill ready -> allow (aligned).
-       - "none"  -> no rank has a prefill              -> allow (vacuous).
-       - "mixed" -> only some ranks have prefill ready -> DELAY.
-  3. In "mixed", refuse the prefill for up to ``max_delay_passes`` consecutive
-     steps OR ``max_delay_ms`` wall-clock, whichever comes first, then
-     force-allow to bound worst-case TTFT.
+This class holds no distributed state: the cross-DP signal (how many ranks are
+prefillable) is gathered by the engine core's existing per-step DP sync and
+handed in. Given that count it derives a 3-way status:
+  - "all"   -> every rank has a new prefill ready -> allow (aligned).
+  - "none"  -> no rank has a prefill              -> allow (vacuous).
+  - "mixed" -> only some ranks have prefill ready -> DELAY.
+In "mixed", refuse the prefill for up to ``max_delay_passes`` consecutive steps
+OR ``max_delay_ms`` wall-clock, whichever comes first, then force-allow to bound
+worst-case TTFT.
 """
 
 from __future__ import annotations
 
 import time
-
-import torch
-import torch.distributed as dist
 
 from vllm.logger import init_logger
 
@@ -37,28 +33,15 @@ class PrefillDelayer:
     def __init__(
         self,
         dp_size: int,
-        cpu_group,
         max_delay_passes: int = 30,
         max_delay_ms: float = 5000.0,
     ):
         self.dp_size = dp_size
-        self.cpu_group = cpu_group
         self.max_delay_passes = max_delay_passes
         self.max_delay_ms = max_delay_ms
 
-        # 2-slot MAX-reduce buffer on CPU (gloo-friendly):
-        #   slot 0 = local_prefillable      (MAX -> any rank prefillable)
-        #   slot 1 = NOT local_prefillable  (MAX -> any rank lacks prefill)
-        # int32 matches the other DP-group collectives (has_unfinished_dp /
-        # sync_dp_state); a wider dtype here desyncs byte sizes on the shared
-        # gloo group and trips its size check.
-        self._reduce_buf = torch.zeros(2, dtype=torch.int32, device="cpu")
-
         self._delayed_count: int = 0
         self._delay_start_ts: float = 0.0
-        # Skip the first negotiation so the decode batch can build up on the
-        # initial burst before we start aligning prefills.
-        self._skip_first: bool = True
 
         logger.info(
             "PrefillDelayer initialized: dp_size=%d max_delay_passes=%d "
@@ -68,38 +51,18 @@ class PrefillDelayer:
             max_delay_ms,
         )
 
-    def should_allow_prefill(
-        self,
-        local_prefillable: bool,
-    ) -> bool:
-        """Return True iff this rank may admit new prefills this step.
-
-        Performs exactly one CPU all_reduce and must be called once per step on
-        every DP rank (including idle/dummy steps) to stay in lockstep.
+    def should_allow_prefill(self, prefillable_count: int) -> bool:
+        """Return True iff ranks may admit new prefills this step.
 
         Args:
-            local_prefillable: This rank has a new prefill ready to admit.
+            prefillable_count: Number of DP ranks that have a new prefill ready,
+                summed across ranks by the engine core's DP sync. The decision
+                is identical on every rank because the input is a reduced value.
         """
-        self._reduce_buf[0] = 1 if local_prefillable else 0
-        self._reduce_buf[1] = 0 if local_prefillable else 1
-        dist.all_reduce(
-            self._reduce_buf,
-            op=dist.ReduceOp.MAX,
-            group=self.cpu_group,
-        )
-        any_prefillable = int(self._reduce_buf[0].item()) > 0
-        any_not_prefillable = int(self._reduce_buf[1].item()) > 0
-
-        # Skip the first call to maximize initial decode batch build-up.
-        if self._skip_first:
-            self._skip_first = False
-            self._reset_delay()
-            return True
-
-        # Only "mixed" (some ranks prefillable, some not) causes delay.
-        # "all" and "none" are already aligned -> allow.
-        if not (any_prefillable and any_not_prefillable):
-            self._reset_delay()
+        # "all" and "none" are already aligned -> allow. Only "mixed" (some
+        # ranks prefillable, some not) causes delay.
+        if prefillable_count == 0 or prefillable_count == self.dp_size:
+            self.reset()
             return True
 
         # status == "mixed" -> delay within budget.
@@ -115,19 +78,9 @@ class PrefillDelayer:
             return False
 
         # Timed out -> force allow to bound worst-case TTFT.
-        self._reset_delay()
+        self.reset()
         return True
 
-    def on_wave_boundary(self) -> None:
-        """Reset delay state at a DP wave boundary.
-
-        On a fresh wave the decode batch needs to build up again, so re-arm the
-        skip-first behavior and clear any in-flight delay so the first prefill
-        of the new wave is not held back.
-        """
-        self._skip_first = True
-        self._reset_delay()
-
-    def _reset_delay(self) -> None:
+    def reset(self) -> None:
         self._delayed_count = 0
         self._delay_start_ts = 0.0

@@ -1802,12 +1802,12 @@ class DPEngineCoreProc(EngineCoreProc):
             tensor_queue=tensor_queue,
         )
 
-        # Construct after super().__init__ so self.dp_group and self.scheduler
-        # both exist.
+        # Construct after super().__init__ so self.scheduler exists. The delayer
+        # holds no distributed state; its cross-DP signal rides the per-step
+        # sync_dp_state collective (see _has_global_unfinished_reqs).
         if self.enable_prefill_delayer:
             self._prefill_delayer = PrefillDelayer(
                 dp_size=self.dp_size,
-                cpu_group=self.dp_group,
                 max_delay_passes=scheduler_config.prefill_delayer_max_delay_passes,
                 max_delay_ms=scheduler_config.prefill_delayer_max_delay_ms,
             )
@@ -1936,32 +1936,13 @@ class DPEngineCoreProc(EngineCoreProc):
         # step_counter is identical across DP ranks. On a fresh wave the
         # counter is 0, so prefills are admitted immediately after idle.
         if self._prefill_delayer is not None:
-            # Content-aware path: return the decision computed in lockstep at
-            # the top of this busy-loop iteration (see _refresh_prefill_delayer).
+            # Content-aware path: return the decision computed from the previous
+            # iteration's DP sync (see _has_global_unfinished_reqs).
             return self._delayer_throttle
         return (
             self.prefill_schedule_interval > 1
             and self.step_counter % self.prefill_schedule_interval != 0
         )
-
-    def _refresh_prefill_delayer(self) -> None:
-        """Run the delayer's cross-DP collective once per step, in lockstep.
-
-        Must be called before _process_engine_step so schedule() reads a fresh
-        decision. Gated on engines_running: during the running phase every rank
-        performs a real-or-dummy forward each iteration (whose own DP collective
-        already enforces lockstep), so the all_reduce here is safe. When idle,
-        no prefills are admitted anyway, so we skip the collective.
-        """
-        if self._prefill_delayer is None:
-            return
-        if not self.engines_running:
-            self._delayer_throttle = False
-            return
-        allow = self._prefill_delayer.should_allow_prefill(
-            local_prefillable=self.scheduler.get_request_counts()[1] > 0,
-        )
-        self._delayer_throttle = not allow
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
@@ -1980,10 +1961,6 @@ class DPEngineCoreProc(EngineCoreProc):
                         raise SystemExit
                     self.process_input_queue_block = True
                     self.eep_scaling_state = None
-
-            # Compute the prefill-delay decision in lockstep before stepping,
-            # so schedule() (called inside _process_engine_step) reads it fresh.
-            self._refresh_prefill_delayer()
 
             executed = self._process_engine_step()
             self._maybe_publish_request_counts()
@@ -2025,23 +2002,41 @@ class DPEngineCoreProc(EngineCoreProc):
                 self.current_wave += 1
                 self.step_counter = 0
                 if self._prefill_delayer is not None:
-                    self._prefill_delayer.on_wave_boundary()
+                    # Clear any in-flight delay so a stale "mixed" decision does
+                    # not carry across the idle gap into the next wave.
+                    self._prefill_delayer.reset()
+                    self._delayer_throttle = False
 
         raise SystemExit
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
         # Optimization - only perform finish-sync all-reduce every 32 steps.
         self.step_counter += 1
-        # PrefillDelayer requires syncing every step
+        # With the PrefillDelayer active we sync every step instead, so its
+        # cross-DP signal (how many ranks are prefillable) can ride this same
+        # collective rather than needing its own. The delay decision is applied
+        # on the next iteration's schedule() via _delayer_throttle.
         should_sync_every_step = self._prefill_delayer is not None
         if not should_sync_every_step and self.step_counter % 32 != 0:
             return True
 
-        has_unfinished, pause_consensus = ParallelConfig.sync_dp_state(
-            self.dp_group,
-            has_unfinished=local_unfinished,
-            pending_pause=self.pending_pause,
+        local_prefillable = (
+            self._prefill_delayer is not None
+            and self.scheduler.get_request_counts()[1] > 0
         )
+        has_unfinished, pause_consensus, prefillable_count = (
+            ParallelConfig.sync_dp_state(
+                self.dp_group,
+                has_unfinished=local_unfinished,
+                pending_pause=self.pending_pause,
+                local_prefillable=local_prefillable,
+            )
+        )
+
+        if self._prefill_delayer is not None:
+            self._delayer_throttle = not self._prefill_delayer.should_allow_prefill(
+                prefillable_count
+            )
 
         if pause_consensus:
             self.ignore_start_dp_wave = True
