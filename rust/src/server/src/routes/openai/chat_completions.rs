@@ -144,6 +144,7 @@ async fn collect_chat_completion(
         usage,
         finish_reason,
         kv_transfer_params,
+        ec_transfer_params,
     } = collected;
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let saw_tool_calls = message.tool_calls().next().is_some();
@@ -224,6 +225,7 @@ async fn collect_chat_completion(
         prompt_logprobs,
         prompt_token_ids: return_token_ids.then(|| prompt_token_ids.to_vec()),
         kv_transfer_params,
+        ec_transfer_params,
     })
 }
 
@@ -951,6 +953,7 @@ mod tests {
                 },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 
@@ -1031,6 +1034,7 @@ mod tests {
                 },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 
@@ -1086,6 +1090,7 @@ mod tests {
                 },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 
@@ -1167,6 +1172,7 @@ mod tests {
                 },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 
@@ -1300,6 +1306,7 @@ mod tests {
                 },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 
@@ -1381,6 +1388,7 @@ mod tests {
                 },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 

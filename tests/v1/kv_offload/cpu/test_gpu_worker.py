@@ -96,7 +96,7 @@ def test_transfer(
             SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT,
         )
         mmap_region = SharedOffloadRegion(
-            instance_id=str(uuid.uuid4()),
+            engine_id=str(uuid.uuid4()),
             num_blocks=num_cpu_blocks,
             rank=0,
             kv_bytes_per_block=cpu_page_size,
