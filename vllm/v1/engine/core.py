@@ -1766,10 +1766,9 @@ class DPEngineCoreProc(EngineCoreProc):
         self.enable_prefill_delayer = scheduler_config.enable_prefill_delayer
 
         # Content-aware prefill alignment. Constructed after super().__init__
-        # (which sets self.dp_group via _init_data_parallel). Cached decision
-        # is refreshed once per busy-loop iteration in lockstep across ranks.
+        # (which sets self.dp_group via _init_data_parallel). Its decision is
+        # refreshed once per busy-loop iteration in lockstep across ranks.
         self._prefill_delayer: PrefillDelayer | None = None
-        self._delayer_throttle: bool = False
 
         # Counts forward-passes of the model so that we can synchronize
         # finished with DP peers every N steps.
@@ -1938,7 +1937,7 @@ class DPEngineCoreProc(EngineCoreProc):
         if self._prefill_delayer is not None:
             # Content-aware path: return the decision computed from the previous
             # iteration's DP sync (see _has_global_unfinished_reqs).
-            return self._delayer_throttle
+            return self._prefill_delayer.should_throttle
         return (
             self.prefill_schedule_interval > 1
             and self.step_counter % self.prefill_schedule_interval != 0
@@ -2005,7 +2004,6 @@ class DPEngineCoreProc(EngineCoreProc):
                     # Clear any in-flight delay so a stale "mixed" decision does
                     # not carry across the idle gap into the next wave.
                     self._prefill_delayer.reset()
-                    self._delayer_throttle = False
 
         raise SystemExit
 
@@ -2014,8 +2012,8 @@ class DPEngineCoreProc(EngineCoreProc):
         self.step_counter += 1
         # With the PrefillDelayer active we sync every step instead, so its
         # cross-DP signal (how many ranks are prefillable) can ride this same
-        # collective rather than needing its own. The delay decision is applied
-        # on the next iteration's schedule() via _delayer_throttle.
+        # collective rather than needing its own. The delay decision is stored
+        # on the delayer and applied on the next iteration's schedule().
         should_sync_every_step = self._prefill_delayer is not None
         if not should_sync_every_step and self.step_counter % 32 != 0:
             return True
@@ -2034,9 +2032,7 @@ class DPEngineCoreProc(EngineCoreProc):
         )
 
         if self._prefill_delayer is not None:
-            self._delayer_throttle = not self._prefill_delayer.should_allow_prefill(
-                prefillable_count
-            )
+            self._prefill_delayer.update_throttle(prefillable_count)
 
         if pause_consensus:
             self.ignore_start_dp_wave = True

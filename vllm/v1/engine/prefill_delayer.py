@@ -42,6 +42,9 @@ class PrefillDelayer:
 
         self._delayed_count: int = 0
         self._delay_start_ts: float = 0.0
+        # Whether new prefills are currently being held back. Updated by
+        # observe() from the DP sync and read back in the next schedule().
+        self._throttle: bool = False
 
         logger.info(
             "PrefillDelayer initialized: dp_size=%d max_delay_passes=%d "
@@ -51,14 +54,22 @@ class PrefillDelayer:
             max_delay_ms,
         )
 
-    def should_allow_prefill(self, prefillable_count: int) -> bool:
-        """Return True iff ranks may admit new prefills this step.
+    @property
+    def should_throttle(self) -> bool:
+        """Whether new prefills should be deferred, per the last observe()."""
+        return self._throttle
+
+    def update_throttle(self, prefillable_count: int) -> None:
+        """Update the delay decision from the cross-DP prefillable count.
 
         Args:
             prefillable_count: Number of DP ranks that have a new prefill ready,
                 summed across ranks by the engine core's DP sync. The decision
                 is identical on every rank because the input is a reduced value.
         """
+        self._throttle = not self._allow(prefillable_count)
+
+    def _allow(self, prefillable_count: int) -> bool:
         # "all" and "none" are already aligned -> allow. Only "mixed" (some
         # ranks prefillable, some not) causes delay.
         if prefillable_count == 0 or prefillable_count == self.dp_size:
@@ -84,3 +95,4 @@ class PrefillDelayer:
     def reset(self) -> None:
         self._delayed_count = 0
         self._delay_start_ts = 0.0
+        self._throttle = False
