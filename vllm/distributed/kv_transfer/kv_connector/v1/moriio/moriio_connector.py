@@ -187,6 +187,16 @@ def resolve_moriio_transfer_ack(
 
 
 class MoRIIOConnector(KVConnectorBase_V1):
+    @classmethod
+    def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
+        # MoRIIO READ mode does asynchronous per-layer RDMA reads and blocks in
+        # wait_for_layer_load() between layers. That Python barrier cannot be
+        # captured in a FULL CUDA graph -- it would be skipped during replay, so
+        # attention runs before the remote KV lands (high-concurrency "salad").
+        # Require PIECEWISE so Python executes between graph pieces and the
+        # barrier actually fires.
+        return True
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -296,7 +306,8 @@ class MoRIIOConnector(KVConnectorBase_V1):
         self.connector_worker.start_load_kv(self._connector_metadata)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        pass
+        assert self.connector_worker is not None
+        self.connector_worker.wait_for_layer_load(layer_name)
 
     def save_kv_layer(
         self,
@@ -994,8 +1005,10 @@ class MoRIIOConnectorWorker:
         # Map of engine_id -> num_blocks. All ranks in the same deployment will
         # have the same number of blocks.
         self.dst_num_blocks: dict[EngineId, int] = {}
-        # In progress transfers.
-        self._recving_transfers: defaultdict[ReqId, list] = defaultdict(list)
+        # In progress READ transfers, keyed per-layer (req_id -> {layer_name:
+        # status}) so wait_for_layer_load() can block on exactly the layer whose
+        # attention is about to run; a flat list cannot tell which layer landed.
+        self._recving_transfers: defaultdict[ReqId, dict] = defaultdict(dict)
         # Values are (remote_host, remote_notify_port, transfer_id).
         self._recving_transfers_callback_addr: dict[ReqId, tuple[str, str, str]] = {}
 
@@ -1600,13 +1613,69 @@ class MoRIIOConnectorWorker:
 
         return done_sending, done_recving
 
+    def wait_for_layer_load(self, layer_name: str) -> None:
+        """Block until every in-flight READ of ``layer_name`` has landed.
+
+        MoRIIO READ posts all of a request's per-layer RDMA reads up front in
+        start_load_kv; they complete asynchronously (a CQ-poll thread flips each
+        status to Succeeded). The attention kernel for ``layer_name`` runs
+        immediately after this returns, so without this barrier attention reads
+        KV that has not arrived yet -> garbage output that scales with
+        concurrency. Only the READ-mode consumer waits; the producer and WRITE
+        mode return immediately.
+
+        A failed read is treated as terminal here and cleaned up non-fatally by
+        _pop_done_transfers (notify prefill + drop). The deadline logs and
+        proceeds rather than raising, so a stuck transfer cannot take down the
+        worker.
+        """
+        if self.is_producer or self.mode != MoRIIOMode.READ:
+            return
+
+        deadline = time.monotonic() + self.moriio_config.transfer_timeout
+        while True:
+            with self.moriio_wrapper.lock:
+                pending = [
+                    status_by_layer[layer_name]
+                    for status_by_layer in self._recving_transfers.values()
+                    if layer_name in status_by_layer
+                ]
+
+            if not pending:
+                return
+
+            still_running = False
+            for status in pending:
+                # Succeeded and Failed are both terminal for the barrier; a
+                # Failed read is notified + dropped in _pop_done_transfers.
+                if status.Succeeded() or status.Failed():
+                    continue
+                still_running = True
+
+            if not still_running:
+                return
+
+            if time.monotonic() > deadline:
+                logger.warning(
+                    "MoRIIO READ barrier timed out for layer %s after "
+                    "transfer_timeout; proceeding (get_finished notifies "
+                    "prefill and drops unfinished requests).",
+                    layer_name,
+                )
+                return
+
+            time.sleep(0.001)
+
     def _pop_done_transfers(self) -> set[str]:
         done_req_ids: set[str] = set()
         with self.moriio_wrapper.lock:
             to_remove = []
-            for req_id, status_list in self._recving_transfers.items():
-                last = status_list[-1]
-                if last.Succeeded():
+            for req_id, status_by_layer in self._recving_transfers.items():
+                statuses = list(status_by_layer.values())
+                failed_status = next(
+                    (status for status in statuses if status.Failed()), None
+                )
+                if statuses and all(status.Succeeded() for status in statuses):
                     host, port, xfer_id = self._recving_transfers_callback_addr[req_id]
                     done_req_ids.add(xfer_id)
                     self.moriio_wrapper.send_notify(
@@ -1617,14 +1686,14 @@ class MoRIIOConnectorWorker:
                         message_fields={"consumer_tp_size": self.world_size},
                     )
                     to_remove.append(req_id)
-                elif last.Failed():
+                elif failed_status is not None:
                     logger.error(
                         "RDMA transfer failed for request %s: %s (code=%s). "
                         "Notifying prefill to free blocks; request will be "
                         "aborted by timeout.",
                         req_id,
-                        last.Message(),
-                        last.Code(),
+                        failed_status.Message(),
+                        failed_status.Code(),
                     )
                     host, port, xfer_id = self._recving_transfers_callback_addr[req_id]
                     try:
@@ -1966,7 +2035,7 @@ class MoRIIOConnectorWorker:
                 offs[2], offs[0], offs[1], sessions[sess_idx]
             )
             with self.moriio_wrapper.lock:
-                self._recving_transfers[request_id].append(transfer_status)
+                self._recving_transfers[request_id][layer_name] = transfer_status
                 self._recving_transfers_callback_addr[request_id] = (
                     remote_host,
                     str(remote_notify_port + self._remote_tp_rank(remote_tp_size)),
