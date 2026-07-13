@@ -691,19 +691,20 @@ void launchFusedDeepseekV4QNormRopeKVRopeQuantInsert(
 //
 // Sibling to the FlashMLA kernel above, used by the FlashInfer V4 sparse-MLA
 // backend.  Differences from the legacy path:
-//   * No Q head padding — output Q layout matches the input num_heads_q.
+//   * Optional FP8 Q head padding, with zero-filled padding heads written
+//     directly from this fused kernel.
 //   * KV is written as a *contiguous* 512-wide row per token (token-strided),
 //     not the legacy UE8M0 paged layout with a separate scale tail.
 //   * Q/KV are stored either as bf16 or as per-tensor E4M3 FP8 (one global
 //     scale), selected by the STORE_Q_FP8 / STORE_KV_FP8 template flags.
 //
-// Grid: 1D, gridDim.x = ceil(num_tokens_full * (num_heads_q + 1) / warps).
-// Each warp handles one (token, slot): slot < num_heads_q → Q, slot ==
-// num_heads_q → KV.
+// Grid: 1D, gridDim.x = ceil(num_tokens_full * (num_heads_q_padded + 1) /
+// warps). Each warp handles one (token, slot): slot < num_heads_q → live Q,
+// num_heads_q <= slot < num_heads_q_padded → padded Q, final slot → KV.
 template <typename scalar_t_in, bool STORE_Q_FP8, bool STORE_KV_FP8>
 __global__ void fusedDeepseekV4FullCacheKernel(
     scalar_t_in* __restrict__ q_inout,          // [N, H, 512], in place (bf16)
-    uint8_t* __restrict__ q_fp8_out,            // [N, H, 512] fp8, optional
+    uint8_t* __restrict__ q_fp8_out,            // [N, H_out, 512] fp8, optional
     int64_t const q_fp8_stride0,                // elements (fp8 == bytes)
     int64_t const q_fp8_stride1,                // elements (fp8 == bytes)
     scalar_t_in const* __restrict__ kv_in,      // [N, 512] bf16
@@ -716,7 +717,8 @@ __global__ void fusedDeepseekV4FullCacheKernel(
     float const eps,
     int const num_tokens_full,      // = q.size(0) = kv.size(0)
     int const num_tokens_insert,    // = slot_mapping.size(0)
-    int const num_heads_q,          // H (no padding)
+    int const num_heads_q,          // real H
+    int const num_heads_q_padded,   // output/kernel H
     int const cache_block_size,     // tokens per cache block
     int64_t const kv_block_stride,  // bytes per cache block
     int64_t const kv_token_stride) {  // bytes per cache token
@@ -731,11 +733,12 @@ __global__ void fusedDeepseekV4FullCacheKernel(
     int const laneId = threadIdx.x % 32;
     int const globalWarpIdx = blockIdx.x * warpsPerBlock + warpId;
 
-    int const slotsPerToken = num_heads_q + 1;
+    int const slotsPerToken = num_heads_q_padded + 1;
     int const tokenIdx = globalWarpIdx / slotsPerToken;
     int const slotIdx = globalWarpIdx % slotsPerToken;
     if (tokenIdx >= num_tokens_full) return;
-    bool const isKV = (slotIdx == num_heads_q);
+    bool const isKV = (slotIdx == num_heads_q_padded);
+    bool const isQPad = (slotIdx >= num_heads_q) && !isKV;
     // KV branch: skip DP-padded tokens (no slot reserved for them).
     if (isKV && tokenIdx >= num_tokens_insert) return;
 
@@ -744,6 +747,19 @@ __global__ void fusedDeepseekV4FullCacheKernel(
 #endif
 
     int const dim_base = laneId * kElemsPerLane;  // in [0, 512) step 16
+
+    if (isQPad) {
+      // padded position zero_
+      uint4 const zero{};
+      if constexpr (STORE_Q_FP8) {
+        uint8_t* dst = q_fp8_out +
+                       static_cast<int64_t>(tokenIdx) * q_fp8_stride0 +
+                       static_cast<int64_t>(slotIdx) * q_fp8_stride1 + dim_base;
+        *reinterpret_cast<uint4*>(dst) = zero;
+      }
+      return;
+    }
+
     scalar_t_in const* src_ptr;
     if (isKV) {
       src_ptr = kv_in + static_cast<int64_t>(tokenIdx) * kHeadDim + dim_base;
@@ -842,7 +858,8 @@ __global__ void fusedDeepseekV4FullCacheKernel(
         }
         scalar_t_in* dst =
             q_inout +
-            (static_cast<int64_t>(tokenIdx) * num_heads_q + slotIdx) * kHeadDim +
+            (static_cast<int64_t>(tokenIdx) * num_heads_q + slotIdx) *
+                kHeadDim +
             dim_base;
         *reinterpret_cast<uint4*>(dst) = out0;
         *reinterpret_cast<uint4*>(dst + 8) = out1;
@@ -898,12 +915,13 @@ static void launchFullCacheKernel(
     float const* cos_sin_cache, float const* fp8_scale,
     float const* q_fp8_scale_inv, float const eps, int const num_tokens_full,
     int const num_tokens_insert, int const num_heads_q,
-    int const cache_block_size, int64_t const kv_block_stride,
-    int64_t const kv_token_stride, char const* op_name, cudaStream_t stream) {
+    int const num_heads_q_padded, int const cache_block_size,
+    int64_t const kv_block_stride, int64_t const kv_token_stride,
+    char const* op_name, cudaStream_t stream) {
   constexpr int kBlockSize = 256;
   constexpr int kWarpsPerBlock = kBlockSize / 32;
   int64_t const total_warps =
-      static_cast<int64_t>(num_tokens_full) * (num_heads_q + 1);
+      static_cast<int64_t>(num_tokens_full) * (num_heads_q_padded + 1);
   int const grid =
       static_cast<int>((total_warps + kWarpsPerBlock - 1) / kWarpsPerBlock);
   auto* kernel =
@@ -926,13 +944,14 @@ static void launchFullCacheKernel(
                      q_fp8_stride1, kv_in, k_cache, slot_mapping, position_ids,
                      cos_sin_cache, fp8_scale, q_fp8_scale_inv, eps,
                      num_tokens_full, num_tokens_insert, num_heads_q,
-                     cache_block_size, kv_block_stride, kv_token_stride);
+                     num_heads_q_padded, cache_block_size, kv_block_stride,
+                     kv_token_stride);
 #else
   kernel<<<grid, kBlockSize, 0, stream>>>(
       q_inout, q_fp8_out, q_fp8_stride0, q_fp8_stride1, kv_in, k_cache,
-      slot_mapping, position_ids, cos_sin_cache, fp8_scale, q_fp8_scale_inv,
-      eps, num_tokens_full, num_tokens_insert, num_heads_q, cache_block_size,
-      kv_block_stride, kv_token_stride);
+      slot_mapping, position_ids, cos_sin_cache, fp8_scale,
+      q_fp8_scale_inv, eps, num_tokens_full, num_tokens_insert, num_heads_q,
+      num_heads_q_padded, cache_block_size, kv_block_stride, kv_token_stride);
 #endif
 }
 
@@ -1090,8 +1109,8 @@ void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
             position_ids.const_data_ptr<int64_t>(),
             cos_sin_cache.const_data_ptr<float>(), nullptr, nullptr,
             static_cast<float>(eps), num_tokens_full, num_tokens_insert,
-            num_heads_q, static_cast<int>(cache_block_size), kv_block_stride,
-            kv_token_stride,
+            num_heads_q, num_heads_q,
+            static_cast<int>(cache_block_size), kv_block_stride, kv_token_stride,
             "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert",
             stream);
       });
@@ -1116,8 +1135,9 @@ void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
   STD_TORCH_CHECK(q_fp8.device().is_cuda() && q_fp8.is_contiguous() &&
                       q_fp8.scalar_type() == ScalarType::Float8_e4m3fn &&
                       q_fp8.dim() == 3 && q_fp8.size(0) == q.size(0) &&
-                      q_fp8.size(1) == q.size(1) && q_fp8.size(2) == q.size(2),
-                  "q_fp8 must be a contiguous float8_e4m3fn tensor matching q");
+                      q_fp8.size(1) >= q.size(1) && q_fp8.size(2) == q.size(2),
+                  "q_fp8 must be a contiguous float8_e4m3fn tensor with shape "
+                  "[N, H_out, 512] and H_out >= q.size(1)");
   STD_TORCH_CHECK(k_cache.device().is_cuda(), "k_cache must be CUDA");
   STD_TORCH_CHECK(slot_mapping.device().is_cuda() &&
                       slot_mapping.scalar_type() == ScalarType::Long,
@@ -1155,6 +1175,7 @@ void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
   STD_TORCH_CHECK(num_tokens_insert <= num_tokens_full,
                   "slot_mapping must not exceed q row count");
   int const num_heads_q = static_cast<int>(q.size(1));
+  int const num_heads_q_padded = static_cast<int>(q_fp8.size(1));
 
   const torch::stable::accelerator::DeviceGuard device_guard(
       q.get_device_index());
@@ -1167,8 +1188,7 @@ void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
                                                            true>(
             // q is read-only in the fp8 path (the kernel writes q_fp8); the
             // launcher signature is non-const, so cast away const on the ptr.
-            reinterpret_cast<scalar_t*>(
-                const_cast<void*>(q.const_data_ptr())),
+            reinterpret_cast<scalar_t*>(const_cast<void*>(q.const_data_ptr())),
             reinterpret_cast<uint8_t*>(q_fp8.mutable_data_ptr()),
             q_fp8.stride(0), q_fp8.stride(1),
             reinterpret_cast<scalar_t const*>(kv.const_data_ptr()),
@@ -1179,7 +1199,7 @@ void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
             fp8_scale.const_data_ptr<float>(),
             q_fp8_scale_inv.const_data_ptr<float>(), static_cast<float>(eps),
             num_tokens_full, num_tokens_insert, num_heads_q,
-            static_cast<int>(cache_block_size),
+            num_heads_q_padded, static_cast<int>(cache_block_size),
             // fp8 cache: 1 byte/element -> stride already in bytes.
             k_cache.stride(0), k_cache.stride(1),
             "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert",

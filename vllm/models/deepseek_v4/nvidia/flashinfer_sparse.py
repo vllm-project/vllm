@@ -465,6 +465,11 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         # the query heads to the allocated output head count. Padded heads attend
         # to the shared KV and are sliced off downstream (output is padded too).
         padded_heads = output.shape[1]
+        if self.kv_cache_torch_dtype == torch.float8_e4m3fn:
+            assert query.shape[1] == padded_heads, (
+                f"FP8 Q must already be padded: query_heads={query.shape[1]}, "
+                f"output_heads={padded_heads}"
+            )
         if query.shape[1] < padded_heads:
             padded_query = query.new_zeros(
                 (query.shape[0], padded_heads, query.shape[2])

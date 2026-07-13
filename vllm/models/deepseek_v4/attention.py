@@ -583,7 +583,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             return q
 
         # per-tensor fp8 (torch.float8_e4m3fn)
-        q_fp8 = torch.empty_like(q, dtype=torch.float8_e4m3fn)
+        q_fp8 = torch.empty(
+            (q.shape[0], self.padded_heads, q.shape[2]),
+            dtype=torch.float8_e4m3fn,
+            device=q.device,
+        )
         torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
             q,
             kv,

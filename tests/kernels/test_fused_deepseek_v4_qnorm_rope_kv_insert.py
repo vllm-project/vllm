@@ -642,7 +642,10 @@ def test_full_cache_per_tensor_fp8_matches_reference(
     # (FNUZ on gfx942); the kernel's own outputs must stay float8_e4m3fn-typed
     # because the op asserts that dtype.
     q_fp8_ref = torch.empty_like(q, dtype=FP8_STORE_DTYPE)
-    q_fp8_fused = torch.empty_like(q, dtype=torch.float8_e4m3fn)
+    padded_heads = 16 if n_heads <= 16 else 32
+    q_fp8_fused = torch.empty(
+        num_tokens, padded_heads, HEAD_DIM, dtype=torch.float8_e4m3fn, device=device
+    )
     k_cache_ref = torch.zeros(
         num_blocks, block_size, HEAD_DIM, dtype=FP8_STORE_DTYPE, device=device
     )
@@ -681,8 +684,9 @@ def test_full_cache_per_tensor_fp8_matches_reference(
     # reduction and RoPE rotation can land the kernel and the torch reference on
     # opposite sides of an fp8 round-to-nearest tie, so allow <=1 fp8 ULP.
     q_fused = _as_stored_fp8(q_fp8_fused)
-    q_max_ulp = int(fp8_ulp_distance(q_fused, q_fp8_ref).max().item())
+    q_max_ulp = int(fp8_ulp_distance(q_fused[:, :n_heads], q_fp8_ref).max().item())
     assert q_max_ulp <= 1, f"Q fp8 differs by {q_max_ulp} ULP (>1)"
+    assert q_fused[:, n_heads:padded_heads].float().abs().max().item() == 0.0
 
     # K-cache NoPE region [0, NOPE_DIM) is a deterministic per-tensor fp8 quant
     # of the (un-rotated) KV input, so it must be bit-identical. The RoPE region
