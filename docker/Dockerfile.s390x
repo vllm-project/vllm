@@ -37,37 +37,6 @@ RUN microdnf install -y \
     python${PYTHON_VERSION}-devel python${PYTHON_VERSION}-pip python${PYTHON_VERSION}-wheel  && \
     python${PYTHON_VERSION} -m venv $VIRTUAL_ENV && pip install --no-cache -U pip wheel uv && microdnf clean all
 
-FROM python-install AS pyarrow
-
-# Build Apache Arrow
-WORKDIR /tmp
-RUN --mount=type=cache,target=/root/.cache/uv \
-    git clone https://github.com/apache/arrow.git  -b maint-19.0.1 && \
-    cd arrow/cpp && \
-    mkdir release && cd release && \
-    cmake -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_INSTALL_PREFIX=/usr/local \
-          -DARROW_PYTHON=ON \
-          -DARROW_PARQUET=ON \
-          -DARROW_ORC=ON \
-          -DARROW_FILESYSTEM=ON \
-          -DARROW_WITH_LZ4=ON \
-          -DARROW_WITH_ZSTD=ON \
-          -DARROW_WITH_SNAPPY=ON \
-          -DARROW_JSON=ON \
-          -DARROW_CSV=ON \
-          -DARROW_DATASET=ON \
-          -DPROTOBUF_PROTOC_EXECUTABLE=/usr/bin/protoc \
-          -DARROW_DEPENDENCY_SOURCE=BUNDLED \
-          .. && \
-    make -j$(nproc) && \
-    make install && \
-    cd ../../python && \
-    export PYARROW_PARALLEL=4 && \
-    export ARROW_BUILD_TYPE=release && \
-    uv pip install -r requirements-build.txt && \
-    python setup.py build_ext --build-type=$ARROW_BUILD_TYPE --bundle-arrow-cpp bdist_wheel
-
 FROM python-install AS rust
 ENV CARGO_HOME=/root/.cargo
 ENV RUSTUP_HOME=/root/.rustup
@@ -121,60 +90,18 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM python-install AS numba-builder
 
 ARG MAX_JOBS
-ARG NUMBA_VERSION=0.61.2
+ARG NUMBA_VERSION=0.65.0
 
 WORKDIR /tmp
 
 # Clone all required dependencies
 RUN --mount=type=cache,target=/root/.cache/uv \
     microdnf install ninja-build gcc gcc-c++ -y && \
-    git clone --recursive https://github.com/llvm/llvm-project.git -b llvmorg-15.0.7  && \
-    git clone --recursive https://github.com/numba/llvmlite.git -b v0.44.0 && \
+    git clone --recursive https://github.com/numba/llvmlite.git -b v0.47.0 && \
     git clone --recursive https://github.com/numba/numba.git -b ${NUMBA_VERSION} && \
-    cd llvm-project && mkdir build && cd  build && \
+    cd llvmlite && \
     uv pip install 'cmake<4' 'setuptools<70' numpy && \
-    export PREFIX=/usr/local && CMAKE_ARGS="${CMAKE_ARGS} -DLLVM_ENABLE_PROJECTS=lld;libunwind;compiler-rt" \
-    CFLAGS="$(echo $CFLAGS | sed 's/-fno-plt //g')" \
-    CXXFLAGS="$(echo $CXXFLAGS | sed 's/-fno-plt //g')" \
-    CMAKE_ARGS="${CMAKE_ARGS} -DFFI_INCLUDE_DIR=$PREFIX/include" \
-    CMAKE_ARGS="${CMAKE_ARGS} -DFFI_LIBRARY_DIR=$PREFIX/lib" \
-    cmake -DCMAKE_INSTALL_PREFIX="${PREFIX}"               \
-        -DCMAKE_BUILD_TYPE=Release                       \
-        -DCMAKE_LIBRARY_PATH="${PREFIX}"                 \
-        -DLLVM_ENABLE_LIBEDIT=OFF                        \
-        -DLLVM_ENABLE_LIBXML2=OFF                        \
-        -DLLVM_ENABLE_RTTI=ON                            \
-        -DLLVM_ENABLE_TERMINFO=OFF                       \
-        -DLLVM_INCLUDE_BENCHMARKS=OFF                    \
-        -DLLVM_INCLUDE_DOCS=OFF                          \
-        -DLLVM_INCLUDE_EXAMPLES=OFF                      \
-        -DLLVM_INCLUDE_GO_TESTS=OFF                      \
-        -DLLVM_INCLUDE_TESTS=OFF                         \
-        -DLLVM_INCLUDE_UTILS=ON                          \
-        -DLLVM_INSTALL_UTILS=ON                          \
-        -DLLVM_UTILS_INSTALL_DIR=libexec/llvm            \
-        -DLLVM_BUILD_LLVM_DYLIB=OFF                      \
-        -DLLVM_LINK_LLVM_DYLIB=OFF                       \
-        -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD=WebAssembly \
-        -DLLVM_ENABLE_FFI=ON                             \
-        -DLLVM_ENABLE_Z3_SOLVER=OFF                      \
-        -DLLVM_OPTIMIZED_TABLEGEN=ON                     \
-        -DCMAKE_POLICY_DEFAULT_CMP0111=NEW               \
-        -DCOMPILER_RT_BUILD_BUILTINS=ON                  \
-        -DCOMPILER_RT_BUILTINS_HIDE_SYMBOLS=OFF          \
-        -DCOMPILER_RT_BUILD_LIBFUZZER=OFF                \
-        -DCOMPILER_RT_BUILD_CRT=OFF                      \
-        -DCOMPILER_RT_BUILD_MEMPROF=OFF                  \
-        -DCOMPILER_RT_BUILD_PROFILE=OFF                  \
-        -DCOMPILER_RT_BUILD_SANITIZERS=OFF               \
-        -DCOMPILER_RT_BUILD_XRAY=OFF                     \
-        -DCOMPILER_RT_BUILD_GWP_ASAN=OFF                 \
-        -DCOMPILER_RT_BUILD_ORC=OFF                      \
-        -DCOMPILER_RT_INCLUDE_TESTS=OFF                  \
-        ${CMAKE_ARGS} -GNinja ../llvm                    \
-    && ninja install  . && \
-    #  build llvmlite
-    cd ../../llvmlite && python setup.py bdist_wheel && \
+    python setup.py bdist_wheel && \
     cd ../numba && \
     if ! grep '#include "dynamic_annotations.h"' numba/_dispatcher.cpp; then \
        sed -i '/#include "internal\/pycore_atomic.h"/i\#include "dynamic_annotations.h"' numba/_dispatcher.cpp; \
@@ -191,21 +118,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     git clone --recursive https://github.com/opencv/opencv-python.git -b ${OPENCV_VERSION} && \
     cd opencv-python && \
     python -m build --wheel --installer=uv --outdir /tmp/opencv-python/dist
-
-## Todo(r3hankhan123): Remove guidance-builder stage once vLLM upgrades to new version of llguidance that fixes s390x issues. See https://github.com/guidance-ai/llguidance/issues/330
-FROM python-install AS guidance-builder
-WORKDIR /tmp
-ENV CARGO_HOME=/root/.cargo
-ENV RUSTUP_HOME=/root/.rustup
-ENV PATH="$CARGO_HOME/bin:$RUSTUP_HOME/bin:$PATH"
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,from=rust,source=/root/.cargo,target=/root/.cargo,rw \
-    --mount=type=bind,from=rust,source=/root/.rustup,target=/root/.rustup,rw \
-    git clone https://github.com/guidance-ai/llguidance.git && \
-    cd llguidance && \
-    git checkout s390x-fix-v2  && \
-    uv pip install maturin && \
-    python -m maturin build --release --out dist --compatibility linux
 
 # # Final build stage
 FROM python-install AS vllm-cpu
@@ -235,20 +147,16 @@ RUN --mount=type=bind,from=numa-build,src=/tmp/numactl-2.0.19,target=/numactl \
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=rust,source=/root/.cargo,target=/root/.cargo,rw \
     --mount=type=bind,from=rust,source=/root/.rustup,target=/root/.rustup,rw \
-    --mount=type=bind,from=pyarrow,source=/tmp/arrow/python/dist,target=/tmp/arrow-wheels \
     --mount=type=bind,from=torch-vision,source=/tmp/vision/dist,target=/tmp/vision-wheels/ \
     --mount=type=bind,from=hf-xet-builder,source=/tmp/hf-xet/dist,target=/tmp/hf-xet-wheels/ \
     --mount=type=bind,from=numba-builder,source=/tmp/llvmlite/dist,target=/tmp/llvmlite-wheels/ \
     --mount=type=bind,from=numba-builder,source=/tmp/numba/dist,target=/tmp/numba-wheels/ \
     --mount=type=bind,from=opencv-builder,source=/tmp/opencv-python/dist,target=/tmp/opencv-wheels/ \
-    --mount=type=bind,from=guidance-builder,source=/tmp/llguidance/dist,target=/tmp/guidance-wheels/ \
-     ARROW_WHL_FILE=$(ls /tmp/arrow-wheels/*.whl) && \
      VISION_WHL_FILE=$(ls /tmp/vision-wheels/*.whl) && \
      HF_XET_WHL_FILE=$(ls /tmp/hf-xet-wheels/*.whl) && \
      LLVM_WHL_FILE=$(ls /tmp/llvmlite-wheels/*.whl) && \
      NUMBA_WHL_FILE=$(ls /tmp/numba-wheels/*.whl) && \
      OPENCV_WHL_FILE=$(ls /tmp/opencv-wheels/*.whl) && \
-     GUIDANCE_WHL_FILE=$(ls /tmp/guidance-wheels/*.whl) && \
      uv pip install -v \
         $ARROW_WHL_FILE \
         $VISION_WHL_FILE \
@@ -256,7 +164,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         $LLVM_WHL_FILE \
         $NUMBA_WHL_FILE \
         $OPENCV_WHL_FILE \
-        $GUIDANCE_WHL_FILE \
         --torch-backend cpu \
         --index-strategy unsafe-best-match \
         -r requirements/build/cpu.txt \
