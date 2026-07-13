@@ -520,6 +520,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         is_available_online=False,
     ),
     "RWForCausalLM": _HfExamplesInfo("tiiuae/falcon-40b"),
+    "RWKV7ForCausalLM": _HfExamplesInfo(
+        "https://huggingface.co/BlinkDL/rwkv7-g1/blob/main/"
+        "rwkv7-g1g-1.5b-20260526-ctx8192.pth",
+        tokenizer_mode="rwkv",
+        is_available_online=False,
+    ),
     "SarvamMoEForCausalLM": _HfExamplesInfo(
         "sarvamai/sarvam-30b",
         trust_remote_code=True,

@@ -105,6 +105,7 @@ from vllm.transformers_utils.config import (
     is_interleaved,
     maybe_override_with_speculators,
 )
+from vllm.transformers_utils.configs.rwkv7 import try_parse_rwkv7_pth_source
 from vllm.transformers_utils.repo_utils import get_model_path
 from vllm.transformers_utils.utils import is_cloud_storage
 from vllm.utils.argparse_utils import (
@@ -1860,7 +1861,10 @@ class EngineArgs:
         # Skip speculator detection for cloud storage models (eg: S3, GCS) since
         # HuggingFace cannot load configs directly from S3 URLs. S3 models can still
         # use speculators with explicit --speculative-config.
-        if not is_cloud_storage(self.model):
+        if (
+            not is_cloud_storage(self.model)
+            and try_parse_rwkv7_pth_source(self.model) is None
+        ):
             (self.model, self.tokenizer, self.speculative_config) = (
                 maybe_override_with_speculators(
                     model=self.model,
@@ -1877,7 +1881,7 @@ class EngineArgs:
         self.model_weights = model_config.model_weights
         self.tokenizer = model_config.tokenizer
 
-        self._check_feature_supported()
+        self._check_feature_supported(model_config)
         self._set_default_chunked_prefill_and_prefix_caching_args(model_config)
         self._set_default_reasoning_config_args()
         sliding_window: int | None = None
@@ -2394,10 +2398,12 @@ class EngineArgs:
 
         return config
 
-    def _check_feature_supported(self):
+    def _check_feature_supported(self, model_config: ModelConfig):
         """Raise an error if the feature is not supported."""
         # No Concurrent Partial Prefills so far.
-        if (
+        architectures = getattr(model_config, "architectures", [])
+        is_rwkv7 = "RWKV7ForCausalLM" in architectures
+        if not is_rwkv7 and (
             self.max_num_partial_prefills != SchedulerConfig.max_num_partial_prefills
             or self.max_long_partial_prefills
             != SchedulerConfig.max_long_partial_prefills

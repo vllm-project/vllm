@@ -100,6 +100,7 @@ def _construct_expected_sampling_metadata(
     presence_penalties = [0.0 for _ in range(num_reqs)]
     frequency_penalties = [0.0 for _ in range(num_reqs)]
     repetition_penalties = [1.0 for _ in range(num_reqs)]
+    penalty_decays = [0.996 for _ in range(num_reqs)]
     top_k = [0 for _ in range(num_reqs)]
     top_p = [0.0 for _ in range(num_reqs)]
     temperature = [0.0 for _ in range(num_reqs)]
@@ -122,6 +123,7 @@ def _construct_expected_sampling_metadata(
         repetition_penalties[index_in_input_batch] = (
             req.sampling_params.repetition_penalty
         )
+        penalty_decays[index_in_input_batch] = req.sampling_params.penalty_decay
         top_k[index_in_input_batch] = req.sampling_params.top_k
         top_p[index_in_input_batch] = req.sampling_params.top_p
         temperature[index_in_input_batch] = req.sampling_params.temperature
@@ -166,6 +168,7 @@ def _construct_expected_sampling_metadata(
         repetition_penalties=torch.tensor(
             repetition_penalties, dtype=torch.float, device=device
         ),
+        penalty_decays=torch.tensor(penalty_decays, dtype=torch.float, device=device),
         output_token_ids=output_token_ids,
         spec_token_ids=[[] for _ in range(len(output_token_ids))],
         no_penalties=(
@@ -185,6 +188,7 @@ def _create_sampling_params():
         top_p=np.random.uniform(0.0, 1.0),
         presence_penalty=np.random.uniform(-2.0, 2.0),
         repetition_penalty=np.random.uniform(0.0, 2.0),
+        penalty_decay=np.random.uniform(0.0, 1.0),
         frequency_penalty=np.random.uniform(-2.0, 2.0),
         min_tokens=np.random.randint(1, 10),
         stop_token_ids=[

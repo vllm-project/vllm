@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import numpy as np
@@ -49,6 +50,8 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner as PackedGPUModelRunner
+from vllm.v1.worker.gpu.warmup import warmup_kernels
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import select_common_block_size
@@ -56,6 +59,48 @@ from vllm.v1.worker.utils import select_common_block_size
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_warmup_kernels_handles_no_kv_cache_groups(monkeypatch):
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+    kv_connector = SimpleNamespace(set_disabled=Mock())
+    model_runner = SimpleNamespace(
+        num_speculative_steps=0,
+        decode_query_len=1,
+        kv_cache_config=KVCacheConfig(
+            num_blocks=1,
+            kv_cache_tensors=[],
+            kv_cache_groups=[],
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=4,
+            max_num_batched_tokens=16,
+        ),
+        is_pooling_model=False,
+        is_last_pp_rank=True,
+        model_config=SimpleNamespace(get_vocab_size=lambda: 64),
+        kv_connector=kv_connector,
+    )
+    executed: list[Any] = []
+    sampled: list[Any] = []
+
+    warmup_kernels(model_runner, executed.append, sampled.append)
+
+    assert [call.args[0] for call in kv_connector.set_disabled.call_args_list] == [
+        True,
+        False,
+    ]
+    assert len(executed) == 3
+    assert len(sampled) == 2
+
+    prefill_output, decode_output, cleanup_output = executed
+    assert len(prefill_output.scheduled_new_reqs) == 4
+    assert all(req.block_ids == () for req in prefill_output.scheduled_new_reqs)
+    assert prefill_output.num_common_prefix_blocks == []
+
+    assert decode_output.scheduled_cached_reqs.new_block_ids == [None] * 4
+    assert decode_output.num_common_prefix_blocks == []
+    assert cleanup_output.finished_req_ids == {f"_warmup_{i}_" for i in range(4)}
 
 
 def initialize_kv_cache(runner: GPUModelRunner):
@@ -855,6 +900,299 @@ def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
 def test_reload_weights_before_load_model(model_runner):
     with pytest.raises(ValueError):
         model_runner.reload_weights()
+
+
+class _HiddenStatesThatFailOnGenericGather:
+    def __getitem__(self, _logits_indices):
+        pytest.fail("generic hidden-state gather should not run")
+
+
+def test_sample_prefers_model_sampling_logits_hook_before_generic_gather():
+    runner = object.__new__(PackedGPUModelRunner)
+    logits = torch.tensor([[1.0, 2.0]], dtype=torch.float32)
+    sampler_output = SimpleNamespace(
+        num_sampled=torch.tensor([1], dtype=torch.int32),
+        num_rejected=torch.tensor([0], dtype=torch.int32),
+    )
+    input_batch = SimpleNamespace(
+        logits_indices=torch.tensor([0], dtype=torch.int64),
+        num_draft_tokens=0,
+    )
+    hidden_states = _HiddenStatesThatFailOnGenericGather()
+    hook_calls = []
+
+    class FakeModel:
+        def compute_sampling_logits(
+            self,
+            hook_hidden_states,
+            hook_logits_indices,
+            hook_input_batch,
+        ):
+            hook_calls.append(
+                (hook_hidden_states, hook_logits_indices, hook_input_batch)
+            )
+            return logits
+
+        def compute_logits(self, _sample_hidden_states):
+            pytest.fail("generic compute_logits fallback should not run")
+
+    runner.model = FakeModel()
+    runner.sampler = Mock(return_value=sampler_output)
+    runner.rejection_sampler = None
+    runner.speculator = None
+    runner.structured_outputs_worker = None
+
+    output, num_sampled, num_rejected = PackedGPUModelRunner.sample(
+        runner,
+        hidden_states,
+        input_batch,
+        grammar_output=None,
+    )
+
+    assert output is sampler_output
+    assert num_sampled is sampler_output.num_sampled
+    assert num_rejected is sampler_output.num_rejected
+    assert len(hook_calls) == 1
+    assert hook_calls[0][0] is hidden_states
+    assert hook_calls[0][1] is input_batch.logits_indices
+    assert hook_calls[0][2] is input_batch
+    runner.sampler.assert_called_once_with(logits, input_batch)
+
+
+def test_sample_applies_grammar_to_model_sampling_logits_before_sampler():
+    runner = object.__new__(PackedGPUModelRunner)
+    logits = torch.tensor([[1.0, 2.0]], dtype=torch.float32)
+    sampler_output = SimpleNamespace(
+        num_sampled=torch.tensor([1], dtype=torch.int32),
+        num_rejected=torch.tensor([0], dtype=torch.int32),
+    )
+    input_batch = SimpleNamespace(
+        logits_indices=torch.tensor([0], dtype=torch.int64),
+        num_draft_tokens=0,
+    )
+    grammar_output = SimpleNamespace(
+        structured_output_request_ids=["req-0"],
+        grammar_bitmask=torch.tensor([[True, False]]),
+    )
+    calls = []
+
+    class FakeModel:
+        def compute_sampling_logits(
+            self,
+            _hook_hidden_states,
+            _hook_logits_indices,
+            _hook_input_batch,
+        ):
+            return logits
+
+        def compute_logits(self, _sample_hidden_states):
+            pytest.fail("generic compute_logits fallback should not run")
+
+    class FakeStructuredOutputsWorker:
+        def apply_grammar_bitmask(
+            self,
+            applied_logits,
+            applied_input_batch,
+            request_ids,
+            grammar_bitmask,
+        ):
+            calls.append("grammar")
+            assert applied_logits is logits
+            assert applied_input_batch is input_batch
+            assert request_ids is grammar_output.structured_output_request_ids
+            assert grammar_bitmask is grammar_output.grammar_bitmask
+            applied_logits.add_(10)
+
+    def sample(masked_logits, sampled_input_batch):
+        calls.append("sampler")
+        assert masked_logits is logits
+        assert sampled_input_batch is input_batch
+        torch.testing.assert_close(masked_logits, torch.tensor([[11.0, 12.0]]))
+        return sampler_output
+
+    runner.model = FakeModel()
+    runner.sampler = Mock(side_effect=sample)
+    runner.rejection_sampler = None
+    runner.speculator = None
+    runner.structured_outputs_worker = FakeStructuredOutputsWorker()
+
+    output, num_sampled, num_rejected = PackedGPUModelRunner.sample(
+        runner,
+        object(),
+        input_batch,
+        grammar_output=grammar_output,
+    )
+
+    assert output is sampler_output
+    assert num_sampled is sampler_output.num_sampled
+    assert num_rejected is sampler_output.num_rejected
+    assert calls == ["grammar", "sampler"]
+
+
+def test_sample_falls_back_to_generic_gather_when_sampling_logits_hook_declines():
+    runner = object.__new__(PackedGPUModelRunner)
+    hidden_states = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+    logits_indices = torch.tensor([0, 2], dtype=torch.int64)
+    logits = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32)
+    sampler_output = SimpleNamespace(
+        num_sampled=torch.tensor([1, 1], dtype=torch.int32),
+        num_rejected=torch.tensor([0, 0], dtype=torch.int32),
+    )
+    input_batch = SimpleNamespace(
+        logits_indices=logits_indices,
+        num_draft_tokens=0,
+    )
+    hook_calls = []
+    compute_logits_calls = []
+
+    class FakeModel:
+        def compute_sampling_logits(
+            self,
+            hook_hidden_states,
+            hook_logits_indices,
+            hook_input_batch,
+        ):
+            hook_calls.append(
+                (hook_hidden_states, hook_logits_indices, hook_input_batch)
+            )
+            return None
+
+        def compute_logits(self, sample_hidden_states):
+            compute_logits_calls.append(sample_hidden_states)
+            torch.testing.assert_close(
+                sample_hidden_states,
+                hidden_states[logits_indices],
+                rtol=0,
+                atol=0,
+            )
+            return logits
+
+    runner.model = FakeModel()
+    runner.sampler = Mock(return_value=sampler_output)
+    runner.rejection_sampler = None
+    runner.speculator = None
+    runner.structured_outputs_worker = None
+
+    output, num_sampled, num_rejected = PackedGPUModelRunner.sample(
+        runner,
+        hidden_states,
+        input_batch,
+        grammar_output=None,
+    )
+
+    assert output is sampler_output
+    assert num_sampled is sampler_output.num_sampled
+    assert num_rejected is sampler_output.num_rejected
+    assert len(hook_calls) == 1
+    assert hook_calls[0][0] is hidden_states
+    assert hook_calls[0][1] is logits_indices
+    assert hook_calls[0][2] is input_batch
+    assert len(compute_logits_calls) == 1
+    runner.sampler.assert_called_once_with(logits, input_batch)
+
+
+def _patch_packed_dummy_input_batch(monkeypatch, dummy_input_batch):
+    make_dummy_calls = []
+
+    def make_dummy(num_reqs, num_tokens, input_buffers):
+        make_dummy_calls.append((num_reqs, num_tokens, input_buffers))
+        return dummy_input_batch
+
+    monkeypatch.setattr(
+        PackedGPUModelRunner._dummy_sampler_run.__wrapped__.__globals__["InputBatch"],
+        "make_dummy",
+        staticmethod(make_dummy),
+    )
+    return make_dummy_calls
+
+
+def test_dummy_sampler_run_prefers_model_sampling_logits_hook_before_generic_logits(
+    monkeypatch,
+):
+    runner = object.__new__(PackedGPUModelRunner)
+    runner.input_buffers = object()
+    hidden_states = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    logits_indices = torch.tensor([0, 1, 2], dtype=torch.int64)
+    logits = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+    dummy_input_batch = SimpleNamespace(
+        logits_indices=logits_indices,
+        num_draft_tokens=0,
+    )
+    make_dummy_calls = _patch_packed_dummy_input_batch(monkeypatch, dummy_input_batch)
+    hook_calls = []
+
+    class FakeModel:
+        def compute_sampling_logits(
+            self,
+            hook_hidden_states,
+            hook_logits_indices,
+            hook_input_batch,
+        ):
+            hook_calls.append(
+                (hook_hidden_states, hook_logits_indices, hook_input_batch)
+            )
+            return logits
+
+        def compute_logits(self, _hidden_states):
+            pytest.fail("generic compute_logits fallback should not run")
+
+    runner.model = FakeModel()
+    runner.sampler = Mock()
+
+    PackedGPUModelRunner._dummy_sampler_run(runner, hidden_states)
+
+    assert make_dummy_calls == [(3, 3, runner.input_buffers)]
+    assert len(hook_calls) == 1
+    assert hook_calls[0][0] is hidden_states
+    assert hook_calls[0][1] is logits_indices
+    assert hook_calls[0][2] is dummy_input_batch
+    runner.sampler.assert_called_once_with(logits, dummy_input_batch)
+
+
+def test_dummy_sampler_run_falls_back_to_generic_logits_when_sampling_hook_declines(
+    monkeypatch,
+):
+    runner = object.__new__(PackedGPUModelRunner)
+    runner.input_buffers = object()
+    hidden_states = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+    logits_indices = torch.tensor([0, 1], dtype=torch.int64)
+    logits = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    dummy_input_batch = SimpleNamespace(
+        logits_indices=logits_indices,
+        num_draft_tokens=0,
+    )
+    make_dummy_calls = _patch_packed_dummy_input_batch(monkeypatch, dummy_input_batch)
+    hook_calls = []
+    compute_logits_calls = []
+
+    class FakeModel:
+        def compute_sampling_logits(
+            self,
+            hook_hidden_states,
+            hook_logits_indices,
+            hook_input_batch,
+        ):
+            hook_calls.append(
+                (hook_hidden_states, hook_logits_indices, hook_input_batch)
+            )
+            return None
+
+        def compute_logits(self, sample_hidden_states):
+            compute_logits_calls.append(sample_hidden_states)
+            return logits
+
+    runner.model = FakeModel()
+    runner.sampler = Mock()
+
+    PackedGPUModelRunner._dummy_sampler_run(runner, hidden_states)
+
+    assert make_dummy_calls == [(2, 2, runner.input_buffers)]
+    assert len(hook_calls) == 1
+    assert hook_calls[0][0] is hidden_states
+    assert hook_calls[0][1] is logits_indices
+    assert hook_calls[0][2] is dummy_input_batch
+    assert compute_logits_calls == [hidden_states]
+    runner.sampler.assert_called_once_with(logits, dummy_input_batch)
 
 
 def test_sample_passes_reordered_draft_probs_to_rejection_sampler():

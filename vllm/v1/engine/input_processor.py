@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 import vllm.envs as envs
+from vllm.build_profile import get_build_profile_metadata
 from vllm.config import VllmConfig
 from vllm.inputs import (
     EngineInput,
@@ -48,6 +49,7 @@ class InputProcessor:
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
+        self.build_profile = get_build_profile_metadata()
         self.observability_config = vllm_config.observability_config
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
 
@@ -91,6 +93,18 @@ class InputProcessor:
             ]
             if not supported_generation_tasks:
                 raise ValueError("This model does not support generation")
+
+            if (
+                not self.build_profile.unrestricted
+                and params.structured_outputs is not None
+                and not params.structured_outputs.all_constraints_none()
+                and "structured_outputs"
+                not in self.build_profile.supported_serving_features
+            ):
+                raise ValueError(
+                    "The RWKV build profile does not support structured "
+                    "outputs. Install a full build of vLLM to use them."
+                )
 
             params.verify(
                 self.model_config,

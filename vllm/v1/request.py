@@ -146,6 +146,8 @@ class Request:
             if self.prompt_token_ids is not None
             else [0] * self.num_prompt_tokens
         )
+        self.repetition_ngram_counts: dict[int, dict[tuple[int, ...], int]] = {}
+        self.repetition_ngram_next_start: dict[int, int] = {}
 
         # Used in async scheduling.
         self.num_output_placeholders = 0

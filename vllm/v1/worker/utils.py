@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 import math
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from itertools import product as iprod
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
@@ -36,6 +37,9 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.attention import Attention
 
 logger = init_logger(__name__)
 
@@ -92,7 +96,7 @@ class KVBlockZeroer:
         self,
         device: torch.device,
         pin_memory: bool,
-        attn_groups_iter: Iterable["AttentionGroup"],
+        attn_groups_iter: Iterable[AttentionGroup],
         kernel_block_sizes: list[int],
         cache_dtype: str,
         static_forward_context: dict[str, Any],

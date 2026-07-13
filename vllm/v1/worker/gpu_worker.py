@@ -17,6 +17,7 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
+from vllm.build_profile import get_build_profile_metadata
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode
 from vllm.device_allocator import get_mem_allocator_instance
@@ -50,7 +51,6 @@ from vllm.distributed.weight_transfer import (
 )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.video import (
     PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
     PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
@@ -84,8 +84,16 @@ from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...model_executor.model_loader import TensorizerLoader
-from .gpu.warmup import warmup_kernels
+from .gpu.warmup import should_skip_v2_kernel_warmup, warmup_kernels
 from .utils import request_memory
+
+if get_build_profile_metadata().profile == "rwkv":
+
+    def kernel_warmup(worker: "Worker") -> None:
+        """Skip attention/MoE kernel warmups omitted by the RWKV artifact."""
+
+else:
+    from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 
 logger = init_logger(__name__)
 
@@ -860,7 +868,12 @@ class Worker(WorkerBase):
 
         if self.use_v2_model_runner:
             # V2: Run full execute_model + sample_tokens to JIT compile triton kernels.
-            warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
+            if should_skip_v2_kernel_warmup(self.model_runner):
+                logger.info("Skipping the incompatible V2 kernel warmup for RWKV7.")
+            else:
+                warmup_kernels(
+                    self.model_runner, self.execute_model, self.sample_tokens
+                )
         elif get_pp_group().is_last_rank:
             # V1: Warm up sampler and preallocate memory buffer for logits and other
             # sampling related tensors of max possible shape to avoid memory
@@ -1289,6 +1302,11 @@ class Worker(WorkerBase):
 
         self.weight_transfer_engine.finish_weight_update()
         self.weight_transfer_engine.reset_weight_update_target()
+        model_runner = getattr(self, "model_runner", None)
+        model_state = getattr(model_runner, "model_state", None)
+        reset_state = getattr(model_state, "reset_after_weight_update", None)
+        if callable(reset_state):
+            reset_state()
         self._weight_update_active = False
 
     def shutdown(self) -> None:

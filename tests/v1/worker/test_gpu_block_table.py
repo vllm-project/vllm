@@ -13,6 +13,30 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def test_block_tables_apply_staged_writes_no_kv_groups():
+    device = torch.device("cuda")
+    block_tables = BlockTables(
+        block_sizes=[],
+        max_num_reqs=2,
+        max_num_batched_tokens=16,
+        max_num_blocks_per_group=[],
+        device=device,
+        kernel_block_sizes=[],
+    )
+
+    block_tables.append_block_ids(
+        req_index=0,
+        new_block_ids=(),
+        overwrite=True,
+    )
+    block_tables.apply_staged_writes()
+    torch.accelerator.synchronize()
+
+    assert block_tables.block_tables == []
+    assert block_tables.get_dummy_block_tables(num_reqs=1) == ()
+    assert tuple(block_tables.num_blocks.gpu.shape) == (0, 2)
+
+
 def test_block_tables_apply_staged_writes_fuses_kv_groups(monkeypatch):
     device = torch.device("cuda")
     block_tables = BlockTables(

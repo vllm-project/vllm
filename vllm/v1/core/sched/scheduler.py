@@ -52,6 +52,7 @@ from vllm.v1.core.sched.request_queue import (
     SchedulingPolicy,
     create_request_queue,
 )
+from vllm.v1.core.sched.rwkv_decode_wave import RWKVNativeDecodeWavePolicy
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -95,6 +96,10 @@ class Scheduler(SchedulerInterface):
             )
         self.structured_output_manager = structured_output_manager
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
+        model_config = vllm_config.model_config
+        self.use_rwkv_native_decode_wave = RWKVNativeDecodeWavePolicy.enabled_for_model(
+            model_config
+        )
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
@@ -461,11 +466,26 @@ class Scheduler(SchedulerInterface):
         defer_prefills = (
             throttle_prefills and not self.prefill_capacity_bound
         ) and any(not r.is_prefill_chunk for r in self.running)
+        rwkv_decode_wave_plan = None
+        if self.use_rwkv_native_decode_wave and token_budget > 0 and self.running:
+            rwkv_decode_wave_plan = RWKVNativeDecodeWavePolicy.make_plan(
+                running_requests=self.running,
+                token_budget=token_budget,
+                current_step=self.current_step,
+                max_model_len=self.max_model_len,
+                num_sampled_tokens_per_step=self.num_sampled_tokens_per_step,
+            )
 
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+            if (
+                rwkv_decode_wave_plan is not None
+                and not rwkv_decode_wave_plan.allows_running_request(request)
+            ):
+                req_index += 1
+                continue
 
             if (
                 request.num_output_placeholders > 0
@@ -614,6 +634,11 @@ class Scheduler(SchedulerInterface):
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
             req_index += 1
+            if (
+                rwkv_decode_wave_plan is not None
+                and rwkv_decode_wave_plan.on_running_request_scheduled(request)
+            ):
+                req_index = 0
 
             # Speculative decode related.
             if request.spec_token_ids:

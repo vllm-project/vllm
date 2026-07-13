@@ -6184,6 +6184,7 @@ class GPUModelRunner(
             frequency_penalties=dummy_tensors(0.1),
             presence_penalties=dummy_tensors(0.1),
             repetition_penalties=dummy_tensors(0.1),
+            penalty_decays=dummy_tensors(0.996),
             output_token_ids=[[] for _ in range(num_reqs)],
             spec_token_ids=[[] for _ in range(num_reqs)],
             allowed_token_ids_mask=None,

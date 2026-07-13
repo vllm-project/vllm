@@ -17,6 +17,7 @@ from vllm.compilation.backends import VllmBackend
 from vllm.config import (
     CompilationConfig,
     KernelConfig,
+    LoRAConfig,
     ModelConfig,
     ParallelConfig,
     PoolerConfig,
@@ -289,6 +290,71 @@ def test_is_default_v2_model_runner_model(model_config, expected):
     config = SimpleNamespace(model_config=model_config)
 
     assert VllmConfig._is_default_v2_model_runner_model(config) is expected
+
+
+def _rwkv7_model_config():
+    return SimpleNamespace(
+        architectures=["RWKV7ForCausalLM"],
+        runner_type="generate",
+        is_quantized=False,
+        is_diffusion=False,
+        has_inner_state=False,
+        enable_return_routed_experts=False,
+        logits_processors=None,
+        enable_prompt_embeds=False,
+        logprobs_mode="raw_logprobs",
+    )
+
+
+def test_rwkv7_uses_v2_model_runner_by_default(monkeypatch):
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    config = VllmConfig()
+    config.model_config = _rwkv7_model_config()
+
+    assert config.use_v2_model_runner is True
+
+
+def test_rwkv7_rejects_disabled_v2_model_runner(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    config = VllmConfig()
+    config.model_config = _rwkv7_model_config()
+
+    with pytest.raises(ValueError, match="RWKV7ForCausalLM requires Model Runner V2"):
+        _ = config.use_v2_model_runner
+
+
+def test_rwkv7_rejects_speculative_decoding_before_model_runner(monkeypatch):
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    config = VllmConfig()
+    config.model_config = _rwkv7_model_config()
+    config.speculative_config = SimpleNamespace(
+        method="eagle",
+        parallel_drafting=False,
+        uses_dynamic_speculative_decoding=lambda: False,
+    )
+
+    with pytest.raises(ValueError, match="RWKV7ForCausalLM.*speculative decoding"):
+        _ = config.use_v2_model_runner
+
+
+def test_rwkv7_rejects_lora_before_model_runner(monkeypatch):
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    config = VllmConfig()
+    config.model_config = _rwkv7_model_config()
+    config.lora_config = LoRAConfig()
+
+    with pytest.raises(ValueError, match="RWKV7ForCausalLM.*LoRA"):
+        _ = config.use_v2_model_runner
+
+
+def test_rwkv7_rejects_non_cuda_device_before_model_runner(monkeypatch):
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    config = VllmConfig()
+    config.model_config = _rwkv7_model_config()
+    config.device_config = SimpleNamespace(device_type="cpu")
+
+    with pytest.raises(ValueError, match="RWKV7ForCausalLM.*CUDA"):
+        _ = config.use_v2_model_runner
 
 
 @pytest.mark.skip_global_cleanup

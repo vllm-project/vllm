@@ -73,6 +73,7 @@ DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
         "InklingForConditionalGeneration",
         "LongcatFlashNgramForCausalLM",
         "Qwen2MoeForCausalLM",
+        "RWKV7ForCausalLM",
     }
 )
 
@@ -533,6 +534,13 @@ class VllmConfig:
     def use_v2_model_runner(self) -> bool:
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
+            if not use_v2_model_runner and self._is_rwkv7_model():
+                raise ValueError(
+                    "RWKV7ForCausalLM requires Model Runner V2. "
+                    "Unset VLLM_USE_V2_MODEL_RUNNER=0 or set it to 1."
+                )
+            if use_v2_model_runner and self._is_rwkv7_model():
+                self._raise_rwkv7_unsupported_features()
             return use_v2_model_runner
 
         # DSpark is implemented only by the V2 GPU model runner, and DeepSeek-V4
@@ -554,9 +562,15 @@ class VllmConfig:
             return True
 
         if not self._is_default_v2_model_runner_model():
+            if self._is_rwkv7_model():
+                raise ValueError("RWKV7ForCausalLM requires Model Runner V2.")
             return False
 
         if not HAS_TRITON:
+            if self._is_rwkv7_model():
+                raise ValueError(
+                    "RWKV7ForCausalLM requires Model Runner V2 with Triton."
+                )
             logger.warning_once(
                 "Model Runner V2 requires Triton; using the V1 model runner instead."
             )
@@ -564,6 +578,8 @@ class VllmConfig:
 
         unsupported = self._get_v2_model_runner_unsupported_features()
         if unsupported:
+            if self._is_rwkv7_model():
+                self._raise_rwkv7_unsupported_features(unsupported)
             logger.warning_once(
                 "Model Runner V2 does not yet support %s; using the V1 model "
                 "runner instead.",
@@ -603,6 +619,24 @@ class VllmConfig:
             any(arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures)
             or not model_config.is_moe
         )
+
+    def _is_rwkv7_model(self) -> bool:
+        model_config = self.model_config
+        if model_config is None:
+            return False
+        architectures = getattr(model_config, "architectures", [])
+        architecture = getattr(model_config, "architecture", None)
+        return architecture == "RWKV7ForCausalLM" or "RWKV7ForCausalLM" in architectures
+
+    def _raise_rwkv7_unsupported_features(
+        self, unsupported: list[str] | None = None
+    ) -> None:
+        unsupported = unsupported or self._get_v2_model_runner_unsupported_features()
+        if unsupported:
+            raise ValueError(
+                "RWKV7ForCausalLM requires Model Runner V2, but RWKV7 does "
+                f"not support: {', '.join(unsupported)}"
+            )
 
     @property
     def needs_dp_coordinator(self) -> bool:
@@ -925,6 +959,9 @@ class VllmConfig:
         if self.performance_mode != "balanced":
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
 
+        from vllm.build_profile import validate_build_profile_capabilities
+
+        validate_build_profile_capabilities(self)
         self.try_verify_and_update_config()
 
         if self.model_config is not None:
@@ -2095,6 +2132,15 @@ class VllmConfig:
         unsupported: list[str] = []
         model_config = self.model_config
         speculative_config = self.speculative_config
+        is_rwkv7 = self._is_rwkv7_model()
+
+        if is_rwkv7:
+            if getattr(self.device_config, "device_type", None) != "cuda":
+                unsupported.append("non-CUDA platforms")
+            if self.lora_config is not None:
+                unsupported.append("LoRA")
+            if speculative_config is not None:
+                unsupported.append("speculative decoding")
 
         if self.parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("prefill context parallelism")
@@ -2116,7 +2162,7 @@ class VllmConfig:
         ):
             unsupported.append("pipeline parallelism with external_launcher")
 
-        if speculative_config is not None:
+        if speculative_config is not None and not is_rwkv7:
             # TODO: ngram / ngram_gpu are not supported by the v2 model runner yet
             if speculative_config.method in ("ngram", "ngram_gpu"):
                 unsupported.append("ngram/ngram_gpu speculative decoding")

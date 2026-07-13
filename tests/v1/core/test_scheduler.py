@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
+import importlib
+import importlib.util
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -26,7 +29,9 @@ from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import (
@@ -41,6 +46,8 @@ from vllm.v1.structured_output import StructuredOutputManager
 from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 
 pytestmark = pytest.mark.cpu_test
+
+RWKV_DECODE_WAVE_MODULE = "vllm.v1.core.sched.rwkv_decode_wave"
 
 
 def test_make_scheduled_encoder_input_stats_output_embeddings():
@@ -450,6 +457,393 @@ def test_throttle_prefills_defers_remote_kv_resume_with_local_prefill():
     output = scheduler.schedule(throttle_prefills=True)
     assert "r2" not in output.num_scheduled_tokens  # deferred (has local prefill)
     assert "r1" in output.num_scheduled_tokens
+
+
+class _FakeKVBlocks:
+    def get_block_ids(self, allow_none: bool = False):
+        return ()
+
+
+class _FakeKVCacheManager:
+    block_pool = None
+    empty_kv_cache_blocks = _FakeKVBlocks()
+
+    def new_step_starts(self) -> None:
+        pass
+
+    def allocate_slots(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        num_lookahead_tokens: int = 0,
+        **_kwargs,
+    ) -> _FakeKVBlocks:
+        return _FakeKVBlocks()
+
+    def get_computed_blocks(self, request: Request):
+        return self.empty_kv_cache_blocks, 0
+
+    def get_blocks(self, request_id: str) -> _FakeKVBlocks:
+        return _FakeKVBlocks()
+
+    def get_num_common_prefix_blocks(self, request_id: str) -> list[int]:
+        return [0]
+
+    def take_new_block_ids(self) -> list[int]:
+        return []
+
+    def take_kv_cache_block_copies(self) -> tuple[list[int], list[int]]:
+        return [], []
+
+
+class _FakeEncoderCacheManager:
+    def get_freed_mm_hashes(self) -> list[str]:
+        return []
+
+
+def _new_fake_scheduler(
+    *,
+    use_rwkv_native_decode_wave: bool,
+    max_num_scheduled_tokens: int = 16,
+    max_num_running_reqs: int = 16,
+) -> Scheduler:
+    scheduler = object.__new__(Scheduler)
+    scheduler.current_step = 0
+    scheduler.num_waiting_for_streaming_input = 0
+    scheduler.sched_step_seq = 0
+    scheduler.running = []
+    scheduler.waiting = create_request_queue(SchedulingPolicy.FCFS)
+    scheduler.skipped_waiting = create_request_queue(SchedulingPolicy.FCFS)
+    scheduler.finished_req_ids = set()
+    scheduler.reset_preempted_req_ids = set()
+    scheduler.max_num_running_reqs = max_num_running_reqs
+    scheduler.max_num_scheduled_tokens = max_num_scheduled_tokens
+    scheduler.max_model_len = 2048
+    scheduler.num_sampled_tokens_per_step = 1
+    scheduler.num_lookahead_tokens = 0
+    scheduler.max_num_encoder_input_tokens = 0
+    scheduler.use_rwkv_native_decode_wave = use_rwkv_native_decode_wave
+    scheduler.prefill_capacity_bound = False
+    scheduler._pause_state = PauseState.UNPAUSED
+    scheduler.policy = SchedulingPolicy.FCFS
+    scheduler.lora_config = None
+    scheduler.log_stats = False
+    scheduler.need_mamba_block_aligned_split = False
+    scheduler.kv_cache_manager = _FakeKVCacheManager()
+    scheduler.encoder_cache_manager = _FakeEncoderCacheManager()
+    scheduler.kv_cache_config = SimpleNamespace(kv_cache_groups=[object()])
+    scheduler.has_mamba_layers = False
+    scheduler.connector_prefix_cache_stats = None
+    scheduler.scheduler_reserve_full_isl = False
+    scheduler.is_encoder_decoder = False
+    scheduler.use_v2_model_runner = True
+    scheduler.use_pp = False
+    scheduler.scheduler_config = SimpleNamespace(
+        async_scheduling=False,
+        enable_chunked_prefill=True,
+        long_prefill_token_threshold=0,
+    )
+    scheduler.prev_step_scheduled_req_ids = set()
+    scheduler.needs_kv_cache_zeroing = False
+    scheduler.num_spec_tokens = 0
+    scheduler.dynamic_sd_lookup = None
+    scheduler.connector = None
+    scheduler.ec_connector = None
+    scheduler.defer_block_free = False
+    scheduler._inflight_prefills = set()
+    scheduler.enable_return_routed_experts = False
+    scheduler._update_after_schedule = lambda _output: None
+    return scheduler
+
+
+def _new_ready_decode_request(req_id: str) -> Request:
+    (request,) = create_requests(num_requests=1, num_tokens=4, req_ids=[req_id])
+    request.status = RequestStatus.RUNNING
+    request.num_computed_tokens = request.num_prompt_tokens
+    request.append_output_token_ids(0)
+    return request
+
+
+def _new_waiting_prefill_request(req_id: str, num_tokens: int = 4) -> Request:
+    (request,) = create_requests(
+        num_requests=1, num_tokens=num_tokens, req_ids=[req_id]
+    )
+    request.status = RequestStatus.WAITING
+    return request
+
+
+def _get_rwkv_decode_wave_policy_api():
+    module = importlib.import_module(RWKV_DECODE_WAVE_MODULE)
+    assert hasattr(module, "RWKVNativeDecodeWavePolicy")
+    assert hasattr(module, "RWKVDecodeWavePlan")
+    return module.RWKVNativeDecodeWavePolicy, module.RWKVDecodeWavePlan
+
+
+def _new_running_prefill_chunk_request(req_id: str) -> Request:
+    request = _new_waiting_prefill_request(req_id, num_tokens=8)
+    request.status = RequestStatus.RUNNING
+    request.num_computed_tokens = 4
+    request.is_prefill_chunk = True
+    return request
+
+
+def test_rwkv_decode_wave_policy_module_api_exists():
+    assert importlib.util.find_spec(RWKV_DECODE_WAVE_MODULE) is not None, (
+        f"{RWKV_DECODE_WAVE_MODULE} should define the RWKV native decode wave policy"
+    )
+    policy_cls, plan_cls = _get_rwkv_decode_wave_policy_api()
+
+    policy = policy_cls()
+
+    assert policy.enabled_for_model(
+        SimpleNamespace(architecture="RWKV7ForCausalLM", architectures=[])
+    )
+    assert policy.enabled_for_model(
+        SimpleNamespace(architecture=None, architectures=["RWKV7ForCausalLM"])
+    )
+    assert not policy.enabled_for_model(
+        SimpleNamespace(architecture="LlamaForCausalLM", architectures=["Llama"])
+    )
+
+    plan = policy.make_plan(
+        running_requests=[],
+        token_budget=1,
+        current_step=1,
+        max_model_len=2048,
+        num_sampled_tokens_per_step=1,
+    )
+    assert isinstance(plan, plan_cls)
+
+
+def test_rwkv_decode_wave_policy_requires_budget_for_complete_wave():
+    assert importlib.util.find_spec(RWKV_DECODE_WAVE_MODULE) is not None, (
+        f"{RWKV_DECODE_WAVE_MODULE} should define the RWKV native decode wave policy"
+    )
+    policy_cls, _ = _get_rwkv_decode_wave_policy_api()
+    policy = policy_cls()
+
+    with pytest.raises(ValueError, match="RWKV7 native decode wave"):
+        policy.make_plan(
+            running_requests=[
+                _new_ready_decode_request("r0"),
+                _new_ready_decode_request("r1"),
+            ],
+            token_budget=1,
+            current_step=1,
+            max_model_len=2048,
+            num_sampled_tokens_per_step=1,
+        )
+
+
+def test_rwkv_decode_wave_policy_rejects_multi_token_decode_request():
+    assert importlib.util.find_spec(RWKV_DECODE_WAVE_MODULE) is not None, (
+        f"{RWKV_DECODE_WAVE_MODULE} should define the RWKV native decode wave policy"
+    )
+    policy_cls, _ = _get_rwkv_decode_wave_policy_api()
+    policy = policy_cls()
+    request = _new_ready_decode_request("r0")
+    request.append_output_token_ids(1)
+
+    with pytest.raises(ValueError, match="one-token decode requests"):
+        policy.make_plan(
+            running_requests=[request],
+            token_budget=2,
+            current_step=1,
+            max_model_len=2048,
+            num_sampled_tokens_per_step=1,
+        )
+
+
+def test_rwkv_decode_wave_policy_allows_prefill_when_decode_wave_unready():
+    assert importlib.util.find_spec(RWKV_DECODE_WAVE_MODULE) is not None, (
+        f"{RWKV_DECODE_WAVE_MODULE} should define the RWKV native decode wave policy"
+    )
+    policy_cls, _ = _get_rwkv_decode_wave_policy_api()
+    policy = policy_cls()
+    ready = _new_ready_decode_request("r0")
+    unready = _new_ready_decode_request("r1")
+    unready.next_decode_eligible_step = 2
+    prefill = _new_running_prefill_chunk_request("p0")
+
+    plan = policy.make_plan(
+        running_requests=[ready, unready, prefill],
+        token_budget=8,
+        current_step=1,
+        max_model_len=2048,
+        num_sampled_tokens_per_step=1,
+    )
+
+    assert not plan.allows_running_request(ready)
+    assert not plan.allows_running_request(unready)
+    assert plan.allows_running_request(prefill)
+
+
+def test_rwkv_decode_wave_policy_restarts_after_complete_decode_wave():
+    assert importlib.util.find_spec(RWKV_DECODE_WAVE_MODULE) is not None, (
+        f"{RWKV_DECODE_WAVE_MODULE} should define the RWKV native decode wave policy"
+    )
+    policy_cls, _ = _get_rwkv_decode_wave_policy_api()
+    policy = policy_cls()
+    decode0 = _new_ready_decode_request("r0")
+    decode1 = _new_ready_decode_request("r1")
+    prefill = _new_running_prefill_chunk_request("p0")
+
+    plan = policy.make_plan(
+        running_requests=[decode0, decode1, prefill],
+        token_budget=8,
+        current_step=1,
+        max_model_len=2048,
+        num_sampled_tokens_per_step=1,
+    )
+
+    assert plan.allows_running_request(decode0)
+    assert plan.allows_running_request(decode1)
+    assert not plan.allows_running_request(prefill)
+    assert not plan.on_running_request_scheduled(decode0)
+    assert not plan.allows_running_request(prefill)
+    assert plan.on_running_request_scheduled(decode1)
+    assert plan.allows_running_request(prefill)
+
+
+def test_rwkv_scheduler_waits_when_live_decode_row_is_not_ready():
+    scheduler = _new_fake_scheduler(use_rwkv_native_decode_wave=True)
+    req0 = _new_ready_decode_request("r0")
+    req1 = _new_ready_decode_request("r1")
+    scheduler.running = [req0, req1]
+
+    req0.next_decode_eligible_step = scheduler.current_step + 2
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens == {}
+    assert req0 in scheduler.running
+    assert req1 in scheduler.running
+
+
+def test_rwkv_scheduler_allows_running_prefill_chunk_when_decode_wave_unready():
+    scheduler = _new_fake_scheduler(use_rwkv_native_decode_wave=True)
+    ready = _new_ready_decode_request("r0")
+    unready = _new_ready_decode_request("r1")
+    unready.next_decode_eligible_step = scheduler.current_step + 2
+    prefill = _new_running_prefill_chunk_request("p0")
+    scheduler.running = [ready, unready, prefill]
+    remaining_prefill_tokens = prefill.num_tokens - prefill.num_computed_tokens
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens == {"p0": remaining_prefill_tokens}
+    assert ready in scheduler.running
+    assert unready in scheduler.running
+    assert prefill in scheduler.running
+
+
+def test_rwkv_scheduler_holds_decode_behind_lower_running_prefill_chunk():
+    scheduler = _new_fake_scheduler(use_rwkv_native_decode_wave=True)
+    prefill = _new_running_prefill_chunk_request("p0")
+    decode = _new_ready_decode_request("r0")
+    scheduler.running = [prefill, decode]
+    remaining_prefill_tokens = prefill.num_tokens - prefill.num_computed_tokens
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens == {"p0": remaining_prefill_tokens}
+    assert prefill in scheduler.running
+    assert decode in scheduler.running
+
+
+def test_rwkv_scheduler_waits_when_live_decode_row_reaches_max_tokens():
+    scheduler = _new_fake_scheduler(use_rwkv_native_decode_wave=True)
+    req0 = _new_ready_decode_request("r0")
+    req1 = _new_ready_decode_request("r1")
+    scheduler.running = [req0, req1]
+
+    req0.max_tokens = 1
+    req0.num_output_placeholders = 1
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens == {}
+    assert req0 in scheduler.running
+    assert req1 in scheduler.running
+
+
+def test_rwkv_scheduler_requires_complete_ready_decode_wave_budget():
+    scheduler = _new_fake_scheduler(
+        use_rwkv_native_decode_wave=True,
+        max_num_scheduled_tokens=1,
+    )
+    scheduler.running = [
+        _new_ready_decode_request("r0"),
+        _new_ready_decode_request("r1"),
+    ]
+
+    with pytest.raises(ValueError, match="RWKV7 native decode wave"):
+        scheduler.schedule()
+
+
+def test_rwkv_scheduler_keeps_live_decode_running_while_refilling_rows():
+    scheduler = _new_fake_scheduler(
+        use_rwkv_native_decode_wave=True,
+        max_num_scheduled_tokens=8,
+        max_num_running_reqs=3,
+    )
+    scheduler.running = [_new_ready_decode_request("r0")]
+    prefill = _new_waiting_prefill_request("p0")
+    scheduler.waiting.add_request(prefill)
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens == {
+        "r0": 1,
+        "p0": prefill.num_prompt_tokens,
+    }
+    assert prefill in scheduler.running
+    assert "r0" in output.num_scheduled_tokens
+
+
+def test_rwkv_scheduler_waits_when_live_decode_row_has_no_token_ready():
+    scheduler = _new_fake_scheduler(use_rwkv_native_decode_wave=True)
+    (req0,) = create_requests(num_requests=1, num_tokens=4, req_ids=["r0"])
+    req0.status = RequestStatus.RUNNING
+    req0.num_computed_tokens = req0.num_prompt_tokens
+    req1 = _new_ready_decode_request("r1")
+    scheduler.running = [req0, req1]
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens == {}
+    assert req0 in scheduler.running
+    assert req1 in scheduler.running
+
+
+def test_rwkv_scheduler_does_not_mix_waiting_prefill_after_decode_wave():
+    scheduler = _new_fake_scheduler(
+        use_rwkv_native_decode_wave=True,
+        max_num_scheduled_tokens=8,
+        max_num_running_reqs=2,
+    )
+    scheduler.running = [
+        _new_ready_decode_request("r0"),
+        _new_ready_decode_request("r1"),
+    ]
+    scheduler.waiting.add_request(_new_waiting_prefill_request("p0"))
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens == {"r0": 1, "r1": 1}
+    assert [request.request_id for request in scheduler.waiting] == ["p0"]
+
+
+def test_default_scheduler_still_allows_running_decode_subset():
+    scheduler = _new_fake_scheduler(use_rwkv_native_decode_wave=False)
+    req0 = _new_ready_decode_request("r0")
+    req1 = _new_ready_decode_request("r1")
+    scheduler.running = [req0, req1]
+    req0.next_decode_eligible_step = scheduler.current_step + 2
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens == {"r1": 1}
 
 
 def test_throttle_defers_inflight_prefill_chunk():

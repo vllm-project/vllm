@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import TYPE_CHECKING
 
+from vllm import envs
+from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
 
@@ -602,6 +604,57 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                 cache_config.mamba_block_size = model_config.max_model_len
 
 
+class RWKV7ForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        wkv_mode = envs.VLLM_RWKV7_WKV_MODE
+        if wkv_mode not in {"fp16", "fp32io16"}:
+            raise ValueError(
+                f"VLLM_RWKV7_WKV_MODE={wkv_mode!r} is invalid for RWKV7. "
+                "Expected one of: fp16, fp32io16."
+            )
+
+        cache_config = getattr(vllm_config, "cache_config", None)
+        if cache_config is not None:
+            cache_config.enable_prefix_caching = False
+
+        scheduler_config = getattr(vllm_config, "scheduler_config", None)
+        if scheduler_config is not None:
+            token_budget = scheduler_config.max_num_scheduled_tokens
+            if token_budget is None:
+                token_budget = scheduler_config.max_num_batched_tokens
+            if scheduler_config.max_num_seqs > token_budget:
+                raise ValueError(
+                    "RWKV7 native decode wave requires max_num_seqs to fit "
+                    "within max_num_scheduled_tokens or max_num_batched_tokens. "
+                    f"Got max_num_seqs={scheduler_config.max_num_seqs} and "
+                    f"token_budget={token_budget}."
+                )
+
+        compilation_config = vllm_config.compilation_config
+        if compilation_config.mode not in (None, CompilationMode.NONE):
+            raise ValueError(
+                "RWKV7 does not support torch.compile. Use non-compiled "
+                "execution with CompilationMode.NONE."
+            )
+        compilation_config.mode = CompilationMode.NONE
+
+        cudagraph_mode = compilation_config.cudagraph_mode
+        if (
+            vllm_config.model_config.enforce_eager
+            or cudagraph_mode == CUDAGraphMode.NONE
+        ):
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            return
+
+        if cudagraph_mode not in (None, CUDAGraphMode.FULL_DECODE_ONLY):
+            logger.warning_once(
+                "RWKV7 supports decode-only CUDAGraph without torch.compile. "
+                "Overriding cudagraph_mode to FULL_DECODE_ONLY."
+            )
+        compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+
+
 class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
     DEFAULT_MAMBA_SSM_CACHE_DTYPE = "float32"
     """Only `float32` is known to have no accuracy issues by default."""
@@ -862,6 +915,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen3VLForSequenceClassification": Qwen3VLForSequenceClassificationConfig,
     "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
+    "RWKV7ForCausalLM": RWKV7ForCausalLMConfig,
     "UnlimitedOCRForCausalLM": UnlimitedOCRForCausalLMConfig,
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,

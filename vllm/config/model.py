@@ -632,6 +632,8 @@ class ModelConfig:
                 self.tokenizer_mode = "deepseek_v4"
             elif arch in ("InklingForCausalLM", "InklingForConditionalGeneration"):
                 self.tokenizer_mode = "inkling"
+            elif arch == "RWKV7ForCausalLM":
+                self.tokenizer_mode = "rwkv"
 
             if self.tokenizer_mode != "auto":
                 logger.info(

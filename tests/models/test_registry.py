@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import subprocess
+import sys
 import warnings
+from types import SimpleNamespace
 
 import pytest
 import torch.cuda
@@ -23,6 +26,7 @@ from vllm.model_executor.models.registry import (
     _LazyRegisteredModel,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.config import get_config
 
 from ..utils import create_new_process_for_each_test
 from .registry import HF_EXAMPLE_MODELS
@@ -159,3 +163,57 @@ def test_hf_registry_coverage():
         "Please add the following architectures to "
         f"`tests/models/registry.py`: {untested_archs}"
     )
+
+
+def test_rwkv7_hf_registry_uses_blinkdl_raw_pth(tmp_path):
+    model_info = HF_EXAMPLE_MODELS.get_hf_info("RWKV7ForCausalLM")
+
+    assert model_info.default == (
+        "https://huggingface.co/BlinkDL/rwkv7-g1/blob/main/"
+        "rwkv7-g1g-1.5b-20260526-ctx8192.pth"
+    )
+    assert model_info.tokenizer_mode == "rwkv"
+    assert model_info.is_available_online is False
+
+    checkpoint = tmp_path / "rwkv7-g1g-1.5b-20260526-ctx8192.pth"
+    checkpoint.touch()
+    hf_config = get_config(checkpoint, trust_remote_code=False)
+    model_cls, arch = ModelRegistry.resolve_model_cls(
+        hf_config.architectures,
+        SimpleNamespace(
+            model_impl="auto",
+            convert_type="none",
+            runner_type="generate",
+        ),
+    )
+
+    assert arch == "RWKV7ForCausalLM"
+    assert model_cls.__name__ == "RWKV7ForCausalLM"
+    assert is_text_generation_model(model_cls)
+
+
+def test_rwkv7_registry_load_does_not_import_ops_with_unspecified_platform():
+    code = """
+import sys
+import types
+
+for name in (
+    "vllm._C",
+    "vllm._C_stable_libtorch",
+    "vllm._moe_C_stable_libtorch",
+):
+    sys.modules[name] = types.ModuleType(name)
+
+import vllm.platforms as platforms
+from vllm.platforms.interface import UnspecifiedPlatform
+
+platforms.current_platform = UnspecifiedPlatform()
+from vllm.model_executor.models.registry import ModelRegistry
+
+assert "vllm.rwkv7_ops" not in sys.modules
+model_cls = ModelRegistry._try_load_model_cls("RWKV7ForCausalLM")
+assert model_cls.__name__ == "RWKV7ForCausalLM"
+assert "vllm.rwkv7_ops" not in sys.modules
+"""
+
+    subprocess.run([sys.executable, "-c", code], check=True)

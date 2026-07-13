@@ -48,6 +48,57 @@ def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch)
     assert envs.VLLM_P2P_SIDE_CHANNEL_PORT == 5799
 
 
+def test_rwkv7_runtime_profile_is_registered() -> None:
+    with patch.dict(
+        os.environ,
+        {"VLLM_RWKV7_WKV_MODE": "fp32io16"},
+        clear=True,
+    ):
+        envs.validate_environ(hard_fail=True)
+
+        assert envs.VLLM_RWKV7_WKV_MODE == "fp32io16"
+
+
+def test_rwkv7_wkv_mode_defaults_to_fp16() -> None:
+    with patch.dict(os.environ, {}, clear=True):
+        assert envs.environment_variables["VLLM_RWKV7_WKV_MODE"]() == "fp16"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "VLLM_RWKV7_EMB_DEVICE",
+        "VLLM_RWKV7_RKV_MODE",
+        "VLLM_RWKV7_CMIX_SPARSE",
+        "VLLM_RWKV7_LOW_RANK_WEIGHT",
+        "VLLM_RWKV7_ORIG_LINEAR_GROUPS",
+        "VLLM_RWKV7_ALLOW_FP16_ACCUMULATION",
+        "VLLM_RWKV7_SLOT_MAPPED_STATE",
+        "VLLM_RWKV7_SKIP_V2_KERNEL_WARMUP",
+    ],
+)
+def test_rwkv7_legacy_path_environment_variables_are_rejected(name: str) -> None:
+    assert name not in environment_variables
+    assert not hasattr(envs, name)
+
+    with (
+        patch.dict(os.environ, {name: "1"}, clear=True),
+        pytest.raises(ValueError, match=name),
+    ):
+        envs.validate_environ(hard_fail=True)
+
+
+def test_rwkv7_model_is_not_a_registered_runtime_environment_variable() -> None:
+    assert "VLLM_RWKV7_MODEL" not in environment_variables
+    assert not hasattr(envs, "VLLM_RWKV7_MODEL")
+
+    with (
+        patch.dict(os.environ, {"VLLM_RWKV7_MODEL": "/tmp/rwkv7-model"}, clear=True),
+        pytest.raises(ValueError, match="VLLM_RWKV7_MODEL"),
+    ):
+        envs.validate_environ(hard_fail=True)
+
+
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
     monkeypatch.setenv("VLLM_PORT", "1234")

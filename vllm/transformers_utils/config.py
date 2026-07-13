@@ -120,6 +120,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     step3_text="Step3TextConfig",
     step3p5="Step3p5Config",
     qianfan_ocr="QianfanOCRConfig",
+    rwkv7="RWKV7Config",
     qwen3_asr="Qwen3ASRConfig",
     qwen3_next="Qwen3NextConfig",
     qwen3_5="Qwen3_5Config",
@@ -694,6 +695,12 @@ def get_config(
     hf_overrides_fn: Callable[[PretrainedConfig], PretrainedConfig] | None = None,
     **kwargs,
 ) -> PretrainedConfig:
+    from vllm.transformers_utils.configs.rwkv7 import build_rwkv7_config_from_pth
+
+    rwkv7_config = build_rwkv7_config_from_pth(model)
+    if rwkv7_config is not None:
+        return rwkv7_config
+
     if config_format == "auto":
         try:
             # First check for Mistral to avoid defaulting to
@@ -1043,8 +1050,10 @@ def get_hf_image_processor_config(
     revision: str | None = None,
     **kwargs,
 ) -> dict[str, Any]:
+    from vllm.transformers_utils.configs.rwkv7 import try_parse_rwkv7_pth_source
+
     # ModelScope does not provide an interface for image_processor
-    if envs.VLLM_USE_MODELSCOPE:
+    if envs.VLLM_USE_MODELSCOPE or try_parse_rwkv7_pth_source(model) is not None:
         return dict()
     return get_image_processor_config(
         model, token=hf_token, revision=revision, **kwargs
@@ -1075,6 +1084,12 @@ def try_get_generation_config(
     config_format: str | ConfigFormat = "auto",
     hf_token: bool | str | None = None,
 ) -> GenerationConfig | None:
+    from vllm.transformers_utils.configs.rwkv7 import build_rwkv7_config_from_pth
+
+    rwkv7_config = build_rwkv7_config_from_pth(model)
+    if rwkv7_config is not None:
+        return GenerationConfig.from_model_config(rwkv7_config)
+
     try:
         return GenerationConfig.from_pretrained(
             model,
