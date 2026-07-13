@@ -243,16 +243,10 @@ def _minimax_qk_norm_fusion(
         if q_size % warp_work_size == 0 and kv_size % warp_work_size == 0:
             aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
             if aiter_ar is not None:
-                try:
-                    q_out, k_out, _ = aiter_ar.aiter_ca.custom_fused_qknorm_ar(
-                        qkv, q_weight, k_weight, eps
-                    )
-                    return q_out, k_out
-                except (RuntimeError, AttributeError):
-                    logger.warning_once(
-                        "AITER custom_fused_qknorm_ar failed, "
-                        "falling back to unfused path."
-                    )
+                q_out, k_out, _ = aiter_ar.aiter_ca.custom_fused_qknorm_ar(
+                    qkv, q_weight, k_weight, eps
+                )
+                return q_out, k_out
     return _minimax_qk_norm_tp_fallback(
         qkv, q_weight, k_weight, q_size, kv_size, tp_rank, tp_world, eps
     )
