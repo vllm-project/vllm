@@ -202,5 +202,8 @@ pub enum ChatEvent {
         finish_reason: FinishReason,
         /// Connector-specific KV transfer parameters for disaggregated serving.
         kv_transfer_params: Option<serde_json::Value>,
+        /// Connector-specific encoder cache transfer parameters for
+        /// disaggregated serving.
+        ec_transfer_params: Option<serde_json::Value>,
     },
 }
