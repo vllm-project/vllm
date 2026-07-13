@@ -523,6 +523,7 @@ def make_nixl_scheduler(
         sched.side_channel_port = 5555
         sched.blocks_per_sw = []
         sched.is_bidirectional_kv_xfer_enabled = False
+        sched.kv_cache_config = make_kv_cache_config(block_size=16)
     return sched
 
 
@@ -562,6 +563,9 @@ def make_nixl_push_scheduler(
     sched.side_channel_port = 5600
     sched.is_bidirectional_kv_xfer_enabled = is_bidirectional_kv_xfer_enabled
     sched._has_mamba = has_mamba
+    sched.kv_cache_config = make_kv_cache_config(
+        block_size=16, mamba_enabled=has_mamba
+    )
 
     # vllm_config is consulted for parallel_config.tensor_parallel_size.
     vllm_config = MagicMock()

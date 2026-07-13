@@ -749,6 +749,49 @@ def test_nixl_metadata_hybrid_ssm_block_ids():
     assert len(req_meta.remote.block_ids[0]) != len(req_meta.remote.block_ids[1])
 
 
+@pytest.mark.cpu_test
+def test_nixl_meta_marks_loaded_attention_blocks_to_skip_zeroing():
+    """Remote loads overwrite FA blocks, but not Mamba state blocks."""
+    from vllm.v1.core.sched.output import SchedulerOutput
+
+    scheduler = make_nixl_scheduler(
+        has_mamba=True, is_hma_required=True, heartbeat=True
+    )
+    scheduler.kv_cache_config = make_kv_cache_config(block_size=16, mamba_enabled=True)
+
+    req = create_request(do_remote_prefill=True)
+    assert req.kv_transfer_params is not None
+    req.kv_transfer_params["remote_block_ids"] = ([100, 101], [200])
+
+    scheduler._reqs_need_recv[req.request_id] = (req, ([10, 11], [20]))
+
+    meta = scheduler.build_connector_meta(SchedulerOutput.make_empty())
+
+    assert meta.get_blocks_to_skip_kv_cache_zeroing() == {10, 11}
+
+
+@pytest.mark.cpu_test
+def test_scheduler_filters_connector_loaded_blocks_from_zeroing():
+    """Blocks that will be loaded by the connector must not be zeroed."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+    )
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    class FakeKVCacheManager:
+        def take_new_block_ids(self):
+            return [9, 10, 11, 12]
+
+    scheduler = object.__new__(Scheduler)
+    scheduler.needs_kv_cache_zeroing = True
+    scheduler.kv_cache_manager = FakeKVCacheManager()
+
+    metadata = NixlConnectorMetadata()
+    metadata.add_blocks_to_skip_kv_cache_zeroing({10, 12})
+
+    assert scheduler._get_new_block_ids_to_zero(metadata) == [9, 11]
+
+
 # ── Mamba N-1 prefill tests ──────────────────────────────────────────────
 
 

@@ -144,7 +144,9 @@ class KVConnectorMetadata(ABC):  # noqa: B024
     Scheduler KVConnector -> Worker KVConnector.
     """
 
-    pass
+    def get_blocks_to_skip_kv_cache_zeroing(self) -> set[int]:
+        """Return block IDs that will be overwritten by connector loads."""
+        return set()
 
 
 class KVConnectorWorkerMetadata(ABC):
