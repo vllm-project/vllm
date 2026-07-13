@@ -102,6 +102,7 @@ def _cpu_gdn_attention_nonspec(
     query_start_loc = attn_metadata_i.non_spec_query_start_loc
     assert state_indices_tensor is not None
     assert query_start_loc is not None
+    state_indices_tensor = state_indices_tensor.contiguous()
 
     is_amx = torch.cpu._is_amx_tile_supported()
 
@@ -316,9 +317,9 @@ def _cpu_gdn_attention_spec_aware(
 
     if spec_sequence_masks is None:
         # No spec sequences in this batch (e.g. the prompt prefill step while
-        # speculative decoding is configured). Process as prefill/decode using
-        # torch conv (which only touches the first ``width-1`` columns of the
-        # wide buffer, leaving the rolling history untouched).
+        # speculative decoding is configured). Process as ordinary
+        # prefill/decode while touching only the first ``width-1`` columns of
+        # the wide buffer, leaving the rolling history untouched.
         _spec_aware_nonspec(
             layer,
             attn_metadata_i,
@@ -417,29 +418,53 @@ def _spec_forward(
     bias = layer.conv1d.bias
     silu = layer.activation == "silu"
 
-    conv_out = torch.empty_like(mixed_qkv_spec)
     col0 = spec_state_indices[:, 0].to("cpu", torch.int64)
-    for i in range(num_spec_decodes):
-        q_i = int(seq_lens[i].item())
-        if q_i == 0:
-            continue
-        start = int(seq_starts[i].item())
-        slot0 = int(col0[i].item())
-        a_prev = int(num_acc_cpu[i].item())
-        offset = a_prev - 1
-        B = conv_buf[slot0]  # (dim, state_len)
-        x_seq = mixed_qkv_spec[start : start + q_i].transpose(0, 1).to(B.dtype)
-        prior = B[:, offset : offset + (width - 1)]
-        conv_in = torch.cat([prior, x_seq], dim=-1).unsqueeze(0)  # (1, dim, w-1+q)
-        out = F.conv1d(conv_in, w, bias, groups=dim)[0]  # (dim, q_i)
-        if silu:
-            out = F.silu(out)
-        conv_out[start : start + q_i] = out.transpose(0, 1).to(conv_out.dtype)
-        # Roll the buffer: drop ``a_prev`` from the front, append the new
-        # draft tokens, keep total length == state_len.
-        keep = B[:, offset + 1 : offset + 1 + (state_len - q_i)]
-        new_B = torch.cat([keep, x_seq], dim=-1)
-        B.copy_(new_B)
+    history_offsets_cpu = torch.clamp(num_acc_cpu - 1, min=0)
+
+    can_use_native_conv = (
+        torch.cpu._is_amx_tile_supported()
+        and not is_conv_state_dim_first()
+        and width == 4
+        and num_spec_decodes > 0
+        and bool(torch.all(seq_lens == seq_lens[0]).item())
+        and int(seq_lens[0].item()) > 0
+    )
+    if can_use_native_conv:
+        q_i = int(seq_lens[0].item())
+        conv_out = ops.causal_conv1d_update_cpu(
+            x=mixed_qkv_spec.reshape(num_spec_decodes, q_i, dim).contiguous(),
+            conv_states=conv_buf,
+            weight=layer.conv1d.weight,
+            bias=bias,
+            silu_activation=silu,
+            conv_state_indices=col0[:num_spec_decodes].to(torch.int32).contiguous(),
+            is_vnni=True,
+            cache_seqlens=history_offsets_cpu[:num_spec_decodes]
+            .to(torch.int32)
+            .contiguous(),
+        ).reshape_as(mixed_qkv_spec)
+    else:
+        conv_out = torch.empty_like(mixed_qkv_spec)
+        for i in range(num_spec_decodes):
+            q_i = int(seq_lens[i].item())
+            if q_i == 0:
+                continue
+            start = int(seq_starts[i].item())
+            slot0 = int(col0[i].item())
+            offset = int(history_offsets_cpu[i].item())
+            B = conv_buf[slot0]  # (dim, state_len)
+            x_seq = mixed_qkv_spec[start : start + q_i].transpose(0, 1).to(B.dtype)
+            prior = B[:, offset : offset + (width - 1)]
+            conv_in = torch.cat([prior, x_seq], dim=-1).unsqueeze(0)
+            out = F.conv1d(conv_in, w, bias, groups=dim)[0]  # (dim, q_i)
+            if silu:
+                out = F.silu(out)
+            conv_out[start : start + q_i] = out.transpose(0, 1).to(conv_out.dtype)
+            # Roll the buffer: drop the accepted history from the front, append
+            # the new draft tokens, keep total length == state_len.
+            keep = B[:, offset + 1 : offset + 1 + (state_len - q_i)]
+            new_B = torch.cat([keep, x_seq], dim=-1)
+            B.copy_(new_B)
 
     # ---- 2. Recurrent (multi-slot SSM state) ----
     # Single fused kernel call: it runs the recurrence over each sequence's
@@ -489,13 +514,19 @@ def _spec_aware_nonspec(
     ssm_state: torch.Tensor,
     width: int,
 ) -> None:
-    """Non-spec prefill/decode with a wide conv buffer (torch path)."""
+    """Non-spec prefill/decode with a wide conv buffer."""
     state_indices_tensor = attn_metadata_i.non_spec_state_indices_tensor
     query_start_loc = attn_metadata_i.non_spec_query_start_loc
     assert state_indices_tensor is not None
     assert query_start_loc is not None
+    state_indices_tensor = state_indices_tensor.contiguous()
 
-    conv_weights = _unpacked_conv_weight(layer)
+    is_amx = torch.cpu._is_amx_tile_supported()
+    if is_amx and is_conv_state_dim_first():
+        raise RuntimeError("AMX GDN attention requires `SD` conv_state layout.")
+
+    if not is_amx:
+        conv_weights = _unpacked_conv_weight(layer)
 
     num_decodes = attn_metadata_i.num_decodes
     num_decode_tokens = attn_metadata_i.num_decode_tokens
@@ -507,27 +538,38 @@ def _spec_aware_nonspec(
         decode_b = b[:num_decode_tokens]
         decode_a = a[:num_decode_tokens]
         decode_state_indices = state_indices_tensor[:num_decodes]
-        # Only the first ``width-1`` columns hold the real conv state.
-        if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
-            conv_state_view = conv_buf[:, :, : width - 1]
-            decode_conv_state = conv_state_view[decode_state_indices].contiguous()
-            decode_mixed_qkv = causal_conv1d_update_torch(
-                x=decode_mixed_qkv.unsqueeze(-1),
-                conv_state=decode_conv_state,
-                weight=conv_weights,
-                bias=layer.conv1d.bias,
-                activation=layer.activation,
-            ).squeeze(-1)
-            conv_state_view[decode_state_indices] = decode_conv_state
-        else:
-            decode_mixed_qkv = causal_conv1d_update_cpu(
+        if is_amx:
+            decode_mixed_qkv = ops.causal_conv1d_update_cpu(
                 x=decode_mixed_qkv,
-                conv_state=conv_buf[:, :, : width - 1],
-                weight=conv_weights,
+                conv_states=conv_buf,
+                weight=layer.conv1d.weight,
                 bias=layer.conv1d.bias,
-                activation=layer.activation,
+                silu_activation=layer.activation == "silu",
                 conv_state_indices=decode_state_indices,
+                is_vnni=True,
             )
+        else:
+            # Only the first ``width-1`` columns hold the real conv state.
+            conv_state_view = conv_buf[:, :, : width - 1]
+            if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
+                decode_conv_state = conv_state_view[decode_state_indices].contiguous()
+                decode_mixed_qkv = causal_conv1d_update_torch(
+                    x=decode_mixed_qkv.unsqueeze(-1),
+                    conv_state=decode_conv_state,
+                    weight=conv_weights,
+                    bias=layer.conv1d.bias,
+                    activation=layer.activation,
+                ).squeeze(-1)
+                conv_state_view[decode_state_indices] = decode_conv_state
+            else:
+                decode_mixed_qkv = causal_conv1d_update_cpu(
+                    x=decode_mixed_qkv,
+                    conv_state=conv_state_view,
+                    weight=conv_weights,
+                    bias=layer.conv1d.bias,
+                    activation=layer.activation,
+                    conv_state_indices=decode_state_indices,
+                )
 
         query, key, value = layer.rearrange_mixed_qkv(decode_mixed_qkv)
         # rearrange_mixed_qkv can return views whose last dim is not
@@ -568,17 +610,29 @@ def _spec_aware_nonspec(
         prefill_has_initial_state = has_initial_state[
             num_decodes : num_decodes + num_prefills
         ]
-        # ``causal_conv1d_torch`` only touches columns [:width-1] of the buffer.
-        prefill_mixed_qkv = causal_conv1d_torch(
-            x=prefill_mixed_qkv.transpose(0, 1),
-            weight=conv_weights,
-            bias=layer.conv1d.bias,
-            conv_states=conv_buf,
-            query_start_loc=prefill_query_start_loc,
-            cache_indices=prefill_state_indices,
-            has_initial_state=prefill_has_initial_state,
-            activation=layer.activation,
-        ).transpose(0, 1)
+        if is_amx:
+            prefill_mixed_qkv = ops.causal_conv1d_fwd_cpu(
+                x=prefill_mixed_qkv.transpose(0, 1),
+                weight=layer.conv1d.weight,
+                bias=layer.conv1d.bias,
+                conv_states=conv_buf,
+                query_start_loc=prefill_query_start_loc,
+                cache_indices=prefill_state_indices,
+                has_initial_state=prefill_has_initial_state,
+                silu_activation=layer.activation == "silu",
+                is_vnni=True,
+            ).transpose(0, 1)
+        else:
+            prefill_mixed_qkv = causal_conv1d_torch(
+                x=prefill_mixed_qkv.transpose(0, 1),
+                weight=conv_weights,
+                bias=layer.conv1d.bias,
+                conv_states=conv_buf,
+                query_start_loc=prefill_query_start_loc,
+                cache_indices=prefill_state_indices,
+                has_initial_state=prefill_has_initial_state,
+                activation=layer.activation,
+            ).transpose(0, 1)
 
         query, key, value = layer.rearrange_mixed_qkv(prefill_mixed_qkv)
         g, beta = ops.fused_gdn_gating_cpu(
@@ -624,18 +678,36 @@ def _spec_aware_nonspec_subset(
     prefill_qsl = attn_metadata_i.prefill_query_start_loc
     assert prefill_state_indices is not None and prefill_qsl is not None
     assert has_initial_state is not None
+    prefill_state_indices = prefill_state_indices.contiguous()
 
-    conv_weights = _unpacked_conv_weight(layer)
-    conv_out = causal_conv1d_torch(
-        x=mixed_qkv.transpose(0, 1),
-        weight=conv_weights,
-        bias=layer.conv1d.bias,
-        conv_states=conv_buf,
-        query_start_loc=prefill_qsl,
-        cache_indices=prefill_state_indices,
-        has_initial_state=has_initial_state,
-        activation=layer.activation,
-    ).transpose(0, 1)
+    is_amx = torch.cpu._is_amx_tile_supported()
+    if is_amx and is_conv_state_dim_first():
+        raise RuntimeError("AMX GDN attention requires `SD` conv_state layout.")
+
+    if is_amx:
+        conv_out = ops.causal_conv1d_fwd_cpu(
+            x=mixed_qkv.transpose(0, 1),
+            weight=layer.conv1d.weight,
+            bias=layer.conv1d.bias,
+            conv_states=conv_buf,
+            query_start_loc=prefill_qsl,
+            cache_indices=prefill_state_indices,
+            has_initial_state=has_initial_state,
+            silu_activation=layer.activation == "silu",
+            is_vnni=True,
+        ).transpose(0, 1)
+    else:
+        conv_weights = _unpacked_conv_weight(layer)
+        conv_out = causal_conv1d_torch(
+            x=mixed_qkv.transpose(0, 1),
+            weight=conv_weights,
+            bias=layer.conv1d.bias,
+            conv_states=conv_buf,
+            query_start_loc=prefill_qsl,
+            cache_indices=prefill_state_indices,
+            has_initial_state=has_initial_state,
+            activation=layer.activation,
+        ).transpose(0, 1)
 
     query, key, value = layer.rearrange_mixed_qkv(conv_out)
     g, beta = ops.fused_gdn_gating_cpu(
