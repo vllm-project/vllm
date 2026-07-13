@@ -65,6 +65,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.sampling_params import (
+    RAPID_PENALTY_DECAY_DEFAULT,
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
@@ -271,6 +272,7 @@ class ResponsesRequest(OpenAIBaseModel):
     )
 
     repetition_penalty: float | None = None
+    penalty_decay: float | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: str | list[str] | None = []
     ignore_eos: bool = False
@@ -352,6 +354,7 @@ class ResponsesRequest(OpenAIBaseModel):
         "temperature": 1.0,
         "top_p": 1.0,
         "top_k": 0,
+        "penalty_decay": RAPID_PENALTY_DECAY_DEFAULT,
     }
 
     def to_sampling_params(
@@ -381,6 +384,12 @@ class ResponsesRequest(OpenAIBaseModel):
         if (repetition_penalty := self.repetition_penalty) is None:
             repetition_penalty = default_sampling_params.get("repetition_penalty", 1.0)
 
+        if (penalty_decay := self.penalty_decay) is None:
+            penalty_decay = default_sampling_params.get(
+                "penalty_decay",
+                self._DEFAULT_SAMPLING_PARAMS["penalty_decay"],
+            )
+
         if (presence_penalty := self.presence_penalty) is None:
             presence_penalty = default_sampling_params.get("presence_penalty", 0.0)
 
@@ -409,8 +418,15 @@ class ResponsesRequest(OpenAIBaseModel):
                 )
 
         stop = self.stop if self.stop else []
+        if not stop and "stop" not in self.model_fields_set:
+            stop = default_sampling_params.get("stop", stop)
         if isinstance(stop, str):
             stop = [stop]
+        elif isinstance(stop, list):
+            stop = list(stop)
+        stop_token_ids = default_sampling_params.get("stop_token_ids")
+        if isinstance(stop_token_ids, list):
+            stop_token_ids = list(stop_token_ids)
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
@@ -428,8 +444,10 @@ class ResponsesRequest(OpenAIBaseModel):
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,
             repetition_penalty=repetition_penalty,
+            penalty_decay=penalty_decay,
             seed=self.seed,
             ignore_eos=self.ignore_eos,
+            stop_token_ids=stop_token_ids,
             output_kind=(
                 RequestOutputKind.DELTA if self.stream else RequestOutputKind.FINAL_ONLY
             ),

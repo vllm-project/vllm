@@ -102,6 +102,10 @@ from vllm.parser import Parser, ParserManager
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.rwkv_defaults import (
+    apply_rwkv_default_sampling_params,
+    resolve_rwkv_tool_parser,
+)
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
 
@@ -182,6 +186,11 @@ class OpenAIServingResponses(GenerateBaseServing):
 
         # Set up the unified parser - either a unified parser or fall back to
         # separate parsers accessed through the parser interface
+        tool_parser = resolve_rwkv_tool_parser(
+            tool_parser=tool_parser,
+            enable_auto_tools=enable_auto_tools,
+            model_config=self.model_config,
+        )
         self.parser = ParserManager.get_parser(
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,
@@ -193,6 +202,9 @@ class OpenAIServingResponses(GenerateBaseServing):
         self.enable_force_include_usage = enable_force_include_usage
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
+        apply_rwkv_default_sampling_params(
+            self.default_sampling_params, self.model_config
+        )
         mc = self.model_config
         self.override_max_tokens = (
             self.default_sampling_params.get("max_tokens")

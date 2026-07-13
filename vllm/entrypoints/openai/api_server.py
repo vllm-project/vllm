@@ -11,7 +11,7 @@ import socket
 import tempfile
 import warnings
 from argparse import Namespace
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
@@ -22,6 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.datastructures import State
 
 import vllm.envs as envs
+from vllm.build_profile import get_build_profile_metadata
 from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
@@ -32,7 +33,6 @@ from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
-from vllm.entrypoints.serve.sagemaker.api_router import sagemaker_standards_bootstrap
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import (
     cli_env_setup,
@@ -69,6 +69,12 @@ from vllm.utils.network_utils import is_valid_ipv6_address
 from vllm.utils.system_utils import decorate_logs, set_ulimit
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.version import __version__ as VLLM_VERSION
+
+sagemaker_standards_bootstrap: Callable[[FastAPI], FastAPI] | None = None
+if get_build_profile_metadata().profile == "full":
+    from vllm.entrypoints.serve.sagemaker.api_router import (
+        sagemaker_standards_bootstrap,
+    )
 
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
@@ -198,6 +204,7 @@ def build_app(
     supported_tasks: tuple["SupportedTask", ...] | None = None,
     model_config: ModelConfig | None = None,
 ) -> FastAPI:
+    build_profile = get_build_profile_metadata()
     if supported_tasks is None:
         warnings.warn(
             "The 'supported_tasks' parameter was not provided to "
@@ -228,11 +235,12 @@ def build_app(
 
     register_models_api_router(app)
 
-    from vllm.entrypoints.serve.sagemaker.api_router import (
-        attach_router as register_sagemaker_api_router,
-    )
+    if build_profile.profile == "full":
+        from vllm.entrypoints.serve.sagemaker.api_router import (
+            attach_router as register_sagemaker_api_router,
+        )
 
-    register_sagemaker_api_router(app, supported_tasks, model_config)
+        register_sagemaker_api_router(app, supported_tasks, model_config)
 
     if envs.VLLM_SERVER_DEV_MODE:
         from vllm.entrypoints.serve import register_vllm_dev_api_routers
@@ -244,7 +252,7 @@ def build_app(
             register_generate_api_routers,
         )
 
-        register_generate_api_routers(app)
+        register_generate_api_routers(app, build_profile)
 
         from vllm.entrypoints.serve.elastic_ep.api_router import (
             attach_router as elastic_ep_attach_router,
@@ -345,7 +353,9 @@ def build_app(
                 f"Invalid middleware {middleware}. Must be a function or a class."
             )
 
-    app = sagemaker_standards_bootstrap(app)
+    if build_profile.profile == "full":
+        assert sagemaker_standards_bootstrap is not None
+        app = sagemaker_standards_bootstrap(app)
     return app
 
 
@@ -356,6 +366,7 @@ async def init_app_state(
     supported_tasks: tuple["SupportedTask", ...] | None = None,
 ) -> None:
     vllm_config = engine_client.vllm_config
+    build_profile = get_build_profile_metadata()
 
     if args.tool_call_parser is not None:
         from vllm.parser.metrics import init_parser_metrics
@@ -453,7 +464,12 @@ async def init_app_state(
         from vllm.entrypoints.generate.api_router import init_generate_state
 
         await init_generate_state(
-            engine_client, state, args, request_logger, supported_tasks
+            engine_client,
+            state,
+            args,
+            request_logger,
+            supported_tasks,
+            build_profile,
         )
 
         from vllm.entrypoints.scale_out.factories import init_scale_out_state

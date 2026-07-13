@@ -41,6 +41,7 @@ from vllm.renderers.inputs.preprocess import (
     parse_model_prompt,
     prompt_to_seq,
 )
+from vllm.tokenizers.rwkv_defaults import resolve_rwkv_tool_parser
 from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
 from vllm.utils.mistral import mt as _mt
 
@@ -71,6 +72,11 @@ class OnlineRenderer:
         self.enable_auto_tools = enable_auto_tools
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
         self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
+        tool_parser = resolve_rwkv_tool_parser(
+            tool_parser=tool_parser,
+            enable_auto_tools=enable_auto_tools,
+            model_config=model_config,
+        )
         self.parser: type[Parser] | None = ParserManager.get_parser(
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,

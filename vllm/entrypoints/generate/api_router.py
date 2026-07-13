@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
+from vllm.build_profile import BuildProfileMetadata, get_build_profile_metadata
+
 if TYPE_CHECKING:
     from argparse import Namespace
 
@@ -16,18 +18,22 @@ else:
     RequestLogger = object
 
 
-def register_generate_api_routers(app: FastAPI):
+def register_generate_api_routers(
+    app: FastAPI, build_profile: BuildProfileMetadata | None = None
+):
+    build_profile = build_profile or get_build_profile_metadata()
     from vllm.entrypoints.openai.chat_completion.api_router import (
         attach_router as register_chat_api_router,
     )
 
     register_chat_api_router(app)
 
-    from vllm.entrypoints.openai.responses.api_router import (
-        attach_router as register_responses_api_router,
-    )
+    if build_profile.unrestricted:
+        from vllm.entrypoints.openai.responses.api_router import (
+            attach_router as register_responses_api_router,
+        )
 
-    register_responses_api_router(app)
+        register_responses_api_router(app)
 
     from vllm.entrypoints.openai.completion.api_router import (
         attach_router as register_completion_api_router,
@@ -35,15 +41,18 @@ def register_generate_api_routers(app: FastAPI):
 
     register_completion_api_router(app)
 
-    from vllm.entrypoints.anthropic.api_router import (
-        attach_router as register_anthropic_api_router,
-    )
+    if build_profile.unrestricted:
+        from vllm.entrypoints.anthropic.api_router import (
+            attach_router as register_anthropic_api_router,
+        )
 
-    register_anthropic_api_router(app)
+        register_anthropic_api_router(app)
 
-    from .generative_scoring.api_router import register_generative_scoring_api_router
+        from .generative_scoring.api_router import (
+            register_generative_scoring_api_router,
+        )
 
-    register_generative_scoring_api_router(app)
+        register_generative_scoring_api_router(app)
 
 
 async def init_generate_state(
@@ -52,21 +61,25 @@ async def init_generate_state(
     args: "Namespace",
     request_logger: RequestLogger | None,
     supported_tasks: tuple["SupportedTask", ...],
+    build_profile: BuildProfileMetadata | None = None,
 ):
-    from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
+    build_profile = build_profile or get_build_profile_metadata()
     from vllm.entrypoints.chat_utils import load_chat_template
-    from vllm.entrypoints.mcp.tool_server import (
-        DemoToolServer,
-        MCPToolServer,
-        ToolServer,
-    )
     from vllm.entrypoints.openai.chat_completion.batch_serving import (
         OpenAIServingChatBatch,
     )
     from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
     from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
-    from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
     from vllm.entrypoints.serve.utils.fingerprint import set_default_fingerprint_mode
+
+    if build_profile.unrestricted:
+        from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
+        from vllm.entrypoints.mcp.tool_server import (
+            DemoToolServer,
+            MCPToolServer,
+            ToolServer,
+        )
+        from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 
     # Applied before any serving class is constructed so that each one picks
     # up the chosen mode on its first cache miss.
@@ -75,13 +88,21 @@ async def init_generate_state(
         getattr(args, "fingerprint_value", None),
     )
 
-    if args.tool_server == "demo":
-        tool_server: ToolServer | None = DemoToolServer()
-        assert isinstance(tool_server, DemoToolServer)
-        await tool_server.init_and_validate()
-    elif args.tool_server:
-        tool_server = MCPToolServer()
-        await tool_server.add_tool_server(args.tool_server)
+    if not build_profile.unrestricted and args.tool_server:
+        raise ValueError(
+            "The RWKV build profile does not support MCP tool servers. "
+            "Install a full build of vLLM to use --tool-server."
+        )
+    if build_profile.unrestricted:
+        if args.tool_server == "demo":
+            tool_server: ToolServer | None = DemoToolServer()
+            assert isinstance(tool_server, DemoToolServer)
+            await tool_server.init_and_validate()
+        elif args.tool_server:
+            tool_server = MCPToolServer()
+            await tool_server.add_tool_server(args.tool_server)
+        else:
+            tool_server = None
     else:
         tool_server = None
     resolved_chat_template = load_chat_template(args.chat_template)
@@ -108,7 +129,7 @@ async def init_generate_state(
             enable_log_outputs=args.enable_log_outputs,
             default_chat_template_kwargs=args.default_chat_template_kwargs,
         )
-        if "generate" in supported_tasks
+        if build_profile.unrestricted and "generate" in supported_tasks
         else None
     )
     _chat_kwargs = dict(
@@ -173,14 +194,17 @@ async def init_generate_state(
             enable_force_include_usage=args.enable_force_include_usage,
             default_chat_template_kwargs=args.default_chat_template_kwargs,
         )
-        if "generate" in supported_tasks
+        if build_profile.unrestricted and "generate" in supported_tasks
         else None
     )
 
-    from .generative_scoring.serving import ServingGenerativeScoring
+    if build_profile.unrestricted:
+        from .generative_scoring.serving import ServingGenerativeScoring
 
-    state.serving_generative_scoring = ServingGenerativeScoring(
-        engine_client,
-        state.openai_serving_models,
-        request_logger=request_logger,
-    )
+        state.serving_generative_scoring = ServingGenerativeScoring(
+            engine_client,
+            state.openai_serving_models,
+            request_logger=request_logger,
+        )
+    else:
+        state.serving_generative_scoring = None

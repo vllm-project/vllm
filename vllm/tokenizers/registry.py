@@ -48,6 +48,7 @@ _VLLM_TOKENIZERS = {
     # mode exists to select the InklingRenderer, which renders chat to
     # token ids natively (Inkling has no Jinja chat template).
     "inkling": ("hf", "CachedHfTokenizer"),
+    "rwkv": ("rwkv", "RWKVTokenizer"),
 }
 
 

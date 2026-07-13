@@ -30,6 +30,7 @@ from vllm.renderers.inputs.preprocess import (
     extract_prompt_len,
 )
 from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.tokenizers.rwkv_defaults import apply_rwkv_default_sampling_params
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -55,6 +56,7 @@ class ServingRender(BaseServing):
             online_renderer.model_config.get_diff_sampling_param()
         )
         mc = online_renderer.model_config
+        apply_rwkv_default_sampling_params(self.default_sampling_params, mc)
         self.override_max_tokens = (
             self.default_sampling_params.get("max_tokens")
             if mc.generation_config not in ("auto", "vllm")

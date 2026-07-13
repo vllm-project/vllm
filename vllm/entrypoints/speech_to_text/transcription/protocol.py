@@ -21,6 +21,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import (
+    RAPID_PENALTY_DECAY_DEFAULT,
     BeamSearchParams,
     RequestOutputKind,
     SamplingParams,
@@ -176,6 +177,9 @@ class TranscriptionRequest(OpenAIBaseModel):
     repetition_penalty: float | None = None
     """The repetition penalty to use for sampling."""
 
+    penalty_decay: float | None = None
+    """The rapid-sampling penalty decay to use for sampling."""
+
     presence_penalty: float | None = 0.0
     """The presence penalty to use for sampling."""
 
@@ -190,6 +194,7 @@ class TranscriptionRequest(OpenAIBaseModel):
         "top_p": 1.0,
         "top_k": 0,
         "min_p": 0.0,
+        "penalty_decay": RAPID_PENALTY_DECAY_DEFAULT,
     }
 
     def build_stt_params(
@@ -264,6 +269,11 @@ class TranscriptionRequest(OpenAIBaseModel):
                 "repetition_penalty",
                 self._DEFAULT_SAMPLING_PARAMS["repetition_penalty"],
             )
+        if (penalty_decay := self.penalty_decay) is None:
+            penalty_decay = default_sampling_params.get(
+                "penalty_decay",
+                self._DEFAULT_SAMPLING_PARAMS["penalty_decay"],
+            )
 
         return SamplingParams.from_optional(
             temperature=temperature,
@@ -274,6 +284,7 @@ class TranscriptionRequest(OpenAIBaseModel):
             min_p=min_p,
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=repetition_penalty,
+            penalty_decay=penalty_decay,
             presence_penalty=self.presence_penalty,
             output_kind=RequestOutputKind.DELTA
             if self.stream

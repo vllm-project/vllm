@@ -154,6 +154,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "pythonic_tool_parser",
         "PythonicToolParser",
     ),
+    "rwkv": (
+        "rwkv_tool_parser",
+        "RWKVToolParser",
+    ),
     "qwen3_coder": (
         "qwen3_engine_tool_parser",
         "Qwen3EngineToolParser",

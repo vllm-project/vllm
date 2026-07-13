@@ -64,6 +64,10 @@ from vllm.renderers import ChatParams
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.rwkv_defaults import (
+    apply_rwkv_default_sampling_params,
+    resolve_rwkv_tool_parser,
+)
 from vllm.utils.collection_utils import as_list
 from vllm.utils.mistral import is_mistral_tool_parser
 
@@ -144,6 +148,11 @@ class OpenAIServingChat(GenerateBaseServing):
         self.enable_log_deltas = enable_log_deltas
 
         self.enable_auto_tools: bool = enable_auto_tools
+        tool_parser = resolve_rwkv_tool_parser(
+            tool_parser=tool_parser,
+            enable_auto_tools=enable_auto_tools,
+            model_config=self.model_config,
+        )
         self.parser_cls = ParserManager.get_parser(
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,
@@ -166,6 +175,9 @@ class OpenAIServingChat(GenerateBaseServing):
         self.enable_force_include_usage = enable_force_include_usage
         self.enable_per_request_metrics = enable_per_request_metrics
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
+        apply_rwkv_default_sampling_params(
+            self.default_sampling_params, self.model_config
+        )
         mc = self.model_config
         self.override_max_tokens = (
             self.default_sampling_params.get("max_tokens")

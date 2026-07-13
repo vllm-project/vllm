@@ -39,6 +39,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.sampling_params import (
+    RAPID_PENALTY_DECAY_DEFAULT,
     BeamSearchParams,
     RepetitionDetectionParams,
     RequestOutputKind,
@@ -253,6 +254,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     top_k: int | None = None
     min_p: float | None = None
     repetition_penalty: float | None = None
+    penalty_decay: float | None = None
     length_penalty: float = 1.0
     stop_token_ids: list[int] | None = []
     include_stop_str_in_output: bool = False
@@ -587,6 +589,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         "top_p": 1.0,
         "top_k": 0,
         "min_p": 0.0,
+        "penalty_decay": RAPID_PENALTY_DECAY_DEFAULT,
     }
 
     def to_beam_search_params(
@@ -618,6 +621,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 "repetition_penalty",
                 self._DEFAULT_SAMPLING_PARAMS["repetition_penalty"],
             )
+        if (penalty_decay := self.penalty_decay) is None:
+            penalty_decay = default_sampling_params.get(
+                "penalty_decay",
+                self._DEFAULT_SAMPLING_PARAMS["penalty_decay"],
+            )
         if (temperature := self.temperature) is None:
             temperature = default_sampling_params.get(
                 "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"]
@@ -634,18 +642,19 @@ class ChatCompletionRequest(OpenAIBaseModel):
             min_p = default_sampling_params.get(
                 "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"]
             )
+        stop = self.stop
+        if not stop and "stop" not in self.model_fields_set:
+            stop = default_sampling_params.get("stop", stop)
+        if isinstance(stop, list):
+            stop = list(stop)
 
-        # Merge server-default stop_token_ids (e.g., model-specific tokens
-        # like </call> for gpt-oss) with any request-specified ones
         stop_token_ids = self.stop_token_ids
-        default_stop_ids = default_sampling_params.get("stop_token_ids")
-        if default_stop_ids:
-            if not stop_token_ids:
-                stop_token_ids = list(default_stop_ids)
-            else:
-                stop_token_ids = list(
-                    dict.fromkeys([*stop_token_ids, *default_stop_ids])
-                )
+        if not stop_token_ids and "stop_token_ids" not in self.model_fields_set:
+            stop_token_ids = default_sampling_params.get(
+                "stop_token_ids", stop_token_ids
+            )
+        if isinstance(stop_token_ids, list):
+            stop_token_ids = list(stop_token_ids)
 
         prompt_logprobs = self.prompt_logprobs
         if prompt_logprobs is None and self.echo:
@@ -695,12 +704,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
             presence_penalty=self.presence_penalty,
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=repetition_penalty,
+            penalty_decay=penalty_decay,
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
             min_p=min_p,
             seed=self.seed,
-            stop=self.stop,
+            stop=stop,
             stop_token_ids=stop_token_ids,
             logprobs=(
                 self.top_logprobs
@@ -1065,6 +1075,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     top_k: int | None = None
     min_p: float | None = None
     repetition_penalty: float | None = None
+    penalty_decay: float | None = None
     length_penalty: float | None = 1.0
     early_stopping: bool = False
     structured_outputs: StructuredOutputsParams | None = None
