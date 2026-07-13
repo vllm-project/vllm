@@ -6,6 +6,7 @@ import math
 import cutlass
 import cutlass.cute as cute
 from cuda.bindings.driver import CUstream
+from cutlass import const_expr
 from cutlass._mlir import ir as _ir
 from cutlass._mlir.dialects import llvm as _llvm
 from cutlass.cutlass_dsl import dsl_user_op
@@ -57,6 +58,8 @@ class LLBf16SplitK:
     :type num_dma_warps: int
     :param split_k: Number of CTAs in the cluster-level split-K reduction.
     :type split_k: int
+    :param use_pdl: Whether to launch with Programmatic Dependent Launch.
+    :type use_pdl: bool
 
     :note: Supported A/B data types:
         - BFloat16/BFloat16
@@ -81,6 +84,7 @@ class LLBf16SplitK:
         num_stages: int = 2,
         num_dma_warps: int = 4,
         split_k: int = 8,
+        use_pdl: bool = False,
     ):
         """Initialize the split-K kernel configuration.
 
@@ -101,6 +105,8 @@ class LLBf16SplitK:
         :type num_dma_warps: int
         :param split_k: CTAs in the cluster-level split-K reduction.
         :type split_k: int
+        :param use_pdl: Whether to launch with Programmatic Dependent Launch.
+        :type use_pdl: bool
         """
         self.ab_dtype = ab_dtype
         self.acc_dtype = acc_dtype
@@ -111,6 +117,7 @@ class LLBf16SplitK:
         self.copy_bits = 128
         self.num_stages = num_stages
         self.split_k = split_k
+        self.use_pdl = use_pdl
         self.mma_shape = (16, 8, 16)  # mma.sync.aligned.m16n8k16
         self.atom_layout = (1, 1, 1)  # one MMA atom per warp
         self.num_dma_warps = num_dma_warps
@@ -275,7 +282,7 @@ class LLBf16SplitK:
                 self.split_k,
             ],  # split-K CTAs form one cluster
             stream=stream,
-            use_pdl=False,
+            use_pdl=self.use_pdl,
         )
 
     @cute.kernel
@@ -387,7 +394,8 @@ class LLBf16SplitK:
                 tBsB[None, None, None, producer_state.index],
                 pred=tBpB,
             )
-            #cute.arch.griddepcontrol_wait()  # PDL-wait
+            if const_expr(self.use_pdl):
+                cute.arch.griddepcontrol_wait()
             cute.copy(
                 tiled_copy_A,
                 tAgA[None, None, None, k_start],
@@ -554,8 +562,8 @@ class LLBf16SplitK:
             cute.arch.cluster_arrive()
             cute.arch.cluster_wait()  # peer DSMEM stores are now visible
 
-            #if mma_tidx == 0:
-            #    cute.arch.griddepcontrol_launch_dependents()
+            if const_expr(self.use_pdl) and mma_tidx == 0:
+                cute.arch.griddepcontrol_launch_dependents()
             cute.arch.sync_threads()
 
             # Reduce split-K partials and write global output.

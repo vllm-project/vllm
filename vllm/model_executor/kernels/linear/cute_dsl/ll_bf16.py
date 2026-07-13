@@ -66,6 +66,12 @@ def _stream():
     return CUstream(current_stream().cuda_stream)
 
 
+def _use_pdl() -> bool:
+    from vllm.platforms import current_platform
+
+    return current_platform.is_arch_support_pdl()
+
+
 class LLBf16Gemm:
     @dataclass(frozen=True, slots=True)
     class CompileKey:
@@ -130,6 +136,7 @@ class LLBf16Gemm:
             num_stages=compile_key.num_stages,
             num_dma_warps=4,
             split_k=compile_key.split_k,
+            use_pdl=_use_pdl(),
         )
         compiled = cute.compile(
             gemm,
@@ -158,7 +165,9 @@ class LLBf16Gemm:
             N=N,
             divisibility=stride_divisibility,
         )
-        gemm = LLBf16Dotprod(k=compile_key.K, bs=compile_key.bs)
+        gemm = LLBf16Dotprod(
+            k=compile_key.K, bs=compile_key.bs, use_pdl=_use_pdl()
+        )
         compiled = cute.compile(
             gemm,
             hidden_states,

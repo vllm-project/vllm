@@ -23,6 +23,8 @@ class LLBf16Dotprod:
     :type main_vec_width: int
     :param tail_vec_width: bf16 elements loaded per thread in the vector tail.
     :type tail_vec_width: int
+    :param use_pdl: Whether to launch with Programmatic Dependent Launch.
+    :type use_pdl: bool
 
     :note: Supported A/B data types:
         - BFloat16/BFloat16
@@ -45,6 +47,7 @@ class LLBf16Dotprod:
         bs: int = 128,
         main_vec_width: int = 8,
         tail_vec_width: int = 4,
+        use_pdl: bool = False,
     ):
         """Initialize the dot-product kernel configuration.
 
@@ -60,10 +63,13 @@ class LLBf16Dotprod:
         :type main_vec_width: int
         :param tail_vec_width: BF16 elements loaded per thread in the vector tail.
         :type tail_vec_width: int
+        :param use_pdl: Whether to launch with Programmatic Dependent Launch.
+        :type use_pdl: bool
         """
         self.bs = bs
         self.main_vec_width = main_vec_width
         self.tail_vec_width = tail_vec_width
+        self.use_pdl = use_pdl
         self.num_warps = bs // cute.arch.WARP_SIZE
         self._init_k_tiles(k)
 
@@ -201,7 +207,7 @@ class LLBf16Dotprod:
             block=[self.bs, 1, 1],
             smem=M * 4 * self.num_warps,
             stream=stream,
-            use_pdl=False,
+            use_pdl=self.use_pdl,
             min_blocks_per_mp=1,
         )
 
@@ -234,7 +240,8 @@ class LLBf16Dotprod:
         acc = cute.make_rmem_tensor((M,), cutlass.Float32)
         acc.fill(0.0)
 
-        #cute.arch.griddepcontrol_wait()  # PDL wait
+        if const_expr(self.use_pdl):
+            cute.arch.griddepcontrol_wait()
 
         # 128-bit vectorized main loop
         if const_expr(k_main_elems > 0):
@@ -298,7 +305,8 @@ class LLBf16Dotprod:
                     init_val=cutlass.Float32(0.0),
                     reduction_profile=0,
                 )
-        #cute.arch.griddepcontrol_launch_dependents()  # PDL signal
+        if const_expr(self.use_pdl):
+            cute.arch.griddepcontrol_launch_dependents()
 
 
 def make_host_bf16(k_val: int, bs: int = 128):
