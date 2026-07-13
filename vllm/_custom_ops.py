@@ -2516,6 +2516,7 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     q_out: torch.Tensor | None = None,
     index_q_out: torch.Tensor | None = None,
     kv_cache_dtype: str = "auto",
+    skip_index_branch: bool = False,
 ) -> None:
     """Fused MiniMax-M3 attention pre-processing (in-place).
 
@@ -2537,6 +2538,11 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     instead of in place — folding the de-interleave into this kernel's store so
     callers skip a separate ``.contiguous()`` copy before the SM100 sparse
     attention's flat TMA descriptor.
+
+    When ``skip_index_branch`` is true, sparse rows still keep their packed
+    ``[index_q | index_k]`` tail, but the kernel only processes the main q/k/v
+    branches and main KV cache. This is used by MiniMax-M3 index-topk reuse
+    layers that consume top-k block ids selected by an earlier sparse layer.
     """
     torch.ops._C.fused_minimax_m3_qknorm_rope_kv_insert(
         qkv,
@@ -2559,6 +2565,7 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
         q_out,
         index_q_out,
         kv_cache_dtype,
+        skip_index_branch,
     )
 
 
@@ -3238,6 +3245,40 @@ def fused_sigmoid_gating_delta_rule_update_cpu(
         b,
         initial_state_source,
         initial_state_indices,
+        cu_seqlens,
+        use_qk_l2norm_in_kernel,
+        softplus_beta,
+        softplus_threshold,
+    )
+
+
+def fused_sigmoid_gating_delta_rule_update_spec_cpu(
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    initial_state_source: torch.Tensor,
+    spec_state_indices: torch.Tensor,
+    num_accepted_tokens: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    use_qk_l2norm_in_kernel: bool,
+    softplus_beta: float = 1.0,
+    softplus_threshold: float = 20.0,
+) -> torch.Tensor:
+    return torch.ops._C.fused_sigmoid_gating_delta_rule_update_spec_cpu(
+        A_log,
+        dt_bias,
+        q,
+        k,
+        v,
+        a,
+        b,
+        initial_state_source,
+        spec_state_indices,
+        num_accepted_tokens,
         cu_seqlens,
         use_qk_l2norm_in_kernel,
         softplus_beta,
