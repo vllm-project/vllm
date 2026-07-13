@@ -94,12 +94,10 @@ class LLBf16Gemm:
 
     def get_warmup_keys(
         self,
-        vllm_config: object,
         *,
         shapes: Iterable[tuple[int, int]],
         m_values: Iterable[int],
     ) -> list[CompileKey]:
-        del vllm_config
         return list(
             dict.fromkeys(
                 self.dispatch(M=M, K=K, N=N) for K, N in shapes for M in m_values
@@ -193,14 +191,11 @@ class LLBf16Gemm:
 
     def warmup(
         self,
-        vllm_config: object,
         *,
         shapes: Iterable[tuple[int, int]],
         m_values: Iterable[int],
     ) -> None:
-        for compile_key in self.get_warmup_keys(
-            vllm_config, shapes=shapes, m_values=m_values
-        ):
+        for compile_key in self.get_warmup_keys(shapes=shapes, m_values=m_values):
             self.compile(compile_key)
 
     @staticmethod

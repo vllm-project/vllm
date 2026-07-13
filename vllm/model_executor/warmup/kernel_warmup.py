@@ -50,7 +50,7 @@ _LL_BF16_WARMUP_MODEL_SHAPES: tuple[tuple[int, int], ...] = (
 _LL_BF16_WARMUP_M_RANGE = range(1, 17)
 
 
-def _warmup_ll_bf16_router_gemm(vllm_config: object) -> None:
+def _warmup_ll_bf16_router_gemm() -> None:
     from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
         is_available as is_ll_bf16_gemm_available,
     )
@@ -63,7 +63,6 @@ def _warmup_ll_bf16_router_gemm(vllm_config: object) -> None:
 
     logger.info("Warming up ll_bf16 router GEMM kernels.")
     ll_bf16_gemm_kernel.warmup(
-        vllm_config,
         shapes=_LL_BF16_WARMUP_MODEL_SHAPES,
         m_values=_LL_BF16_WARMUP_M_RANGE,
     )
@@ -121,7 +120,7 @@ def kernel_warmup(worker: "Worker"):
         flashinfer_autotune(worker.model_runner)
 
     if current_platform.has_device_capability(90):
-        _warmup_ll_bf16_router_gemm(worker.vllm_config)
+        _warmup_ll_bf16_router_gemm()
 
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups

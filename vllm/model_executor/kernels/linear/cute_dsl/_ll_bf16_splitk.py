@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CuteDSL A GEMM: C[M,N] = A[M,K] @ B[N,K]^T.
-
-Warp-specialized kernel with cluster split-K reduction.
-"""
 
 import math
 
@@ -40,9 +36,40 @@ def st_shared_remote_f32(remote_addr, val, *, loc=None, ip=None):
     )
 
 
-@dsl_user_op
 class LLBf16SplitK:
-    """Warp specialization split: half DMA, half MMA."""
+    """BF16 router GEMM kernel based on clustered split-K MMA.
+
+    This kernel computes C[M, N] = A[M, K] @ B[N, K]^T for bf16 inputs
+    and fp32 output. It partitions K across a CTA cluster, uses DMA warps to
+    stage A/B tiles with cp.async, uses MMA warps to accumulate fp32 partials,
+    and reduces split-K partials through DSMEM before storing C.
+
+    :param ab_dtype: Element type for A and B operands.
+    :param acc_dtype: Accumulator type used by MMA and reductions.
+    :param out_dtype: Output element type. The public wrapper uses fp32.
+    :param tile_n: CTA tile size in N. M is fixed to 16 for router batches.
+    :type tile_n: int
+    :param tile_k: K tile size staged through shared memory.
+    :type tile_k: int
+    :param num_stages: Number of cp.async pipeline stages.
+    :type num_stages: int
+    :param num_dma_warps: Producer warps that issue GMEM to SMEM copies.
+    :type num_dma_warps: int
+    :param split_k: Number of CTAs in the cluster-level split-K reduction.
+    :type split_k: int
+
+    :note: Supported A/B data types:
+        - BFloat16/BFloat16
+    :note: Supported accumulator data types:
+        - Float32
+    :note: Supported C data types:
+        - Float32
+    :note: Constraints:
+        - K must preserve 16-byte row alignment for contiguous bf16 inputs.
+
+    :compile-key: ``(split_k, num_stages)`` selects the cluster split
+        count and cp.async pipeline depth specialization.
+    """
 
     def __init__(
         self,
@@ -54,10 +81,27 @@ class LLBf16SplitK:
         num_stages: int = 2,
         num_dma_warps: int = 4,
         split_k: int = 8,
-        *,
-        loc=None,
-        ip=None,
     ):
+        """Initialize the split-K kernel configuration.
+
+        This configuration fixes the CTA tile shape, cp.async pipeline depth,
+        producer/consumer warp split, and CTA-cluster split count used by the
+        DSMEM reduction.
+
+        :param ab_dtype: Element type for A and B operands.
+        :param acc_dtype: Accumulator type used by MMA and reductions.
+        :param out_dtype: Output element type.
+        :param tile_n: CTA tile size in N. M is fixed to 16.
+        :type tile_n: int
+        :param tile_k: K tile size staged through shared memory.
+        :type tile_k: int
+        :param num_stages: Number of cp.async pipeline stages.
+        :type num_stages: int
+        :param num_dma_warps: Producer warps that issue GMEM to SMEM copies.
+        :type num_dma_warps: int
+        :param split_k: CTAs in the cluster-level split-K reduction.
+        :type split_k: int
+        """
         self.ab_dtype = ab_dtype
         self.acc_dtype = acc_dtype
         self.out_dtype = out_dtype
@@ -78,10 +122,11 @@ class LLBf16SplitK:
         self.epilogue_elems_per_thread = self.num_epilogue_elems // self.num_mma_threads
 
     def _make_smem_layout_AB(self, dtype, copy_bits, smem_tiler):
+        """Build the staged swizzled SMEM layout for A or B tiles."""
         major_size = min(smem_tiler[1], 64)
-        # Use the largest safe swizzle for vectorized copies.
+        # Match swizzle span to contiguous K bytes, capped by CuTe 3-bit swizzle.
         swizzle_bits = int(math.log2(major_size * dtype.width // copy_bits))
-        swizzle_bits = min(swizzle_bits, 3)  # cap at 3 swizzle bits
+        swizzle_bits = min(swizzle_bits, 3)
         # Tile the swizzled atom across (M_or_N, K, stages).
         layout_atom_outer = cute.make_layout((8, major_size), stride=(major_size, 1))
         layout_atom = cute.make_composed_layout(
@@ -90,7 +135,9 @@ class LLBf16SplitK:
         return cute.tile_to_shape(layout_atom, smem_tiler, (0, 1, 2))
 
     def _make_gmem_tiled_copy(self, atom_copy, dtype, copy_bits, num_threads):
-        copy_elems = copy_bits // dtype.width  # elements per copy
+        """Build the per-thread cp.async vector-copy layout."""
+        # Lay threads across K so each lane issues one vector copy.
+        copy_elems = copy_bits // dtype.width
         k_threads = cute.size(self.tile_k) // copy_elems  # threads along K
         thread_layout = cute.make_layout(
             (num_threads // k_threads, k_threads), stride=(k_threads, 1)
@@ -100,6 +147,7 @@ class LLBf16SplitK:
 
     @cute.jit
     def _fill_pred(self, pred_flat, coord_tensor, k_tile, dim_limit, K_total):
+        # Predicate one K tile and keep the stage-broadcast view in sync.
         coord_ktile = coord_tensor[None, None, 0, k_tile]
         num_vec = pred_flat.shape[0]
         num_mn = pred_flat.shape[1]
@@ -110,6 +158,7 @@ class LLBf16SplitK:
                 )
 
     def _make_pred(self, tXcX, k_tile, dim_limit, K_total):
+        # Flat storage plus a zero-stride stage mode broadcasts predicates.
         num_vec = tXcX.shape[0][1]
         num_mn = cute.size(tXcX, mode=[1])
         pred_flat = cute.make_rmem_tensor(
@@ -134,6 +183,28 @@ class LLBf16SplitK:
         stream: CUstream,
         scale: float = 1.0,
     ):
+        """Execute the split-K GEMM operation in steps:
+        - Build swizzled staged SMEM layouts for A ``[16, tile_k, stages]``
+          and B ``[tile_n, tile_k, stages]``.
+        - Build 128-bit cp.async GMEM-to-SMEM tiled copies for DMA warps.
+        - Build an m16n8k16 BF16 MMA tiled across the CTA N tile.
+        - Launch grid ``ceil(M/16) x ceil(N/tile_n) x split_k`` with one
+          cluster along split-K, so each cluster rank owns K tiles
+          ``rank, rank + split_k, ...``.
+        - Reduce MMA-warp partials within the CTA, exchange split-K partials
+          through DSMEM, then reduce cluster partials and store C.
+
+        :param mA: Input tensor A with shape ``[M, K]``.
+        :type mA: cute.Tensor
+        :param mB: Input tensor B with shape ``[N, K]``.
+        :type mB: cute.Tensor
+        :param mC: Output tensor C with shape ``[M, N]``.
+        :type mC: cute.Tensor
+        :param stream: CUDA stream for asynchronous execution.
+        :type stream: CUstream
+        :param scale: Epilogue scale applied before storing C.
+        :type scale: float
+        """
         bM, bN, bK = self.tile_m, self.tile_n, self.tile_k
         copy_bits: cutlass.Constexpr = self.copy_bits
         sA_layout = self._make_smem_layout_AB(
@@ -142,6 +213,19 @@ class LLBf16SplitK:
         sB_layout = self._make_smem_layout_AB(
             mB.element_type, copy_bits, (bN, bK, self.num_stages)
         )
+
+        @cute.struct
+        class SharedStorage:
+            a: cute.struct.Align[
+                cute.struct.MemRange[mA.element_type, cute.cosize(sA_layout)], 16
+            ]
+            b: cute.struct.Align[
+                cute.struct.MemRange[mB.element_type, cute.cosize(sB_layout)], 16
+            ]
+            mbar: cute.struct.Align[
+                cute.struct.MemRange[cutlass.Int64, self.num_stages * 2], 8
+            ]
+
         atom_g2s = cute.make_copy_atom(
             cute.nvgpu.cpasync.CopyG2SOp(
                 cache_mode=cute.nvgpu.cpasync.LoadCacheMode.GLOBAL
@@ -156,6 +240,7 @@ class LLBf16SplitK:
             atom_g2s, mB.element_type, copy_bits, self.num_dma_threads
         )
         op = cute.nvgpu.warp.MmaF16BF16Op(self.ab_dtype, self.acc_dtype, self.mma_shape)
+        # Repeat the m16n8k16 atom along N to cover the CTA output tile.
         perm_mnk = (
             self.atom_layout[0] * self.mma_shape[0],
             self.atom_layout[1] * self.mma_shape[1] * (self.tile_n // 8),
@@ -176,6 +261,7 @@ class LLBf16SplitK:
             tiled_copy_A,
             tiled_copy_B,
             tiled_mma,
+            SharedStorage,
         ).launch(
             grid=[
                 cute.size(grid_m),
@@ -189,7 +275,7 @@ class LLBf16SplitK:
                 self.split_k,
             ],  # split-K CTAs form one cluster
             stream=stream,
-            use_pdl=True,
+            use_pdl=False,
         )
 
     @cute.kernel
@@ -204,6 +290,7 @@ class LLBf16SplitK:
         tiled_copy_A: cute.TiledCopy,
         tiled_copy_B: cute.TiledCopy,
         tiled_mma: cute.TiledMma,
+        shared_storage: cutlass.Constexpr,
     ):
         bM, bN, bK = self.tile_m, self.tile_n, self.tile_k
         num_stages = self.num_stages
@@ -242,21 +329,11 @@ class LLBf16SplitK:
         gA = cute.make_tensor(gA.iterator.align(16), gA.layout)
         gB = cute.make_tensor(gB.iterator.align(16), gB.layout)
 
-        @cute.struct
-        class SharedStorage:
-            a: cute.struct.Align[
-                cute.struct.MemRange[mA.element_type, cute.cosize(sA_layout)], 16
-            ]  # cosize of the swizzled layout, 16-byte aligned
-            b: cute.struct.Align[
-                cute.struct.MemRange[mB.element_type, cute.cosize(sB_layout)], 16
-            ]
-            mbar: cute.struct.Align[
-                cute.struct.MemRange[cutlass.Int64, num_stages * 2], 8
-            ]  # pipeline barriers
-
         smem = cutlass.utils.SmemAllocator()
-        storage_ptr = smem.allocate(SharedStorage.size_in_bytes(), byte_alignment=16)  # type: ignore[attr-defined]
-        storage = SharedStorage(storage_ptr)  # type: ignore[call-arg]
+        storage_ptr = smem.allocate(
+            shared_storage.size_in_bytes(), byte_alignment=16
+        )  # type: ignore[attr-defined]
+        storage = shared_storage(storage_ptr)  # type: ignore[call-arg]
         sA = storage.a.get_tensor(sA_layout)
         sB = storage.b.get_tensor(sB_layout)
 
@@ -276,7 +353,7 @@ class LLBf16SplitK:
 
         # Round-robin split-K: split z handles tiles z, z+split_k, ...
         K_total = cute.size(mA, mode=[1])
-        k_tile_count = cute.ceil_div(K_total, bK)
+        k_tile_count = cute.size(gA, mode=[2])
         k_start = bid_z
         num_k_tiles = cute.ceil_div(k_tile_count - k_start, self.split_k)
 
@@ -285,8 +362,8 @@ class LLBf16SplitK:
             cute.arch.setmaxregister_decrease(40)
             thr_A = tiled_copy_A.get_slice(dma_tidx)
             thr_B = tiled_copy_B.get_slice(dma_tidx)
-            tAgA = thr_A.partition_S(gA)  # thread's source (global) partition
-            tAsA = thr_A.partition_D(sA)  # thread's destination (shared) partition
+            tAgA = thr_A.partition_S(gA)
+            tAsA = thr_A.partition_D(sA)
             tBgB = thr_B.partition_S(gB)
             tBsB = thr_B.partition_D(sB)
             tAcA = thr_A.partition_S(cA)
@@ -310,7 +387,7 @@ class LLBf16SplitK:
                 tBsB[None, None, None, producer_state.index],
                 pred=tBpB,
             )
-            cute.arch.griddepcontrol_wait()  # PDL-wait
+            #cute.arch.griddepcontrol_wait()  # PDL-wait
             cute.copy(
                 tiled_copy_A,
                 tAgA[None, None, None, k_start],
@@ -387,6 +464,7 @@ class LLBf16SplitK:
                 pipeline.PipelineUserType.Consumer, num_stages
             )
 
+            # Shape-dynamic split-K count, so this stays a runtime range.
             for _ in cutlass.range(num_k_tiles, unroll_full=True):
                 mainloop_pipeline.consumer_wait(consumer_state)
                 for ki in cutlass.range_constexpr(k_blocks_per_warp):
@@ -459,7 +537,7 @@ class LLBf16SplitK:
                             reduction_profile=0,
                         )
                     )
-                    total = cutlass.Float32(total) * scale
+                    total = total * scale
                 partials[cta_rank, elem_idx] = total
 
             cute.arch.sync_threads()
@@ -476,8 +554,8 @@ class LLBf16SplitK:
             cute.arch.cluster_arrive()
             cute.arch.cluster_wait()  # peer DSMEM stores are now visible
 
-            if mma_tidx == 0:
-                cute.arch.griddepcontrol_launch_dependents()
+            #if mma_tidx == 0:
+            #    cute.arch.griddepcontrol_launch_dependents()
             cute.arch.sync_threads()
 
             # Reduce split-K partials and write global output.
@@ -495,6 +573,6 @@ class LLBf16SplitK:
                             reduction_profile=0,
                         )
                     )
-                    gC[local_coord] = cutlass.Float32(acc)
+                    gC[local_coord] = acc
 
         cute.arch.sync_threads()
