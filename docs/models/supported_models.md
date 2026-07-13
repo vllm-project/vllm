@@ -443,6 +443,7 @@ th {
 | `Qwen3MoeForCausalLM` | Qwen3MoE | `Qwen/Qwen3-30B-A3B`, etc. | ✅︎ | ✅︎ |
 | `Qwen3NextForCausalLM` | Qwen3NextMoE | `Qwen/Qwen3-Next-80B-A3B-Instruct`, etc. | ✅︎ | ✅︎ |
 | `RWForCausalLM` | Falcon RW | `tiiuae/falcon-40b`, etc. | | ✅︎ |
+| `RWKV7ForCausalLM` | RWKV7 | `https://huggingface.co/BlinkDL/rwkv7-g1/blob/main/rwkv7-g1g-1.5b-20260526-ctx8192.pth`, etc. | | ✅︎ |
 | `Rnj1ForCausalLM` | Rnj1 | `EssentialAI/rnj-1-instruct`, etc. | | |
 | `SarvamMoEForCausalLM` | Sarvam 2 | `sarvamai/sarvam2-30b-a3b`, etc. | ✅︎ | ✅︎ |
 | `SarvamMLAForCausalLM` | Sarvam 2 | `sarvamai/sarvam2-105b-a9b`, etc. | | ✅︎ |
@@ -456,6 +457,20 @@ th {
 | `TeleChat3ForCausalLM` | TeleChat3 | `Tele-AI/TeleChat3-36B-Thinking`, `Tele-AI/TeleChat3-Coder-36B-Thinking`, etc. | ✅︎ | ✅︎ |
 | `TeleFLMForCausalLM` | TeleFLM | `CofeAI/FLM-2-52B-Instruct-2407`, `CofeAI/Tele-FLM`, etc. | ✅︎ | ✅︎ |
 | `Zamba2ForCausalLM` | Zamba2 | `Zyphra/Zamba2-7B-instruct`, `Zyphra/Zamba2-2.7B-instruct`, `Zyphra/Zamba2-1.2B-instruct`, etc. | | |
+
+!!! note
+    RWKV7 support is limited to CUDA inference with raw BlinkDL `.pth`
+    checkpoints from `BlinkDL/rwkv7-g1`, such as
+    `rwkv7-g1g-1.5b-20260526-ctx8192.pth`. vLLM uses the RWKV
+    `rwkv_vocab_v20230424` tokenizer for these checkpoints. FLA checkpoints or
+    kernels, CPU inference, non-CUDA platforms, speculative decoding, LoRA,
+    `torch.compile`, normal KV prefix caching, and breakable/piecewise CUDA
+    Graph are unsupported. RWKV7 does not allocate vLLM KV cache blocks; its
+    per-request recurrent state is owned by `ModelState`, so any future RWKV
+    state reuse must be documented separately from KV prefix caching. RWKV7
+    requires the vLLM V1 engine with Model Runner V2 enabled. RWKV7 also uses
+    a native chat template and the `rwkv` tool-call parser for OpenAI-compatible
+    tool calling.
 
 Some models are supported only via the [Transformers modeling backend](#transformers). The purpose of the table below is to acknowledge models which we officially support in this way. The logs will say that the Transformers modeling backend is being used, and you will see no warning that this is fallback behaviour. This means that, if you have issues with any of the models listed below, please [make an issue](https://github.com/vllm-project/vllm/issues/new/choose) and we'll do our best to fix it!
 
