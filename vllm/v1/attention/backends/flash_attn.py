@@ -47,6 +47,11 @@ from vllm.config import (
     get_layers_from_vllm_config,
 )
 from vllm.config.cache import CacheDType
+from vllm.distributed.layer_parallel import (
+    LayerParallelPlan,
+    LayerType,
+    get_layer_parallel_config,
+)
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
@@ -81,6 +86,12 @@ class FlashAttentionBackend(AttentionBackend):
         return [MultipleOf(16)]
 
     forward_includes_kv_cache_update: bool = False
+
+    @classmethod
+    def supports_layer_parallel_plan(cls, plan: LayerParallelPlan) -> bool:
+        if plan.reshards_output and get_flash_attn_version() not in (3, 4):
+            return False
+        return plan.output.world_size % plan.input.world_size == 0
 
     @classmethod
     def get_preferred_block_size(cls, default_block_size: int) -> int:
@@ -366,7 +377,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.cache_config = vllm_config.cache_config
         self.compilation_config = vllm_config.compilation_config
         self.attention_config = vllm_config.attention_config
-
         self.num_heads_q = self.model_config.get_num_attention_heads(
             self.parallel_config
         )
@@ -387,6 +397,13 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
+
+        plan = get_layer_parallel_config(LayerType.ATTENTION)
+        self.dcp_context_num_heads = (
+            self.num_heads_q
+            if plan.reshards_output
+            else self.num_heads_q * self.dcp_world_size
+        )
 
         self.cp_kv_cache_interleave_size = (
             self.parallel_config.cp_kv_cache_interleave_size
@@ -425,6 +442,13 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 max_num_reqs,
                 dtype=torch.int32,
                 device=self.device,
+            )
+            max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            current_workspace_manager().get_simultaneous(
+                (
+                    (max_num_tokens, self.dcp_context_num_heads, self.headdim),
+                    self.model_config.dtype,
+                ),
             )
 
         # Sliding window size to be used with the AOT scheduler will be
@@ -514,7 +538,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                     batch_size=batch_size,
                     max_seqlen_q=max_query_len,
                     max_seqlen_k=max_seq_len,
-                    num_heads_q=self.num_heads_q * self.dcp_world_size,
+                    num_heads_q=self.dcp_context_num_heads,
                     num_heads_kv=self.num_heads_kv,
                     headdim=self.headdim,
                     cache_seqlens=seqlens,
@@ -919,6 +943,7 @@ class FlashAttentionImpl(AttentionImpl):
 
             if self.dcp_world_size > 1:
                 self._forward_with_dcp(
+                    layer,
                     query[:num_actual_tokens],
                     key[:num_actual_tokens],
                     value[:num_actual_tokens],
@@ -1106,6 +1131,7 @@ class FlashAttentionImpl(AttentionImpl):
 
     def _forward_with_dcp(
         self,
+        layer: torch.nn.Module,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
@@ -1124,14 +1150,29 @@ class FlashAttentionImpl(AttentionImpl):
         cu_seqlens_q = attn_metadata.query_start_loc
         max_seqlen_q = attn_metadata.max_query_len
         block_table = attn_metadata.block_table
+        parallel_plan = getattr(layer, "parallel_plan", None)
+        reshard_output = parallel_plan is not None and parallel_plan.reshards_output
+        if reshard_output:
+            output_heads = output.shape[1]
+            assert query.shape[1] == output_heads * self.dcp_world_size
+            head_start = get_dcp_group().rank_in_group * output_heads
+            output_head_slice = slice(head_start, head_start + output_heads)
 
         query = query.contiguous()
         if attn_metadata.max_dcp_context_kv_len == 0:
+            local_output = output
+            if reshard_output:
+                (local_output,) = current_workspace_manager().get_simultaneous(
+                    (
+                        (query.shape[0], query.shape[1], self.head_size),
+                        self._dcp_dtype,
+                    ),
+                )
             flash_attn_varlen_func(
                 q=query,
                 k=key,
                 v=value,
-                out=output,
+                out=local_output,
                 cu_seqlens_q=cu_seqlens_q,
                 max_seqlen_q=max_seqlen_q,
                 cu_seqlens_k=cu_seqlens_q,
@@ -1150,30 +1191,38 @@ class FlashAttentionImpl(AttentionImpl):
                 v_descale=v_descale,
                 num_splits=attn_metadata.max_num_splits,
             )
+            if reshard_output:
+                output.copy_(local_output[:, output_head_slice, :])
             return output
 
-        query_across_dcp = get_dcp_group().all_gather(query, dim=1)
+        context_query = (
+            query if reshard_output else get_dcp_group().all_gather(query, dim=1)
+        )
         sliding_window_size = (
             list(self.sliding_window) if self.sliding_window is not None else None
         )
-        n = query_across_dcp.shape[0]
+        n = context_query.shape[0]
         num_reqs = cu_seqlens_q.shape[0] - 1
         num_decodes = attn_metadata.num_decode_reqs
         num_context_prefills = attn_metadata.num_prefill_reqs
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_context_prefill_tokens = attn_metadata.num_prefill_tokens
-        split_dcp_context = should_split_fa2_dcp_context_attention(
-            self.vllm_flash_attn_version,
-            max_seqlen_q,
-            num_reqs,
-            num_decodes,
-            num_context_prefills,
+        split_dcp_context = (
+            not reshard_output
+            and should_split_fa2_dcp_context_attention(
+                self.vllm_flash_attn_version,
+                max_seqlen_q,
+                num_reqs,
+                num_decodes,
+                num_context_prefills,
+            )
         )
         dcp_context_out_tokens = max(n, self._dcp_max_num_tokens)
         dcp_context_out_spec = (
             (
                 dcp_context_out_tokens,
-                self.num_heads * self.dcp_world_size,
+                self.num_heads,
+                self.dcp_world_size,
                 self.head_size,
             ),
             self._dcp_dtype,
@@ -1191,7 +1240,7 @@ class FlashAttentionImpl(AttentionImpl):
             assert self.vllm_flash_attn_version is not None
             context_attn_out, context_lse = run_split_fa2_dcp_context_attention(
                 flash_attn_varlen_func,
-                query_across_dcp,
+                context_query,
                 key_cache,
                 value_cache,
                 dcp_context_out,
@@ -1218,7 +1267,7 @@ class FlashAttentionImpl(AttentionImpl):
             )
         else:
             context_attn_out, context_lse = flash_attn_varlen_func(
-                q=query_across_dcp,
+                q=context_query,
                 k=key_cache,
                 v=value_cache,
                 out=dcp_context_out,
@@ -1240,6 +1289,9 @@ class FlashAttentionImpl(AttentionImpl):
                 v_descale=v_descale,
                 num_splits=attn_metadata.max_num_splits,
             )
+        context_num_heads = context_query.shape[1]
+        context_attn_out = context_attn_out[:, :context_num_heads]
+        context_lse = context_lse[:context_num_heads]
         # FA returns LSE in shape [ H, B ] but DCP combine wants [ B, H ]
         context_attn_out_cor, context_lse_cor = self.dcp_combine(
             context_attn_out,
@@ -1249,11 +1301,16 @@ class FlashAttentionImpl(AttentionImpl):
         )
         context_lse_cor = context_lse_cor.transpose(0, 1).contiguous()
 
+        query_output = output
+        if reshard_output:
+            (query_output,) = current_workspace_manager().get_simultaneous(
+                ((query.shape[0], query.shape[1], self.head_size), self._dcp_dtype),
+            )
         query_attn_out, query_lse = flash_attn_varlen_func(
             q=query,
             k=key,
             v=value,
-            out=output,
+            out=query_output,
             cu_seqlens_q=cu_seqlens_q,
             max_seqlen_q=max_seqlen_q,
             cu_seqlens_k=cu_seqlens_q,
@@ -1270,6 +1327,9 @@ class FlashAttentionImpl(AttentionImpl):
             v_descale=v_descale,
             num_splits=attn_metadata.max_num_splits,
         )
+        if reshard_output:
+            query_attn_out = query_attn_out[:, output_head_slice, :].contiguous()
+            query_lse = query_lse[output_head_slice, :]
         assert context_attn_out_cor.shape == query_attn_out.shape
         assert context_lse_cor.shape == query_lse.shape
         merge_attn_states(

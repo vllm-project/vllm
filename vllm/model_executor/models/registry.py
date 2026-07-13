@@ -29,6 +29,7 @@ from vllm.config import (
     iter_architecture_defaults,
     try_match_architecture_defaults,
 )
+from vllm.distributed.layer_parallel import LayerType
 from vllm.logger import init_logger
 from vllm.logging_utils import logtime
 from vllm.tasks import ScoreType
@@ -45,6 +46,7 @@ else:
 
 
 from .interfaces import (
+    get_supported_layer_types,
     has_inner_state,
     has_noops,
     is_attention_free,
@@ -766,6 +768,7 @@ class _ModelInfo:
     requires_raw_input_tokens: bool
     supports_multimodal_encoder_tp_data: bool
     supports_pp: bool
+    supported_layer_types: tuple[str, ...]
     has_inner_state: bool
     is_attention_free: bool
     is_hybrid: bool
@@ -793,6 +796,7 @@ class _ModelInfo:
                 model
             ),
             supports_pp=supports_pp(model),
+            supported_layer_types=get_supported_layer_types(model),
             has_inner_state=has_inner_state(model),
             is_attention_free=is_attention_free(model),
             is_hybrid=is_hybrid(model),
@@ -1343,6 +1347,15 @@ class _ModelRegistry:
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
         return model_cls.supports_pp
+
+    def is_layer_parallel_supported_model(
+        self,
+        architectures: str | list[str],
+        model_config: ModelConfig,
+        layer_type: LayerType,
+    ) -> bool:
+        model_cls, _ = self.inspect_model_cls(architectures, model_config)
+        return layer_type.name in model_cls.supported_layer_types
 
     def model_has_inner_state(
         self,

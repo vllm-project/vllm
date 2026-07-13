@@ -21,6 +21,7 @@ from vllm.utils.torch_utils import np_to_pinned_tensor
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
+    from vllm.distributed.layer_parallel import LayerParallelPlan
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
@@ -65,6 +66,10 @@ class AttentionBackend(ABC):
 
     # Does attention's forward() include kv cache update?
     forward_includes_kv_cache_update: bool = True
+
+    @classmethod
+    def supports_layer_parallel_plan(cls, plan: "LayerParallelPlan") -> bool:
+        return not plan.reshards_output
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:

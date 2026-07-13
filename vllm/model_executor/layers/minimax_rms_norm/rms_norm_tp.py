@@ -6,11 +6,15 @@ from functools import partial
 import torch
 from torch import nn
 
-from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
+from vllm.distributed.layer_parallel import (
+    LayerParallelPlan,
+    ParallelGroupType,
+    get_layer_parallel_config,
+)
 from vllm.distributed.parallel_state import (
+    get_parallel_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    get_tp_group,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -26,8 +30,11 @@ MINIMAX_QK_NORM_MAX_TOKEN_NUM = 2048
 _MINIMAX_FUSED_AR_RMS_QK = getattr(torch.ops._C, "minimax_allreduce_rms_qk", None)
 
 
-def _all_reduce_variance(var: torch.Tensor) -> torch.Tensor:
-    """All-reduce a per-token variance tensor across the TP group.
+def _all_reduce_variance(
+    var: torch.Tensor,
+    reduce_group_type: int,
+) -> torch.Tensor:
+    """All-reduce a per-token variance tensor across the configured group.
 
     Variance is accumulated in fp32 for numerical stability. The FlashInfer
     fused all-reduce caches a single global workspace keyed to the model's
@@ -37,7 +44,8 @@ def _all_reduce_variance(var: torch.Tensor) -> torch.Tensor:
     a flattened (1D) view keeps these fp32 reductions on custom all-reduce /
     pynccl, both of which handle fp32 correctly.
     """
-    return tensor_model_parallel_all_reduce(var.flatten()).view_as(var)
+    group = get_parallel_group(ParallelGroupType(reduce_group_type))
+    return group.all_reduce(var.flatten()).view_as(var)
 
 
 @triton.jit
@@ -132,6 +140,7 @@ def _minimax_qk_norm_tp_eager(
     kv_size: int,
     tp_world: int,
     eps: float,
+    reduce_group_type: int = ParallelGroupType.TENSOR.value,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pure-torch reference path used when Triton is unavailable."""
     q, k, _ = qkv.split([q_size, kv_size, kv_size], dim=-1)
@@ -142,7 +151,7 @@ def _minimax_qk_norm_tp_eager(
     k_var = k.pow(2).mean(dim=-1, keepdim=True)
 
     qk_var = torch.cat([q_var, k_var], dim=-1)
-    qk_var = _all_reduce_variance(qk_var) / tp_world
+    qk_var = _all_reduce_variance(qk_var, reduce_group_type) / tp_world
     q_var, k_var = qk_var.chunk(2, dim=-1)
     q = q * torch.rsqrt(q_var + eps) * q_weight
     k = k * torch.rsqrt(k_var + eps) * k_weight
@@ -158,6 +167,7 @@ def _minimax_qk_norm_tp_fallback(
     tp_rank: int,
     tp_world: int,
     eps: float,
+    reduce_group_type: int = ParallelGroupType.TENSOR.value,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """All-reduce + QK RMSNorm without the Lamport fused kernel.
 
@@ -169,7 +179,14 @@ def _minimax_qk_norm_tp_fallback(
     """
     if not HAS_TRITON:
         return _minimax_qk_norm_tp_eager(
-            qkv, q_weight, k_weight, q_size, kv_size, tp_world, eps
+            qkv,
+            q_weight,
+            k_weight,
+            q_size,
+            kv_size,
+            tp_world,
+            eps,
+            reduce_group_type,
         )
 
     num_tokens = qkv.shape[0]
@@ -184,7 +201,7 @@ def _minimax_qk_norm_tp_fallback(
 
     # All-reduce sums the per-shard means; the /tp_world that turns this back
     # into the global mean is folded into the apply kernel's rsqrt below.
-    qk_var = _all_reduce_variance(qk_var)
+    qk_var = _all_reduce_variance(qk_var, reduce_group_type)
 
     q_out = torch.empty(num_tokens, q_size, dtype=qkv.dtype, device=qkv.device)
     k_out = torch.empty(num_tokens, kv_size, dtype=qkv.dtype, device=qkv.device)
@@ -215,6 +232,7 @@ def _minimax_qk_norm_fusion(
     tp_world: int,
     eps: float,
     workspace: torch.Tensor | None,
+    reduce_group_type: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert qkv.ndim == 2
     num_tokens = qkv.shape[0]
@@ -236,7 +254,15 @@ def _minimax_qk_norm_fusion(
             eps,
         )
     return _minimax_qk_norm_tp_fallback(
-        qkv, q_weight, k_weight, q_size, kv_size, tp_rank, tp_world, eps
+        qkv,
+        q_weight,
+        k_weight,
+        q_size,
+        kv_size,
+        tp_rank,
+        tp_world,
+        eps,
+        reduce_group_type,
     )
 
 
@@ -250,6 +276,7 @@ def _minimax_qk_norm_fusion_fake(
     tp_world: int,
     eps: float,
     workspace: torch.Tensor | None,
+    reduce_group_type: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert qkv.ndim == 2
     num_tokens = qkv.shape[0]
@@ -276,10 +303,14 @@ class MiniMaxText01RMSNormTP(CustomOp):
         *,
         weight_shard_world_size: int | None = None,
         weight_shard_rank: int | None = None,
+        parallel_plan: LayerParallelPlan | None = None,
     ) -> None:
         super().__init__()
-        self.tp_world = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
+        plan = parallel_plan or get_layer_parallel_config()
+        self.reduce_group = get_parallel_group(plan.input.group)
+        self.reduce_group_type = plan.input.group.value
+        self.tp_world = plan.input.world_size
+        self.tp_rank = plan.input.rank
         self.weight_shard_world = weight_shard_world_size or self.tp_world
         self.weight_shard_rank = (
             self.tp_rank if weight_shard_rank is None else weight_shard_rank
@@ -309,7 +340,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
                     rank=self.tp_rank,
                     world_size=self.tp_world,
                     max_tokens=MINIMAX_QK_NORM_MAX_TOKEN_NUM,
-                    process_group=get_tp_group().cpu_group,
+                    process_group=self.reduce_group.cpu_group,
                 )
             except Exception as e:
                 logger.warning_once(
@@ -345,7 +376,9 @@ class MiniMaxText01RMSNormTP(CustomOp):
         x = x.to(torch.float32)
         variance = x.pow(2).mean(dim=-1, keepdim=True, dtype=torch.float32)
         if self.tp_world > 1:
-            variance = _all_reduce_variance(variance) / self.tp_world
+            variance = (
+                _all_reduce_variance(variance, self.reduce_group_type) / self.tp_world
+            )
         x = x * torch.rsqrt(variance + self.variance_epsilon)
         x = (x * self.weight).to(orig_dtype)
         return x
@@ -389,7 +422,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
 
         assert q_norm.variance_epsilon == k_norm.variance_epsilon
         # Case 0： tp_size=1
-        if get_tensor_model_parallel_world_size() == 1:
+        if q_norm.tp_world == 1:
             q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
             q, k = MiniMaxText01RMSNormTP.forward_qk(q_norm, k_norm, q, k)
             return q, k, v
@@ -404,6 +437,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
             q_norm.tp_world,
             q_norm.variance_epsilon,
             q_norm.workspace,
+            q_norm.reduce_group_type,
         )
         _, _, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
         return q, k, v

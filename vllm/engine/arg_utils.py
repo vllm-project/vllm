@@ -471,6 +471,9 @@ class EngineArgs:
     numa_bind_cpus: list[str] | None = ParallelConfig.numa_bind_cpus
     device_ids: list[int | str] | None = None
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
+    tensor_parallel_size_attention: int | None = (
+        ParallelConfig.tensor_parallel_size_attention
+    )
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
     dcp_comm_backend: DCPCommBackend = ParallelConfig.dcp_comm_backend
@@ -1010,6 +1013,11 @@ class EngineArgs:
         )
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
+        )
+        parallel_group.add_argument(
+            "--tensor-parallel-size-attention",
+            "-tpa",
+            **parallel_kwargs["tensor_parallel_size_attention"],
         )
         parallel_group.add_argument(
             "--decode-context-parallel-size",
@@ -2094,6 +2102,7 @@ class EngineArgs:
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
+            tensor_parallel_size_attention=self.tensor_parallel_size_attention,
             prefill_context_parallel_size=self.prefill_context_parallel_size,
             data_parallel_size=self.data_parallel_size,
             data_parallel_rank=self.data_parallel_rank or 0,

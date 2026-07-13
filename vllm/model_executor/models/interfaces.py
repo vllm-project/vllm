@@ -29,6 +29,7 @@ from torch import Tensor
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
+from vllm.distributed.layer_parallel import LayerType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.collection_utils import common_prefix
@@ -68,6 +69,19 @@ The output embeddings must be one of the following formats:
     each input multimodal data item (e.g, image).
 - A single 3D tensor, with the batch dimension grouping the 2D tensors.
 """
+
+
+class SupportsHeteroLayerParallelism:
+    """Marker for models migrated to explicit layer parallel plans."""
+
+    supported_layer_types: ClassVar[frozenset[LayerType]] = frozenset(
+        {LayerType.ATTENTION}
+    )
+
+
+def get_supported_layer_types(model: type[object] | object) -> tuple[str, ...]:
+    layer_types = getattr(model, "supported_layer_types", frozenset())
+    return tuple(sorted(layer_type.name for layer_type in layer_types))
 
 
 class StreamingTranscriptionPostProcessor:

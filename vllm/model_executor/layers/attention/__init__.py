@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.model_executor.layers.attention.attention import Attention
+from vllm.model_executor.layers.attention.attention import (
+    Attention,
+    HeteroParallelAttention,
+)
 from vllm.model_executor.layers.attention.chunked_local_attention import (
     ChunkedLocalAttention,
 )
@@ -24,6 +27,7 @@ __all__ = [
     "ChunkedLocalAttention",
     "CrossAttention",
     "EncoderOnlyAttention",
+    "HeteroParallelAttention",
     "MLAAttention",
     "MMEncoderAttention",
     "PrefillPrefixLMAttention",

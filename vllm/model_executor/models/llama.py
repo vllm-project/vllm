@@ -33,11 +33,15 @@ from transformers import LlamaConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import get_pp_group
+from vllm.distributed.layer_parallel import (
+    LayerType,
+    get_layer_parallel_config,
+)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import (
-    Attention,
     EncoderOnlyAttention,
+    HeteroParallelAttention,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -61,6 +65,7 @@ from .interfaces import (
     LocalArgmaxMixin,
     SupportsEagle,
     SupportsEagle3,
+    SupportsHeteroLayerParallelism,
     SupportsLoRA,
     SupportsPP,
     SupportsQuant,
@@ -137,27 +142,17 @@ class LlamaAttention(nn.Module):
         super().__init__()
         layer_idx = extract_layer_index(prefix)
         self.hidden_size = hidden_size
-        tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
-        assert self.total_num_heads % tp_size == 0
-        self.num_heads = self.total_num_heads // tp_size
-        self.total_num_kv_heads = num_kv_heads
-        if self.total_num_kv_heads >= tp_size:
-            # Number of KV heads is greater than TP size, so we partition
-            # the KV heads across multiple tensor parallel GPUs.
-            assert self.total_num_kv_heads % tp_size == 0
-        else:
-            # Number of KV heads is less than TP size, so we replicate
-            # the KV heads across multiple tensor parallel GPUs.
-            assert tp_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        self.total_num_kv_heads = num_kv_heads or num_heads
 
         head_dim = getattr(config, "head_dim", None)
         self.head_dim = head_dim or self.hidden_size // self.total_num_heads
-        self.q_size = self.num_heads * self.head_dim
-        self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.max_position_embeddings = max_position_embeddings
+        is_encoder_only = attn_type == AttentionType.ENCODER_ONLY
+        parallel_plan = get_layer_parallel_config(
+            LayerType.DEFAULT if is_encoder_only else LayerType.ATTENTION
+        )
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size=hidden_size,
@@ -167,7 +162,10 @@ class LlamaAttention(nn.Module):
             bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
+            parallel_plan=parallel_plan,
         )
+        self.num_heads = self.qkv_proj.num_heads
+        self.num_kv_heads = self.qkv_proj.num_kv_heads
 
         self.o_proj = RowParallelLinear(
             input_size=self.total_num_heads * self.head_dim,
@@ -200,11 +198,7 @@ class LlamaAttention(nn.Module):
             if is_sliding:
                 sliding_window = config.sliding_window
 
-        attn_cls = (
-            EncoderOnlyAttention
-            if attn_type == AttentionType.ENCODER_ONLY
-            else Attention
-        )
+        attn_cls = EncoderOnlyAttention if is_encoder_only else HeteroParallelAttention
 
         self.attn = attn_cls(
             self.num_heads,
@@ -224,7 +218,7 @@ class LlamaAttention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, k, v = self.qkv_proj.split_qkv(qkv)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -451,6 +445,7 @@ class LlamaForCausalLM(
     SupportsEagle,
     SupportsEagle3,
     SupportsQuant,
+    SupportsHeteroLayerParallelism,
 ):
     hf_to_vllm_mapper = LlamaModel.hf_to_vllm_mapper
     # LoRA specific attributes
