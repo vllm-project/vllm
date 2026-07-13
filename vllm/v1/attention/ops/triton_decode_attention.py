@@ -144,10 +144,9 @@ def _fwd_kernel_stage1(
             ).to(tl.int64)  # page_number * page stride overflows int32
             kv_in_page = offs_n % PAGE_SIZE
             offs_buf_k = (
-                (
-                    kv_page_number.to(tl.int64) * stride_buf_kpbs
-                    + kv_in_page * stride_buf_kbs
-                )[:, None]
+                (kv_page_number * stride_buf_kpbs + kv_in_page * stride_buf_kbs)[
+                    :, None
+                ]
                 + cur_kv_head * stride_buf_kh
                 + offs_d[None, :]
             )
@@ -167,10 +166,9 @@ def _fwd_kernel_stage1(
             qk = tl.where(offs_n < split_kv_end, qk, float("-inf"))
 
             offs_buf_v = (
-                (
-                    kv_page_number.to(tl.int64) * stride_buf_vpbs
-                    + kv_in_page * stride_buf_vbs
-                )[:, None]
+                (kv_page_number * stride_buf_vpbs + kv_in_page * stride_buf_vbs)[
+                    :, None
+                ]
                 + cur_kv_head * stride_buf_vh
                 + offs_dv[None, :]
             )
@@ -397,8 +395,7 @@ def _fwd_grouped_kernel_stage1(
                 cache_modifier=".ca",
             ).to(tl.int64)  # page_number * page stride overflows int32
             kv_off_k = (
-                kv_page_number.to(tl.int64) * stride_buf_kpbs
-                + (offs_n % PAGE_SIZE) * stride_buf_kbs
+                kv_page_number * stride_buf_kpbs + (offs_n % PAGE_SIZE) * stride_buf_kbs
             )
 
             # explicitly facilitate overlapping load/compute
