@@ -89,7 +89,7 @@ from vllm.distributed.weight_transfer.wpi_engine import (
 )
 
 # Start weight update on inference side
-llm.start_weight_update(is_checkpoint_format=True)
+llm.start_weight_update()
 
 # Prepare send arguments with the trainer context
 trainer_args = WPITrainerSendWeightsArgs(

@@ -75,6 +75,20 @@ def init_weight_transfer_engine(
     response.raise_for_status()
 
 
+def start_weight_update(base_url: str) -> None:
+    """Start a weight update via HTTP endpoint."""
+    url = f"{base_url}/start_weight_update"
+    response = requests.post(url, json={}, timeout=60)
+    response.raise_for_status()
+
+
+def finish_weight_update(base_url: str) -> None:
+    """Finish a weight update via HTTP endpoint."""
+    url = f"{base_url}/finish_weight_update"
+    response = requests.post(url, json={}, timeout=60)
+    response.raise_for_status()
+
+
 def pause_generation(base_url: str) -> None:
     """Pause generation via HTTP endpoint."""
     url = f"{base_url}/pause"
@@ -137,11 +151,13 @@ def main():
     socket_dir = "/run/wpi/sockets"
     driver_port = 50051
 
-    # Calculate model size in bytes
-    total_model_bytes = sum(
-        p.numel() * p.element_size() for p in train_model.parameters()
-    )
-    print(f"Calculated model size: {total_model_bytes} bytes")
+    # Calculate model size in bytes with alignment padding
+    total_model_bytes = 0
+    for p in train_model.parameters():
+        itemsize = p.element_size()
+        total_model_bytes = (total_model_bytes + itemsize - 1) // itemsize * itemsize
+        total_model_bytes += p.numel() * itemsize
+    print(f"Calculated model size with alignment: {total_model_bytes} bytes")
 
     print("Initializing weight transfer on server...")
 
@@ -165,6 +181,9 @@ def main():
     # Pause generation before weight sync
     pause_generation(BASE_URL)
 
+    # Start weight update, broadcast via WPI, then finish
+    start_weight_update(BASE_URL)
+
     # Broadcast all weights from trainer to vLLM workers
     print("Propagating weights via WPI...")
     param_iter = ((n, p) for n, p in train_model.named_parameters())
@@ -176,6 +195,8 @@ def main():
 
     # This will pack weights, trigger WPI propagate, and call /update_weights on server
     WPIWeightTransferEngine.trainer_send_weights(param_iter, args)
+
+    finish_weight_update(BASE_URL)
 
     # Resume generation after weight sync
     resume_generation(BASE_URL)

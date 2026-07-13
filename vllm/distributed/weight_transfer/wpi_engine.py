@@ -16,12 +16,18 @@ Architecture:
     │  → receive FD    │                │  → receive FD          │
     │  → CUDA import   │                │  → CUDA import         │
     │                  │                │  → connect notify sock │
+    │                  │                │                        │
+    │ /start_weight_upd├───(HTTP/Ray)──→│ start_weight_update()  │
+    │                  │                │                        │
     │ trainer_send_wts │                │                        │
     │  → pack into buf │  NodePropagate │ receive_weights()      │
     │  → propagate ────┼───(NCCL)──────→│  → wait_for_ready      │
     │  → HTTP metadata │                │  → unpack from buffer  │
-    │    /update_weights├───(HTTP)─────→│  → load_weights()      │
+    │    /update_weights├───(HTTP/Ray)─→│  → load_weights()      │
+    │                  │                │                        │
+    │ /finish_weight_up├───(HTTP/Ray)──→│ finish_weight_update() │
     └──────────────────┘                └───────────────────────┘
+
 
 Key differences from NCCL/IPC engines:
 - NCCL communicator is managed by the WPI driver, not by vLLM
@@ -498,6 +504,11 @@ class WPIWeightTransferEngine(
         The WPI driver handles NCCL communicator setup, broadcast execution,
         and READY notification to consumers — all transparently.
 
+        .. note::
+            This method calls ``update_weights`` internally. The caller must
+            call ``start_weight_update`` before and ``finish_weight_update``
+            after this method.
+
         Args:
             iterator: Iterator of (name, tensor) tuples from the model.
             trainer_args: Dict or WPITrainerSendWeightsArgs with WPI config.
@@ -552,6 +563,9 @@ class WPIWeightTransferEngine(
 
         for name, tensor in iterator:
             weight = tensor.detach().contiguous()
+            itemsize = weight.element_size()
+            # Align offset to itemsize boundary to prevent unaligned view errors
+            offset = (offset + itemsize - 1) // itemsize * itemsize
             nbytes = weight.nbytes
 
             if offset + nbytes > ctx.buffer_size_bytes:
