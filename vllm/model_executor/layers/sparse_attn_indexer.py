@@ -462,6 +462,24 @@ def sparse_attn_indexer(
                         cu_seqlen_ks,
                         cu_seqlen_ke,
                     )
+                elif current_platform.is_device_capability_family(120):
+                    from vllm.model_executor.layers.sparse_indexer_sm120 import (
+                        fp8_mqa_logits_sm120,
+                    )
+
+                    if q_scale_slice is not None:
+                        raise RuntimeError(
+                            "The SM120 sparse indexer fallback does not support FP4 Q"
+                        )
+                    logits = fp8_mqa_logits_sm120(
+                        q_slice_cast,
+                        k_quant_cast,
+                        k_scale_cast,
+                        weights[chunk.token_start : chunk.token_end],
+                        cu_seqlen_ks,
+                        cu_seqlen_ke,
+                        clean_logits=False,
+                    )
                 else:
                     logits = fp8_fp4_mqa_logits(
                         (q_slice_cast, q_scale_slice),
@@ -557,6 +575,24 @@ def sparse_attn_indexer(
                 decode_metadata.block_table,
                 decode_metadata.schedule_metadata,
                 max_model_len,
+            )
+        elif current_platform.is_device_capability_family(120):
+            from vllm.model_executor.layers.sparse_indexer_sm120 import (
+                fp8_paged_mqa_logits_sm120,
+            )
+
+            if padded_q_scale is not None:
+                raise RuntimeError(
+                    "The SM120 sparse indexer fallback does not support FP4 Q"
+                )
+            logits = fp8_paged_mqa_logits_sm120(
+                padded_q_quant_cast,
+                kv_cache,
+                weights[:num_padded_tokens],
+                seq_lens,
+                decode_metadata.block_table,
+                max_model_len,
+                clean_logits=False,
             )
         else:
             logits = fp8_fp4_paged_mqa_logits(
