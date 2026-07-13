@@ -529,7 +529,20 @@ class Gemma4MTP(nn.Module):
 
         draft_cfg = vllm_config.speculative_config.draft_model_config
         gen_cfg = draft_cfg.try_get_generation_config()
-        self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
+        suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
+        if suppress_token_ids:
+            # Register as a buffer (not a plain list) so it moves to the
+            # right device with the rest of the module. Indexing a CUDA
+            # tensor with a Python list triggers an implicit unpinned
+            # host-to-device copy, which is illegal during CUDA graph
+            # capture (see capture_model() -> speculator.capture()).
+            self.register_buffer(
+                "_suppress_token_ids",
+                torch.tensor(suppress_token_ids, dtype=torch.long),
+                persistent=False,
+            )
+        else:
+            self._suppress_token_ids = None
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -581,7 +594,7 @@ class Gemma4MTP(nn.Module):
             )
         else:
             logits = self.logits_processor(self.lm_head, hidden_states)
-        if logits is not None and self._suppress_token_ids:
+        if logits is not None and self._suppress_token_ids is not None:
             logits[:, self._suppress_token_ids] = -float("inf")
         return logits
 
