@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
+from types import SimpleNamespace
+
 import pytest
 import torch
 
+from vllm.config import CUDAGraphMode
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
@@ -32,6 +36,72 @@ requires_split_decode_arch = pytest.mark.skipif(
 NOPE_HEAD_DIM = 448
 ROPE_HEAD_DIM = 64
 HEAD_DIM = NOPE_HEAD_DIM + ROPE_HEAD_DIM
+
+
+@pytest.mark.parametrize(
+    ("warmup_mode", "capturing", "runtime_mode", "expected"),
+    [
+        (CUDAGraphMode.FULL, False, CUDAGraphMode.NONE, True),
+        (CUDAGraphMode.PIECEWISE, False, CUDAGraphMode.NONE, False),
+        (None, True, CUDAGraphMode.FULL, True),
+        (None, True, CUDAGraphMode.NONE, True),
+        (None, True, CUDAGraphMode.PIECEWISE, False),
+        (None, False, CUDAGraphMode.FULL, False),
+    ],
+)
+def test_dsv4_aiter_tgemm_is_limited_to_full_graph_warmup_and_capture(
+    monkeypatch,
+    warmup_mode: CUDAGraphMode | None,
+    capturing: bool,
+    runtime_mode: CUDAGraphMode,
+    expected: bool,
+) -> None:
+    from vllm.models.deepseek_v4.amd import rocm
+
+    attention = object.__new__(rocm.DeepseekV4ROCMAiterMLAAttention)
+    torch.nn.Module.__init__(attention)
+    weight = torch.empty(0, dtype=torch.bfloat16)
+    attention.compressor = SimpleNamespace(
+        fused_wkv_wgate=SimpleNamespace(weight=weight)
+    )
+    attention.indexer = None
+
+    warmup_context = (
+        current_platform.cudagraph_warmup_context(warmup_mode)
+        if warmup_mode is not None
+        else nullcontext()
+    )
+    with warmup_context:
+        additional_kwargs = current_platform.set_additional_forward_context()
+
+    monkeypatch.setattr(rocm.rocm_aiter_ops, "is_tgemm_enabled", lambda: True)
+    monkeypatch.setattr(
+        rocm,
+        "get_forward_context",
+        lambda: SimpleNamespace(
+            additional_kwargs=additional_kwargs,
+            cudagraph_runtime_mode=runtime_mode,
+        ),
+    )
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing)
+
+    hidden_states = torch.empty(0, dtype=torch.bfloat16)
+    assert attention._use_aiter_tgemm(hidden_states) is expected
+
+
+def test_rocm_cudagraph_warmup_context_is_scoped() -> None:
+    def warmup_mode() -> CUDAGraphMode | None:
+        return current_platform.set_additional_forward_context()[
+            "cudagraph_warmup_mode"
+        ]
+
+    assert warmup_mode() is None
+    with current_platform.cudagraph_warmup_context(CUDAGraphMode.FULL):
+        assert warmup_mode() == CUDAGraphMode.FULL
+        with current_platform.cudagraph_warmup_context(CUDAGraphMode.PIECEWISE):
+            assert warmup_mode() == CUDAGraphMode.PIECEWISE
+        assert warmup_mode() == CUDAGraphMode.FULL
+    assert warmup_mode() is None
 
 
 def _ref_global_topk_ragged(
