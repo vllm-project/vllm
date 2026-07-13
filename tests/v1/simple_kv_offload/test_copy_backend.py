@@ -15,6 +15,7 @@ import ctypes
 import queue
 import time
 from typing import Any
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -141,9 +142,14 @@ def _run_copy_loop_once(
     )
     q.put(None)
     fake_stream = _FakeStream(getattr(event_pool, "_calls", []))
-    DmaCopyBackend._copy_loop(
-        q, torch.device("cpu"), fake_stream, fake_stream, event_pool
-    )
+    # These tests drive the loop with fake streams/events on any host; on a
+    # CUDA machine current_platform.set_device would reject the cpu device,
+    # so stub it out -- device binding is irrelevant to the ordering under
+    # test.
+    with mock.patch.object(copy_backend_mod.current_platform, "set_device"):
+        DmaCopyBackend._copy_loop(
+            q, torch.device("cpu"), fake_stream, fake_stream, event_pool
+        )
 
 
 def _patch_prepare_submit(
