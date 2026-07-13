@@ -587,6 +587,9 @@ void shm_gather_impl(ThreadSHMContext* ctx, scalar_t* data, size_t elem_num,
           thread_ctx->wait_for_all(ThreadSHMContext::check_no_buffer_conflict);
         }
 
+        TORCH_CHECK(data_elem_num * sizeof(scalar_t) <=
+                        PER_THREAD_SHM_BUFFER_OFFSET,
+                    "shm_gather: data chunk exceeds SHM buffer capacity");
         shm_cc_ops::memcpy(thread_shm_ptr, data + data_offset,
                            data_elem_num * sizeof(scalar_t));
         thread_ctx->commit_ready_stamp();
@@ -716,6 +719,8 @@ void shm_send_tensor_list_impl(ThreadSHMContext* ctx, int64_t dst,
         int64_t curr_shm_offset = 0;
         thread_ctx->wait_for_one(dst,
                                  ThreadSHMContext::check_no_buffer_conflict);
+        TORCH_CHECK(data_elem_num <= (int64_t)PER_THREAD_SHM_BUFFER_OFFSET,
+                    "shm_send: data chunk exceeds SHM buffer capacity");
         while (curr_shm_offset < data_elem_num) {
           MemPiece frag = metadata->get_data(data_offset + curr_shm_offset);
           frag.size = std::min(frag.size, data_elem_num - curr_shm_offset);
@@ -756,6 +761,8 @@ std::vector<torch::Tensor> shm_recv_tensor_list_impl(ThreadSHMContext* ctx,
           int64_t data_elem_num, bool fast_mode) {
         thread_ctx->wait_for_one(src, ThreadSHMContext::check_stamp_ready);
         int64_t curr_shm_offset = 0;
+        TORCH_CHECK(data_elem_num <= (int64_t)PER_THREAD_SHM_BUFFER_OFFSET,
+                    "shm_recv: data chunk exceeds SHM buffer capacity");
         while (curr_shm_offset < data_elem_num) {
           MemPiece frag = metadata.get_data(data_offset + curr_shm_offset);
           frag.size = std::min(frag.size, data_elem_num - curr_shm_offset);
