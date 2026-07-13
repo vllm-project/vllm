@@ -1083,7 +1083,14 @@ class SlidingWindowMLAManager(SlidingWindowManager):
 
         aligned_num_hit_blocks = aligned_cache_hit_length // self.block_size
         last_full_prompt_block = max_cache_hit_length // self.block_size
-        contiguous_blocks = cdiv(self.sliding_window - 1, self.block_size)
+        # Must match find_longest_cache_hit's contiguous-block requirement,
+        # including the eagle +1 (the last matched block is dropped under
+        # eagle/MTP); under-protecting by one block lets it evict and zeroes the
+        # entire SWA hit at the hybrid-coordinator boundary. Reported by
+        # @calper-ql.
+        contiguous_blocks = self._contiguous_blocks_for_hit(
+            self.sliding_window, self.block_size, self.use_eagle
+        )
         first_protected_block = max(0, aligned_num_hit_blocks - contiguous_blocks)
         last_protected_block = max(aligned_num_hit_blocks, last_full_prompt_block)
         blocks = self.req_to_blocks[request.request_id]

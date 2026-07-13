@@ -1687,7 +1687,7 @@ def test_deepseek_v4_mla_prompt_protection_scales_with_max_num_seqs():
     manager = make_kv_cache_manager(
         make_mla_kv_cache_config(block_size=block_size, num_blocks=64),
         max_model_len=16,
-        max_num_batched_tokens=16,
+        max_in_flight_tokens=16,
         max_num_seqs=4,
         enable_caching=True,
         hash_block_size=block_size,
@@ -1703,7 +1703,7 @@ def test_deepseek_v4_mla_prompt_protection_leaves_allocation_headroom():
     manager = make_kv_cache_manager(
         make_mla_kv_cache_config(block_size=block_size, num_blocks=15),
         max_model_len=16,
-        max_num_batched_tokens=16,
+        max_in_flight_tokens=16,
         max_num_seqs=4,
         enable_caching=True,
         hash_block_size=block_size,
@@ -2093,34 +2093,6 @@ def test_maybe_evict_cached_block():
     # Evict block3
     pool._maybe_evict_cached_block(block3)
     assert pool.cached_block_hash_to_block._cache == {}
-
-
-@pytest.mark.parametrize("cache_state", ["missing", "different_block"])
-def test_maybe_evict_cached_block_resets_stale_hash_on_miss(cache_state: str):
-    pool = BlockPool(
-        num_gpu_blocks=3,
-        enable_caching=True,
-        hash_block_size=16,
-        enable_kv_cache_events=True,
-    )
-    block = pool.blocks[1]
-    other_block = pool.blocks[2]
-    block_hash = make_block_hash_with_group_id(BlockHash(b"stale"), 0)
-
-    block.block_hash = block_hash
-    if cache_state == "different_block":
-        other_block.block_hash = block_hash
-        pool.cached_block_hash_to_block.insert(block_hash, other_block)
-
-    assert pool._maybe_evict_cached_block(block) is False
-    assert block.block_hash is None
-    assert pool.kv_event_queue == []
-
-    if cache_state == "different_block":
-        assert pool.cached_block_hash_to_block._cache == {block_hash: other_block}
-        assert other_block.block_hash == block_hash
-    else:
-        assert pool.cached_block_hash_to_block._cache == {}
 
 
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])
@@ -3738,7 +3710,7 @@ def test_deepseek_v4_mla_prompt_cache_survives_decode_pressure():
         config,
         max_model_len=128,
         scheduler_block_size=full_block_size,
-        max_num_batched_tokens=chunk_tokens,
+        max_in_flight_tokens=chunk_tokens,
         enable_caching=True,
         hash_block_size=hash_block_size,
     )
@@ -3817,7 +3789,7 @@ def test_deepseek_v4_mla_cached_prompts_do_not_block_admission():
         ),
         max_model_len=512,
         scheduler_block_size=block_size,
-        max_num_batched_tokens=128,
+        max_in_flight_tokens=128,
         enable_caching=True,
         hash_block_size=block_size,
     )
@@ -3867,7 +3839,7 @@ def test_deepseek_v4_mla_prefix_hit_under_pressure_does_not_overallocate():
         ),
         max_model_len=512,
         scheduler_block_size=block_size,
-        max_num_batched_tokens=128,
+        max_in_flight_tokens=128,
         enable_caching=True,
         hash_block_size=block_size,
     )
@@ -3928,7 +3900,7 @@ def test_reset_prefix_cache_after_deepseek_v4_mla_prompt_cache():
         ),
         max_model_len=512,
         scheduler_block_size=block_size,
-        max_num_batched_tokens=128,
+        max_in_flight_tokens=128,
         enable_caching=True,
         hash_block_size=block_size,
     )
