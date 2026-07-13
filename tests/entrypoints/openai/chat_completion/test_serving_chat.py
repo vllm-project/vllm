@@ -2124,6 +2124,13 @@ async def test_tool_choice_validation_without_parser():
     assert isinstance(response_named, ErrorResponse)
     assert "tool_choice" in response_named.error.message
     assert "--tool-call-parser" in response_named.error.message
+    # The function name should appear in a clean, readable form -
+    # guards against leaking Pydantic's internal repr of the
+    # ChatCompletionNamedToolChoiceParam/ChatCompletionNamedFunction
+    # objects directly into the client-facing error message.
+    assert "get_weather" in response_named.error.message
+    assert "ChatCompletionNamedFunction" not in response_named.error.message
+    assert "ChatCompletionNamedToolChoiceParam" not in response_named.error.message
 
 
 @pytest.mark.asyncio
