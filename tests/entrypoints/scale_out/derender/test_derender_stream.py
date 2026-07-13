@@ -424,6 +424,91 @@ class TestDerenderChatStream:
             )
 
 
+class TestDerenderStreamStateValidation:
+    """DerenderStreamState rejects malformed caller supplied offsets/lengths."""
+
+    def test_negative_prefix_offset_rejected(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            DerenderStreamState(prefix_offset=-1)
+
+    def test_negative_read_offset_rejected(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            DerenderStreamState(read_offset=-1)
+
+    def test_prev_tokens_over_cap_rejected(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            DerenderStreamState(prev_tokens=["a"] * 1025)
+
+    def test_prev_tokens_at_cap_accepted(self):
+        state = DerenderStreamState(prev_tokens=["a"] * 1024)
+        assert len(state.prev_tokens) == 1024
+
+
+class TestServingDerenderStreamErrorHandling:
+    """Malformed stream_state must surface as 400 and not an unhandled 500."""
+
+    def _make_serving(self, side_effect: Exception):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from vllm.entrypoints.scale_out.derender.serving import ServingDerender
+
+        models = MagicMock()
+        models.is_base_model.return_value = True
+        models.model_config = MagicMock()
+
+        online_derenderer = MagicMock()
+        online_derenderer.derender_completion_stream = AsyncMock(
+            side_effect=side_effect
+        )
+        online_derenderer.derender_chat_stream = AsyncMock(side_effect=side_effect)
+
+        return ServingDerender(models=models, online_derenderer=online_derenderer)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("exc", [KeyError("bad byte"), IndexError("oob")])
+    async def test_completion_stream_bad_state_returns_400(self, exc):
+        from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+        from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+            DerenderCompletionStreamRequest,
+        )
+
+        serving = self._make_serving(exc)
+        request = DerenderCompletionStreamRequest(
+            stream=True,
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk([1, 2]),
+            stream_state=DerenderStreamState(),
+        )
+        result = await serving.derender_completion_stream_response(request)
+        assert isinstance(result, ErrorResponse)
+        assert result.error.code == 400
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("exc", [KeyError("bad byte"), IndexError("oob")])
+    async def test_chat_stream_bad_state_returns_400(self, exc):
+        from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+        from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+            DerenderChatStreamRequest,
+        )
+
+        serving = self._make_serving(exc)
+        request = DerenderChatStreamRequest(
+            stream=True,
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk([1, 2]),
+            stream_state=DerenderStreamState(),
+        )
+        result = await serving.derender_chat_stream_response(request)
+        assert isinstance(result, ErrorResponse)
+        assert result.error.code == 400
+
+
 # ---------------------------------------------------------------------------
 # Integration tests — require a live render server
 # ---------------------------------------------------------------------------
@@ -607,8 +692,8 @@ async def test_streaming_chat_derender_roundtrip(client):
 
 
 @pytest.mark.asyncio
-async def test_streaming_derender_invalid_body_returns_422(client):
-    """Missing required field in streaming request returns 422."""
+async def test_streaming_derender_invalid_body_returns_400(client):
+    """Missing required field in streaming request returns 400."""
     r = await client.post(
         "/v1/completions/derender",
         json={
@@ -616,17 +701,17 @@ async def test_streaming_derender_invalid_body_returns_422(client):
             # missing required 'model' and 'generate_chunk'
         },
     )
-    assert r.status_code == 422
+    assert r.status_code == 400
 
 
 @pytest.mark.asyncio
-async def test_streaming_derender_non_object_body_returns_422(client):
-    """A non object JSON body (e.g. a list) returns 422, not a 500."""
+async def test_streaming_derender_non_object_body_returns_400(client):
+    """A non object JSON body (e.g. a list) returns 400, not a 500."""
     r = await client.post(
         "/v1/completions/derender",
         json=[1, 2, 3],
     )
-    assert r.status_code == 422
+    assert r.status_code == 400
 
 
 @pytest.mark.asyncio
