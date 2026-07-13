@@ -51,6 +51,7 @@ class TestConfig:
 class TestTensors:
     rank_tokens: torch.Tensor
     rank_token_scales: torch.Tensor | None
+    intermediate_scales: torch.Tensor | None
     topk: torch.Tensor
     topk_weights: torch.Tensor
     config: TestConfig
@@ -64,6 +65,12 @@ class TestTensors:
         rank_tokens = (
             torch.randn((config.m, config.k), device="cuda", dtype=token_dtype) / 10
         )
+        if config.dtype == torch.float8_e4m3fn:
+            rank_token_scales = torch.tensor(1 / 448, device="cuda")
+            intermediate_scales = torch.tensor(8 / 448, device="cuda")
+        else:
+            rank_token_scales = None
+            intermediate_scales = None
 
         topk = torch.stack(
             [
@@ -74,7 +81,8 @@ class TestTensors:
         topk_weights = torch.randn(topk.shape, dtype=torch.float32, device="cuda")
         return TestTensors(
             rank_tokens=rank_tokens,
-            rank_token_scales=None,
+            rank_token_scales=rank_token_scales,
+            intermediate_scales=intermediate_scales,
             topk=topk,
             topk_weights=topk_weights,
             config=config,
@@ -162,6 +170,7 @@ def deepep_v2_moe_impl(
         w2_scale=w2_scale,
         per_act_token_quant=per_act_token_quant,
         a1_scale=test_tensors.rank_token_scales,
+        a2_scale=test_tensors.intermediate_scales,
     )
 
     hidden_size = test_tensors.rank_tokens.size(1)
@@ -231,6 +240,8 @@ def _deep_ep_v2_moe(
             test_tensors.topk,
             w1_scale=w1_scale,
             w2_scale=w2_scale,
+            a1_scale=test_tensors.rank_token_scales,
+            a2_scale=test_tensors.intermediate_scales,
             quant_dtype=q_dtype,
             per_act_token_quant=per_act_token_quant,
         )
@@ -262,12 +273,11 @@ def _deep_ep_v2_moe(
             per_act_token_quant,
         )
 
-    tol = 2e-1 if is_quantized else 6e-2
     torch.testing.assert_close(
         torch_combined,
         deepep_combined,
-        atol=tol,
-        rtol=tol,
+        atol=6e-2,
+        rtol=6e-2,
     )
 
 
@@ -500,8 +510,8 @@ def _deep_ep_v2_moe_cudagraph(
         torch.testing.assert_close(
             torch_combined,
             out,
-            atol=2e-1,
-            rtol=2e-1,
+            atol=6e-2,
+            rtol=6e-2,
         )
 
 
