@@ -188,7 +188,7 @@ def test_minimax_qk_norm_triton_fallback(
     ``/ tp_world`` scaling without needing multiple ranks -- ``hidden_dims``
     are the per-rank q/k segment widths.
     """
-    monkeypatch.setattr(rms_norm_tp, "_all_reduce_variance", lambda v: v)
+    monkeypatch.setattr(rms_norm_tp, "_all_reduce_variance", lambda v, *_: v)
 
     q_size, kv_size = hidden_dims
     device = "cuda"

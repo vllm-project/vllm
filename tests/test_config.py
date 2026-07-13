@@ -362,6 +362,55 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
     assert cfg.scheduler_config.async_scheduling is True
 
 
+@pytest.mark.parametrize("attention_tp_size", [1, 2])
+def test_attention_tp_requires_matching_dcp(attention_tp_size: int):
+    tp_size = 4
+    expected_dcp_size = tp_size // attention_tp_size
+
+    config = ParallelConfig(
+        tensor_parallel_size=tp_size,
+        tensor_parallel_size_attention=attention_tp_size,
+        decode_context_parallel_size=expected_dcp_size,
+    )
+
+    assert config.attention_tp_size == attention_tp_size
+
+    with pytest.raises(ValidationError, match="decode_context_parallel_size"):
+        ParallelConfig(
+            tensor_parallel_size=tp_size,
+            tensor_parallel_size_attention=attention_tp_size,
+            decode_context_parallel_size=1,
+        )
+
+
+def test_attention_tp_equal_to_tp_is_noop():
+    config = ParallelConfig(
+        tensor_parallel_size=4,
+        tensor_parallel_size_attention=4,
+        decode_context_parallel_size=2,
+    )
+
+    assert config.attention_tp_size == config.tensor_parallel_size
+
+
+def test_attention_tp_rejects_model_without_layer_plan_support():
+    model_config = SimpleNamespace(
+        model_arch_config=SimpleNamespace(total_num_attention_heads=32),
+        architectures=["UnsupportedForCausalLM"],
+        registry=SimpleNamespace(
+            is_layer_parallel_supported_model=lambda *args: False,
+        ),
+    )
+    parallel_config = ParallelConfig(
+        tensor_parallel_size=4,
+        tensor_parallel_size_attention=2,
+        decode_context_parallel_size=2,
+    )
+
+    with pytest.raises(ValueError, match="ATTENTION layer parallel plan"):
+        ModelConfig.verify_with_parallel_config(model_config, parallel_config)
+
+
 @dataclass
 class _TestConfigFields:
     a: int

@@ -46,6 +46,13 @@ import vllm.envs as envs
 from vllm.distributed.device_communicators.base_device_communicator import (
     DeviceCommunicatorBase,
 )
+from vllm.distributed.layer_parallel import (
+    LayerParallelPlan,
+    LayerType,
+    ParallelAxis,
+    ParallelGroupType,
+    init_layer_parallel_config,
+)
 from vllm.distributed.utils import (
     StatelessProcessGroup,
     get_cached_tcp_store_client,
@@ -1370,6 +1377,15 @@ def get_tp_group() -> GroupCoordinator:
     return _TP
 
 
+_ATTENTION_TP: GroupCoordinator | None = None
+
+
+def get_parallel_group(group_type: ParallelGroupType) -> GroupCoordinator:
+    if group_type is ParallelGroupType.ATTENTION_TENSOR:
+        return _ATTENTION_TP or get_tp_group()
+    return get_tp_group()
+
+
 _DCP: GroupCoordinator | None = None
 
 
@@ -1810,6 +1826,31 @@ def initialize_model_parallel(
         group_name="tp",
     )
 
+    attention_tp_size = parallel_config.attention_tp_size
+    global _ATTENTION_TP
+    assert _ATTENTION_TP is None, (
+        "attention tensor parallel group is already initialized"
+    )
+    if attention_tp_size != tensor_model_parallel_size:
+        dcp_size = tensor_model_parallel_size // attention_tp_size
+        tp_ranks = (
+            local_all_ranks.view(-1, tensor_model_parallel_size)
+            if enable_elastic_ep
+            else all_ranks.view(-1, tensor_model_parallel_size)
+        )
+        group_ranks = (
+            tp_ranks.reshape(-1, attention_tp_size, dcp_size)
+            .transpose(1, 2)
+            .reshape(-1, attention_tp_size)
+            .unbind(0)
+        )
+        _ATTENTION_TP = init_model_parallel_group(
+            [ranks.tolist() for ranks in group_ranks],
+            get_world_group().local_rank,
+            backend,
+            group_name="attention_tp",
+        )
+
     # Build the DCP model-parallel groups.
     global _DCP
     assert _DCP is None, "decode context model parallel group is already initialized"
@@ -1939,6 +1980,23 @@ def initialize_model_parallel(
     # If no EP group needed, _EP remains None
     # If no EPLB group needed, _EPLB remains None
 
+    tensor_axis = ParallelAxis(
+        _TP.world_size, _TP.rank_in_group, ParallelGroupType.TENSOR
+    )
+    overrides: dict[LayerType, LayerParallelPlan] = {}
+    if _ATTENTION_TP is not None:
+        overrides[LayerType.ATTENTION] = LayerParallelPlan(
+            input=ParallelAxis(
+                _ATTENTION_TP.world_size,
+                _ATTENTION_TP.rank_in_group,
+                ParallelGroupType.ATTENTION_TENSOR,
+            ),
+            output=tensor_axis,
+        )
+    init_layer_parallel_config(
+        LayerParallelPlan(input=tensor_axis, output=tensor_axis), overrides
+    )
+
     logger.info_once(
         "rank %s in world size %s is assigned as "
         "DP rank %s, PP rank %s, PCP rank %s, "
@@ -2008,6 +2066,8 @@ def prepare_communication_buffer_for_model(model: torch.nn.Module):
     """
     if _TP is not None:
         _TP.prepare_communication_buffer_for_model(model)
+    if _ATTENTION_TP is not None:
+        _ATTENTION_TP.prepare_communication_buffer_for_model(model)
     if _PCP is not None:
         _PCP.prepare_communication_buffer_for_model(model)
     if _PP is not None:
@@ -2046,6 +2106,11 @@ def get_node_count() -> int:
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
+    global _ATTENTION_TP
+    if _ATTENTION_TP:
+        _ATTENTION_TP.destroy()
+    _ATTENTION_TP = None
+
     global _TP
 
     if _TP:
@@ -2081,6 +2146,10 @@ def destroy_model_parallel():
     if _EPLB:
         _EPLB.destroy()
     _EPLB = None
+
+    from vllm.distributed.layer_parallel import clear_layer_parallel_config
+
+    clear_layer_parallel_config()
 
 
 def destroy_distributed_environment():

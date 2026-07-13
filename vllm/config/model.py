@@ -24,6 +24,7 @@ from vllm.config.pooler import PoolerConfig
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
+from vllm.distributed.layer_parallel import LayerType
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.tasks import PoolingTask, ScoreType, SupportedTask
@@ -1216,6 +1217,17 @@ class ModelConfig:
                 f"({tensor_parallel_size})."
             )
 
+        attention_tp_size = parallel_config.attention_tp_size
+        if attention_tp_size != tensor_parallel_size and not (
+            self.registry.is_layer_parallel_supported_model(
+                self.architectures, self, LayerType.ATTENTION
+            )
+        ):
+            raise ValueError(
+                "Attention tensor parallelism requires a model that supports "
+                "the ATTENTION layer parallel plan."
+            )
+
         if parallel_config.enable_expert_parallel:
             self._verify_with_expert_parallelism()
 
@@ -1229,7 +1241,11 @@ class ModelConfig:
             )
 
         decode_context_parallel_size = parallel_config.decode_context_parallel_size
-        if decode_context_parallel_size > 1 and not self.use_mla:
+        if (
+            decode_context_parallel_size > 1
+            and not self.use_mla
+            and attention_tp_size == tensor_parallel_size
+        ):
             total_num_kv_heads = self.get_total_num_kv_heads()
             assert tensor_parallel_size > total_num_kv_heads, (
                 f"tensor parallel size {tensor_parallel_size} must be greater "
@@ -1314,15 +1330,16 @@ class ModelConfig:
             return 1
 
         total_num_kv_heads = self.get_total_num_kv_heads()
+        tensor_parallel_size = parallel_config.attention_tp_size
         # If tensor parallelism is used, we divide the number of KV heads by
         # the tensor parallel size. We will replicate the KV heads in the
         # case where the number of KV heads is smaller than the tensor
         # parallel size so each GPU has at least one KV head.
-        return max(1, total_num_kv_heads // parallel_config.tensor_parallel_size)
+        return max(1, total_num_kv_heads // tensor_parallel_size)
 
     def get_num_attention_heads(self, parallel_config: ParallelConfig) -> int:
         num_heads = self.model_arch_config.total_num_attention_heads
-        return num_heads // parallel_config.tensor_parallel_size
+        return num_heads // parallel_config.attention_tp_size
 
     def get_num_experts(self) -> int:
         return self.model_arch_config.num_experts

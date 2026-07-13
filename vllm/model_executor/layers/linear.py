@@ -19,6 +19,10 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
+from vllm.distributed.layer_parallel import (
+    LayerParallelPlan,
+    get_layer_parallel_config,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.batch_invariant import (
@@ -982,6 +986,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
         v_head_size: int | None = None,
+        parallel_plan: LayerParallelPlan | None = None,
     ):
         self.hidden_size = hidden_size
         self.head_size = head_size
@@ -990,15 +995,28 @@ class QKVParallelLinear(ColumnParallelLinear):
         if total_num_kv_heads is None:
             total_num_kv_heads = total_num_heads
         self.total_num_kv_heads = total_num_kv_heads
-        # Divide the weight matrix along the last dimension.
         tp_size = get_tensor_model_parallel_world_size() if not disable_tp else 1
-        self.num_heads = divide(self.total_num_heads, tp_size)
-        if tp_size >= self.total_num_kv_heads:
+        plan = parallel_plan or get_layer_parallel_config()
+        if not disable_tp and plan.output.world_size != tp_size:
+            raise ValueError(
+                "QKV output plan must match tensor parallelism: "
+                f"plan={plan.output.world_size}, tp={tp_size}"
+            )
+
+        input_tp_size = plan.input.world_size
+        input_tp_rank = plan.input.rank
+        if disable_tp:
+            input_tp_size = 1
+            input_tp_rank = 0
+
+        self.num_heads = divide(self.total_num_heads, input_tp_size)
+        if input_tp_size >= self.total_num_kv_heads:
             self.num_kv_heads = 1
-            self.num_kv_head_replicas = divide(tp_size, self.total_num_kv_heads)
+            self.num_kv_head_replicas = divide(input_tp_size, self.total_num_kv_heads)
         else:
-            self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
+            self.num_kv_heads = divide(self.total_num_kv_heads, input_tp_size)
             self.num_kv_head_replicas = 1
+        self._qkv_tp_rank = input_tp_rank
         input_size = self.hidden_size
         self.output_sizes = [
             self.num_heads * self.head_size * tp_size,  # q_proj
@@ -1045,6 +1063,18 @@ class QKVParallelLinear(ColumnParallelLinear):
             "v": self.num_kv_heads * self.v_head_size,
         }
         return shard_size_mapping.get(loaded_shard_id)
+
+    def split_qkv(
+        self, qkv: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return qkv.split(
+            [
+                self.num_heads * self.head_size,
+                self.num_kv_heads * self.head_size,
+                self.num_kv_heads * self.v_head_size,
+            ],
+            dim=-1,
+        )
 
     def _load_fused_module_from_checkpoint(
         self, param: BasevLLMParameter, loaded_weight: torch.Tensor
@@ -1111,11 +1141,16 @@ class QKVParallelLinear(ColumnParallelLinear):
                 # works correctly while preserving the parameter shape.
                 for idx in range(param.data.shape[0]):
                     param.load_qkv_weight(
-                        loaded_weight=loaded_weight, shard_id=idx, tp_rank=self.tp_rank
+                        loaded_weight=loaded_weight,
+                        shard_id=idx,
+                        tp_rank=self._qkv_tp_rank,
                     )
                 return
             elif type(param) in (RowvLLMParameter, BasevLLMParameter):
-                param.load_qkv_weight(loaded_weight=loaded_weight, tp_rank=self.tp_rank)
+                param.load_qkv_weight(
+                    loaded_weight=loaded_weight,
+                    tp_rank=self._qkv_tp_rank,
+                )
                 return
             # TODO: @dsikka - move to parameter.py
             self._load_fused_module_from_checkpoint(param, loaded_weight)
@@ -1139,7 +1174,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             shard_id=loaded_shard_id,
             shard_offset=shard_offset,
             shard_size=shard_size,
-            tp_rank=self.tp_rank,
+            tp_rank=self._qkv_tp_rank,
         )
 
     def weight_loader(
@@ -1297,9 +1332,9 @@ class QKVParallelLinear(ColumnParallelLinear):
 
             param_data = param_data.narrow(output_dim, shard_offset, shard_size)
             if loaded_shard_id == "q":
-                shard_rank = self.tp_rank
+                shard_rank = self._qkv_tp_rank
             else:
-                shard_rank = self.tp_rank // self.num_kv_head_replicas
+                shard_rank = self._qkv_tp_rank // self.num_kv_head_replicas
             start_idx = shard_rank * shard_size
 
             if not is_sharded_weight:

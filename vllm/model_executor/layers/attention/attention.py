@@ -10,6 +10,11 @@ import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.config.vllm import VllmConfig
+from vllm.distributed.layer_parallel import (
+    LayerParallelPlan,
+    LayerType,
+    get_layer_parallel_config,
+)
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
@@ -332,6 +337,7 @@ class Attention(nn.Module, AttentionLayerBase):
         self.layer_name = prefix
 
         self.num_heads = num_heads
+        self.output_num_heads = num_heads
         self.head_size = head_size
         self.head_size_v = self.head_size if head_size_v is None else head_size_v
         self.num_kv_heads = num_kv_heads
@@ -524,14 +530,16 @@ class Attention(nn.Module, AttentionLayerBase):
             # Handle both 2D [num_tokens, hidden] and
             # 3D [num_tokens, heads, head_dim] query
             num_tokens = query.shape[0]
-            output_shape = torch.Size((num_tokens, self.num_heads * self.head_size_v))
+            output_shape = torch.Size(
+                (num_tokens, self.output_num_heads * self.head_size_v)
+            )
         output = torch.empty(output_shape, dtype=output_dtype, device=query.device)
         hidden_size = output_shape[-1]
         # Reshape the query, key, and value tensors.
         # NOTE(woosuk): We do this outside the custom op to minimize the
         # CPU overheads from the non-CUDA-graph regions.
         query = query.view(-1, self.num_heads, self.head_size)
-        output = output.view(-1, self.num_heads, self.head_size_v)
+        output = output.view(-1, self.output_num_heads, self.head_size_v)
         if key is not None:
             key = key.view(-1, self.num_kv_heads, self.head_size)
         if value is not None:
@@ -686,6 +694,28 @@ class Attention(nn.Module, AttentionLayerBase):
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
             )
+
+
+class HeteroParallelAttention(Attention):
+    """Attention with an explicit input-to-output parallel plan."""
+
+    def __init__(
+        self,
+        *args: Any,
+        parallel_plan: LayerParallelPlan | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.parallel_plan = parallel_plan or get_layer_parallel_config(
+            LayerType.ATTENTION
+        )
+        super().__init__(*args, **kwargs)
+
+        if not self.attn_backend.supports_layer_parallel_plan(self.parallel_plan):
+            raise ValueError(
+                f"{self.attn_backend.get_name()} does not support layer parallel "
+                f"plan {self.parallel_plan}."
+            )
+        self.output_num_heads = self.parallel_plan.get_output_size(self.num_heads)
 
 
 def maybe_calc_kv_scales(
