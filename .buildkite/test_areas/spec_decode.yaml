@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: Spec Decode Eagle
   key: spec-decode-eagle
-  timeout_in_minutes: 30
+  timeout_in_minutes: 25
   device: h200_18gb
   source_file_dependencies:
     - vllm/v1/spec_decode/
@@ -15,7 +15,7 @@ steps:
   mirror:
     amd:
       device: mi325_1
-      timeout_in_minutes: 45
+      timeout_in_minutes: 60
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -29,7 +29,7 @@ steps:
 
 - label: Spec Decode Eagle Nightly B200
   key: spec-decode-eagle-nightly-b200
-  timeout_in_minutes: 30
+  timeout_in_minutes: 25
   device: b200-k8s
   optional: true
   source_file_dependencies:
@@ -41,7 +41,7 @@ steps:
 
 - label: Spec Decode Speculators + MTP
   key: spec-decode-speculators-mtp
-  timeout_in_minutes: 30
+  timeout_in_minutes: 20
   device: h200_18gb
   source_file_dependencies:
     - vllm/v1/spec_decode/
@@ -82,7 +82,7 @@ steps:
   
 - label: Spec Decode Ngram + Suffix
   key: spec-decode-ngram-suffix
-  timeout_in_minutes: 30
+  timeout_in_minutes: 20
   device: h200_18gb
   source_file_dependencies:
     - vllm/v1/spec_decode/
@@ -93,7 +93,7 @@ steps:
   mirror:
     amd:
       device: mi325_1
-      timeout_in_minutes: 65
+      timeout_in_minutes: 55
       # TODO(akaratza): Test after Torch >= 2.12 bump
       soft_fail: true
       depends_on:
@@ -109,7 +109,7 @@ steps:
 
 - label: Spec Decode Draft Model
   key: spec-decode-draft-model
-  timeout_in_minutes: 30
+  timeout_in_minutes: 45
   device: h200_18gb
   source_file_dependencies:
     - vllm/v1/spec_decode/
@@ -120,7 +120,7 @@ steps:
   mirror:
     amd:
       device: mi325_1
-      timeout_in_minutes: 50
+      timeout_in_minutes: 55
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -134,7 +134,7 @@ steps:
 
 - label: Spec Decode Draft Model Nightly B200
   key: spec-decode-draft-model-nightly-b200
-  timeout_in_minutes: 30
+  timeout_in_minutes: 40
   device: b200-k8s
   optional: true
   source_file_dependencies:
@@ -146,7 +146,7 @@ steps:
 
 - label: Speculators Correctness
   key: speculators-correctness
-  timeout_in_minutes: 60
+  timeout_in_minutes: 30
   device: h100
   optional: true
   num_devices: 1
@@ -159,7 +159,7 @@ steps:
     - pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test
 
 - label: Spec Decode MTP hybrid (B200)
-  timeout_in_minutes: 30
+  timeout_in_minutes: 20
   device: b200-k8s
   optional: true
   source_file_dependencies:
