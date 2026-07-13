@@ -1,0 +1,169 @@
+name: Rebase RWKV on upstream vLLM
+
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub Actions cron is UTC: 10:00 is 04:00 CST / 05:00 CDT.
+    - cron: "0 10 * * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: rebase-rwkv
+  cancel-in-progress: false
+
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out rwkv
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: rwkv
+          fetch-depth: 0
+
+      - name: Rebase rwkv on upstream/main
+        id: rebase
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream https://github.com/vllm-project/vllm.git
+          else
+            git remote add upstream https://github.com/vllm-project/vllm.git
+          fi
+
+          git fetch origin rwkv
+          git fetch upstream main
+
+          old_head="$(git rev-parse refs/remotes/origin/rwkv)"
+          git switch --force-create rwkv refs/remotes/origin/rwkv
+
+          rwkv_commit_count="$(git rev-list --count refs/remotes/upstream/main..HEAD)"
+          if [[ "$rwkv_commit_count" == "0" ]]; then
+            echo "rwkv has no commits ahead of upstream/main; refusing to overwrite it with plain upstream."
+            exit 1
+          fi
+
+          echo "Replaying $rwkv_commit_count rwkv commits on top of upstream/main."
+          git rebase refs/remotes/upstream/main
+
+          post_rebase_commit_count="$(git rev-list --count refs/remotes/upstream/main..HEAD)"
+          if [[ "$post_rebase_commit_count" == "0" ]]; then
+            echo "Rebase removed every rwkv commit; refusing to push."
+            exit 1
+          fi
+
+          if [[ "$(git rev-parse HEAD)" == "$old_head" ]]; then
+            echo "rwkv is already based on the latest upstream/main."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          {
+            echo "changed=true"
+            echo "old_head=$old_head"
+            echo "upstream_head=$(git rev-parse refs/remotes/upstream/main)"
+            echo "candidate_head=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run lightweight RWKV interface guards
+        if: steps.rebase.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import ast
+          from pathlib import Path
+
+          def class_methods(path: str, class_name: str) -> dict[str, ast.FunctionDef]:
+              tree = ast.parse(Path(path).read_text())
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.ClassDef) and node.name == class_name:
+                      return {
+                          item.name: item
+                          for item in node.body
+                          if isinstance(item, ast.FunctionDef)
+                      }
+              raise AssertionError(f"{class_name} not found in {path}")
+
+          def positional_args(fn: ast.FunctionDef) -> list[str]:
+              return [arg.arg for arg in fn.args.posonlyargs + fn.args.args]
+
+          base = class_methods(
+              "vllm/v1/worker/gpu/model_states/interface.py", "ModelState"
+          )
+          rwkv = class_methods(
+              "vllm/v1/worker/gpu/model_states/rwkv.py", "RWKV7ModelState"
+          )
+
+          failures: list[str] = []
+          for name, base_fn in sorted(base.items()):
+              if name.startswith("_") or name not in rwkv:
+                  continue
+              rwkv_fn = rwkv[name]
+              if rwkv_fn.args.vararg is not None:
+                  continue
+
+              base_args = positional_args(base_fn)
+              rwkv_args = positional_args(rwkv_fn)
+              if rwkv_args[: len(base_args)] != base_args:
+                  failures.append(
+                      f"{name}: RWKV args {rwkv_args} do not accept "
+                      f"base ModelState args {base_args}"
+                  )
+
+          if failures:
+              raise AssertionError("\n".join(failures))
+          PY
+
+      - name: Push rebase candidate and open PR
+        if: steps.rebase.outputs.changed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          candidate_branch="automation/rebase-rwkv"
+          git fetch origin "$candidate_branch" || true
+          git push --force-with-lease origin HEAD:"$candidate_branch"
+
+          body_file="$(mktemp)"
+          cat >"$body_file" <<EOF
+          Automated upstream sync candidate for \`rwkv\`.
+
+          - Previous \`rwkv\` head: \`${{ steps.rebase.outputs.old_head }}\`
+          - Upstream \`main\` head: \`${{ steps.rebase.outputs.upstream_head }}\`
+          - Candidate head: \`${{ steps.rebase.outputs.candidate_head }}\`
+
+          This workflow no longer updates \`rwkv\` directly. Merge this PR only after RWKV validation passes.
+          EOF
+
+          pr_number="$(gh pr list \
+            --head "$candidate_branch" \
+            --base rwkv \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          if [[ -z "$pr_number" ]]; then
+            gh pr create \
+              --base rwkv \
+              --head "$candidate_branch" \
+              --title "ci(rwkv): rebase on upstream main" \
+              --body-file "$body_file"
+          else
+            gh pr edit "$pr_number" \
+              --title "ci(rwkv): rebase on upstream main" \
+              --body-file "$body_file"
+          fi
