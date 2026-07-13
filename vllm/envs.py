@@ -236,6 +236,7 @@ if TYPE_CHECKING:
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = True
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
+    VLLM_RESPONSES_API_STORE_MAX_ENTRIES: int = 1000
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
@@ -1735,13 +1736,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # When set to 1, vLLM's OpenAI server will retain the input and output
     # messages for those requests in memory. By default, this is disabled (0),
     # and the "store" option is ignored.
-    # NOTE/WARNING:
-    # 1. Messages are kept in memory only (not persisted to disk) and will be
-    #    lost when the vLLM server shuts down.
-    # 2. Enabling this option will cause a memory leak, as stored messages are
-    #    never removed from memory until the server terminates.
+    # Messages are kept in memory only (not persisted to disk) and will be lost
+    # when the vLLM server shuts down.
     "VLLM_ENABLE_RESPONSES_API_STORE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))
+    ),
+    # Maximum number of completed Responses API entries to retain in memory.
+    # Active responses are not evicted and may temporarily exceed this limit.
+    "VLLM_RESPONSES_API_STORE_MAX_ENTRIES": lambda: int(
+        os.getenv("VLLM_RESPONSES_API_STORE_MAX_ENTRIES", "1000")
     ),
     # If set, use the fp8 mfma in rocm paged attention.
     "VLLM_ROCM_FP8_MFMA_PAGE_ATTN": lambda: bool(
