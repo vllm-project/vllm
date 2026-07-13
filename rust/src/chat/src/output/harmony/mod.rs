@@ -370,6 +370,7 @@ async fn harmony_assistant_event_stream(
                         usage: finished.usage,
                         finish_reason: finished.finish_reason,
                         kv_transfer_params: finished.kv_transfer_params,
+                        ec_transfer_params: finished.ec_transfer_params,
                     })
                     .await;
                 }
