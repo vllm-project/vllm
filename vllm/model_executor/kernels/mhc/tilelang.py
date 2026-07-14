@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
@@ -16,6 +18,23 @@ def _torch_hc_prenorm_gemm(
     x_float = x.float()
     out[0].copy_(x_float @ fn.t())
     sqrsum[0].copy_(x_float.square().sum(dim=-1))
+
+
+def _can_use_cutedsl_hc_prenorm_gemm(
+    x: torch.Tensor,
+    fn: torch.Tensor,
+    n_splits: int,
+) -> bool:
+    if not (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability(100)
+        and has_cutedsl()
+    ):
+        return False
+
+    from vllm.model_executor.kernels.mhc.cutedsl import can_use_hc_prenorm_gemm
+
+    return can_use_hc_prenorm_gemm(x, fn, n_splits)
 
 
 def _tilelang_hc_prenorm_gemm(
@@ -85,6 +104,35 @@ def _tilelang_hc_prenorm_gemm(
         tile_n,
         n_splits,
     )
+
+
+def _hc_prenorm_gemm(
+    x: torch.Tensor,
+    fn: torch.Tensor,
+    out: torch.Tensor,
+    sqrsum: torch.Tensor,
+    hidden_size: int,
+    hc_mult: int,
+    tile_n: int = 12,
+    n_thr: int = 512,
+    n_splits: int = 1,
+) -> None:
+    if _can_use_cutedsl_hc_prenorm_gemm(x, fn, n_splits):
+        from vllm.model_executor.kernels.mhc.cutedsl import run_hc_prenorm_gemm
+
+        run_hc_prenorm_gemm(x, fn, out, sqrsum, n_splits)
+    else:
+        _tilelang_hc_prenorm_gemm(
+            x,
+            fn,
+            out,
+            sqrsum,
+            hidden_size,
+            hc_mult,
+            tile_n,
+            n_thr,
+            n_splits,
+        )
 
 
 def mhc_pre_tilelang(
@@ -200,7 +248,7 @@ def mhc_pre_tilelang(
             n_splits,
         )
     else:
-        _tilelang_hc_prenorm_gemm(
+        _hc_prenorm_gemm(
             residual_2d,
             fn,
             gemm_out_mul,
@@ -603,7 +651,7 @@ def mhc_fused_post_pre_tilelang(
                 n_splits,
             )
         else:
-            _tilelang_hc_prenorm_gemm(
+            _hc_prenorm_gemm(
                 residual_cur_2d,
                 fn,
                 gemm_out_mul,
