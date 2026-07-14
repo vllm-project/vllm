@@ -3,8 +3,8 @@
 import gc
 import weakref
 from collections.abc import Iterable, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
-from functools import partial
 from typing import TYPE_CHECKING
 
 import torch
@@ -25,7 +25,6 @@ from vllm.distributed import (
     get_pcp_group,
     get_tp_group,
 )
-from vllm.distributed.elastic_ep.async_utils import SingleMethodAsyncRunner
 from vllm.distributed.elastic_ep.standby_state import (
     create_standby_groups,
     get_standby_dp_group,
@@ -146,7 +145,10 @@ class ElasticEPScalingExecutor:
         self.worker_ref = weakref.ref(worker)
         self.reconfig_request = None
         self._staged_moe_quant_methods: dict[nn.Module, FusedMoEMethodBase] = {}
-        self._async_runner = SingleMethodAsyncRunner()
+        self._async_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="ElasticEPAsync"
+        )
+        self._async_future: Future[None] | None = None
 
     @property
     def worker(self):
@@ -162,14 +164,16 @@ class ElasticEPScalingExecutor:
         return method(*args, **kwargs)
 
     def start_async(self, execute_method: str, *args, **kwargs) -> str:
+        if self._async_future is not None:
+            raise RuntimeError("Another Elastic EP async method is active")
         if args and isinstance(args[0], ReconfigureDistributedRequest):
             self.reconfig_request = args[0]
         dp_rank = self.worker.vllm_config.parallel_config.data_parallel_rank
         done_key = f"eep_async/{execute_method}/{dp_rank}/{self.worker.rank}"
-        future = self._async_runner.start(
-            partial(self._run_async, execute_method, *args, **kwargs)
+        self._async_future = self._async_executor.submit(
+            self._run_async, execute_method, *args, **kwargs
         )
-        future.add_done_callback(lambda _: self._mark_async_done(done_key))
+        self._async_future.add_done_callback(lambda _: self._mark_async_done(done_key))
         return done_key
 
     def _run_async(self, execute_method: str, *args, **kwargs) -> None:
@@ -191,7 +195,13 @@ class ElasticEPScalingExecutor:
         ).set(done_key, b"1")
 
     def clear_async(self) -> None:
-        self._async_runner.clear()
+        future = self._async_future
+        if future is None:
+            raise RuntimeError("No Elastic EP async method is active")
+        if not future.done():
+            raise RuntimeError("Elastic EP async method is not done")
+        self._async_future = None
+        future.result()
 
     def load_model(self) -> None:
         self.worker.load_model(load_dummy_weights=True)
