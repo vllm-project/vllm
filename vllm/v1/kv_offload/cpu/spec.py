@@ -12,6 +12,7 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     OffloadingCounterMetadata,
     OffloadingGaugeMetadata,
+    OffloadingHistogramMetadata,
     OffloadingManager,
     OffloadingMetricMetadata,
     OffloadingSpec,
@@ -37,7 +38,28 @@ class CPUOffloadingSpec(OffloadingSpec):
                     "values indicate transfers (stores or promotions) may be "
                     "dropped due to insufficient capacity."
                 ),
-            )
+            ),
+            CPUOffloadingMetrics.CPU_CACHE_WRITE_USAGE_PERC: OffloadingGaugeMetadata(
+                documentation=(
+                    "Fraction of CPU KV-cache space currently pinned by "
+                    "in-flight stores that have not yet "
+                    "completed (0.0 = idle, 1.0 = saturated)."
+                ),
+            ),
+            CPUOffloadingMetrics.CPU_CACHE_READ_USAGE_PERC: OffloadingGaugeMetadata(
+                documentation=(
+                    "Fraction of CPU KV-cache space currently pinned by "
+                    "in-flight loads that have not yet "
+                    "completed (0.0 = idle, 1.0 = saturated)."
+                ),
+            ),
+            CPUOffloadingMetrics.CPU_ALLOCATION_SIZE: OffloadingHistogramMetadata(
+                documentation=(
+                    "Histogram of the number of CPU blocks requested by each "
+                    "KV offload prepare_store call."
+                ),
+                buckets=(1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144),
+            ),
         }
         store_threshold = int(extra_config.get("store_threshold", 0))
         if store_threshold >= 2:
