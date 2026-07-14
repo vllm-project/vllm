@@ -212,7 +212,6 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         # [K/bs, N/bs] -> [batch, K/bs, N_per_batch/bs]
         if getattr(layer, "is_bmm", False):
             batch = layer.bmm_batch_size
-            bs = layer.weight_block_size[0]
             k_blocks = scale_t.shape[0]
             n_per_batch_blocks = scale_t.shape[1] // batch
             layer.bmm_scale = (

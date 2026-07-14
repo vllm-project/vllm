@@ -43,7 +43,6 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
 
     backend_cls = DeepseekV4XPUSparseBackend
     use_flashmla_fp8_layout = True
-    BLOCK_FP8_SIZE = 128
 
     def __init__(self, *args, **kwargs) -> None:
         # torch.cuda.Event() raises RuntimeError on XPU ("dummy base class").
@@ -118,6 +117,8 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
         # [n_groups, K/bs, lora_rank/bs].
         wo_a_scale = self.wo_a.bmm_scale
 
+        # TODO: optimize fused_inv_rope_fp8_quant for xpu bmm to
+        # eliminate o_scale transpose + contiguous
         z = torch.ops._xpu_C.fp8_bmm(
             o_fp8.transpose(0, 1),
             wo_a_weight,
