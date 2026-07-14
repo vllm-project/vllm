@@ -23,7 +23,10 @@ from torch import nn
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.config.attention import IndexerKVDType
 from vllm.config.cache import CacheDType
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -31,7 +34,9 @@ from vllm.platforms import current_platform
 
 if current_platform.is_rocm():
     from vllm.models.minimax_m3.amd.ops.index_topk import (
+        alloc_cp_decode_buffers,
         minimax_m3_index_decode,
+        minimax_m3_index_decode_cp,
         minimax_m3_index_score,
         minimax_m3_index_topk,
     )
@@ -384,6 +389,10 @@ class MiniMaxM3IndexerImpl(nn.Module):
         # Shared, stable-address top-k output buffer (set by the model for the
         # cudagraph-safe MSA impl); None -> impl allocates fresh (eager).
         self.topk_indices_buffer = topk_indices_buffer
+        vllm_config = get_current_vllm_config()
+        self.max_decode_tokens = vllm_config.scheduler_config.max_num_seqs
+        self.max_model_len = vllm_config.model_config.max_model_len
+        self.cp_decode_buffers: tuple[torch.Tensor, torch.Tensor] | None = None
         # Owns the side cache (registers itself in the static forward context).
         self.index_cache = MiniMaxM3IndexerCache(
             head_dim=index_head_dim,
@@ -415,8 +424,10 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
         assert isinstance(index_md, MiniMaxM3IndexerMetadata)
         num_tokens = index_md.num_actual_tokens
         nd = index_md.num_decode_tokens
+        # index_q is replicated: index_query holds all index heads on every rank.
+        world = get_tensor_model_parallel_world_size()
         iq = index_query[:num_tokens].view(
-            -1, self.num_index_heads, self.index_head_dim
+            -1, self.num_index_heads * world, self.index_head_dim
         )
         kv = self.index_cache.kv_cache
 
@@ -429,7 +440,17 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
         if index_md.num_decodes > 0:
             d = index_md.decode
             assert d is not None
-            decode_topk = minimax_m3_index_decode(
+            if self.cp_decode_buffers is None:
+                self.cp_decode_buffers = alloc_cp_decode_buffers(
+                    max_decode_tokens=self.max_decode_tokens,
+                    max_model_len=self.max_model_len,
+                    num_index_heads=self.num_index_heads * world,
+                    topk=self.topk_blocks,
+                    world=world,
+                    device=iq.device,
+                )
+            block_scores, partials = self.cp_decode_buffers
+            decode_topk = minimax_m3_index_decode_cp(
                 iq[:nd],
                 kv,
                 d.block_table,
@@ -442,12 +463,17 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
                 d.decode_query_len,
                 d.max_decode_query_len,
                 out=buf,
+                block_scores=block_scores,
+                partials=partials,
             )
         if index_md.num_prefills > 0:
             p = index_md.prefill
             assert p is not None
+            # Prefill stays per-rank: slice this rank's index head.
+            head = get_tensor_model_parallel_rank() * self.num_index_heads
+            iq_prefill = iq[nd:, head : head + self.num_index_heads, :].contiguous()
             score = minimax_m3_index_score(
-                iq[nd:],
+                iq_prefill,
                 kv,
                 p.block_table,
                 p.cu_seqlens_q,
@@ -508,7 +534,7 @@ def select_indexer_impl_cls(
             indexer_kv_dtype,
         )
         return MiniMaxM3IndexerMSAImpl
-    if indexer_kv_dtype != "bf16":
+    if indexer_kv_dtype not in ("bf16", "fp8", "fp8_e4m3"):
         raise NotImplementedError(
             f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the "
             "Triton indexer impl."

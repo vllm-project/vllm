@@ -16,6 +16,11 @@ feed the block-sparse attention kernels in ``sparse_attn``.
 
 import torch
 
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
@@ -101,6 +106,7 @@ def _index_block_score_kernel(
     stride_bt_b,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,  # == SPARSE_BLOCK_SIZE (128)
+    IS_FP8: tl.constexpr,
 ):
     pid_q = tl.program_id(0)
     pid_bh = tl.program_id(1)
@@ -146,6 +152,8 @@ def _index_block_score_kernel(
             + off_k[None, :] * stride_ik_pos
             + off_d[:, None] * stride_ik_d,
         )
+        if IS_FP8:
+            k = k.to(tl.bfloat16)
         qk = tl.dot(q, k)
         # apply causal mask as needed
         if q_start < i + BLOCK_SIZE_K:
@@ -317,14 +325,17 @@ def _decode_index_score_kernel(
     BLOCK_SIZE_Q: tl.constexpr,
     num_kv_chunks,
     USE_PDL: tl.constexpr,
+    IS_FP8: tl.constexpr,
 ):
     BLOCK_SIZE_HQ: tl.constexpr = num_idx_heads * BLOCK_SIZE_Q
+    PAD_HQ: tl.constexpr = max(16, ((BLOCK_SIZE_HQ + 15) // 16) * 16)
     pid_r = tl.program_id(0)
     pid_c = tl.program_id(1)
-    hq_offsets = tl.arange(0, BLOCK_SIZE_HQ)
+    hq_offsets = tl.arange(0, PAD_HQ)
+    hq_valid = hq_offsets < BLOCK_SIZE_HQ
     h_offsets = hq_offsets // BLOCK_SIZE_Q
     q_offsets = hq_offsets % BLOCK_SIZE_Q
-    q_mask = q_offsets < decode_query_len
+    q_mask = (q_offsets < decode_query_len) & hq_valid
     q_ids = pid_r * decode_query_len + q_offsets
 
     if USE_PDL:
@@ -706,6 +717,7 @@ def minimax_m3_index_score(
         block_table.stride(0),
         BLOCK_SIZE_Q=BLOCK_SIZE_Q,
         BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
+        IS_FP8=index_kv_cache.dtype in (torch.float8_e4m3fn, torch.float8_e5m2),
     )
     return score
 
@@ -816,7 +828,7 @@ def minimax_m3_index_decode(
     )
     # split-K over seq blocks; chunk count depends only on shape constants so
     # the grid is fixed within a cuda graph.
-    TARGET_GRID = 512
+    TARGET_GRID = 8192
     MAX_NUM_KV_CHUNKS = 256
     # Use the configured max decode length to avoid Triton recompiles when
     # switching between qlen=1 and spec-decode verification batches.
@@ -853,6 +865,7 @@ def minimax_m3_index_decode(
         BLOCK_SIZE_Q=BLOCK_SIZE_Q,
         num_kv_chunks=num_kv_chunks,
         USE_PDL=use_pdl,
+        IS_FP8=index_kv_cache.dtype in (torch.float8_e4m3fn, torch.float8_e5m2),
         **score_kwargs,
     )
 
@@ -937,3 +950,293 @@ def minimax_m3_index_decode(
         **pdl_kwargs,
     )
     return topk_idx
+
+
+# Context-parallel decode: score a 1/world block shard, all-reduce partial top-k.
+@triton.jit(do_not_specialize=["num_kv_chunks", "decode_query_len"])
+def _decode_index_score_sharded_kernel(
+    q_ptr,
+    ik_cache_ptr,
+    score_ptr,
+    block_table_ptr,
+    seq_lens,
+    num_idx_heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    init_blocks,
+    local_blocks,
+    decode_query_len,
+    stride_q_n,
+    stride_q_h,
+    stride_q_d,
+    stride_ik_blk,
+    stride_ik_pos,
+    stride_ik_d,
+    stride_s_h,
+    stride_s_n,
+    stride_s_k,
+    stride_bt_b,
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_SIZE_Q: tl.constexpr,
+    num_kv_chunks,
+    block_start,
+    block_end,
+    USE_PDL: tl.constexpr,
+    IS_FP8: tl.constexpr,
+):
+    BLOCK_SIZE_HQ: tl.constexpr = num_idx_heads * BLOCK_SIZE_Q
+    PAD_HQ: tl.constexpr = max(16, ((BLOCK_SIZE_HQ + 15) // 16) * 16)
+    pid_r = tl.program_id(0)
+    pid_c = tl.program_id(1)
+    hq_offsets = tl.arange(0, PAD_HQ)
+    hq_valid = hq_offsets < BLOCK_SIZE_HQ
+    h_offsets = hq_offsets // BLOCK_SIZE_Q
+    q_offsets = hq_offsets % BLOCK_SIZE_Q
+    q_mask = (q_offsets < decode_query_len) & hq_valid
+    q_ids = pid_r * decode_query_len + q_offsets
+
+    if USE_PDL:
+        tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
+
+    seq_len = tl.load(seq_lens + pid_r)
+    query_pos = seq_len - decode_query_len + q_offsets
+    kv_len = tl.maximum(query_pos + 1, 0)
+    num_blocks_q = (kv_len + BLOCK_SIZE_K - 1) // BLOCK_SIZE_K
+    kv_len_max = tl.max(tl.where(q_mask, kv_len, 0), axis=0)
+    num_blocks = (kv_len_max + BLOCK_SIZE_K - 1) // BLOCK_SIZE_K
+
+    # Shard [0, num_blocks) across ranks, then fixed-count split within the shard
+    # (grid stays seq_len-independent for cuda graph).
+    shard_end = tl.minimum(block_end, num_blocks)
+    shard_blocks = tl.maximum(shard_end - block_start, 0)
+    chunk_size_blocks = (shard_blocks + num_kv_chunks - 1) // num_kv_chunks
+    chunk_start_block = block_start + pid_c * chunk_size_blocks
+    chunk_end_block = tl.minimum(chunk_start_block + chunk_size_blocks, shard_end)
+    if chunk_start_block >= chunk_end_block:
+        return
+    off_k = tl.arange(0, BLOCK_SIZE_K)
+    off_d = tl.arange(0, head_dim)
+    bt_row = block_table_ptr + pid_r * stride_bt_b
+    local_start = tl.maximum(0, num_blocks_q - local_blocks)
+    q = tl.load(
+        q_ptr
+        + q_ids[None, :] * stride_q_n
+        + h_offsets[None, :] * stride_q_h
+        + off_d[:, None] * stride_q_d,
+        mask=q_mask[None, :],
+        other=0.0,
+    )  # [D,HQ]
+    for blk in tl.range(chunk_start_block, chunk_end_block):
+        page = tl.load(bt_row + blk).to(tl.int64)
+        pos = blk * BLOCK_SIZE_K + off_k
+        pos_mask = pos[:, None] < kv_len[None, :]
+        k = tl.load(
+            ik_cache_ptr
+            + page * stride_ik_blk
+            + off_k[:, None] * stride_ik_pos
+            + off_d * stride_ik_d,
+        )  # [N,D]
+        if BLOCK_SIZE_HQ == 1:
+            q_vec = tl.sum(q, axis=1).to(tl.float32)  # [D]
+            kq = tl.sum(k.to(tl.float32) * q_vec[None, :], axis=1)[:, None]  # [N,1]
+        else:
+            if IS_FP8:
+                # ROCm Triton can't feed fp8 to the MMA; upcast (exact in bf16).
+                k = k.to(q.dtype)
+            kq = tl.dot(k, q, out_dtype=tl.float32)  # [N,HQ]
+        kq = tl.where(pos_mask & q_mask[None, :], kq, float("-inf"))
+        score = tl.max(kq, axis=0)  # [HQ]
+        is_visible_block = blk < num_blocks_q
+        is_init = (blk < init_blocks) & is_visible_block
+        is_local = (blk >= local_start) & is_visible_block
+        score = tl.where(is_local, 1e29, tl.where(is_init, 1e30, score))
+        tl.store(
+            score_ptr + h_offsets * stride_s_h + q_ids * stride_s_n + blk * stride_s_k,
+            score,
+            mask=q_mask,
+        )
+
+
+@torch.no_grad()
+def minimax_m3_index_decode_cp(
+    idx_q: torch.Tensor,  # [total_q, num_index_heads, head_dim], replicated
+    index_kv_cache: torch.Tensor,  # [num_blocks, 128, head_dim]
+    block_table: torch.Tensor,  # [num_reqs, max_blocks]
+    seq_lens: torch.Tensor,  # [num_reqs] int32
+    max_seq_len: int,
+    topk: int,
+    init_blocks: int,
+    local_blocks: int,
+    num_kv_heads: int,  # this rank's output head count
+    decode_query_len: int,
+    max_decode_query_len: int,
+    out: torch.Tensor | None = None,
+    block_scores: torch.Tensor | None = None,
+    partials: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Context-parallel drop-in for ``minimax_m3_index_decode`` (decode only).
+
+    Each rank scores its 1/world shard of the KV blocks for every index head,
+    then a single all-reduce merges the per-rank partial top-k. ``block_scores``
+    and ``partials`` are shared scratch (``alloc_cp_decode_buffers``), sliced to
+    this batch; both are allocated fresh when ``None``. Returns this rank's head
+    top-k ``[num_kv_heads, total_q, topk]``.
+    """
+    world = get_tensor_model_parallel_world_size()
+    rank = get_tensor_model_parallel_rank()
+    total_q, num_index_heads, head_dim = idx_q.shape
+    device = idx_q.device
+    num_output_heads = num_kv_heads
+    output_head_start = rank * num_output_heads
+    max_block = triton.cdiv(max_seq_len, SPARSE_BLOCK_SIZE)
+    score_block_stride = round_up(max_block, 16)
+    padded_topk = triton.next_power_of_2(topk)
+
+    if block_scores is None:
+        block_scores = torch.empty(
+            num_index_heads, total_q, score_block_stride,
+            device=device, dtype=torch.float32,
+        )
+    else:
+        block_scores = block_scores[:num_index_heads, :total_q, :]
+    if partials is None:
+        partials = torch.empty(
+            world, num_index_heads, total_q, 2 * padded_topk,
+            device=device, dtype=torch.float32,
+        )
+    # Unscored blocks stay -1e30; partials starts zero so the all-reduce over
+    # disjoint per-rank slots acts as a gather. partials stays contiguous for the
+    # all-reduce -- the batch/head slicing happens only in the kernel-arg views.
+    block_scores.fill_(-1e30)
+    partials.zero_()
+
+    # This rank's contiguous shard of [0, max_block).
+    base, remainder = divmod(max_block, world)
+    block_start = rank * base + min(rank, remainder)
+    block_end = block_start + base + (1 if rank < remainder else 0)
+
+    block_size_q = triton.next_power_of_2(max_decode_query_len)
+    num_kv_chunks = _score_kv_chunks(seq_lens.shape[0])
+    _decode_index_score_sharded_kernel[(seq_lens.shape[0], num_kv_chunks)](
+        idx_q,
+        index_kv_cache,
+        block_scores,
+        block_table,
+        seq_lens,
+        num_index_heads,
+        head_dim,
+        init_blocks,
+        local_blocks,
+        decode_query_len,
+        idx_q.stride(0),
+        idx_q.stride(1),
+        idx_q.stride(2),
+        index_kv_cache.stride(0),
+        index_kv_cache.stride(1),
+        index_kv_cache.stride(2),
+        block_scores.stride(0),
+        block_scores.stride(1),
+        block_scores.stride(2),
+        block_table.stride(0),
+        BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
+        BLOCK_SIZE_Q=block_size_q,
+        num_kv_chunks=num_kv_chunks,
+        block_start=block_start,
+        block_end=block_end,
+        USE_PDL=False,
+        IS_FP8=index_kv_cache.dtype in (torch.float8_e4m3fn, torch.float8_e5m2),
+    )
+
+    # partials packs [scores | ids] on the last dim; ids are 1-indexed globals.
+    local_partial_scores = partials[rank : rank + 1, :num_index_heads, :total_q, :padded_topk]
+    local_partial_ids = partials[rank : rank + 1, :num_index_heads, :total_q, padded_topk:]
+    _topk_index_partial_kernel[(total_q, num_index_heads, 1)](
+        block_scores,
+        local_partial_scores,
+        local_partial_ids,
+        seq_lens,
+        SPARSE_BLOCK_SIZE,
+        topk,
+        score_block_stride,
+        decode_query_len,
+        block_scores.stride(0),
+        block_scores.stride(1),
+        block_scores.stride(2),
+        local_partial_scores.stride(0),
+        local_partial_scores.stride(1),
+        local_partial_scores.stride(2),
+        local_partial_scores.stride(3),
+        local_partial_ids.stride(0),
+        local_partial_ids.stride(1),
+        local_partial_ids.stride(2),
+        local_partial_ids.stride(3),
+        USE_PDL=False,
+    )
+
+    # Disjoint slots (others zero) -> all-reduce acts as a gather.
+    partials = tensor_model_parallel_all_reduce(partials)
+
+    if out is not None:
+        topk_idx = out[:, :total_q, :]
+    else:
+        topk_idx = torch.empty(
+            num_output_heads, total_q, topk, dtype=torch.int32, device=device
+        )
+    head_slice = slice(output_head_start, output_head_start + num_output_heads)
+    partial_scores = partials[:, head_slice, :total_q, :padded_topk]
+    partial_ids = partials[:, head_slice, :total_q, padded_topk:]
+    _topk_index_merge_kernel[(total_q, num_output_heads)](
+        partial_scores,
+        partial_ids,
+        topk_idx,
+        seq_lens,
+        SPARSE_BLOCK_SIZE,
+        topk,
+        decode_query_len,
+        partial_scores.stride(0),
+        partial_scores.stride(1),
+        partial_scores.stride(2),
+        partial_scores.stride(3),
+        partial_ids.stride(0),
+        partial_ids.stride(1),
+        partial_ids.stride(2),
+        partial_ids.stride(3),
+        topk_idx.stride(0),
+        topk_idx.stride(1),
+        topk_idx.stride(2),
+        num_topk_chunks=world,
+        USE_PDL=False,
+    )
+    return topk_idx
+
+
+def _score_kv_chunks(num_reqs: int) -> int:
+    """Fixed (seq_len-independent) split of a request's blocks, for cudagraph."""
+    target_grid = 8192
+    max_chunks = 256
+    target = max(1, min(max_chunks, target_grid // max(1, num_reqs)))
+    return 1 << (target.bit_length() - 1)
+
+
+def alloc_cp_decode_buffers(
+    *,
+    max_decode_tokens: int,
+    max_model_len: int,
+    num_index_heads: int,
+    topk: int,
+    world: int,
+    device: torch.device | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Shared ``(block_scores, partials)`` scratch for
+    ``minimax_m3_index_decode_cp``, sized for the largest decode batch/context."""
+    block_stride = round_up(triton.cdiv(max_model_len, SPARSE_BLOCK_SIZE), 16)
+    padded_topk = triton.next_power_of_2(topk)
+    block_scores = torch.empty(
+        num_index_heads, max_decode_tokens, block_stride,
+        device=device, dtype=torch.float32,
+    )
+    partials = torch.empty(
+        world, num_index_heads, max_decode_tokens, 2 * padded_topk,
+        device=device, dtype=torch.float32,
+    )
+    return block_scores, partials

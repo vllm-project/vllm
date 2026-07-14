@@ -584,8 +584,9 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         sparse_cfg = config.sparse_attention_config
         self.total_idx_heads = sparse_cfg["sparse_num_index_heads"]
         self.num_idx_heads = self.num_kv_heads
+        self.proj_idx_heads = self.total_idx_heads
         self.idx_head_dim = sparse_cfg["sparse_index_dim"]
-        self.index_q_size = self.num_idx_heads * self.idx_head_dim
+        self.index_q_size = self.proj_idx_heads * self.idx_head_dim
 
         # Single fused projection: q, k, v, index_q, index_k in one GEMM.
         self.qkv_proj = MinimaxM3QKVParallelLinearWithIndexer(
@@ -636,6 +637,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, vllm_config.model_config
         )
+        self._fp8_kv = "fp8" in self.kv_cache_dtype
 
         # Shared top-k buffer: the indexer writes the selected blocks into it and
         # the attend impl reads them back (no Python value crosses the break).
@@ -656,6 +658,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
             sparse_block_size=sparse_cfg["sparse_block_size"],
         )
+        indexer_kv_dtype = vllm_config.attention_config.indexer_kv_dtype
+        self._index_fp8 = "fp8" in indexer_kv_dtype
         # Self-contained nn.Module: owns its side cache, selects its impl in init
         # (Triton on ROCm, where the SM100 gate is always False).
         self.indexer = MiniMaxM3Indexer(
@@ -670,6 +674,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             local_blocks=sparse_cfg.get("sparse_local_block", 0),
             score_type=sparse_cfg.get("sparse_score_type", "max"),
             cache_config=cache_config,
+            indexer_kv_dtype=indexer_kv_dtype,
             topk_indices_buffer=topk_indices_buffer,
         )
 
@@ -693,6 +698,29 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             dtype=self.kv_cache_torch_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )
+
+    def _insert_kv(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        index_key: torch.Tensor,
+        main_slot_mapping: torch.Tensor,
+        index_slot_mapping: torch.Tensor,
+    ) -> None:
+        key_cache, value_cache = self.kv_cache.unbind(1)
+        scale = torch.ones((), device=key.device)
+        ops.reshape_and_cache_flash(
+            key.view(-1, self.num_kv_heads, self.head_dim),
+            value.view(-1, self.num_kv_heads, self.head_dim),
+            key_cache,
+            value_cache,
+            main_slot_mapping,
+            self.kv_cache_dtype,
+            scale,
+            scale,
+        )
+        idx_cache = self.indexer.index_cache.kv_cache.view(-1, self.idx_head_dim)
+        idx_cache[index_slot_mapping] = index_key.to(idx_cache.dtype)
 
     def forward(
         self,
@@ -727,6 +755,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
         q = qkv.new_empty((num_tokens, self.q_size))
         index_q = qkv.new_empty((num_tokens, self.index_q_size))
+        insert_via_fused = not self._fp8_kv and not self._index_fp8
         ops.fused_minimax_m3_qknorm_rope_kv_insert(
             qkv,
             self.q_norm.weight,
@@ -739,16 +768,23 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             eps,
             self.index_q_norm.weight,
             self.index_k_norm.weight,
-            self.num_idx_heads,
+            self.proj_idx_heads,
             main_slot_mapping,
             index_slot_mapping,
-            self.kv_cache,
-            self.indexer.index_cache.kv_cache,
+            self.kv_cache if insert_via_fused else None,
+            self.indexer.index_cache.kv_cache if insert_via_fused else None,
             self.kv_cache.size(2),  # paged-cache block size
             q,
             index_q,
             self.kv_cache_dtype,
         )
+        if not insert_via_fused:
+            kv = self.num_kv_heads * self.head_dim
+            k = qkv[:, self.q_size : self.q_size + kv]
+            v = qkv[:, self.q_size + kv : self.q_size + 2 * kv]
+            ik0 = self.q_size + 2 * kv + self.index_q_size
+            index_k = qkv[:, ik0 : ik0 + self.num_idx_heads * self.idx_head_dim]
+            self._insert_kv(k, v, index_k, main_slot_mapping, index_slot_mapping)
 
         output = torch.empty_like(q)
         attn_output = self._run_attention(q, index_q, output)
@@ -802,7 +838,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 prefix=f"{prefix}.self_attn",
                 cache_config=cache_config,
                 topk_indices_buffer=topk_indices_buffer,
-            )
+                )
         else:
             self.self_attn = MiniMaxM3Attention(
                 config=config,
