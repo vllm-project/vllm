@@ -17,19 +17,23 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.serve.engine.typing import RendererChatRequest, RendererRequest
 from vllm.inputs import EngineInput, SingletonPrompt
+from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.tool_parsers import ToolParser
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from ..typing import (
+    EncodeChatRenderParams,
+    EncodeCMPLRenderParams,
     OfflineInputsContext,
     OfflineOutputsContext,
     PoolingChatLikeRequest,
     PoolingCompletionLikeRequest,
+    PoolingEngineInput,
     PoolingServeContext,
-    PromptFactory,
-    PromptGenerator,
+    RequestFactory,
+    RequestGenerator,
 )
 
 
@@ -102,8 +106,12 @@ class PoolingIOProcessor:
     #######################################
     # offline APIs
 
-    def get_prompt_factory_offline(self, ctx: OfflineInputsContext) -> PromptFactory:
-        num_requests = len(ctx.prompts)
+    def get_request_factory_offline(
+        self, ctx: OfflineInputsContext
+    ) -> tuple[RequestFactory, int]:
+        prompts_seq = prompt_to_seq(ctx.prompts)
+        num_requests = len(prompts_seq)
+        pooling_task = ctx.pooling_task
 
         parsed_prompts = [
             (
@@ -111,27 +119,42 @@ class PoolingIOProcessor:
                 if isinstance(prompt, bytes)
                 else parse_model_prompt(self.model_config, prompt)
             )
-            for prompt in ctx.prompts
+            for prompt in prompts_seq
         ]
         tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
             **(ctx.tokenization_kwargs or {})
         )
 
-        def prompt_factory() -> PromptGenerator:
+        if ctx.pooling_params is None:
+            pooling_params = PoolingParams()
+        else:
+            pooling_params = ctx.pooling_params
+
+        params_seq = self._params_to_seq(pooling_params, num_requests)
+
+        for param in params_seq:
+            if param.task is None:
+                param.task = pooling_task
+            elif param.task != pooling_task:
+                msg = f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
+                raise ValueError(msg)
+
+        seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
+        seq_priority = self._priority_to_seq(None, num_requests)
+
+        def request_factory() -> RequestGenerator:
             for i in range(num_requests):
-                yield (
-                    {
-                        "prompts": [parsed_prompts[i]],
-                        "tok_params": tok_params,
-                    },
-                    {
-                        "params": [ctx.pooling_params[i]],
-                        "lora_requests": [ctx.seq_lora_requests[i]],
-                        "priorities": [ctx.priorities[i]],
-                    },
+                yield EncodeCMPLRenderParams(
+                    prompts=parsed_prompts[i],
+                    tok_params=tok_params,
+                    prompt_extras=None,
+                    skip_mm_cache=False,
+                    params=params_seq[i],
+                    lora_requests=seq_lora_requests[i],
+                    priorities=seq_priority[i],
                 )
 
-        return prompt_factory
+        return request_factory, num_requests
 
     def post_process_offline(
         self,
@@ -144,17 +167,29 @@ class PoolingIOProcessor:
 
     def render(
         self,
-        render_params: tuple[dict[str, Any], dict[str, Any]],
-    ) -> dict[str, Any]:
-        render_params, engine_inputs = render_params
-
+        render_params: EncodeCMPLRenderParams | EncodeChatRenderParams,
+    ) -> PoolingEngineInput:
         if "conversations" in render_params:
-            (_,), (engine_input,) = self.renderer.render_chat(**render_params)
+            (_,), (engine_input,) = self.renderer.render_chat(
+                conversations=[render_params["conversations"]],
+                chat_params=render_params["chat_params"],
+                tok_params=render_params["tok_params"],
+                prompt_extras=render_params["prompt_extras"],
+                skip_mm_cache=render_params["skip_mm_cache"],
+            )
         else:
-            engine_input = self.renderer.render_cmpl(**render_params)
-
-        engine_inputs["prompts"] = engine_input
-        return engine_inputs
+            engine_input = self.renderer.render_cmpl(
+                prompts=[render_params["prompts"]],
+                tok_params=render_params["tok_params"],
+                prompt_extras=render_params["prompt_extras"],
+                skip_mm_cache=render_params["skip_mm_cache"],
+            )
+        return PoolingEngineInput(
+            prompts=engine_input[0],
+            params=render_params["params"],
+            lora_requests=render_params["lora_requests"],
+            priorities=render_params["priorities"],
+        )
 
     def _preprocess_cmpl_online(
         self,
@@ -269,3 +304,35 @@ class PoolingIOProcessor:
             return params
 
         return [params] * num_requests
+
+    def _lora_request_to_seq(
+        self,
+        lora_request: LoRARequest | None | Sequence[LoRARequest | None],
+        num_requests: int,
+    ) -> Sequence[LoRARequest | None]:
+        if isinstance(lora_request, Sequence):
+            if len(lora_request) != num_requests:
+                raise ValueError(
+                    f"The lengths of prompts ({num_requests}) "
+                    f"and lora_request ({len(lora_request)}) must be the same."
+                )
+
+            return lora_request
+
+        return [lora_request] * num_requests
+
+    def _priority_to_seq(
+        self,
+        priority: list[int] | None,
+        num_requests: int,
+    ) -> Sequence[int]:
+        if priority is not None:
+            if len(priority) != num_requests:
+                raise ValueError(
+                    f"The lengths of prompts ({num_requests}) "
+                    f"and priority ({len(priority)}) must be the same."
+                )
+
+            return priority
+
+        return [0] * num_requests

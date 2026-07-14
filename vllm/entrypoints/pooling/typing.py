@@ -3,15 +3,19 @@
 import time
 from collections.abc import AsyncGenerator, Callable, Generator, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Generic, TypeAlias, TypeVar
+from typing import Any, Generic, TypeAlias, TypedDict, TypeVar
 
 from fastapi import Request
 from pydantic import ConfigDict
 
 from vllm import PoolingParams, PoolingRequestOutput, PromptType
+from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.inputs import EngineInput
 from vllm.lora.request import LoRARequest
+from vllm.renderers import ChatParams, TokenizeParams
+from vllm.renderers.inputs import DictPrompt
 
+from ...tasks import PoolingTask
 from .classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
@@ -34,6 +38,7 @@ from .pooling.protocol import (
     PoolingResponse,
 )
 from .scoring.protocol import ScoringRequest, ScoringResponse
+from .scoring.typing import ScoreData, ScoringData
 
 PoolingCompletionLikeRequest: TypeAlias = (
     EmbeddingCompletionRequest
@@ -67,9 +72,6 @@ AnyPoolingResponse: TypeAlias = (
 )
 
 PoolingRequestT = TypeVar("PoolingRequestT", bound=AnyPoolingRequest)
-
-PromptGenerator: TypeAlias = Generator[tuple[dict[str, Any], dict[str, Any]]]
-PromptFactory: TypeAlias = Callable[[], PromptGenerator]
 
 
 @dataclass(kw_only=True)
@@ -113,17 +115,25 @@ class PoolingServeContext(Generic[PoolingRequestT]):
 
 @dataclass
 class OfflineInputsContext:
+    pooling_task: PoolingTask
     prompts: Sequence[PromptType]
-    pooling_params: Sequence[PoolingParams]
+    pooling_params: PoolingParams | Sequence[PoolingParams] | None
     tokenization_kwargs: dict[str, Any]
-    seq_lora_requests: Sequence[LoRARequest | None]
-    priorities: Sequence[int]
+    lora_request: Sequence[LoRARequest | None]
+    priorities: Sequence[int] | None = None
+    num_requests: int = 0
+
+
+@dataclass
+class OfflineInputsScoringContext:
+    scoring_data: ScoringData
+    pooling_params: PoolingParams
+    tokenization_kwargs: dict[str, Any]
+    lora_request: Sequence[LoRARequest | None]
+    priorities: Sequence[int] | None = None
 
     # for scoring
     chat_template: str | None = None
-
-    ## for bi-encoder & late-interaction
-    n_queries: int | None = None
 
 
 @dataclass
@@ -132,3 +142,41 @@ class OfflineOutputsContext:
 
     ## for bi-encoder & late-interaction
     n_queries: int | None = None
+
+
+class RenderParams(TypedDict):
+    tok_params: TokenizeParams
+    prompt_extras: dict[str, Any] | None
+    skip_mm_cache: bool
+
+    params: PoolingParams
+    lora_requests: LoRARequest | None
+    priorities: int
+
+
+class EncodeCMPLRenderParams(RenderParams):
+    prompts: DictPrompt
+
+
+class EncodeChatRenderParams(RenderParams):
+    conversations: list["ChatCompletionMessageParam"]
+    chat_params: ChatParams
+
+
+class ScoringRenderParams(RenderParams):
+    data_1: ScoreData
+    data_2: ScoreData
+    chat_template: str | None
+
+
+class PoolingEngineInput(TypedDict):
+    prompts: EngineInput
+    params: PoolingParams
+    lora_requests: LoRARequest | None
+    priorities: int
+
+
+RequestGenerator: TypeAlias = Generator[
+    EncodeCMPLRenderParams | EncodeChatRenderParams | ScoringRenderParams
+]
+RequestFactory: TypeAlias = Callable[[], RequestGenerator]

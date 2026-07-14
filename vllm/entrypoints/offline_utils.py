@@ -530,6 +530,11 @@ class OfflineInferenceMixin:
     ) -> list[str]:
         added_request_ids: list[str] = []
 
+        print(prompts)
+        print(params)
+        print(lora_requests)
+        print(priorities)
+
         try:
             for i, prompt in enumerate(prompts):
                 request_id = self._add_request(

@@ -18,14 +18,18 @@ from vllm.outputs import (
     ScoringRequestOutput,
 )
 from vllm.pooling_params import PoolingParams
-from vllm.renderers.inputs.preprocess import prompt_to_seq
 from vllm.tasks import SCORE_TYPE_MAP, PoolingTask, SupportedTask
 
 from .base.io_processor import PoolingIOProcessor
 from .factories import init_pooling_io_processors
 from .scoring.io_processor import ScoringIOProcessor
 from .scoring.typing import ScoreInput
-from .typing import OfflineInputsContext, OfflineOutputsContext, PromptFactory
+from .typing import (
+    OfflineInputsContext,
+    OfflineInputsScoringContext,
+    OfflineOutputsContext,
+    RequestFactory,
+)
 
 logger = init_logger(__name__)
 
@@ -89,95 +93,27 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             pooled hidden states in the same order as the input prompts.
         """
 
-        self._verify_pooling_task(pooling_task)
-
-        if isinstance(prompts, dict) and "data" in prompts:
-            if pooling_task != "plugin":
-                raise ValueError(
-                    "The 'data' field is only supported for the 'plugin' pooling task."
-                )
-            return self._encode_plugin(
-                prompts,
-                pooling_params,
-                use_tqdm=use_tqdm,
-                lora_request=lora_request,
-                tokenization_kwargs=tokenization_kwargs,
+        if isinstance(prompts, dict) and "data" in prompts and pooling_task != "plugin":
+            raise ValueError(
+                "The 'data' field is only supported for the 'plugin' pooling task."
             )
-
+        self._verify_pooling_task(pooling_task)
         assert pooling_task is not None and pooling_task in self.pooling_io_processors
+
         io_processor = self.pooling_io_processors[pooling_task]
-
-        if pooling_params is None:
-            pooling_params = PoolingParams()
-
-        prompts = prompt_to_seq(prompts)
-        num_requests = len(prompts)
-
-        params_seq = self._params_to_seq(pooling_params, num_requests)
-        seq_lora_requests = self._lora_request_to_seq(lora_request, num_requests)
-        seq_priority = self._priority_to_seq(None, num_requests)
-
-        for param in params_seq:
-            if param.task is None:
-                param.task = pooling_task
-            elif param.task != pooling_task:
-                msg = f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
-                raise ValueError(msg)
-
         ctx = OfflineInputsContext(
+            pooling_task=pooling_task,
             prompts=prompts,
-            pooling_params=params_seq,
             tokenization_kwargs=tokenization_kwargs,
-            seq_lora_requests=seq_lora_requests,
-            priorities=seq_priority,
-        )
-
-        prompt_factory = io_processor.get_prompt_factory_offline(ctx)
-
-        outputs = self._run_tiling_engine(
-            io_processor, prompt_factory, num_requests, use_tqdm=use_tqdm
-        )
-        outputs = io_processor.post_process_offline(
-            ctx=OfflineOutputsContext(outputs=outputs)
-        )
-        return outputs
-
-    def _encode_plugin(
-        self,
-        prompts: PromptType | Sequence[PromptType] | DataPrompt,
-        pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
-        *,
-        use_tqdm: bool | Callable[..., tqdm] = True,
-        lora_request: list[LoRARequest] | LoRARequest | None = None,
-        tokenization_kwargs: dict[str, Any] | None = None,
-    ):
-        io_processor = self.pooling_io_processors["plugin"]
-
-        if pooling_params is None:
-            pooling_params = PoolingParams()
-
-        ctx = OfflineInputsContext(
-            prompts=prompts,
             pooling_params=pooling_params,
-            tokenization_kwargs=tokenization_kwargs,
+            lora_request=lora_request,
+            priorities=None,
         )
 
-        engine_inputs = io_processor.pre_process_offline(ctx)
-        n_inputs = len(engine_inputs)
-        assert ctx.pooling_params is not None
-
-        params_seq = self._params_to_seq(ctx.pooling_params, n_inputs)
-        seq_lora_requests = self._lora_request_to_seq(lora_request, n_inputs)
-        seq_priority = self._priority_to_seq(None, n_inputs)
-
-        self._render_and_add_requests(
-            prompts=engine_inputs,
-            params=params_seq,
-            lora_requests=seq_lora_requests,
-            priorities=seq_priority,
+        request_factory, num_requests = io_processor.get_request_factory_offline(ctx)
+        outputs = self._run_tiling_engine(
+            io_processor, request_factory, num_requests, use_tqdm=use_tqdm
         )
-
-        outputs = self._run_engine(use_tqdm=use_tqdm, output_type=PoolingRequestOutput)
         outputs = io_processor.post_process_offline(
             ctx=OfflineOutputsContext(outputs=outputs)
         )
@@ -405,44 +341,35 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         io_processor = self.pooling_io_processors[score_type]
         assert isinstance(io_processor, ScoringIOProcessor)
 
-        pooling_task = io_processor.pooling_task
         scoring_data = io_processor.valid_inputs(data_1, data_2)
         n_queries = len(scoring_data.data_1)
 
         if pooling_params is None:
             pooling_params = PoolingParams()
 
-        ctx = OfflineInputsContext(
-            prompts=scoring_data,
+        assert isinstance(pooling_params, PoolingParams)
+        pooling_task = io_processor.pooling_task
+        if pooling_params.task is None:
+            pooling_params.task = pooling_task
+        elif pooling_params.task != pooling_task:
+            msg = (
+                f"You cannot overwrite {pooling_params.task=!r} with {pooling_task=!r}!"
+            )
+            raise ValueError(msg)
+
+        ctx = OfflineInputsScoringContext(
+            scoring_data=scoring_data,
             pooling_params=pooling_params,
             tokenization_kwargs=tokenization_kwargs,
+            lora_request=lora_request,
             chat_template=chat_template,
-            n_queries=n_queries,
         )
 
-        engine_inputs = io_processor.pre_process_offline(ctx)
-        n_inputs = len(engine_inputs)
-
-        seq_lora_requests = self._lora_request_to_seq(lora_request, n_inputs)
-        params_seq = self._params_to_seq(ctx.pooling_params, n_inputs)
-
-        for param in params_seq:
-            if param.task is None:
-                param.task = pooling_task
-            elif param.task != pooling_task:
-                msg = f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
-                raise ValueError(msg)
-
-        seq_priority = self._priority_to_seq(None, n_inputs)
-
-        self._render_and_add_requests(
-            prompts=engine_inputs,
-            params=params_seq,
-            lora_requests=seq_lora_requests,
-            priorities=seq_priority,
+        request_factory, num_requests = io_processor.get_request_factory_offline(ctx)
+        outputs = self._run_tiling_engine(
+            io_processor, request_factory, num_requests, use_tqdm=use_tqdm
         )
 
-        outputs = self._run_engine(use_tqdm=use_tqdm, output_type=PoolingRequestOutput)
         outputs = io_processor.post_process_offline(
             ctx=OfflineOutputsContext(outputs=outputs, n_queries=n_queries),
         )
@@ -452,7 +379,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
     def _run_tiling_engine(
         self,
         io_processor: PoolingIOProcessor,
-        prompt_factory: PromptFactory,
+        request_factory: RequestFactory,
         num_requests: int,
         use_tqdm: bool | Callable[..., tqdm] = True,
     ):
@@ -476,22 +403,31 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         outputs: list[PoolingRequestOutput] = []
         added_request_ids: set[str] = set()
 
-        it = self._executor.map(io_processor.render, prompt_factory())
+        it = self._executor.map(io_processor.render, request_factory())
 
         try:
             while num_waited_requests or self.llm_engine.has_unfinished_requests():
+                requests = []
                 for _ in range(max_requests_in_core - num_requests_in_core):
                     if num_waited_requests == 0:
                         break
                     try:
-                        requests = next(it)
+                        request = next(it)
+                        requests.append(request)
                     except StopIteration:
                         num_waited_requests = 0
                         break
 
                     num_waited_requests -= 1
                     num_requests_in_core += 1
-                    request_ids = self._render_and_add_requests(**requests)
+
+                if requests:
+                    request_ids = self._render_and_add_requests(
+                        prompts=[x["prompts"] for x in requests],
+                        params=[x["params"] for x in requests],
+                        lora_requests=[x["lora_requests"] for x in requests],
+                        priorities=[x["priorities"] for x in requests],
+                    )
 
                     for request_id in request_ids:
                         # undo assign_request_id
