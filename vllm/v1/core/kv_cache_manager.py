@@ -11,7 +11,7 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
@@ -136,6 +136,7 @@ class KVCacheManager:
             max_in_flight_tokens = max_model_len
 
         self.enable_caching = enable_caching
+        self.enable_kv_cache_events = enable_kv_cache_events
         self.use_eagle = use_eagle
         self.log_stats = log_stats
         self.metrics_collector = metrics_collector
@@ -203,7 +204,7 @@ class KVCacheManager:
         self.prefix_cache_stats = PrefixCacheStats()
         return stats
 
-    def get_computed_blocks(self, request: Request) -> tuple[KVCacheBlocks, int]:
+    def get_computed_blocks(self, request: Request) -> tuple[KVCacheBlocks, int, int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
 
@@ -214,13 +215,18 @@ class KVCacheManager:
             A tuple containing:
                 - A list of blocks that are computed for the request.
                 - The number of computed tokens.
+                - ``shared_prefix_boundary``: the block-aligned token position of
+                  a shared prefix that a sparse-retention group (Mamba / sliding
+                  window) has not cached yet (Marconi-style APC), or 0 if none.
+                  Pinned so ``VLLM_PREFIX_CACHE_RETENTION_INTERVAL`` does not drop
+                  the junction and defeat cross-request reuse.
         """
         # We skip finding the prefix cache hit when prefix caching is
         # disabled or the request is marked as skipping kv cache read
         # (which happens when the request requires prompt logprobs
         # or calls a pooling model with all pooling).
         if not self.enable_caching or request.skip_reading_prefix_cache:
-            return self.empty_kv_cache_blocks, 0
+            return self.empty_kv_cache_blocks, 0, 0
 
         # NOTE: When all tokens hit the cache, we must recompute the last token
         # to obtain logits. Thus, set max_cache_hit_length to prompt_length - 1.
@@ -229,10 +235,38 @@ class KVCacheManager:
         # num_computed_tokens to be block-size aligned. Removing this limitation
         # could slightly improve performance in the future.
         max_cache_hit_length = request.num_tokens - 1
-        computed_blocks, num_new_computed_tokens = (
+        computed_blocks, num_new_computed_tokens, num_uncached = (
             self.coordinator.find_longest_cache_hit(
                 request.block_hashes, max_cache_hit_length
             )
+        )
+
+        # When kv_cache_report_mode is "full", emit BlockStored events
+        # for the reused prefix cache blocks so that external consumers
+        # (e.g. gateway) can learn about them.
+        if (
+            num_new_computed_tokens > 0
+            and self.enable_kv_cache_events
+            and getattr(request, "kv_cache_report_mode", "incremental") == "full"
+        ):
+            for group_idx, group_blocks in enumerate(computed_blocks):
+                num_blocks = len(group_blocks)
+                if num_blocks > 0:
+                    group = self.kv_cache_config.kv_cache_groups[group_idx]
+                    block_size = group.kv_cache_spec.block_size
+                    self.block_pool.emit_cached_block_events(
+                        request,
+                        num_blocks,
+                        block_size,
+                        group_idx,
+                    )
+
+        # The junction to pin is where the lagging sparse-retention group stops
+        # (``num_new_computed_tokens``) plus the uncached shared prefix -- i.e.
+        # the longest single-group hit. Sub-block gaps are left to the mask,
+        # which floors to the alignment boundary (a no-op there).
+        shared_prefix_boundary = (
+            num_new_computed_tokens + num_uncached if num_uncached else 0
         )
 
         if self.log_stats:
@@ -243,7 +277,8 @@ class KVCacheManager:
                 preempted=request.num_preemptions > 0,
             )
 
-        return self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens
+        blocks = self.create_kv_cache_blocks(computed_blocks)
+        return blocks, num_new_computed_tokens, shared_prefix_boundary
 
     def allocate_slots(
         self,
@@ -383,6 +418,7 @@ class KVCacheManager:
                 new_computed_blocks=new_computed_block_list,
                 num_encoder_tokens=num_encoder_tokens,
                 total_computed_tokens=total_computed_tokens,
+                num_local_computed_tokens=num_local_computed_tokens,
                 num_tokens_main_model=full_num_tokens,
                 apply_admission_cap=True,
             )
@@ -417,6 +453,7 @@ class KVCacheManager:
             num_encoder_tokens=num_encoder_tokens,
             total_computed_tokens=num_local_computed_tokens
             + num_external_computed_tokens,
+            num_local_computed_tokens=num_local_computed_tokens,
             num_tokens_main_model=num_tokens_main_model,
         )
 
@@ -644,6 +681,23 @@ class KVCacheManager:
             ids.extend(mgr.take_new_block_ids())
         return ids
 
+    def take_kv_cache_block_copies(
+        self,
+    ) -> tuple[list[KVCacheBlockCopy], list[KVCacheBlock]]:
+        """Drain pending copies and return their retained endpoints."""
+        pending_copies: list[tuple[KVCacheBlock, KVCacheBlock]] = []
+        for mgr in self.coordinator.single_type_managers:
+            pending_copies.extend(mgr.take_pending_cow_copies())
+        copies = [
+            KVCacheBlockCopy(
+                src_block_id=source_block.block_id,
+                dst_block_id=cow_block.block_id,
+            )
+            for source_block, cow_block in pending_copies
+        ]
+        retained_blocks = [block for pair in pending_copies for block in pair]
+        return copies, retained_blocks
+
     def new_step_starts(self) -> None:
-        """Called when a new step is started."""
+        """Notify the coordinator that a new step is starting."""
         self.coordinator.new_step_starts()
