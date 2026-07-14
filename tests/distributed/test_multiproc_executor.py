@@ -405,12 +405,13 @@ def test_multiproc_executor_multi_node():
                 executor.shutdown()
 
     # Create a queue to collect results from both processes
-    result_queue: multiprocessing.Queue[dict[str, int | bool]] = multiprocessing.Queue()
+    mp_ctx = multiprocessing.get_context("fork")
+    result_queue: multiprocessing.Queue[dict[str, int | bool]] = mp_ctx.Queue()
 
     # Start both node processes
     processes = []
     for node_rank in range(2):
-        p = multiprocessing.Process(
+        p = mp_ctx.Process(
             target=run_node,
             args=(node_rank, result_queue, port),
             name=f"Node{node_rank}",
