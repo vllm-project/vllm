@@ -295,10 +295,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             inputs_embeds = None
             if self.supports_mm_inputs:
                 # Merge multimodal embeddings with input ids.
-                mm_embeds, is_mm_embed = mm_inputs or (
-                    None,
-                    None,
-                )
+                mm_embeds, is_mm_embed = mm_inputs or (None, None)
                 num_input_tokens = (
                     is_mm_embed.shape[0] if is_mm_embed is not None else num_tokens
                 )

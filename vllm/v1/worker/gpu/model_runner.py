@@ -600,7 +600,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         dtype=torch.bool,
                         device=self.device,
                     ),
-                    [],
                 )
 
             # Let the target override the hidden state fed to the drafter

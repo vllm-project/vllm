@@ -90,9 +90,7 @@ class DefaultModelState(ModelState):
         # input_batch.input_ids may be padded for CUDA graphs.
         input_ids_unpadded = input_batch.input_ids[: input_batch.num_tokens]
         inputs_embeds = self.encoder_runner.get_inputs_embeds(
-            input_ids_unpadded,
-            mm_embeds,
-            is_mm_embed,
+            input_ids_unpadded, mm_embeds, is_mm_embed
         )
         return inputs_embeds[: input_batch.num_tokens_after_padding]
 

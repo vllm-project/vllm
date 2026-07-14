@@ -159,9 +159,7 @@ class EncoderRunner:
         is_mm_embed: torch.Tensor,
     ) -> torch.Tensor:
         x = self.model.embed_input_ids(
-            input_ids,
-            multimodal_embeddings=mm_embeds,
-            is_multimodal=is_mm_embed,
+            input_ids, multimodal_embeddings=mm_embeds, is_multimodal=is_mm_embed
         )
         # Copy to the pre-allocated buffer for CUDA graphs.
         self.inputs_embeds[: x.shape[0]] = x

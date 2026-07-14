@@ -131,7 +131,7 @@ class ModelState(ABC):
     def gather_mm_embeddings(
         self, input_batch: InputBatch, draft_lookahead: int = 0
     ) -> tuple[list[torch.Tensor], torch.Tensor]:
-        """Gather cached multimodal embeddings (modality attached on tensors)."""
+        """Gather cached multimodal embeddings."""
         return self.encoder_runner.gather_mm_embeddings(
             input_batch.req_ids,
             input_batch.num_tokens,

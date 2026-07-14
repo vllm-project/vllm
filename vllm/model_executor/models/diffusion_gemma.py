@@ -775,13 +775,11 @@ class DiffusionGemmaModelState(ModelState):
         super().__init__(vllm_config, model, encoder_cache, device)
 
         # Per-step MM data produced by get_mm_embeddings and consumed by
-        # prepare_inputs.  Stored as raw (mm_embeds, is_mm_embed)
-        # so that prepare_inputs can call
-        # embed_input_ids directly into the persistent _inputs_embeds_buf,
-        # avoiding the intermediate copy through encoder_runner.inputs_embeds.
-        self._pending_mm_embeds: (
-            tuple[list[torch.Tensor], torch.Tensor] | None
-        ) = None
+        # prepare_inputs.  Stored as raw (mm_embeds, is_mm_embed) so that
+        # prepare_inputs can call embed_input_ids directly into the
+        # persistent _inputs_embeds_buf, avoiding the intermediate copy
+        # through encoder_runner.inputs_embeds.
+        self._pending_mm_embeds: tuple[list[torch.Tensor], torch.Tensor] | None = None
 
         diffusion_config = vllm_config.diffusion_config
         canvas_length = diffusion_config.canvas_length if diffusion_config else 32
@@ -890,9 +888,7 @@ class DiffusionGemmaModelState(ModelState):
             encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
             self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
 
-        mm_embeds, is_mm_embed = self.gather_mm_embeddings(
-            input_batch
-        )
+        mm_embeds, is_mm_embed = self.gather_mm_embeddings(input_batch)
 
         if not mm_embeds:
             # No MM tokens in this batch (e.g. all-decode step).
