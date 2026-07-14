@@ -220,9 +220,9 @@ def build_additive_sps_table(
     max_num_reqs: int,
     max_batch_tokens: int,
 ) -> tuple[np.ndarray, list[tuple[int, float]], list[tuple[int, float]], float]:
-    """Fit ``step_ms(R, B) = draft_ms(R) + verify_ms(B)``."""
+    """Fit ``step_ms(R, B) = request_ms(R) + verify_ms(B)``."""
     measured_reqs = sorted(step_time_grid)
-    draft_ms: list[float] = []
+    request_ms: list[float] = []
     verify_by_tokens: dict[int, float] = {}
     residuals = []
     for num_reqs in measured_reqs:
@@ -232,20 +232,20 @@ def build_additive_sps_table(
             for num_tokens, step_ms in curve
             if num_tokens in verify_by_tokens
         ]
-        if draft_ms and not offsets:
+        if request_ms and not offsets:
             raise ValueError("SPS profiling rows do not share verification sizes")
-        draft_cost = 0.0 if not draft_ms else float(np.median(offsets))
-        draft_cost = max(draft_ms[-1] if draft_ms else 0.0, draft_cost)
-        draft_ms.append(draft_cost)
+        request_cost = 0.0 if not request_ms else float(np.median(offsets))
+        request_cost = max(request_ms[-1] if request_ms else 0.0, request_cost)
+        request_ms.append(request_cost)
         for num_tokens, step_ms in curve:
-            verify_by_tokens.setdefault(num_tokens, max(step_ms - draft_cost, 1e-6))
-            residuals.append(draft_cost + verify_by_tokens[num_tokens] - step_ms)
+            verify_by_tokens.setdefault(num_tokens, max(step_ms - request_cost, 1e-6))
+            residuals.append(request_cost + verify_by_tokens[num_tokens] - step_ms)
 
     measured_tokens = sorted(verify_by_tokens)
     verify_ms = np.array(
         [verify_by_tokens[num_tokens] for num_tokens in measured_tokens]
     )
-    draft_ms_np = np.array(draft_ms)
+    request_ms_np = np.array(request_ms)
     rmse_ms = float(np.sqrt(np.mean(np.square(residuals))))
 
     def interpolate(values: np.ndarray, xs: list[int], ys: np.ndarray) -> np.ndarray:
@@ -258,12 +258,12 @@ def build_additive_sps_table(
 
     all_reqs = np.arange(max_num_reqs + 1)
     all_tokens = np.arange(max_batch_tokens + 1)
-    draft_table = np.maximum(interpolate(all_reqs, measured_reqs, draft_ms_np), 0.0)
+    request_table = np.maximum(interpolate(all_reqs, measured_reqs, request_ms_np), 0.0)
     verify_table = np.maximum(interpolate(all_tokens, measured_tokens, verify_ms), 1e-6)
-    sps_table = 1000.0 / (draft_table[:, None] + verify_table[None, :])
-    draft_curve = list(zip(measured_reqs, draft_ms))
+    sps_table = 1000.0 / (request_table[:, None] + verify_table[None, :])
+    request_curve = list(zip(measured_reqs, request_ms))
     verify_curve = list(zip(measured_tokens, verify_ms.tolist()))
-    return sps_table, draft_curve, verify_curve, rmse_ms
+    return sps_table, request_curve, verify_curve, rmse_ms
 
 
 class ConfidenceManager:
@@ -329,12 +329,12 @@ class ConfidenceManager:
         max_batch_tokens = self.req_states.max_num_reqs * (
             1 + self.num_speculative_steps
         )
-        self.sps_table_np, draft_curve, verify_curve, rmse_ms = (
+        self.sps_table_np, request_curve, verify_curve, rmse_ms = (
             build_additive_sps_table(
                 step_time_grid, self.req_states.max_num_reqs, max_batch_tokens
             )
         )
-        return draft_curve, verify_curve, rmse_ms
+        return request_curve, verify_curve, rmse_ms
 
     def profile_sps_curve(
         self,
@@ -349,7 +349,7 @@ class ConfidenceManager:
         warmup_iters: int = 3,
         timed_chunks: int = 5,
     ) -> None:
-        """Profile additive draft and verification step costs."""
+        """Profile additive request-sized and verification step costs."""
         import time
 
         from vllm import SamplingParams
@@ -441,12 +441,12 @@ class ConfidenceManager:
             ]
             for num_reqs in req_counts
         }
-        draft_curve, verify_curve, rmse_ms = self.set_sps_profile(step_time_grid)
+        request_curve, verify_curve, rmse_ms = self.set_sps_profile(step_time_grid)
         if self.online_sts is not None:
             self.online_sts.reset()
         logger.info(
-            "DSpark auto-profiled draft cost (requests -> ms): %s",
-            [(r, round(ms, 3)) for r, ms in draft_curve],
+            "DSpark auto-profiled request-sized cost (requests -> ms): %s",
+            [(r, round(ms, 3)) for r, ms in request_curve],
         )
         logger.info(
             "DSpark auto-profiled verification cost (tokens -> ms): %s",

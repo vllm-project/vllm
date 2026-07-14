@@ -168,10 +168,10 @@ def test_allocate_capacity_sps_curve_argmax():
     assert capacities.tolist() == [2, 0]
 
 
-def test_additive_sps_table_separates_draft_and_verification_costs():
+def test_additive_sps_table_separates_request_and_verification_costs():
     request_counts = (1, 2, 4, 8)
     batch_multipliers = (1, 2, 4, 8)
-    draft_ms = {1: 0.0, 2: 0.4, 4: 0.9, 8: 1.8}
+    request_ms = {1: 0.0, 2: 0.4, 4: 0.9, 8: 1.8}
     verify_ms = {
         num_tokens: 2.0 + 0.25 * np.log2(num_tokens)
         for num_tokens in (1, 2, 4, 8, 16, 32, 64)
@@ -180,22 +180,22 @@ def test_additive_sps_table_separates_draft_and_verification_costs():
         num_reqs: [
             (
                 num_reqs * multiplier,
-                draft_ms[num_reqs] + verify_ms[num_reqs * multiplier],
+                request_ms[num_reqs] + verify_ms[num_reqs * multiplier],
             )
             for multiplier in batch_multipliers
         ]
         for num_reqs in request_counts
     }
 
-    table, draft_curve, verify_curve, rmse_ms = build_additive_sps_table(
+    table, request_curve, verify_curve, rmse_ms = build_additive_sps_table(
         step_time_grid, max_num_reqs=8, max_batch_tokens=64
     )
 
-    assert dict(draft_curve) == pytest.approx(draft_ms)
+    assert dict(request_curve) == pytest.approx(request_ms)
     assert dict(verify_curve) == pytest.approx(verify_ms)
     assert rmse_ms == pytest.approx(0.0, abs=1e-12)
     assert 1000.0 / table[1, 8] == pytest.approx(verify_ms[8])
-    assert 1000.0 / table[8, 8] == pytest.approx(draft_ms[8] + verify_ms[8])
+    assert 1000.0 / table[8, 8] == pytest.approx(request_ms[8] + verify_ms[8])
 
 
 def test_allocate_capacity_temperature_desaturates_zeros():
