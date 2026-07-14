@@ -7,6 +7,7 @@ This file provides a clean, self-contained, and statically-instantiated
 version of WavTokenizer40 to avoid dynamic imports or external path injection.
 """
 
+import contextlib
 import math
 import os
 import typing as tp
@@ -18,8 +19,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from torch.nn.utils import weight_norm
 from safetensors.torch import load_file
+from torch.nn.utils import weight_norm
 
 try:
     import torch._dynamo as dynamo
@@ -35,41 +36,38 @@ DEFAULT_CONFIG = {
         "init_args": {
             "feature_extractor": {
                 "class_path": "EncodecFeatures",
-                "init_args":  {
-                    "encodec_model":   "encodec_24khz",
-                    "bandwidths":      [6.6, 6.6, 6.6, 6.6],
+                "init_args": {
+                    "encodec_model": "encodec_24khz",
+                    "bandwidths": [6.6, 6.6, 6.6, 6.6],
                     "train_codebooks": True,
-                    "num_quantizers":  1,
-                    "dowmsamples":     [6, 5, 5, 4],
-                    "vq_bins":         4096,
-                    "vq_kmeans":       200,
-                    },
+                    "num_quantizers": 1,
+                    "dowmsamples": [6, 5, 5, 4],
+                    "vq_bins": 4096,
+                    "vq_kmeans": 200,
                 },
-            "backbone":          {
+            },
+            "backbone": {
                 "class_path": "VocosBackbone",
-                "init_args":  {
-                    "input_channels":         512,
-                    "dim":                    768,
-                    "intermediate_dim":       2304,
-                    "num_layers":             12,
+                "init_args": {
+                    "input_channels": 512,
+                    "dim": 768,
+                    "intermediate_dim": 2304,
+                    "num_layers": 12,
                     "adanorm_num_embeddings": 4,
-                    },
                 },
-            "head":              {
+            },
+            "head": {
                 "class_path": "ISTFTHead",
-                "init_args":  {
-                    "dim":        768,
-                    "n_fft":      2400,
+                "init_args": {
+                    "dim": 768,
+                    "n_fft": 2400,
                     "hop_length": 600,
-                    "padding":    "same",
-                    },
+                    "padding": "same",
                 },
             },
         },
-    }
-
-
-
+    },
+}
 
 
 class SLSTM(nn.Module):
@@ -90,15 +88,15 @@ class SLSTM(nn.Module):
 
 
 CONV_NORMALIZATIONS = frozenset(
-        [
-            "none",
-            "weight_norm",
-            "spectral_norm",
-            "time_layer_norm",
-            "layer_norm",
-            "time_group_norm",
-            ],
-        )
+    [
+        "none",
+        "weight_norm",
+        "spectral_norm",
+        "time_layer_norm",
+        "layer_norm",
+        "time_group_norm",
+    ],
+)
 
 
 def apply_parametrization_norm(module: nn.Module, norm: str = "none") -> nn.Module:
@@ -111,15 +109,21 @@ def apply_parametrization_norm(module: nn.Module, norm: str = "none") -> nn.Modu
 
 
 def get_norm_module(
-        module: nn.Module, causal: bool = False, norm: str = "none", **norm_kwargs: tp.Any,
-        ) -> nn.Module:
+    module: nn.Module,
+    causal: bool = False,
+    norm: str = "none",
+    **norm_kwargs: tp.Any,
+) -> nn.Module:
     assert norm in CONV_NORMALIZATIONS
     return nn.Identity()
 
 
 def get_extra_padding_for_conv1d(
-        x: torch.Tensor, kernel_size: int, stride: int, padding_total: int = 0,
-        ) -> int:
+    x: torch.Tensor,
+    kernel_size: int,
+    stride: int,
+    padding_total: int = 0,
+) -> int:
     length = x.shape[-1]
     n_frames = (length - kernel_size + padding_total) / stride + 1
     ideal_length = (math.ceil(n_frames) - 1) * stride + (kernel_size - padding_total)
@@ -127,8 +131,11 @@ def get_extra_padding_for_conv1d(
 
 
 def pad1d(
-        x: torch.Tensor, paddings: tuple[int, int], mode: str = "zero", value: float = 0.0,
-        ) -> torch.Tensor:
+    x: torch.Tensor,
+    paddings: tuple[int, int],
+    mode: str = "zero",
+    value: float = 0.0,
+) -> torch.Tensor:
     length = x.shape[-1]
     padding_left, padding_right = paddings
     assert padding_left >= 0 and padding_right >= 0, (padding_left, padding_right)
@@ -147,13 +154,13 @@ def pad1d(
 
 class NormConv1d(nn.Module):
     def __init__(
-            self,
-            *args: tp.Any,
-            causal: bool = False,
-            norm: str = "none",
-            norm_kwargs: dict[str, tp.Any] | None = None,
-            **kwargs: tp.Any,
-            ):
+        self,
+        *args: tp.Any,
+        causal: bool = False,
+        norm: str = "none",
+        norm_kwargs: dict[str, tp.Any] | None = None,
+        **kwargs: tp.Any,
+    ):
         super().__init__()
         if norm_kwargs is None:
             norm_kwargs = {}
@@ -169,40 +176,40 @@ class NormConv1d(nn.Module):
 
 class SConv1d(nn.Module):
     def __init__(
-            self,
-            in_channels: int,
-            out_channels: int,
-            kernel_size: int,
-            stride: int = 1,
-            dilation: int = 1,
-            groups: int = 1,
-            bias: bool = True,
-            causal: bool = False,
-            norm: str = "none",
-            norm_kwargs: dict[str, tp.Any] | None = None,
-            pad_mode: str = "reflect",
-            ):
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        stride: int = 1,
+        dilation: int = 1,
+        groups: int = 1,
+        bias: bool = True,
+        causal: bool = False,
+        norm: str = "none",
+        norm_kwargs: dict[str, tp.Any] | None = None,
+        pad_mode: str = "reflect",
+    ):
         super().__init__()
         if norm_kwargs is None:
             norm_kwargs = {}
         if stride > 1 and dilation > 1:
             warnings.warn(
-                    "SConv1d has been initialized with stride > 1 and dilation > 1"
-                    f" (kernel_size={kernel_size} stride={stride}, dilation={dilation}).",
-                    stacklevel=2,
-                    )
+                "SConv1d has been initialized with stride > 1 and dilation > 1"
+                f" (kernel_size={kernel_size} stride={stride}, dilation={dilation}).",
+                stacklevel=2,
+            )
         self.conv = NormConv1d(
-                in_channels,
-                out_channels,
-                kernel_size,
-                stride,
-                dilation=dilation,
-                groups=groups,
-                bias=bias,
-                causal=causal,
-                norm=norm,
-                norm_kwargs=norm_kwargs,
-                )
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            dilation=dilation,
+            groups=groups,
+            bias=bias,
+            causal=causal,
+            norm=norm,
+            norm_kwargs=norm_kwargs,
+        )
         self.causal = causal
         self.pad_mode = pad_mode
 
@@ -213,34 +220,39 @@ class SConv1d(nn.Module):
         kernel_size = (kernel_size - 1) * dilation + 1
         padding_total = kernel_size - stride
         extra_padding = get_extra_padding_for_conv1d(
-                x, kernel_size, stride, padding_total,
-                )
+            x,
+            kernel_size,
+            stride,
+            padding_total,
+        )
         if self.causal:
             x = pad1d(x, (padding_total, extra_padding), mode=self.pad_mode)
         else:
             padding_right = padding_total // 2
             padding_left = padding_total - padding_right
             x = pad1d(
-                    x, (padding_left, padding_right + extra_padding), mode=self.pad_mode,
-                    )
+                x,
+                (padding_left, padding_right + extra_padding),
+                mode=self.pad_mode,
+            )
         return self.conv(x)
 
 
 class SEANetResnetBlock(nn.Module):
     def __init__(
-            self,
-            dim: int,
-            kernel_sizes: tp.Sequence[int] = (3, 1),
-            dilations: tp.Sequence[int] = (1, 1),
-            activation: str = "ELU",
-            activation_params: dict | None = None,
-            norm: str = "weight_norm",
-            norm_params: dict[str, tp.Any] | None = None,
-            causal: bool = False,
-            pad_mode: str = "reflect",
-            compress: int = 2,
-            true_skip: bool = True,
-            ):
+        self,
+        dim: int,
+        kernel_sizes: tp.Sequence[int] = (3, 1),
+        dilations: tp.Sequence[int] = (1, 1),
+        activation: str = "ELU",
+        activation_params: dict | None = None,
+        norm: str = "weight_norm",
+        norm_params: dict[str, tp.Any] | None = None,
+        causal: bool = False,
+        pad_mode: str = "reflect",
+        compress: int = 2,
+        true_skip: bool = True,
+    ):
         super().__init__()
         if norm_params is None:
             norm_params = {}
@@ -260,29 +272,29 @@ class SEANetResnetBlock(nn.Module):
             block += [
                 act(**activation_params),
                 SConv1d(
-                        in_chs,
-                        out_chs,
-                        kernel_size=kernel_size,
-                        dilation=dilation,
-                        norm=norm,
-                        norm_kwargs=norm_params,
-                        causal=causal,
-                        pad_mode=pad_mode,
-                        ),
-                ]
+                    in_chs,
+                    out_chs,
+                    kernel_size=kernel_size,
+                    dilation=dilation,
+                    norm=norm,
+                    norm_kwargs=norm_params,
+                    causal=causal,
+                    pad_mode=pad_mode,
+                ),
+            ]
         self.block = nn.Sequential(*block)
         if true_skip:
             self.shortcut = nn.Identity()
         else:
             self.shortcut = SConv1d(
-                    dim,
-                    dim,
-                    kernel_size=1,
-                    norm=norm,
-                    norm_kwargs=norm_params,
-                    causal=causal,
-                    pad_mode=pad_mode,
-                    )
+                dim,
+                dim,
+                kernel_size=1,
+                norm=norm,
+                norm_kwargs=norm_params,
+                causal=causal,
+                pad_mode=pad_mode,
+            )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.shortcut(x) + self.block(x)
@@ -290,26 +302,26 @@ class SEANetResnetBlock(nn.Module):
 
 class SEANetEncoder(nn.Module):
     def __init__(
-            self,
-            channels: int = 1,
-            dimension: int = 128,
-            n_filters: int = 32,
-            n_residual_layers: int = 1,
-            ratios: tp.Sequence[int] = (8, 5, 4, 2),
-            activation: str = "ELU",
-            activation_params: dict | None = None,
-            norm: str = "weight_norm",
-            norm_params: dict[str, tp.Any] | None = None,
-            kernel_size: int = 7,
-            last_kernel_size: int = 7,
-            residual_kernel_size: int = 3,
-            dilation_base: int = 2,
-            causal: bool = False,
-            pad_mode: str = "reflect",
-            true_skip: bool = False,
-            compress: int = 2,
-            lstm: int = 2,
-            ):
+        self,
+        channels: int = 1,
+        dimension: int = 128,
+        n_filters: int = 32,
+        n_residual_layers: int = 1,
+        ratios: tp.Sequence[int] = (8, 5, 4, 2),
+        activation: str = "ELU",
+        activation_params: dict | None = None,
+        norm: str = "weight_norm",
+        norm_params: dict[str, tp.Any] | None = None,
+        kernel_size: int = 7,
+        last_kernel_size: int = 7,
+        residual_kernel_size: int = 3,
+        dilation_base: int = 2,
+        causal: bool = False,
+        pad_mode: str = "reflect",
+        true_skip: bool = False,
+        compress: int = 2,
+        lstm: int = 2,
+    ):
         super().__init__()
         if norm_params is None:
             norm_params = {}
@@ -326,46 +338,46 @@ class SEANetEncoder(nn.Module):
         mult = 1
         model: list[nn.Module] = [
             SConv1d(
-                    channels,
-                    mult * n_filters,
-                    kernel_size,
-                    norm=norm,
-                    norm_kwargs=norm_params,
-                    causal=causal,
-                    pad_mode=pad_mode,
-                    ),
-            ]
+                channels,
+                mult * n_filters,
+                kernel_size,
+                norm=norm,
+                norm_kwargs=norm_params,
+                causal=causal,
+                pad_mode=pad_mode,
+            ),
+        ]
         for i, ratio in enumerate(self.ratios):
             for j in range(n_residual_layers):
                 model += [
                     SEANetResnetBlock(
-                            mult * n_filters,
-                            kernel_sizes=[residual_kernel_size, 1],
-                            dilations=[dilation_base ** j, 1],
-                            norm=norm,
-                            norm_params=norm_params,
-                            activation=activation,
-                            activation_params=activation_params,
-                            causal=causal,
-                            pad_mode=pad_mode,
-                            compress=compress,
-                            true_skip=true_skip,
-                            ),
-                    ]
+                        mult * n_filters,
+                        kernel_sizes=[residual_kernel_size, 1],
+                        dilations=[dilation_base**j, 1],
+                        norm=norm,
+                        norm_params=norm_params,
+                        activation=activation,
+                        activation_params=activation_params,
+                        causal=causal,
+                        pad_mode=pad_mode,
+                        compress=compress,
+                        true_skip=true_skip,
+                    ),
+                ]
 
             model += [
                 act(**activation_params),
                 SConv1d(
-                        mult * n_filters,
-                        mult * n_filters * 2,
-                        kernel_size=ratio * 2,
-                        stride=ratio,
-                        norm=norm,
-                        norm_kwargs=norm_params,
-                        causal=causal,
-                        pad_mode=pad_mode,
-                        ),
-                ]
+                    mult * n_filters,
+                    mult * n_filters * 2,
+                    kernel_size=ratio * 2,
+                    stride=ratio,
+                    norm=norm,
+                    norm_kwargs=norm_params,
+                    causal=causal,
+                    pad_mode=pad_mode,
+                ),
+            ]
             mult *= 2
 
         if lstm:
@@ -374,15 +386,15 @@ class SEANetEncoder(nn.Module):
         model += [
             act(**activation_params),
             SConv1d(
-                    mult * n_filters,
-                    dimension,
-                    last_kernel_size,
-                    norm=norm,
-                    norm_kwargs=norm_params,
-                    causal=causal,
-                    pad_mode=pad_mode,
-                    ),
-            ]
+                mult * n_filters,
+                dimension,
+                last_kernel_size,
+                norm=norm,
+                norm_kwargs=norm_params,
+                causal=causal,
+                pad_mode=pad_mode,
+            ),
+        ]
 
         self.model = nn.Sequential(*model)
 
@@ -392,15 +404,15 @@ class SEANetEncoder(nn.Module):
 
 class EuclideanCodebook(nn.Module):
     def __init__(
-            self,
-            dim: int,
-            codebook_size: int,
-            kmeans_init: bool = False,
-            kmeans_iters: int = 10,
-            decay: float = 0.99,
-            epsilon: float = 1e-5,
-            threshold_ema_dead_code: int = 2,
-            ):
+        self,
+        dim: int,
+        codebook_size: int,
+        kmeans_init: bool = False,
+        kmeans_iters: int = 10,
+        decay: float = 0.99,
+        epsilon: float = 1e-5,
+        threshold_ema_dead_code: int = 2,
+    ):
         super().__init__()
         self.decay = decay
         if kmeans_init:
@@ -427,16 +439,18 @@ class EuclideanCodebook(nn.Module):
     def quantize(self, x: torch.Tensor) -> torch.Tensor:
         embed = self.embed.t()
         dist = -(
-                x.pow(2).sum(1, keepdim=True)
-                - 2 * x @ embed
-                + embed.pow(2).sum(0, keepdim=True)
+            x.pow(2).sum(1, keepdim=True)
+            - 2 * x @ embed
+            + embed.pow(2).sum(0, keepdim=True)
         )
         embed_ind = dist.max(dim=-1).indices
         return embed_ind
 
     def postprocess_emb(
-            self, embed_ind: torch.Tensor, shape: torch.Size,
-            ) -> torch.Tensor:
+        self,
+        embed_ind: torch.Tensor,
+        shape: torch.Size,
+    ) -> torch.Tensor:
         return embed_ind.view(*shape[:-1])
 
     def dequantize(self, embed_ind: torch.Tensor) -> torch.Tensor:
@@ -454,17 +468,17 @@ class EuclideanCodebook(nn.Module):
 
 class VectorQuantization(nn.Module):
     def __init__(
-            self,
-            dim: int,
-            codebook_size: int,
-            codebook_dim: int | None = None,
-            decay: float = 0.99,
-            epsilon: float = 1e-5,
-            kmeans_init: bool = True,
-            kmeans_iters: int = 50,
-            threshold_ema_dead_code: int = 2,
-            commitment_weight: float = 1.0,
-            ):
+        self,
+        dim: int,
+        codebook_size: int,
+        codebook_dim: int | None = None,
+        decay: float = 0.99,
+        epsilon: float = 1e-5,
+        kmeans_init: bool = True,
+        kmeans_iters: int = 50,
+        threshold_ema_dead_code: int = 2,
+        commitment_weight: float = 1.0,
+    ):
         super().__init__()
         _codebook_dim = codebook_dim if codebook_dim is not None else dim
         requires_projection = _codebook_dim != dim
@@ -477,14 +491,14 @@ class VectorQuantization(nn.Module):
         self.epsilon = epsilon
         self.commitment_weight = commitment_weight
         self._codebook = EuclideanCodebook(
-                dim=_codebook_dim,
-                codebook_size=codebook_size,
-                kmeans_init=kmeans_init,
-                kmeans_iters=kmeans_iters,
-                decay=decay,
-                epsilon=epsilon,
-                threshold_ema_dead_code=threshold_ema_dead_code,
-                )
+            dim=_codebook_dim,
+            codebook_size=codebook_size,
+            kmeans_init=kmeans_init,
+            kmeans_iters=kmeans_iters,
+            decay=decay,
+            epsilon=epsilon,
+            threshold_ema_dead_code=threshold_ema_dead_code,
+        )
         self.codebook_size = codebook_size
 
     @property
@@ -492,8 +506,9 @@ class VectorQuantization(nn.Module):
         return self._codebook.embed
 
     def forward(
-            self, x: torch.Tensor,
-            ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        self,
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         device = x.device
         x = rearrange(x, "b d n -> b n d")
         x = self.project_in(x)
@@ -508,12 +523,14 @@ class LanguageVectorQuantization(nn.Module):
     def __init__(self, *, num_quantizers: int, **kwargs: tp.Any):
         super().__init__()
         self.layers = nn.ModuleList(
-                [VectorQuantization(**kwargs) for _ in range(num_quantizers)],
-                )
+            [VectorQuantization(**kwargs) for _ in range(num_quantizers)],
+        )
 
     def forward(
-            self, x: torch.Tensor, n_q: int | None = None,
-            ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        self,
+        x: torch.Tensor,
+        n_q: int | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         quantized_out = 0.0
         residual = x
         all_losses = []
@@ -539,15 +556,15 @@ class QuantizedResult:
 
 class ResidualVectorQuantizer(nn.Module):
     def __init__(
-            self,
-            dimension: int = 256,
-            n_q: int = 8,
-            bins: int = 1024,
-            decay: float = 0.99,
-            kmeans_init: bool = True,
-            kmeans_iters: int = 50,
-            threshold_ema_dead_code: int = 2,
-            ):
+        self,
+        dimension: int = 256,
+        n_q: int = 8,
+        bins: int = 1024,
+        decay: float = 0.99,
+        kmeans_init: bool = True,
+        kmeans_iters: int = 50,
+        threshold_ema_dead_code: int = 2,
+    ):
         super().__init__()
         self.n_q = n_q
         self.dimension = dimension
@@ -558,18 +575,21 @@ class ResidualVectorQuantizer(nn.Module):
         self.threshold_ema_dead_code = threshold_ema_dead_code
 
         self.vq = LanguageVectorQuantization(
-                dim=self.dimension,
-                codebook_size=self.bins,
-                num_quantizers=self.n_q,
-                decay=self.decay,
-                kmeans_init=self.kmeans_init,
-                kmeans_iters=self.kmeans_iters,
-                threshold_ema_dead_code=self.threshold_ema_dead_code,
-                )
+            dim=self.dimension,
+            codebook_size=self.bins,
+            num_quantizers=self.n_q,
+            decay=self.decay,
+            kmeans_init=self.kmeans_init,
+            kmeans_iters=self.kmeans_iters,
+            threshold_ema_dead_code=self.threshold_ema_dead_code,
+        )
 
     def infer(
-            self, x: torch.Tensor, frame_rate: int, bandwidth: float | None = None,
-            ) -> QuantizedResult:
+        self,
+        x: torch.Tensor,
+        frame_rate: int,
+        bandwidth: float | None = None,
+    ) -> QuantizedResult:
         bw_per_q = self.get_bandwidth_per_quantizer(frame_rate)
         n_q = 1
         quantized, codes, commit_loss = self.vq(x, n_q=n_q)
@@ -582,18 +602,18 @@ class ResidualVectorQuantizer(nn.Module):
 
 class EncodecModel(nn.Module):
     def __init__(
-            self,
-            encoder: SEANetEncoder,
-            quantizer: ResidualVectorQuantizer,
-            target_bandwidths: list[float],
-            sample_rate: int,
-            channels: int,
-            normalize: bool = False,
-            segment: float | None = None,
-            overlap: float = 0.01,
-            name: str = "unset",
-            decoder: nn.Module | None = None,
-            ):
+        self,
+        encoder: SEANetEncoder,
+        quantizer: ResidualVectorQuantizer,
+        target_bandwidths: list[float],
+        sample_rate: int,
+        channels: int,
+        normalize: bool = False,
+        segment: float | None = None,
+        overlap: float = 0.01,
+        name: str = "unset",
+        decoder: nn.Module | None = None,
+    ):
         super().__init__()
         self.bandwidth: float | None = None
         self.target_bandwidths = target_bandwidths
@@ -608,7 +628,7 @@ class EncodecModel(nn.Module):
         self.frame_rate = math.ceil(self.sample_rate / np.prod(self.encoder.ratios))
         self.name = name
         self.bits_per_codebook = int(math.log2(self.quantizer.bins))
-        assert 2 ** self.bits_per_codebook == self.quantizer.bins, (
+        assert 2**self.bits_per_codebook == self.quantizer.bins, (
             "quantizer bins must be a power of 2."
         )
 
@@ -620,68 +640,72 @@ class FeatureExtractor(nn.Module):
 
 class EncodecFeatures(FeatureExtractor):
     def __init__(
-            self,
-            encodec_model: str = "encodec_24khz",
-            bandwidths: tp.Sequence[float] = (1.5, 3.0, 6.0, 12.0),
-            train_codebooks: bool = False,
-            num_quantizers: int = 1,
-            dowmsamples: tp.Sequence[int] = (6, 5, 5, 4),
-            vq_bins: int = 16384,
-            vq_kmeans: int = 800,
-            ):
+        self,
+        encodec_model: str = "encodec_24khz",
+        bandwidths: tp.Sequence[float] = (1.5, 3.0, 6.0, 12.0),
+        train_codebooks: bool = False,
+        num_quantizers: int = 1,
+        dowmsamples: tp.Sequence[int] = (6, 5, 5, 4),
+        vq_bins: int = 16384,
+        vq_kmeans: int = 800,
+    ):
         super().__init__()
         self.frame_rate = 25
         n_q = num_quantizers
         encoder = SEANetEncoder(
-                causal=False,
-                n_residual_layers=1,
-                norm="weight_norm",
-                pad_mode="reflect",
-                lstm=2,
-                dimension=512,
-                channels=1,
-                n_filters=32,
-                ratios=list(dowmsamples),
-                activation="ELU",
-                kernel_size=7,
-                residual_kernel_size=3,
-                last_kernel_size=7,
-                dilation_base=2,
-                true_skip=False,
-                compress=2,
-                )
+            causal=False,
+            n_residual_layers=1,
+            norm="weight_norm",
+            pad_mode="reflect",
+            lstm=2,
+            dimension=512,
+            channels=1,
+            n_filters=32,
+            ratios=list(dowmsamples),
+            activation="ELU",
+            kernel_size=7,
+            residual_kernel_size=3,
+            last_kernel_size=7,
+            dilation_base=2,
+            true_skip=False,
+            compress=2,
+        )
         quantizer = ResidualVectorQuantizer(
-                dimension=512,
-                n_q=n_q,
-                bins=vq_bins,
-                kmeans_iters=vq_kmeans,
-                decay=0.99,
-                kmeans_init=True,
-                )
+            dimension=512,
+            n_q=n_q,
+            bins=vq_bins,
+            kmeans_iters=vq_kmeans,
+            decay=0.99,
+            kmeans_init=True,
+        )
 
         if encodec_model == "encodec_24khz":
             self.encodec = EncodecModel(
-                    encoder=encoder,
-                    quantizer=quantizer,
-                    target_bandwidths=list(bandwidths),
-                    sample_rate=24000,
-                    channels=1,
-                    )
+                encoder=encoder,
+                quantizer=quantizer,
+                target_bandwidths=list(bandwidths),
+                sample_rate=24000,
+                channels=1,
+            )
         else:
             raise ValueError(
-                    f"Unsupported encodec_model: {encodec_model}. "
-                    "Supported options are 'encodec_24khz'.",
-                    )
+                f"Unsupported encodec_model: {encodec_model}. "
+                "Supported options are 'encodec_24khz'.",
+            )
         self.bandwidths = list(bandwidths)
 
     def infer(
-            self, audio: torch.Tensor, bandwidth_id: torch.Tensor,
-            ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        self,
+        audio: torch.Tensor,
+        bandwidth_id: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         audio = audio.unsqueeze(1)
         emb = self.encodec.encoder(audio)
         q_res = self.encodec.quantizer.infer(
-                emb, self.frame_rate, bandwidth=self.bandwidths[bandwidth_id],
-                )
+            emb,
+            self.frame_rate,
+            bandwidth=self.bandwidths[bandwidth_id],
+        )
         quantized = q_res.quantized
         codes = q_res.codes
         commit_loss = q_res.penalty
@@ -708,22 +732,25 @@ class OriginalWavTokenizer(nn.Module):
 
     @torch.inference_mode()
     def encode_infer(
-            self, audio_input: torch.Tensor, **kwargs: tp.Any,
-            ) -> tuple[torch.Tensor, torch.Tensor]:
+        self,
+        audio_input: torch.Tensor,
+        **kwargs: tp.Any,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         features, discrete_codes, _ = self.feature_extractor.infer(
-                audio_input, **kwargs,
-                )
+            audio_input,
+            **kwargs,
+        )
         return features, discrete_codes
 
 
 class WavTokenizerBase(nn.Module):
     def __init__(
-            self,
-            device: str = "cuda",
-            checkpoint: str | None = None,
-            torch_compile: bool = True,
-            audio_config: dict | None = None,
-            ):
+        self,
+        device: str = "cuda",
+        checkpoint: str | None = None,
+        torch_compile: bool = True,
+        audio_config: dict | None = None,
+    ):
         super().__init__()
         self.device = device
         self.checkpoint = checkpoint
@@ -757,8 +784,9 @@ class WavTokenizerBase(nn.Module):
         bandwidth_id = torch.tensor([0]).to(self.device)
         with torch.no_grad():
             _, discrete_codes = self.model.encode_infer(
-                    audio, bandwidth_id=bandwidth_id,
-                    )
+                audio,
+                bandwidth_id=bandwidth_id,
+            )
         if discrete_codes.dim() == 3:
             discrete_codes = discrete_codes.squeeze(0)
         return discrete_codes
@@ -774,13 +802,19 @@ class WavTokenizer40(WavTokenizerBase):
         assert self.checkpoint is not None, "checkpoint path must be provided"
 
         # Check for safetensors or ckpt file
-        safetensors_path = os.path.join(self.checkpoint, "wavtokenizer_large_unify_600_24k.safetensors")
-        ckpt_path = os.path.join(self.checkpoint, "wavtokenizer_large_unify_600_24k.ckpt")
+        safetensors_path = os.path.join(
+            self.checkpoint, "wavtokenizer_large_unify_600_24k.safetensors"
+        )
+        ckpt_path = os.path.join(
+            self.checkpoint, "wavtokenizer_large_unify_600_24k.ckpt"
+        )
 
         # Initialize self.model using config
         config = self.audio_config if self.audio_config is not None else DEFAULT_CONFIG
         init_args = config["model"]["init_args"]
-        feature_extractor = instantiate_class(args=(), init=init_args["feature_extractor"])
+        feature_extractor = instantiate_class(
+            args=(), init=init_args["feature_extractor"]
+        )
         self.model = OriginalWavTokenizer(feature_extractor=feature_extractor)
 
         # Load weights
@@ -794,55 +828,55 @@ class WavTokenizer40(WavTokenizerBase):
                 state_dict_raw = raw_state
         else:
             raise FileNotFoundError(
-                    f"WavTokenizer checkpoint not found under {self.checkpoint}. "
-                    f"Expected either 'wavtokenizer_large_unify_600_24k.safetensors' or "
-                    f"'wavtokenizer_large_unify_600_24k.ckpt'.",
-                    )
+                f"WavTokenizer checkpoint not found under {self.checkpoint}. "
+                f"Expected either 'wavtokenizer_large_unify_600_24k.safetensors' or "
+                f"'wavtokenizer_large_unify_600_24k.ckpt'.",
+            )
 
         state_dict = {}
         for k, v in state_dict_raw.items():
-            if k.startswith("feature_extractor."):
-                if not k.startswith("feature_extra"
-                                    "ctor.encodec.decoder"):
-                    state_dict[k] = v
+            if k.startswith("feature_extractor.") and not k.startswith(
+                "feature_extractor.encodec.decoder"
+            ):
+                state_dict[k] = v
 
         self.model.load_state_dict(state_dict)
         self.model.to(self.device)
         self.model.eval()
 
         if self.torch_compile and dynamo is not None:
-            try:
+            with contextlib.suppress(Exception):
                 dynamo.config.recompile_limit = int(
-                        os.environ.get("WAVTOKENIZER_DYNAMO_RECOMPILE_LIMIT", "64"),
-                        )
-            except Exception:
-                pass
+                    os.environ.get("WAVTOKENIZER_DYNAMO_RECOMPILE_LIMIT", "64"),
+                )
             self.model.feature_extractor.encodec.encoder = torch.compile(
-                    self.model.feature_extractor.encodec.encoder,
-                    dynamic=False,
-                    )
+                self.model.feature_extractor.encodec.encoder,
+                dynamic=False,
+            )
             logger.info("WavTokenizer large-600 loaded successfully (compiled)")
         else:
             logger.info("WavTokenizer large-600 loaded successfully (eager)")
 
 
 def build_audio_tokenizer(
-        type: str,
-        model_path: str,
-        device: str = "cuda:0",
-        audio_config: dict | None = None,
-        ) -> WavTokenizer40:
+    type: str,
+    model_path: str,
+    device: str = "cuda:0",
+    audio_config: dict | None = None,
+) -> WavTokenizer40:
     if type != "wavtokenizer":
         raise NotImplementedError(f"Unsupported audio tokenizer type: {type}")
 
-    assert audio_config is not None, "audio_config must be provided to build_audio_tokenizer"
+    assert audio_config is not None, (
+        "audio_config must be provided to build_audio_tokenizer"
+    )
 
     tokenizer_compile = audio_config.get("apertus_audio_tokenizer_compile", False)
 
     tokenizer = WavTokenizer40(
-            device=device,
-            checkpoint=model_path,
-            torch_compile=tokenizer_compile,
-            audio_config=audio_config,
-            )
+        device=device,
+        checkpoint=model_path,
+        torch_compile=tokenizer_compile,
+        audio_config=audio_config,
+    )
     return tokenizer
