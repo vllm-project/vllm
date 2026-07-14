@@ -36,14 +36,18 @@ docker buildx create --name vllm-builder --driver docker-container --use || true
 docker buildx inspect --bootstrap
 docker buildx ls
 
-# --- Skip if image already exists ---
-echo "--- :mag: Checking if image already exists"
-if docker manifest inspect "$IMAGE_TAG" >/dev/null 2>&1; then
-  echo "Image found: $IMAGE_TAG — skipping build"
+# --- Skip if image already exists (unless forcing a rebuild) ---
+# The image tag is keyed on the vLLM commit SHA only, with no PyTorch nightly
+# date/version in it. Reusing a cached image for the same commit would run the
+# tests against a stale nightly, so default to always rebuilding here. Set
+# FORCE_REBUILD=0 to opt back into cache reuse.
+FORCE_REBUILD="${FORCE_REBUILD:-1}"
+if [[ "$FORCE_REBUILD" != "1" ]] && docker manifest inspect "$IMAGE_TAG" >/dev/null 2>&1; then
+  echo "Image found: $IMAGE_TAG — skipping build (FORCE_REBUILD=0)"
   .buildkite/scripts/annotate-image-build.sh "$IMAGE_TAG"
   exit 0
 fi
-echo "Image not found, proceeding with build..."
+echo "Building image (FORCE_REBUILD=$FORCE_REBUILD): $IMAGE_TAG"
 
 # --- CUDA 13.0 for nightly builds ---
 # Nightly CI uses CUDA 13.0 while regular CI stays on CUDA 12.9
