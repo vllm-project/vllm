@@ -100,6 +100,8 @@ class Request:
 
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None
+        # E/P/D: Connector-specific encoder-cache transfer parameters.
+        self.ec_transfer_params: dict[str, Any] | None = None
 
         if pooling_params is not None:
             # Pooling models.
@@ -114,6 +116,9 @@ class Request:
             if sampling_params.extra_args is not None:
                 self.kv_transfer_params = sampling_params.extra_args.get(
                     "kv_transfer_params"
+                )
+                self.ec_transfer_params = sampling_params.extra_args.get(
+                    "ec_transfer_params"
                 )
                 self.kv_cache_report_mode = sampling_params.extra_args.get(
                     "kv_cache_report_mode", "incremental"
@@ -176,6 +181,11 @@ class Request:
 
         # True if this request is scheduled as a non-final prefill chunk.
         self.is_prefill_chunk = False
+
+        # Block-aligned token position of a proven shared prefix worth pinning
+        # in the (sparse) prefix cache; 0 means none. Set at admission for
+        # hybrid/Mamba models when a shared prefix is detected (Marconi-style).
+        self.shared_prefix_boundary = 0
 
         # The number of NaNs in logits. A value greater than 0
         # indicates that the output is corrupted
