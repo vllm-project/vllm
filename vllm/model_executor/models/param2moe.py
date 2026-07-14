@@ -32,7 +32,10 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -353,13 +356,12 @@ class Param2MoEMoEBlock(nn.Module):
         else:
             self.shared_experts = None  # type: ignore[assignment]
 
-        self.experts = SharedFusedMoE(
+        self.experts = FusedMoE(
             shared_experts=self.shared_experts,
             num_experts=self.num_experts,
             top_k=self.top_k,
             hidden_size=self.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
             renormalize=self.norm_expert_prob,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
@@ -371,7 +373,7 @@ class Param2MoEMoEBlock(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
         )
 
-    def maybe_get_fused_moe(self) -> SharedFusedMoE:
+    def maybe_get_fused_moe(self) -> FusedMoE:
         return self.experts
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -388,23 +390,10 @@ class Param2MoEMoEBlock(nn.Module):
             self.gate.weight.float(),
         ).to(hidden_states.dtype)
 
-        final_hidden = self.experts(
+        expert_output = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
         )
-
-        if self.shared_experts is not None:
-            shared_output, expert_output = final_hidden
-        else:
-            shared_output, expert_output = None, final_hidden
-
-        if shared_output is not None:
-            expert_output = expert_output + shared_output
-
-        if self.tp_size > 1:
-            expert_output = self.experts.maybe_all_reduce_tensor_model_parallel(
-                expert_output
-            )
 
         return expert_output.view(num_tokens, hidden_dim)
 
@@ -704,7 +693,7 @@ class Param2MoEModel(nn.Module):
         return loaded_params
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return SharedFusedMoE.make_expert_params_mapping(
+        return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
@@ -715,8 +704,6 @@ class Param2MoEModel(nn.Module):
 
 class Param2MoEMixtureOfExperts(MixtureOfExperts):
     """Implements the vLLM MixtureOfExperts protocol for Param2MoE."""
-
-    expert_weights: list[torch.Tensor]
 
     def extract_moe_parameters(self, example_moe: Param2MoEMoEBlock | None) -> None:
         if example_moe is None:
@@ -755,24 +742,6 @@ class Param2MoEMixtureOfExperts(MixtureOfExperts):
                 fused.n_redundant_experts = self.num_redundant_experts
             if hasattr(fused, "update_expert_map"):
                 fused.update_expert_map()
-
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> None:
-        self.expert_weights.clear()
-        for layer_idx, layer in enumerate(self.moe_layers):
-            if hasattr(layer, "get_expert_weights"):
-                self.expert_weights.append(layer.get_expert_weights())
-            if hasattr(layer, "set_eplb_state"):
-                layer.set_eplb_state(
-                    moe_layer_idx=layer_idx,
-                    expert_load_view=expert_load_view,
-                    logical_to_physical_map=logical_to_physical_map,
-                    logical_replica_count=logical_replica_count,
-                )
 
 
 class Param2MoEForCausalLM(
@@ -843,7 +812,6 @@ class Param2MoEForCausalLM(
             self.model.make_empty_intermediate_tensors
         )
 
-        self.expert_weights: list[torch.Tensor] = []
         self.num_moe_layers: int = 0
         self.moe_layers: list = []
         self.moe_mlp_layers: list = []

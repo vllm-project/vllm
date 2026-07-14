@@ -78,6 +78,7 @@ class EngineClient(ABC):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         reasoning_ended: bool | None = None,
+        reasoning_parser_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request."""
         ...
@@ -104,6 +105,20 @@ class EngineClient(ABC):
         Args:
             request_id: The unique id of the request,
                         or an iterable of such ids.
+        """
+        ...
+
+    @abstractmethod
+    async def notify_kv_transfer_request_rejected(
+        self,
+        request_id: str,
+        kv_transfer_params: dict[str, Any],
+        *,
+        data_parallel_rank: int | None = None,
+    ) -> None:
+        """Notify the engine that a KV-transfer request was rejected before
+        engine admission, so connector-side cleanup can run (e.g. free
+        prefill blocks pinned on the P node).
         """
         ...
 
@@ -229,6 +244,18 @@ class EngineClient(ABC):
         """Initialize weight transfer for RL training."""
         raise NotImplementedError
 
+    async def start_weight_update(self) -> None:
+        """Start a new weight update."""
+        raise NotImplementedError
+
+    async def start_draft_weight_update(self) -> None:
+        """Start a new weight update targeting the speculative draft model."""
+        raise NotImplementedError
+
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
         """Batched weight update for RL training."""
+        raise NotImplementedError
+
+    async def finish_weight_update(self) -> None:
+        """Finish the current weight update."""
         raise NotImplementedError

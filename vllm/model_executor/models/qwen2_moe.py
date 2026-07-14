@@ -40,7 +40,9 @@ from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -55,14 +57,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     extract_layer_index,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -164,13 +165,12 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
         else:
             self.shared_expert = None
 
-        self.experts = SharedFusedMoE(
+        self.experts = FusedMoE(
             shared_experts=self.shared_expert,
             num_experts=config.num_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
@@ -187,12 +187,6 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
-        if self.shared_expert is not None:
-            final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
-        if self.tp_size > 1:
-            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(  # noqa E501
-                final_hidden_states
-            )
 
         return final_hidden_states.view(orig_shape)
 
@@ -422,124 +416,22 @@ class Qwen2MoeModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        # Params for weights, fp8 weight scales, fp8 activation scales
-        # (param_name, weight_name, expert_id, shard_id)
-        return SharedFusedMoE.make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts,
-        )
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        expert_params_mapping = self.get_expert_mapping()
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                # Skip non-stacked layers and experts (experts handled below).
-                if weight_name not in name:
-                    continue
-                # We have mlp.experts[0].gate_proj in the checkpoint.
-                # Since we handle the experts below in expert_params_mapping,
-                # we need to skip here BEFORE we update the name, otherwise
-                # name will be updated to mlp.experts[0].gate_up_proj, which
-                # will then be updated below in expert_params_mapping
-                # for mlp.experts[0].gate_gate_up_proj, which breaks load.
-                if "mlp.experts" in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if (
-                    name.endswith(".bias") or name.endswith("_bias")
-                ) and name not in params_dict:
-                    continue
-                # Skip layers on other devices.
-                if is_pp_missing_parameter(name, self):
-                    continue
-                if name not in params_dict:
-                    continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
-                    if weight_name not in name:
-                        continue
-                    name = name.replace(weight_name, param_name)
-
-                    # Skip layers on other devices.
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    # Skip loading extra bias for GPTQ models.
-                    if (
-                        name.endswith(".bias") or name.endswith("_bias")
-                    ) and name not in params_dict:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                    )
-                    break
-                else:
-                    # Skip loading extra bias for GPTQ models.
-                    if (
-                        name.endswith(".bias") or name.endswith("_bias")
-                    ) and name not in params_dict:
-                        continue
-                    # Skip layers on other devices.
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    # Remapping the name of FP8 kv-scale.
-                    if name.endswith("kv_scale"):
-                        remapped_kv_scale_name = name.replace(
-                            ".kv_scale", ".attn.kv_scale"
-                        )
-                        if remapped_kv_scale_name not in params_dict:
-                            logger.warning_once(
-                                "Found kv_scale in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). kv_scale is not loaded.",  #  noqa: E501
-                                name,
-                                remapped_kv_scale_name,
-                            )
-                            continue
-                        else:
-                            name = remapped_kv_scale_name
-                    # GGUF: make sure that shared_expert_gate is a 2D tensor.
-                    if (
-                        "mlp.shared_expert_gate" in name
-                        and len(loaded_weight.shape) == 1
-                    ):
-                        loaded_weight = loaded_weight[None, :]
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
-
 
 class Qwen2MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     fall_back_to_pt_during_load = False
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            # weight_name: (param_name, shard_id)
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+            # .experts.gate_up_proj must be handled by MoERunner.load_weights for EP
+            ".mlp.gate_proj": (".mlp.gate_up_proj", 0),
+            ".mlp.up_proj": (".mlp.gate_up_proj", 1),
+            ".shared_expert.gate_proj": (".shared_expert.gate_up_proj", 0),
+            ".shared_expert.up_proj": (".shared_expert.gate_up_proj", 1),
+        }
+    )
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -600,8 +492,16 @@ class Qwen2MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        def _maybe_reshape(
+            weights: Iterable[tuple[str, torch.Tensor]],
+        ) -> Iterable[tuple[str, torch.Tensor]]:
+            for name, loaded_weight in weights:
+                # GGUF: make sure that shared_expert_gate is a 2D tensor.
+                if "mlp.shared_expert_gate" in name and loaded_weight.dim() == 1:
+                    loaded_weight = loaded_weight[None, :]
+                yield name, loaded_weight
 
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return self.model.get_expert_mapping()
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(
+            _maybe_reshape(weights), mapper=self.hf_to_vllm_mapper
+        )

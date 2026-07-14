@@ -40,15 +40,6 @@ using __hip_fp8_e5m2 = __hip_fp8_e5m2_fnuz;
   #define __HIP__FP8MFMA__
 #endif
 
-#if defined(__HIPCC__) && (defined(__gfx1100__) || defined(__gfx1101__) || \
-                           defined(__gfx1150__) || defined(__gfx1151__))
-  #define __HIP__GFX11__
-#endif
-
-#if defined(__HIPCC__) && (defined(__gfx1200__) || defined(__gfx1201__))
-  #define __HIP__GFX12__
-#endif
-
 #if defined(NDEBUG)
   #undef NDEBUG
   #include <assert.h>
@@ -1054,7 +1045,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const scalar_t* q_ptr =
         q + query_start_off * q_stride + wg_start_head_idx * HEAD_SIZE;
     const _B16x8* q_ptrh8 = reinterpret_cast<const _B16x8*>(q_ptr);
-    const int qhead_elemh8 = laneid / 4;
+    const int qhead_elemh8 = MIN(laneid / 4, HEAD_SIZE / 8 - 1);
 
     for (int h = 0; h < QHLOOP - 1; h++) {
       const int qhead_idx = h * 4 + lane4id;
@@ -1629,7 +1620,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
   }
 }
 
-#elif defined(__HIP__GFX11__)
+#elif defined(__GFX11__)
 
 using floatx8 = __attribute__((__vector_size__(8 * sizeof(float)))) float;
 
@@ -2388,7 +2379,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
   out_ptr[threadIdx.x] = from_float<scalar_t>(acc);
 }
 
-#elif defined(__HIP__GFX12__)
+#elif defined(__GFX12__)
 
 using floatx8 = __attribute__((__vector_size__(8 * sizeof(float)))) float;
 

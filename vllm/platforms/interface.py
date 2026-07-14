@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import enum
+import functools
 import os
 import platform
 import sys
@@ -29,7 +30,35 @@ else:
 
 logger = init_logger(__name__)
 
+_assigned_physical_gpu_ids: list[int] | None = None
 
+
+def set_assigned_physical_gpu_ids(ids: list[int]) -> None:
+    """Set the physical GPU IDs assigned to this worker process.
+    Called during worker init so that device_id_to_physical_device_id()
+    can map local_rank to the correct physical device without relying
+    on CUDA_VISIBLE_DEVICES.
+
+    Idempotent: a second call with the same value is a no-op.
+    Raises RuntimeError if called again with a different value.
+
+    This is expected to run during single-threaded worker initialization."""
+    global _assigned_physical_gpu_ids
+    if _assigned_physical_gpu_ids is not None:
+        if _assigned_physical_gpu_ids != ids:
+            raise RuntimeError(
+                f"set_assigned_physical_gpu_ids called with conflicting values: "
+                f"existing={_assigned_physical_gpu_ids}, new={ids}"
+            )
+        return
+    _assigned_physical_gpu_ids = ids
+
+
+def get_assigned_physical_gpu_ids() -> list[int] | None:
+    return _assigned_physical_gpu_ids
+
+
+@functools.cache
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071
     return "microsoft" in " ".join(platform.uname()).lower()
@@ -85,6 +114,9 @@ class DeviceCapability(NamedTuple):
         if not isinstance(other, DeviceCapability):
             return NotImplemented
         return (self.major, self.minor) > (other.major, other.minor)
+
+    def __hash__(self) -> int:
+        return hash((self.major, self.minor))
 
     def as_version_str(self) -> str:
         return f"{self.major}.{self.minor}"
@@ -169,6 +201,10 @@ class Platform:
     def is_cpu(self) -> bool:
         return self._enum == PlatformEnum.CPU
 
+    def uses_host_device_handling(self) -> bool:
+        """Whether vLLM should leave DeviceConfig.device unset."""
+        return self.is_tpu()
+
     def is_zen_cpu(self) -> bool:
         return False
 
@@ -190,7 +226,15 @@ class Platform:
         # for ROCm, but currently we don't have a way to detect the
         # exact GPU model statelessly here. So we return True for
         # all ROCm platforms for now.
-        return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
+        return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM, PlatformEnum.XPU)
+
+    def is_cumem_allocator_available(self) -> bool:
+        try:
+            from vllm.device_allocator.cumem import cumem_available
+        except ImportError:
+            return False
+
+        return cumem_available
 
     @classmethod
     def get_pass_manager_cls(cls) -> str:
@@ -217,7 +261,43 @@ class Platform:
         import vllm.kernels  # noqa: F401
 
     @classmethod
+    def device_control_id_to_physical_device_id(cls, device_id: str) -> int:
+        """Map one device-control env entry to an integer physical device ID."""
+        try:
+            return int(device_id)
+        except ValueError as e:
+            raise ValueError(
+                f"Non-integer device ID {device_id!r} is not supported by "
+                f"{cls.device_name}."
+            ) from e
+
+    # GPU device IDs can refer to three distinct namespaces:
+    # - logical: vLLM-local IDs such as local ranks. These index
+    #   assigned_physical_gpu_ids when it is set.
+    # - visible: torch/CUDA ordinals in the current process after applying
+    #   the device-control env var, e.g. CUDA_VISIBLE_DEVICES.
+    # - physical: global GPU IDs used by topology and management APIs such as
+    #   NVML, which are not remapped by CUDA_VISIBLE_DEVICES.
+    # Keep conversions explicit. In particular, torch device indices are
+    # visible IDs, not vLLM logical IDs.
+
+    @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):
+        """Map a vLLM-local logical device ID to a physical device ID.
+
+        The input is a logical local ID (e.g. a local rank), NOT a visible
+        device ordinal; for the latter use
+        visible_device_id_to_physical_device_id(). The two coincide only
+        when no logical-to-physical mapping is in effect.
+        """
+        if _assigned_physical_gpu_ids is not None:
+            if device_id >= len(_assigned_physical_gpu_ids):
+                raise IndexError(
+                    f"device_id {device_id} is out of range for "
+                    f"assigned_physical_gpu_ids {_assigned_physical_gpu_ids} "
+                    f"({len(_assigned_physical_gpu_ids)} devices assigned)"
+                )
+            return _assigned_physical_gpu_ids[device_id]
         # Treat empty device control env var as unset. This is a valid
         # configuration in Ray setups where the engine is launched in
         # a CPU-only placement group located on a GPU node.
@@ -227,9 +307,57 @@ class Platform:
         ):
             device_ids = os.environ[cls.device_control_env_var].split(",")
             physical_device_id = device_ids[device_id]
-            return int(physical_device_id)
+            return cls.device_control_id_to_physical_device_id(physical_device_id)
         else:
             return device_id
+
+    @classmethod
+    def logical_device_id_to_visible_device_id(cls, device_id: int) -> int:
+        """Map a vLLM-local logical device ID to the current process's
+        visible accelerator ordinal.
+
+        vLLM internals use logical local IDs. Physical IDs are used only
+        at platform/topology boundaries. This helper performs the final
+        translation needed by APIs such as ``torch.device("cuda:N")``.
+        """
+        physical_device_id = cls.device_id_to_physical_device_id(device_id)
+        device_control_env = os.environ.get(cls.device_control_env_var, "")
+        if not device_control_env:
+            return physical_device_id
+
+        visible_physical_device_ids = [
+            cls.device_control_id_to_physical_device_id(physical_id)
+            for physical_id in device_control_env.split(",")
+        ]
+        if physical_device_id not in visible_physical_device_ids:
+            raise RuntimeError(
+                f"Physical device {physical_device_id} for logical device "
+                f"{device_id} is not visible in {cls.device_control_env_var}="
+                f"{device_control_env}"
+            )
+        return visible_physical_device_ids.index(physical_device_id)
+
+    @classmethod
+    def visible_device_id_to_physical_device_id(cls, device_id: int) -> int:
+        """Map a visible accelerator ordinal (e.g. ``torch.device.index``)
+        to a physical device ID.
+
+        This is the inverse of the env-var translation performed by
+        logical_device_id_to_visible_device_id() and is independent of any
+        logical-to-physical mapping set via set_assigned_physical_gpu_ids().
+        """
+        device_control_env = os.environ.get(cls.device_control_env_var, "")
+        if not device_control_env:
+            return device_id
+        visible_device_ids = device_control_env.split(",")
+        if device_id >= len(visible_device_ids):
+            raise IndexError(
+                f"visible device ordinal {device_id} is out of range for "
+                f"{cls.device_control_env_var}={device_control_env}"
+            )
+        return cls.device_control_id_to_physical_device_id(
+            visible_device_ids[device_id]
+        )
 
     @classmethod
     def import_kernels(cls) -> None:
@@ -237,9 +365,9 @@ class Platform:
         try:
             import vllm._C  # noqa: F401
         except ImportError as e:
-            logger.warning("Failed to import from vllm._C: %r", e)
+            logger.warning_once("Failed to import from vllm._C: %r", e)
         with contextlib.suppress(ImportError):
-            import vllm._moe_C  # noqa: F401
+            import vllm._moe_C_stable_libtorch  # noqa: F401
 
     @classmethod
     def get_attn_backend_cls(
@@ -293,7 +421,12 @@ class Platform:
         cls,
         device_id: int = 0,
     ) -> DeviceCapability | None:
-        """Stateless version of [torch.cuda.get_device_capability][]."""
+        """Stateless version of [torch.cuda.get_device_capability][].
+
+        Args:
+            device_id: Device index in the visible device namespace, matching
+                the argument accepted by torch.cuda.
+        """
         return None
 
     @classmethod
@@ -373,6 +506,19 @@ class Platform:
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         """Get the total memory of a device in bytes."""
         raise NotImplementedError
+
+    @classmethod
+    def get_all_gpu_pci_bus_ids(cls) -> dict[int, str]:
+        """Return a mapping of device index to PCI bus ID string.
+
+        Used by ``VLLM_GPU_NIC_PCIE_MAPPING`` for RDMA NIC selection.
+        Subclasses should override with platform-specific discovery
+        (e.g. pynvml for CUDA).
+        """
+        raise NotImplementedError(
+            "VLLM_GPU_NIC_PCIE_MAPPING is not supported on the "
+            f"current platform ({cls.device_name})"
+        )
 
     @classmethod
     def inference_mode(cls):
@@ -498,6 +644,123 @@ class Platform:
         if model_config.is_hybrid:
             cls._align_hybrid_block_size(vllm_config, backend_cls)
 
+        # Phase 3: Align block/page sizes when multiple KV dtypes share the
+        # block pool (e.g. nvfp4 primary + unquantized skip layers).
+        # May override the user's --block-size.
+        if cache_config.kv_cache_dtype_skip_layers:
+            cls._align_heterogeneous_kv_block_size(vllm_config, backend_cls)
+
+    @classmethod
+    def _align_heterogeneous_kv_block_size(
+        cls,
+        vllm_config: "VllmConfig",
+        backend_cls: "type[AttentionBackend]",
+    ) -> None:
+        """Align block size when several KV dtypes share one block pool.
+
+        A quantized primary (e.g. nvfp4) shares the block pool with one or more
+        higher-precision "padded specs" (skip layers today; the first/last-N
+        sibling in the future). A padded spec's per-token page is larger than
+        the primary's *and not an integer multiple of it*, so the trivial
+        ``unify_kv_cache_spec_page_size`` cannot reconcile them. We do it here
+        instead, before the specs are built:
+
+        1. Bump the primary ``block_size`` (kernel-aligned) until the primary
+           page is large enough to cover the largest padded-spec page.
+        2. Record that shared page in each padded spec's ``*_page_size_padded``
+           hint, so it pads up to the shared page.
+
+        ``unify`` then sees equal pages and stays trivial.
+
+        To add a padded-spec type: append its per-token page to ``padded_pages``
+        and set its ``*_page_size_padded`` hint below.
+        """
+        from vllm.config.vllm import set_current_vllm_config
+        from vllm.utils.math_utils import cdiv
+        from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+        from vllm.v1.attention.backend import MultipleOf
+        from vllm.v1.kv_cache_interface import FullAttentionSpec, get_kv_quant_mode
+
+        cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
+        parallel_config = vllm_config.parallel_config
+        if not model_config:
+            return
+
+        def per_token_page_bytes(dtype: "torch.dtype", cache_dtype: str) -> int:
+            """Bytes one token occupies in one layer, for the given dtype."""
+            return FullAttentionSpec(
+                block_size=1,
+                num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                head_size=model_config.get_head_size(),
+                dtype=dtype,
+                kv_quant_mode=get_kv_quant_mode(cache_dtype),
+            ).page_size_bytes
+
+        primary_dtype = (
+            STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+            if cache_config.cache_dtype != "auto"
+            else model_config.dtype
+        )
+        primary_page = per_token_page_bytes(primary_dtype, cache_config.cache_dtype)
+
+        # Per-token page of every higher-precision padded spec sharing the pool.
+        padded_pages: list[int] = []
+        if cache_config.kv_cache_dtype_skip_layers:
+            padded_pages.append(per_token_page_bytes(model_config.dtype, "auto"))
+        # To add the first/last-N sibling:
+        #   padded_pages.append(per_token_page_bytes(<sibling_dtype>, "auto"))
+        if not padded_pages:
+            return
+
+        largest_padded_page = max(padded_pages)
+        assert largest_padded_page >= primary_page, (
+            f"padded-spec per-token page ({largest_padded_page}B) < primary "
+            f"({primary_page}B); a higher-precision padded spec must not be "
+            "smaller than the quantized primary."
+        )
+        if largest_padded_page == primary_page:
+            # Pages already match per token; ``unify`` reconciles the differing
+            # block sizes by integer scaling, so no bump or padding is needed.
+            return
+
+        # Smallest block the kernel supports, and the granularity the primary
+        # block is rounded up to (never below the already-chosen block_size).
+        with set_current_vllm_config(vllm_config):
+            supported = backend_cls.get_supported_kernel_block_sizes()
+        smallest_kernel_block = min(
+            s.base if isinstance(s, MultipleOf) else s for s in supported
+        )
+        block_alignment = max(smallest_kernel_block, cache_config.block_size)
+
+        # Bytes one padded-spec page spans at its own smallest kernel block;
+        # also cover any mamba page a hybrid model already padded.
+        required_page = max(
+            largest_padded_page * smallest_kernel_block,
+            cache_config.mamba_page_size_padded or 0,
+        )
+
+        # Smallest kernel-aligned primary block whose page covers required_page.
+        primary_block_size = block_alignment * cdiv(
+            required_page, block_alignment * primary_page
+        )
+        if cache_config.block_size < primary_block_size:
+            cache_config.block_size = primary_block_size
+            logger.info(
+                "Setting attention block size to %d tokens so the quantized "
+                "primary KV page covers the higher-precision padded-spec page.",
+                primary_block_size,
+            )
+
+        # The shared page that every padded spec (and mamba) pads up to.
+        shared_page = cache_config.block_size * primary_page
+        if cache_config.kv_cache_dtype_skip_layers:
+            cache_config.skip_page_size_padded = shared_page
+        # To add the first/last-N sibling:
+        #   cache_config.sibling_page_size_padded = shared_page
+        if cache_config.mamba_page_size_padded is not None:
+            cache_config.mamba_page_size_padded = shared_page
+
     @classmethod
     def _align_hybrid_block_size(
         cls,
@@ -542,6 +805,42 @@ class Platform:
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
             ).page_size_bytes
+        elif cache_config.cache_dtype.startswith("turboquant_"):
+            # TQ has a packed K|V layout; the standard FullAttentionSpec
+            # formula over-sizes it and trips unify_kv_cache_spec_page_size
+            # when all attention layers are TQ. With mixed skip+TQ the skip
+            # layers still use the standard layout — take max so mamba
+            # padding covers the largest actual page.
+            from vllm.model_executor.layers.quantization.turboquant.config import (
+                TurboQuantConfig,
+            )
+            from vllm.v1.kv_cache_interface import TQFullAttentionSpec
+
+            tq_cfg = TurboQuantConfig.from_cache_dtype(
+                cache_config.cache_dtype, model_config.get_head_size()
+            )
+            tq_page = TQFullAttentionSpec(
+                block_size=1,
+                num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                head_size=model_config.get_head_size(),
+                head_size_v=model_config.get_head_size(),
+                dtype=kv_cache_dtype,
+                kv_quant_mode=kv_quant_mode,
+                tq_slot_size=tq_cfg.slot_size_aligned,
+            ).page_size_bytes
+            if cache_config.kv_cache_dtype_skip_layers:
+                skip_page = FullAttentionSpec(
+                    block_size=1,
+                    num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                    head_size=model_config.get_head_size(),
+                    dtype=model_config.dtype,
+                ).page_size_bytes
+                # lcm, not max: skip_page is often not a multiple of
+                # tq_page, so max would leave per-layer page sizes
+                # un-unifiable downstream.
+                attn_page_size_1_token = lcm(tq_page, skip_page)
+            else:
+                attn_page_size_1_token = tq_page
         else:
             attn_page_size_1_token = FullAttentionSpec(
                 block_size=1,
@@ -635,6 +934,13 @@ class Platform:
             )
 
     @classmethod
+    def register_custom_kv_cache_specs(cls, vllm_config: "VllmConfig") -> None:
+        """
+        Register custom KVCacheSpec class on current platform.
+        """
+        pass
+
+    @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
         """
         Verify whether the current platform supports the specified model
@@ -681,11 +987,13 @@ class Platform:
     def is_pin_memory_available(cls) -> bool:
         """Checks whether pin memory is available on the current platform."""
         if in_wsl():
-            # Pinning memory in WSL is not supported.
             # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
-            logger.warning(
+            # Pinned memory support under WSL depends on the vendor and driver
+            # version. Conservative default: return False. Platform subclasses
+            # that can verify support (e.g. CudaPlatformBase) override this.
+            logger.warning_once(
                 "Using 'pin_memory=False' as WSL is detected. "
-                "This may slow down the performance."
+                "This may slow down performance."
             )
             return False
         return True
@@ -827,7 +1135,7 @@ class Platform:
             if attr is not None:
                 return attr
 
-        logger.warning(
+        logger.warning_once(
             "Current platform %s does not have '%s' attribute.",
             self.device_type,
             key,
@@ -972,6 +1280,13 @@ class Platform:
 
         # Native always used by default. Platforms can override this behavior.
         return IrOpPriorityConfig.with_default(["native"])
+
+    @classmethod
+    def is_arch_support_pdl(cls) -> bool:
+        """
+        Does the current platform support PDL (Programmatic Dependent Launch)?
+        """
+        return False
 
 
 class UnspecifiedPlatform(Platform):

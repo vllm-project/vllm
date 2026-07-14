@@ -278,15 +278,15 @@ def create_qwen2_5_omni_thinker_field_factory(
             image_embeds=MultiModalFieldConfig.flat_from_sizes(
                 "image", image_embed_grid_sizes
             ),
-            image_grid_thw=MultiModalFieldConfig.batched("image"),
+            image_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_grid_sizes
             ),
             video_embeds=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_embed_grid_sizes
             ),
-            video_grid_thw=MultiModalFieldConfig.batched("video"),
-            second_per_grid_ts=MultiModalFieldConfig.batched("video"),
+            video_grid_thw=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+            second_per_grid_ts=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
             use_audio_in_video=MultiModalFieldConfig.shared("video", num_videos),
         )
 
@@ -952,8 +952,6 @@ class Qwen2_5OmniConditionalGenerationMixin:
     def _process_audio_input(
         self,
         audio_input: Qwen2_5OmniAudioFeatureInputs,
-        audio_hashes: list[str] | None = None,
-        cached_audio_features: torch.Tensor | None = None,
     ) -> torch.Tensor:
         input_features = audio_input["input_features"]
         audio_feature_lengths = audio_input["audio_feature_lengths"]
@@ -990,8 +988,6 @@ class Qwen2_5OmniConditionalGenerationMixin:
     def _process_video_input(
         self,
         video_input: Qwen2_5_VLVideoInputs,
-        video_hashes: list[str] = None,
-        cached_video_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
         if video_input["type"] == "video_embeds":
             return video_input["video_embeds"].type(self.visual.dtype)

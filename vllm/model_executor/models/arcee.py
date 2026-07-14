@@ -26,10 +26,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import (
@@ -42,9 +38,10 @@ from .interfaces import (
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
-    is_pp_missing_parameter,
+    WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
+    maybe_prefix,
 )
 
 
@@ -275,79 +272,6 @@ class ArceeModel(nn.Module, EagleModelMixin):
             return hidden_states, aux_hidden_states
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load weights, mapping q/k/v projections to fused qkv_proj."""
-        stacked_params_mapping = [
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-        ]
-
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-            if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
-                continue
-
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-
-            if "scale" in name or "zero_point" in name:
-                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
-                if remapped_name is None:
-                    continue
-                name = remapped_name
-
-            mapped = False
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-
-                name = name.replace(weight_name, param_name)
-
-                if name.endswith(".bias") and name not in params_dict:
-                    mapped = True
-                    break
-
-                if is_pp_missing_parameter(name, self):
-                    mapped = True
-                    break
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader  # type: ignore[attr-defined]
-                weight_loader(param, loaded_weight, shard_id)
-                loaded_params.add(name)
-                mapped = True
-                break
-
-            if mapped:
-                continue
-
-            if name.endswith(".bias") and name not in params_dict:
-                continue
-
-            if is_pp_missing_parameter(name, self):
-                continue
-
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-
-        return loaded_params
-
 
 class ArceeForCausalLM(
     nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
@@ -355,6 +279,14 @@ class ArceeForCausalLM(
     """Arcee Model for causal language modeling, integrated with vLLM
     runtime."""
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            # weight_name: (param_name, shard_id)
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        }
+    )
     # Map fused module names to their submodule components
     # (for quantization and LoRA)
     packed_modules_mapping = {
@@ -367,7 +299,10 @@ class ArceeForCausalLM(
         self.config = config
 
         # Initialize the inner Transformer model (ArceeModel)
-        self.model = ArceeModel(vllm_config=vllm_config, prefix=f"{prefix}.model")
+        self.model = ArceeModel(
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+        )
         # On the last pipeline stage, set up the LM head and logits processor
         if get_pp_group().is_last_rank:
             # Determine vocabulary size (including any LoRA extra tokens
@@ -378,7 +313,7 @@ class ArceeForCausalLM(
                 config.hidden_size,
                 quant_config=vllm_config.quant_config,
                 bias=getattr(config, "lm_head_bias", False),
-                prefix=f"{prefix}.lm_head",
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
             if config.tie_word_embeddings:
                 # Tie output weights with input embedding matrix
@@ -428,4 +363,4 @@ class ArceeForCausalLM(
         )
         # AutoWeightLoader handles weight name remapping, including fusing
         # separate q_proj, k_proj, v_proj into qkv_proj
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
