@@ -23,7 +23,8 @@ steps:
   - tests/kernels/test_concat_mla_q.py
   - tests/kernels/test_fused_qk_norm_rope_gate.py
   commands:
-    - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py kernels/test_fused_qk_norm_rope_gate.py
+    - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_concat_mla_q.py kernels/test_fused_qk_norm_rope_gate.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 3
 
 - label: Kernels MiniMax Reduce RMS Test (2 GPUs)
   key: kernels-minimax-reduce-rms-test-2-gpus
@@ -231,6 +232,10 @@ steps:
   - vllm/v1/attention/backends/mla/flashinfer_mla.py
   - vllm/v1/attention/selector.py
   - vllm/platforms/cuda.py
+  - vllm/model_executor/kernels/linear/cute_dsl/ll_bf16.py
+  - vllm/model_executor/kernels/linear/cute_dsl/_ll_bf16_dotprod.py
+  - vllm/model_executor/kernels/linear/cute_dsl/_ll_bf16_splitk.py
+  - tests/kernels/test_ll_bf16_gemm.py
   - tests/kernels/test_top_k_per_row.py
   commands:
     - nvidia-smi
@@ -259,6 +264,7 @@ steps:
     - pytest -v -s tests/kernels/moe/test_flashinfer_moe.py
     - pytest -v -s tests/kernels/moe/test_trtllm_nvfp4_moe.py
     - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
+    - pytest -v -s tests/kernels/test_ll_bf16_gemm.py
     # e2e
     - pytest -v -s tests/models/quantization/test_nvfp4.py
 
@@ -271,7 +277,8 @@ steps:
   - tests/kernels/helion/
   commands:
     - pip install helion==1.1.0
-    - pytest -v -s kernels/helion/
+    - pytest -v -s kernels/helion/ --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 2
 
  
 - label: Kernels FP8 MoE Test (1xH100)
