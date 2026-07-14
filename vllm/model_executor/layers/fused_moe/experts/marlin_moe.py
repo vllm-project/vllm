@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused MoE utilities for GPTQ."""
 
+import math
 from collections.abc import Callable
 
 import torch
@@ -72,6 +73,7 @@ def _fused_marlin_moe(
     num_tokens_post_padded: torch.Tensor,
     activation: MoEActivation = MoEActivation.SILU,
     activation_func: Callable[..., None] = apply_moe_activation,
+    topk_ids: torch.Tensor | None = None,
     input_global_scale1: torch.Tensor | None = None,
     input_global_scale2: torch.Tensor | None = None,
     global_scale1: torch.Tensor | None = None,
@@ -167,6 +169,8 @@ def _fused_marlin_moe(
         clamp_limit=clamp_limit,
         alpha=gemm1_alpha,
         beta=gemm1_beta,
+        topk_ids=topk_ids,
+        expert_map=expert_map,
     )
 
     if output is None:
@@ -312,6 +316,12 @@ def fused_marlin_moe(
     assert num_bits in [4, 8]
     assert topk_weights.dtype == torch.float32
 
+    if global_num_experts == -1:
+        global_num_experts = E
+    else:
+        # Set M to estimated valid tokens per rank
+        M = math.ceil(M * E / global_num_experts)
+
     # M block size selection logic
     # TODO: tune this further for specific models
     for block_size_m in [8, 16, 32, 48, 64]:
@@ -321,8 +331,6 @@ def fused_marlin_moe(
     if input_dtype is not None and input_dtype.itemsize == 1:
         block_size_m = max(block_size_m, 16)
 
-    if global_num_experts == -1:
-        global_num_experts = E
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids,
         block_size_m,
@@ -341,6 +349,7 @@ def fused_marlin_moe(
         w1_scale=w1_scale,
         w2_scale=w2_scale,
         topk_weights=topk_weights,
+        topk_ids=topk_ids,
         num_topk=topk,
         quant_type=quant_type,
         apply_router_weight_on_input=apply_router_weight_on_input,
@@ -822,6 +831,8 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
             clamp_limit: float | None = None,
             alpha: float = 1.0,
             beta: float = 0.0,
+            topk_ids: torch.Tensor | None = None,
+            expert_map: torch.Tensor | None = None,
         ) -> None:
             # act_input  = intermediate_cache1 (M*topk, 2N for gated)
             # act_output = intermediate_cache2 (M*topk, N)
@@ -858,6 +869,8 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
                 clamp_limit=clamp_limit,
                 alpha=alpha,
                 beta=beta,
+                topk_ids=topk_ids,
+                expert_map=expert_map,
             )
             lora_state["cache2"] = act_output
 
