@@ -468,6 +468,51 @@ class FlashInferBackend(AttentionBackend):
         )
 
     @classmethod
+    def validate_configuration(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: "CacheDType | None",
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
+        use_per_head_quant_scales: bool,
+        device_capability: DeviceCapability,
+        attn_type: str,
+        has_sliding_window: bool = False,
+        use_non_causal: bool = False,
+        use_batch_invariant: bool = False,
+        use_kv_connector: bool = False,
+    ) -> list[str]:
+        invalid_reasons = super().validate_configuration(
+            head_size=head_size,
+            dtype=dtype,
+            kv_cache_dtype=kv_cache_dtype,
+            block_size=block_size,
+            use_mla=use_mla,
+            has_sink=has_sink,
+            use_sparse=use_sparse,
+            use_mm_prefix=use_mm_prefix,
+            use_per_head_quant_scales=use_per_head_quant_scales,
+            device_capability=device_capability,
+            attn_type=attn_type,
+            has_sliding_window=has_sliding_window,
+            use_non_causal=use_non_causal,
+            use_batch_invariant=use_batch_invariant,
+            use_kv_connector=use_kv_connector,
+        )
+
+        if has_sliding_window and device_capability == DeviceCapability(9, 0):
+            invalid_reasons.append(
+                "sliding-window attention not supported on SM90 "
+                "(see https://github.com/flashinfer-ai/flashinfer/issues/3578)"
+            )
+
+        return invalid_reasons
+
+    @classmethod
     def supports_sink(cls) -> bool:
         """FlashInfer supports sinks only on the SM100 trtllm-gen path."""
         from vllm.utils.flashinfer import (
