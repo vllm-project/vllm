@@ -1,5 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""
+Regression tests for the concurrent sparse-invariant race condition.
+
+PyTorch's ``torch.sparse.check_sparse_tensor_invariants()`` context manager
+manipulates a process-global flag.  Without serialization, concurrent callers
+can race the save/restore sequence: one context exits and restores ``False``
+while another thread is still inside its guard, bypassing the invariant check.
+
+These tests verify that ``_SPARSE_LOAD_LOCK`` prevents the race for all
+embedding-load entry points.
+"""
 
 import contextlib
 import io
@@ -11,10 +22,9 @@ import pytest
 import torch
 
 from vllm.config import ModelConfig
-from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.media import AudioEmbeddingMediaIO, ImageEmbeddingMediaIO
 from vllm.renderers.embed_utils import safe_load_prompt_embeds
-from vllm.utils.sparse_utils import check_sparse_tensor_invariants_threadsafe
+from vllm.utils.sparse_utils import _SPARSE_LOAD_LOCK
 
 
 def _encode_tensor(tensor: torch.Tensor) -> bytes:
@@ -55,7 +65,7 @@ class TestNegativeControlWithoutRace:
 
     def test_malicious_sparse_rejected_by_prompt_loader(self, model_config):
         encoded = _encode_tensor(_create_malicious_sparse_tensor())
-        with pytest.raises((RuntimeError, ValueError, VLLMValidationError)):
+        with pytest.raises((RuntimeError, ValueError)):
             safe_load_prompt_embeds(model_config, encoded)
 
     def test_malicious_sparse_rejected_by_image_loader(self):
@@ -92,7 +102,7 @@ class TestConcurrentRaceProtection:
         def thread_a_benign():
             """Enter context, signal B, load, exit."""
             try:
-                with check_sparse_tensor_invariants_threadsafe():
+                with _SPARSE_LOAD_LOCK, torch.sparse.check_sparse_tensor_invariants():
                     barrier.wait()  # signal B that A holds the lock
                     tensor = torch.load(
                         io.BytesIO(pybase64.b64decode(valid_encoded, validate=True)),
@@ -108,7 +118,7 @@ class TestConcurrentRaceProtection:
             """Wait for A to hold the lock, then try to acquire it."""
             try:
                 barrier.wait()  # wait until A is inside the lock
-                with check_sparse_tensor_invariants_threadsafe():
+                with _SPARSE_LOAD_LOCK, torch.sparse.check_sparse_tensor_invariants():
                     tensor = torch.load(
                         io.BytesIO(
                             pybase64.b64decode(malicious_encoded, validate=True)
@@ -148,7 +158,7 @@ class TestConcurrentRaceProtection:
             try:
                 safe_load_prompt_embeds(model_config, malicious_encoded)
                 bypassed.append(True)
-            except (RuntimeError, ValueError, VLLMValidationError):
+            except (RuntimeError, ValueError):
                 rejected.append(True)
 
         with ThreadPoolExecutor(max_workers=num_workers) as pool:
@@ -193,7 +203,7 @@ class TestGlobalFlagRestoration:
         initial = torch.sparse.check_sparse_tensor_invariants.is_enabled()
         malicious_encoded = _encode_tensor(_create_malicious_sparse_tensor())
 
-        with pytest.raises((RuntimeError, ValueError, VLLMValidationError)):
+        with pytest.raises((RuntimeError, ValueError)):
             safe_load_prompt_embeds(model_config, malicious_encoded)
 
         assert torch.sparse.check_sparse_tensor_invariants.is_enabled() == initial
@@ -204,7 +214,7 @@ class TestGlobalFlagRestoration:
         malicious_encoded = _encode_tensor(_create_malicious_sparse_tensor())
 
         def attempt_load(_):
-            with contextlib.suppress(RuntimeError, ValueError, VLLMValidationError):
+            with contextlib.suppress(RuntimeError, ValueError):
                 safe_load_prompt_embeds(model_config, malicious_encoded)
 
         with ThreadPoolExecutor(max_workers=4) as pool:
@@ -245,20 +255,21 @@ class TestCrossLoaderLockSharing:
         # serialization — one finishes before the other starts), AND invalid
         # tensors are still rejected.
         malicious = _encode_tensor(_create_malicious_sparse_tensor())
-        with pytest.raises((RuntimeError, ValueError, VLLMValidationError)):
+        with pytest.raises((RuntimeError, ValueError)):
             safe_load_prompt_embeds(model_config, malicious)
         with pytest.raises((RuntimeError, ValueError)):
             io_handler.load_base64("", malicious.decode("utf-8"))
 
-    def test_all_loaders_use_same_context_manager(self):
-        """Verify all modules reference the same context manager function."""
+    def test_all_loaders_use_same_lock_instance(self):
+        """Verify at import time that all modules reference the same lock."""
+        # Re-import from each consumer module's namespace
         import vllm.multimodal.media.audio as audio_mod
         import vllm.multimodal.media.image as image_mod
         import vllm.renderers.embed_utils as embed_mod
         from vllm.utils.sparse_utils import (
-            check_sparse_tensor_invariants_threadsafe as cm_from_utils,
+            _SPARSE_LOAD_LOCK as lock_from_utils,
         )
 
-        assert embed_mod.check_sparse_tensor_invariants_threadsafe is cm_from_utils
-        assert image_mod.check_sparse_tensor_invariants_threadsafe is cm_from_utils
-        assert audio_mod.check_sparse_tensor_invariants_threadsafe is cm_from_utils
+        assert embed_mod._SPARSE_LOAD_LOCK is lock_from_utils
+        assert image_mod._SPARSE_LOAD_LOCK is lock_from_utils
+        assert audio_mod._SPARSE_LOAD_LOCK is lock_from_utils
