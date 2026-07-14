@@ -119,6 +119,7 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
     pre_trained_config["dflash_config"] = {
         "mask_token_id": config_dict["mask_token_id"],
         "target_layer_ids": [i - 1 for i in aux_layer_ids],
+        "sample_from_anchor": config_dict.get("sample_from_anchor", False),
     }
     # Enable causal masking in SWA for vllm-project/speculators models
     pre_trained_config["dflash_config"]["causal"] = not config_dict.get(
@@ -148,8 +149,9 @@ def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
         target_layer_ids (DSpark's i-1 layer semantics).
     """
     pre_trained_config["architectures"] = ["Qwen3DSparkModel"]
-    # Speculators DSpark uses the 1+N fill-in block (anchor is a bonus token).
-    pre_trained_config["dspark_bonus_anchor"] = True
+    pre_trained_config["sample_from_anchor"] = config_dict.get(
+        "sample_from_anchor", True
+    )
 
     aux_layer_ids = config_dict["aux_hidden_state_layer_ids"]
     pre_trained_config["eagle_aux_hidden_state_layer_ids"] = aux_layer_ids

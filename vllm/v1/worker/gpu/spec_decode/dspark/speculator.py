@@ -40,10 +40,8 @@ class DSparkSpeculator(DFlashSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
-        # Anchor-as-first (N slots) unless the checkpoint uses the 1+N fill-in
-        # block, where the anchor is a separate bonus token.
-        self.sample_from_anchor = not getattr(
-            self.draft_model_config.hf_config, "dspark_bonus_anchor", False
+        self.sample_from_anchor = getattr(
+            self.draft_model_config.hf_config, "sample_from_anchor", True
         )
         if self.sample_from_anchor:
             self.num_query_per_req = self.num_speculative_steps
