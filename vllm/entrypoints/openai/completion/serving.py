@@ -41,7 +41,7 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
-from vllm.logprobs import Logprob
+from vllm.logprobs import Logprob, clamp_logprob
 from vllm.outputs import RequestOutput
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -700,7 +700,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     tokenizer,
                     return_as_token_id=should_return_as_token_id,
                 )
-                token_logprob = max(step_token.logprob, -9999.0)
+                token_logprob = clamp_logprob(step_token.logprob)
 
                 out_tokens.append(token)
                 out_token_logprobs.append(token_logprob)
@@ -718,7 +718,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             top_lp[0],
                             tokenizer,
                             return_as_token_id=should_return_as_token_id,
-                        ): max(top_lp[1].logprob, -9999.0)
+                        ): clamp_logprob(top_lp[1].logprob)
                         for i, top_lp in enumerate(step_top_logprobs.items())
                         if logprob_token_ids or num_output_top_logprobs >= i
                     }

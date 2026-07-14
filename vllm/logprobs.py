@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import math
 from collections.abc import Iterable, Iterator, MutableSequence
 from dataclasses import dataclass, field
 from typing import overload
@@ -204,3 +205,22 @@ def append_logprobs_for_next_position(
                 )
             }
         )
+
+
+# Fallback value used by the OpenAI-compatible API for non-finite logprobs
+# (None, nan, or ±inf). Matches the sentinel used in the original vLLM impl.
+_LOGPROB_FALLBACK = -9999.0
+
+
+def clamp_logprob(logprob: float | None) -> float:
+    """Return a finite logprob, clamping non-finite / missing values.
+
+    Handles three cases that would break JSON serialization or downstream
+    consumers:
+      - None : logprob was not computed
+      - nan  : numerical instability
+      - ±inf : float("-inf") is common for zero-probability tokens
+    """
+    if logprob is None or not math.isfinite(logprob):
+        return _LOGPROB_FALLBACK
+    return max(logprob, _LOGPROB_FALLBACK)
