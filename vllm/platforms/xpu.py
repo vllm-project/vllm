@@ -152,11 +152,22 @@ class XPUPlatform(Platform):
             # Flash Attention on XPU has no FA4 kernel, so it cannot apply the
             # multimodal prefix-LM bidirectional mask. Fall back to Triton
             # Attention, which supports mm_prefix.
-            logger.warning_once(
-                "Flash Attention on XPU does not support multimodal prefix-LM "
-                "attention. Falling back to Triton Attention backend."
-            )
-            return AttentionBackendEnum.TRITON_ATTN.get_path()
+            # However, for models with heterogeneous head dims (e.g., Gemma4),
+            # the Triton attention backend for ALL layers is very slow. For
+            # layers with head_size ≤ 256, allow Flash Attention since the
+            # mm_prefix_clamp_sliding_window feature handles the prefix range
+            # at the kernel level, and for text-only inference there are no
+            # multimodal tokens anyway.
+            head_size = attn_selector_config.head_size
+            if head_size is not None and head_size > 256:
+                logger.warning_once(
+                    "Flash Attention on XPU does not support multimodal "
+                    "prefix-LM attention with head_size=%d. "
+                    "Falling back to Triton Attention backend.",
+                    head_size,
+                )
+                return AttentionBackendEnum.TRITON_ATTN.get_path()
+            # For head_size ≤ 256, proceed to Flash Attention below
         elif dtype == torch.float32:
             logger.warning_once(
                 "Flash Attention on XPU does not support float32 dtype. "
@@ -171,6 +182,18 @@ class XPUPlatform(Platform):
                 f"Invalid attention backend for {cls.device_name}, "
                 f"with use_mla: {attn_selector_config.use_mla}"
             )
+
+        # XPU Flash Attention SYCL kernel supports head_size ≤ 256.
+        # For larger head sizes (e.g., Gemma4 full attention with
+        # head_dim=512), fall back to Triton attention.
+        head_size = attn_selector_config.head_size
+        if head_size is not None and head_size > 256:
+            logger.info_once(
+                "head_size=%d exceeds XPU Flash Attention limit (256). "
+                "Using Triton Attention backend for this layer.",
+                head_size,
+            )
+            return AttentionBackendEnum.TRITON_ATTN.get_path()
 
         logger.info_once("Using Flash Attention backend.")
         return AttentionBackendEnum.FLASH_ATTN.get_path()

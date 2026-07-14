@@ -236,14 +236,36 @@ class Gemma4Config(VerifyAndUpdateConfig):
                     global_head_dim,
                 )
         elif vllm_config.attention_config.backend is None:
-            vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
-            logger.info(
-                "Gemma4 model has heterogeneous head dimensions "
-                "(head_dim=%d, global_head_dim=%d). FA4 not available, "
-                "forcing TRITON_ATTN backend.",
-                head_dim,
-                global_head_dim,
-            )
+            # On XPU, allow per-layer backend selection instead of forcing
+            # TRITON_ATTN globally. The XPU platform's get_attn_backend_cls()
+            # falls back to Triton for head_size > 256 (unsupported by XPU FA
+            # SYCL kernel), while sliding attention layers (head_dim ≤ 256)
+            # use the faster Flash Attention SYCL path.
+            from vllm.platforms import current_platform
+
+            if current_platform.is_xpu() and head_dim <= 256:
+                logger.info(
+                    "Gemma4 model has heterogeneous head dimensions "
+                    "(head_dim=%d, global_head_dim=%d). On XPU, using mixed "
+                    "backends: Flash Attention for sliding layers "
+                    "(head_dim=%d), Triton for full attention layers "
+                    "(head_dim=%d).",
+                    head_dim,
+                    global_head_dim,
+                    head_dim,
+                    global_head_dim,
+                )
+            else:
+                vllm_config.attention_config.backend = (
+                    AttentionBackendEnum.TRITON_ATTN
+                )
+                logger.info(
+                    "Gemma4 model has heterogeneous head dimensions "
+                    "(head_dim=%d, global_head_dim=%d). FA4 not available, "
+                    "forcing TRITON_ATTN backend.",
+                    head_dim,
+                    global_head_dim,
+                )
 
 
 class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
