@@ -1077,11 +1077,7 @@ async fn canonical_health_and_unimplemented_extensions_share_listener() {
     }
 
     assert_eq!(
-        client
-            .get_deployment_info(pb::GetDeploymentInfoRequest {})
-            .await
-            .unwrap_err()
-            .code(),
+        client.get_server_info(pb::GetServerInfoRequest {}).await.unwrap_err().code(),
         tonic::Code::Unimplemented
     );
     assert_eq!(

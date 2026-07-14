@@ -166,11 +166,11 @@ impl pb::generate_server::Generate for GenerateServiceImpl {
 
 #[tonic::async_trait]
 impl pb::engine_server::Engine for EngineServiceImpl {
-    async fn get_deployment_info(
+    async fn get_server_info(
         &self,
-        _request: Request<pb::GetDeploymentInfoRequest>,
-    ) -> Result<Response<pb::DeploymentInfo>, Status> {
-        Err(Status::unimplemented("GetDeploymentInfo"))
+        _request: Request<pb::GetServerInfoRequest>,
+    ) -> Result<Response<pb::ServerInfo>, Status> {
+        Err(Status::unimplemented("GetServerInfo"))
     }
 
     async fn get_model_info(
