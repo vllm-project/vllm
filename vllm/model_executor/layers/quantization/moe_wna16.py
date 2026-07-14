@@ -374,8 +374,39 @@ class MoeWNA16Method(FusedMoEMethodBase):
             num_bits=self.quant_config.weight_bits,
         )
 
+    def _setup_kernel(self, layer: RoutedExperts):
+        assert self.experts_cls is not None
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.moe_quant_config is not None
+        self.moe_kernel = make_wna16_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            experts_cls=self.experts_cls,
+            routing_tables=layer._expert_routing_tables(),
+        )
+
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         has_zp = self.quant_config.has_zp
+        converted = convert_to_wna16_moe_kernel_format(
+            backend=self.wna16_backend,
+            layer=layer,
+            quant_config=self.quant_config,
+            input_dtype=None,
+            w13=layer.w13_qweight,
+            w2=layer.w2_qweight,
+            w13_scale=layer.w13_scales,
+            w2_scale=layer.w2_scales,
+            w13_g_idx=None,
+            w2_g_idx=None,
+            w13_qzeros=layer.w13_qzeros if has_zp else None,
+            w2_qzeros=layer.w2_qzeros if has_zp else None,
+        )
+
+        if converted is None:
+            # Backend rewrote the layer's params in place (e.g. Humming).
+            self._setup_kernel(layer)
+            return
+
         (
             w13_qweight,
             w2_qweight,
@@ -391,20 +422,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
             w2_input_global_scale,
             _,  # w13_bias
             _,  # w2_bias
-        ) = convert_to_wna16_moe_kernel_format(
-            backend=self.wna16_backend,
-            layer=layer,
-            quant_config=self.quant_config,
-            input_dtype=None,
-            w13=layer.w13_qweight,
-            w2=layer.w2_qweight,
-            w13_scale=layer.w13_scales,
-            w2_scale=layer.w2_scales,
-            w13_g_idx=None,
-            w2_g_idx=None,
-            w13_qzeros=layer.w13_qzeros if has_zp else None,
-            w2_qzeros=layer.w2_qzeros if has_zp else None,
-        )
+        ) = converted
 
         # Replace common parameters
         replace_parameter(layer, "w13_qweight", w13_qweight)
@@ -431,15 +449,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
                     torch.nn.Parameter(w2_input_global_scale, requires_grad=False),
                 )
 
-        assert self.experts_cls is not None
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        assert self.moe_quant_config is not None
-        self.moe_kernel = make_wna16_moe_kernel(
-            moe_quant_config=self.moe_quant_config,
-            moe_config=self.moe,
-            experts_cls=self.experts_cls,
-            routing_tables=layer._expert_routing_tables(),
-        )
+        self._setup_kernel(layer)
 
     def apply(
         self,

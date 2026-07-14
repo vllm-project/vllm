@@ -664,6 +664,10 @@ def test_gptq_marlin_moe_padded_round_trip(shape, group_size):
     torch.testing.assert_close(marlin_out, ref, atol=5e-2, rtol=0)
 
 
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="MoE Marlin is not selected on ROCm.",
+)
 def test_check_moe_marlin_supports_layer_padding():
     from vllm.model_executor.layers.quantization.utils.marlin_utils import (
         check_moe_marlin_supports_layer,

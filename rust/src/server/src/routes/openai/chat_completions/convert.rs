@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use itertools::Itertools as _;
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart,
@@ -13,7 +16,9 @@ use crate::routes::openai::utils::structured_outputs::convert_from_response_form
 use crate::routes::openai::utils::types::{
     ChatMessage, ContentPart, MessageContent, Tool, ToolChoice, ToolChoiceValue,
 };
-use crate::utils::{ResolvedRequestContext, convert_logit_bias, merge_kv_transfer_params};
+use crate::utils::{
+    ResolvedRequestContext, convert_logit_bias, merge_ec_transfer_params, merge_kv_transfer_params,
+};
 
 /// Lowered chat request plus the public response metadata carried by every SSE
 /// chunk.
@@ -122,6 +127,7 @@ pub(super) fn prepare_chat_request(
             frequency_penalty: request.frequency_penalty,
             presence_penalty: request.presence_penalty,
             repetition_penalty: request.repetition_penalty,
+            repetition_detection: request.repetition_detection,
             stop_token_ids: request.stop_token_ids,
             ignore_eos: request.ignore_eos,
             logit_bias: convert_logit_bias(request.logit_bias)?,
@@ -131,7 +137,7 @@ pub(super) fn prepare_chat_request(
             structured_outputs,
             skip_reading_prefix_cache: None,
             vllm_xargs: merge_kv_transfer_params(
-                request.vllm_xargs,
+                merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),
                 request.kv_transfer_params.as_ref(),
             ),
         },
@@ -289,7 +295,10 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
                     detail: image_url.detail,
                     uuid,
                 }),
-                _ => bail_invalid_request!("Only text and image_url content parts are supported."),
+                ContentPart::VideoUrl { video_url, uuid } => Ok(ChatContentPart::VideoUrl {
+                    video_url: video_url.url,
+                    uuid,
+                }),
             })
             .try_collect()
             .map(ChatContent::Parts),
@@ -361,6 +370,13 @@ fn convert_tool_choice(tool_choice: Option<&ToolChoice>) -> Result<ChatToolChoic
     match tool_choice {
         None | Some(ToolChoice::Value(ToolChoiceValue::Auto)) => Ok(ChatToolChoice::Auto),
         Some(ToolChoice::Value(ToolChoiceValue::None)) => Ok(ChatToolChoice::None),
+        Some(ToolChoice::Value(ToolChoiceValue::Required)) => Ok(ChatToolChoice::Required),
+        Some(ToolChoice::Function {
+            tool_type,
+            function,
+        }) if tool_type == "function" => Ok(ChatToolChoice::Function {
+            name: function.name.clone(),
+        }),
         _ => bail_invalid_request!("tool_choice={:?} is not supported yet.", tool_choice),
     }
 }
@@ -764,28 +780,34 @@ mod tests {
     }
 
     #[test]
-    fn prepare_chat_request_rejects_video_content_parts() {
+    fn prepare_chat_request_accepts_video_content_parts() {
         let request = ChatCompletionRequest {
             messages: vec![ChatMessage::User {
                 content: MessageContent::Parts(vec![ContentPart::VideoUrl {
                     video_url: VideoUrl {
                         url: "https://example.com/video.mp4".to_string(),
                     },
+                    uuid: Some("video-uuid".to_string()),
                 }]),
                 name: None,
             }],
             ..base_request()
         };
 
-        let error = prepare_chat_request(
+        let prepared = prepare_chat_request(
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
-        .unwrap_err();
+        .expect("request is valid");
 
-        expect!["Only text and image_url content parts are supported."]
-            .assert_eq(&error.to_error_response().error.message);
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::user(vec![ChatContentPart::VideoUrl {
+                video_url: "https://example.com/video.mp4".to_string(),
+                uuid: Some("video-uuid".to_string()),
+            }])]
+        );
     }
 
     #[test]
@@ -822,7 +844,7 @@ mod tests {
         let message = ChatCompletionMessage {
             role: AssistantRole,
             content: Some("answer".to_string()),
-            tool_calls: None,
+            tool_calls: Vec::new(),
             reasoning: Some("inner".to_string()),
         };
         let message_json = serde_json::to_value(message).expect("message serializes");
@@ -960,6 +982,74 @@ mod tests {
             }]
         );
         assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::None);
+    }
+
+    #[test]
+    fn prepare_chat_request_lowers_required_tool_choice() {
+        let request = ChatCompletionRequest {
+            tools: Some(vec![Tool {
+                tool_type: "function".to_string(),
+                function: Function {
+                    name: "get_weather".to_string(),
+                    description: Some("Get weather".to_string()),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    }),
+                    strict: None,
+                },
+            }]),
+            tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Required)),
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::Required);
+    }
+
+    #[test]
+    fn prepare_chat_request_lowers_named_function_tool_choice() {
+        let request = ChatCompletionRequest {
+            tools: Some(vec![Tool {
+                tool_type: "function".to_string(),
+                function: Function {
+                    name: "get_weather".to_string(),
+                    description: Some("Get weather".to_string()),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    }),
+                    strict: None,
+                },
+            }]),
+            tool_choice: Some(ToolChoice::Function {
+                tool_type: "function".to_string(),
+                function: crate::routes::openai::utils::types::FunctionChoice {
+                    name: "get_weather".to_string(),
+                },
+            }),
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.tool_choice,
+            ChatToolChoice::Function {
+                name: "get_weather".to_string(),
+            }
+        );
     }
 
     #[test]
