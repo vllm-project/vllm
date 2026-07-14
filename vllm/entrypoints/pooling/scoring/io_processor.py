@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections.abc import Sequence
-from typing import Any, TypeAlias
+from typing import Any, TypeAlias, cast
 
 import torch.nn.functional as F
 
@@ -21,6 +21,8 @@ from vllm.utils.mistral import is_mistral_tokenizer
 from ...chat_utils import ChatTemplateResolutionError
 from ..base.io_processor import PoolingIOProcessor
 from ..typing import (
+    EncodeChatRenderParams,
+    EncodeCMPLRenderParams,
     OfflineInputsContext,
     OfflineInputsScoringContext,
     OfflineOutputsContext,
@@ -223,8 +225,11 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
     # offline APIs
 
     def get_request_factory_offline(
-        self, ctx: OfflineInputsScoringContext
+        self, ctx: OfflineInputsScoringContext | OfflineInputsContext
     ) -> tuple[RequestFactory, int]:
+        assert "scoring_data" in ctx
+        ctx = cast(OfflineInputsScoringContext, ctx)
+
         max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
             pooling_params=ctx.pooling_params
         )
@@ -298,7 +303,6 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         )
 
     def _post_process(self, outputs: list[PoolingRequestOutput], n_queries: int):
-
         emb_data_1 = outputs[:n_queries]
         emb_data_2 = outputs[n_queries:]
 
@@ -470,8 +474,11 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
     # offline APIs
 
     def get_request_factory_offline(
-        self, ctx: OfflineInputsScoringContext
+        self, ctx: OfflineInputsScoringContext | OfflineInputsContext
     ) -> tuple[RequestFactory, int]:
+        assert "scoring_data" in ctx
+        ctx = cast(OfflineInputsScoringContext, ctx)
+
         data_1 = ctx.scoring_data.data_1
         data_2 = ctx.scoring_data.data_2
         num_requests = len(data_2)
@@ -509,8 +516,16 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
     def render(
         self,
-        render_params: ScoringRenderParams,
+        render_params: EncodeCMPLRenderParams
+        | EncodeChatRenderParams
+        | ScoringRenderParams,
     ) -> PoolingEngineInput:
+        if "data_1" not in render_params:
+            raise ValueError(
+                f"Unsupported render_params type {render_params.__class__.__name__}"
+            )
+        render_params = cast(ScoringRenderParams, render_params)
+
         arrival_time = time.time()
 
         tok_params = render_params["tok_params"]
@@ -823,8 +838,11 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
     pooling_task: PoolingTask = "token_embed"
 
     def get_request_factory_offline(
-        self, ctx: OfflineInputsScoringContext
+        self, ctx: OfflineInputsScoringContext | OfflineInputsContext
     ) -> tuple[RequestFactory, int]:
+        assert "scoring_data" in ctx
+        ctx = cast(OfflineInputsScoringContext, ctx)
+
         scoring_data = ctx.scoring_data
         prompt_extras = ctx.pooling_params.extra_kwargs
 

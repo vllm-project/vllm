@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from vllm import (
     PoolingParams,
@@ -27,6 +27,7 @@ from ..typing import (
     EncodeChatRenderParams,
     EncodeCMPLRenderParams,
     OfflineInputsContext,
+    OfflineInputsScoringContext,
     OfflineOutputsContext,
     PoolingChatLikeRequest,
     PoolingCompletionLikeRequest,
@@ -34,6 +35,7 @@ from ..typing import (
     PoolingServeContext,
     RequestFactory,
     RequestGenerator,
+    ScoringRenderParams,
 )
 
 
@@ -107,8 +109,11 @@ class PoolingIOProcessor:
     # offline APIs
 
     def get_request_factory_offline(
-        self, ctx: OfflineInputsContext
+        self, ctx: OfflineInputsScoringContext | OfflineInputsContext
     ) -> tuple[RequestFactory, int]:
+        assert "prompts" in ctx
+        ctx = cast(OfflineInputsContext, ctx)
+
         prompts_seq = prompt_to_seq(ctx.prompts)
         num_requests = len(prompts_seq)
         pooling_task = ctx.pooling_task
@@ -125,6 +130,7 @@ class PoolingIOProcessor:
             **(ctx.tokenization_kwargs or {})
         )
 
+        pooling_params: PoolingParams | Sequence[PoolingParams]
         if ctx.pooling_params is None:
             pooling_params = PoolingParams()
         else:
@@ -171,9 +177,12 @@ class PoolingIOProcessor:
 
     def render(
         self,
-        render_params: EncodeCMPLRenderParams | EncodeChatRenderParams,
+        render_params: EncodeCMPLRenderParams
+        | EncodeChatRenderParams
+        | ScoringRenderParams,
     ) -> PoolingEngineInput:
         if "conversations" in render_params:
+            render_params = cast(EncodeChatRenderParams, render_params)
             (_,), (engine_input,) = self.renderer.render_chat(
                 conversations=[render_params["conversations"]],
                 chat_params=render_params["chat_params"],
@@ -181,13 +190,19 @@ class PoolingIOProcessor:
                 prompt_extras=render_params["prompt_extras"],
                 skip_mm_cache=render_params["skip_mm_cache"],
             )
-        else:
+        elif "prompts" in render_params:
+            render_params = cast(EncodeCMPLRenderParams, render_params)
             engine_input = self.renderer.render_cmpl(
                 prompts=[render_params["prompts"]],
                 tok_params=render_params["tok_params"],
                 prompt_extras=render_params["prompt_extras"],
                 skip_mm_cache=render_params["skip_mm_cache"],
             )
+        else:
+            raise ValueError(
+                f"Unsupported render_params type {render_params.__class__.__name__}"
+            )
+
         return PoolingEngineInput(
             prompts=engine_input[0],
             params=render_params["params"],

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any
+from typing import Any, cast
 
 from vllm import PoolingParams, PoolingRequestOutput
 from vllm.logger import init_logger
@@ -10,6 +10,7 @@ from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from ..base.io_processor import PoolingIOProcessor
 from ..typing import (
     OfflineInputsContext,
+    OfflineInputsScoringContext,
     OfflineOutputsContext,
     PoolingServeContext,
     RequestFactory,
@@ -111,8 +112,10 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
     # offline APIs
 
     def get_request_factory_offline(
-        self, ctx: OfflineInputsContext
+        self, ctx: OfflineInputsScoringContext | OfflineInputsContext
     ) -> tuple[RequestFactory, int]:
+        assert "prompts" in ctx
+        ctx = cast(OfflineInputsContext, ctx)
         assert isinstance(ctx.prompts, dict) and "data" in ctx.prompts
 
         # Validate the request data is valid for the loaded plugin

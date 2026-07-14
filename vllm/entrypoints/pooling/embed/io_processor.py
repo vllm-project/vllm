@@ -30,6 +30,7 @@ from ..scoring.io_processor import JinaRankingIOProcessorMixin
 from ..typing import (
     ChunkedEmbeddingMetadata,
     OfflineInputsContext,
+    OfflineInputsScoringContext,
     PoolingChatLikeRequest,
     PoolingCompletionLikeRequest,
     PoolingServeContext,
@@ -667,8 +668,10 @@ class JinaRankingTokenEmbedIOProcessor(
         ctx.engine_inputs = engine_inputs
 
     def get_request_factory_offline(
-        self, ctx: OfflineInputsContext
+        self, ctx: OfflineInputsScoringContext | OfflineInputsContext
     ) -> tuple[RequestFactory, int]:
+        assert "prompts" in ctx
+        ctx = cast(OfflineInputsContext, ctx)
         if not isinstance(ctx.prompts, Sequence) or len(ctx.prompts) < 2:
             raise ValueError("The JinaForRanking model requires at least 2 inputs.")
 
