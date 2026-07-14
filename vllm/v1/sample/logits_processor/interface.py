@@ -66,6 +66,11 @@ class LogitsProcessor(ABC):
         """
         return None
 
+    @classmethod
+    def supports_spec_decode(cls) -> bool:
+        """Whether this logits processor can be used with spec decoding."""
+        return False
+
     @abstractmethod
     def __init__(
         self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool

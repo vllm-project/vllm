@@ -209,15 +209,16 @@ def test_rejects_custom_logitsprocs(
     monkeypatch, model_scenario: str, logitproc_source: CustomLogitprocSource
 ):
     """Validate that vLLM engine initialization properly rejects custom
-    logitsprocs when the model is a pooling model or speculative decoding
-    enabled.
+    logitsprocs when the model is a pooling model, and rejects custom
+    logitsprocs without explicit opt-in when speculative decoding is enabled.
 
-    Use `LLM` entrypoint. We expect `LLM` initialization to fail before the
-    logitproc is actually loaded.
+    Use `LLM` entrypoint. For constructor-provided logits processors, we expect
+    `LLM` initialization to fail before model loading.
 
     Scenario 1:
     * Mock a logitproc entrypoint
-    * Validate that `LLM` does not load the logitproc
+    * Pooling: validate that `LLM` does not load the logitproc
+    * Spec decode: validate that `LLM` rejects the unsupported logitproc plugin
 
     Scenario 2:
     * Pass custom logitproc to `LLM` constructor
@@ -259,13 +260,19 @@ def test_rejects_custom_logitsprocs(
     }
 
     if logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_ENTRYPOINT:
-        # Scenario: vLLM loads a model and ignores a logitproc that is
-        # available at a preconfigured entrypoint
-
         # Register real dist-info package so spawned workers can
         # discover the entrypoint via PYTHONPATH (spawn-compatible)
         setup_fake_entrypoint(monkeypatch)
 
+        if model_scenario == "spec_dec":
+            with pytest.raises(ValueError, match=config["error_message"]):
+                # Speculative decoding now rejects installed logits processor
+                # plugins unless they explicitly opt in.
+                LLM(**llm_kwargs)
+            return
+
+        # Scenario: vLLM loads a pooling model and ignores a logitproc that is
+        # available at a preconfigured entrypoint.
         llm = LLM(**llm_kwargs)
         # Require that no custom logitsprocs have been loaded
         # (built-in processors may exist: MinTokensLogitsProcessor,

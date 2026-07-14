@@ -13,7 +13,6 @@ import torch.nn as nn
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplerOutput
-from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words_with_drafts
 from vllm.v1.sample.ops.penalties import apply_all_penalties
@@ -162,6 +161,7 @@ class RejectionSampler(nn.Module):
         # `apply_sampling_constraints` function.
         target_logits = apply_sampling_constraints(
             target_logits,
+            metadata.num_draft_tokens,
             metadata.cu_num_draft_tokens,
             sampling_metadata,
         )
@@ -332,11 +332,11 @@ class RejectionSampler(nn.Module):
                 logits, bad_words_token_ids, output_token_ids, metadata.num_draft_tokens
             )
 
-        for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
-            if isinstance(processor, MinTokensLogitsProcessor):
-                logits = processor.apply_with_spec_decode(
-                    logits, metadata.num_draft_tokens
-                )
+        logits = apply_logits_processors_with_spec_decode(
+            logits,
+            sampling_metadata.logitsprocs.non_argmax_invariant,
+            metadata.num_draft_tokens,
+        )
         if holder is not None and holder.has_tracked_requests():
             logits = holder.apply_to_logits(
                 logits,
@@ -507,8 +507,25 @@ def rejection_sample(
     return output_token_ids
 
 
+def apply_logits_processors_with_spec_decode(
+    logits: torch.Tensor,
+    processors: Sequence[object],
+    num_draft_tokens: list[int],
+) -> torch.Tensor:
+    for processor in processors:
+        apply_with_spec_decode = getattr(processor, "apply_with_spec_decode", None)
+        if apply_with_spec_decode is None:
+            raise NotImplementedError(
+                f"{type(processor).__name__} was enabled with speculative "
+                "decoding but does not implement apply_with_spec_decode()."
+            )
+        logits = apply_with_spec_decode(logits, num_draft_tokens)
+    return logits
+
+
 def apply_sampling_constraints(
     logits: torch.Tensor,  # [num_tokens, vocab_size]
+    num_draft_tokens: list[int],
     cu_num_draft_tokens: torch.Tensor,  # [batch_size]
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
@@ -543,6 +560,12 @@ def apply_sampling_constraints(
     )
     # NOTE(woosuk): Update `logits` in place to avoid allocating a new tensor.
     logits.div_(temperature.unsqueeze(-1))
+
+    logits = apply_logits_processors_with_spec_decode(
+        logits,
+        sampling_metadata.logitsprocs.argmax_invariant,
+        num_draft_tokens,
+    )
 
     # Get expanded top_k and top_p tensors.
     top_k = None
