@@ -149,20 +149,37 @@ impl TextLlm {
 
         if let Some(truncate_prompt_tokens) = request.truncate_prompt_tokens {
             let max_input_tokens = if truncate_prompt_tokens < 0 {
+                // `-1` maps to the model's input budget. The reservation uses the
+                // engine-facing `max_tokens`: for `/v1/completions` prompt-only
+                // echo the frontend drives the engine with one internal output
+                // token, and that token must stay reserved so the truncated
+                // prompt still fits alongside it (see `resolve_max_tokens`).
                 let max_output_tokens = request.sampling_params.max_tokens.unwrap_or(0);
-                if self.max_model_len > max_output_tokens {
-                    (self.max_model_len - max_output_tokens) as usize
-                } else {
-                    0
-                }
+                self.max_model_len.saturating_sub(max_output_tokens) as usize
             } else {
                 truncate_prompt_tokens as usize
             };
 
             if prompt_token_ids.len() > max_input_tokens {
                 let side = request.truncation_side.as_deref().unwrap_or("left");
+                let boundary = if side == "left" {
+                    prompt_token_ids.len() - max_input_tokens
+                } else {
+                    max_input_tokens
+                };
+                if request.mm_features.as_ref().is_some_and(|features| {
+                    features.iter().any(|f| {
+                        let end = f.mm_position.offset + f.mm_position.length;
+                        f.mm_position.offset < boundary && boundary < end
+                    })
+                }) {
+                    return Err(crate::error::Error::PartialMultimodalTruncation {
+                        request_id: request.request_id.clone(),
+                    });
+                }
+
                 if side == "left" {
-                    let start = prompt_token_ids.len() - max_input_tokens;
+                    let start = boundary;
                     prompt_token_ids.drain(0..start);
                     if let Some(features) = request.mm_features.as_mut() {
                         features.retain_mut(|f| {
