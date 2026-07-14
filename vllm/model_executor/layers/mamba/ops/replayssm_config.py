@@ -52,15 +52,24 @@ def _mamba2_output_only(dstate, L, is_blackwell):
     return 16, 1, _dstate_tile(dstate, 64), _dstate_tile(dstate, 128), 2
 
 
+def _gdn_decode(L, is_blackwell):
+    if is_blackwell:
+        return 128, 1, 3, 4
+    return 64, 1, 3, 2
+
+
 def get_replayssm_config(kernel: str, **shape) -> tuple:
     """Return the launch config for ``kernel`` (override > tuned default).
 
-    kernel: "mamba2_output_only". ``shape`` carries the keying dims (dstate;
-    ``L`` for the buffer length, default 16); hardware is auto-detected.
+    kernel: "mamba2_output_only" or "gdn_decode". ``shape`` carries the keying
+    dims (dstate; ``L`` for the buffer length, default 16); hardware is
+    auto-detected.
     """
     if kernel in _overrides:
         return _overrides[kernel]
     bw = _is_blackwell()
     if kernel == "mamba2_output_only":
         return _mamba2_output_only(shape["dstate"], shape.get("L", 16), bw)
+    if kernel == "gdn_decode":
+        return _gdn_decode(shape.get("L", 16), bw)
     raise ValueError(f"unknown ReplaySSM kernel config key: {kernel}")
