@@ -6412,6 +6412,25 @@ class GPUModelRunner(
                 output = self._dummy_sampler_run(last_hidden_states)
         else:
             output = None
+        # Warm compute_logits' vocab-parallel all-gather at the spec-decode row
+        # count (max_num_reqs*(1+num_spec_tokens)), larger than the 1-row-per-
+        # request warmup above. On ROCm/RCCL the larger message connects extra
+        # channels lazily on first use, so if that first use is a live decode
+        # step the connect fails ("no transport for peer on channel N"). Running
+        # it here forces the connect during init.
+        if (
+            self.num_spec_tokens > 0
+            and get_pp_group().is_last_rank
+            and not self.is_pooling_model
+        ):
+            spec_logit_rows = min(
+                self.max_num_reqs * (1 + self.num_spec_tokens),
+                self.max_num_tokens,
+            )
+            if spec_logit_rows > last_hidden_states.shape[0]:
+                self.model.compute_logits(
+                    last_hidden_states[:1].expand(spec_logit_rows, -1).contiguous()
+                )
         self._sync_device()
         del hidden_states, output
         self.encoder_cache.clear()
