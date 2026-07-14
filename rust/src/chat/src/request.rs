@@ -1,12 +1,15 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::HashMap;
 
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
+pub use vllm_parser::tool::Tool as ChatTool;
 pub use vllm_text::SamplingParams;
 use vllm_text::TextDecodeOptions;
-pub use vllm_tool_parser::Tool as ChatTool;
 
 use crate::AssistantMessageExt;
 use crate::error::{Error, Result};
@@ -36,7 +39,13 @@ pub enum ChatContentPart {
         detail: Option<ImageDetail>,
         uuid: Option<String>,
     },
+    /// One video URL/data URL content block.
+    VideoUrl {
+        video_url: String,
+        uuid: Option<String>,
+    },
     // ImageData...
+    // VideoData...
     // ImageEmbeds...
 }
 
@@ -55,12 +64,21 @@ impl ChatContentPart {
         }
     }
 
+    /// Construct one video URL content part with the given URL string.
+    pub fn video_url(video_url: impl Into<String>) -> Self {
+        Self::VideoUrl {
+            video_url: video_url.into(),
+            uuid: None,
+        }
+    }
+
     /// Return the text content of this part when it's a text block, or an
     /// "unsupported multimodal content" error otherwise.
     pub(crate) fn as_text(&self) -> Result<&str> {
         match self {
             Self::Text { text } => Ok(text),
             Self::ImageUrl { .. } => Err(Error::UnsupportedMultimodalContent("image_url")),
+            Self::VideoUrl { .. } => Err(Error::UnsupportedMultimodalContent("video_url")),
         }
     }
 
@@ -73,7 +91,7 @@ impl ChatContentPart {
     pub(crate) fn is_multimodal(&self) -> bool {
         match self {
             Self::Text { .. } => false,
-            Self::ImageUrl { .. } => true,
+            Self::ImageUrl { .. } | Self::VideoUrl { .. } => true,
         }
     }
 }
@@ -553,6 +571,26 @@ mod tests {
     fn chat_content_deserializes_from_raw_string() {
         let content: ChatContent = serde_json::from_value(json!("hello")).unwrap();
         assert_eq!(content, ChatContent::Text("hello".to_string()));
+    }
+
+    #[test]
+    fn chat_content_video_url_part_round_trips_through_serde() {
+        let content = ChatContent::Parts(vec![ChatContentPart::VideoUrl {
+            video_url: "https://example.com/demo.mp4".to_string(),
+            uuid: Some("video-1".to_string()),
+        }]);
+
+        let value = to_value(&content).unwrap();
+        assert_eq!(
+            value,
+            json!([{
+                "type": "video_url",
+                "video_url": "https://example.com/demo.mp4",
+                "uuid": "video-1",
+            }])
+        );
+        let decoded: ChatContent = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, content);
     }
 
     #[test]
