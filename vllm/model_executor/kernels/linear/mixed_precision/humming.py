@@ -39,12 +39,9 @@ class HummingLinearKernel(MPLinearKernel):
             "group_size": 0 if group_size == -1 else group_size,
         }
 
-        if self.config.zero_points:
-            assert self.w_zp_name is not None
-            name_map["zero_point"] = self.w_zp_name
-            quant_config["has_zero_point"] = True
-
-        convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)
+        convert_linear_layer_to_humming_standard(
+            layer=layer, name_map=name_map, weight_type=self.config.weight_type
+        )
         prepare_humming_layer(layer, quant_config)
 
     def apply_weights(
