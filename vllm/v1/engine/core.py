@@ -1261,7 +1261,7 @@ class EngineCoreProc(EngineCore):
                 # Non-MoE DP ranks are completely independent, so treat like DP=1.
                 # Note that parallel_config.data_parallel_index will still reflect
                 # the original DP rank.
-                parallel_config.rescope_for_independent_dp()
+                parallel_config.reconfigure_for_independent_dp_rank()
                 engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
 
             assert engine_core is not None
@@ -2350,7 +2350,7 @@ class EngineCoreActor(EngineCoreActorMixin, EngineCoreProc):
         dp_rank: int = 0,
         local_dp_rank: int = 0,
     ):
-        vllm_config.parallel_config.rescope_for_independent_dp()
+        vllm_config.parallel_config.reconfigure_for_independent_dp_rank()
         EngineCoreActorMixin.__init__(
             self, vllm_config, addresses, dp_rank, local_dp_rank
         )
