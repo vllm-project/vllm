@@ -10,6 +10,7 @@ from transformers import PretrainedConfig
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
@@ -119,6 +120,20 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
             hidden_states=hidden_states,
             residual=None,
         )
+        # Under sequence-parallel MoE (expert-parallel + TP>1) mtp_block
+        # reduce-scatters to a per-rank token shard. Restore full tokens before
+        # shared_head/compute_logits so the vocab-parallel all_gather sees a
+        # consistent token count on every rank (else it deadlocks). Mirrors
+        # DeepseekV2Model.forward and the Qwen MTP fix #48429.
+        if hidden_states.shape[0] != positions.shape[0]:
+            combined_states = torch.cat([hidden_states, residual], dim=-1)
+            combined_states = tensor_model_parallel_all_gather(combined_states, 0)
+            combined_states = combined_states[: positions.shape[0]]
+            hidden_states, residual = combined_states.split(
+                [self.config.hidden_size, self.config.hidden_size], dim=-1
+            )
+            # fused_add_rms_norm requires a contiguous residual
+            residual = residual.contiguous()
         hidden_states = residual + hidden_states  # pre-final-norm (logits hidden)
         # Recycle the post-final-norm hidden into the next draft step.
         # compute_logits applies shared_head (== final norm) to the pre-norm
