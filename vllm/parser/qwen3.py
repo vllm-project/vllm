@@ -22,6 +22,10 @@ from typing import TYPE_CHECKING
 
 import regex as re
 
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
@@ -29,12 +33,12 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
+from vllm.sampling_params import StructuredOutputsParams
+from vllm.tool_parsers.structural_tag_registry import (
+    build_reasoning_json_structural_tag,
+)
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.chat_completion.protocol import (
-        ChatCompletionRequest,
-    )
-    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.tokenizers import TokenizerLike
     from vllm.tool_parsers.abstract_tool_parser import Tool
 
@@ -265,3 +269,52 @@ class Qwen3Parser(ParserEngine):
                         continue
                     return True
         return False
+
+    @staticmethod
+    def _extract_json_schema(request: ChatCompletionRequest) -> dict | None:
+        rf = request.response_format
+        if rf is not None:
+            if rf.type == "structural_tag":
+                return None
+            if rf.type == "json_object":
+                return {"type": "object"}
+            if rf.type == "json_schema" and rf.json_schema is not None:
+                return rf.json_schema.json_schema
+
+        so = request.structured_outputs
+        if so is None:
+            return None
+        if so.structural_tag:
+            return None
+        if so.json_object:
+            return {"type": "object"}
+        if so.json:
+            if isinstance(so.json, dict):
+                return so.json
+            return json.loads(so.json)
+
+        return None
+
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        if not isinstance(request, ChatCompletionRequest):
+            return super().adjust_request(request)
+
+        if not self.thinking_enabled:
+            return super().adjust_request(request)
+
+        schema = self._extract_json_schema(request)
+        if schema is None:
+            return super().adjust_request(request)
+
+        tag = build_reasoning_json_structural_tag(
+            "qwen_3_5", schema, reasoning=self.thinking_enabled
+        )
+
+        request.structured_outputs = StructuredOutputsParams(
+            structural_tag=json.dumps(tag.model_dump()),
+        )
+        request.response_format = None
+
+        return super().adjust_request(request)
