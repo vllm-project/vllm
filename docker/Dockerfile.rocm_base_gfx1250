@@ -8,8 +8,8 @@ ARG TRITON_VERSION=3.7.1+git110cd8e2.rocm7.14.0a20260623
 ARG APEX_VERSION=1.11.0+rocm7.14.0a20260623
 
 
-ARG FA_BRANCH="0e60e394"
-ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
+ARG FA_BRANCH="jpvillam/gfx1250_wip"
+ARG FA_REPO="https://github.com/jpvillam-amd/flash-attention.git"
 ARG AITER_BRANCH="main"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="v1.1.0"
@@ -29,10 +29,12 @@ ARG PYTORCH_ROCM_ARCH=gfx1250
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
 ENV AITER_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
 ENV MORI_GPU_ARCHS=gfx942;gfx950
-ENV FA_GPU_ARCHS=gfx942;gfx950
+ENV FA_GPU_ARCHS=gfx942;gfx950;gfx1250
 
 # TODO: Unset these when support is available for gfx1250
 ENV ENABLE_CK=0
+ENV SKIP_CK_BUILD="TRUE"
+ENV FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE"
 ARG PREBUILD_KERNELS=0
 
 # Required for RCCL in ROCm7.1
@@ -214,6 +216,7 @@ RUN mkdir -p /app/install; \
 ###
 ### FlashAttention Build
 ###
+# Remove  && git submodule update --init \ for CK
 FROM base AS build_fa
 ARG FA_BRANCH
 ARG FA_REPO
@@ -222,7 +225,6 @@ RUN mkdir -p /app/install; \
     git clone ${FA_REPO} \
     && cd flash-attention \
     && git checkout ${FA_BRANCH} \
-    && git submodule update --init \
     && if [ "$USE_SCCACHE" = "1" ]; then \
     export HIP_CLANG_PATH=/opt/sccache-wrappers \
     && sccache --show-stats; \
