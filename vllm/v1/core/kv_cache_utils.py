@@ -957,6 +957,28 @@ def _group_bytes_per_block(group: KVCacheGroupSpec) -> int:
     return group.kv_cache_spec.page_size_bytes * len(group.layer_names)
 
 
+def _groups_have_mixed_page_sizes(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> bool:
+    """Whether the groups must be accounted for independently.
+
+    True when a ``UniformTypeKVCacheSpecs`` group is present (its page size is a
+    sum over inner specs, so it never equals a sibling spec's per-layer page
+    size), or when sibling specs simply have differing page sizes. The latter
+    arises after ``generate_scheduler_kv_cache_config`` flattens a
+    ``UniformTypeKVCacheSpecs`` group into one plain spec: e.g. an MLA group
+    becomes a single ``MLAAttentionSpec`` whose page size differs from the
+    ``MambaSpec`` groups. In both cases the uniform-page-size general path does
+    not apply, so each group contributes independently.
+    """
+    if any(
+        isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs)
+        for g in kv_cache_groups
+    ):
+        return True
+    return len({g.kv_cache_spec.page_size_bytes for g in kv_cache_groups}) > 1
+
+
 def _pool_bytes_per_block(
     vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec]
 ) -> int:
@@ -974,12 +996,12 @@ def _pool_bytes_per_block(
         # buckets = {page_size: [[layer_names], [layer_names], ...]}
         buckets = _bucket_layers_by_page_size(kv_cache_groups)
         return sum(ps * len(slots) for ps, slots in buckets.items())
-    elif any(
-        isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs) for g in kv_cache_groups
-    ):
-        # Mixed groups: UniformTypeKVCacheSpecs + other types (e.g. MambaSpec).
-        # Sum physical layer page sizes, matching the mixed allocator in
-        # get_kv_cache_config_from_groups.
+    elif _groups_have_mixed_page_sizes(kv_cache_groups):
+        # Mixed groups: UniformTypeKVCacheSpecs + other types (e.g. MambaSpec),
+        # or specs with differing page sizes (e.g. an MLA group flattened to a
+        # single MLAAttentionSpec next to MambaSpec groups after scheduler
+        # unwrap). Sum physical layer page sizes, matching the mixed allocator
+        # in get_kv_cache_config_from_groups.
         return sum(_group_bytes_per_block(g) for g in kv_cache_groups)
     group_size = max(len(g.layer_names) for g in kv_cache_groups)
     page_size = get_uniform_page_size([g.kv_cache_spec for g in kv_cache_groups])
@@ -2057,12 +2079,11 @@ def _max_memory_usage_bytes_from_groups(
             total_max_mem_usage_bytes += g_max_mem_usage_page_bytes
         return total_max_mem_usage_bytes
 
-    elif any(
-        isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-        for group in kv_cache_groups
-    ):
-        # Mixed groups: UniformTypeKVCacheSpecs + other types (e.g. MambaSpec).
-        # Each group contributes independently.
+    elif _groups_have_mixed_page_sizes(kv_cache_groups):
+        # Mixed groups: UniformTypeKVCacheSpecs + other types (e.g. MambaSpec),
+        # or specs with differing page sizes (e.g. an MLA group flattened to a
+        # single MLAAttentionSpec next to MambaSpec groups after the scheduler
+        # unwrap). Each group contributes independently.
         total = 0
         for group in kv_cache_groups:
             if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):

@@ -2190,6 +2190,71 @@ def test_get_kv_cache_config_balanced_mamba_hybrid():
     ) == pytest.approx(100 / blocks_per_request)
 
 
+def test_get_kv_cache_capacity_after_scheduler_unwrap():
+    """max_concurrency must survive the scheduler-config unwrap.
+
+    Regression for the balanced-mamba hybrid layout:
+    ``generate_scheduler_kv_cache_config`` flattens the MLA
+    ``UniformTypeKVCacheSpecs`` group into a single ``MLAAttentionSpec``, so the
+    scheduler config holds an MLA spec (page size A) next to ``MambaSpec``
+    groups (page size B). ``EngineCore._initialize_kv_caches`` calls
+    ``get_kv_cache_capacity`` on that unwrapped config; the uniform-page-size
+    path used to assert-fail (``assert len(page_sizes) == 1``) on this topology.
+    """
+    model_config = ModelConfig(max_model_len=8192)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    kv_cache_spec: dict[str, KVCacheSpec] = {}
+    for i in range(45):
+        if i % 4 == 3:
+            kv_cache_spec[f"layers.{i}.attn"] = MLAAttentionSpec(
+                block_size=1024,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.bfloat16,
+            )
+            kv_cache_spec[f"layers.{i}.indexer"] = MLAAttentionSpec(
+                block_size=1024,
+                num_kv_heads=1,
+                head_size=132,
+                dtype=torch.uint8,
+                compress_ratio=16,
+            )
+        else:
+            kv_cache_spec[f"layers.{i}.linear_attn"] = new_mamba_spec()
+
+    groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
+    bytes_per_block = kv_cache_utils._pool_bytes_per_block(vllm_config, groups)
+    kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        vllm_config, groups, bytes_per_block * 100 + 1
+    )
+
+    scheduler_config = generate_scheduler_kv_cache_config([kv_cache_config])
+    # Confirm we are exercising the regression path: the MLA group is no longer
+    # UniformTypeKVCacheSpecs, so sibling specs have differing page sizes.
+    assert not any(
+        isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs)
+        for g in scheduler_config.kv_cache_groups
+    )
+
+    unwrapped_groups = scheduler_config.kv_cache_groups
+    expected_max_mem = kv_cache_utils._max_memory_usage_bytes_from_groups(
+        vllm_config, unwrapped_groups
+    )
+    expected_pool = kv_cache_utils._pool_bytes_per_block(
+        vllm_config, unwrapped_groups
+    )
+    expected_blocks_per_request = (
+        expected_max_mem + expected_pool - 1
+    ) // expected_pool
+
+    _, max_concurrency = get_kv_cache_capacity(vllm_config, scheduler_config)
+    assert max_concurrency > 0
+    assert max_concurrency == pytest.approx(
+        scheduler_config.num_blocks / expected_blocks_per_request
+    )
+
+
 def new_mla_spec(cache_dtype_str=None):
     # head_size = kv_lora_rank(512) + qk_rope_head_dim(64) = 576
     return MLAAttentionSpec(
