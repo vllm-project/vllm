@@ -346,7 +346,7 @@ impl MultimodalModelInfo {
         }
 
         let media_connector = Arc::new(MediaConnector::new(
-            reqwest::Client::new(),
+            reqwest_0_13::Client::new(),
             MediaConnectorConfig::default(),
         )?);
 
