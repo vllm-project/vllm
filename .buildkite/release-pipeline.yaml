@@ -76,6 +76,49 @@ steps:
         env:
           DOCKER_BUILDKIT: "1"
 
+      - label: "Build wheel - macOS arm64 - CPU"
+        depends_on: ~
+        id: build-wheel-macos-arm64-cpu
+        agents:
+          queue: macmini
+        timeout_in_minutes: 90
+        commands:
+          - "bash .buildkite/scripts/build-macos-wheel.sh"
+          - "mkdir -p artifacts/transfer"
+          - "basename artifacts/dist/*.whl > artifacts/transfer/wheel.name"
+          - "shasum -a 256 artifacts/dist/*.whl > artifacts/transfer/wheel.sha256"
+          - "split -b 1m artifacts/dist/*.whl artifacts/transfer/wheel.part."
+        env:
+          BUILDKITE_ARTIFACT_UPLOAD_CONCURRENCY: "1"
+          BUILDKITE_NO_HTTP2: "true"
+        artifact_paths:
+          - "artifacts/transfer/*"
+
+      - label: "Upload wheel - macOS arm64 - CPU"
+        depends_on: build-wheel-macos-arm64-cpu
+        id: upload-wheel-macos-arm64-cpu
+        agents:
+          queue: small_cpu_queue_release
+        timeout_in_minutes: 15
+        commands:
+          - 'buildkite-agent artifact download "artifacts/transfer/*" .'
+          - "mkdir -p artifacts/dist artifacts/reassembled"
+          - 'wheel_name=$$(cat artifacts/transfer/wheel.name)'
+          - '[[ "$$wheel_name" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*\.whl$$ && "$$wheel_name" != *..* ]]'
+          - 'expected_sha=$$(awk ''{print $$1}'' artifacts/transfer/wheel.sha256)'
+          - '[[ "$$expected_sha" =~ ^[0-9a-f]{64}$$ ]]'
+          - 'cat artifacts/transfer/wheel.part.* > artifacts/reassembled/wheel'
+          - 'actual_sha=$$(shasum -a 256 artifacts/reassembled/wheel | awk ''{print $$1}'')'
+          - '[[ "$$actual_sha" == "$$expected_sha" ]]'
+          - 'mv artifacts/reassembled/wheel "artifacts/dist/$$wheel_name"'
+          - "aws sts get-caller-identity"
+          - "VLLM_WHEEL_PLATFORM=macos bash .buildkite/scripts/upload-nightly-wheels.sh"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "s3://vllm-wheels/$$BUILDKITE_COMMIT/$(cd artifacts/dist && echo *.whl)"'
+        plugins:
+          - aws-assume-role-with-web-identity#v1.6.0:
+              role-arn: arn:aws:iam::936637512419:role/vllm-release-macos-wheel-uploader
+              region: us-west-2
+
       - label: "Build wheel - x86_64 - CUDA 12.9"
         depends_on: ~
         id: build-wheel-x86-cuda-12-9
