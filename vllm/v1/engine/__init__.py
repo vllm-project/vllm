@@ -156,7 +156,7 @@ class EngineCoreEventType(enum.IntEnum):
 class EngineCoreEvent(msgspec.Struct):
     """A timestamped engine core event associated with a request.
 
-    The timestamp is a monotonic timestamps and is used for by the engine
+    The timestamp is a monotonic timestamp and is used by the engine
     frontend to calculate intervals between engine core events. These
     timestamps should not be compared with timestamps from other processes.
     """
@@ -190,6 +190,7 @@ class EngineCoreOutput(
     stop_reason: int | str | None = None
     events: list[EngineCoreEvent] | None = None
     kv_transfer_params: dict[str, Any] | None = None
+    ec_transfer_params: dict[str, Any] | None = None
 
     trace_headers: Mapping[str, str] | None = None
 

@@ -70,6 +70,15 @@ endif()
 #
 set(TORCH_SUPPORTED_VERSION_CUDA "2.11.0")
 set(TORCH_SUPPORTED_VERSION_ROCM "2.11.0")
+# TORCH_NIGHTLY=1 builds run against unpinned nightly wheels, so the supported-
+# version check would always warn. Only treat it as a nightly build when the
+# value is exactly "1" (the bootstrap exports TORCH_NIGHTLY=0 by default, which
+# must NOT suppress the warning for normal builds).
+if (DEFINED ENV{TORCH_NIGHTLY} AND "$ENV{TORCH_NIGHTLY}" STREQUAL "1")
+  set(TORCH_NIGHTLY_BUILD TRUE)
+else()
+  set(TORCH_NIGHTLY_BUILD FALSE)
+endif()
 
 #
 # Try to find python package with an executable that exactly matches
@@ -141,6 +150,21 @@ if(Python_VERSION VERSION_GREATER_EQUAL "3.11")
 endif()
 
 #
+# fs_io extension (pure CXX; must stay above the non-CUDA device branch
+# so CPU builds define the target before the early return).
+# GIL-releasing filesystem helpers for FileSystemTierManager.
+#
+if(Python_VERSION VERSION_GREATER_EQUAL "3.11")
+  define_extension_target(
+    fs_io_C
+    DESTINATION vllm
+    LANGUAGE CXX
+    SOURCES csrc/fs_io.cpp
+    USE_SABI 3.11
+    WITH_SOABI)
+endif()
+
+#
 # Forward the non-CUDA device extensions to external CMake scripts.
 #
 if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
@@ -160,7 +184,7 @@ endif()
 if (NOT HIP_FOUND AND NOT PYTORCH_FOUND_HIP AND CUDA_FOUND)
   set(VLLM_GPU_LANG "CUDA")
 
-  if (NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_CUDA})
+  if (NOT TORCH_NIGHTLY_BUILD AND NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_CUDA})
     message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_CUDA} "
       "expected for CUDA build, saw ${Torch_VERSION} instead.")
   endif()
@@ -173,7 +197,7 @@ elseif(HIP_FOUND OR PYTORCH_FOUND_HIP)
   enable_language(HIP)
 
   # ROCm 5.X and 6.X
-  if (ROCM_VERSION_DEV_MAJOR GREATER_EQUAL 5 AND
+  if (NOT TORCH_NIGHTLY_BUILD AND ROCM_VERSION_DEV_MAJOR GREATER_EQUAL 5 AND
       Torch_VERSION VERSION_LESS ${TORCH_SUPPORTED_VERSION_ROCM})
     message(WARNING "Pytorch version >= ${TORCH_SUPPORTED_VERSION_ROCM} "
       "expected for ROCm build, saw ${Torch_VERSION} instead.")
@@ -270,6 +294,16 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   set(CMAKE_${VLLM_GPU_LANG}_FLAGS "${CMAKE_${VLLM_GPU_LANG}_FLAGS} -Wno-unused-result -Wno-unused-value")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result -Wno-unused-value")
+
+  # When using LTO then *.cpp files must be compiled with same compiler as used linker
+  # So if HIP uses clang linker we also must use it
+  # Otherwise symbols will be missing from .so
+  if (CMAKE_CXX_FLAGS MATCHES "\-flto")
+    if(NOT CMAKE_CXX_COMPILER_ID STREQUAL CMAKE_HIP_COMPILER_ID)
+      message(FATAL_ERROR "LTO is enabled for ROCm build, but the C++ compiler (${CMAKE_CXX_COMPILER_ID}) and HIP compiler (${CMAKE_HIP_COMPILER_ID}) are different which is not supported. "
+                          "Please ensure they are same by setting CXX=${CMAKE_HIP_COMPILER} environment variable. Or alternatively disable LTO.")
+    endif()
+   endif()
 endif()
 
 #
@@ -319,82 +353,33 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 endif()
 
 #
-# _C extension
+# Legacy _C extension (ROCm only — CUDA ops migrated to _C_stable_libtorch)
 #
 
-set(VLLM_EXT_SRC
-  "csrc/quantization/activation_kernels.cu"
-  "csrc/torch_bindings.cpp")
+if(VLLM_GPU_LANG STREQUAL "HIP")
+  set(VLLM_EXT_SRC
+    "csrc/torch_bindings.cpp"
+    "csrc/custom_quickreduce.cu")
 
-if(VLLM_GPU_LANG STREQUAL "CUDA")
-  SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
+  message(STATUS "Enabling C extension.")
+  define_extension_target(
+    _C
+    DESTINATION vllm
+    LANGUAGE ${VLLM_GPU_LANG}
+    SOURCES ${VLLM_EXT_SRC}
+    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+    ARCHITECTURES ${VLLM_GPU_ARCHES}
+    INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+    INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+    USE_SABI 3
+    WITH_SOABI)
 
-  # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
-  set(CUTLASS_REVISION "v4.4.2")
-
-  # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
-  if (DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
-    set(VLLM_CUTLASS_SRC_DIR $ENV{VLLM_CUTLASS_SRC_DIR})
-  endif()
-
-  if(VLLM_CUTLASS_SRC_DIR)
-    if(NOT IS_ABSOLUTE VLLM_CUTLASS_SRC_DIR)
-      get_filename_component(VLLM_CUTLASS_SRC_DIR "${VLLM_CUTLASS_SRC_DIR}" ABSOLUTE)
-    endif()
-    message(STATUS "The VLLM_CUTLASS_SRC_DIR is set, using ${VLLM_CUTLASS_SRC_DIR} for compilation")
-    FetchContent_Declare(cutlass SOURCE_DIR ${VLLM_CUTLASS_SRC_DIR})
-  else()
-    FetchContent_Declare(
-        cutlass
-        GIT_REPOSITORY https://github.com/nvidia/cutlass.git
-        # Please keep this in sync with CUTLASS_REVISION line above.
-        GIT_TAG ${CUTLASS_REVISION}
-        GIT_PROGRESS TRUE
-
-        # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
-        # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
-        # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
-        GIT_SHALLOW TRUE
-    )
-  endif()
-  FetchContent_MakeAvailable(cutlass)
-
-  set_gencode_flags_for_srcs(
-    SRCS "${VLLM_EXT_SRC}"
-    CUDA_ARCHS "${CUDA_ARCHS}")
-
-# if CUDA endif
-endif()
-
-if (VLLM_GPU_LANG STREQUAL "HIP")
-  # Add QuickReduce kernels (ROCm-only; not part of stable ABI migration).
-  # TODO: Remove the cuda_view when ROCm upgrade to torch 2.11.
-  list(APPEND VLLM_EXT_SRC
-    "csrc/custom_quickreduce.cu"
-    "csrc/cuda_view.cu"
-    "csrc/libtorch_stable/cuda_utils_kernels.cu"
-  )
-# if ROCM endif
-endif()
-
-message(STATUS "Enabling C extension.")
-define_extension_target(
-  _C
-  DESTINATION vllm
-  LANGUAGE ${VLLM_GPU_LANG}
-  SOURCES ${VLLM_EXT_SRC}
-  COMPILE_FLAGS ${VLLM_GPU_FLAGS}
-  ARCHITECTURES ${VLLM_GPU_ARCHES}
-  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
-  INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
-  USE_SABI 3
-  WITH_SOABI)
-
-# If CUTLASS is compiled on NVCC >= 12.5, it by default uses
-# cudaGetDriverEntryPointByVersion as a wrapper to avoid directly calling the
-# driver API. This causes problems when linking with earlier versions of CUDA.
-# Setting this variable sidesteps the issue by calling the driver directly.
-target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
+  # If CUTLASS is compiled on NVCC >= 12.5, it by default uses
+  # cudaGetDriverEntryPointByVersion as a wrapper to avoid directly calling the
+  # driver API. This causes problems when linking with earlier versions of CUDA.
+  # Setting this variable sidesteps the issue by calling the driver directly.
+  target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
+endif() # _C HIP endif
 
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   #
@@ -402,7 +387,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   #
   set(VLLM_STABLE_EXT_SRC
     "csrc/libtorch_stable/torch_bindings.cpp"
+    "csrc/libtorch_stable/cuda_view.cu"
+    "csrc/libtorch_stable/cuda_utils_kernels.cu"
     "csrc/libtorch_stable/activation_kernels.cu"
+    "csrc/libtorch_stable/ngram_embedding_kernels.cu"
+    "csrc/libtorch_stable/quantization/activation_kernels.cu"
     "csrc/libtorch_stable/quantization/w8a8/int8/scaled_quant.cu"
     "csrc/libtorch_stable/quantization/w8a8/fp8/common.cu"
     "csrc/libtorch_stable/quantization/w8a8/fp8/per_token_group_quant.cu"
@@ -420,18 +409,63 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/libtorch_stable/sampler.cu"
     "csrc/libtorch_stable/topk.cu"
     "csrc/libtorch_stable/mamba/selective_scan_fwd.cu"
-    "csrc/libtorch_stable/attention/paged_attention_v1.cu"
-    "csrc/libtorch_stable/attention/paged_attention_v2.cu"
-    "csrc/libtorch_stable/cache_kernels.cu"
     "csrc/libtorch_stable/cache_kernels.cu"
     "csrc/libtorch_stable/cache_kernels_fused.cu"
     "csrc/libtorch_stable/custom_all_reduce.cu"
     "csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu")
 
+  if(VLLM_GPU_LANG STREQUAL "CUDA" AND
+     DEFINED CMAKE_CUDA_COMPILER_VERSION AND
+     CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.0)
+
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+      cuda_archs_loose_intersection(COOPERATIVE_TOPK_ARCHS
+        "9.0a;10.0f;10.1f;10.3f;11.0f;12.0f;12.1f" "${CUDA_ARCHS}")
+    else()
+      cuda_archs_loose_intersection(COOPERATIVE_TOPK_ARCHS
+        "9.0a;10.0a;10.1a;10.3a;12.0a;12.1a" "${CUDA_ARCHS}")
+    endif()
+
+    if(COOPERATIVE_TOPK_ARCHS)
+      list(APPEND VLLM_GPU_FLAGS "-DVLLM_ENABLE_COOPERATIVE_TOPK=1")
+
+    endif()
+  endif()
+
   if(VLLM_GPU_LANG STREQUAL "CUDA")
+    SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
+
+    # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
+    set(CUTLASS_REVISION "v4.4.2")
+
+    # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
+    if (DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
+      set(VLLM_CUTLASS_SRC_DIR $ENV{VLLM_CUTLASS_SRC_DIR})
+    endif()
+
+    if(VLLM_CUTLASS_SRC_DIR)
+      if(NOT IS_ABSOLUTE VLLM_CUTLASS_SRC_DIR)
+        get_filename_component(VLLM_CUTLASS_SRC_DIR "${VLLM_CUTLASS_SRC_DIR}" ABSOLUTE)
+      endif()
+      message(STATUS "The VLLM_CUTLASS_SRC_DIR is set, using ${VLLM_CUTLASS_SRC_DIR} for compilation")
+      FetchContent_Declare(cutlass SOURCE_DIR ${VLLM_CUTLASS_SRC_DIR})
+    else()
+      FetchContent_Declare(
+          cutlass
+          GIT_REPOSITORY https://github.com/nvidia/cutlass.git
+          # Please keep this in sync with CUTLASS_REVISION line above.
+          GIT_TAG ${CUTLASS_REVISION}
+          GIT_PROGRESS TRUE
+
+          # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
+          # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
+          # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
+          GIT_SHALLOW TRUE
+      )
+    endif()
+    FetchContent_MakeAvailable(cutlass)
+
     list(APPEND VLLM_STABLE_EXT_SRC
-      "csrc/libtorch_stable/cuda_view.cu"
-      "csrc/libtorch_stable/cuda_utils_kernels.cu"
       "csrc/libtorch_stable/cutlass_extensions/common.cpp"
       "csrc/libtorch_stable/quantization/w8a8/cutlass/scaled_mm_entry.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_entry.cu"
@@ -511,6 +545,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     set_gencode_flags_for_srcs(
       SRCS "${VLLM_STABLE_EXT_SRC}"
       CUDA_ARCHS "${CUDA_ARCHS}")
+
+    if(COOPERATIVE_TOPK_ARCHS)
+      list(APPEND VLLM_STABLE_EXT_SRC
+        "csrc/libtorch_stable/cooperative_topk.cu")
+      set_gencode_flags_for_srcs(
+        SRCS "csrc/libtorch_stable/cooperative_topk.cu"
+        CUDA_ARCHS "${COOPERATIVE_TOPK_ARCHS}")
+    endif()
 
     # Only build Marlin kernels if we are building for at least some compatible archs.
     # Keep building Marlin for 9.0 as there are some group sizes and shapes that
@@ -857,9 +899,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
 
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0f" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0f;11.0f" "${CUDA_ARCHS}")
   else()
-    cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a;10.3a" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
   endif()
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS)
     set(CUTLASS_MOE_SM100_SRCS "csrc/libtorch_stable/quantization/w8a8/cutlass/moe/grouped_mm_c3x_sm100.cu")
@@ -929,7 +971,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       SRCS "${FP4_SM120_SRCS}"
       CUDA_ARCHS "${FP4_SM120_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${FP4_SM120_SRCS}")
-    target_compile_definitions(_C PRIVATE ENABLE_NVFP4_SM120=1)
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM120=1")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM120=1")
     message(STATUS "Building SM12x NVFP4 for archs: ${FP4_SM120_ARCHS}")
@@ -962,7 +1003,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       SRCS "${FP4_SM100_SRCS}"
       CUDA_ARCHS "${FP4_SM100_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${FP4_SM100_SRCS}")
-    target_compile_definitions(_C PRIVATE ENABLE_NVFP4_SM100=1)
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM100=1")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM100=1")
     message(STATUS "Building SM10x/11x NVFP4/MXFP4 for archs: ${FP4_SM100_ARCHS}")
@@ -1056,25 +1096,24 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     USE_SABI 3
     WITH_SOABI)
 
+  # Set TORCH_TARGET_VERSION for stable ABI compatibility.
+  # This ensures we only use C-shim APIs available in PyTorch 2.11.
+  # _C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
+  # which is currently set to 2.11.
+  target_compile_definitions(_C_stable_libtorch PRIVATE
+    TORCH_TARGET_VERSION=0x020B000000000000ULL)
+
   # Needed to use cuda/hip APIs from C-shim
   if(VLLM_GPU_LANG STREQUAL "CUDA")
-    # Set TORCH_TARGET_VERSION for stable ABI compatibility.
-    # This ensures we only use C-shim APIs available in PyTorch 2.11.
-    # _C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
-    # which is currently set to 2.11.
-    target_compile_definitions(_C_stable_libtorch PRIVATE
-      TORCH_TARGET_VERSION=0x020B000000000000ULL)
     target_compile_definitions(_C_stable_libtorch PRIVATE USE_CUDA)
+    if(COOPERATIVE_TOPK_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_COOPERATIVE_TOPK=1)
+    endif()
     # Needed by CUTLASS kernels
     target_compile_definitions(_C_stable_libtorch PRIVATE
       CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
   elseif(VLLM_GPU_LANG STREQUAL "HIP")
-    # Set TORCH_TARGET_VERSION for stable ABI compatibility.
-    # This ensures we only use C-shim APIs available in PyTorch 2.10.
-    # _C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
-    # which is currently set to 2.10.
-    target_compile_definitions(_C_stable_libtorch PRIVATE
-      TORCH_TARGET_VERSION=0x020A000000000000ULL)
     target_compile_definitions(_C_stable_libtorch PRIVATE USE_ROCM)
   endif()
 
@@ -1282,25 +1321,20 @@ define_extension_target(
   USE_SABI 3
   WITH_SOABI)
 
+# Set TORCH_TARGET_VERSION for stable ABI compatibility.
+# This ensures we only use C-shim APIs available in PyTorch 2.11.
+# _moe_C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
+# which is currently set to 2.11.
+target_compile_definitions(_moe_C_stable_libtorch PRIVATE
+  TORCH_TARGET_VERSION=0x020B000000000000ULL)
+
 # Needed to use cuda/hip APIs from C-shim
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  # Set TORCH_TARGET_VERSION for stable ABI compatibility.
-  # This ensures we only use C-shim APIs available in PyTorch 2.11.
-  # _moe_C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
-  # which is currently set to 2.11.
-  target_compile_definitions(_moe_C_stable_libtorch PRIVATE
-    TORCH_TARGET_VERSION=0x020B000000000000ULL)
   target_compile_definitions(_moe_C_stable_libtorch PRIVATE USE_CUDA)
   # Needed by CUTLASS kernels
   target_compile_definitions(_moe_C_stable_libtorch PRIVATE
     CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 elseif(VLLM_GPU_LANG STREQUAL "HIP")
-  # Set TORCH_TARGET_VERSION for stable ABI compatibility.
-  # This ensures we only use C-shim APIs available in PyTorch 2.10.
-  # _moe_C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
-  # which is currently set to 2.10.
-  target_compile_definitions(_moe_C_stable_libtorch PRIVATE
-    TORCH_TARGET_VERSION=0x020A000000000000ULL)
   target_compile_definitions(_moe_C_stable_libtorch PRIVATE USE_ROCM)
 endif()
 

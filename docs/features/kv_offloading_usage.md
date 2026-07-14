@@ -74,11 +74,14 @@ vllm serve <model> \
 | `max_tracker_size` | no | `64000` | single-tier | Max entries in the lookup tracker. |
 | `secondary_tiers` | no | `[]` | multi-tier | List of secondary tier configs (see below). |
 | `offload_prompt_only` | no | `true` | both | If `true`, only prompt (prefill) blocks are offloaded; decode blocks are skipped. |
+| `self_describing_kv_events` | no | `false` | single-tier | Opt-in. When `true` *and* KV cache events are enabled (`--kv-events-config` with `enable_kv_cache_events`), the connector emits self-describing block-granular `BlockStored`/`BlockRemoved` payloads (constituent block hashes, whole-chunk `token_ids`, per-block `block_size`, parent hash, LoRA + group/cache-spec metadata) instead of the placeholder fallback, so external KV-event consumers can index offloaded blocks. Inert unless events are enabled. Currently rejected by `TieringOffloadingSpec`. Full-attention groups only; sliding-window/SSM groups keep the placeholder fallback. In chunk mode (`block_size` > GPU block size), overlapping chunks re-announce shared per-block hashes, so consumers must reference-count (deduplicate) repeated store/remove announcements. |
 | `spec_module_path` | no | — | both | Python import path for a custom `OffloadingSpec` not in the built-in registry. Required only when `spec_name` is not built-in (advanced). |
 
 ## Secondary Tiers
 
 Each entry in `secondary_tiers` is a dict with a required `type` field plus tier-specific fields.
+
+The filesystem and object-store tiers can publish hash-only `BlockStored` KV events for blocks they successfully store, tagged with a stable per-tier `medium` (`FS` for the filesystem tier, `OBJ` for the object-store tier). Set `enable_kv_events: true` in the tier's entry to opt in; events are published only when KV cache events are also enabled globally via `--kv-events-config`.
 
 ### Filesystem (FS)
 
@@ -90,6 +93,7 @@ The filesystem tier (`type: "fs"`) writes blocks to a directory on local storage
 | `root_dir` | yes | — | Base directory; vLLM creates subdirectories beneath it (see [On-Disk Layout](#on-disk-layout)). |
 | `n_read_threads` | no | `16` | Read-priority I/O threads (load path). |
 | `n_write_threads` | no | `16` | Write-priority I/O threads (store path). |
+| `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `FS`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
 
 Each thread group prefers its own queue but pulls from the other when its primary queue is empty, so a write-heavy or read-heavy burst won't leave the off-priority queue waiting. Size the totals to your storage's effective concurrency.
 
@@ -118,6 +122,45 @@ To enable KV cache sharing between multiple vLLM instances using the same `root_
 ```bash
 PYTHONHASHSEED=0 vllm serve ...
 ```
+
+### Object Store (OBJ)
+
+The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object store through the NIXL OBJ backend.
+
+| Key | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `type` | yes | — | Must be `obj`. |
+| `store_config` | yes | — | Object store connection parameters (see below). |
+| `prefix` | no | `""` | Key prefix prepended to all object keys. |
+| `io_threads` | no | `4` | Number of NIXL OBJ backend I/O threads. |
+| `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `OBJ`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
+
+`store_config` fields:
+
+| Key | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `bucket` | yes | — | Bucket name. |
+| `endpoint_override` | yes | — | Object store endpoint host; the URL scheme is set separately via `scheme`. |
+| `scheme` | no | `http` | `http` or `https`. |
+| `access_key`, `secret_key`, `session_token` | no | `""` | Explicit credentials. When left empty, the NIXL OBJ plugin falls back to the AWS SDK default credential provider chain (IAM roles, environment variables, credential files), which enables workload-identity auth on Kubernetes. |
+| `region` | no | `""` | Bucket region, if the endpoint requires one. |
+| `ca_bundle` | no | `""` | CA bundle path for TLS verification. |
+
+Object keys follow the same run-configuration digest scheme as the filesystem tier (see [On-Disk Layout](#on-disk-layout)) and are stored under the optional `prefix`. The [Cross-Process Sharing](#cross-process-sharing) requirement (`PYTHONHASHSEED`) applies to shared buckets as well, so instances sharing a bucket produce identical keys for identical content. At startup the tier probes object store connectivity and fails fast with a configuration error if the bucket is unreachable.
+
+### P2P (Including P/D)
+
+The P2P tier (`type: "p2p"`) shares completed KV blocks between vLLM instances over RDMA via NIXL. Each instance binds a control socket on `host:port` and exchanges blocks directly with peers — no shared filesystem required.
+
+| Key | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `type` | yes | — | Must be `p2p`. |
+| `host` | no | `0.0.0.0` | Address the control socket binds to. |
+| `port` | no | `7777` | Port for the control socket. Must be reachable from peers. |
+| `backends` | no | `["UCX"]` | NIXL transport backends. See [NixlConnector Usage Guide](nixl_connector_usage.md#selecting-a-nixl-transport-backend-plugin) for available backends and selection guidance. |
+| `num_threads` | no | `4` | NIXL agent worker threads. Only used when `backends` is UCX-only; ignored when any non-UCX backend is requested. |
+
+The `backends` and `num_threads` options mirror the conditional logic used by [`NixlConnector`](nixl_connector_usage.md#selecting-a-nixl-transport-backend-plugin): when any non-UCX backend is configured, NIXL is initialised with `backends=...`; otherwise it falls back to a UCX-only agent with the configured `num_threads`. This lets the P2P tier use a different transport (e.g. `MOONCAKE`, `GDS_MT`, `LIBFABRIC`) than the main `NixlConnector` running in the same process.
 
 ## Tuning Tips
 

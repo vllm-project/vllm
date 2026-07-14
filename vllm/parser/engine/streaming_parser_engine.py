@@ -6,25 +6,84 @@ incremental lexing, and state-machine-driven semantic event emission."""
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.incremental_lexer import (
     CONTENT_TERMINAL,
     IncrementalLexer,
+    LexerShape,
     LexToken,
+    TerminalDef,
 )
 from vllm.parser.engine.parser_engine_config import (
-    STRUCTURAL_DROP_TOKENS,
     ParserEngineConfig,
     ParserState,
     Transition,
 )
 from vllm.parser.engine.token_id_scanner import (
+    DROP_TERMINAL,
     LexerInput,
     PreLexedTerminal,
     TextChunk,
     TokenIDScanner,
 )
+
+
+@dataclass(slots=True)
+class _DropInfo:
+    lexer_shape: LexerShape
+    extra_token_ids: dict[int, str]
+
+
+def _build_drop_info(
+    config: ParserEngineConfig,
+    tokenizer,
+) -> _DropInfo | None:
+    try:
+        special_tokens: list[str] = list(tokenizer.all_special_tokens)
+        special_ids: list[int] = list(tokenizer.all_special_ids)
+    except (AttributeError, NotImplementedError):
+        return None
+
+    if not special_tokens:
+        return None
+
+    configured_texts = (
+        set(config.token_id_terminals.values())
+        | set(config.terminals.values())
+        | config.preserve_tokens
+    )
+
+    extra_token_ids: dict[int, str] = {}
+    drop_texts: set[str] = set()
+    for text, tid in zip(special_tokens, special_ids):
+        if text not in configured_texts:
+            extra_token_ids[tid] = DROP_TERMINAL
+            drop_texts.add(text)
+
+    if not drop_texts:
+        return None
+
+    import regex as re
+
+    drop_terminal_defs = [
+        TerminalDef(
+            name=DROP_TERMINAL,
+            pattern=re.compile(re.escape(text)),
+            is_literal=True,
+            literal=text,
+        )
+        for text in drop_texts
+    ]
+
+    all_terminal_defs = list(config.terminal_defs) + drop_terminal_defs
+    lexer_shape = LexerShape(all_terminal_defs)
+
+    return _DropInfo(
+        lexer_shape=lexer_shape,
+        extra_token_ids=extra_token_ids,
+    )
 
 
 class StreamingParserEngine:
@@ -60,7 +119,6 @@ class StreamingParserEngine:
         self.config = config
 
         resolved_token_ids: dict[int, str] = {}
-        drop_token_ids: set[int] = set()
         if tokenizer is not None:
             if vocab is None:
                 vocab = tokenizer.get_vocab()
@@ -69,32 +127,29 @@ class StreamingParserEngine:
                     tid = vocab.get(token_text)
                     if tid is not None:
                         resolved_token_ids[tid] = terminal_name
-            all_drop = config.drop_tokens | STRUCTURAL_DROP_TOKENS
-            for token_text in all_drop:
-                tid = vocab.get(token_text)
-                if tid is not None:
-                    drop_token_ids.add(tid)
-            for attr in ("eos_token_id", "bos_token_id", "pad_token_id"):
-                tid = getattr(tokenizer, attr, None)
-                if tid is not None:
-                    drop_token_ids.add(tid)
+
+        drop_info: _DropInfo | None = None
+        if tokenizer is not None:
+            drop_info = _build_drop_info(config, tokenizer)
+
+        lexer_shape = config.lexer_shape
+        if drop_info is not None:
+            resolved_token_ids.update(drop_info.extra_token_ids)
+            lexer_shape = drop_info.lexer_shape
 
         self._resolved_token_ids = resolved_token_ids
-        self._drop_token_ids = drop_token_ids
+        self._has_drops = drop_info is not None
 
         self._scanner = TokenIDScanner(
             resolved_token_ids,
             tokenizer,
-            drop_token_ids,
         )
 
         self._token_id_terminal_names: frozenset[str] = frozenset(
             resolved_token_ids.values()
         )
 
-        self._lexer = IncrementalLexer(
-            config.lexer_shape, content_terminal=CONTENT_TERMINAL
-        )
+        self._lexer = IncrementalLexer(lexer_shape, content_terminal=CONTENT_TERMINAL)
 
         self._tool_terminals: frozenset[str] = frozenset(
             terminal
@@ -150,7 +205,7 @@ class StreamingParserEngine:
         ):
             has_special = False
             for tid in delta_token_ids:
-                if tid in self._resolved_token_ids or tid in self._drop_token_ids:
+                if tid in self._resolved_token_ids:
                     has_special = True
                     break
             if not has_special:
@@ -247,6 +302,15 @@ class StreamingParserEngine:
         transition = self.config.transitions.get(key)
 
         if transition is None:
+            if (
+                self._has_drops
+                and terminal == DROP_TERMINAL
+                # Preserve drop tokens when skip_tool_parsing is active so
+                # the reasoning pass doesn't silently remove tokens that a
+                # later tool-call pass might need to see.
+                and not self.skip_tool_parsing
+            ):
+                return []
             return self._emit_for_state(value)
 
         if self.skip_tool_parsing and terminal in self._tool_terminals:

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -11,19 +11,21 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     to_keys,
 )
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
-from vllm.distributed.kv_events import BlockRemoved, BlockStored
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    OffloadingConnectorStats,
+    _ConnectorMetricName,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
 )
-from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.kv_offload.base import (
-    OffloadingEvent,
+    LookupResult,
     OffloadingManager,
     OffloadPolicy,
     ReqContext,
@@ -32,6 +34,72 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.request import RequestStatus
+
+
+def _reduce_kv_connector_stats(runner):
+    reduced: dict[str, int | float] = {}
+    for payload in runner.kv_connector_stats:
+        stats = (
+            payload
+            if hasattr(payload, "reduce")
+            else OffloadingConnectorStats(data=payload)
+        )
+        for key, value in stats.reduce().items():
+            reduced[key] = reduced.get(key, 0) + value
+    return reduced
+
+
+def test_scheduler_reports_allocation_failure(request_runner):
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+    )
+    runner.new_request(token_ids=[0] * 4)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: None
+
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+
+    reduced = _reduce_kv_connector_stats(runner)
+    assert reduced[_ConnectorMetricName.ALLOCATION_FAILURE] == 1
+
+
+def test_scheduler_reports_lookup_sync_delay(request_runner):
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+    )
+    runner.new_request(token_ids=[1] * 4)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output([])
+    )
+
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+
+    reduced = _reduce_kv_connector_stats(runner)
+    assert reduced[f"{_ConnectorMetricName.LOOKUP_SYNC_DELAY}_count"] == 1
+    assert reduced[f"{_ConnectorMetricName.LOOKUP_SYNC_DELAY}_sum"] > 0
+
+
+def test_scheduler_reports_lookup_async_delay_on_resolve(request_runner):
+    """A deferred lookup reports its async delay once it resolves."""
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+    )
+    runner.manager.lookup.side_effect = [LookupResult.RETRY, LookupResult.MISS]
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output([])
+    )
+
+    runner.new_request(token_ids=[1] * 4)
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+
+    reduced = _reduce_kv_connector_stats(runner)
+    assert reduced[f"{_ConnectorMetricName.LOOKUP_ASYNC_DELAY}_count"] == 1
+    assert reduced[f"{_ConnectorMetricName.LOOKUP_ASYNC_DELAY}_sum"] > 0
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -145,31 +213,6 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
     runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_loaded=(3, 4, 5))
 
-    # test take_events
-    def to_hashes(int_hashes: list[int]) -> list[BlockHash]:
-        return [BlockHash(str(i).encode()) for i in int_hashes]
-
-    def take_events() -> Iterable[OffloadingEvent]:
-        yield OffloadingEvent(keys=to_keys([1, 2, 3]), medium="A", removed=False)
-        yield OffloadingEvent(keys=to_keys([4, 5, 6]), medium="B", removed=True)
-
-    runner.manager.take_events.side_effect = take_events
-    events = list(runner.scheduler_connector.take_events())
-    assert len(events) == 2
-    event = events[0]
-    assert isinstance(event, BlockStored)
-    assert event.block_hashes == to_hashes([1, 2, 3])
-    assert event.block_size == 0
-    assert event.medium == "A"
-    assert event.token_ids == []
-    assert event.parent_block_hash is None
-    assert event.lora_id is None
-    assert event.lora_name is None
-    event = events[1]
-    assert isinstance(event, BlockRemoved)
-    assert event.block_hashes == to_hashes([4, 5, 6])
-    assert event.medium == "B"
-
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_request_preemption(request_runner, async_scheduling: bool):
@@ -244,17 +287,14 @@ def test_request_preemption(request_runner, async_scheduling: bool):
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
-def test_no_offload_call_after_on_request_finished(
+def test_on_request_finished_is_not_deferred_until_store_completion(
     request_runner, async_scheduling: bool
 ):
-    """on_request_finished is not issued before a per-request offload
-    call.
+    """on_request_finished fires when no more stores will be submitted.
 
-    A request can finish while its GPU->primary store is still in flight; the
-    later worker completion then drives complete_store. The scheduler defers
-    on_request_finished until the request is finished AND has no in-flight
-    transfer jobs, so complete_store is observed BEFORE on_request_finished,
-    and it is called exactly once.
+    A request can finish while its GPU->primary store is still in flight. The
+    manager-level hook should not wait for that completion; complete_store may
+    still arrive afterward for already-submitted transfer jobs.
     """
     block_size = 4
     block_size_factor = 3
@@ -291,16 +331,24 @@ def test_no_offload_call_after_on_request_finished(
         complete_transfers=False,
     )
 
-    # Finish the request, completing its pending stores. on_request_finished is
-    # deferred until the stores drain, so it lands after the last complete_store.
-    # 4 offloaded blocks are stored (2 prompt + 2 decode) -> 4 * block_size_factor
-    # GPU blocks.
+    # Finish the request while its stores are still in flight. The hook should
+    # fire immediately even though no complete_store has arrived yet.
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
-        expected_stored=tuple(range(4 * block_size_factor)),
+        complete_transfers=False,
     )
 
     req_id = str(runner.req_id)
+
+    assert calls == [("on_request_finished", req_id)], calls
+
+    # Drain the stores afterward. The already-submitted complete_store calls
+    # are allowed to arrive after on_request_finished.
+    runner.run(
+        decoded_tokens=[],
+        complete_transfers=True,
+        expected_stored=tuple(range(4 * block_size_factor)),
+    )
 
     # on_request_finished is issued exactly once.
     assert calls.count(("on_request_finished", req_id)) == 1, calls
@@ -308,10 +356,9 @@ def test_no_offload_call_after_on_request_finished(
     finished_idx = calls.index(("on_request_finished", req_id))
     store_indices = [i for i, c in enumerate(calls) if c == ("complete_store", req_id)]
 
-    # All of the request's complete_store calls must precede its single
-    # on_request_finished.
+    # The request-level hook no longer waits for already-submitted transfers.
     assert store_indices, calls
-    assert max(store_indices) < finished_idx, calls
+    assert finished_idx < min(store_indices), calls
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -508,7 +555,7 @@ def test_two_groups_full_and_sliding_window(request_runner, async_scheduling: bo
 
     # full 3 blocks hit [0, 1, 2]
     runner.new_request(token_ids=[0] * (block_size * 3 + 1))
-    runner.manager.lookup.return_value = True
+    runner.manager.lookup.return_value = LookupResult.HIT
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
         # Group 0 (full attn): prefix lookup hits 3 → loads blocks 0,1,2
@@ -528,7 +575,7 @@ def test_two_groups_full_and_sliding_window(request_runner, async_scheduling: bo
     # 3 blocks are hit on GPU [0, 1, 2]
     # 1 block loaded [3,]
     runner.new_request(token_ids=[0] * (block_size * 4 + 1))
-    runner.manager.lookup.return_value = True
+    runner.manager.lookup.return_value = LookupResult.HIT
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
         # Group 0 (full attn): prefix lookup hits 3 → loads blocks 0,1,2
@@ -656,7 +703,7 @@ def test_two_groups_different_block_sizes(request_runner, async_scheduling: bool
     # 48 tokens (3 block) from the second group
     # Total 48 tokens can be loaded
     runner.new_request(token_ids=[0] * 48)
-    runner.manager.lookup.return_value = True
+    runner.manager.lookup.return_value = LookupResult.HIT
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output([])
     )
@@ -672,7 +719,7 @@ def test_two_groups_different_block_sizes(request_runner, async_scheduling: bool
     # extra tokens [0, 36] (blocks [4, 5, 6]) from the first group
     # extra tokens [0, 32] (block [3, 4]) from the second group
     runner.new_request(token_ids=[0] * (48 + 37))
-    runner.manager.lookup.return_value = True
+    runner.manager.lookup.return_value = LookupResult.HIT
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output([])
     )
@@ -689,12 +736,12 @@ def test_two_groups_different_block_sizes(request_runner, async_scheduling: bool
 
 
 def _make_scheduler_with_lookup(
-    lookup_results: dict[int, bool | None],
+    lookup_results: dict[int, LookupResult],
 ) -> OffloadingConnectorScheduler:
     """Create an OffloadingConnectorScheduler with a mocked manager.lookup."""
     manager = MagicMock(spec=OffloadingManager)
     manager.lookup.side_effect = lambda key, req_context: lookup_results.get(
-        int(get_offload_block_hash(key).decode()), False
+        int(get_offload_block_hash(key).decode()), LookupResult.MISS
     )
 
     scheduler = object.__new__(OffloadingConnectorScheduler)
@@ -707,7 +754,7 @@ _EMPTY_REQ_CTX = ReqContext(req_id="")
 
 class TestMaximalPrefixLookup:
     def test_all_hit(self):
-        sched = _make_scheduler_with_lookup({1: True, 2: True})
+        sched = _make_scheduler_with_lookup({1: LookupResult.HIT, 2: LookupResult.HIT})
         assert sched._maximal_prefix_lookup(to_keys([1, 2]), _EMPTY_REQ_CTX) == 2
 
     def test_all_miss(self):
@@ -715,32 +762,54 @@ class TestMaximalPrefixLookup:
         assert sched._maximal_prefix_lookup(to_keys([1, 2]), _EMPTY_REQ_CTX) == 0
 
     def test_partial_prefix(self):
-        sched = _make_scheduler_with_lookup({1: True, 2: True})
+        sched = _make_scheduler_with_lookup({1: LookupResult.HIT, 2: LookupResult.HIT})
         assert sched._maximal_prefix_lookup(to_keys([1, 2, 3]), _EMPTY_REQ_CTX) == 2
 
     def test_miss_then_hit(self):
-        sched = _make_scheduler_with_lookup({2: True})
+        sched = _make_scheduler_with_lookup({2: LookupResult.HIT})
         assert sched._maximal_prefix_lookup(to_keys([1, 2]), _EMPTY_REQ_CTX) == 0
 
     def test_single_hit(self):
-        sched = _make_scheduler_with_lookup({1: True})
+        sched = _make_scheduler_with_lookup({1: LookupResult.HIT})
         assert sched._maximal_prefix_lookup(to_keys([1]), _EMPTY_REQ_CTX) == 1
 
     def test_empty(self):
         sched = _make_scheduler_with_lookup({})
         assert sched._maximal_prefix_lookup([], _EMPTY_REQ_CTX) == 0
 
-    def test_none_defers(self):
-        sched = _make_scheduler_with_lookup({1: None, 2: True})
+    def test_retry_defers(self):
+        sched = _make_scheduler_with_lookup(
+            {1: LookupResult.RETRY, 2: LookupResult.HIT}
+        )
+        assert sched._maximal_prefix_lookup(to_keys([1, 2]), _EMPTY_REQ_CTX) is None
+        assert sched.manager.lookup.call_count == 2
+
+    def test_retry_after_hit_defers(self):
+        sched = _make_scheduler_with_lookup(
+            {1: LookupResult.HIT, 2: LookupResult.RETRY}
+        )
         assert sched._maximal_prefix_lookup(to_keys([1, 2]), _EMPTY_REQ_CTX) is None
 
-    def test_none_after_hit_defers(self):
-        sched = _make_scheduler_with_lookup({1: True, 2: None})
+    def test_hit_pending_defers(self):
+        sched = _make_scheduler_with_lookup(
+            {1: LookupResult.HIT_PENDING, 2: LookupResult.HIT}
+        )
         assert sched._maximal_prefix_lookup(to_keys([1, 2]), _EMPTY_REQ_CTX) is None
+        assert sched.manager.lookup.call_count == 2
 
-    def test_none_stops_at_miss(self):
-        """None is treated as hit for iteration, but miss stops the scan."""
-        sched = _make_scheduler_with_lookup({1: None, 2: False, 3: True})
+    def test_hit_pending_does_not_stop_scan(self):
+        """HIT_PENDING defers but does not break — scan continues until miss."""
+        sched = _make_scheduler_with_lookup(
+            {1: LookupResult.HIT_PENDING, 2: LookupResult.MISS, 3: LookupResult.HIT}
+        )
+        assert sched._maximal_prefix_lookup(to_keys([1, 2, 3]), _EMPTY_REQ_CTX) is None
+        assert sched.manager.lookup.call_count == 2
+
+    def test_retry_stops_at_miss(self):
+        """RETRY is treated as hit for iteration, but miss stops the scan."""
+        sched = _make_scheduler_with_lookup(
+            {1: LookupResult.RETRY, 2: LookupResult.MISS, 3: LookupResult.HIT}
+        )
         assert sched._maximal_prefix_lookup(to_keys([1, 2, 3]), _EMPTY_REQ_CTX) is None
         # lookup should have been called for blocks 1 and 2 (stops at miss)
         assert sched.manager.lookup.call_count == 2
@@ -748,7 +817,7 @@ class TestMaximalPrefixLookup:
 
 class TestSlidingWindowLookup:
     def test_all_hit_exact_window(self):
-        sched = _make_scheduler_with_lookup({1: True, 2: True})
+        sched = _make_scheduler_with_lookup({1: LookupResult.HIT, 2: LookupResult.HIT})
         assert sched._sliding_window_lookup(to_keys([1, 2]), 2, _EMPTY_REQ_CTX) == 2
 
     def test_all_miss(self):
@@ -756,25 +825,27 @@ class TestSlidingWindowLookup:
         assert sched._sliding_window_lookup(to_keys([1, 2, 3]), 1, _EMPTY_REQ_CTX) == 0
 
     def test_window_at_end(self):
-        sched = _make_scheduler_with_lookup({2: True, 3: True})
+        sched = _make_scheduler_with_lookup({2: LookupResult.HIT, 3: LookupResult.HIT})
         assert sched._sliding_window_lookup(to_keys([1, 2, 3]), 2, _EMPTY_REQ_CTX) == 3
 
     def test_window_in_middle(self):
-        sched = _make_scheduler_with_lookup({2: True, 3: True})
+        sched = _make_scheduler_with_lookup({2: LookupResult.HIT, 3: LookupResult.HIT})
         assert (
             sched._sliding_window_lookup(to_keys([1, 2, 3, 4]), 2, _EMPTY_REQ_CTX) == 3
         )
 
     def test_no_full_window_falls_back_to_prefix(self):
-        sched = _make_scheduler_with_lookup({1: True, 2: True})
+        sched = _make_scheduler_with_lookup({1: LookupResult.HIT, 2: LookupResult.HIT})
         assert sched._sliding_window_lookup(to_keys([1, 2, 3]), 3, _EMPTY_REQ_CTX) == 2
 
     def test_single_block_window(self):
-        sched = _make_scheduler_with_lookup({2: True, 3: True})
+        sched = _make_scheduler_with_lookup({2: LookupResult.HIT, 3: LookupResult.HIT})
         assert sched._sliding_window_lookup(to_keys([1, 2, 3]), 1, _EMPTY_REQ_CTX) == 3
 
     def test_gap_resets_consecutive(self):
-        sched = _make_scheduler_with_lookup({2: True, 3: True, 4: True})
+        sched = _make_scheduler_with_lookup(
+            {2: LookupResult.HIT, 3: LookupResult.HIT, 4: LookupResult.HIT}
+        )
         # [1, 2, 3, 0, 4] — gap at 0 resets, window of 2 found at [2,3]
         assert (
             sched._sliding_window_lookup(to_keys([1, 2, 3, 0, 4]), 2, _EMPTY_REQ_CTX)
@@ -782,7 +853,14 @@ class TestSlidingWindowLookup:
         )
 
     def test_window_prefers_rightmost(self):
-        sched = _make_scheduler_with_lookup({1: True, 2: True, 4: True, 5: True})
+        sched = _make_scheduler_with_lookup(
+            {
+                1: LookupResult.HIT,
+                2: LookupResult.HIT,
+                4: LookupResult.HIT,
+                5: LookupResult.HIT,
+            }
+        )
         # two valid windows: [1,2] at positions 0-1 and [4,5] at positions 3-4
         # scans right-to-left, finds [4,5] first
         assert (
@@ -791,7 +869,14 @@ class TestSlidingWindowLookup:
         )
 
     def test_prefix_fallback_with_gap(self):
-        sched = _make_scheduler_with_lookup({2: True, 3: True, 4: True, 5: True})
+        sched = _make_scheduler_with_lookup(
+            {
+                2: LookupResult.HIT,
+                3: LookupResult.HIT,
+                4: LookupResult.HIT,
+                5: LookupResult.HIT,
+            }
+        )
         # window of 4 not found contiguously (gap at 1)
         assert (
             sched._sliding_window_lookup(to_keys([2, 1, 3, 4, 5]), 4, _EMPTY_REQ_CTX)
@@ -802,18 +887,45 @@ class TestSlidingWindowLookup:
         sched = _make_scheduler_with_lookup({})
         assert sched._sliding_window_lookup([], 1, _EMPTY_REQ_CTX) == 0
 
-    def test_none_defers(self):
-        sched = _make_scheduler_with_lookup({1: True, 2: None})
+    def test_retry_defers(self):
+        sched = _make_scheduler_with_lookup(
+            {1: LookupResult.HIT, 2: LookupResult.RETRY}
+        )
         assert sched._sliding_window_lookup(to_keys([1, 2]), 2, _EMPTY_REQ_CTX) is None
 
-    def test_none_with_full_window_still_defers(self):
-        """Even if a real window is found after a None, result is deferred."""
-        # Scan right-to-left: 4(True), 3(None) resets, 2(True), 1(True) = window
-        # but block 3 was None so defer_lookup is set
-        sched = _make_scheduler_with_lookup({1: True, 2: True, 3: None, 4: True})
+    def test_retry_with_full_window_still_defers(self):
+        """Even if a real window is found after a RETRY, result is deferred."""
+        # Scan right-to-left: 4(HIT), 3(RETRY) resets, 2(HIT), 1(HIT) = window
+        # but block 3 was RETRY so defer_lookup is set
+        sched = _make_scheduler_with_lookup(
+            {
+                1: LookupResult.HIT,
+                2: LookupResult.HIT,
+                3: LookupResult.RETRY,
+                4: LookupResult.HIT,
+            }
+        )
         assert (
             sched._sliding_window_lookup(to_keys([1, 2, 3, 4]), 2, _EMPTY_REQ_CTX)
             is None
+        )
+
+    def test_hit_pending_counts_as_hit(self):
+        """HIT_PENDING counts toward the consecutive-hit streak."""
+        sched = _make_scheduler_with_lookup(
+            {1: LookupResult.HIT, 2: LookupResult.HIT_PENDING}
+        )
+        # window=2: both count as hits, but defer_lookup is set
+        assert sched._sliding_window_lookup(to_keys([1, 2]), 2, _EMPTY_REQ_CTX) is None
+
+    def test_hit_pending_does_not_break_streak(self):
+        """HIT_PENDING in the middle of a window doesn't reset the streak."""
+        sched = _make_scheduler_with_lookup(
+            {1: LookupResult.HIT, 2: LookupResult.HIT_PENDING, 3: LookupResult.HIT}
+        )
+        # window=3: right-to-left finds 3(HIT),2(HIT_PENDING),1(HIT) = 3 consecutive
+        assert (
+            sched._sliding_window_lookup(to_keys([1, 2, 3]), 3, _EMPTY_REQ_CTX) is None
         )
 
 
@@ -1260,11 +1372,8 @@ def test_reset_cache(request_runner, async_scheduling: bool):
 def test_reset_cache_finalizes_finished_request_with_pending_store(
     request_runner, async_scheduling: bool
 ):
-    """reset_cache must finalize a finished request whose in-flight stores it
-    discards: call on_request_finished and drop its _req_status entry.
-
-    Otherwise the deferred hook (which waits for the now-discarded jobs to
-    complete) never fires and the entry leaks.
+    """reset_cache drops a finished request whose in-flight stores it discards
+    without calling on_request_finished twice.
     """
     block_size = 4
     block_size_factor = 3
@@ -1278,11 +1387,11 @@ def test_reset_cache_finalizes_finished_request_with_pending_store(
     )
 
     finalized: list[str] = []
-    runner.manager.on_request_finished.side_effect = (
-        lambda req_context: finalized.append(req_context.req_id)
+    runner.manager.on_request_finished.side_effect = lambda req_context: (
+        finalized.append(req_context.req_id)
     )
-    runner.manager.prepare_store.side_effect = (
-        lambda keys, req_context: generate_store_output(keys)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
     )
 
     # Decode a couple of blocks and keep every transfer in flight, so the
@@ -1301,17 +1410,112 @@ def test_reset_cache_finalizes_finished_request_with_pending_store(
     assert any(job.is_store for job in cs._jobs.values())
 
     # Finish the request while its store is still in flight. request_finished
-    # takes the defer branch (pending jobs), so on_request_finished is NOT
-    # called yet and the entry stays tracked.
+    # fires the hook eagerly, but the entry stays tracked so later completions
+    # can still call complete_store().
     req_status.req.status = RequestStatus.FINISHED_STOPPED
     cs.request_finished(req_status.req)
-    assert finalized == []
+    assert finalized == [req_id]
     assert req_id in cs._req_status
 
-    # reset_cache discards the in-flight store; it must finalize the request.
+    # reset_cache discards the in-flight store and drops the state without a
+    # duplicate on_request_finished call.
     cs.reset_cache()
     assert finalized == [req_id]
     assert req_id not in cs._req_status
+
+
+def test_pending_transfer_defers_prefix_lookup():
+    """A request with an in-flight store must not issue a load on re-admission.
+
+    With async scheduling, a preempted request's store can be flushed by the
+    worker before the scheduler consumes its completion. If the request is
+    re-admitted in that window, the connector should defer it instead of
+    looking up offloaded blocks and later asserting when a load is queued while
+    the store job is still tracked.
+    """
+    scheduler = object.__new__(OffloadingConnectorScheduler)
+    scheduler.manager = MagicMock(spec=OffloadingManager)
+
+    request = SimpleNamespace(request_id="req-0")
+    group_state = SimpleNamespace(block_ids=[1, 2, 3])
+    req_status = SimpleNamespace(
+        group_states=[group_state],
+        transfer_jobs={123},
+    )
+    scheduler._req_status = {request.request_id: req_status}
+
+    matched_tokens, is_async = scheduler.get_num_new_matched_tokens(
+        request,
+        num_computed_tokens=0,
+    )
+
+    assert matched_tokens is None
+    assert is_async is False
+    assert group_state.block_ids == []
+    scheduler.manager.lookup.assert_not_called()
+
+
+def test_async_preempt_readmit_before_transfer_output_is_deferred(request_runner):
+    """A preempted request can be scheduled again before flush output is read.
+
+    EngineCore.step_with_batch_queue() may schedule a new batch while a prior
+    preemption batch is still queued. The store completion from jobs_to_flush is
+    only cleared when that queued output reaches update_from_output(), so the
+    re-admission path must defer while the scheduler still tracks the store.
+    """
+    block_size = 4
+    block_size_factor = 3
+    offloaded_block_size = block_size * block_size_factor
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=True,
+        block_size_factor=block_size_factor,
+    )
+    free_block_queue = runner.scheduler.kv_cache_manager.block_pool.free_block_queue
+    num_free_blocks_empty = free_block_queue.num_free_blocks
+
+    req_id = "0"
+    runner.new_request(token_ids=[0] * offloaded_block_size * 2)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    runner.run(decoded_tokens=[0], complete_transfers=False)
+    runner.run(
+        decoded_tokens=[0] * (2 * offloaded_block_size - block_size),
+        complete_transfers=False,
+    )
+
+    req_status = runner.connector_scheduler._req_status[req_id]
+    pending_store_jobs = set(req_status.transfer_jobs)
+    assert pending_store_jobs
+    assert all(
+        runner.connector_scheduler._jobs[jid].is_store for jid in pending_store_jobs
+    )
+
+    free_block_queue.num_free_blocks = 0
+    preempt_output = runner.scheduler.schedule()
+    assert preempt_output.preempted_req_ids == {req_id}
+    assert preempt_output.kv_connector_metadata is not None
+    assert pending_store_jobs <= preempt_output.kv_connector_metadata.jobs_to_flush
+    assert req_status.transfer_jobs == pending_store_jobs
+
+    # Simulate the async batch-queue window: schedule again before the
+    # preemption batch's ModelRunnerOutput is consumed by update_from_output().
+    free_block_queue.num_free_blocks = num_free_blocks_empty
+    assert runner.scheduler.reset_prefix_cache()
+    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: len(
+        key
+    )
+
+    readmit_output = runner.scheduler.schedule()
+
+    assert readmit_output.num_scheduled_tokens == {}
+    assert readmit_output.kv_connector_metadata is not None
+    assert readmit_output.kv_connector_metadata.load_jobs == {}
+    assert req_status.transfer_jobs == pending_store_jobs
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -1417,7 +1621,7 @@ def test_swa_alignment_skip(request_runner, async_scheduling: bool):
     # Verify that loads still work correctly for the stored SWA blocks.
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * num_tokens + [1])
-    runner.manager.lookup.return_value = True
+    runner.manager.lookup.return_value = LookupResult.HIT
     runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 2
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
@@ -1633,7 +1837,9 @@ class TestEagle:
             kv_cache_groups=groups,
         )
         runner.manager.lookup.side_effect = lambda key, req_context: (
-            int(get_offload_block_hash(key).decode()) in {1, 2, 3}
+            LookupResult.HIT
+            if int(get_offload_block_hash(key).decode()) in {1, 2, 3}
+            else LookupResult.MISS
         )
         sched = runner.connector_scheduler
         req_status = self._make_req_status(
@@ -1664,7 +1870,9 @@ class TestEagle:
             kv_cache_groups=groups,
         )
         runner.manager.lookup.side_effect = lambda key, req_context: (
-            int(get_offload_block_hash(key).decode()) in {1}
+            LookupResult.HIT
+            if int(get_offload_block_hash(key).decode()) in {1}
+            else LookupResult.MISS
         )
         sched = runner.connector_scheduler
         req_status = self._make_req_status(
@@ -1694,7 +1902,7 @@ class TestEagle:
             async_scheduling=False,
             kv_cache_groups=groups,
         )
-        runner.manager.lookup.return_value = False
+        runner.manager.lookup.return_value = LookupResult.MISS
         sched = runner.connector_scheduler
         req_status = self._make_req_status(
             sched, num_tokens=8, offload_keys_per_group=[[1, 2]]
@@ -1735,7 +1943,9 @@ class TestEagle:
             kv_cache_groups=groups,
         )
         runner.manager.lookup.side_effect = lambda key, req_context: (
-            int(get_offload_block_hash(key).decode()) in {1, 2, 3, 4}
+            LookupResult.HIT
+            if int(get_offload_block_hash(key).decode()) in {1, 2, 3, 4}
+            else LookupResult.MISS
         )
         sched = runner.connector_scheduler
 
@@ -1790,7 +2000,9 @@ class TestEagle:
             kv_cache_groups=groups,
         )
         runner.manager.lookup.side_effect = lambda key, req_context: (
-            int(get_offload_block_hash(key).decode()) in {1, 2}
+            LookupResult.HIT
+            if int(get_offload_block_hash(key).decode()) in {1, 2}
+            else LookupResult.MISS
         )
         sched = runner.connector_scheduler
         req_status = self._make_req_status(
@@ -1823,7 +2035,9 @@ class TestEagle:
             kv_cache_groups=groups,
         )
         runner.manager.lookup.side_effect = lambda key, req_context: (
-            int(get_offload_block_hash(key).decode()) in {1, 2, 3}
+            LookupResult.HIT
+            if int(get_offload_block_hash(key).decode()) in {1, 2, 3}
+            else LookupResult.MISS
         )
         sched = runner.connector_scheduler
         # num_tokens=13 → max_hit=13-1=12, query_max=min(12+4,12)=12
@@ -1872,7 +2086,9 @@ class TestEagle:
             kv_cache_groups=groups,
         )
         runner.manager.lookup.side_effect = lambda key, req_context: (
-            int(get_offload_block_hash(key).decode()) in {1, 2, 3}
+            LookupResult.HIT
+            if int(get_offload_block_hash(key).decode()) in {1, 2, 3}
+            else LookupResult.MISS
         )
         sched = runner.connector_scheduler
         req_status = self._make_req_status(
@@ -1927,7 +2143,9 @@ class TestEagle:
         # Group 0 keys [10,11,12]: only 10 hits.
         # Group 1 keys [1,2,3]: all hit.
         runner.manager.lookup.side_effect = lambda key, req_context: (
-            int(get_offload_block_hash(key).decode()) in {10, 1, 2, 3}
+            LookupResult.HIT
+            if int(get_offload_block_hash(key).decode()) in {10, 1, 2, 3}
+            else LookupResult.MISS
         )
         sched = runner.connector_scheduler
         req_status = self._make_req_status(
@@ -1978,7 +2196,9 @@ class TestEagle:
             kv_cache_groups=groups,
         )
         runner.manager.lookup.side_effect = lambda key, req_context: (
-            int(get_offload_block_hash(key).decode()) in {1, 2, 3}
+            LookupResult.HIT
+            if int(get_offload_block_hash(key).decode()) in {1, 2, 3}
+            else LookupResult.MISS
         )
         sched = runner.connector_scheduler
         req_status = self._make_req_status(
@@ -1996,15 +2216,17 @@ class TestEagle:
     # -------------------------------------------------------------------
 
     @pytest.mark.parametrize("async_scheduling", [True, False])
-    def test_full_attn_store_excludes_trailing_block(
+    def test_full_attn_store_excludes_trailing_decode_block(
         self, request_runner, async_scheduling: bool
     ):
-        """Eagle full-attention group stores all blocks except the trailing
-        one.
+        """Eagle full-attention group excludes the trailing block only while
+        decoding.
 
         Setup: 2 groups — group 0 is normal full-attention, group 1 is
-        eagle full-attention. With a 3-block prompt, group 1 should store
-        only blocks 0 and 1, skipping block 2 (the volatile tail).
+        eagle full-attention. With a 3-block prompt, group 1 stores all 3
+        prompt blocks at the end of prefill (the trailing prompt block is
+        stable), but skips block 3 once it fills with decoded tokens (its
+        draft-layer KV is volatile until the next block starts).
         """
         block_size = 4
         block_size_factor = 1
@@ -2050,23 +2272,27 @@ class TestEagle:
         runner.manager.prepare_store.side_effect = lambda keys, req_context: (
             generate_store_output(keys)
         )
+        # 4 decoded tokens fill block 3 entirely with decode tokens (one
+        # extra token so the block is stored under async scheduling too).
         runner.run(
-            decoded_tokens=[EOS_TOKEN_ID],
+            decoded_tokens=[1, 1, 1, 1, 1, EOS_TOKEN_ID],
             expected_stored=(
                 (0, 0),
                 (0, 1),
                 (0, 2),
+                (0, 3),
                 (1, 0),
                 (1, 1),
+                (1, 2),
             ),
         )
 
     @pytest.mark.parametrize("async_scheduling", [True, False])
-    def test_sw_store_excludes_trailing_block(
+    def test_sw_store_excludes_trailing_decode_block(
         self, request_runner, async_scheduling: bool
     ):
-        """Eagle sliding-window group stores all blocks except the trailing
-        one."""
+        """Eagle sliding-window group stores all prompt blocks but excludes
+        the trailing block while decoding."""
         block_size = 4
         sliding_window = 8
         num_gpu_blocks = 100
@@ -2101,15 +2327,18 @@ class TestEagle:
         runner.manager.prepare_store.side_effect = lambda keys, req_context: (
             generate_store_output(keys)
         )
+        # 4 decoded tokens fill block 3 entirely with decode tokens.
         runner.run(
-            decoded_tokens=[EOS_TOKEN_ID],
-            expected_stored=((0, 0), (0, 1)),
+            decoded_tokens=[1, 1, 1, 1, EOS_TOKEN_ID],
+            expected_stored=((0, 0), (0, 1), (0, 2)),
         )
 
     @pytest.mark.parametrize("async_scheduling", [True, False])
-    def test_single_block_nothing_stored(self, request_runner, async_scheduling: bool):
-        """An eagle group with only one block stores nothing: that block is
-        the tail."""
+    def test_single_block_stored_at_end_of_prefill(
+        self, request_runner, async_scheduling: bool
+    ):
+        """An eagle group with a single-block prompt stores it at the end of
+        prefill: prompt blocks are stable, so no tail is held back."""
         block_size = 4
         block_size_factor = 1
         offloaded_block_size = block_size * block_size_factor
@@ -2140,17 +2369,80 @@ class TestEagle:
         runner.manager.prepare_store.side_effect = lambda keys, req_context: (
             generate_store_output(keys)
         )
-        runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=())
-        runner.manager.prepare_store.assert_not_called()
+        runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=((0, 0),))
+
+    @pytest.mark.parametrize("async_scheduling", [True, False])
+    def test_multichunk_store_no_interior_holes(
+        self, request_runner, async_scheduling: bool
+    ):
+        """Eagle store must not drop interior blocks across prefill chunks.
+
+        Regression: the trailing-block exclusion (num_blocks - 1) was applied
+        when collecting keys, but next_stored_block_idx advanced by the
+        non-decremented count, so the trailing block of every chunked-prefill
+        chunk was skipped and never re-considered. With the harness chunk budget
+        (1000 tokens) and block_size 4, a prompt longer than one chunk lost the
+        block at the chunk boundary, leaving a permanent gap that caps prefix
+        reuse at the first hole. Only the trailing decode block may be held
+        back; all other blocks must be stored exactly once (no duplicates from
+        next_stored_block_idx regressing at the prefill->decode transition).
+        """
+        block_size = 4
+        block_size_factor = 1
+        offloaded_block_size = block_size * block_size_factor
+        num_gpu_blocks = 1000
+
+        kv_cache_groups = [
+            KVCacheGroupSpec(
+                ["layer0"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=True,
+            ),
+        ]
+        runner = request_runner(
+            block_size=block_size,
+            num_gpu_blocks=num_gpu_blocks,
+            async_scheduling=async_scheduling,
+            kv_cache_groups=kv_cache_groups,
+            block_size_factor=block_size_factor,
+        )
+        assert runner.connector_scheduler.config.kv_group_configs[0].is_eagle_group
+
+        # Prompt spans more than one prefill chunk (chunk budget 1000 tokens).
+        num_blocks = 256
+        runner.new_request(token_ids=[0] * offloaded_block_size * num_blocks)
+        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+            generate_store_output(keys)
+        )
+        # Decode a few non-EOS tokens so prefill completes across both chunks
+        # before the request finishes.
+        runner._run([1, 1, 1, 1, EOS_TOKEN_ID], complete_transfers=True)
+
+        offsets = sorted(
+            b.request_block_offset
+            for t in runner.completed_stores
+            for b in t.gpu_blocks
+        )
+        # The stored blocks must be contiguous from 0: no interior block is
+        # dropped at a chunk boundary. (The bug left a gap at offloaded block
+        # 249, the tail of the first 1000-token chunk.)
+        assert offsets == list(range(len(offsets))), (
+            f"interior hole in stored blocks: {offsets}"
+        )
 
     @pytest.mark.parametrize("async_scheduling", [True, False])
     def test_full_attn_store_then_load(self, request_runner, async_scheduling: bool):
         """Eagle group constrains load: convergence tightens both groups.
 
-        Store 3 offloaded blocks per group (eagle group skips tail → stores
-        2). Then a new request loads from CPU. The eagle group's post-pop hit
-        (2) does not tighten below group 0's hit (3), so both groups load
-        normally.
+        Store 3 offloaded blocks per group (all prompt blocks, so the eagle
+        group stores all 3 as well). Then a new request loads from CPU. The
+        eagle group pops its trailing hit block on load, tightening the hit
+        to 2 blocks for both groups.
         """
         block_size = 4
         block_size_factor = 1
@@ -2199,13 +2491,14 @@ class TestEagle:
                 (0, 2),
                 (1, 0),
                 (1, 1),
+                (1, 2),
             ),
         )
 
         runner.scheduler.reset_prefix_cache()
 
         runner.new_request(token_ids=[0] * offloaded_block_size * 3 + [1])
-        runner.manager.lookup.return_value = True
+        runner.manager.lookup.return_value = LookupResult.HIT
         runner.manager.prepare_store.side_effect = lambda keys, req_context: (
             generate_store_output([])
         )

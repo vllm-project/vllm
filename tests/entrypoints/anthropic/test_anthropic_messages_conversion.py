@@ -8,6 +8,8 @@ AnthropicServingMessages._convert_anthropic_to_openai_request().
 Also covers extended-thinking edge cases such as ``redacted_thinking``
 blocks echoed back by Anthropic clients, and streaming conversion in
 ``message_stream_converter``.
+
+Also covers cache usage computation in ``_build_anthropic_usage``.
 """
 
 import json
@@ -18,15 +20,23 @@ import pytest
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicMessagesRequest,
 )
-from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
+from vllm.entrypoints.anthropic.serving import (
+    AnthropicServingMessages,
+    _build_anthropic_usage,
+    _get_cached_tokens,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionResponse,
+    ChatCompletionResponseChoice,
     ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse,
+    ChatMessage,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
+    PromptTokenUsageInfo,
     UsageInfo,
 )
 
@@ -653,6 +663,108 @@ class TestThinkingBlockConversion:
         assert asst.get("content") == "Hi!"
 
 
+# ======================================================================
+# Cache usage computation
+# ======================================================================
+
+
+class TestGetCachedTokens:
+    """Tests for _get_cached_tokens helper."""
+
+    def test_none_usage(self):
+        assert _get_cached_tokens(None) is None
+
+    def test_no_prompt_tokens_details(self):
+        usage = UsageInfo(prompt_tokens=100, completion_tokens=10)
+        assert _get_cached_tokens(usage) is None
+
+    def test_cached_tokens_present(self):
+        usage = UsageInfo(
+            prompt_tokens=100,
+            completion_tokens=10,
+            prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=80),
+        )
+        assert _get_cached_tokens(usage) == 80
+
+    def test_cached_tokens_zero(self):
+        """Zero cached tokens should return 0, not None."""
+        usage = UsageInfo(
+            prompt_tokens=100,
+            completion_tokens=10,
+            prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=0),
+        )
+        assert _get_cached_tokens(usage) == 0
+
+    def test_cached_tokens_none_in_details(self):
+        usage = UsageInfo(
+            prompt_tokens=100,
+            completion_tokens=10,
+            prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=None),
+        )
+        assert _get_cached_tokens(usage) is None
+
+
+class TestBuildAnthropicUsage:
+    """Tests for _build_anthropic_usage helper.
+
+    Anthropic defines: total_input = input_tokens + cache_read + cache_creation
+    vLLM's prompt_tokens is the total.
+    """
+
+    def test_no_cache_info(self):
+        """When cache info is unavailable, return raw prompt_tokens."""
+        result = _build_anthropic_usage(100, 10, None)
+        assert result.input_tokens == 100
+        assert result.output_tokens == 10
+        assert result.cache_read_input_tokens is None
+        assert result.cache_creation_input_tokens is None
+
+    def test_cache_hit(self):
+        """When cache is hit, input_tokens excludes cached tokens."""
+        usage = UsageInfo(
+            prompt_tokens=100,
+            completion_tokens=10,
+            prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=80),
+        )
+        result = _build_anthropic_usage(100, 10, usage)
+        assert result.input_tokens == 20  # 100 - 80
+        assert result.output_tokens == 10
+        assert result.cache_read_input_tokens == 80
+        assert result.cache_creation_input_tokens == 0
+
+    def test_zero_cached_tokens(self):
+        """Zero cached tokens should still set cache_creation to 0."""
+        usage = UsageInfo(
+            prompt_tokens=100,
+            completion_tokens=10,
+            prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=0),
+        )
+        result = _build_anthropic_usage(100, 10, usage)
+        assert result.input_tokens == 100  # 100 - 0
+        assert result.cache_read_input_tokens == 0
+        assert result.cache_creation_input_tokens == 0
+
+    def test_all_tokens_cached(self):
+        """When all tokens are cached, input_tokens should be 0."""
+        usage = UsageInfo(
+            prompt_tokens=100,
+            completion_tokens=10,
+            prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=100),
+        )
+        result = _build_anthropic_usage(100, 10, usage)
+        assert result.input_tokens == 0
+        assert result.cache_read_input_tokens == 100
+        assert result.cache_creation_input_tokens == 0
+
+    def test_no_prompt_tokens_details(self):
+        """UsageInfo without prompt_tokens_details returns no cache info."""
+        usage = UsageInfo(prompt_tokens=100, completion_tokens=10)
+        result = _build_anthropic_usage(100, 10, usage)
+        assert result.input_tokens == 100
+        assert result.cache_read_input_tokens is None
+        assert result.cache_creation_input_tokens is None
+
+
 class TestInlineSystemMessageInMessagesArray:
     """Verify that ``role: system`` messages embedded inside the ``messages``
     array are preserved in their original position.
@@ -1098,6 +1210,135 @@ class TestMessageStartIncludesTypeAndRole:
         assert message["role"] == "assistant"
 
 
+class TestStreamingCacheUsageSemantics:
+    """Locks in the documented streaming behavior of cache usage fields.
+
+    vLLM's OpenAI chat completion streaming only attaches
+    ``prompt_tokens_details`` to the terminal usage chunk. The Anthropic layer
+    mirrors that contract: cache fields are omitted on ``message_start`` (key
+    absence signals "unknown") and populated on ``message_delta`` (the final
+    cumulative count). This is intentionally consistent with vLLM's OpenAI
+    behavior, even though Anthropic's upstream API populates cache fields on
+    ``message_start``; closing that gap requires plumbing cache info into the
+    first chunk at the OpenAI layer, which is out of scope here.
+    """
+
+    @pytest.mark.asyncio
+    async def test_streaming_cache_fields_absent_then_populated(self):
+        """First chunk lacks prompt_tokens_details (vLLM contract);
+        message_start omits cache fields. The final chunk carries
+        prompt_tokens_details, so message_delta carries resolved values."""
+
+        async def sse_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(role="assistant", content="hi"),
+                usage=UsageInfo(prompt_tokens=100, total_tokens=100),
+            )
+            yield _make_stream_chunk(finish_reason="stop")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(
+                    prompt_tokens=100,
+                    completion_tokens=5,
+                    total_tokens=105,
+                    prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=80),
+                ),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+        events = _parse_sse_events(output)
+
+        # message_start: cache fields unknown → omitted from JSON entirely.
+        start_usage = events[0][1]["message"]["usage"]
+        assert events[0][0] == "message_start"
+        assert start_usage["input_tokens"] == 100
+        assert "cache_read_input_tokens" not in start_usage
+        assert "cache_creation_input_tokens" not in start_usage
+
+        # message_delta: authoritative usage with cache fields populated.
+        delta_usage = next(
+            data["usage"] for ev, data in events if ev == "message_delta"
+        )
+        assert delta_usage["input_tokens"] == 20  # 100 - 80
+        assert delta_usage["cache_read_input_tokens"] == 80
+        assert delta_usage["cache_creation_input_tokens"] == 0
+
+    @pytest.mark.asyncio
+    async def test_streaming_no_cache_hit(self):
+        """When the final chunk reports cached_tokens=0, message_delta carries
+        cache fields = 0 (cache miss); message_start still omits them."""
+
+        async def sse_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(role="assistant"),
+                usage=UsageInfo(prompt_tokens=50, total_tokens=50),
+            )
+            yield _make_stream_chunk(finish_reason="stop")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(
+                    prompt_tokens=50,
+                    completion_tokens=5,
+                    total_tokens=55,
+                    prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=0),
+                ),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+        events = _parse_sse_events(output)
+
+        start_usage = events[0][1]["message"]["usage"]
+        delta_usage = next(
+            data["usage"] for ev, data in events if ev == "message_delta"
+        )
+        assert start_usage["input_tokens"] == 50
+        assert "cache_read_input_tokens" not in start_usage
+        assert "cache_creation_input_tokens" not in start_usage
+        assert delta_usage["input_tokens"] == 50  # 50 - 0
+        assert delta_usage["cache_read_input_tokens"] == 0
+        assert delta_usage["cache_creation_input_tokens"] == 0
+
+    @pytest.mark.asyncio
+    async def test_streaming_no_prompt_tokens_details_at_all(self):
+        """If --enable-prompt-tokens-details is off, no chunk carries cache
+        info; both message_start and message_delta omit cache fields."""
+
+        async def sse_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(role="assistant"),
+                usage=UsageInfo(prompt_tokens=30, total_tokens=30),
+            )
+            yield _make_stream_chunk(finish_reason="stop")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(prompt_tokens=30, completion_tokens=2, total_tokens=32),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+        events = _parse_sse_events(output)
+
+        start_usage = events[0][1]["message"]["usage"]
+        delta_usage = next(
+            data["usage"] for ev, data in events if ev == "message_delta"
+        )
+        assert "cache_read_input_tokens" not in start_usage
+        assert "cache_creation_input_tokens" not in start_usage
+        assert "cache_read_input_tokens" not in delta_usage
+        assert "cache_creation_input_tokens" not in delta_usage
+
+
 # ======================================================================
 # Auto-detection of system-first template requirement
 # ======================================================================
@@ -1143,3 +1384,39 @@ class TestDetectMergeInlineSystem:
     def test_no_template_defaults_merge(self):
         """No chat_template → conservative default: merge."""
         assert AnthropicServingMessages._detect_merge_inline_system(None) is True
+
+
+# ======================================================================
+# Full (non-streaming) response conversion: messages_full_converter
+# ======================================================================
+
+
+def _make_full_converter():
+    obj = MagicMock(spec=AnthropicServingMessages)
+    obj.messages_full_converter = (
+        AnthropicServingMessages.messages_full_converter.__get__(obj)
+    )
+    return obj
+
+
+class TestMessagesFullConverter:
+    def test_empty_completion_emits_one_text_block(self):
+        """An empty completion still yields exactly one (empty) text block."""
+        generator = ChatCompletionResponse(
+            id="chatcmpl-empty",
+            model="test-model",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content=None),
+                    finish_reason="stop",
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=10, completion_tokens=0, total_tokens=10),
+        )
+
+        result = _make_full_converter().messages_full_converter(generator)
+
+        assert len(result.content) == 1
+        assert result.content[0].type == "text"
+        assert result.content[0].text == ""
