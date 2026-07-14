@@ -97,8 +97,11 @@ class INCWna16Scheme(INCScheme):
         layer_config: "INCLayerConfig",
     ):
         del config, prefix
-        # XPU and CPU do not support MoE quantization yet
-        if current_platform.is_xpu() or current_platform.is_cpu():
+        # CPU does not support quantized MoE yet; fall back to dequantized bf16.
+        # XPU is supported via the WNA16 oracle backend (routes through
+        # _resolve_gptq_moe -> MoeWNA16Method -> XPUExpertsWNA16), so it must
+        # NOT take this dequant fallback, which OOMs materializing bf16 experts.
+        if current_platform.is_cpu():
             from vllm.model_executor.layers.fused_moe import (
                 UnquantizedFusedMoEMethod,
             )
@@ -128,7 +131,12 @@ def _resolve_gptq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
         (4, True): scalar_types.uint4b8,
         (8, True): scalar_types.uint8b128,
     }
-    use_marlin = (layer_config.bits, layer_config.sym) in gptq_type_map
+    # Marlin is a CUDA-only path; XPU uses the WNA16 oracle backend instead
+    # (check_moe_marlin_supports_layer is platform-agnostic, so gate it here).
+    use_marlin = (
+        layer_config.bits,
+        layer_config.sym,
+    ) in gptq_type_map and not current_platform.is_xpu()
     if use_marlin:
         use_marlin = check_marlin_supported(
             gptq_type_map[(layer_config.bits, layer_config.sym)],
