@@ -55,6 +55,26 @@ def _convert_tokens_to_string_with_added_encoders(
 # tokenizers (bigger = more conservative).
 INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET = 5
 
+# SentencePiece and byte-level BPE use these characters in raw vocab pieces
+# to represent a leading space. SentencePiece's decode() strips the first
+# one (the add_dummy_prefix inverse), which makes "▁true" and "true" both
+# decode to "true" — colliding as dict keys in the Legacy Completions API.
+_LEADING_SPACE_MARKERS = frozenset(("▁", "Ġ"))
+
+
+def _restore_leading_spaces(raw_token: str, token_str: str) -> str:
+    """Restore leading spaces that decode() stripped from a raw vocab piece."""
+    num_markers = 0
+    for ch in raw_token:
+        if ch not in _LEADING_SPACE_MARKERS:
+            break
+        num_markers += 1
+    if num_markers == 0:
+        return token_str
+    existing = len(token_str) - len(token_str.lstrip(" "))
+    missing = num_markers - existing
+    return " " * missing + token_str if missing > 0 else token_str
+
 
 def convert_prompt_ids_to_tokens(
     tokenizer: TokenizerLike,
@@ -86,6 +106,10 @@ def convert_ids_list_to_tokens(
 ) -> list[str]:
     """Detokenize the input ids individually.
 
+    Uses decode() for human-readable output, then checks the raw vocab
+    piece via convert_ids_to_tokens() to restore any leading spaces that
+    decode() stripped (SentencePiece add_dummy_prefix inverse).
+
     Args:
       tokenizer: tokenizer used by model under test
       token_ids: convert these tokens (Python list form)
@@ -94,14 +118,13 @@ def convert_ids_list_to_tokens(
       Python list of token string representations
 
     """
-    token_str_lst = []
-    for token_id in token_ids:
-        # use default skip_special_tokens.
-        token_str = tokenizer.decode([token_id])
-        if token_str is None:
-            token_str = ""
-        token_str_lst.append(token_str)
-    return token_str_lst
+    if not token_ids:
+        return []
+    raw_tokens = tokenizer.convert_ids_to_tokens(token_ids)
+    return [
+        _restore_leading_spaces(raw, tokenizer.decode([tid]) or "")
+        for tid, raw in zip(token_ids, raw_tokens)
+    ]
 
 
 # Based on
