@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
-use hf_hub::api::tokio::ApiBuilder;
+use hf_hub::{HFClient, split_id};
 use tokio::runtime::Runtime;
 use vllm_tokenizer::{HuggingFaceTokenizer, Tokenizer};
 
@@ -60,12 +60,13 @@ impl BenchFixture {
 
 fn tokenizer_json() -> std::path::PathBuf {
     Runtime::new().expect("build tokio runtime").block_on(async {
-        ApiBuilder::from_env()
-            .with_progress(false)
-            .build()
+        let (owner, name) = split_id(MODEL_ID);
+        HFClient::new()
             .expect("build hf-hub api")
-            .model(MODEL_ID.to_string())
-            .get("tokenizer.json")
+            .model(owner, name)
+            .download_file()
+            .filename("tokenizer.json")
+            .send()
             .await
             .expect("fetch tokenizer.json from hf-hub")
     })

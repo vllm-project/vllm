@@ -12,6 +12,34 @@ pub use crate::lower::token_ids::TokenIdsError;
 pub enum Error {
     #[error("tokenizer error: {0}")]
     Tokenizer(String),
+    #[error("failed to create Hugging Face Hub client")]
+    HuggingFaceHubClient {
+        #[source]
+        source: Box<hf_hub::HFError>,
+    },
+    #[error("failed to fetch model `{model_id}` from Hugging Face Hub")]
+    HuggingFaceHubModel {
+        model_id: String,
+        #[source]
+        source: Box<hf_hub::HFError>,
+    },
+    #[error("model `{model_id}` metadata from Hugging Face Hub has no commit revision")]
+    HuggingFaceHubModelRevision { model_id: String },
+    #[error("failed to {operation} snapshot for model `{model_id}` through Hugging Face Hub")]
+    HuggingFaceHubSnapshot {
+        operation: &'static str,
+        model_id: String,
+        #[source]
+        source: Box<hf_hub::HFError>,
+    },
+    #[error("failed to {operation} `{filename}` for model `{model_id}` through Hugging Face Hub")]
+    HuggingFaceHubFile {
+        operation: &'static str,
+        filename: String,
+        model_id: String,
+        #[source]
+        source: Box<hf_hub::HFError>,
+    },
     #[error("text request `{request_id}` must contain at least one prompt token ID")]
     EmptyPromptTokenIds { request_id: String },
     #[error(

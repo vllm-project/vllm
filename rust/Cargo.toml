@@ -42,7 +42,7 @@ fastokens = { version = "0.2.1", default-features = false }
 futures = "0.3.31"
 half = { version = "2.7.1", features = ["bytemuck"] }
 hex = "0.4.3"
-hf-hub = { version = "0.5.0", default-features = false, features = ["tokio"] }
+hf-hub = { version = "1.0.0", default-features = false }
 http-body = "1.0.1"
 hyper = { version = "1.10.1", features = ["http1", "server"] }
 hyper-util = { version = "0.1.20", features = [
@@ -53,7 +53,9 @@ hyper-util = { version = "0.1.20", features = [
 indexmap = "2.13.0"
 itertools = "0.14.0"
 libc = "0.2.177"
-llm-multimodal = { git = "https://github.com/smg-project/llm-multimodal", rev = "c8a29dcc755139fdc26185f400ea48c6d6d48273" }
+llm-multimodal = { git = "https://github.com/smg-project/llm-multimodal", rev = "c8a29dcc755139fdc26185f400ea48c6d6d48273", default-features = false, features = [
+    "native-tls",
+] }
 mimalloc = "0.1.52"
 minijinja = { version = "2.0", features = ["unstable_machinery", "json", "builtins", "loader", "loop_controls", "preserve_order"] }
 minijinja-contrib = { version = "2.0", features = ["pycompat"] }
