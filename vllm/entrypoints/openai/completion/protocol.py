@@ -95,6 +95,20 @@ class CompletionRequest(OpenAIBaseModel):
     )
     allowed_token_ids: list[int] | None = None
     prompt_logprobs: int | None = None
+    logprob_token_ids: list[int] | None = Field(
+        default=None,
+        description=(
+            "Specific vocab token IDs to return logprobs for at each generated "
+            "position, in addition to the sampled token. More efficient than "
+            "requesting the full vocab when only a small fixed label set is "
+            "needed (e.g. multilabel "
+            "scoring where each label corresponds to a known vocab id). When "
+            "set, this explicit token selection takes precedence over the "
+            "natural top-k selected by `logprobs`. Requires `logprobs` to be "
+            "set."
+        ),
+    )
+    bad_words: list[str] = Field(default_factory=list)
     # --8<-- [end:completion-sampling-params]
 
     # --8<-- [start:completion-extra-params]
@@ -186,6 +200,13 @@ class CompletionRequest(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
+    )
+
+    ec_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "ECTransfer parameters used for encoder-cache disaggregated serving."
+        ),
     )
 
     vllm_xargs: dict[str, str | int | float] | None = Field(
@@ -345,6 +366,9 @@ class CompletionRequest(OpenAIBaseModel):
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
+        if self.ec_transfer_params:
+            # Pass in ec_transfer_params via extra_args
+            extra_args["ec_transfer_params"] = self.ec_transfer_params
         return SamplingParams.from_optional(
             n=self.n,
             presence_penalty=self.presence_penalty,
@@ -357,11 +381,12 @@ class CompletionRequest(OpenAIBaseModel):
             seed=self.seed,
             stop=self.stop,
             stop_token_ids=stop_token_ids,
-            logprobs=self.logprobs,
+            logprobs=None if self.logprob_token_ids else self.logprobs,
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens if not echo_without_generation else 1,
             min_tokens=self.min_tokens,
             prompt_logprobs=prompt_logprobs,
+            logprob_token_ids=self.logprob_token_ids or None,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
@@ -371,6 +396,7 @@ class CompletionRequest(OpenAIBaseModel):
             structured_outputs=self.structured_outputs,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
+            bad_words=self.bad_words,
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
@@ -447,6 +473,29 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_logprobs(cls, data):
+        if data.get("logprob_token_ids") and data.get("use_beam_search"):
+            raise VLLMValidationError(
+                "`logprob_token_ids` is not supported with beam search.",
+                parameter="logprob_token_ids",
+            )
+
+        if (
+            data.get("logprob_token_ids")
+            and data.get("echo")
+            and data.get("max_tokens") == 0
+        ):
+            raise VLLMValidationError(
+                "`logprob_token_ids` is not supported when `echo=True` and "
+                "`max_tokens=0` because no output tokens are generated.",
+                parameter="logprob_token_ids",
+            )
+
+        if data.get("logprob_token_ids") and data.get("logprobs") is None:
+            raise VLLMValidationError(
+                "when using `logprob_token_ids`, `logprobs` must be set.",
+                parameter="logprob_token_ids",
+            )
+
         if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
             if data.get("stream") and (prompt_logprobs > 0 or prompt_logprobs == -1):
                 raise VLLMValidationError(
@@ -592,6 +641,9 @@ class CompletionResponse(OpenAIBaseModel):
     # vLLM-specific fields that are not in OpenAI spec
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
+    )
+    ec_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="ECTransfer parameters."
     )
     metrics: PerRequestTimingMetrics | None = None
 

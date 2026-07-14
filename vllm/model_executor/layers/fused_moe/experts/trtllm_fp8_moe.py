@@ -136,6 +136,8 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             not moe_parallel_config.use_all2all_kernels
             or moe_parallel_config.use_ag_rs_all2all_kernels
             or moe_parallel_config.use_deepep_v2_kernels
+            or moe_parallel_config.use_fi_nvl_one_sided_kernels
+            or moe_parallel_config.use_fi_nvl_two_sided_kernels
         ) and not moe_parallel_config.enable_eplb
 
     @staticmethod
@@ -391,7 +393,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             n_group = num_expert_group or None
             selected_topk_group = topk_group or None
         else:
-            assert self.topk <= 10
+            assert self.topk <= 32
             fp8_quant_type = Fp8QuantizationType.DeepSeekFp8
             use_shuffled_weight = True
             weight_layout = WeightLayout.BlockMajorK

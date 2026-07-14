@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::BTreeSet;
 use std::sync::Once;
 use std::time::Duration;
@@ -51,6 +54,7 @@ fn request_output_with_events(
         stop_reason: None,
         events,
         kv_transfer_params: None,
+        ec_transfer_params: None,
         trace_headers: None,
         prefill_stats: None,
         routed_experts: None,
@@ -75,6 +79,7 @@ fn request_output_with_logprobs(
         stop_reason: None,
         events: None,
         kv_transfer_params: None,
+        ec_transfer_params: None,
         trace_headers: None,
         prefill_stats: None,
         routed_experts: None,
@@ -89,6 +94,7 @@ fn request_output_with_logprobs_and_kv(
     new_logprobs: Option<Logprobs>,
     prompt_logprobs: Option<Logprobs>,
     kv_transfer_params: Option<serde_json::Value>,
+    ec_transfer_params: Option<serde_json::Value>,
 ) -> EngineCoreOutput {
     EngineCoreOutput {
         request_id: request_id.to_string(),
@@ -100,6 +106,7 @@ fn request_output_with_logprobs_and_kv(
         stop_reason: None,
         events: None,
         kv_transfer_params,
+        ec_transfer_params,
         trace_headers: None,
         prefill_stats: None,
         routed_experts: None,
@@ -356,6 +363,7 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
                                 Some(logprobs_for_position(44, -0.3, 1, 88, -0.4)),
                                 None,
                                 Some(serde_json::json!({"connector": "x"})),
+                                None,
                             ),
                         ],
                         ..Default::default()
