@@ -1590,6 +1590,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="google/gemma-4-E4B-it-assistant",
         trust_remote_code=True,
         min_transformers_version="5.8.0",
+        use_original_num_layers=True,
     ),
     "ErnieMTPModel": _HfExamplesInfo(
         "baidu/ERNIE-4.5-21B-A3B-PT",
