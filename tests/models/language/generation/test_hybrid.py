@@ -43,6 +43,11 @@ HYBRID_MODELS = [
     "tiny-random/qwen3-next-moe",
 ]
 
+HYBRID_MODELS_REQUIRING_CHUNKED_PREFILL = {
+    "LiquidAI/LFM2-1.2B",
+    "tiny-random/qwen3-next-moe",
+}
+
 FULL_CUDA_GRAPH_MODELS = [
     "ai21labs/Jamba-tiny-dev",
     "pfnet/plamo-2-1b",
@@ -92,8 +97,15 @@ def test_models(
             example_prompts, max_tokens, num_logprobs
         )
 
+    extra_kwargs = {}
+    if model in HYBRID_MODELS_REQUIRING_CHUNKED_PREFILL:
+        extra_kwargs["enable_chunked_prefill"] = True
+
     with vllm_runner(
-        model, max_num_seqs=MAX_NUM_SEQS, attention_backend=ATTN_BACKEND
+        model,
+        max_num_seqs=MAX_NUM_SEQS,
+        attention_backend=ATTN_BACKEND,
+        **extra_kwargs,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
