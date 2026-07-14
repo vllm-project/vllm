@@ -34,7 +34,7 @@ class ScaleUpExistingEngineState(enum.IntEnum):
     STAGE_QUANT_METHODS = 1
     TRANSFER_WEIGHTS = 2
     SYNC_KV_CACHE_MEMORY_SIZE = 3
-    COMMIT_SCALE_UP = 4
+    COMMIT_SCALE_UP = 4  # Blocks forward passes.
     COMPLETE = 5
 
 
@@ -46,7 +46,7 @@ class ScaleUpNewEngineState(enum.IntEnum):
 
 class ScaleDownRemainingEngineState(enum.IntEnum):
     PREPARE = 0
-    COMMIT_SCALE_DOWN = 1
+    COMMIT_SCALE_DOWN = 1  # Blocks forward passes.
     COMPLETE = 2
 
 
