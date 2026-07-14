@@ -58,7 +58,11 @@ from vllm.multimodal.video import (
     VIDEO_LOADER_REGISTRY,
 )
 from vllm.platforms import current_platform
-from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
+from vllm.profiler.wrapper import (
+    CudaProfilerWrapper,
+    ProtonProfilerWrapper,
+    TorchProfilerWrapper,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
@@ -161,14 +165,14 @@ class Worker(WorkerBase):
         self.weight_transfer_engine: WeightTransferEngine | None = None
         self._weight_update_active = False
 
-        # Torch/CUDA profiler. Enabled and configured through profiler_config.
-        # Profiler wrapper is created lazily in profile() when start is called,
-        # so we have all the information needed for proper trace naming.
+        # Worker profiler. Enabled and configured through profiler_config.
+        # Profiler wrappers are normally created lazily in profile(). Proton is
+        # prepared during CUDA graph capture so it can identify later replays.
         self.profiler: Any | None = None
         self.profiler_config = vllm_config.profiler_config
 
         # Only validate profiler config is valid, don't instantiate yet
-        if self.profiler_config.profiler not in ("torch", "cuda", None):
+        if self.profiler_config.profiler not in ("torch", "cuda", "proton", None):
             raise ValueError(f"Unknown profiler type: {self.profiler_config.profiler}")
 
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
@@ -781,7 +785,14 @@ class Worker(WorkerBase):
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
-            cuda_graph_memory_bytes = self.model_runner.capture_model()
+            capture_context = nullcontext()
+            if self.profiler_config.profiler == "proton":
+                self._get_or_create_profiler()
+                assert isinstance(self.profiler, ProtonProfilerWrapper)
+                capture_context = self.profiler.capture_cuda_graphs()
+
+            with capture_context:
+                cuda_graph_memory_bytes = self.model_runner.capture_model()
 
         # Compare actual vs estimated CUDA graph memory (if we did profiling)
         if (
@@ -1177,52 +1188,46 @@ class Worker(WorkerBase):
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
 
+    def _get_or_create_profiler(self, profile_prefix: str | None = None) -> None:
+        from vllm.distributed.utils import get_worker_rank_suffix
+
+        rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
+        trace_name = (
+            f"{profile_prefix}_{rank_suffix}" if profile_prefix else rank_suffix
+        )
+        if self.profiler is not None:
+            if isinstance(self.profiler, ProtonProfilerWrapper):
+                self.profiler.set_worker_name(trace_name)
+            return
+
+        profiler_type = self.profiler_config.profiler
+        if profiler_type == "torch":
+            self.profiler = TorchProfilerWrapper(
+                self.profiler_config,
+                worker_name=trace_name,
+                local_rank=self.local_rank,
+                activities=["CPU", "CUDA"],
+            )
+        elif profiler_type == "cuda":
+            self.profiler = CudaProfilerWrapper(self.profiler_config)
+        elif profiler_type == "proton":
+            self.profiler = ProtonProfilerWrapper(
+                self.profiler_config,
+                worker_name=trace_name,
+            )
+        else:
+            raise ValueError(f"Invalid profiler value of {profiler_type}")
+        logger.debug("Initialized %s profiler as %s", profiler_type, trace_name)
+
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
-        # Check if profiling is enabled
         if self.profiler_config is None or self.profiler_config.profiler is None:
             raise RuntimeError(
-                "Profiling is not enabled. Please set --profiler-config to enable "
-                "profiling. Example: "
-                "'--profiler-config.profiler=torch --profiler-config.torch_profiler_dir"
-                "=YOUR_DIR_PATH_TO_DUMP_TRACE'"
+                "Profiling is not enabled. Set --profiler-config.profiler and "
+                "the selected profiler's output directory."
             )
 
         if is_start:
-            # Generate the trace name by combining prefix with comprehensive rank suffix
-            from vllm.distributed.utils import get_worker_rank_suffix
-
-            rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
-
-            # Build the full trace name
-            if profile_prefix:
-                trace_name = f"{profile_prefix}_{rank_suffix}"
-            else:
-                trace_name = rank_suffix
-
-            # Create the profiler wrapper only on the first start call
-            if self.profiler is None:
-                profiler_type = self.profiler_config.profiler
-                if profiler_type == "torch":
-                    self.profiler = TorchProfilerWrapper(
-                        self.profiler_config,
-                        worker_name=trace_name,
-                        local_rank=self.local_rank,
-                        activities=["CPU", "CUDA"],
-                    )
-                    logger.debug(
-                        "Starting torch profiler with trace name: %s", trace_name
-                    )
-                elif profiler_type == "cuda":
-                    self.profiler = CudaProfilerWrapper(self.profiler_config)
-                    logger.debug("Starting CUDA profiler")
-                else:
-                    # Config validation should prevent this code being reached
-                    raise ValueError(
-                        f"Invalid profiler value of {self.profiler_config.profiler}"
-                    )
-
-            # If profiler already initialized, restart profiling but keep
-            # the original trace name from the first initialization.
+            self._get_or_create_profiler(profile_prefix)
             self.profiler.start()
         else:
             if self.profiler is None:

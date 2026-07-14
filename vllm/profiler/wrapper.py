@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
+import os
 from abc import ABC, abstractmethod
-from collections.abc import Callable
-from contextlib import nullcontext
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext, suppress
 from typing import Literal
 
 import torch
@@ -305,6 +307,123 @@ class TorchProfilerWrapper(WorkerProfiler):
     @override
     def annotate_context_manager(self, name: str):
         return torch.profiler.record_function(name)
+
+
+class ProtonProfilerWrapper(WorkerProfiler):
+    """Worker profiler backed by :mod:`triton.profiler` (Proton).
+
+    A dormant session observes CUDA graph creation so later profiling sessions
+    can identify graph replays without retaining model-startup activity.
+    """
+
+    def __init__(
+        self,
+        profiler_config: ProfilerConfig,
+        worker_name: str,
+    ) -> None:
+        super().__init__(profiler_config)
+
+        try:
+            self._proton = importlib.import_module("triton.profiler")
+        except ImportError as exc:
+            raise RuntimeError(
+                "The Proton profiler requires a Triton installation with "
+                "triton.profiler support."
+            ) from exc
+
+        self._output_dir = profiler_config.proton_profiler_dir
+        self._output_path = os.path.join(self._output_dir, f"proton_{worker_name}")
+        self._context = profiler_config.proton_context
+        self._data = profiler_config.proton_data
+        self._backend = profiler_config.proton_backend
+        self._mode = profiler_config.proton_mode
+        self._hook = profiler_config.proton_hook
+        self._session_id: int | None = None
+        self._capture_session_id: int | None = None
+        self._capture_output_path = os.path.join(
+            self._output_dir,
+            f".proton_cuda_graph_capture_{worker_name}_{os.getpid()}",
+        )
+
+        logger.info_once(
+            "Proton profiling enabled. Output will be saved under: %s",
+            self._output_dir,
+        )
+
+    def _create_session(self, output_path: str, *, capture: bool = False) -> int:
+        os.makedirs(self._output_dir, exist_ok=True)
+        session_id = self._proton.start(
+            name=output_path,
+            context="shadow" if capture else self._context,
+            data="tree" if capture else self._data,
+            backend=self._backend,
+            mode=self._mode,
+            hook=self._hook,
+        )
+        if session_id is None:
+            raise RuntimeError("Proton did not create a profiling session")
+        return session_id
+
+    def set_worker_name(self, worker_name: str) -> None:
+        """Set the next profile's rank-qualified output name."""
+        if self._session_id is None:
+            self._output_path = os.path.join(
+                self._output_dir, f"proton_{worker_name}"
+            )
+
+    @contextmanager
+    def capture_cuda_graphs(self) -> Iterator[None]:
+        """Keep a dormant session aware of CUDA graphs captured by vLLM.
+
+        Proton must observe graph creation before it can associate later graph
+        replays with kernels. This capture-only session stays dormant while
+        requested profiles use separate, clean sessions.
+        """
+        if self._mode and self._mode.split(":", 1)[0] == "pcsampling":
+            raise ValueError(
+                "Proton PC sampling is incompatible with CUDA graph capture; "
+                "enable eager execution."
+            )
+        if self._running:
+            yield
+            return
+
+        if self._capture_session_id is None:
+            self._capture_session_id = self._create_session(
+                self._capture_output_path, capture=True
+            )
+        else:
+            self._proton.activate(session=self._capture_session_id)
+
+        try:
+            yield
+        finally:
+            self._proton.deactivate(session=self._capture_session_id)
+
+    @override
+    def _start(self) -> None:
+        self._session_id = self._create_session(self._output_path)
+
+    @override
+    def _stop(self) -> None:
+        assert self._session_id is not None
+        self._proton.deactivate(session=self._session_id)
+        self._proton.finalize(session=self._session_id)
+        self._session_id = None
+
+    @override
+    def shutdown(self) -> None:
+        if self._running:
+            self.stop()
+        if self._capture_session_id is not None:
+            self._proton.finalize(session=self._capture_session_id)
+            self._capture_session_id = None
+            with suppress(FileNotFoundError):
+                os.remove(f"{self._capture_output_path}.hatchet")
+
+    @override
+    def annotate_context_manager(self, name: str):
+        return self._proton.scope(name)
 
 
 class CudaProfilerWrapper(WorkerProfiler):
