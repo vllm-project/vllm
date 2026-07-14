@@ -42,6 +42,28 @@ from vllm.inputs import TokensPrompt
 
 logger = logging.getLogger(__name__)
 
+# Inductor combo kernels select kernels by timing them (per process), so
+# run-to-run timing noise changes which kernel wins, changing float
+# reduction order and thus logits. Disabling them freezes kernel selection
+# to Inductor's deterministic heuristics, making KLD bit-reproducible
+# run-to-run while keeping torch.compile speed.
+DETERMINISTIC_COMPILATION_CONFIG: dict[str, Any] = {
+    "inductor_compile_config": {
+        "combo_kernels": False,
+        "benchmark_combo_kernel": False,
+    },
+}
+
+
+def apply_deterministic_env() -> None:
+    """Disable the remaining timing-based Inductor autotuners.
+
+    These only affect static ``compile_sizes`` autotuning, but they are the
+    only other timing-based kernel selectors in the compile path.
+    """
+    os.environ.setdefault("VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE", "0")
+    os.environ.setdefault("VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING", "0")
+
 
 def load_dataset_texts(
     dataset_name: str,
@@ -406,6 +428,13 @@ def main():
         "to save GPU memory",
     )
     parser.add_argument(
+        "--no-deterministic",
+        action="store_true",
+        help="Allow timing-based Inductor kernel selection (combo kernels). "
+        "Faster warmup is possible but KLD becomes non-reproducible "
+        "run-to-run. Deterministic mode is the default for scoring.",
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -436,6 +465,10 @@ def main():
         llm_kwargs["quantization"] = args.quantization
     if args.language_model_only:
         llm_kwargs["language_model_only"] = True
+    if not args.no_deterministic:
+        apply_deterministic_env()
+        llm_kwargs["compilation_config"] = DETERMINISTIC_COMPILATION_CONFIG
+        print("Deterministic mode: combo kernels disabled (bit-reproducible KLD)")
 
     print("\nCalculating KLD...")
     print(f"  Context length: {args.context_length}")

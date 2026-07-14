@@ -136,6 +136,50 @@ reference logits caching, see the example script:
 
 [examples/offline_inference/score_mode_kld.py](../../examples/offline_inference/score_mode_kld.py)
 
+## Determinism
+
+Scoring is only meaningful if the same command produces the same score every
+time. Two Inductor features select kernels by *timing* them, so run-to-run
+timing noise can change which kernel wins, changing floating-point reduction
+order and thus logits (and therefore PPL/KLD) between otherwise identical
+runs:
+
+- `combo_kernels` / `benchmark_combo_kernel` (enabled by default in
+  `CompilationConfig` on torch >= 2.9)
+- `max_autotune` / `coordinate_descent_tuning` (only active for static
+  `compile_sizes`)
+
+The example scripts disable these by default by passing:
+
+```python
+llm = LLM(
+    model=...,
+    compilation_config={
+        "inductor_compile_config": {
+            "combo_kernels": False,
+            "benchmark_combo_kernel": False,
+        },
+    },
+)
+```
+
+with `VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE=0` and
+`VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING=0`. This keeps
+`torch.compile` speed while making kernel selection deterministic; pass
+`--no-deterministic` to opt out.
+
+Notes:
+
+- Kernel rounding noise is orders of magnitude smaller than quantization
+  effects, but KLD is sensitive enough to detect it. Reference logits and
+  test runs must be produced under the same kernel configuration; never mix
+  references generated with combo kernels enabled and disabled.
+- Determinism is guaranteed run-to-run on the same GPU/driver/PyTorch
+  version. Different hardware or software versions generate different
+  kernels and yield slightly different (internally consistent) baselines.
+- For a fully eager fallback, set `TORCH_COMPILE_DISABLE=1` (slower, and a
+  slightly different baseline than compiled mode).
+
 ## Constraints
 
 - `score_mode` requires `prompt_logprobs` to be set.

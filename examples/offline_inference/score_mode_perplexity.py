@@ -22,6 +22,7 @@ Usage:
 import argparse
 import logging
 import math
+import os
 import time
 from typing import Any
 
@@ -31,6 +32,28 @@ from vllm import LLM, SamplingParams
 from vllm.inputs import TokensPrompt
 
 logger = logging.getLogger(__name__)
+
+# Inductor combo kernels select kernels by timing them (per process), so
+# run-to-run timing noise changes which kernel wins, changing float
+# reduction order and thus logits. Disabling them freezes kernel selection
+# to Inductor's deterministic heuristics, making perplexity bit-reproducible
+# run-to-run while keeping torch.compile speed.
+DETERMINISTIC_COMPILATION_CONFIG: dict[str, Any] = {
+    "inductor_compile_config": {
+        "combo_kernels": False,
+        "benchmark_combo_kernel": False,
+    },
+}
+
+
+def apply_deterministic_env() -> None:
+    """Disable the remaining timing-based Inductor autotuners.
+
+    These only affect static ``compile_sizes`` autotuning, but they are the
+    only other timing-based kernel selectors in the compile path.
+    """
+    os.environ.setdefault("VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE", "0")
+    os.environ.setdefault("VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING", "0")
 
 
 def _extract_logprobs_from_window(
@@ -296,6 +319,13 @@ def main():
         help="Trust remote code when loading model",
     )
     parser.add_argument(
+        "--no-deterministic",
+        action="store_true",
+        help="Allow timing-based Inductor kernel selection (combo kernels). "
+        "Faster warmup is possible but perplexity becomes non-reproducible "
+        "run-to-run. Deterministic mode is the default for scoring.",
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -321,6 +351,11 @@ def main():
 
     if args.quantization:
         llm_kwargs["quantization"] = args.quantization
+
+    if not args.no_deterministic:
+        apply_deterministic_env()
+        llm_kwargs["compilation_config"] = DETERMINISTIC_COMPILATION_CONFIG
+        print("Deterministic mode: combo kernels disabled (bit-reproducible PPL)")
 
     print(f"Initializing LLM with model: {args.model}")
     llm = LLM(model=args.model, **llm_kwargs)
