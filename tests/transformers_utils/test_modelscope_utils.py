@@ -2,10 +2,26 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import sys
 from pathlib import Path
 
 from vllm.transformers_utils import modelscope_utils
 from vllm.transformers_utils.modelscope_utils import configure_modelscope_runtime
+
+
+def _pop_modelscope_modules() -> dict[str, object]:
+    return {
+        name: sys.modules.pop(name)
+        for name in list(sys.modules)
+        if name == "modelscope" or name.startswith("modelscope.")
+    }
+
+
+def _restore_modelscope_modules(saved_modules: dict[str, object]) -> None:
+    for name in list(sys.modules):
+        if name == "modelscope" or name.startswith("modelscope."):
+            sys.modules.pop(name, None)
+    sys.modules.update(saved_modules)
 
 
 def test_configure_modelscope_runtime_preserves_existing_env(monkeypatch):
@@ -32,12 +48,14 @@ def test_modelscope_is_available_rejects_unsupported_version(
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.setattr("vllm.envs.VLLM_USE_MODELSCOPE", True)
 
+    saved_modules = _pop_modelscope_modules()
     modelscope_utils.modelscope_is_available.cache_clear()
     try:
         assert modelscope_utils.modelscope_is_available() is False
         assert modelscope_utils.should_use_modelscope() is False
     finally:
         modelscope_utils.modelscope_is_available.cache_clear()
+        _restore_modelscope_modules(saved_modules)
 
 
 def test_modelscope_is_available_rejects_broken_install(
@@ -53,9 +71,11 @@ def test_modelscope_is_available_rejects_broken_install(
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.setattr("vllm.envs.VLLM_USE_MODELSCOPE", True)
 
+    saved_modules = _pop_modelscope_modules()
     modelscope_utils.modelscope_is_available.cache_clear()
     try:
         assert modelscope_utils.modelscope_is_available() is False
         assert modelscope_utils.should_use_modelscope() is False
     finally:
         modelscope_utils.modelscope_is_available.cache_clear()
+        _restore_modelscope_modules(saved_modules)
