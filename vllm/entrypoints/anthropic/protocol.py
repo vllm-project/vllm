@@ -75,6 +75,7 @@ class AnthropicTool(BaseModel):
     name: str
     description: str | None = None
     input_schema: dict[str, Any]
+    strict: bool | None = None
     defer_loading: bool | None = None
 
     @field_validator("input_schema")
@@ -135,6 +136,12 @@ class AnthropicMessagesRequest(BaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
+    )
+    ec_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "ECTransfer parameters used for encoder-cache disaggregated serving."
+        ),
     )
     chat_template_kwargs: dict[str, Any] | None = Field(
         default=None,
@@ -216,6 +223,9 @@ class AnthropicMessagesResponse(BaseModel):
     # vLLM-specific fields that are not in Anthropic spec
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
+    )
+    ec_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="ECTransfer parameters."
     )
 
     def model_post_init(self, __context):

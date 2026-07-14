@@ -76,7 +76,7 @@ def batch_transfer_weights(
     all_params = []
 
     for name, param in state_dict.items():
-        if name.endswith("expert_map"):
+        if name.endswith("expert_map") or name.find("._shared_experts") != -1:
             continue
         if param.data_ptr() not in expert_weights_set:
             all_params.append(param.data)
@@ -207,6 +207,9 @@ class ElasticEPScalingExecutor:
             )
         if new_dp_size > old_dp_size:
             self._set_eplb_suppressed(True)
+            eplb_state = self.worker.model_runner.eplb_state
+            if eplb_state is not None:
+                eplb_state.drain_async()
         elif new_dp_size < old_dp_size:
             self._stage_standby_moe_quant_methods()
 
@@ -396,10 +399,7 @@ class ElasticEPScalingExecutor:
         ep_group = get_ep_group()
         for module in moe_modules:
             new_moe_config = self._make_eep_moe_config(module, dp_group, ep_group)
-            module.moe_config.num_experts = new_moe_config.num_experts
-            module.global_num_experts = module.moe_config.num_experts
-            module.moe_parallel_config = new_moe_config.moe_parallel_config
-            module.moe_config.moe_parallel_config = module.moe_parallel_config
+            module._set_moe_config(new_moe_config)
 
         # Update EPLB state
         eplb_state = self.worker.model_runner.eplb_state
@@ -458,7 +458,9 @@ class ElasticEPScalingExecutor:
                 eplb_model_state.logical_to_physical_map,
                 eplb_model_state.logical_replica_count,
             )
-            eplb_state._init_should_record_tensor(model)
+            eplb_state._propagate_shared_tensors(
+                model, eplb_model_state.num_unpadded_tokens_tensors
+            )
             model.update_physical_experts_metadata(
                 num_physical_experts=num_physical_experts,
                 num_local_physical_experts=num_local_experts,
@@ -466,13 +468,16 @@ class ElasticEPScalingExecutor:
             self._commit_staged_moe_quant_methods()
             # Legacy modular methods need to be recreated for the new EP size.
             for module in moe_modules:
-                if getattr(module.quant_method, "wraps_legacy_quant_method", False):
-                    module._replace_quant_method(module.quant_method.old_quant_method)
+                if getattr(module._quant_method, "wraps_legacy_quant_method", False):
+                    module._replace_quant_method(module._quant_method.old_quant_method)
             prepare_communication_buffer_for_model(self.worker.model_runner.model)
 
         eplb_model_state.expert_buffer = [
             torch.empty_like(w) for w in model.expert_weights[0]
         ]
+        assert parallel_config.eplb_config.communicator is not None, (
+            "EPLB communicator backend must be set by ParallelConfig"
+        )
         eplb_model_state.communicator = create_eplb_communicator(
             group_coordinator=get_eplb_group(),
             backend=parallel_config.eplb_config.communicator,
@@ -540,6 +545,11 @@ class ElasticEPScalingExecutor:
             eplb_model_state.physical_to_logical_map.shape[1]
         )
         eplb_state.is_async = is_async_enabled
+        # Start the async worker thread if it doesn't exist yet (idempotent).
+        # This is needed for new workers after scale-up: they create EplbState
+        # in setup_eplb_from_mapping() but don't start the thread there because
+        # groups aren't ready yet.
+        eplb_state.start_async_loop()
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Expert resharding completed")
 
@@ -549,6 +559,9 @@ class ElasticEPScalingExecutor:
 
     def perform_scale_down_eplb_reshuffle(self, new_dp_size: int) -> None:
         self._set_eplb_suppressed(True)
+        eplb_state = self.worker.model_runner.eplb_state
+        if eplb_state is not None:
+            eplb_state.drain_async()
         parallel_config = self.worker.vllm_config.parallel_config
         tp_size = parallel_config.tensor_parallel_size
         old_ep_size = parallel_config.data_parallel_size * tp_size

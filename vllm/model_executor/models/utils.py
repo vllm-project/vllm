@@ -4,14 +4,13 @@
 import itertools
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, overload
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, overload
 
 import regex as re
 import torch
 import torch.nn as nn
 from torch.nn.modules.module import register_module_module_registration_hook
-from transformers import PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.distributed import (
@@ -19,9 +18,6 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig,
-)
 from vllm.model_executor.model_loader.reload import (
     support_quantized_model_reload_from_hp_weights,
 )
@@ -35,7 +31,15 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 
+if TYPE_CHECKING:
+    from transformers import PretrainedConfig
+    from transformers.conversion_mapping import WeightRenaming
+
+    from vllm.model_executor.layers.quantization import QuantizationConfig
+
 logger = init_logger(__name__)
+
+ShardId: TypeAlias = str | int | tuple[int, ...]
 
 
 @dataclass
@@ -44,20 +48,55 @@ class WeightsMapper:
 
     If a key maps to a value of `None`, the corresponding weight is ignored."""
 
+    orig_to_new_renaming: list["WeightRenaming"] = field(default_factory=list)
     orig_to_new_regex: Mapping[re.Pattern, str | None] = field(default_factory=dict)
     orig_to_new_substr: Mapping[str, str | None] = field(default_factory=dict)
+    orig_to_new_stacked: Mapping[str, tuple[str, ShardId]] = field(default_factory=dict)
     orig_to_new_prefix: Mapping[str, str | None] = field(default_factory=dict)
     orig_to_new_suffix: Mapping[str, str | None] = field(default_factory=dict)
 
     def __or__(self, other: "WeightsMapper") -> "WeightsMapper":
         """Combine two `WeightsMapper`s by merging their mappings."""
         return WeightsMapper(
+            orig_to_new_renaming=[
+                *self.orig_to_new_renaming,
+                *other.orig_to_new_renaming,
+            ],
+            orig_to_new_regex={**self.orig_to_new_regex, **other.orig_to_new_regex},
             orig_to_new_substr={**self.orig_to_new_substr, **other.orig_to_new_substr},
+            orig_to_new_stacked={
+                **self.orig_to_new_stacked,
+                **other.orig_to_new_stacked,
+            },
             orig_to_new_prefix={**self.orig_to_new_prefix, **other.orig_to_new_prefix},
             orig_to_new_suffix={**self.orig_to_new_suffix, **other.orig_to_new_suffix},
         )
 
     def _map_name(self, key: str) -> str | None:
+        """Map a weight name (backward-compatible wrapper that discards shard_id)."""
+        result = self._map_name_with_shard(key)
+        return result[0] if result is not None else None
+
+    def _map_name_with_shard(self, key: str) -> tuple[str, ShardId | None] | None:
+        """Map a weight name and extract any shard_id metadata.
+
+        Returns:
+            (mapped_name, shard_id) if the name should be kept.
+            None if the name should be dropped.
+        """
+        # Deprecation warnings
+        if key.endswith(".kv_scale"):
+            logger.warning_once(
+                "DEPRECATED. Found kv_scale in the checkpoint. "
+                "This format is deprecated in favor of separate k_scale and "
+                "v_scale tensors and will be removed in a future release. "
+                "Functionally, we will remap kv_scale to k_scale and duplicate "
+                "k_scale to v_scale"
+            )
+
+        for renaming in self.orig_to_new_renaming:
+            key, _ = renaming.rename_source_key(key)
+
         for pattern, new_key in self.orig_to_new_regex.items():
             if pattern.search(key):
                 if new_key is None:
@@ -71,6 +110,12 @@ class WeightsMapper:
                     return None
 
                 key = key.replace(substr, new_key, 1)
+
+        shard_id: ShardId | None = None
+        for substr, (new_key, new_shard_id) in self.orig_to_new_stacked.items():
+            if substr in key:
+                key = key.replace(substr, new_key, 1)
+                shard_id = new_shard_id
 
         for prefix, new_key in self.orig_to_new_prefix.items():
             if key.startswith(prefix):
@@ -86,16 +131,19 @@ class WeightsMapper:
 
                 key = new_key.join(key.rsplit(suffix, 1))
 
-        return key
+        return key, shard_id
 
     def apply(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[tuple[str, torch.Tensor]]:
-        return (
-            (out_name, data)
-            for name, data in weights
-            if (out_name := self._map_name(name)) is not None
-        )
+        for name, data in weights:
+            result = self._map_name_with_shard(name)
+            if result is None:
+                continue
+            out_name, shard_id = result
+            if shard_id is not None:
+                data.shard_id = shard_id
+            yield out_name, data
 
     def apply_list(self, values: list[str]) -> list[str]:
         return [
@@ -110,6 +158,15 @@ class WeightsMapper:
             for name, value in values.items()
             if (out_name := self._map_name(name)) is not None
         }
+
+    def get_unstacked_mapper(self) -> "WeightsMapper":
+        """Mapper variant that drops stacked maps, keeping all genuine renames/prefixes.
+
+        Consumers that reference the checkpoint's *unstacked* module names (LoRA name
+        parsing and the quantization config's layer lists) need the constituent names
+        (e.g. `q_proj`) to survive rather than being rewritten to the stacked vLLM name
+        (`qkv_proj`)."""
+        return replace(self, orig_to_new_stacked={})
 
 
 class AutoWeightsLoader:
@@ -343,6 +400,19 @@ class AutoWeightsLoader:
         *,
         mapper: WeightsMapper | None = None,
     ) -> set[str]:
+        # Ignore unexpected biases (typically from GPTQ models)
+        self.ignore_unexpected_suffixes.append(".bias")
+
+        # Many models store quant_config in the base model instead of the causal model.
+        # We look at the causal model's direct children for this reason.
+        modules = (self.module, *self.module.children())
+        iterator = (m.quant_config for m in modules if hasattr(m, "quant_config"))
+        if quant_config := next(iterator, None):
+            # Get mappings and ignore prefixes for KV cache quantization scales
+            mapper = mapper or WeightsMapper()
+            mapper |= quant_config.get_cache_scale_mapper()
+            ignore_unexpected_suffixes = quant_config._ignore_unexpected_suffixes
+            self.ignore_unexpected_suffixes.extend(ignore_unexpected_suffixes)
         if mapper is not None:
             weights = mapper.apply(weights)
         # filter out weights with first-prefix/substr to skip in name
@@ -358,7 +428,7 @@ def init_vllm_registered_model(
     vllm_config: VllmConfig,
     *,
     prefix: str = "",
-    hf_config: PretrainedConfig | None = None,
+    hf_config: "PretrainedConfig | None" = None,
     architectures: list[str] | None = None,
 ) -> nn.Module:
     """
@@ -711,9 +781,7 @@ def maybe_prefix(prefix: str, name: str) -> str:
     return name if not prefix else f"{prefix}.{name}"
 
 
-def get_draft_quant_config(
-    vllm_config: VllmConfig,
-) -> QuantizationConfig | None:
+def get_draft_quant_config(vllm_config: VllmConfig) -> "QuantizationConfig | None":
     """Get quantization config for Draft models.
 
     Draft models should use their own quantization config instead of the verifier/target
@@ -823,7 +891,10 @@ def sequence_parallel_chunk_impl(x: torch.Tensor) -> torch.Tensor:
 
     chunk = y.shape[0] // tp_size
     start = tp_rank * chunk
-    return torch.narrow(y, 0, start, chunk)
+    out = torch.narrow(y, 0, start, chunk)
+    # narrow() returns a view; clone when it aliases the input (no-pad case),
+    # since a functional custom op must not return a view of an input.
+    return out.clone() if y is x else out
 
 
 def sequence_parallel_chunk_impl_fake(x: torch.Tensor) -> torch.Tensor:

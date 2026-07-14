@@ -797,11 +797,11 @@ class TestMistralTokenizer:
                 True,
                 (
                     [1, 3, 23325, 2294, 1686, 4, 23325],
-                    [1, 3, 22177, 4304, 2662, 4, 22177, 2],
+                    [1, 3, 22177, 4304, 2662, 4, 22177],
                 ),
                 (
                     "<s>[INST]▁Hello▁world▁![/INST]▁Hello",
-                    ("<s>[INST]Hello world ![/INST]Hello</s>"),
+                    "<s>[INST]Hello world ![/INST]Hello",
                 ),
             ),
         ],

@@ -46,16 +46,17 @@ class QuantFP8(CustomOp):
         compile_native: bool = True,
     ):
         """
-        :param static: static or dynamic quantization
-        :param group_shape: quantization group shape (PER_TOKEN, PER_TENSOR,
-            PER_CHANNEL, or arbitrary block size)
-        :param num_token_padding: Pad the token dimension of output to this
-            size
-        :param tma_aligned_scales: For group quantization, output scales in
-            TMA-aligned layout
-        :param column_major_scales: For group quantization, output scales in
-            column major format
-        :param compile_native: Manually compile forward_native if compile mode > None
+        Args:
+            static: static or dynamic quantization
+            group_shape: quantization group shape (PER_TOKEN, PER_TENSOR,
+                PER_CHANNEL, or arbitrary block size)
+            num_token_padding: Pad the token dimension of output to this
+                size
+            tma_aligned_scales: For group quantization, output scales in
+                TMA-aligned layout
+            column_major_scales: For group quantization, output scales in
+                column major format
+            compile_native: Manually compile forward_native if compile mode > None
         """
         super().__init__(compile_native=compile_native)
         self.static = static

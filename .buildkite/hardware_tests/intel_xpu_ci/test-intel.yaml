@@ -1,0 +1,80 @@
+group: Intel
+steps:
+  - label: ":docker: Build XPU image"
+    soft_fail: true
+    optional: true
+    depends_on: []
+    key: image-build-xpu
+    commands:
+      - bash -lc '.buildkite/image_build/image_build_xpu.sh "public.ecr.aws/q9t5s3a7" "vllm-ci-test-repo" "$BUILDKITE_COMMIT"'
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2
+  - label: "XPU example Test"
+    depends_on:
+      - image-build-xpu
+    timeout_in_minutes: 50
+    optional: true
+    device: intel_gpu
+    agent_tags:
+      label: production
+      gpu: 2+
+      mem: 24+
+    no_plugin: true
+    env:
+      REGISTRY: "public.ecr.aws/q9t5s3a7"
+      REPO: "vllm-ci-test-repo"
+    source_file_dependencies:
+      - .buildkite/hardware_tests/intel_xpu_ci/test-intel.yaml
+      - .buildkite/scripts/hardware_ci/run-intel-ci-test.sh
+    commands:
+      - >-
+        bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+        'bash .buildkite/scripts/hardware_ci/run-intel-ci-test.sh example'
+  - label: "XPU V1 test"
+    depends_on:
+      - image-build-xpu
+    timeout_in_minutes: 70
+    optional: true
+    device: intel_gpu
+    agent_tags:
+      label: production
+      gpu: 1+
+      mem: 24+
+    no_plugin: true
+    env:
+      REGISTRY: "public.ecr.aws/q9t5s3a7"
+      REPO: "vllm-ci-test-repo"
+    source_file_dependencies:
+      - .buildkite/hardware_tests/intel_xpu_ci/test-intel.yaml
+      - .buildkite/scripts/hardware_ci/run-intel-ci-test.sh
+    commands:
+      - >-
+        bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+        'bash .buildkite/scripts/hardware_ci/run-intel-ci-test.sh v1'
+  - label: "XPU server test"
+    depends_on:
+      - image-build-xpu
+    timeout_in_minutes: 45
+    optional: true
+    device: intel_gpu
+    agent_tags:
+      label: production
+      gpu: 1+
+      mem: 16+
+    no_plugin: true
+    env:
+      REGISTRY: "public.ecr.aws/q9t5s3a7"
+      REPO: "vllm-ci-test-repo"
+    source_file_dependencies:
+      - .buildkite/hardware_tests/intel_xpu_ci/test-intel.yaml
+      - .buildkite/scripts/hardware_ci/run-intel-ci-test.sh
+    commands:
+      - >-
+        bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+        'bash .buildkite/scripts/hardware_ci/run-intel-ci-test.sh server'

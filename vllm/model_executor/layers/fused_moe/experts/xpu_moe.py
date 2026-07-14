@@ -14,9 +14,12 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
+    kFp8Static128BlockSym,
     kFp8StaticTensorSym,
     kInt4Static,
+    kInt4Static32,
     kMxfp4Static,
     kMxfp8Dynamic,
     kMxfp8Static,
@@ -59,10 +62,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             max_num_tokens,
             num_dispatchers,
         )
-        self.is_fp8 = False
-        self.is_int4 = False
-        self.is_mxfp4 = False
-        self.is_mxfp8 = False
+        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
         self.fused_moe_impl: XpuFusedMoe | None = None
 
     @property
@@ -144,17 +144,14 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        # The kernel takes is_fp8/is_int4/is_mxfp4 as independent booleans.
-        # In this hierarchy each subclass flips exactly one to True; assert
-        # the invariant so a future subclass that sets two doesn't silently
-        # miscompute (kernel-side priority is undocumented).
-        assert sum([self.is_fp8, self.is_int4, self.is_mxfp4]) <= 1, (
-            "XPUExperts: at most one of is_fp8, is_int4, is_mxfp4 may be True; "
-            f"got is_fp8={self.is_fp8}, is_int4={self.is_int4}, "
-            f"is_mxfp4={self.is_mxfp4}."
-        )
         if self.fused_moe_impl is None:
             topk = topk_ids.size(-1)
+            if (
+                self.quant_config is not None
+                and self.quant_config.weight_quant_dtype == "mxfp4"
+            ):
+                w1 = w1.view(torch.float4_e2m1fn_x2)
+                w2 = w2.view(torch.float4_e2m1fn_x2)
             self.fused_moe_impl = XpuFusedMoe(
                 w13=w1,
                 w13_scales=self.w1_scale,
@@ -167,10 +164,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
                 num_experts=self.moe_config.num_local_experts,
                 ep_rank=self.moe_config.ep_rank,
                 ep_size=self.moe_config.ep_size,
-                is_fp8=self.is_fp8,
-                is_int4=self.is_int4,
-                is_mxfp4=self.is_mxfp4,
-                is_mxfp8=self.is_mxfp8,
+                gemm1_clamp_limit=self.gemm1_clamp_limit,
             )
         assert self.fused_moe_impl is not None
         self.fused_moe_impl.apply(
@@ -195,7 +189,6 @@ class XPUExpertsFp8(XPUExperts):
             max_num_tokens,
             num_dispatchers,
         )
-        self.is_fp8 = True
 
     @staticmethod
     def _supports_quant_scheme(
@@ -209,7 +202,7 @@ class XPUExpertsFp8(XPUExperts):
         return (weight_key, activation_key) in SUPPORTED_W_A
 
 
-class XPUExpertsMxfp8(XPUExpertsFp8):
+class XPUExpertsMxFp8(XPUExpertsFp8):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -224,7 +217,6 @@ class XPUExpertsMxfp8(XPUExpertsFp8):
             num_dispatchers,
         )
         assert quant_config.quant_dtype == "mxfp8"
-        self.is_mxfp8 = True
 
     @staticmethod
     def _supports_quant_scheme(
@@ -234,6 +226,32 @@ class XPUExpertsMxfp8(XPUExpertsFp8):
         SUPPORTED_W_A = [
             (kMxfp8Static, None),
             (kMxfp8Static, kMxfp8Dynamic),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+
+class XPUExpertsBlockFp8(XPUExperts):
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
+    ):
+        super().__init__(
+            moe_config,
+            quant_config,
+            max_num_tokens,
+            num_dispatchers,
+        )
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
@@ -264,17 +282,19 @@ class XPUExpertsWNA16(XPUExperts):
             max_num_tokens,
             num_dispatchers,
         )
-        self.is_int4 = True
 
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        return (weight_key, activation_key) == (kInt4Static, None)
+        return (weight_key, activation_key) in (
+            (kInt4Static, None),
+            (kInt4Static32, None),
+        )
 
 
-class XPUExpertsMXFp4(XPUExperts):
+class XPUExpertsMxFp4(XPUExperts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -288,7 +308,6 @@ class XPUExpertsMXFp4(XPUExperts):
             max_num_tokens,
             num_dispatchers,
         )
-        self.is_mxfp4 = True
 
     @staticmethod
     def _supports_quant_scheme(

@@ -34,6 +34,7 @@ from transformers.models.gemma4.configuration_gemma4 import (
 )
 
 from vllm.config import VllmConfig
+from vllm.config.model import get_served_model_name
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
@@ -62,7 +63,6 @@ from vllm.multimodal.processing.processor import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -217,7 +217,10 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
             and num_items > 0
             and self.get_hf_config().audio_config is None
         ):
-            model = self.ctx.model_config.model
+            model_config = self.ctx.model_config
+            model = get_served_model_name(
+                model_config.model, model_config.served_model_name
+            )
             raise ValueError(
                 f"Audio input was provided but the model "
                 f"'{model}' does not have an audio tower. "
@@ -975,6 +978,13 @@ class Gemma4ForConditionalGeneration(
     SupportsLoRA,
     SupportsEagle3,
 ):
+    # Gemma4 clamps mm_prefix bidirectional ranges to the sliding window
+    # in-kernel (HF's (causal OR blockwise) AND sliding_window). The model
+    # runner reads this to keep image bidirectional ranges that exceed the
+    # window instead of dropping them (which would make image attention
+    # causal-only for images larger than the sliding window).
+    mm_prefix_clamp_sliding_window: bool = True
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1110,7 +1120,6 @@ class Gemma4ForConditionalGeneration(
                 )
 
         # --- MixtureOfExperts delegation to language_model ---
-        self.expert_weights = self.language_model.expert_weights
         self.moe_layers = self.language_model.moe_layers
         self.num_moe_layers = self.language_model.num_moe_layers
         self.num_logical_experts = self.language_model.num_logical_experts
@@ -1271,7 +1280,7 @@ class Gemma4ForConditionalGeneration(
         # pass has already allocated activations we should account for.
         last_hidden_states_map: dict[int, torch.Tensor] = {}
         for patches, items in buckets.items():
-            free, total = current_platform.mem_get_info()
+            free, total = torch.accelerator.get_memory_info()
             max_batch_size = min(
                 len(items),
                 self._encoder_chunk(
@@ -1379,7 +1388,7 @@ class Gemma4ForConditionalGeneration(
             fc_list = list(frame_counts)
 
         total_frames = pixel_values.shape[0]
-        free, total = current_platform.mem_get_info()
+        free, total = torch.accelerator.get_memory_info()
         max_batch_size = min(
             total_frames,
             self._encoder_chunk(

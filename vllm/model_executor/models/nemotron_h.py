@@ -19,7 +19,7 @@
 """Inference-only NemotronH model."""
 
 import typing
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from itertools import islice
 
 import torch
@@ -229,7 +229,6 @@ class NemotronHMoE(nn.Module):
             scoring_func="sigmoid",
             e_score_correction_bias=self.gate.e_score_correction_bias,
             activation=activation_without_mul(config.mlp_hidden_act),
-            is_act_and_mul=False,  # non-gated MoE
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
@@ -541,9 +540,22 @@ ALL_DECODER_LAYER_TYPES = {
 }
 
 
-@support_torch_compile
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": -1,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+    }
+)
 class NemotronHModel(nn.Module, EagleModelMixin):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        decoder_layer_types: Mapping[str, type[nn.Module]] | None = None,
+    ):
         super().__init__()
 
         config: NemotronHConfig = vllm_config.model_config.hf_config
@@ -563,11 +575,16 @@ class NemotronHModel(nn.Module, EagleModelMixin):
 
         self.has_moe = "E" in config.hybrid_override_pattern
 
+        layer_types = decoder_layer_types or ALL_DECODER_LAYER_TYPES
+
         def get_layer(prefix: str):
             layer_idx = int(prefix.rsplit(".", 1)[1])
-            layer_class = ALL_DECODER_LAYER_TYPES[
-                config.hybrid_override_pattern[layer_idx]
-            ]
+            layer_type = config.hybrid_override_pattern[layer_idx]
+            if layer_type not in layer_types:
+                raise ValueError(
+                    f"Unsupported layer type {layer_type!r} at layer {layer_idx}"
+                )
+            layer_class = layer_types[layer_type]
             return layer_class(
                 config=config,
                 layer_idx=layer_idx,
@@ -887,7 +904,6 @@ class NemotronHForCausalLM(
 
         # Set MoE hyperparameters
         if self.model.has_moe:
-            self.expert_weights = []
             self.num_expert_groups = config.n_group
 
             self.moe_layers = []

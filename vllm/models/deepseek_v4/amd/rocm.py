@@ -2,23 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 import torch
 
 from vllm.forward_context import get_forward_context
+from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
-from vllm.models.deepseek_v4.nvidia.flashmla import (
-    DeepseekV4FlashMLASparseBackend,
-    DeepseekV4SparseMLAAttentionImpl,
+from vllm.models.deepseek_v4.sparse_mla import (
+    DeepseekV4FlashMLABackend,
+    DeepseekV4FlashMLAMetadata,
+    DeepseekV4FlashMLAMetadataBuilder,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
-)
-from vllm.v1.attention.backends.mla.flashmla_sparse import (
-    FlashMLASparseMetadata,
-    FlashMLASparseMetadataBuilder,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWAMetadata,
@@ -26,15 +25,11 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
 )
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     build_ragged_indices_from_dense,
+    rocm_inv_rope_einsum,
     rocm_sparse_attn_decode,
     rocm_sparse_attn_prefill,
 )
 from vllm.v1.worker.workspace import current_workspace_manager
-
-if TYPE_CHECKING:
-    from vllm.models.deepseek_v4.attention import (
-        DeepseekV4MLAAttention,
-    )
 
 
 def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
@@ -277,153 +272,6 @@ def compute_global_topk_ragged_indices_and_indptr(
     return global_topk_ragged, topk_indptr, topk_lens
 
 
-@triton.jit
-def _compute_combined_lens_kernel(
-    combined_lens_ptr,
-    query_start_loc_ptr,
-    seq_lens_ptr,
-    TOP_K: tl.constexpr,
-    COMPRESS_RATIO: tl.constexpr,
-    WINDOW_SIZE: tl.constexpr,
-):
-    batch_idx = tl.program_id(0)
-    worker_id = tl.program_id(1)
-    num_workers = tl.num_programs(1)
-
-    base = tl.load(query_start_loc_ptr)
-    query_start = tl.load(query_start_loc_ptr + batch_idx) - base
-    query_end = tl.load(query_start_loc_ptr + batch_idx + 1) - base
-    query_len = query_end - query_start
-    seq_len = tl.load(seq_lens_ptr + batch_idx)
-    start_pos = seq_len - query_len
-
-    for token_idx in range(query_start + worker_id, query_end, num_workers):
-        token_idx_in_query = token_idx - query_start
-        pos = start_pos + token_idx_in_query
-        topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
-        swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
-        tl.store(combined_lens_ptr + token_idx, topk_len + swa_len)
-
-
-@triton.jit
-def _combine_topk_swa_indices_ragged_kernel(
-    combined_ragged_ptr,
-    combined_indptr_ptr,
-    topk_indices_ptr,
-    topk_indices_stride,
-    query_start_loc_ptr,
-    seq_lens_ptr,
-    gather_lens_ptr,
-    M,
-    N,
-    topk_width,
-    TOP_K: tl.constexpr,
-    COMPRESS_RATIO: tl.constexpr,
-    WINDOW_SIZE: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    batch_idx = tl.program_id(0)
-    worker_id = tl.program_id(1)
-    block_idx = tl.program_id(2)
-    num_workers = tl.num_programs(1)
-
-    base = tl.load(query_start_loc_ptr)
-    query_start = tl.load(query_start_loc_ptr + batch_idx) - base
-    query_end = tl.load(query_start_loc_ptr + batch_idx + 1) - base
-    query_len = query_end - query_start
-    seq_len = tl.load(seq_lens_ptr + batch_idx)
-    gather_len = tl.load(gather_lens_ptr + batch_idx)
-    start_pos = seq_len - query_len
-    gather_start = seq_len - gather_len
-
-    for token_idx in range(query_start + worker_id, query_end, num_workers):
-        token_idx_in_query = token_idx - query_start
-        pos = start_pos + token_idx_in_query
-        topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
-        swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
-        combined_len = topk_len + swa_len
-
-        offset = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        if block_idx * BLOCK_SIZE < combined_len:
-            out_start = tl.load(combined_indptr_ptr + token_idx)
-            topk_mask = (offset < topk_len) & (offset < topk_width)
-            topk_vals = tl.load(
-                topk_indices_ptr + token_idx * topk_indices_stride + offset,
-                mask=topk_mask,
-                other=-1,
-            )
-            tl.store(
-                combined_ragged_ptr + out_start + offset,
-                topk_vals + M * batch_idx,
-                mask=topk_mask,
-            )
-
-            swa_offset = offset - topk_len
-            swa_mask = (offset >= topk_len) & (swa_offset < swa_len)
-            tl.store(
-                combined_ragged_ptr + out_start + offset,
-                M * batch_idx + N + swa_offset + pos - swa_len + 1 - gather_start,
-                mask=swa_mask,
-            )
-
-
-def combine_topk_swa_indices_ragged(
-    topk_indices: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    seq_lens: torch.Tensor,
-    gather_lens: torch.Tensor,
-    window_size: int,
-    compress_ratio: int,
-    topk: int,
-    M: int,
-    N: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    topk_indices = topk_indices.reshape(topk_indices.shape[0], -1).contiguous()
-    num_tokens = topk_indices.shape[0]
-    num_reqs = seq_lens.shape[0]
-    combined_lens = torch.empty(
-        num_tokens, dtype=torch.int32, device=topk_indices.device
-    )
-
-    num_workers = 128
-    _compute_combined_lens_kernel[(num_reqs, num_workers)](
-        combined_lens,
-        query_start_loc,
-        seq_lens,
-        TOP_K=topk,
-        COMPRESS_RATIO=compress_ratio,
-        WINDOW_SIZE=window_size,
-    )
-
-    combined_indptr = _build_indptr_from_lengths(combined_lens)
-    combined_ragged = torch.empty(
-        num_tokens * (topk + window_size),
-        dtype=torch.int32,
-        device=topk_indices.device,
-    )
-    if combined_ragged.numel() > 0:
-        block = 128
-        _combine_topk_swa_indices_ragged_kernel[
-            (num_reqs, num_workers, triton.cdiv(topk + window_size, block))
-        ](
-            combined_ragged,
-            combined_indptr,
-            topk_indices,
-            topk_indices.stride(0),
-            query_start_loc,
-            seq_lens,
-            gather_lens,
-            M,
-            N,
-            topk_indices.shape[-1],
-            TOP_K=topk,
-            COMPRESS_RATIO=compress_ratio,
-            WINDOW_SIZE=window_size,
-            BLOCK_SIZE=block,
-        )
-    return combined_ragged, combined_indptr, combined_lens
-
-
 def _copy_ragged_to_graph_buffers(
     ragged_indices: torch.Tensor,
     ragged_indptr: torch.Tensor,
@@ -449,7 +297,7 @@ def _copy_ragged_to_graph_buffers(
 
 
 @dataclass
-class DeepseekV4ROCMAiterMLASparseMetadata(FlashMLASparseMetadata):
+class DeepseekV4ROCMAiterMLASparseMetadata(DeepseekV4FlashMLAMetadata):
     """ROCm-specific DeepSeek V4 metadata carrying ragged decode topk."""
 
     c128a_decode_topk_ragged_indices: torch.Tensor | None = None
@@ -462,12 +310,12 @@ class DeepseekV4ROCMAiterSparseSWAMetadata(DeepseekSparseSWAMetadata):
     decode_swa_ragged_indptr: torch.Tensor | None = None
 
 
-class DeepseekV4ROCMAiterMLASparseMetadataBuilder(FlashMLASparseMetadataBuilder):
+class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4FlashMLAMetadataBuilder):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.c128a_decode_topk_ragged_indices_buffer: torch.Tensor | None = None
         self.c128a_decode_topk_ragged_indptr_buffer: torch.Tensor | None = None
-        if self.is_deepseek_v4 and self.compress_ratio == 128:
+        if self.compress_ratio == 128:
             max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
             self.c128a_decode_topk_ragged_indices_buffer = torch.empty(
                 max_tokens * self.c128a_max_compressed,
@@ -523,8 +371,12 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
+        # The non-causal (DSpark draft) path widens each token's SWA index list
+        # to ``noncausal_index_width`` (>= window_size), so size the persistent
+        # ragged buffer to the wider bound to cover both causal and non-causal.
+        swa_index_width = max(self.window_size, self.noncausal_index_width)
         self.decode_swa_ragged_indices_buffer = torch.empty(
-            max_tokens * self.window_size,
+            max_tokens * swa_index_width,
             dtype=torch.int32,
             device=self.device,
         )
@@ -563,7 +415,9 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
                 self.decode_swa_ragged_indices_buffer,
                 self.decode_swa_ragged_indptr_buffer,
                 base.num_decode_tokens,
-                self.window_size,
+                # Actual dense width for this build: window_size (causal) or
+                # noncausal_index_width (DSpark non-causal draft).
+                base.decode_swa_indices.shape[-1],
             )
 
         return DeepseekV4ROCMAiterSparseSWAMetadata(
@@ -573,7 +427,7 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
         )
 
 
-class DeepseekV4ROCMAiterMLASparseBackend(DeepseekV4FlashMLASparseBackend):
+class DeepseekV4ROCMAiterMLASparseBackend(DeepseekV4FlashMLABackend):
     @staticmethod
     def get_name() -> str:
         return "ROCM_FLASHMLA_SPARSE_DSV4"
@@ -582,13 +436,9 @@ class DeepseekV4ROCMAiterMLASparseBackend(DeepseekV4FlashMLASparseBackend):
     def get_builder_cls() -> type["DeepseekV4ROCMAiterMLASparseMetadataBuilder"]:
         return DeepseekV4ROCMAiterMLASparseMetadataBuilder
 
-    @staticmethod
-    def get_impl_cls() -> type["DeepseekV4SparseMLAAttentionImpl"]:
-        return DeepseekV4ROCMAiterMLASparseImpl
 
-
-class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
-    """ROCm sparse MLA implementation used by DeepSeek V4's custom MLA layer."""
+class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
+    """ROCm sparse MLA attention layer for DeepSeek V4."""
 
     backend_cls = DeepseekV4ROCMAiterMLASparseBackend
 
@@ -596,10 +446,21 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
         return num_heads
 
-    @classmethod
-    def forward_mqa(  # type: ignore[override]
-        cls,
-        layer: "DeepseekV4MLAAttention",
+    def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        # ROCm BF16 reference wo_a path (inverse RoPE + einsum) + wo_b.
+        z = rocm_inv_rope_einsum(
+            self.rotary_emb,
+            o,
+            positions,
+            self.rope_head_dim,
+            self.n_local_groups,
+            self.o_lora_rank,
+            self.wo_a,
+        )
+        return self.wo_b(z.flatten(1))
+
+    def forward_mqa(
+        self,
         q: torch.Tensor,
         kv: torch.Tensor,
         positions: torch.Tensor,
@@ -619,16 +480,16 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
             # Warmup dummy run: no real metadata. Reserve the same bf16
             # gather workspace _forward_prefill would; the dequantize / topk
             # / sparse_fwd kernels are skipped this step.
-            swa_only = layer.compress_ratio <= 1
+            swa_only = self.compress_ratio <= 1
             N = (
                 0
                 if swa_only
-                else (layer.max_model_len + layer.compress_ratio - 1)
-                // layer.compress_ratio
+                else (self.max_model_len + self.compress_ratio - 1)
+                // self.compress_ratio
             )
-            M = N + layer.window_size + layer.max_num_batched_tokens
+            M = N + self.window_size + self.max_num_batched_tokens
             current_workspace_manager().get_simultaneous(
-                ((cls.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
+                ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
             )
             output.zero_()
             return
@@ -636,25 +497,24 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
         assert isinstance(attn_metadata, dict)
         rocm_metadata = cast(
             DeepseekV4ROCMAiterMLASparseMetadata | None,
-            attn_metadata.get(layer.prefix),
+            attn_metadata.get(self.prefix),
         )
         swa_metadata = cast(
             DeepseekV4ROCMAiterSparseSWAMetadata | None,
-            attn_metadata.get(layer.swa_cache_layer.prefix),
+            attn_metadata.get(self.swa_cache_layer.prefix),
         )
         assert swa_metadata is not None
 
-        swa_only = layer.compress_ratio <= 1
-        self_kv_cache = layer.kv_cache if not swa_only else None
-        swa_kv_cache = layer.swa_cache_layer.kv_cache
+        swa_only = self.compress_ratio <= 1
+        self_kv_cache = self.kv_cache if not swa_only else None
+        swa_kv_cache = self.swa_cache_layer.kv_cache
 
         num_decodes = swa_metadata.num_decodes
         num_prefills = swa_metadata.num_prefills
         num_decode_tokens = swa_metadata.num_decode_tokens
 
         if num_prefills > 0:
-            cls._forward_prefill(
-                layer=layer,
+            self._forward_prefill(
                 q=q[num_decode_tokens:],
                 positions=positions[num_decode_tokens:],
                 compressed_k_cache=self_kv_cache,
@@ -664,8 +524,7 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
                 swa_metadata=swa_metadata,
             )
         if num_decodes > 0:
-            cls._forward_decode(
-                layer=layer,
+            self._forward_decode(
                 q=q[:num_decode_tokens],
                 kv_cache=self_kv_cache,
                 swa_metadata=swa_metadata,
@@ -674,10 +533,8 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
                 output=output[:num_decode_tokens],
             )
 
-    @classmethod
     def _forward_decode(
-        cls,
-        layer: "DeepseekV4MLAAttention",
+        self,
         q: torch.Tensor,
         kv_cache: torch.Tensor | None,
         swa_metadata: DeepseekV4ROCMAiterSparseSWAMetadata,
@@ -695,16 +552,16 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
         if not swa_only:
             assert attn_metadata is not None
             assert swa_metadata.is_valid_token is not None
-            block_size = attn_metadata.block_size // layer.compress_ratio
+            block_size = attn_metadata.block_size // self.compress_ratio
             is_valid = swa_metadata.is_valid_token[:num_decode_tokens]
-            if layer.compress_ratio == 4:
-                assert layer.topk_indices_buffer is not None
+            if self.compress_ratio == 4:
+                assert self.topk_indices_buffer is not None
                 (
                     topk_ragged_indices,
                     topk_ragged_indptr,
                     topk_lens,
                 ) = compute_global_topk_ragged_indices_and_indptr(
-                    layer.topk_indices_buffer[:num_decode_tokens],
+                    self.topk_indices_buffer[:num_decode_tokens],
                     swa_metadata.token_to_req_indices,
                     attn_metadata.block_table[:num_decodes],
                     block_size,
@@ -719,7 +576,7 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
         rocm_sparse_attn_decode(
             q=q,
             kv_cache=kv_cache,
-            swa_k_cache=layer.swa_cache_layer.kv_cache,
+            swa_k_cache=self.swa_cache_layer.kv_cache,
             swa_only=swa_only,
             topk_indices=topk_indices,
             topk_lens=topk_lens,
@@ -729,18 +586,16 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
             swa_ragged_indptr=swa_metadata.decode_swa_ragged_indptr,
             topk_ragged_indices=topk_ragged_indices,
             topk_ragged_indptr=topk_ragged_indptr,
-            attn_sink=layer.attn_sink,
-            scale=layer.scale,
-            head_dim=layer.head_dim,
-            nope_head_dim=layer.nope_head_dim,
-            rope_head_dim=layer.rope_head_dim,
+            attn_sink=self.attn_sink,
+            scale=self.scale,
+            head_dim=self.head_dim,
+            nope_head_dim=self.nope_head_dim,
+            rope_head_dim=self.rope_head_dim,
             output=output,
         )
 
-    @classmethod
     def _forward_prefill(
-        cls,
-        layer: "DeepseekV4MLAAttention",
+        self,
         q: torch.Tensor,
         positions: torch.Tensor,
         compressed_k_cache: torch.Tensor | None,
@@ -768,47 +623,49 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
         prefill_token_base = query_start_loc_cpu[num_decodes]
 
         if not swa_only:
-            if layer.compress_ratio == 4:
-                assert layer.topk_indices_buffer is not None
-                topk_indices = layer.topk_indices_buffer[num_decode_tokens:]
+            if self.compress_ratio == 4:
+                assert self.topk_indices_buffer is not None
+                topk_indices = self.topk_indices_buffer[num_decode_tokens:]
                 topk_indices = topk_indices[:num_prefill_tokens]
             else:
                 assert attn_metadata is not None
                 topk_indices = attn_metadata.c128a_prefill_topk_indices
             assert topk_indices is not None
             top_k = topk_indices.shape[-1]
-            N = (layer.max_model_len + layer.compress_ratio - 1) // layer.compress_ratio
+            N = (self.max_model_len + self.compress_ratio - 1) // self.compress_ratio
         else:
-            assert layer.topk_indices_buffer is not None
-            topk_indices = layer.topk_indices_buffer[num_decode_tokens:]
+            assert self.topk_indices_buffer is not None
+            topk_indices = self.topk_indices_buffer[num_decode_tokens:]
             top_k = 0
             N = 0
 
-        M = N + layer.window_size + layer.max_num_batched_tokens
-        num_chunks = (num_prefills + cls.PREFILL_CHUNK_SIZE - 1) // (
-            cls.PREFILL_CHUNK_SIZE
+        M = N + self.window_size + self.max_num_batched_tokens
+        num_chunks = (num_prefills + self.PREFILL_CHUNK_SIZE - 1) // (
+            self.PREFILL_CHUNK_SIZE
         )
 
         workspace_manager = current_workspace_manager()
         kv = workspace_manager.get_simultaneous(
-            ((cls.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
+            ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
         )[0]
         for chunk_idx in range(num_chunks):
-            chunk_start = chunk_idx * cls.PREFILL_CHUNK_SIZE
-            chunk_end = min(chunk_start + cls.PREFILL_CHUNK_SIZE, num_prefills)
+            chunk_start = chunk_idx * self.PREFILL_CHUNK_SIZE
+            chunk_end = min(chunk_start + self.PREFILL_CHUNK_SIZE, num_prefills)
             chunk_size = chunk_end - chunk_start
             if not swa_only:
                 assert attn_metadata is not None
                 assert compressed_k_cache is not None
                 block_table = attn_metadata.block_table[num_decodes:]
+                # compressed_k_cache is OCP on every platform (Triton encoder).
                 dequantize_and_gather_k_cache(
                     kv[:chunk_size],
                     compressed_k_cache,
-                    seq_lens=seq_lens[chunk_start:chunk_end] // layer.compress_ratio,
+                    seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
                     gather_lens=None,
                     block_table=block_table[chunk_start:chunk_end],
-                    block_size=attn_metadata.block_size // layer.compress_ratio,
+                    block_size=attn_metadata.block_size // self.compress_ratio,
                     offset=0,
+                    use_fnuz=False,
                 )
 
             swa_block_table = swa_metadata.block_table[num_decodes:]
@@ -820,6 +677,7 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
                 block_table=swa_block_table[chunk_start:chunk_end],
                 block_size=swa_metadata.block_size,
                 offset=N,
+                use_fnuz=current_platform.is_fp8_fnuz(),
             )
 
             query_start = (
@@ -836,8 +694,8 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
                 ],
                 seq_lens[chunk_start:chunk_end],
                 gather_lens[chunk_start:chunk_end],
-                layer.window_size,
-                layer.compress_ratio,
+                self.window_size,
+                self.compress_ratio,
                 top_k,
                 M,
                 N,
@@ -847,10 +705,10 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
                 kv=kv.view(-1, 1, q.shape[-1]),
                 indices=combined_indices,
                 topk_length=combined_lens,
-                scale=layer.scale,
-                head_dim=layer.head_dim,
-                nope_head_dim=layer.nope_head_dim,
-                rope_head_dim=layer.rope_head_dim,
-                attn_sink=layer.attn_sink,
+                scale=self.scale,
+                head_dim=self.head_dim,
+                nope_head_dim=self.nope_head_dim,
+                rope_head_dim=self.rope_head_dim,
+                attn_sink=self.attn_sink,
                 output=output[query_start:query_end],
             )
