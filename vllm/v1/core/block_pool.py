@@ -264,7 +264,6 @@ class BlockPool:
             request.block_hashes, self.hash_block_size, block_size
         )
 
-        new_block_hashes = block_hashes[num_cached_blocks:]
         new_hashes: list[ExternalBlockHash] | None = (
             [] if self.enable_kv_cache_events else None
         )
@@ -274,7 +273,7 @@ class BlockPool:
             # in align mode. We skip null blocks here.
             if blk.is_null or (block_mask is not None and not block_mask[i]):
                 continue
-            block_hash = new_block_hashes[i]
+            block_hash = block_hashes[num_cached_blocks + i]
             num_hash_tokens = (num_cached_blocks + i + 1) * block_size
 
             # Update and added the full block to the cache.
