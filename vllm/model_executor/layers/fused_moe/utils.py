@@ -454,7 +454,7 @@ def trtllm_moe_pack_topk_ids_weights(
 
 
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
-def swiglu_limit_func(
+def _swiglu_limit_torch(
     output: torch.Tensor,
     input: torch.Tensor,  # first half is gate, second half is up
     swiglu_limit: float = 0.0,
@@ -468,6 +468,108 @@ def swiglu_limit_func(
         up = torch.clamp(up, min=-swiglu_limit, max=swiglu_limit)
 
     output.copy_(F.silu(gate) * up)
+
+
+@triton.jit
+def _swiglu_limit_pad_aware_kernel(
+    input_ptr,  # [num_tokens, 2 * hidden_size]
+    output_ptr,  # [num_tokens, hidden_size]
+    topk_ids_ptr,  # [num_tokens, num_topk]
+    expert_map_ptr,  # global -> local expert id, or -1 if non-local
+    hidden_size,
+    input_row_stride,
+    num_tokens,
+    swiglu_limit,
+    HAS_LIMIT: tl.constexpr,
+    HAS_EXPERT_MAP: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Persistent over rows: each CTA owns one column tile and processes a
+    # strided set of token assignments.
+    pid = tl.program_id(0)
+    row_stride = tl.num_programs(0)
+    column_tile = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = column_tile < hidden_size
+
+    for row in tl.range(pid, num_tokens, row_stride):
+        expert_id = tl.load(topk_ids_ptr + row)
+        should_compute = expert_id != -1
+        if HAS_EXPERT_MAP:
+            local_expert_id = tl.load(
+                expert_map_ptr + expert_id,
+                mask=expert_id >= 0,
+                other=-1,
+            )
+            should_compute = should_compute & (local_expert_id != -1)
+
+        if should_compute:
+            gate_offsets = row.to(tl.int64) * input_row_stride + column_tile
+            up_offsets = gate_offsets + hidden_size
+
+            gate = tl.load(input_ptr + gate_offsets, mask=mask, other=0.0).to(
+                tl.float32
+            )
+
+            up = tl.load(input_ptr + up_offsets, mask=mask, other=0.0).to(tl.float32)
+
+            if HAS_LIMIT:
+                gate = tl.minimum(gate, swiglu_limit)
+                up = tl.maximum(up, -swiglu_limit)
+                up = tl.minimum(up, swiglu_limit)
+
+            silu_gate = gate / (1.0 + tl.exp(-gate))
+            result = silu_gate * up
+            tl.store(
+                output_ptr + row.to(tl.int64) * hidden_size + column_tile,
+                result.to(output_ptr.dtype.element_ty),
+                mask=mask,
+            )
+
+
+def _swiglu_limit_pad_aware(
+    output: torch.Tensor,
+    input: torch.Tensor,
+    topk_ids: torch.Tensor,
+    swiglu_limit: float,
+    expert_map: torch.Tensor | None = None,
+) -> None:
+    num_tokens, gate_up_size = input.shape
+    hidden_size = gate_up_size // 2
+    if num_tokens == 0:
+        return
+
+    BLOCK_SIZE = 1024
+    grid = (min(num_tokens, 256), triton.cdiv(hidden_size, BLOCK_SIZE))
+    _swiglu_limit_pad_aware_kernel[grid](
+        input,
+        output,
+        topk_ids,
+        expert_map,
+        hidden_size,
+        gate_up_size,
+        num_tokens,
+        swiglu_limit,
+        HAS_LIMIT=swiglu_limit > 0,
+        HAS_EXPERT_MAP=expert_map is not None,
+        BLOCK_SIZE=BLOCK_SIZE,
+        num_warps=4,
+    )
+
+
+def swiglu_limit_func(
+    output: torch.Tensor,
+    input: torch.Tensor,  # first half is gate, second half is up
+    swiglu_limit: float = 0.0,
+    topk_ids: torch.Tensor | None = None,
+    expert_map: torch.Tensor | None = None,
+) -> None:
+    # The pad-aware Triton kernel skips unrouted token slots (topk_ids == -1)
+    # and, when expert_map is given, slots routed to non-local experts, so it
+    # requires topk_ids. Fall back to the torch implementation otherwise.
+    if topk_ids is not None:
+        _swiglu_limit_pad_aware(output, input, topk_ids, swiglu_limit, expert_map)
+    else:
+        _swiglu_limit_torch(output, input, swiglu_limit)
 
 
 @functools.lru_cache
