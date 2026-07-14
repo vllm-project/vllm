@@ -65,6 +65,10 @@ class GDNAttentionMetadata:
 
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
 
+    # Per-decode-row ring write position for the cached decode kernel.
+    # shape: [num_decodes]; None unless use_replayssm is enabled.
+    write_pos_d: torch.Tensor | None = None
+
     # Pre-computed FLA chunk metadata (avoids GPU->CPU sync in prepare_chunk_indices)
     chunk_indices: torch.Tensor | None = None
     chunk_offsets: torch.Tensor | None = None
@@ -165,6 +169,18 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             device=device,
         )
 
+        # Cached decode kernel: persistent per-decode-row ring write position.
+        # write_pos is derived per request each step (decode_step % max_cache_len)
+        # so recycled paged blocks need no zero-init.
+        self.use_cached_kernel: bool = vllm_config.cache_config.use_replayssm
+        self.max_cache_len: int = vllm_config.cache_config.replayssm_buffer_len
+        if self.use_cached_kernel:
+            self.decode_write_pos_d: torch.Tensor = torch.empty(
+                (self.decode_cudagraph_max_bs,),
+                dtype=torch.int32,
+                device=device,
+            )
+
     def build(  # type: ignore[override]
         self,
         common_prefix_len: int,
@@ -209,8 +225,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 )
 
         if spec_sequence_masks is None:
+            # ReplaySSM routes single-token prefill-as-decode rows to prefill.
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-                split_decodes_and_prefills(m, decode_threshold=1)
+                split_decodes_and_prefills(
+                    m,
+                    decode_threshold=1,
+                    treat_short_extends_as_decodes=not self.use_cached_kernel,
+                )
             )
             num_spec_decode_tokens = 0
             spec_token_indx = None
@@ -412,6 +433,44 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             f"num_decodes: {num_decodes}, num_spec_decodes: {num_spec_decodes}"
         )
 
+        # Cached decode kernel: derive the per-request ring write position
+        # (write_pos = decode_step % max_cache_len). Only the non-spec decode
+        # path runs the cached kernel.
+        write_pos_d = None
+        if self.use_cached_kernel and spec_sequence_masks is None and num_decodes > 0:
+            num_prompt_tokens_cpu = m.num_prompt_tokens_cpu
+            num_computed_tokens_cpu = m._num_computed_tokens_cpu
+            if num_prompt_tokens_cpu is None or num_computed_tokens_cpu is None:
+                raise ValueError(
+                    "use_replayssm requires CPU prompt and "
+                    "computed-token counts to derive decode write positions"
+                )
+            decode_steps_cpu = (
+                num_computed_tokens_cpu[:num_decodes]
+                - num_prompt_tokens_cpu[:num_decodes]
+            )
+            query_lens_cpu = (
+                query_start_loc_cpu[1 : num_decodes + 1]
+                - query_start_loc_cpu[:num_decodes]
+            )
+            valid_decode_rows = query_lens_cpu > 0
+            if torch.any(decode_steps_cpu[valid_decode_rows] < 0).item():
+                raise ValueError(
+                    "use_replayssm requires decode-step counts that "
+                    "exclude prompt tokens and start at zero"
+                )
+            decode_steps_cpu = torch.where(
+                valid_decode_rows,
+                decode_steps_cpu,
+                torch.zeros_like(decode_steps_cpu),
+            )
+            write_pos_cpu = torch.remainder(decode_steps_cpu, self.max_cache_len)
+            write_pos_d = async_tensor_h2d(
+                write_pos_cpu.to(torch.int32).tolist(),
+                dtype=torch.int32,
+                device=query_start_loc.device,
+            )
+
         # Prepare per-request tensors for cudagraph. m.num_actual_tokens is
         # token-padded for FULL graph replay, but the GDN state/query/accepted
         # metadata below is indexed by request.
@@ -484,6 +543,16 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
+            if self.use_cached_kernel:
+                assert write_pos_d is not None
+                self.decode_write_pos_d[:num_decodes].copy_(
+                    write_pos_d, non_blocking=True
+                )
+                write_pos_d = self.decode_write_pos_d[:batch_size]
+                # Padded rows map to NULL_BLOCK_ID and hit the kernel's early
+                # return, so their write position is never read; zero is fine.
+                write_pos_d[num_decodes:].fill_(0)
+
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
@@ -506,6 +575,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_token_indx=spec_token_indx,
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
+            write_pos_d=write_pos_d,
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
