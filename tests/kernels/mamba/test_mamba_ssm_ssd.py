@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
+from vllm.model_executor.layers.mamba.ops.ssd_chunk_state import _chunk_cumsum_fwd
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
@@ -577,3 +578,136 @@ def test_mamba_chunk_scan_cont_batch_prefill_chunking(chunk_size, seqlens):
             rtol=rtol,
             msg=lambda x, i=i: f"seq{i} state " + x,
         )
+
+
+# ---------------------------------------------------------------------------
+# Targeted tests for the _chunk_cumsum_fwd Triton tensor-descriptor (TD) store
+# path (VLLM_TRITON_USE_TD). These go beyond the pipeline-level tests above by
+# directly exercising the kernel wrapper and comparing both store paths against
+# a pure-torch golden reference. They deliberately stress the cases the TD
+# shape-bounds masking replaces: a non-power-of-2 head count (partial head
+# tile), a partial last chunk (limit < chunk_size), single head, non-power-of-2
+# chunk size, missing dt_bias, and a finite dt_limit clamp.
+# ---------------------------------------------------------------------------
+
+
+def _chunk_cumsum_reference(
+    dt, A, chunk_size, cu_chunk_seqlens, dt_bias, dt_softplus, dt_limit
+):
+    """Pure-torch golden reference mirroring _chunk_cumsum_fwd_kernel.
+
+    dt_out is the (clamped, optionally softplus'd) timestep, zeroed beyond each
+    chunk's valid token limit; dA_cumsum is its A-scaled cumulative sum carried
+    across the full chunk_size.
+    """
+    seqlen, nheads = dt.shape
+    nchunks = cu_chunk_seqlens.shape[0] - 1
+    dt_min, dt_max = dt_limit
+    dt_out = torch.zeros(
+        nheads, nchunks, chunk_size, device=dt.device, dtype=torch.float32
+    )
+    dA_cumsum = torch.zeros_like(dt_out)
+    A_f = A.to(torch.float32)
+    bias_f = None if dt_bias is None else dt_bias.to(torch.float32)
+    for c in range(nchunks):
+        start = int(cu_chunk_seqlens[c])
+        end = int(cu_chunk_seqlens[c + 1])
+        limit = end - start
+        d = dt[start:end, :].to(torch.float32)  # (limit, nheads)
+        if bias_f is not None:
+            d = d + bias_f[None, :]
+        if dt_softplus:
+            d = torch.where(d <= 20.0, F.softplus(d), d)
+        d = torch.clamp(d, dt_min, dt_max)
+        dt_out[:, c, :limit] = d.transpose(0, 1)  # (nheads, limit)
+        dA = dt_out[:, c, :] * A_f[:, None]  # zeros beyond limit
+        dA_cumsum[:, c, :] = torch.cumsum(dA, dim=1)
+    return dA_cumsum, dt_out
+
+
+def _chunk_cumsum_both_paths(
+    dt, A, chunk_size, dt_bias, dt_softplus, dt_limit, monkeypatch
+):
+    """Run _chunk_cumsum_fwd with TD off and on; return both plus a torch ref."""
+    cu_seqlens = torch.tensor((0, dt.shape[0]), device=DEVICE).cumsum(0).to(torch.int32)
+    cu_chunk_seqlens, _, _ = compute_varlen_chunk_metadata(cu_seqlens, chunk_size)
+    results = {}
+    for flag in ("0", "1"):
+        monkeypatch.setenv("VLLM_TRITON_USE_TD", flag)
+        dA, dt_out = _chunk_cumsum_fwd(
+            dt,
+            A,
+            chunk_size,
+            cu_chunk_seqlens,
+            dt_bias=dt_bias,
+            dt_softplus=dt_softplus,
+            dt_limit=dt_limit,
+        )
+        results[flag] = (dA.clone(), dt_out.clone())
+    ref = _chunk_cumsum_reference(
+        dt, A, chunk_size, cu_chunk_seqlens, dt_bias, dt_softplus, dt_limit
+    )
+    return results, ref
+
+
+def _make_dt(seqlen, nheads, itype):
+    return F.softplus(torch.randn(seqlen, nheads, dtype=itype, device=DEVICE) - 4)
+
+
+def _assert_chunk_cumsum(results, ref, itype):
+    ref_dA, ref_dt = ref
+    atol, rtol = (1e-3, 1e-4) if itype == torch.float32 else (3e-2, 3e-2)
+    # Both store paths must match the independent torch reference.
+    for flag in ("0", "1"):
+        dA, dt_out = results[flag]
+        torch.testing.assert_close(dt_out, ref_dt, atol=atol, rtol=rtol)
+        torch.testing.assert_close(dA, ref_dA, atol=atol, rtol=rtol)
+    # The only intended difference between the paths is how dt_out is stored, so
+    # both must agree. The dt_out store itself is exact; dA_cumsum can differ by
+    # fp32 rounding because USE_TD on/off compile to two distinct kernels.
+    torch.testing.assert_close(results["1"][1], results["0"][1], atol=0.0, rtol=0.0)
+    torch.testing.assert_close(results["1"][0], results["0"][0], atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("itype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("nheads", [17, 128])
+@pytest.mark.parametrize("dt_softplus", [True, False])
+def test_chunk_cumsum_td_matches_reference(nheads, dt_softplus, itype, monkeypatch):
+    set_random_seed(0)
+    chunk_size = 256
+    # multiple chunks with a partial last chunk (limit < chunk_size)
+    seqlen = 2 * chunk_size + chunk_size // 2 + 3
+    dt = _make_dt(seqlen, nheads, itype)
+    A = -torch.exp(torch.rand(nheads, dtype=torch.float32, device=DEVICE))
+    dt_bias = torch.randn(nheads, dtype=torch.float32, device=DEVICE)
+    dt_limit = (0.0, float("inf"))
+
+    results, ref = _chunk_cumsum_both_paths(
+        dt, A, chunk_size, dt_bias, dt_softplus, dt_limit, monkeypatch
+    )
+    _assert_chunk_cumsum(results, ref, itype)
+
+
+@pytest.mark.parametrize(
+    "nheads,chunk_size,dt_bias_on,dt_limit",
+    [
+        (1, 256, True, (0.0, float("inf"))),  # single head
+        (8, 120, True, (0.0, float("inf"))),  # non-power-of-2 chunk size
+        (17, 256, False, (0.0, float("inf"))),  # no dt_bias
+        (17, 256, True, (0.01, 0.5)),  # finite dt_limit clamp
+    ],
+)
+def test_chunk_cumsum_td_options(nheads, chunk_size, dt_bias_on, dt_limit, monkeypatch):
+    set_random_seed(0)
+    itype = torch.float32
+    seqlen = 3 * chunk_size - 7  # partial last chunk
+    dt = _make_dt(seqlen, nheads, itype)
+    A = -torch.exp(torch.rand(nheads, dtype=torch.float32, device=DEVICE))
+    dt_bias = (
+        torch.randn(nheads, dtype=torch.float32, device=DEVICE) if dt_bias_on else None
+    )
+
+    results, ref = _chunk_cumsum_both_paths(
+        dt, A, chunk_size, dt_bias, True, dt_limit, monkeypatch
+    )
+    _assert_chunk_cumsum(results, ref, itype)
