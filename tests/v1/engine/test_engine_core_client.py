@@ -308,15 +308,18 @@ def test_dplb_finished_requests_release_inflight():
     assert req.request_id not in client.reqs_in_flight
 
 
-def test_apply_ready_response_syncs_block_size():
+def test_apply_ready_response_syncs_engine_metadata():
     import msgspec
 
     client = object.__new__(MPClient)
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
+        parallel_config=SimpleNamespace(_coord_store_port=0),
     )
     client.stats_update_address = None
+    client.coordinator_input_address = None
+    client.coordinator_output_address = None
 
     payload = msgspec.msgpack.encode(
         EngineCoreReadyResponse(
@@ -335,10 +338,16 @@ def test_apply_ready_response_syncs_block_size():
             max_num_seqs=256,
             max_num_batched_tokens=8192,
             instance_id="test-instance",
+            coord_store_port=1234,
+            coordinator_input_address="tcp://127.0.0.1:1235",
+            coordinator_output_address="tcp://127.0.0.1:1236",
         )
     )
     client._apply_ready_response(payload)
     assert client.vllm_config.cache_config.block_size == 1056
+    assert client.vllm_config.parallel_config._coord_store_port == 1234
+    assert client.coordinator_input_address == "tcp://127.0.0.1:1235"
+    assert client.coordinator_output_address == "tcp://127.0.0.1:1236"
 
 
 def loop_until_done(client: EngineCoreClient, outputs: dict):
