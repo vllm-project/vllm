@@ -588,8 +588,12 @@ class ResponsesRequest(OpenAIBaseModel):
             return data
 
         tools = data.get("tools")
+        if tools is None:
+            # Tool loops routinely null out `tools` on continuation turns.
+            tools = data["tools"] = []
+
         tool_choice = data.get("tool_choice", "auto")
-        has_tools = tools is not None and len(tools) > 0
+        has_tools = len(tools) > 0
         is_named_tool_choice = (
             isinstance(tool_choice, dict) and tool_choice.get("type") == "function"
         )
@@ -607,7 +611,7 @@ class ResponsesRequest(OpenAIBaseModel):
                     "Tool choice 'function' not found in 'tools' parameter.",
                     parameter="tool_choice",
                 )
-        elif is_named_tool_choice and tools is not None:
+        elif is_named_tool_choice:
             tool_name = tool_choice.get("name")
             tool_names = set()
             for tool in tools:
