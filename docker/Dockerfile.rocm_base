@@ -42,16 +42,18 @@ RUN mkdir -p /app
 WORKDIR /app
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install Python and other dependencies
+# Install Python and other dependencies.
+# gcc-13: torch 2.12 needs libgcc bf16 builtins (__truncsfbf2) absent from jammy's gcc-11.
 RUN apt-get update -y \
     && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev liblzma-dev pkg-config \
     && for i in 1 2 3; do \
-        add-apt-repository -y ppa:deadsnakes/ppa && break || \
+        add-apt-repository -y ppa:deadsnakes/ppa && add-apt-repository -y ppa:ubuntu-toolchain-r/test && break || \
         { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
     done \
     && apt-get update -y \
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
-       python${PYTHON_VERSION}-lib2to3 python-is-python3  \
+       python${PYTHON_VERSION}-lib2to3 python-is-python3 gcc-13 g++-13 \
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 130 --slave /usr/bin/g++ g++ /usr/bin/g++-13 \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
@@ -144,19 +146,6 @@ ARG PYTORCH_AUDIO_REPO
 ARG USE_SCCACHE
 
 RUN apt-get update && apt-get install -y pkg-config liblzma-dev
-# torch 2.12 emits float->__bf16 conversion libcalls (e.g. __truncsfbf2) that
-# jammy's gcc-11 libgcc does not provide, breaking the libtorch_hip.so link.
-# gcc-13 (GCC_13.0.0) ships the bf16 soft-float builtins. add-apt-repository is
-# unusable here (python3 is repointed to 3.12, so apt_pkg is missing), so add
-# the toolchain PPA manually with an HTTPS-fetched key.
-RUN mkdir -p /etc/apt/keyrings \
-    && curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x60C317803A41BA51845E371A1E9377A2BA9EF27F" \
-       | gpg --dearmor -o /etc/apt/keyrings/ubuntu-toolchain-r.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/ubuntu-toolchain-r.gpg] https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu jammy main" \
-       > /etc/apt/sources.list.d/ubuntu-toolchain-r.list \
-    && apt-get update && apt-get install -y gcc-13 g++-13 \
-    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 130 \
-                           --slave  /usr/bin/g++ g++ /usr/bin/g++-13
 RUN git clone ${PYTORCH_REPO} pytorch
 RUN cd pytorch && git checkout ${PYTORCH_BRANCH}
 RUN cd pytorch \
