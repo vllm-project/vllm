@@ -21,7 +21,10 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.deepseek_mtp import SharedHead
+from vllm.model_executor.models.deepseek_mtp import (
+    SharedHead,
+    _restore_full_token_layout_if_needed,
+)
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2MixtureOfExperts,
     DeepseekV2MoE,
@@ -36,7 +39,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .kernels import fused_eh_norm
-from .model import DeepseekV32DecoderLayer, _all_gather_sp_states
+from .model import DeepseekV32DecoderLayer
 
 
 class DeepseekV32MultiTokenPredictorLayer(nn.Module):
@@ -89,14 +92,13 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
-        # sequence-parallel MoE returns TP-sharded token rows, but the shared
-        # head and the hidden state recycled by the next MTP step need the full
-        # token sequence on every rank.
-        if self.mtp_block.use_sequence_parallel_moe:
-            hidden_states, residual = _all_gather_sp_states(
-                hidden_states, residual, positions.shape[0]
-            )
-        else:
+        hidden_states, residual = _restore_full_token_layout_if_needed(
+            hidden_states,
+            residual,
+            positions.shape[0],
+            is_sequence_parallel=self.mtp_block.use_sequence_parallel_moe,
+        )
+        if not self.mtp_block.use_sequence_parallel_moe:
             # Without sequence parallelism, the MoE output is left un-reduced.
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         # Recycle the POST-final-norm hidden into the next draft step. The
