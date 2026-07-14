@@ -74,6 +74,60 @@ class DSparkSpeculator(DFlashSpeculator):
         self._d2t_scatter_index: torch.Tensor | None = None
         self._draft_scatter_buf: torch.Tensor | None = None
 
+        # PATCH (local): draft-side repetition penalty. When enabled (env
+        # VLLM_DRAFT_REP_PENALTY=1 + probabilistic drafting), the drafter
+        # mirrors the target's repetition-penalty logit transform so the
+        # rejection test compares aligned p/q distributions. Without this,
+        # every context-repeated token has q suppressed but p not, which
+        # costs speculation acceptance heavily on repetition-rich outputs
+        # (e.g. TTS speech tokens). Set via set_penalties_state().
+        self._penalties_state = None
+        self._pen_scale_buf: torch.Tensor | None = None
+        self._pen_bit_shifts: torch.Tensor | None = None
+
+    def set_penalties_state(self, penalties_state) -> None:
+        import os
+
+        if os.environ.get("VLLM_DRAFT_REP_PENALTY", "0") != "1":
+            return
+        if self.draft_logits is None:
+            # Greedy drafting: rejection uses exact match, p/q alignment moot.
+            return
+        self._penalties_state = penalties_state
+        self._pen_scale_buf = torch.ones(
+            self.max_num_reqs,
+            self.vocab_size,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self._pen_bit_shifts = torch.arange(
+            32, dtype=torch.int32, device=self.device
+        )
+
+    def load_draft_model(
+        self,
+        target_model: torch.nn.Module,
+        target_attn_layer_names: set[str],
+    ) -> torch.nn.Module:
+        model = load_dspark_model(target_model, self.vllm_config)
+        # Reduced draft vocab: probabilistic rejection sampling indexes draft
+        # logits by target id, so precompute the draft->target column map and a
+        # scratch buffer to scatter logits into target vocab before sampling.
+        if self.draft_logits is not None and model.draft_id_to_target_id is not None:
+            d2t = model.draft_id_to_target_id
+            self._d2t_scatter_index = (
+                torch.arange(d2t.shape[0], device=d2t.device) + d2t
+            )
+            # -inf once; the per-step scatter overwrites the draft->target
+            # columns. Kept separate from draft_logits to avoid aliasing.
+            self._draft_scatter_buf = torch.full(
+                (self.max_num_reqs, self.vocab_size),
+                float("-inf"),
+                dtype=self.draft_logits.dtype,
+                device=self.device,
+            )
+        return model
+
     def load_draft_model(
         self,
         target_model: torch.nn.Module,
@@ -116,6 +170,34 @@ class DSparkSpeculator(DFlashSpeculator):
         # read via the precomputed persistent index (fixed buffer for capture).
         prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
 
+        # PATCH (local): build the per-request repetition-penalty scale for
+        # this draft round, mirroring _penalties_kernel: penalize tokens in
+        # the prompt bin mask or with nonzero output bin counts; in-block
+        # draft tokens are added below as they are sampled (the verify kernel
+        # accumulates draft tokens t_0..t_{i-1} for the row checking t_i; the
+        # anchor is excluded there too). rep==1.0 rows are no-ops, so this is
+        # safe to run unconditionally inside the captured graph.
+        pen_scale = None
+        pen_rep = None
+        if self._penalties_state is not None and self.draft_logits is not None:
+            ps = self._penalties_state
+            rows = idx_map[:, 0].to(torch.long)
+            pen_rep = ps.repetition_penalty.gpu[rows].to(torch.float32)
+            base_mask = ps.output_bin_counts[rows] > 0
+            packed = ps.prompt_bin_mask[rows]
+            bits = (packed.unsqueeze(-1) >> self._pen_bit_shifts) & 1
+            base_mask |= (
+                bits.reshape(num_reqs, -1)[:, : self.vocab_size].to(torch.bool)
+            )
+            pen_scale = self._pen_scale_buf[:num_reqs]
+            pen_scale.copy_(
+                torch.where(
+                    base_mask,
+                    pen_rep.unsqueeze(1),
+                    torch.ones((), device=pen_rep.device),
+                )
+            )
+
         for i in range(n_spec):
             # Sequential stage: Markov bias from the previously sampled token.
             markov_embed = self.model.markov_embed(prev)
@@ -129,6 +211,12 @@ class DSparkSpeculator(DFlashSpeculator):
                     buf = self._draft_scatter_buf[:num_reqs]
                     buf.index_copy_(1, self._d2t_scatter_index, logits_i.to(buf.dtype))
                     logits_i = buf
+                # PATCH (local): mirror the target's repetition-penalty logit
+                # transform on the draft logits (same divide/multiply rule).
+                if pen_scale is not None:
+                    logits_i = logits_i * torch.where(
+                        logits_i > 0, 1.0 / pen_scale, pen_scale
+                    )
                 # sample_pos is the predicted token's position Q; the target
                 # verifies it with the predecessor's Gumbel key (Q-1). Pass Q-1.
                 draft_sampled_i = gumbel_sample(
@@ -147,6 +235,15 @@ class DSparkSpeculator(DFlashSpeculator):
                     logits_i.argmax(dim=-1)
                 )
             self.draft_tokens[:num_reqs, i] = draft_sampled_i
+            # PATCH (local): the just-sampled draft token joins the penalty
+            # set for subsequent in-block steps (matches the verify kernel's
+            # t_0..t_{i-1} accumulation).
+            if pen_scale is not None:
+                pen_scale.scatter_(
+                    1,
+                    draft_sampled_i.view(-1, 1).to(torch.long),
+                    pen_rep.unsqueeze(1),
+                )
             prev = draft_sampled_i
 
     def _generate_draft(

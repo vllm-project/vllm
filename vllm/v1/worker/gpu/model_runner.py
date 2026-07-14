@@ -347,6 +347,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 vocab_size=self.vocab_size,
                 device=self.device,
             )
+            # Let drafters mirror the target's repetition penalty so
+            # probabilistic rejection sampling compares aligned p/q
+            # distributions (opt-in via VLLM_DRAFT_REP_PENALTY=1).
+            if self.speculator is not None and hasattr(
+                self.speculator, "set_penalties_state"
+            ):
+                self.speculator.set_penalties_state(self.sampler.penalties_state)
 
         if self.is_pooling_model and self.is_last_pp_rank:
             self.pooling_runner = PoolingRunner(self.model)
