@@ -787,7 +787,7 @@ class WavTokenizer40(WavTokenizerBase):
         if os.path.exists(safetensors_path):
             state_dict_raw = load_file(safetensors_path, device="cpu")
         elif os.path.exists(ckpt_path):
-            raw_state = torch.load(ckpt_path, map_location="cpu")
+            raw_state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
             if isinstance(raw_state, dict) and "state_dict" in raw_state:
                 state_dict_raw = raw_state["state_dict"]
             else:
