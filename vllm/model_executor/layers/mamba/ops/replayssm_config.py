@@ -88,8 +88,12 @@ def _l_bucket(cache_len: int) -> int:
 # state_and_output stays un-tiled (retained only for precision experiments); the
 # output_only route uses the decoupled dstate-tiled config in _mamba2_output_only.
 _STATE_AND_OUTPUT_BY_L = {8: (32, 1), 16: (32, 1), 32: (32, 1)}
-# GDN standard decode: (block_v, num_warps, num_stages, nk). L-flat in the sweep.
-_GDN_DECODE_BY_L = {8: (64, 1, 3, 2), 16: (64, 1, 3, 2), 32: (64, 1, 3, 2)}
+
+
+def _gdn_decode(L, is_blackwell):
+    if is_blackwell:
+        return 128, 1, 3, 4
+    return 64, 1, 3, 2
 
 
 def get_replayssm_config(kernel: str, **shape) -> tuple:
@@ -117,7 +121,7 @@ def get_replayssm_config(kernel: str, **shape) -> tuple:
     if kernel == "mamba2_state_and_output":
         return _STATE_AND_OUTPUT_BY_L[_l_bucket(shape.get("L", 16))]
     if kernel == "gdn_decode":
-        return _GDN_DECODE_BY_L[_l_bucket(shape.get("L", 16))]
+        return _gdn_decode(shape.get("L", 16), bw)
     if kernel in ("gdn_spec_verify", "gdn_spec_flush"):
         return _gdn_spec(shape["max_spec_len"], bw)
     raise ValueError(f"unknown ReplaySSM kernel config key: {kernel}")
