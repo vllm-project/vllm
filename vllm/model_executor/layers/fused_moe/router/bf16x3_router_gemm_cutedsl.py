@@ -34,6 +34,14 @@ def _decompose_fp32x2_to_3xbf16x2(
     loc=None,
     ip=None,
 ) -> tuple[Uint32, Uint32, Uint32]:
+    # this PTX snippets does the following
+    #   out0 = BF16(in);   res =  in - FP32(out0)
+    #   out1 = BF16(res);  res = res - FP32(out1)
+    #   out2 = BF16(res)
+    #
+    # for normal FP32, this decomposition is exact
+    # i.e. in = FP32(out0) + FP32(out1) + FP32(out2)
+    #
     out = llvm.inline_asm(
         llvm.StructType.get_literal([T.i32(), T.i32(), T.i32()]),
         [w0.ir_value(loc=loc, ip=ip), w1.ir_value(loc=loc, ip=ip)],
@@ -116,8 +124,8 @@ class Sm100BF16x3RouterGemm:
         bid_m, bid_n, bid_k = cute.arch.block_idx()
         _, _, split_k = cute.arch.grid_dim()
 
-        warp_id = cute.arch.make_warp_uniform(tid // 32)
-        lane_id = tid % 32
+        warp_id = cute.arch.make_warp_uniform(cute.arch.warp_idx())
+        lane_id = cute.arch.lane_idx()
 
         BN, BM, BK = self.cta_tile
         num_stages = self.num_stages
@@ -333,7 +341,7 @@ class Sm100BF16x3RouterGemm:
         SPLIT_K = cute.sym_int()
         X = make_fake_tensor(BFloat16, (N, K), divisibility=8)
         W = make_fake_tensor(Float32, (M, K), divisibility=4)
-        out = make_fake_tensor(Float32, (SPLIT_K, N, M), divisibility=16)
+        out = make_fake_tensor(Float32, (SPLIT_K, N, M), divisibility=1)
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
         kernel = Sm100BF16x3RouterGemm(BN)
         return cute.compile(

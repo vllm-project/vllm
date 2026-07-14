@@ -20,7 +20,7 @@ def _requires_sm100_cutedsl():
 
 @pytest.mark.parametrize(
     ("num_tokens", "hidden_dim", "num_experts"),
-    [(48, 6144, 128), (96, 3072, 256)],
+    [(48, 6144, 128), (96, 3072, 256), (129, 3072, 17)],
 )
 def test_bf16x3_router_gemm_matches_reference(
     num_tokens: int, hidden_dim: int, num_experts: int
