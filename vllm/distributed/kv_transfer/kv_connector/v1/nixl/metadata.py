@@ -39,8 +39,10 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   2: Add remote_request_id to kv_transfer_params
 #   3: Add physical_blocks_per_logical_kv_block to NixlAgentMetadata
 #   4: Add KV block lease renewal through heartbeats
+#   5: Add remote_blocks_expiry_time to kv_transfer_params + handshake
+#      clock-sync timestamp
 #
-NIXL_CONNECTOR_VERSION: int = 4
+NIXL_CONNECTOR_VERSION: int = 5
 
 
 @dataclass
@@ -157,6 +159,7 @@ class RemoteMeta:
     port: int
     engine_id: str
     request_id: str
+    blocks_expiry_time: float | None = None
 
 
 @dataclass
@@ -225,5 +228,6 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             request_id=kv_transfer_params["remote_request_id"],
             host=kv_transfer_params["remote_host"],
             port=kv_transfer_params["remote_port"],
+            blocks_expiry_time=kv_transfer_params.get("remote_blocks_expiry_time"),
         )
         self.reqs_to_recv[request_id] = req
