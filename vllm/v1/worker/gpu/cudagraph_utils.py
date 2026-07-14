@@ -232,11 +232,7 @@ class CudaGraphManager:
                 if num_tokens > max_decode_tokens or num_tokens > max_cg_capture_size:
                     return
                 max_requests = min(num_tokens, self.max_num_reqs)
-                request_counts = {
-                    (max_requests + 1) // 2,
-                    (3 * max_requests + 3) // 4,
-                    max_requests,
-                }
+                request_counts = {(max_requests + 1) // 2, max_requests}
                 for num_reqs in sorted(request_counts):
                     if num_reqs * self.decode_query_len < num_tokens:
                         continue

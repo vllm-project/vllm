@@ -32,7 +32,7 @@ from vllm.v1.worker.gpu.input_batch import (  # noqa: E402
 from vllm.v1.worker.gpu.spec_decode.confidence import (  # noqa: E402
     MaskedConfidenceManager,
     VarlenConfidenceManager,
-    build_sps_table_from_costs,
+    build_cost_tables_from_curves,
     compute_prefix_survival,
     make_confidence_manager,
     select_draft_token_budget,
@@ -45,7 +45,6 @@ from vllm.v1.worker.gpu.states import RequestState  # noqa: E402
 
 def _spec_config(**overrides: Any) -> SimpleNamespace:
     config = SimpleNamespace(
-        dspark_confidence_threshold=0.0,
         dspark_budget_frac=1.0,
         dspark_sps_curve=None,
         dspark_online_sts=False,
@@ -62,6 +61,7 @@ def _logit(probs: np.ndarray) -> np.ndarray:
 @pytest.fixture(autouse=True)
 def _single_rank_tp_group(monkeypatch):
     group = SimpleNamespace(
+        rank_in_group=0,
         broadcast=lambda tensor, src=0: tensor,
         broadcast_object=lambda value, src=0: value,
     )
@@ -95,9 +95,7 @@ def test_auto_verification_selects_supported_manager(cg_support, expected_type):
     manager = make_confidence_manager(
         "auto",
         attn_cg_support,
-        max_num_tokens=8,
         req_states=req_states,
-        device=device,
         speculative_config=_spec_config(),
     )
 
@@ -107,7 +105,6 @@ def test_auto_verification_selects_supported_manager(cg_support, expected_type):
 def test_masked_verification_does_not_auto_profile_sps():
     device = torch.device("cuda")
     manager = MaskedConfidenceManager(
-        max_num_tokens=8,
         req_states=RequestState(
             max_num_reqs=2,
             max_model_len=4,
@@ -116,12 +113,12 @@ def test_masked_verification_does_not_auto_profile_sps():
             vocab_size=16,
             device=device,
         ),
-        device=device,
         speculative_config=_spec_config(dspark_sps_curve="auto"),
     )
 
     assert not manager.wants_auto_sps_curve
-    assert manager.sps_table_np is None
+    assert manager.draft_cost_ms is None
+    assert manager.verify_and_sample_cost_ms is None
 
 
 def test_prepare_pos_seq_lens_clears_active_padding():
@@ -196,32 +193,16 @@ def test_varlen_indexer_indices_use_device_lengths():
     assert indices.cpu().tolist() == [0, 1, 1, 2, 3]
 
 
-def test_select_budget_uses_global_prefix_order():
-    survival = compute_prefix_survival(
-        _logit(
-            np.array(
-                [
-                    [0.90, 0.90, 0.90],
-                    [0.95, 0.10, 0.99],
-                    [0.70, 0.70, 0.70],
-                ]
-            )
-        )
-    )
-    budget = select_draft_token_budget(survival, 3, 3, 3, min_survival=0.75)
-    assert budget == 3
-
-
 def test_select_budget_applies_fraction_globally():
     survival = compute_prefix_survival(_logit(np.array([[0.90, 0.80], [0.80, 0.80]])))
     budget = select_draft_token_budget(survival, 2, 2, 2, budget_frac=0.5)
-    assert budget == 3
+    assert budget == 2
 
 
 def test_select_budget_is_hard_cap_under_ties():
     survival = compute_prefix_survival(_logit(np.array([[0.90, 0.80], [0.90, 0.80]])))
     budget = select_draft_token_budget(survival, 2, 2, 2, budget_frac=0.25)
-    assert budget == 2
+    assert budget == 1
 
 
 def test_select_budget_is_hard_cap_for_saturated_scores():
@@ -232,7 +213,7 @@ def test_select_budget_is_hard_cap_for_saturated_scores():
     """
     survival = compute_prefix_survival(np.full((4, 7), 40.0))
     budget = select_draft_token_budget(survival, 4, 4, 4, budget_frac=0.5)
-    assert budget == int(4 * 7 * 0.5) + 1
+    assert budget == int(4 * 7 * 0.5)
 
 
 def test_select_budget_never_admits_zero_survival():
@@ -256,46 +237,45 @@ def test_select_budget_uses_sps_argmax():
     # SPS drops sharply after B=4 so theta peaks at k=2:
     #   k=0: 2.00*1.00, k=1: 2.90*0.95=2.755, k=2: 3.62*0.90=3.258,
     #   k=3: 4.22*0.20=0.844, k=4: 4.52*0.10=0.452.
-    sps_table = np.broadcast_to(
-        np.array([1.0, 1.0, 1.0, 0.95, 0.90, 0.20, 0.10]),
-        (3, 7),
-    )
+    rates = np.array([1.0, 1.0, 1.0, 0.95, 0.90, 0.20, 0.10])
     budget = select_draft_token_budget(
         survival,
         num_batch_requests=2,
         num_sampling_requests=2,
         num_required_target_tokens=2,
-        sps_table=sps_table,
+        draft_cost_ms=np.zeros(3),
+        verify_and_sample_cost_ms=1000.0 / rates,
     )
     assert budget == 2
 
 
 def test_select_budget_counts_only_requests_that_sample():
     survival = np.array([[0.9, 0.8], [0.7, 0.6]])
-    sps_table = np.ones((3, 9))
-    sps_table[:, 5:] = 0.1
+    rates = np.ones(9)
+    rates[5:] = 0.1
 
     budget = select_draft_token_budget(
         survival,
         num_batch_requests=2,
         num_sampling_requests=1,
         num_required_target_tokens=4,
-        sps_table=sps_table,
+        draft_cost_ms=np.zeros(3),
+        verify_and_sample_cost_ms=1000.0 / rates,
     )
 
     assert budget == 0
 
 
-def test_sps_table_combines_direct_draft_and_verification_costs():
+def test_cost_tables_keep_draft_and_verification_costs_separate():
     draft_curve = [(1, 0.2), (4, 0.8), (8, 1.6)]
     verify_curve = [(1, 2.0), (8, 3.0), (64, 5.0)]
 
-    table = build_sps_table_from_costs(
+    draft_cost_ms, verify_and_sample_cost_ms = build_cost_tables_from_curves(
         draft_curve, verify_curve, max_num_reqs=8, max_batch_tokens=64
     )
 
-    assert 1000.0 / table[1, 8] == pytest.approx(3.2)
-    assert 1000.0 / table[8, 8] == pytest.approx(4.6)
+    assert draft_cost_ms[1] + verify_and_sample_cost_ms[8] == pytest.approx(3.2)
+    assert draft_cost_ms[8] + verify_and_sample_cost_ms[8] == pytest.approx(4.6)
 
 
 def test_select_budget_temperature_desaturates_zeros():
@@ -312,9 +292,8 @@ def test_select_budget_temperature_desaturates_zeros():
     )
     # T=1: exact-zero survival past position 2 truncates both requests.
     assert budget_t1 == 4
-    # T=80: sigmoid(-10) > 0, so the budget (int(10*0.9)+1 = 10 admissions,
-    # capped at 5 per request) is fully spent.
-    assert budget_t80 == 10
+    # T=80: sigmoid(-10) > 0, so 90% of the candidates are admitted.
+    assert budget_t80 == 9
 
 
 def test_online_sts_fits_order_preserving_temperatures():
@@ -362,6 +341,7 @@ def test_capacity_manager_assigns_scalar_budget_from_gpu_scores(monkeypatch):
     monkeypatch.setattr(
         "vllm.v1.worker.gpu.spec_decode.confidence.get_tp_group",
         lambda: SimpleNamespace(
+            rank_in_group=0,
             broadcast=lambda tensor, src=0: broadcasts.append(tensor),
             broadcast_object=lambda value, src=0: value,
         ),
@@ -377,9 +357,7 @@ def test_capacity_manager_assigns_scalar_budget_from_gpu_scores(monkeypatch):
     )
     req_states.req_id_to_index = {"req0": 0, "req1": 1}
     handler = VarlenConfidenceManager(
-        max_num_tokens=16,
         req_states=req_states,
-        device=device,
         speculative_config=_spec_config(),
     )
     input_batch: Any = SimpleNamespace(
@@ -433,9 +411,7 @@ def test_varlen_capacity_manager_compacts_verifier_batch():
     )
     req_states.req_id_to_index = {"req0": 0, "req1": 1}
     handler = VarlenConfidenceManager(
-        max_num_tokens=16,
         req_states=req_states,
-        device=device,
         speculative_config=_spec_config(dspark_budget_frac=0.34),
     )
     handler._confidence_logits[:2].copy_(
@@ -541,9 +517,7 @@ def test_masked_capacity_manager_marks_pruned_tokens_for_forward_and_sampler():
     )
     req_states.req_id_to_index = {"req0": 0, "req1": 1}
     handler = MaskedConfidenceManager(
-        max_num_tokens=16,
         req_states=req_states,
-        device=device,
         speculative_config=_spec_config(dspark_budget_frac=0.34),
     )
     handler._confidence_logits[:2].copy_(
@@ -679,7 +653,6 @@ def test_varlen_cudagraph_capture_adds_full_desc():
 
     manager._init_candidates()
 
-    assert any(
-        desc.max_req_tokens == manager.decode_query_len
-        for desc in manager._capture_descs[CUDAGraphMode.FULL]
-    )
+    descs = manager._capture_descs[CUDAGraphMode.FULL]
+    assert [desc.num_reqs for desc in descs] == [3, 5]
+    assert all(desc.max_req_tokens == manager.decode_query_len for desc in descs)

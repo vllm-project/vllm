@@ -53,8 +53,7 @@ class RejectionSampler:
             spec_config.method == "dspark"
             and spec_config.confidence_based_verification not in ("none", "off")
             and (
-                spec_config.dspark_confidence_threshold > 0.0
-                or spec_config.dspark_budget_frac < 1.0
+                spec_config.dspark_budget_frac < 1.0
                 or spec_config.dspark_sps_curve is not None
             )
         )

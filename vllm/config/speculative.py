@@ -232,11 +232,6 @@ class SpeculativeConfig:
     synthetic_acceptance_rates. Only valid when rejection_sample_method is 'synthetic'.
     Mutually exclusive with synthetic_acceptance_rates."""
 
-    dspark_confidence_threshold: float = 0.0
-    """Minimum DSpark cumulative prefix-survival probability for keeping a
-    per-request draft prefix. Set to 0.0 to use budget-based global top-k
-    allocation."""
-
     dspark_budget_frac: float = 1.0
     """Fraction of the full per-request draft-token budget available to the
     DSpark global prefix allocator."""
@@ -1217,11 +1212,6 @@ class SpeculativeConfig:
                 "are only valid with rejection_sample_method='synthetic'."
             )
 
-        if not 0.0 <= self.dspark_confidence_threshold <= 1.0:
-            raise ValueError(
-                "dspark_confidence_threshold must be in [0, 1], got "
-                f"{self.dspark_confidence_threshold}."
-            )
         if not 0.0 < self.dspark_budget_frac <= 1.0:
             raise ValueError(
                 f"dspark_budget_frac must be in (0, 1], got {self.dspark_budget_frac}."
@@ -1254,17 +1244,10 @@ class SpeculativeConfig:
         if (
             self.method == "dspark"
             and self.confidence_based_verification in ("auto", "mask")
-            and (
-                self.dspark_confidence_threshold > 0.0
-                or self.dspark_budget_frac < 1.0
-                or self.dspark_sps_curve is not None
-            )
+            and (self.dspark_budget_frac < 1.0 or self.dspark_sps_curve is not None)
             and "VLLM_MOE_SKIP_PADDING" not in os.environ
         ):
-            # The masked fallback keeps pruned verify rows in the batch as
-            # padding; pruning only saves work if MoE kernels skip those rows.
-            # Set here (frontend) so spawned workers inherit it before their
-            # env caches freeze. Set VLLM_MOE_SKIP_PADDING=0 to override.
+            # Set before spawning workers so masked rows can skip MoE work.
             logger.info(
                 "Confidence-based verification: defaulting "
                 "VLLM_MOE_SKIP_PADDING=1 so MoE kernels can skip masked "

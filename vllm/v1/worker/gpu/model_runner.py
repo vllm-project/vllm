@@ -454,9 +454,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.spec_decode_confidence_manager = make_confidence_manager(
                 self.speculative_config.confidence_based_verification,
                 attn_cg_support,
-                self.max_num_tokens,
                 self.req_states,
-                self.device,
                 self.speculative_config,
             )
         self.block_tables = BlockTables(
@@ -1048,7 +1046,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.spec_decode_confidence_manager is not None:
             self.spec_decode_confidence_manager.trim_batch(input_batch, draft_tokens)
         if self.use_dcp:
-            # Prepare dcp local seq_lens.
             prepare_dcp_local_seq_lens(
                 self.input_buffers.dcp_local_seq_lens,
                 self.input_buffers.seq_lens,
@@ -1061,8 +1058,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 : input_batch.num_reqs_after_padding
             ]
         if uses_padding_mask:
-            # Mark trailing cudagraph-padding rows so kernels can skip work for
-            # them when supported.
+            # Mark trailing cudagraph padding.
             self.input_buffers.is_padding[
                 input_batch.num_tokens : num_tokens_after_padding
             ].fill_(True)

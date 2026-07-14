@@ -1576,11 +1576,9 @@ def test_dspark_confidence_config_validation():
     config = SpeculativeConfig(
         method="ngram",
         num_speculative_tokens=1,
-        dspark_confidence_threshold=0.25,
         dspark_budget_frac=0.5,
         confidence_based_verification="mask",
     )
-    assert config.dspark_confidence_threshold == 0.25
     assert config.dspark_budget_frac == 0.5
     assert config.confidence_based_verification == "mask"
     with pytest.raises(ValidationError, match="confidence_based_verification"):
@@ -1594,8 +1592,6 @@ def test_dspark_confidence_config_validation():
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("dspark_confidence_threshold", -0.1),
-        ("dspark_confidence_threshold", 1.1),
         ("dspark_budget_frac", 0.0),
         ("dspark_budget_frac", 1.1),
     ],

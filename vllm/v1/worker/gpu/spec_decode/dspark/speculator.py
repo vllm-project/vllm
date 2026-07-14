@@ -80,8 +80,7 @@ class DSparkSpeculator(DFlashSpeculator):
         self.use_confidence_based_verification = (
             self.speculative_config.confidence_based_verification not in ("none", "off")
             and (
-                self.speculative_config.dspark_confidence_threshold > 0.0
-                or self.speculative_config.dspark_budget_frac < 1.0
+                self.speculative_config.dspark_budget_frac < 1.0
                 or sps_curve is not None
             )
         )
