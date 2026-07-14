@@ -47,26 +47,12 @@ def _build_text_only_renderer() -> HfRenderer:
     )
 
 
-def test_text_only_model_rejects_mm_data_with_value_error():
-    """Sending multimodal data to a text-only model is a client mistake, so it
-    must surface as a ValueError rather than an internal failure."""
-    renderer = _build_text_only_renderer()
-
-    with pytest.raises(ValueError, match="text-only"):
-        renderer._process_multimodal(
-            prompt="What is in this image?",
-            mm_data={"image": [cherry_pil_image]},
-            mm_uuids=None,
-            mm_processor_kwargs=None,
-            tokenization_kwargs=None,
-        )
-
-
 def test_text_only_model_mm_data_maps_to_bad_request():
-    """The text-only rejection must reach the client as HTTP 400, not 500."""
+    """Sending multimodal data to a text-only model is a client mistake, so it
+    must surface as a ValueError and reach the client as HTTP 400, not 500."""
     renderer = _build_text_only_renderer()
 
-    with pytest.raises(ValueError) as exc_info:
+    with pytest.raises(ValueError, match="text-only") as exc_info:
         renderer._process_multimodal(
             prompt="What is in this image?",
             mm_data={"image": [cherry_pil_image]},
