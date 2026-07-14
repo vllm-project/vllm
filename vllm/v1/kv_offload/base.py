@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any, NamedTuple, NewType
 
 import numpy as np
 import torch
-from typing_extensions import override
 
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
@@ -85,20 +84,11 @@ class ScheduleEndContext(NamedTuple):
     preempted_req_ids: Collection[str]
 
 
-class LoadStoreSpec(ABC):
+class LoadStoreSpec:
     """
-    Abstract metadata that encapsulates information allowing a worker
+    Metadata that encapsulates information allowing a worker
     to load, and optionally also to store, blocks of KV data.
     """
-
-    @staticmethod
-    @abstractmethod
-    def medium() -> str:
-        """
-        Returns a string representation of the medium type
-        this store/load targets.
-        """
-        pass
 
 
 @dataclass
@@ -313,6 +303,10 @@ class OffloadingManager(ABC):
         """
         Take the offloading events from the manager.
 
+        A tier manager emits only events for storage state it owns. A
+        composing manager may aggregate child event streams, but should not
+        synthesize events on behalf of a child tier.
+
         Yields:
             New OffloadingEvents collected since the last call.
         """
@@ -391,11 +385,6 @@ class GPULoadStoreSpec(BlockIDsLoadStoreSpec):
         assert len(block_indices) == len(group_sizes)
         self.group_sizes: Sequence[int] = group_sizes
         self.block_indices: Sequence[int] = block_indices
-
-    @staticmethod
-    @override
-    def medium() -> str:
-        return "GPU"
 
 
 @dataclass

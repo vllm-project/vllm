@@ -133,6 +133,38 @@ def test_modelopt_mixed_precision_quantizes_parallel_lm_head():
     assert isinstance(method, ModelOptNvFp4LinearMethod)
 
 
+def test_modelopt_mixed_precision_resolves_declared_packed_projection():
+    config = _mixed_precision_config(
+        {
+            "model.layers.0.self_attn.q_proj": {"quant_algo": "MXFP8"},
+            "model.layers.0.self_attn.k_proj": {"quant_algo": "MXFP8"},
+            "model.layers.0.self_attn.v_proj": {"quant_algo": "MXFP8"},
+        }
+    )
+    config.packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+
+    assert config._resolve_quant_algo("model.layers.0.self_attn.qkv_proj") == "MXFP8"
+
+
+def test_modelopt_mixed_precision_does_not_quantize_unlisted_fused_sibling():
+    config = _mixed_precision_config(
+        {
+            "model.layers.0.linear_attn.in_proj_qkv": {"quant_algo": "FP8"},
+            "model.layers.0.linear_attn.in_proj_z": {"quant_algo": "FP8"},
+            "model.layers.0.linear_attn.out_proj": {"quant_algo": "FP8"},
+        }
+    )
+    config.packed_modules_mapping = {
+        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+        "in_proj_ba": ["in_proj_b", "in_proj_a"],
+    }
+
+    assert (
+        config._resolve_quant_algo("model.layers.0.linear_attn.in_proj_qkvz") == "FP8"
+    )
+    assert config._resolve_quant_algo("model.layers.0.linear_attn.in_proj_ba") is None
+
+
 def test_modelopt_mixed_precision_infers_fused_gate_up_projection():
     from vllm.model_executor.layers.linear import LinearBase
 

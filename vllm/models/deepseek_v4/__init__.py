@@ -22,16 +22,16 @@ if current_platform.is_out_of_tree():
     from .hw_agnostic.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
     from .hw_agnostic.mtp import DeepSeekV4MTP  # type: ignore[assignment]
 elif current_platform.is_rocm():
+    from .amd.dspark import (  # type: ignore[assignment]
+        DSparkDeepseekV4ForCausalLM,
+    )
     from .amd.model import DeepseekV4ForCausalLM
     from .amd.mtp import DeepSeekV4MTP
-
-    # DSpark is NVIDIA-only for now.
-    DSparkDeepseekV4ForCausalLM = None  # type: ignore[assignment]
 elif current_platform.is_xpu():
     from .xpu.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
     from .xpu.mtp import DeepSeekV4MTP  # type: ignore[assignment]
 
-    DSparkDeepseekV4ForCausalLM = None  # type: ignore[assignment]
+    DSparkDeepseekV4ForCausalLM = None  # type: ignore[assignment, misc]
 else:
     from .nvidia.dspark import (  # type: ignore[assignment]
         DSparkDeepseekV4ForCausalLM,
