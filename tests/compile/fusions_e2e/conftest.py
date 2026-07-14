@@ -79,6 +79,7 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
     ):
         monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "1" if use_deepgemm else "0")
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_aiter else "0")
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER_CUSTOM_AR", "1" if use_aiter else "0")
         from vllm._aiter_ops import rocm_aiter_ops
 
         rocm_aiter_ops.refresh_env_variables()
@@ -95,6 +96,11 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
             pytest.skip(
                 f"Incompatible model '{model_name}' and "
                 f"attention backend '{attn_backend.backend.name}'"
+            )
+
+        if backend_name == "rocm_attn" and model_name == "openai/gpt-oss-20b":
+            pytest.skip(
+                "ROCM_ATTN does not support attention sinks (required by gpt-oss-20b)"
             )
 
         if attn_backend.backend.name == "FLASHINFER":

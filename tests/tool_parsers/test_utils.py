@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
 import pytest
 
-from vllm.tool_parsers.utils import coerce_to_schema_type
+from vllm.tool_parsers.utils import (
+    coerce_to_schema_type,
+    extract_types_from_schema,
+)
 
 
 class TestCoerceToSchemaType:
@@ -88,6 +93,71 @@ class TestCoerceToSchemaType:
         def test_invalid_number_fallback(self):
             assert coerce_to_schema_type("abc", "number") == "abc"
 
+    class TestNonFiniteNumbers:
+        """Non-finite numeric strings must not crash and must coerce to a
+        JSON-serializable value.
+
+        Regression: ``int(float("inf"))`` raised an uncaught ``OverflowError``
+        (only ``ValueError``/``TypeError`` were handled), and ``"1e999"``
+        round-tripped through ``json.loads`` to a float ``inf`` that
+        ``json.dumps`` renders as invalid JSON ``Infinity``.
+        """
+
+        @pytest.mark.parametrize(
+            "value", ["inf", "-inf", "Infinity", "1e999", "nan", "-nan"]
+        )
+        def test_non_finite_number_does_not_crash(self, value):
+            # Must not raise (previously OverflowError for inf/1e999/Infinity).
+            result = coerce_to_schema_type(value, "number")
+            # Result must serialize to valid, finite JSON and round-trip.
+            assert json.loads(json.dumps(result)) == result
+
+        @pytest.mark.parametrize("value", ["inf", "-inf", "1e999"])
+        def test_non_finite_number_preserved_as_string(self, value):
+            assert coerce_to_schema_type(value, "number") == value
+
+        @pytest.mark.parametrize("value", ["inf", "1e999", "Infinity"])
+        def test_non_finite_integer_not_float_inf(self, value):
+            result = coerce_to_schema_type(value, "integer")
+            assert isinstance(result, str)
+            assert result == value
+
+    class TestNonFiniteContainers:
+        """Non-finite floats nested in object/array values must not produce
+        invalid JSON.
+
+        Regression: the ``object``/``array`` branch returned
+        ``json.loads(value)`` directly, so ``"[1e999]"`` became ``[inf]`` and
+        ``'{"x": Infinity}'`` became ``{"x": inf}`` -- values that
+        ``json.dumps`` later renders as invalid JSON (``Infinity``/``NaN``).
+        """
+
+        @pytest.mark.parametrize(
+            "value", ["[1e999]", "[1, 2, 1e999]", "[NaN]", "[-Infinity]"]
+        )
+        def test_array_with_non_finite_preserved_as_string(self, value):
+            result = coerce_to_schema_type(value, "array")
+            assert result == value
+            assert json.loads(json.dumps(result)) == result
+
+        @pytest.mark.parametrize(
+            "value", ['{"x": 1e999}', '{"x": Infinity}', '{"a": [1e999, 2]}']
+        )
+        def test_object_with_non_finite_preserved_as_string(self, value):
+            result = coerce_to_schema_type(value, "object")
+            assert result == value
+            assert json.loads(json.dumps(result)) == result
+
+        def test_finite_array_still_coerced(self):
+            assert coerce_to_schema_type("[1, 2, 3]", "array") == [1, 2, 3]
+
+        def test_finite_object_still_coerced(self):
+            assert coerce_to_schema_type('{"a": 1}', "object") == {"a": 1}
+
+        def test_unknown_type_non_finite_falls_back_to_string(self):
+            # Exercises the final json.loads fallback path.
+            assert coerce_to_schema_type("1e999", "unknown_type") == "1e999"
+
     class TestBooleanType:
         def test_true(self):
             assert coerce_to_schema_type("true", "boolean") is True
@@ -146,3 +216,66 @@ class TestCoerceToSchemaType:
 
         def test_unrecognized_type_falls_back_to_json(self):
             assert coerce_to_schema_type("42", "interval") == 42
+
+
+class TestExtractTypesFromSchema:
+    def test_direct_type_string(self):
+        assert extract_types_from_schema({"type": "string"}) == ["string"]
+
+    def test_direct_type_integer(self):
+        assert extract_types_from_schema({"type": "integer"}) == ["integer"]
+
+    def test_type_array(self):
+        result = set(extract_types_from_schema({"type": ["string", "null"]}))
+        assert result == {"string", "null"}
+
+    def test_anyof(self):
+        schema = {"anyOf": [{"type": "object"}, {"type": "null"}]}
+        result = set(extract_types_from_schema(schema))
+        assert result == {"object", "null"}
+
+    def test_oneof(self):
+        schema = {"oneOf": [{"type": "integer"}, {"type": "string"}]}
+        result = set(extract_types_from_schema(schema))
+        assert result == {"integer", "string"}
+
+    def test_allof(self):
+        schema = {"allOf": [{"type": "object"}]}
+        assert extract_types_from_schema(schema) == ["object"]
+
+    def test_enum_infers_types(self):
+        schema = {"enum": [1, "a", None]}
+        result = set(extract_types_from_schema(schema))
+        assert result == {"integer", "string", "null"}
+
+    def test_enum_with_bool(self):
+        schema = {"enum": [True, False]}
+        assert extract_types_from_schema(schema) == ["boolean"]
+
+    def test_enum_with_float(self):
+        schema = {"enum": [1.5, 2.5]}
+        assert extract_types_from_schema(schema) == ["number"]
+
+    def test_enum_with_list_and_dict(self):
+        schema = {"enum": [[1, 2], {"a": 1}]}
+        result = set(extract_types_from_schema(schema))
+        assert result == {"array", "object"}
+
+    def test_none_schema_defaults_to_string(self):
+        assert extract_types_from_schema(None) == ["string"]
+
+    def test_non_dict_schema_defaults_to_string(self):
+        assert extract_types_from_schema("string") == ["string"]
+
+    def test_empty_dict_defaults_to_string(self):
+        assert extract_types_from_schema({}) == ["string"]
+
+    def test_nested_anyof(self):
+        schema = {
+            "anyOf": [
+                {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+                {"type": "string"},
+            ]
+        }
+        result = set(extract_types_from_schema(schema))
+        assert result == {"integer", "null", "string"}

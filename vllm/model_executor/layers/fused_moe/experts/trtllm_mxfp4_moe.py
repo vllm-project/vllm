@@ -79,11 +79,7 @@ class TrtLlmMxfp4ExpertsBase:
         else:
             self.gemm1_clamp_limit = None
 
-        from vllm.config import get_current_vllm_config
-
-        self.max_capture_size = (
-            get_current_vllm_config().compilation_config.max_cudagraph_capture_size
-        )
+        self.max_capture_size = moe_config.max_capture_size
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -112,12 +108,6 @@ class TrtLlmMxfp4ExpertsBase:
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
-
-    def supports_chunking(self) -> bool:
-        return False
-
-    def supports_expert_map(self) -> bool:
-        return False
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -249,9 +239,6 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
     ) -> bool:
         # Modular kernel handles only the expert computation;
         # routing is done externally, so accept any routing method.
-        return True
-
-    def supports_expert_map(self) -> bool:
         return True
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
