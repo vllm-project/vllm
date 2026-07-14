@@ -60,18 +60,15 @@ def _legacy_sliding_window_find_longest_cache_hit(
     drop_eagle_block,
     alignment_tokens,
 ) -> tuple[list[KVCacheBlock], ...]:
-    sliding_window_contiguous_blocks = (
-        SlidingWindowManager._contiguous_blocks_for_hit(
-            kv_cache_spec.sliding_window,
-            kv_cache_spec.block_size,
-            drop_eagle_block,
-        )
+    sliding_window_contiguous_blocks = SlidingWindowManager._contiguous_blocks_for_hit(
+        kv_cache_spec.sliding_window,
+        kv_cache_spec.block_size,
+        drop_eagle_block,
     )
     sliding_window_contiguous_blocks = max(1, sliding_window_contiguous_blocks)
     max_num_blocks = max_length // kv_cache_spec.block_size
     computed_blocks = tuple(
-        [block_pool.null_block] * max_num_blocks
-        for _ in range(len(kv_cache_group_ids))
+        [block_pool.null_block] * max_num_blocks for _ in range(len(kv_cache_group_ids))
     )
     block_size = kv_cache_spec.block_size
     num_contiguous_blocks = 0
@@ -122,7 +119,7 @@ def _sliding_window_cache_hit_for_mask(
     drop_eagle_block: bool,
     alignment_tokens: int,
     use_legacy: bool = False,
-) -> tuple[list[KVCacheBlock], ...]:
+) -> tuple[tuple[list[KVCacheBlock], ...], int]:
     block_hash_list = [BlockHash(str(i).encode()) for i in range(len(mask))]
 
     block_pool.cached_block_hash_to_block._cache.clear()
@@ -133,12 +130,18 @@ def _sliding_window_cache_hit_for_mask(
                 block_pool.blocks[i + 10],
             )
 
-    find_longest_cache_hit = (
-        _legacy_sliding_window_find_longest_cache_hit
-        if use_legacy
-        else SlidingWindowManager.find_longest_cache_hit
-    )
-    return find_longest_cache_hit(
+    if use_legacy:
+        blocks = _legacy_sliding_window_find_longest_cache_hit(
+            block_hashes=block_hash_list,
+            max_length=len(block_hash_list) * sliding_window_spec.block_size,
+            kv_cache_group_ids=[0],
+            block_pool=block_pool,
+            kv_cache_spec=sliding_window_spec,
+            drop_eagle_block=drop_eagle_block,
+            alignment_tokens=alignment_tokens,
+        )
+        return blocks, len(blocks[0]) * sliding_window_spec.block_size
+    return SlidingWindowManager.find_longest_cache_hit(
         block_hashes=block_hash_list,
         max_length=len(block_hash_list) * sliding_window_spec.block_size,
         kv_cache_group_ids=[0],
@@ -195,7 +198,7 @@ def test_chunked_local_attention_possible_cached_prefix():
             kv_cache_spec=chunked_local_attention_spec,
             drop_eagle_block=False,
             alignment_tokens=block_size,
-        )[0]
+        )[0][0]
         assert len(computed_blocks) == expect_length
 
         assert all(
@@ -266,7 +269,7 @@ def test_sliding_window_possible_cached_prefix():
             kv_cache_spec=sliding_window_spec,
             drop_eagle_block=False,
             alignment_tokens=block_size,
-        )[0]
+        )[0][0]
         assert len(computed_blocks) == expect_length
 
         assert all(
@@ -351,7 +354,12 @@ def test_sliding_window_cache_hit_matches_legacy_scan(
             alignment_tokens,
             use_legacy=True,
         )
-        assert _block_ids_by_group(actual) == _block_ids_by_group(expected)
+        actual_blocks, actual_hit_length = actual
+        expected_blocks, expected_hit_length = expected
+        assert _block_ids_by_group(actual_blocks) == _block_ids_by_group(
+            expected_blocks
+        )
+        assert actual_hit_length == expected_hit_length
 
 
 def test_sliding_window_cache_hit_skips_windows_on_miss(monkeypatch):
@@ -388,7 +396,7 @@ def test_sliding_window_cache_hit_skips_windows_on_miss(monkeypatch):
         return original_get_cached_block(*args, **kwargs)
 
     monkeypatch.setattr(block_pool, "get_cached_block", counting_get_cached_block)
-    computed_blocks = SlidingWindowManager.find_longest_cache_hit(
+    computed_blocks, hit_length = SlidingWindowManager.find_longest_cache_hit(
         block_hashes=block_hash_list,
         max_length=len(block_hash_list) * block_size,
         kv_cache_group_ids=[0],
@@ -399,6 +407,7 @@ def test_sliding_window_cache_hit_skips_windows_on_miss(monkeypatch):
     )
 
     assert computed_blocks == ([],)
+    assert hit_length == 0
     assert num_lookups == expected_lookups
     assert num_lookups < len(block_hash_list)
 
@@ -606,13 +615,13 @@ def test_get_num_blocks_to_allocate():
 
     assert (
         manager.get_num_blocks_to_allocate(
-            "1", 20 * block_size, cached_blocks_1, 0, 20 * block_size
+            "1", 20 * block_size, cached_blocks_1, 0, 0, 20 * block_size
         )
         == 20
     )
     assert (
         manager.get_num_blocks_to_allocate(
-            "2", 20 * block_size, cached_blocks_2, 0, 20 * block_size
+            "2", 20 * block_size, cached_blocks_2, 0, 0, 20 * block_size
         )
         == 15
     )
@@ -642,6 +651,7 @@ def test_evictable_cached_blocks_not_double_allocated():
         num_tokens=2 * block_size,
         new_computed_blocks=[evictable_block],
         total_computed_tokens=block_size,
+        num_local_computed_tokens=block_size,
         num_tokens_main_model=2 * block_size,
     )
     # Free capacity check should count evictable cached blocks, but allocation
@@ -682,13 +692,13 @@ def test_chunked_local_attention_get_num_blocks_to_allocate():
 
     assert (
         manager.get_num_blocks_to_allocate(
-            "1", 20 * block_size, cached_blocks_1, 0, 20 * block_size
+            "1", 20 * block_size, cached_blocks_1, 0, 0, 20 * block_size
         )
         == 20
     )
     assert (
         manager.get_num_blocks_to_allocate(
-            "2", 20 * block_size, cached_blocks_2, 0, 20 * block_size
+            "2", 20 * block_size, cached_blocks_2, 0, 0, 20 * block_size
         )
         == 15
     )
@@ -732,6 +742,7 @@ def test_predictor_matches_allocator_blocks_calculation_with_admission_cap():
             num_tokens=num_tokens,
             new_computed_blocks=[],
             total_computed_tokens=total_computed,
+            num_local_computed_tokens=0,
             num_tokens_main_model=num_tokens,
         )
         new_blocks = manager.allocate_new_blocks(
