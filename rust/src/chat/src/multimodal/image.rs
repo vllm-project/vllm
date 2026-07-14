@@ -6,16 +6,14 @@
 
 use std::sync::Arc;
 
-use itertools::izip;
-use llm_multimodal::{FieldLayout, ImageFrame, Modality, PreprocessedEncoderInputs};
+use llm_multimodal::{ImageFrame, Modality, PreprocessedEncoderInputs};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
-use vllm_engine_core_client::protocol::multimodal::{
-    MmBatchedField, MmField, MmFieldElem, MmFlatField, MmKwargsItem, MmSharedField, MmSlice,
-    SliceSpec,
-};
 
-use super::{ModalitySupport, MultimodalModelInfo, PreparedItem, PreparedMedia, tensor};
+use super::{ModalitySupport, MultimodalModelInfo, PreparedMedia, item};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
+
+/// Forward-kwargs name of the primary image encoder input.
+const IMAGE_PRIMARY_KEY: &str = "pixel_values";
 
 impl MultimodalModelInfo {
     /// Preprocess all fetched image frames as one batch and build per-item
@@ -31,7 +29,8 @@ impl MultimodalModelInfo {
         })?;
         let preprocessed = self.preprocess_images(support, &frames).await?;
         let replacements =
-            self.spec
+            support
+                .spec
                 .prompt_replacements_for(&self.context, &preprocessed, Modality::Image)?;
         if replacements.len() != frames.len() {
             bail_multimodal!(
@@ -40,7 +39,15 @@ impl MultimodalModelInfo {
                 frames.len()
             );
         }
-        let items = self.build_image_items(preprocessed, &frames, uuids, model_dtype)?;
+        let hashes = frames.iter().map(|frame| frame.hash.clone()).collect();
+        let items = item::build_batched_items(
+            &support.spec,
+            preprocessed,
+            IMAGE_PRIMARY_KEY,
+            hashes,
+            uuids,
+            model_dtype,
+        )?;
 
         Ok(PreparedMedia {
             modality: Modality::Image,
@@ -69,76 +76,5 @@ impl MultimodalModelInfo {
         tokio::task::spawn_blocking(move || Ok(processor.preprocess(&images, &config)?))
             .await
             .map_err(|error| multimodal!("image preprocessing task failed: {error}"))?
-    }
-
-    /// Convert one batch of preprocessed image tensors into per-item engine
-    /// kwargs.
-    ///
-    /// Tensor fields are sliced per item according to the model spec's field
-    /// layout declarations.
-    fn build_image_items(
-        &self,
-        preprocessed: PreprocessedEncoderInputs,
-        frames: &[Arc<ImageFrame>],
-        uuids: Vec<Option<String>>,
-        model_dtype: ModelDtype,
-    ) -> Result<Vec<PreparedItem>> {
-        let len = frames.len();
-        let tensors = tensor::collect_tensors(preprocessed, "pixel_values", model_dtype)?;
-
-        let mut items = Vec::with_capacity(len);
-        for (index, (frame, uuid)) in izip!(frames, uuids).enumerate() {
-            let mut data = MmKwargsItem::new();
-            for (key, tensor) in &tensors {
-                let keep_on_cpu = self.spec.keep_on_cpu_keys.contains(key);
-                let (value, field) = match self.spec.field_layouts.get(key) {
-                    Some(FieldLayout::Batched) => (
-                        tensor.batched_value_at(index)?,
-                        MmField::Batched(MmBatchedField { keep_on_cpu }),
-                    ),
-                    Some(FieldLayout::Flat { sizes_key }) => {
-                        let sizes = tensors.get(sizes_key).ok_or_else(|| {
-                            multimodal!("flat tensor sizes key `{sizes_key}` is missing")
-                        })?;
-                        let (start, end) = tensor::flat_range_for_index(sizes, sizes_key, index)?;
-                        (
-                            tensor.flat_value_range(start, end)?,
-                            MmField::Flat(MmFlatField {
-                                slices: vec![MmSlice::Slice(SliceSpec {
-                                    start: Some(0),
-                                    stop: Some((end - start) as isize),
-                                    step: None,
-                                })],
-                                dim: 0,
-                                keep_on_cpu,
-                            }),
-                        )
-                    }
-                    None => (
-                        tensor.clone(),
-                        MmField::Shared(MmSharedField {
-                            batch_size: len,
-                            keep_on_cpu,
-                        }),
-                    ),
-                };
-
-                data.insert(
-                    key.clone(),
-                    MmFieldElem {
-                        data: Some(value.try_into()?),
-                        field,
-                    },
-                );
-            }
-
-            items.push(PreparedItem {
-                data,
-                hash: frame.hash.clone(),
-                uuid,
-            });
-        }
-
-        Ok(items)
     }
 }
