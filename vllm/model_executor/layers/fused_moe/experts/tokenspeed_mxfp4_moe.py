@@ -163,6 +163,11 @@ class TokenSpeedMxfp4Experts(mk.FusedMoEExpertsMonolithic):
             raise NotImplementedError(
                 "TokenSpeed MXFP4 MoE does not support apply_router_weight_on_input."
             )
+        if self.a1_scale is None or self.a2_scale is None:
+            raise ValueError(
+                "TokenSpeed MXFP4 MoE requires static FP8 activation scales; "
+                "w13_input_scale and w2_input_scale must be loaded before dispatch."
+            )
 
         enable_warp_decode = True
         out_dtype_code = _DTYPE_TO_CODE[torch.bfloat16]

@@ -144,6 +144,12 @@ TRITON_BACKENDS = (
     Mxfp4MoeBackend.TRITON_UNFUSED,
 )
 
+PREPROCESSED_WEIGHT_BACKENDS = (
+    *TRITON_BACKENDS,
+    Mxfp4MoeBackend.AITER_MXFP4_FP8,
+    Mxfp4MoeBackend.TOKENSPEED,
+)
+
 
 def backend_to_kernel_cls(
     backend: Mxfp4MoeBackend,
@@ -1139,13 +1145,11 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         )
 
     elif mxfp4_backend == Mxfp4MoeBackend.TOKENSPEED:
-        for scale_name in ("w13_input_scale", "w2_input_scale"):
-            scale = getattr(layer, scale_name, None)
-            if scale is None or torch.isnan(scale).any():
-                raise ValueError(
-                    "TokenSpeed MXFP4 MoE requires static FP8 activation "
-                    f"scales, but {scale_name} was not loaded."
-                )
+        if layer.w13_input_scale is None or layer.w2_input_scale is None:
+            raise ValueError(
+                "TokenSpeed MXFP4 MoE requires static FP8 activation "
+                "scales, but w13_input_scale or w2_input_scale was not loaded."
+            )
 
         if w13_bias is not None:
             layer.w13_weight_bias = w13_bias
@@ -1185,21 +1189,12 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
 
         layer.w13_input_layout = "interleaved"
         preprocess_gluon_mxfp4_gfx950_moe_weights({}, layer, preshuffle=True)
-        if not hasattr(layer, "w13_mx_scale"):
-            layer.w13_mx_scale = layer.w13_precision_config.b_mx_scale
-        if not hasattr(layer, "w2_mx_scale"):
-            layer.w2_mx_scale = layer.w2_precision_config.b_mx_scale
-        if not hasattr(layer, "tokenspeed_out_dtype"):
-            w2_precision_config = getattr(layer, "w2_precision_config", None)
-            layer.tokenspeed_out_dtype = (
-                getattr(w2_precision_config, "out_dtype", None) or torch.bfloat16
-            )
 
         return (
             layer.w13_weight_triton_tensor,
             layer.w2_weight_triton_tensor,
-            layer.w13_mx_scale,
-            layer.w2_mx_scale,
+            layer.w13_precision_config.b_mx_scale,
+            layer.w2_precision_config.b_mx_scale,
             None,
             None,
         )

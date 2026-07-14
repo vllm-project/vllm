@@ -34,7 +34,7 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
-    TRITON_BACKENDS,
+    PREPROCESSED_WEIGHT_BACKENDS,
     Mxfp4MoeBackend,
     backend_to_kernel_cls,
     convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
@@ -1217,18 +1217,9 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         )
 
         # Handle weight/scale assignment based on backend type
-        if (
-            self.mxfp4_backend in TRITON_BACKENDS
-            or self.mxfp4_backend
-            in (
-                Mxfp4MoeBackend.AITER_MXFP4_FP8,
-                Mxfp4MoeBackend.TOKENSPEED,
-            )
-            or not isinstance(w13_scale, torch.Tensor)
-            or not isinstance(w2_scale, torch.Tensor)
-        ):
-            # Triton-based backends: w13/w2 are triton_kernels.tensor.Tensor
-            # Store on layer for apply(), scales are PrecisionConfig
+        if self.mxfp4_backend in PREPROCESSED_WEIGHT_BACKENDS:
+            # Preprocessed backends return kernel-ready weight wrappers and
+            # scale metadata instead of ordinary weight-scale Parameters.
             layer.w13_weight = w13
             layer.w2_weight = w2
             self.w13_precision_config = w13_scale
@@ -1267,10 +1258,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         # For oracle-based backends (W4A16, W4A8), use make_mxfp4_moe_quant_config
         if self.mxfp4_backend not in (Mxfp4MoeBackend.NONE, Mxfp4MoeBackend.EMULATION):
             # Determine scale source based on backend type
-            if self.mxfp4_backend in TRITON_BACKENDS or self.mxfp4_backend in (
-                Mxfp4MoeBackend.AITER_MXFP4_FP8,
-                Mxfp4MoeBackend.TOKENSPEED,
-            ):
+            if self.mxfp4_backend in PREPROCESSED_WEIGHT_BACKENDS:
                 w1_scale = self.w13_precision_config
                 w2_scale = self.w2_precision_config
             else:
