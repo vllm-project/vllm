@@ -104,6 +104,9 @@ class EngineCoreReadyResponse:
     supports_draft_weight_updates: bool = False
     # Full-attention block size in tokens after initialization, or unavailable.
     effective_attention_block_size: int | None = None
+    coord_store_port: int = 0
+    coordinator_input_address: str | None = None
+    coordinator_output_address: str | None = None
 
 
 class EngineCoreRequest(
