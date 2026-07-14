@@ -313,7 +313,7 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
     std::optional<torch::stable::Tensor> index_cache, int64_t block_size,
     std::optional<torch::stable::Tensor> q_out,
     std::optional<torch::stable::Tensor> index_q_out,
-    const std::string& kv_cache_dtype);
+    const std::string& kv_cache_dtype, bool skip_index_branch);
 
 // Sampler kernels (shared CUDA/ROCm)
 void apply_repetition_penalties_(
@@ -414,6 +414,8 @@ void gelu_new(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_fast(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_quick(torch::stable::Tensor& out, torch::stable::Tensor& input);
 
+void relu_squared(torch::stable::Tensor& out, torch::stable::Tensor& input);
+
 // INT8 quantization kernels (shared CUDA/ROCm)
 void static_scaled_int8_quant(torch::stable::Tensor& out,
                               torch::stable::Tensor const& input,
@@ -451,32 +453,6 @@ torch::stable::Tensor gptq_gemm(torch::stable::Tensor a,
 
 void gptq_shuffle(torch::stable::Tensor q_weight, torch::stable::Tensor q_perm,
                   int64_t bit);
-
-void paged_attention_v1(
-    torch::stable::Tensor& out, torch::stable::Tensor& query,
-    torch::stable::Tensor& key_cache, torch::stable::Tensor& value_cache,
-    int64_t num_kv_heads, double scale, torch::stable::Tensor& block_tables,
-    torch::stable::Tensor& seq_lens, int64_t block_size, int64_t max_seq_len,
-    const std::optional<torch::stable::Tensor>& alibi_slopes,
-    const std::string& kv_cache_dtype, torch::stable::Tensor& k_scale,
-    torch::stable::Tensor& v_scale, const int64_t tp_rank,
-    const int64_t blocksparse_local_blocks,
-    const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
-    const int64_t blocksparse_head_sliding_step);
-
-void paged_attention_v2(
-    torch::stable::Tensor& out, torch::stable::Tensor& exp_sums,
-    torch::stable::Tensor& max_logits, torch::stable::Tensor& tmp_out,
-    torch::stable::Tensor& query, torch::stable::Tensor& key_cache,
-    torch::stable::Tensor& value_cache, int64_t num_kv_heads, double scale,
-    torch::stable::Tensor& block_tables, torch::stable::Tensor& seq_lens,
-    int64_t block_size, int64_t max_seq_len,
-    const std::optional<torch::stable::Tensor>& alibi_slopes,
-    const std::string& kv_cache_dtype, torch::stable::Tensor& k_scale,
-    torch::stable::Tensor& v_scale, const int64_t tp_rank,
-    const int64_t blocksparse_local_blocks,
-    const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
-    const int64_t blocksparse_head_sliding_step);
 
 // Cache ops (shared CUDA/ROCm)
 void swap_blocks(torch::stable::Tensor& src, torch::stable::Tensor& dst,
@@ -580,3 +556,12 @@ void cp_gather_indexer_k_quant_cache(
                                                 // quant_block_size * 4]
     const torch::stable::Tensor& block_table,   // [batch_size, num_blocks]
     const torch::stable::Tensor& cu_seq_lens);  // [batch_size + 1]
+
+// LongCat n-gram embedding index kernel (see ngram_embedding_kernels.cu).
+void ngram_compute_n_gram_ids(
+    int64_t ne_n, int64_t ne_k, torch::stable::Tensor& ne_weights,
+    torch::stable::Tensor& ne_mods,
+    torch::stable::Tensor& exclusive_ne_embedder_size_sums,
+    torch::stable::Tensor& exclusive_req_len_sums,
+    torch::stable::Tensor& ne_token_table, torch::stable::Tensor& row_indices,
+    torch::stable::Tensor& column_starts, torch::stable::Tensor& n_gram_ids);
