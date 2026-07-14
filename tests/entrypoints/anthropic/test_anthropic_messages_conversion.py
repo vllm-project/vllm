@@ -1443,3 +1443,13 @@ class TestCacheSaltField:
     def test_cache_salt_non_string_rejected(self):
         with pytest.raises(ValueError, match="cache_salt"):
             _make_request([{"role": "user", "content": "hi"}], cache_salt=123)
+
+    def test_cache_salt_forwarded_to_chat_request(self):
+        request = _make_request([{"role": "user", "content": "hi"}], cache_salt="org-A")
+        result = _convert(request)
+        assert result.cache_salt == "org-A"
+
+    def test_no_cache_salt_forwarded_as_none(self):
+        request = _make_request([{"role": "user", "content": "hi"}])
+        result = _convert(request)
+        assert result.cache_salt is None
