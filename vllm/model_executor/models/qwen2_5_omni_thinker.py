@@ -101,6 +101,7 @@ from .interfaces import (
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
+    flatten_bn_with_lengths,
     init_vllm_registered_model,
     maybe_prefix,
     split_list_into_ranges,
@@ -886,6 +887,17 @@ class Qwen2_5OmniConditionalGenerationMixin:
         feature_attention_mask = kwargs.pop("feature_attention_mask", None)
         if input_audio_features is None:
             return None
+
+        # inputs features from rust frontend is batched and padded
+        # with shape [batch_size, n_mels, total_seq_len], different
+        # from python's shape [batch_size * n_mels, total_seq_len]
+        if (
+            isinstance(input_audio_features, torch.Tensor)
+            and input_audio_features.dim() == 3
+        ):
+            input_audio_features = flatten_bn_with_lengths(
+                input_audio_features, audio_feature_lengths
+            )
 
         return Qwen2_5OmniAudioFeatureInputs(
             type="audio_features",

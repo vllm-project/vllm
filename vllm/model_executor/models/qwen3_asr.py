@@ -48,10 +48,9 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 from vllm.model_executor.models.qwen3_omni_moe_thinker import (
-    Qwen3AudioFeatureInputs,
+    Qwen2_5OmniAudioFeatureInputs,
     Qwen3OmniMoeAudioEncoder,
     Qwen3OmniMoeThinkerMultiModalProcessor,
-    _pack_qwen3_audio_features,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -90,6 +89,8 @@ from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.transformers_utils.processors.qwen3_asr import (
     Qwen3ASRProcessor,
 )
+
+from .utils import flatten_bn_with_lengths
 
 logger = init_logger(__name__)
 _ASR_TEXT_TAG = "<asr_text>"
@@ -411,14 +412,25 @@ class Qwen3ASRForConditionalGeneration(
 
     def _parse_and_validate_audio_input(
         self, **kwargs: object
-    ) -> Qwen3AudioFeatureInputs | None:
+    ) -> Qwen2_5OmniAudioFeatureInputs | None:
         input_audio_features = kwargs.pop("input_audio_features", None)
         audio_feature_lengths = kwargs.pop("audio_feature_lengths", None)
         feature_attention_mask = kwargs.pop("feature_attention_mask", None)
         if input_audio_features is None:
             return None
 
-        return Qwen3AudioFeatureInputs(
+        # inputs features from rust frontend is batched and padded
+        # with shape [batch_size, n_mels, total_seq_len], different
+        # from python's shape [batch_size * n_mels, total_seq_len]
+        if (
+            isinstance(input_audio_features, torch.Tensor)
+            and input_audio_features.dim() == 3
+        ):
+            input_audio_features = flatten_bn_with_lengths(
+                input_audio_features, audio_feature_lengths
+            )
+
+        return Qwen2_5OmniAudioFeatureInputs(
             type="audio_features",
             input_features=input_audio_features,
             audio_feature_lengths=audio_feature_lengths,
@@ -442,13 +454,10 @@ class Qwen3ASRForConditionalGeneration(
 
     def _process_audio_input(
         self,
-        audio_input: Qwen3AudioFeatureInputs,
+        audio_input: Qwen2_5OmniAudioFeatureInputs,
     ) -> torch.Tensor:
         input_features = audio_input["input_features"]
         audio_feature_lengths = audio_input["audio_feature_lengths"]
-        input_features = _pack_qwen3_audio_features(
-            input_features, audio_feature_lengths
-        )
 
         audio_output_lengths = _get_feat_extract_output_lengths(audio_feature_lengths)
 
