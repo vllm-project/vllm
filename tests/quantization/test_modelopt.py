@@ -63,6 +63,12 @@ def _mock_lm_head() -> Mock:
     return lm_head
 
 
+def _weight_holder() -> torch.nn.Module:
+    module = torch.nn.Module()
+    module.weight = torch.nn.Parameter(torch.empty(8, 4), requires_grad=False)
+    return module
+
+
 def _mixed_precision_config(quantized_layers: dict) -> ModelOptMixedPrecisionConfig:
     return ModelOptMixedPrecisionConfig(
         kv_cache_quant_method=None,
@@ -118,6 +124,29 @@ def test_modelopt_nvfp4_leaves_excluded_parallel_lm_head_unquantized():
     method = config.get_quant_method(_mock_lm_head(), prefix="lm_head")
 
     assert isinstance(method, UnquantizedLinearMethod)
+
+
+def test_modelopt_excluded_lm_head_ties_to_embedding_weight():
+    """Tied word embeddings must survive ModelOpt's lm_head quantization path.
+
+    ModelOpt checkpoints of tied models (e.g. nvidia/Gemma-4-31B-IT-NVFP4) list
+    ``lm_head`` in ``exclude_modules``, so the head keeps an unquantized method
+    and its weight is shared with ``embed_tokens`` rather than loaded.
+    """
+    config = ModelOptNvFp4Config(
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo="FP8",
+        exclude_modules=["lm_head"],
+    )
+
+    method = config.get_quant_method(_mock_lm_head(), prefix="language_model.lm_head")
+    assert isinstance(method, UnquantizedLinearMethod)
+
+    lm_head = _weight_holder()
+    embed_tokens = _weight_holder()
+    method.tie_weights(lm_head, embed_tokens)
+
+    assert lm_head.weight is embed_tokens.weight
 
 
 def test_modelopt_mixed_precision_quantizes_parallel_lm_head():
