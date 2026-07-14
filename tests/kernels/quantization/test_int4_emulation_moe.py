@@ -156,42 +156,42 @@ def _make_gptq_moe_weights(E, K, N, group_size, asym=False):
     w13_fp = torch.randn(E, K, 2 * N, dtype=torch.float16, device=device)
     w2_fp = torch.randn(E, N, K, dtype=torch.float16, device=device)
 
-    w13_list, w13s, w13z, w13_ref = [], [], [], []
-    w2_list, w2s, w2z, w2_ref = [], [], [], []
+    w13_list, w13s_list, w13z_list, w13_ref_list = [], [], [], []
+    w2_list, w2s_list, w2z_list, w2_ref_list = [], [], [], []
 
     for e in range(E):
         if asym:
             q13, s13, z13 = _quantize_asym(w13_fp[e], group_size)
             w13_list.append(gptq_pack(q13, 4, K, 2 * N))
-            w13s.append(s13)
-            w13z.append(_pack_gptq_zeros(z13, 2 * N))
-            w13_ref.append(_dequantize_ref(q13, s13, z13))
+            w13s_list.append(s13)
+            w13z_list.append(_pack_gptq_zeros(z13, 2 * N))
+            w13_ref_list.append(_dequantize_ref(q13, s13, z13))
             q2, s2, z2 = _quantize_asym(w2_fp[e], group_size)
             w2_list.append(gptq_pack(q2, 4, N, K))
-            w2s.append(s2)
-            w2z.append(_pack_gptq_zeros(z2, K))
-            w2_ref.append(_dequantize_ref(q2, s2, z2))
+            w2s_list.append(s2)
+            w2z_list.append(_pack_gptq_zeros(z2, K))
+            w2_ref_list.append(_dequantize_ref(q2, s2, z2))
         else:
             q13, s13 = _quantize_sym(w13_fp[e], group_size)
             w13_list.append(gptq_pack(q13, 4, K, 2 * N))
-            w13s.append(s13)
-            w13z.append(None)
-            w13_ref.append(_dequantize_ref(q13, s13))
+            w13s_list.append(s13)
+            w13z_list.append(None)
+            w13_ref_list.append(_dequantize_ref(q13, s13))
             q2, s2 = _quantize_sym(w2_fp[e], group_size)
             w2_list.append(gptq_pack(q2, 4, N, K))
-            w2s.append(s2)
-            w2z.append(None)
-            w2_ref.append(_dequantize_ref(q2, s2))
+            w2s_list.append(s2)
+            w2z_list.append(None)
+            w2_ref_list.append(_dequantize_ref(q2, s2))
 
     return (
         torch.stack(w13_list),
-        torch.stack(w13s),
-        torch.stack(w13z) if asym else None,
-        torch.stack(w13_ref),  # [E, K, 2N]
+        torch.stack(w13s_list),
+        torch.stack(w13z_list) if asym else None,
+        torch.stack(w13_ref_list),  # [E, K, 2N]
         torch.stack(w2_list),
-        torch.stack(w2s),
-        torch.stack(w2z) if asym else None,
-        torch.stack(w2_ref),  # [E, N, K]
+        torch.stack(w2s_list),
+        torch.stack(w2z_list) if asym else None,
+        torch.stack(w2_ref_list),  # [E, N, K]
     )
 
 
@@ -201,42 +201,42 @@ def _make_awq_moe_weights(E, K, N, group_size, asym=False):
     w13_fp = torch.randn(E, K, 2 * N, dtype=torch.float16, device=device)
     w2_fp = torch.randn(E, N, K, dtype=torch.float16, device=device)
 
-    w13_list, w13s, w13z, w13_ref = [], [], [], []
-    w2_list, w2s, w2z, w2_ref = [], [], [], []
+    w13_list, w13s_list, w13z_list, w13_ref_list = [], [], [], []
+    w2_list, w2s_list, w2z_list, w2_ref_list = [], [], [], []
 
     for e in range(E):
         if asym:
             q13, s13, z13 = _quantize_asym(w13_fp[e], group_size)
             w13_list.append(awq_pack(q13, 4, K, 2 * N))
-            w13s.append(s13)
-            w13z.append(_pack_awq_zeros(z13, 2 * N))
-            w13_ref.append(_dequantize_ref(q13, s13, z13))
+            w13s_list.append(s13)
+            w13z_list.append(_pack_awq_zeros(z13, 2 * N))
+            w13_ref_list.append(_dequantize_ref(q13, s13, z13))
             q2, s2, z2 = _quantize_asym(w2_fp[e], group_size)
             w2_list.append(awq_pack(q2, 4, N, K))
-            w2s.append(s2)
-            w2z.append(_pack_awq_zeros(z2, K))
-            w2_ref.append(_dequantize_ref(q2, s2, z2))
+            w2s_list.append(s2)
+            w2z_list.append(_pack_awq_zeros(z2, K))
+            w2_ref_list.append(_dequantize_ref(q2, s2, z2))
         else:
             q13, s13 = _quantize_sym(w13_fp[e], group_size)
             w13_list.append(awq_pack(q13, 4, K, 2 * N))
-            w13s.append(s13)
-            w13z.append(None)
-            w13_ref.append(_dequantize_ref(q13, s13))
+            w13s_list.append(s13)
+            w13z_list.append(None)
+            w13_ref_list.append(_dequantize_ref(q13, s13))
             q2, s2 = _quantize_sym(w2_fp[e], group_size)
             w2_list.append(awq_pack(q2, 4, N, K))
-            w2s.append(s2)
-            w2z.append(None)
-            w2_ref.append(_dequantize_ref(q2, s2))
+            w2s_list.append(s2)
+            w2z_list.append(None)
+            w2_ref_list.append(_dequantize_ref(q2, s2))
 
     return (
         torch.stack(w13_list),
-        torch.stack(w13s),
-        torch.stack(w13z) if asym else None,
-        torch.stack(w13_ref),  # [E, K, 2N]
+        torch.stack(w13s_list),
+        torch.stack(w13z_list) if asym else None,
+        torch.stack(w13_ref_list),  # [E, K, 2N]
         torch.stack(w2_list),
-        torch.stack(w2s),
-        torch.stack(w2z) if asym else None,
-        torch.stack(w2_ref),  # [E, N, K]
+        torch.stack(w2s_list),
+        torch.stack(w2z_list) if asym else None,
+        torch.stack(w2_ref_list),  # [E, N, K]
     )
 
 
@@ -531,51 +531,51 @@ def test_gptq_awq_process_weights_agree(E, K, N, group_size, asym):
     w13_fp = torch.randn(E, K, 2 * N, dtype=torch.float16, device=device)
     w2_fp = torch.randn(E, N, K, dtype=torch.float16, device=device)
 
-    g13, g13s, g13z = [], [], []
-    a13, a13s, a13z = [], [], []
-    g2, g2s, g2z = [], [], []
-    a2, a2s, a2z = [], [], []
+    g13_list, g13s_list, g13z_list = [], [], []
+    a13_list, a13s_list, a13z_list = [], [], []
+    g2_list, g2s_list, g2z_list = [], [], []
+    a2_list, a2s_list, a2z_list = [], [], []
 
     for e in range(E):
         if asym:
             q13, s13, z13 = _quantize_asym(w13_fp[e], group_size)
             q2, s2, z2 = _quantize_asym(w2_fp[e], group_size)
-            g13z.append(_pack_gptq_zeros(z13, 2 * N))
-            a13z.append(_pack_awq_zeros(z13, 2 * N))
-            g2z.append(_pack_gptq_zeros(z2, K))
-            a2z.append(_pack_awq_zeros(z2, K))
+            g13z_list.append(_pack_gptq_zeros(z13, 2 * N))
+            a13z_list.append(_pack_awq_zeros(z13, 2 * N))
+            g2z_list.append(_pack_gptq_zeros(z2, K))
+            a2z_list.append(_pack_awq_zeros(z2, K))
         else:
             q13, s13 = _quantize_sym(w13_fp[e], group_size)
             q2, s2 = _quantize_sym(w2_fp[e], group_size)
-            g13z.append(None)
-            a13z.append(None)
-            g2z.append(None)
-            a2z.append(None)
+            g13z_list.append(None)
+            a13z_list.append(None)
+            g2z_list.append(None)
+            a2z_list.append(None)
 
-        g13.append(gptq_pack(q13, 4, K, 2 * N))
-        a13.append(awq_pack(q13, 4, K, 2 * N))
-        g13s.append(s13)
-        a13s.append(s13)
-        g2.append(gptq_pack(q2, 4, N, K))
-        a2.append(awq_pack(q2, 4, N, K))
-        g2s.append(s2)
-        a2s.append(s2)
+        g13_list.append(gptq_pack(q13, 4, K, 2 * N))
+        a13_list.append(awq_pack(q13, 4, K, 2 * N))
+        g13s_list.append(s13)
+        a13s_list.append(s13)
+        g2_list.append(gptq_pack(q2, 4, N, K))
+        a2_list.append(awq_pack(q2, 4, N, K))
+        g2s_list.append(s2)
+        a2s_list.append(s2)
 
     gptq_res = _process_weights_emulation_gptq(
-        torch.stack(g13),
-        torch.stack(g2),
-        torch.stack(g13s),
-        torch.stack(g2s),
-        torch.stack(g13z) if asym else None,
-        torch.stack(g2z) if asym else None,
+        torch.stack(g13_list),
+        torch.stack(g2_list),
+        torch.stack(g13s_list),
+        torch.stack(g2s_list),
+        torch.stack(g13z_list) if asym else None,
+        torch.stack(g2z_list) if asym else None,
     )
     awq_res = _process_weights_emulation_awq(
-        torch.stack(a13),
-        torch.stack(a2),
-        torch.stack(a13s),
-        torch.stack(a2s),
-        torch.stack(a13z) if asym else None,
-        torch.stack(a2z) if asym else None,
+        torch.stack(a13_list),
+        torch.stack(a2_list),
+        torch.stack(a13s_list),
+        torch.stack(a2s_list),
+        torch.stack(a13z_list) if asym else None,
+        torch.stack(a2z_list) if asym else None,
     )
 
     assert torch.allclose(gptq_res[0].float(), awq_res[0].float(), atol=1e-3), (
@@ -600,34 +600,34 @@ def test_gptq_vs_awq_forward_agree(E, K, N, top_k, group_size, num_tokens):
     w13_fp = torch.randn(E, K, 2 * N, dtype=torch.float16, device=device)
     w2_fp = torch.randn(E, N, K, dtype=torch.float16, device=device)
 
-    g13, g13s, a13, a13s = [], [], [], []
-    g2, g2s, a2, a2s = [], [], [], []
+    g13_list, g13s_list, a13_list, a13s_list = [], [], [], []
+    g2_list, g2s_list, a2_list, a2s_list = [], [], [], []
 
     for e in range(E):
         q13, s13 = _quantize_sym(w13_fp[e], group_size)
         q2, s2 = _quantize_sym(w2_fp[e], group_size)
-        g13.append(gptq_pack(q13, 4, K, 2 * N))
-        a13.append(awq_pack(q13, 4, K, 2 * N))
-        g13s.append(s13)
-        a13s.append(s13.clone())
-        g2.append(gptq_pack(q2, 4, N, K))
-        a2.append(awq_pack(q2, 4, N, K))
-        g2s.append(s2)
-        a2s.append(s2.clone())
+        g13_list.append(gptq_pack(q13, 4, K, 2 * N))
+        a13_list.append(awq_pack(q13, 4, K, 2 * N))
+        g13s_list.append(s13)
+        a13s_list.append(s13.clone())
+        g2_list.append(gptq_pack(q2, 4, N, K))
+        a2_list.append(awq_pack(q2, 4, N, K))
+        g2s_list.append(s2)
+        a2s_list.append(s2.clone())
 
     gptq_res = _process_weights_emulation_gptq(
-        torch.stack(g13),
-        torch.stack(g2),
-        torch.stack(g13s),
-        torch.stack(g2s),
+        torch.stack(g13_list),
+        torch.stack(g2_list),
+        torch.stack(g13s_list),
+        torch.stack(g2s_list),
         None,
         None,
     )
     awq_res = _process_weights_emulation_awq(
-        torch.stack(a13),
-        torch.stack(a2),
-        torch.stack(a13s),
-        torch.stack(a2s),
+        torch.stack(a13_list),
+        torch.stack(a2_list),
+        torch.stack(a13s_list),
+        torch.stack(a2s_list),
         None,
         None,
     )
@@ -674,18 +674,18 @@ def test_emulation_output_close_to_bf16_reference(
     w13_fp = torch.randn(E, K, 2 * N, dtype=torch.bfloat16, device=device) * 0.02
     w2_fp = torch.randn(E, N, K, dtype=torch.bfloat16, device=device) * 0.02
 
-    packed13, scales13, packed2, scales2 = [], [], [], []
+    packed13_list, scales13_list, packed2_list, scales2_list = [], [], [], []
     for e in range(E):
         q13, s13 = _quantize_sym(w13_fp[e].float(), group_size)
         q2, s2 = _quantize_sym(w2_fp[e].float(), group_size)
         if fmt == "gptq":
-            packed13.append(gptq_pack(q13, 4, K, 2 * N))
-            packed2.append(gptq_pack(q2, 4, N, K))
+            packed13_list.append(gptq_pack(q13, 4, K, 2 * N))
+            packed2_list.append(gptq_pack(q2, 4, N, K))
         else:
-            packed13.append(awq_pack(q13, 4, K, 2 * N))
-            packed2.append(awq_pack(q2, 4, N, K))
-        scales13.append(s13)
-        scales2.append(s2)
+            packed13_list.append(awq_pack(q13, 4, K, 2 * N))
+            packed2_list.append(awq_pack(q2, 4, N, K))
+        scales13_list.append(s13)
+        scales2_list.append(s2)
 
     process_fn = (
         _process_weights_emulation_gptq
@@ -693,10 +693,10 @@ def test_emulation_output_close_to_bf16_reference(
         else _process_weights_emulation_awq
     )
     res = process_fn(
-        torch.stack(packed13),
-        torch.stack(packed2),
-        torch.stack(scales13),
-        torch.stack(scales2),
+        torch.stack(packed13_list),
+        torch.stack(packed2_list),
+        torch.stack(scales13_list),
+        torch.stack(scales2_list),
         None,
         None,
     )
