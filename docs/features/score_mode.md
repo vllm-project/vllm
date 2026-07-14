@@ -139,17 +139,23 @@ reference logits caching, see the example script:
 ## Determinism
 
 Scoring is only meaningful if the same command produces the same score every
-time. Two Inductor features select kernels by *timing* them, so run-to-run
-timing noise can change which kernel wins, changing floating-point reduction
-order and thus logits (and therefore PPL/KLD) between otherwise identical
-runs:
+time. Several parts of the compiled stack select kernels by *timing*
+candidates, so run-to-run timing noise can change which kernel wins, changing
+floating-point reduction order and thus logits (and therefore PPL/KLD)
+between otherwise identical runs:
 
 - `combo_kernels` / `benchmark_combo_kernel` (enabled by default in
   `CompilationConfig` on torch >= 2.9)
+- Inductor runtime Triton autotuning (`triton.autotune_pointwise`, on by
+  default): multiple candidate configs per generated kernel are benchmarked
+  at first call in every process
 - `max_autotune` / `coordinate_descent_tuning` (only active for static
   `compile_sizes`)
+- FlashInfer warmup autotuning (`enable_flashinfer_autotune`, enabled by
+  default at optimization level >= 1 on SM90+): kernel tactics picked by
+  per-process benchmarking
 
-The example scripts disable these by default by passing:
+The example scripts disable all of these by default by passing:
 
 ```python
 llm = LLM(
@@ -158,15 +164,26 @@ llm = LLM(
         "inductor_compile_config": {
             "combo_kernels": False,
             "benchmark_combo_kernel": False,
+            "triton.autotune_pointwise": False,
+            "max_autotune": False,
+            "coordinate_descent_tuning": False,
+            "benchmark_fusion": False,
         },
     },
+    enable_flashinfer_autotune=False,
 )
 ```
 
 with `VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE=0` and
-`VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING=0`. This keeps
-`torch.compile` speed while making kernel selection deterministic; pass
-`--no-deterministic` to opt out.
+`VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING=0`. Kernel selection then
+uses fixed heuristics instead of timing; `torch.compile` speed is otherwise
+retained. Pass `--no-deterministic` to opt out.
+
+!!! note
+    The first run after changing any compilation-affecting configuration
+    compiles fresh; subsequent runs load from the compile cache. Always
+    compare scores between runs that both hit a warm cache (i.e. discard
+    the first run after a config change or vLLM rebuild).
 
 Notes:
 

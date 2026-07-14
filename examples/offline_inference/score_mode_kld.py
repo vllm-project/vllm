@@ -42,27 +42,46 @@ from vllm.inputs import TokensPrompt
 
 logger = logging.getLogger(__name__)
 
-# Inductor combo kernels select kernels by timing them (per process), so
-# run-to-run timing noise changes which kernel wins, changing float
-# reduction order and thus logits. Disabling them freezes kernel selection
-# to Inductor's deterministic heuristics, making KLD bit-reproducible
-# run-to-run while keeping torch.compile speed.
+# Several parts of the compiled stack select kernels by *timing* candidates,
+# so run-to-run timing noise changes which kernel wins, changing float
+# reduction order and thus logits. All timing-based selectors must be
+# disabled for bit-reproducible scoring:
+#   - combo_kernels / benchmark_combo_kernel: horizontal fusion picked by
+#     compile-time benchmarking.
+#   - triton.autotune_pointwise: Inductor generates multiple Triton configs
+#     per pointwise/reduction kernel and benchmarks them at first call in
+#     every process.
+#   - max_autotune / coordinate_descent_tuning: static-shape autotuning.
+# Heuristic (non-timed) selection is used instead; torch.compile speed is
+# otherwise retained.
 DETERMINISTIC_COMPILATION_CONFIG: dict[str, Any] = {
     "inductor_compile_config": {
         "combo_kernels": False,
         "benchmark_combo_kernel": False,
+        "triton.autotune_pointwise": False,
+        "max_autotune": False,
+        "coordinate_descent_tuning": False,
+        "benchmark_fusion": False,
     },
 }
 
 
 def apply_deterministic_env() -> None:
-    """Disable the remaining timing-based Inductor autotuners.
-
-    These only affect static ``compile_sizes`` autotuning, but they are the
-    only other timing-based kernel selectors in the compile path.
-    """
+    """Disable timing-based autotuners controlled by environment variables."""
     os.environ.setdefault("VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE", "0")
     os.environ.setdefault("VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING", "0")
+
+
+def apply_deterministic_llm_kwargs(llm_kwargs: dict[str, Any]) -> None:
+    """Apply all determinism settings to LLM kwargs.
+
+    Besides Inductor, vLLM's FlashInfer warmup autotuner (enabled by default
+    at optimization level >= 1 on SM90+) also picks kernel tactics by timing
+    them per process; disable it so FlashInfer uses fixed heuristics.
+    """
+    apply_deterministic_env()
+    llm_kwargs["compilation_config"] = DETERMINISTIC_COMPILATION_CONFIG
+    llm_kwargs["enable_flashinfer_autotune"] = False
 
 
 def load_dataset_texts(
@@ -466,9 +485,11 @@ def main():
     if args.language_model_only:
         llm_kwargs["language_model_only"] = True
     if not args.no_deterministic:
-        apply_deterministic_env()
-        llm_kwargs["compilation_config"] = DETERMINISTIC_COMPILATION_CONFIG
-        print("Deterministic mode: combo kernels disabled (bit-reproducible KLD)")
+        apply_deterministic_llm_kwargs(llm_kwargs)
+        print(
+            "Deterministic mode: combo kernels, Inductor runtime autotune, "
+            "and FlashInfer autotune disabled (bit-reproducible KLD)"
+        )
 
     print("\nCalculating KLD...")
     print(f"  Context length: {args.context_length}")

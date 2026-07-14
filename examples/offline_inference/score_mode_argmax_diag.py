@@ -40,8 +40,7 @@ import torch
 from safetensors.torch import safe_open, save_file
 
 from score_mode_kld import (
-    DETERMINISTIC_COMPILATION_CONFIG,
-    apply_deterministic_env,
+    apply_deterministic_llm_kwargs,
     load_dataset_texts,
 )
 
@@ -82,9 +81,8 @@ def generate_logits(args: argparse.Namespace) -> None:
         "max_model_len": args.context_length * 2,
     }
     if args.deterministic:
-        apply_deterministic_env()
-        llm_kwargs["compilation_config"] = DETERMINISTIC_COMPILATION_CONFIG
-        print("Deterministic config: combo kernels disabled")
+        apply_deterministic_llm_kwargs(llm_kwargs)
+        print("Deterministic config: all timing-based autotuners disabled")
     else:
         print("Wobbling config: combo kernels active (diagnostic target)")
 
