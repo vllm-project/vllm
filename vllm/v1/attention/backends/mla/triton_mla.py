@@ -176,8 +176,6 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "alibi_slopes, logits_soft_cap"
             )
 
-        # self.sliding_window_size is set by MLACommonImpl.__init__.
-
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
                 "Encoder self-attention and "
