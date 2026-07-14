@@ -21,17 +21,6 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
-      - .buildkite/hardware_tests/amd.yaml
-      - .buildkite/scripts/ci-bake-rocm.sh
-      - .buildkite/scripts/hardware_ci/run-amd-test.sh
-      - .buildkite/scripts/rocm/build-ci-base.sh
-      - .buildkite/scripts/rocm/build-test-image.sh
-      - docker/Dockerfile.rocm
-      - docker/Dockerfile.rocm_base
-      - docker/ci-rocm.hcl
-      - docker/docker-bake-rocm.hcl
-      - requirements/rocm.txt
-      - requirements/test/rocm.txt
       - vllm/distributed/eplb
       - tests/distributed/test_eplb_algo.py
       - tests/distributed/test_eplb_utils.py

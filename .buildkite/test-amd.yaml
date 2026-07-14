@@ -476,18 +476,6 @@ steps:
   fast_check: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - .buildkite/test-amd.yaml
-  - .buildkite/hardware_tests/amd.yaml
-  - .buildkite/scripts/ci-bake-rocm.sh
-  - .buildkite/scripts/hardware_ci/run-amd-test.sh
-  - .buildkite/scripts/rocm/build-ci-base.sh
-  - .buildkite/scripts/rocm/build-test-image.sh
-  - docker/Dockerfile.rocm
-  - docker/Dockerfile.rocm_base
-  - docker/ci-rocm.hcl
-  - docker/docker-bake-rocm.hcl
-  - requirements/rocm.txt
-  - requirements/test/rocm.txt
   - vllm/
   - tests/basic_correctness/test_basic_correctness
   - tests/basic_correctness/test_cpu_offload
@@ -1333,7 +1321,6 @@ steps:
   - tests/evals/
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - export PYTORCH_ROCM_ARCH=gfx942
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx.txt
 
 - label: ROCm LM Eval Large Models (8 GPUs) # TBD
@@ -1581,9 +1568,8 @@ steps:
   commands:
   - apt-get update && apt-get install -y curl libsodium23
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - export PYTHONFAULTHANDLER=1
-  - pytest -v -s model_executor -m '(not slow_test)' --timeout=900 --timeout-method=thread
-  - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread
+  - pytest -v -s model_executor -m '(not slow_test)'
+  - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py
 
 #----------------------------------------------------  mi300 · model_runner_v2  -------------------------------------------------------#
 
