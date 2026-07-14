@@ -18,8 +18,11 @@ from vllm.v1.kv_offload.base import (
     OffloadingWorker,
 )
 from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
-from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+from vllm.v1.kv_offload.cpu.worker_factory import (
+    create_cpu_offloading_worker,
+    is_ascend_platform,
+)
 
 
 class CPUOffloadingSpec(OffloadingSpec):
@@ -101,7 +104,7 @@ class CPUOffloadingSpec(OffloadingSpec):
         self._manager: OffloadingManager | None = None
 
         # worker-side
-        self._worker: CPUOffloadingWorker | None = None
+        self._worker: OffloadingWorker | None = None
 
         self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
 
@@ -125,8 +128,8 @@ class CPUOffloadingSpec(OffloadingSpec):
             )
         return self._manager
 
-    def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
-        return CPUOffloadingWorker(
+    def create_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
+        return create_cpu_offloading_worker(
             kv_caches=kv_caches,
             block_size_factor=self.block_size_factor,
             num_cpu_blocks=self.num_blocks,
@@ -135,10 +138,14 @@ class CPUOffloadingSpec(OffloadingSpec):
     @override
     def get_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
         if not self._worker:
-            if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+            if not (
+                current_platform.is_cuda_alike()
+                or current_platform.is_xpu()
+                or is_ascend_platform()
+            ):
                 raise Exception(
-                    "CPU Offloading is currently only supported on CUDA-alike "
-                    "and XPU GPUs"
+                    "CPU Offloading is currently only supported on CUDA-alike, "
+                    "XPU, and Ascend NPU devices"
                 )
             self._worker = self.create_worker(kv_caches)
 

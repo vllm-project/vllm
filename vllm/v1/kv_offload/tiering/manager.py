@@ -50,6 +50,10 @@ from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     SecondaryTierManager,
 )
+from vllm.v1.kv_offload.tiering.lifecycle import (
+    LifecycleConfig,
+    SessionLifecycleManager,
+)
 
 logger = init_logger(__name__)
 
@@ -141,6 +145,7 @@ class TieringOffloadingManager(OffloadingManager):
         primary_tier: CPUPrimaryTierOffloadingManager,
         secondary_tiers: list[SecondaryTierManager] | None = None,
         enable_events: bool = False,
+        lifecycle_config: LifecycleConfig | None = None,
     ):
         """
         Initialize the TieringOffloadingManager.
@@ -179,6 +184,7 @@ class TieringOffloadingManager(OffloadingManager):
         # Secondary tiers are finalized only after pending primary stores reach
         # complete_store(), since complete_store() can still submit cascades.
         self._req_state: dict[str, RequestState] = {}
+        self._lifecycle = SessionLifecycleManager(lifecycle_config or LifecycleConfig())
 
     def _next_job_id(self) -> JobId:
         """Generate a unique job ID for async transfer tracking."""
@@ -257,6 +263,7 @@ class TieringOffloadingManager(OffloadingManager):
             MISS      — block not found in any tier, or primary is full
                         and cannot accept a promotion.
         """
+        self._lifecycle.record_request_keys(req_context, (key,))
         self._maybe_process_finished_jobs()
 
         primary_hit = self.primary_tier.lookup(key, req_context)
@@ -372,6 +379,7 @@ class TieringOffloadingManager(OffloadingManager):
         Returns:
             LoadStoreSpec for reading from primary tier.
         """
+        self._lifecycle.record_request_keys(req_context, keys)
         # Process completed promotions to ensure blocks are ready
         self._maybe_process_finished_jobs()
 
@@ -386,6 +394,7 @@ class TieringOffloadingManager(OffloadingManager):
             keys: Blocks to mark as recently used.
             req_context: Per-request context.
         """
+        self._lifecycle.record_request_keys(req_context, keys)
         self.primary_tier.touch(keys, req_context)
         for tier in self.secondary_tiers:
             tier.touch(keys, req_context)
@@ -426,6 +435,7 @@ class TieringOffloadingManager(OffloadingManager):
             PrepareStoreOutput describing where to store blocks and what was
             evicted, or None if store cannot proceed.
         """
+        self._lifecycle.record_request_keys(req_context, keys)
         # Step 1: Poll for completed async jobs FIRST
         # This decrements ref_cnt on primary blocks that have been
         # successfully transferred to secondary tiers.
@@ -563,6 +573,7 @@ class TieringOffloadingManager(OffloadingManager):
         Returns REQUEST_LEVEL if ANY secondary tier wants request-level.
         Only stores REQUEST_LEVEL tier decisions for use in prepare_store.
         """
+        self._lifecycle.on_new_request(req_context)
         state = RequestState(req_context=req_context)
         for tier in self.secondary_tiers:
             tier_ctx = tier.on_new_request(req_context)
@@ -582,6 +593,7 @@ class TieringOffloadingManager(OffloadingManager):
     @override
     def on_request_finished(self, req_context: ReqContext) -> None:
         self.primary_tier.on_request_finished(req_context)
+        self._lifecycle.on_request_finished(req_context)
         state = self._req_state[req_context.req_id]
         state.is_finished = True
         self._maybe_finalize_request(req_context.req_id)
@@ -617,13 +629,46 @@ class TieringOffloadingManager(OffloadingManager):
         for tier in self.secondary_tiers:
             tier.on_schedule_end(context)
 
+        protected_keys = {
+            key for metadata in self._transfer_jobs.values() for key in metadata.keys
+        }
+        protected_keys.update(
+            key
+            for pending_by_req in self._pending_load_submissions.values()
+            for pending in pending_by_req.values()
+            for key in pending.keys
+        )
+        protected_req_ids = {
+            req_id
+            for req_id, state in self._req_state.items()
+            if state.pending_primary_stores > 0
+        }
+        expired = self._lifecycle.expire_idle_sessions(
+            self.secondary_tiers,
+            protected_keys=protected_keys,
+            protected_req_ids=protected_req_ids,
+        )
+        if expired:
+            logger.info("Expired %d idle KV lifecycle session(s)", expired)
+
+    def record_request_keys(
+        self, req_context: ReqContext, keys: Collection[OffloadKey]
+    ) -> None:
+        """Record retained keys for lifecycle observability and cleanup."""
+        self._lifecycle.record_request_keys(req_context, keys)
+
+    def get_lifecycle_snapshot(self) -> dict[str, int]:
+        return self._lifecycle.snapshot()
+
     @override
     def has_pending_work(self) -> bool:
         # In-flight primary<->secondary transfers (pending promotions are
         # translated to transfer jobs in on_schedule_end), plus any work the
         # secondary tiers themselves still have outstanding.
-        return bool(self._transfer_jobs) or any(
-            tier.has_pending_work() for tier in self.secondary_tiers
+        return (
+            bool(self._transfer_jobs)
+            or self._lifecycle.has_pending_expiration()
+            or any(tier.has_pending_work() for tier in self.secondary_tiers)
         )
 
     @override

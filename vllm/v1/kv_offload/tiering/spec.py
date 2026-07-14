@@ -43,11 +43,13 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     OffloadingManager,
     OffloadingMetricMetadata,
+    OffloadingWorker,
 )
-from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+from vllm.v1.kv_offload.cpu.worker_factory import create_cpu_offloading_worker
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
+from vllm.v1.kv_offload.tiering.lifecycle import LifecycleConfig
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
@@ -169,6 +171,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 primary_tier=primary_tier,
                 secondary_tiers=secondary_tiers,
                 enable_events=self.kv_events_config.enable_kv_cache_events,
+                lifecycle_config=LifecycleConfig.from_extra_config(self.extra_config),
             )
             if int(self.extra_config.get("store_threshold", 0)) >= 2:
                 raise ValueError(
@@ -187,7 +190,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         return self._manager
 
     @override
-    def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
+    def create_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
         rank = torch.accelerator.current_device_index()
         worker_mmap = SharedOffloadRegion(
             instance_id=self.vllm_config.instance_id,
@@ -196,7 +199,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
             cpu_page_size=self.cpu_page_size_per_worker,
         )
-        return CPUOffloadingWorker(
+        return create_cpu_offloading_worker(
             kv_caches=kv_caches,
             block_size_factor=self.block_size_factor,
             num_cpu_blocks=self.num_blocks,
