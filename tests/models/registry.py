@@ -576,6 +576,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
 _EMBEDDING_EXAMPLE_MODELS = {
     # [Text-only]
     "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5"),
+    "BertForMaskedLM": _HfExamplesInfo("google-bert/bert-base-uncased"),
     "BertSpladeSparseEmbeddingModel": _HfExamplesInfo(
         "naver/splade-v3",
         hf_overrides={"architectures": ["BertSpladeSparseEmbeddingModel"]},
@@ -809,6 +810,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"super": "nvidia/Cosmos3-Super"},
         max_model_len=4096,
         min_transformers_version="4.57",
+    ),
+    "Cosmos3EdgeForConditionalGeneration": _HfExamplesInfo(
+        "nvidia/Cosmos3-Edge",
+        max_model_len=4096,
+        is_available_online=False,
     ),
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/deepseek-vl2-tiny",
@@ -1513,7 +1519,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         tokenizer="meta-llama/Llama-4-Scout-17B-16E-Instruct",
     ),
     "EagleMiniCPMForCausalLM": _HfExamplesInfo(
-        "openbmb/MiniCPM-1B-sft-bf16",
+        "openbmb/MiniCPM-2B-sft-bf16",
         trust_remote_code=True,
         speculative_model="openbmb/MiniCPM-2B-sft-bf16",
         speculative_method="eagle",
