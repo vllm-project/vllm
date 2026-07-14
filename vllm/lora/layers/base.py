@@ -84,6 +84,22 @@ class BaseLayerWithLoRA(nn.Module):
                     if isinstance(t, torch.Tensor) and t.device.type != "meta":
                         t.zero_()
 
+    def restore_non_parameter_tensors(self) -> None:
+        """Restore non-LoRA GPU tensors from their CPU sources after sleep.
+
+        Some LoRA layers hold GPU tensors (e.g. sharded_to_full_mapping_gpu)
+        that are neither nn.Parameters nor LoRA stacked tensors. After
+        level-2 sleep their GPU memory contains undefined data. This method
+        rebuilds them from their CPU-side sources.
+        """
+        cpu_mapping = getattr(self, "sharded_to_full_mapping", None)
+        if cpu_mapping is not None:
+            self.sharded_to_full_mapping_gpu = torch.tensor(
+                cpu_mapping,
+                device=getattr(self, "device", "cuda"),
+                dtype=torch.long,
+            )
+
     @overload
     def slice_lora_a(
         self, lora_a: list[torch.Tensor | None]

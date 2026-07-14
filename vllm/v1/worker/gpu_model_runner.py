@@ -5509,13 +5509,16 @@ class GPUModelRunner(
                 param.copy_(loaded_weight)
                 loaded_weights.add(name)
 
-        # Re-zero LoRA stacked tensors that are not restored by reload.
-        # After level-2 sleep their GPU memory contains undefined data.
+        # Re-zero LoRA stacked tensors that are not restored by reload,
+        # and restore non-parameter GPU tensors (e.g. sharded_to_full_mapping_gpu)
+        # from their CPU sources. After level-2 sleep their GPU memory
+        # contains undefined data.
         if self.lora_config:
             from vllm.lora.layers.base import BaseLayerWithLoRA
             for module in model.modules():
                 if isinstance(module, BaseLayerWithLoRA):
                     module.zero_lora_state()
+                    module.restore_non_parameter_tensors()
 
         # logging and validation
         counter_after_reloading = time.perf_counter()
