@@ -480,6 +480,13 @@ def main():
         "measure the compiled stack's numeric impact vs eager.",
     )
     parser.add_argument(
+        "--no-cudagraphs",
+        action="store_true",
+        help="Keep compiled kernels but disable CUDA graph capture/replay. "
+        "Diagnostic flag to bisect whether run-to-run variation comes from "
+        "Inductor kernels or from CUDA graphs.",
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -519,6 +526,11 @@ def main():
             "Deterministic mode: combo kernels, Inductor benchmarking, "
             "and FlashInfer autotune disabled (bit-reproducible KLD)"
         )
+    if args.no_cudagraphs and not args.enforce_eager:
+        compilation_config = dict(llm_kwargs.get("compilation_config") or {})
+        compilation_config["cudagraph_mode"] = "NONE"
+        llm_kwargs["compilation_config"] = compilation_config
+        print("CUDA graphs disabled (compiled kernels still active)")
 
     print("\nCalculating KLD...")
     print(f"  Context length: {args.context_length}")
