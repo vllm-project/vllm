@@ -49,14 +49,21 @@ def _draft_penalties_kernel(
     prompt_bin_mask_stride,
     output_bin_counts_ptr,
     output_bin_counts_stride,
-    vocab_size,
+    d2t_index_ptr,  # [vocab_size] draft column -> target id (HAS_D2T only)
+    vocab_size,  # row width of logits (draft vocab when HAS_D2T)
     BLOCK_SIZE: tl.constexpr,
+    HAS_D2T: tl.constexpr,
 ):
     """Draft-side mirror of the target's _penalties_kernel (rep penalty only).
 
     Penalized set = prompt bin mask | output bin counts | draft tokens
     t_0..t_{step_i-1} sampled earlier in this block — identical to what the
     verify kernel accumulates for the row checking t_{step_i}.
+
+    With HAS_D2T, logits are in the (reduced) draft-vocab space and each
+    column's target id is looked up via d2t_index — the penalty statistics
+    (target-vocab sized) are gathered per element. draft_tokens hold target
+    ids in both modes.
     """
     req_idx = tl.program_id(0).to(tl.int64)
     state_idx = tl.load(rows_ptr + req_idx).to(tl.int64)
@@ -70,25 +77,28 @@ def _draft_penalties_kernel(
     logits = tl.load(logits_ptr + req_idx * logits_stride + block, mask=mask)
     logits = logits.to(tl.float32)
 
+    if HAS_D2T:
+        tgt = tl.load(d2t_index_ptr + block, mask=mask, other=0).to(tl.int64)
+    else:
+        tgt = block.to(tl.int64)
+
     counts = tl.load(
-        output_bin_counts_ptr + state_idx * output_bin_counts_stride + block,
+        output_bin_counts_ptr + state_idx * output_bin_counts_stride + tgt,
         mask=mask,
         other=0,
     )
     pen_mask = counts > 0
 
-    packed_block = block_idx * BLOCK_SIZE // 32 + tl.arange(0, BLOCK_SIZE // 32)
-    packed = tl.load(
-        prompt_bin_mask_ptr + state_idx * prompt_bin_mask_stride + packed_block,
-        mask=packed_block < tl.cdiv(vocab_size, 32),
+    word = tl.load(
+        prompt_bin_mask_ptr + state_idx * prompt_bin_mask_stride + (tgt >> 5),
+        mask=mask,
         other=0,
     )
-    prompt_bits = (packed[:, None] >> (tl.arange(0, 32)[None, :])) & 1
-    pen_mask |= prompt_bits.to(tl.int1).reshape(BLOCK_SIZE)
+    pen_mask |= ((word >> (tgt & 31)) & 1).to(tl.int1)
 
     for j in tl.range(step_i):
         t = tl.load(draft_tokens_ptr + req_idx * draft_tokens_stride + j)
-        pen_mask |= block == t
+        pen_mask |= tgt == t
 
     scale = tl.where(pen_mask, rep, 1.0)
     logits *= tl.where(logits > 0, 1.0 / scale, scale)
@@ -233,18 +243,15 @@ class DSparkSpeculator(DFlashSpeculator):
             bias = self.model.markov_bias(markov_embed)
             logits_i = base_logits[:, i] + bias
             if self.draft_logits is not None:
-                # Probabilistic: sample in target vocab (a reduced draft vocab is
-                # scattered into its target columns; full vocab is already there).
-                if self._d2t_scatter_index is not None:
-                    assert self._draft_scatter_buf is not None
-                    buf = self._draft_scatter_buf[:num_reqs]
-                    buf.index_copy_(1, self._d2t_scatter_index, logits_i.to(buf.dtype))
-                    logits_i = buf
                 # PATCH (local): mirror the target's repetition-penalty logit
                 # transform on the draft logits (fused triton kernel, mutates
                 # logits_i in place; per-row early exit when rep == 1.0).
+                # Runs BEFORE the d2t scatter so the kernel (and the top-k/p
+                # mirror below) only touch draft-vocab-sized rows; target-vocab
+                # penalty statistics are gathered via the d2t index.
                 if pen_rows is not None:
                     ps = self._penalties_state
+                    logits_i = logits_i.contiguous()
                     vocab = logits_i.shape[-1]
                     blk = 8192
                     _draft_penalties_kernel[(num_reqs, triton.cdiv(vocab, blk))](
@@ -259,14 +266,22 @@ class DSparkSpeculator(DFlashSpeculator):
                         ps.prompt_bin_mask.stride(0),
                         ps.output_bin_counts,
                         ps.output_bin_counts.stride(0),
+                        # Placeholder pointer when there is no d2t map; the
+                        # kernel never dereferences it with HAS_D2T=False.
+                        self._d2t_scatter_index
+                        if self._d2t_scatter_index is not None
+                        else self.draft_tokens,
                         vocab,
                         BLOCK_SIZE=blk,
+                        HAS_D2T=self._d2t_scatter_index is not None,
                     )
                 # PATCH (local): mirror the target's top-k/top-p truncation so
                 # the draft never proposes tokens the target has zeroed out.
                 # Order matches the target sampler: penalties -> temperature
                 # -> top-k/top-p (top-p is computed on temperature-scaled
-                # logits within the top-k set).
+                # logits within the top-k set). Also pre-scatter: the d2t
+                # scatter is value-preserving into a -inf background, so
+                # top-k/thresholds computed on the draft vocab are identical.
                 if tk_state is not None:
                     k_eff, k_enabled, within_k, p_req, temp = tk_state
                     vals = torch.topk(
@@ -292,6 +307,13 @@ class DSparkSpeculator(DFlashSpeculator):
                         logits_i,
                         torch.full((), float("-inf"), device=vals.device),
                     )
+                # Probabilistic: sample in target vocab (a reduced draft vocab is
+                # scattered into its target columns; full vocab is already there).
+                if self._d2t_scatter_index is not None:
+                    assert self._draft_scatter_buf is not None
+                    buf = self._draft_scatter_buf[:num_reqs]
+                    buf.index_copy_(1, self._d2t_scatter_index, logits_i.to(buf.dtype))
+                    logits_i = buf
                 # sample_pos is the predicted token's position Q; the target
                 # verifies it with the predecessor's Gumbel key (Q-1). Pass Q-1.
                 draft_sampled_i = gumbel_sample(
