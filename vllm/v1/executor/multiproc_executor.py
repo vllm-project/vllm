@@ -248,7 +248,9 @@ class MultiprocExecutor(Executor):
 
     def get_response_mqs(self, unique_reply_rank: int = -1) -> list[MessageQueue]:
         assert unique_reply_rank >= -1 and unique_reply_rank < self.world_size, (
-            f"unique_reply_rank must be -1 or < world_size, unique_reply_rank = {unique_reply_rank}, world_size={self.world_size}"
+            f"unique_reply_rank must be -1 or < world_size,"
+            f"unique_reply_rank = {unique_reply_rank}, "
+            f"world_size={self.world_size}"
         )
         ranks = (
             [unique_reply_rank] if unique_reply_rank != -1 else range(self.world_size)
