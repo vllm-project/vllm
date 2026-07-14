@@ -15,7 +15,16 @@ from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k
 from tests.utils import RemoteOpenAIServer
 from vllm.utils.import_utils import has_deep_ep
 
-IS_BLACKWELL = False
+# Detect Blackwell / B200 (compute capability 10.x)
+try:
+    if torch.cuda.is_available():
+        cap = torch.cuda.get_device_capability(0)
+        IS_BLACKWELL = cap[0] >= 10
+    else:
+        IS_BLACKWELL = False
+except Exception:
+    # Be conservative: if we can't detect, don't xfail by default
+    IS_BLACKWELL = False
 
 MODEL_NAMES = [
     "deepseek-ai/DeepSeek-V2-Lite-Chat",
