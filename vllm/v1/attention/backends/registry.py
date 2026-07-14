@@ -163,6 +163,34 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         _ATTN_OVERRIDES.pop(self, None)
 
 
+def get_dcp_capable_backend_names() -> list[str]:
+    """Return the names of registered attention backends that support
+    Decode Context Parallelism (DCP).
+
+    A backend supports DCP when its attention impl can return the softmax
+    LSE (log-sum-exp) for decode, since DCP needs the per-shard LSE to
+    combine partial attention outputs across ranks (see
+    ``AttentionImplBase.can_return_lse_for_decode``).
+
+    This is best-effort: backends that fail to import (e.g. because an
+    optional dependency like FlashInfer isn't installed, or the current
+    platform doesn't support them) are silently skipped. The result is only
+    used to build a helpful error/log message, never to gate correctness.
+    """
+    capable_backends: list[str] = []
+    for member in AttentionBackendEnum:
+        try:
+            impl_cls = member.get_class().get_impl_cls()
+        except Exception:
+            # Backend isn't importable in this environment (missing
+            # optional dependency, unsupported platform, unregistered
+            # CUSTOM/TORCH_SDPA placeholder, etc.) - not relevant here.
+            continue
+        if getattr(impl_cls, "can_return_lse_for_decode", False):
+            capable_backends.append(member.name)
+    return capable_backends
+
+
 class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     """Enumeration of all supported mamba attention backends.
 
