@@ -1571,10 +1571,10 @@ class Gemma4ForConditionalGeneration(
         self,
         vllm_config: VllmConfig,
     ) -> tuple[int, int]:
-        min_budget = 64
+        min_budget = _SUPPORTED_SOFT_TOKENS[0]
         max_budget = min(
             vllm_config.scheduler_config.max_num_batched_tokens,
-            self.config.text_config.max_position_embeddings,
+            vllm_config.model_config.max_model_len,
         )
         return (min_budget, max_budget)
 
@@ -1591,6 +1591,9 @@ class Gemma4ForConditionalGeneration(
     ) -> list["EncoderItemSpec"]:
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
+        vision_cfg = self.vision_tower.config
+        pool_ratio = getattr(vision_cfg, "pooling_kernel_size", 2) ** 2
+
         modality = self.get_input_modality(mm_kwargs)
         if modality == "image":
             pixel_values = mm_kwargs["pixel_values"]
@@ -1598,7 +1601,7 @@ class Gemma4ForConditionalGeneration(
                 return [
                     EncoderItemSpec(
                         input_size=pv.shape[0],
-                        output_tokens=pv.shape[0] // 4,
+                        output_tokens=pv.shape[0] // pool_ratio,
                     )
                     for pv in pixel_values
                 ]
@@ -1606,7 +1609,7 @@ class Gemma4ForConditionalGeneration(
                 return [
                     EncoderItemSpec(
                         input_size=pixel_values.shape[1],
-                        output_tokens=pixel_values.shape[1] // 4,
+                        output_tokens=pixel_values.shape[1] // pool_ratio,
                     )
                     for _ in range(pixel_values.shape[0])
                 ]
@@ -1622,7 +1625,7 @@ class Gemma4ForConditionalGeneration(
             return [
                 EncoderItemSpec(
                     input_size=fc * np_patches,
-                    output_tokens=fc * (np_patches // 4),
+                    output_tokens=fc * (np_patches // pool_ratio),
                 )
                 for fc in fc_list
             ]
@@ -1720,10 +1723,13 @@ class Gemma4ForConditionalGeneration(
 
         max_size = max(max_batch_size, max_frames_per_batch)
 
+        vision_cfg = self.vision_tower.config
+        pool_ratio = getattr(vision_cfg, "pooling_kernel_size", 2) ** 2
+
         # Distribute global token budget among batch slots
         per_item_output = (token_budget + max_size - 1) // max_size
-        # Satisfy k^2 * per_item_output = per_item_patches with k=2
-        per_item_patches = per_item_output * 4
+        # Satisfy k^2 * per_item_output = per_item_patches
+        per_item_patches = per_item_output * pool_ratio
 
         patch_size = self.vision_tower.config.patch_size
         num_channels = getattr(self.vision_tower.config, "num_channels", 3)
@@ -1820,12 +1826,13 @@ class Gemma4ForConditionalGeneration(
         if modality == "image":
             dst_offset = 0
             for i, n_tok in enumerate(per_item_out_tokens):
+                safe_n_tok = min(n_tok, per_item_output)
                 src_start = i * per_item_output
-                src_end = src_start + n_tok
-                gather_indices[dst_offset : dst_offset + n_tok] = torch.arange(
+                src_end = src_start + safe_n_tok
+                gather_indices[dst_offset : dst_offset + safe_n_tok] = torch.arange(
                     src_start, src_end, dtype=torch.long, device=device
                 )
-                dst_offset += n_tok
+                dst_offset += safe_n_tok
         elif modality == "video":
             video_frame_counts = mm_kwargs["video_frame_counts"]
             fc_list = (
@@ -1833,21 +1840,24 @@ class Gemma4ForConditionalGeneration(
                 if isinstance(video_frame_counts, torch.Tensor)
                 else list(video_frame_counts)
             )
+            vision_cfg = self.vision_tower.config
+            pool_ratio = getattr(vision_cfg, "pooling_kernel_size", 2) ** 2
             np_patches = pixel_values.shape[1]
-            frame_output_tokens = np_patches // 4
+            frame_output_tokens = np_patches // pool_ratio
+            safe_frame_output_tokens = min(frame_output_tokens, per_item_output)
 
             dst_offset = 0
             frame_idx = 0
             for fc in fc_list:
                 for f in range(fc):
                     src_start = (frame_idx + f) * per_item_output
-                    src_end = src_start + frame_output_tokens
-                    gather_indices[dst_offset : dst_offset + frame_output_tokens] = (
-                        torch.arange(
-                            src_start, src_end, dtype=torch.long, device=device
-                        )
+                    src_end = src_start + safe_frame_output_tokens
+                    gather_indices[
+                        dst_offset : dst_offset + safe_frame_output_tokens
+                    ] = torch.arange(
+                        src_start, src_end, dtype=torch.long, device=device
                     )
-                    dst_offset += frame_output_tokens
+                    dst_offset += safe_frame_output_tokens
                 frame_idx += fc
 
         return EncoderCudaGraphReplayBuffers(
