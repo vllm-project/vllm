@@ -8,6 +8,7 @@ from torch._higher_order_ops import auto_functionalized
 from torch._inductor.fx_passes.post_grad import view_to_reshape
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
+import vllm.ir.ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.utils import Range
 from vllm.logger import init_logger
@@ -26,9 +27,6 @@ from vllm.utils.torch_utils import (
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import (
-    MatcherRotaryEmbedding,
-)
 from .rms_quant_fusion import (
     empty_bf16,
     empty_i64,
@@ -306,13 +304,6 @@ class RopeReshapeKVCachePattern:
         self.k_size = self.num_kv_heads * self.head_size
         self.v_size = self.num_kv_heads * self.head_size_v
 
-        self.rope_matcher = MatcherRotaryEmbedding(
-            is_neox=self.is_neox,
-            head_size=self.head_size,
-            num_heads=self.num_heads,
-            num_kv_heads=self.num_kv_heads,
-        )
-
     def get_inputs(self) -> list:
         # Sample inputs to help pattern tracing
         T = 5
@@ -330,7 +321,15 @@ class RopeReshapeKVCachePattern:
 
         def pattern(qkv, positions, cos_sin_cache, layer_name):
             q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
-            q, k = self.rope_matcher(positions, q, k, cos_sin_cache)
+            q, k = vllm.ir.ops.rotary_embedding(
+                positions,
+                q,
+                k,
+                self.head_size,
+                self.head_size,
+                cos_sin_cache,
+                self.is_neox,
+            )
             q = q.view(-1, self.num_heads, self.head_size)
             k = k.view(-1, self.num_kv_heads, self.head_size)
             v = v.view(-1, self.num_kv_heads, self.head_size_v)
@@ -360,7 +359,15 @@ class RopeReshapeKVCachePattern:
 
         def pattern(qkv, positions, cos_sin_cache):
             q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
-            q, k = self.rope_matcher(positions, q, k, cos_sin_cache)
+            q, k = vllm.ir.ops.rotary_embedding(
+                positions,
+                q,
+                k,
+                self.head_size,
+                self.head_size,
+                cos_sin_cache,
+                self.is_neox,
+            )
             q = q.view(-1, self.num_heads, self.head_size)
             k = k.view(-1, self.num_kv_heads, self.head_size)
             v = v.view(-1, self.num_kv_heads, self.head_size_v)
