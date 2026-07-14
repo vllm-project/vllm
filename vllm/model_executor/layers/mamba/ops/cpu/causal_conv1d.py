@@ -179,7 +179,6 @@ def causal_conv1d_update_cpu(
     return out.to(original_x_dtype)
 
 
-
 def causal_conv1d_torch(
     x: torch.Tensor,
     weight: torch.Tensor,

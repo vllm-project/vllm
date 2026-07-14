@@ -441,7 +441,6 @@ class CPUFusedMOE:
         return output
 
 
-
 def cpu_fused_moe_torch(
     layer_id: int,
     output: torch.Tensor,

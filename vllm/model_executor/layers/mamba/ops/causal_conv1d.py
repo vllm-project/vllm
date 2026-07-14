@@ -8,10 +8,8 @@
 import numpy as np
 import torch
 
-from vllm import _custom_ops as ops
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
-
 
 
 @triton.jit()
@@ -1279,10 +1277,10 @@ def causal_conv1d_update(
     )
 
 
-from vllm.platforms import current_platform  # noqa: F401, E402
+from vllm.platforms import current_platform  # noqa: E402
 
 if current_platform.is_cpu():
-    from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (  # noqa: F401, E402
-        causal_conv1d_fn_cpu as causal_conv1d_fn,
-        causal_conv1d_update_cpu as causal_conv1d_update,
-    )
+    import vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d as cpu_conv1d  # noqa: E402
+
+    causal_conv1d_fn = cpu_conv1d.causal_conv1d_fn_cpu  # type: ignore
+    causal_conv1d_update = cpu_conv1d.causal_conv1d_update_cpu  # type: ignore

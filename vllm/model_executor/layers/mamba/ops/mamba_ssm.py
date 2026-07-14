@@ -918,6 +918,6 @@ def selective_state_update(
 
 
 if current_platform.is_cpu():
-    from vllm.model_executor.layers.mamba.ops.cpu.mamba_ssm import (  # noqa: F401, E402
-        selective_state_update,
-    )
+    import vllm.model_executor.layers.mamba.ops.cpu.mamba_ssm as cpu_ssm  # noqa: E402
+
+    selective_state_update = cpu_ssm.selective_state_update

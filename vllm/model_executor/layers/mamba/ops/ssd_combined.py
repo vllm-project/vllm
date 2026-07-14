@@ -13,7 +13,6 @@ from packaging import version
 from vllm.model_executor.custom_op import CustomOp
 from vllm.triton_utils import HAS_TRITON, triton
 
-
 from .ssd_bmm import _bmm_chunk_fwd
 from .ssd_chunk_scan import _chunk_scan_fwd
 from .ssd_chunk_state import _chunk_cumsum_fwd, _chunk_state_fwd
@@ -257,9 +256,9 @@ def mamba_chunk_scan_combined_varlen(
     return varlen_states
 
 
-from vllm.platforms import current_platform  # noqa: F401, E402
+from vllm.platforms import current_platform  # noqa: E402
 
 if current_platform.is_cpu():
-    from vllm.model_executor.layers.mamba.ops.cpu.mamba_ssm import (  # noqa: F401, E402
-        _mamba_chunk_scan_combined_fwd_cpu as _mamba_chunk_scan_combined_fwd,
-    )
+    import vllm.model_executor.layers.mamba.ops.cpu.mamba_ssm as cpu_ssm  # noqa: E402
+
+    _mamba_chunk_scan_combined_fwd = cpu_ssm._mamba_chunk_scan_combined_fwd_cpu

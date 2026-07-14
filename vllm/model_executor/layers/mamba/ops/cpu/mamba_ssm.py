@@ -35,7 +35,6 @@ def _mamba_chunk_scan_combined_fwd_cpu(
     assert cu_seqlens is not None
     batch = cu_seqlens.size(0) - 1
 
-
     dt_f = dt.float()
     if dt_bias is not None:
         dt_f = dt_f + dt_bias.float().unsqueeze(0)
@@ -44,19 +43,16 @@ def _mamba_chunk_scan_combined_fwd_cpu(
     if dt_limit[0] > 0.0 or dt_limit[1] < float("inf"):
         dt_f = dt_f.clamp(min=dt_limit[0], max=dt_limit[1])
 
-
     all_states = torch.zeros(
         batch, nheads, headdim, dstate, dtype=torch.float32, device=x.device
     )
     if initial_states is not None:
         all_states.copy_(initial_states.float())
 
-
     assert out.is_contiguous(), (
         "_mamba_chunk_scan_combined_fwd_cpu: `out` must be "
         "pre-allocated as a contiguous tensor"
     )
-
 
     D_1d = None
     if D is not None:
@@ -109,7 +105,6 @@ def selective_state_update(
     # Ensure out tensor exists
     if out is None:
         out = torch.empty_like(x if x.dim() == 2 else x)
-
 
     _state = state.unsqueeze(1) if state.dim() == 3 else state
     _x = x.unsqueeze(1) if x.dim() == 2 else x
