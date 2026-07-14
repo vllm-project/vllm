@@ -178,6 +178,13 @@ pub struct TextRequest {
     pub priority: i32,
     /// Salt for prefix cache isolation in multi-user environments.
     pub cache_salt: Option<String>,
+    /// Number of tokens to keep:
+    /// - `None` means no truncation.
+    /// - `< 0` (e.g. -1) maps to `max_model_len - max_tokens`.
+    pub truncate_prompt_tokens: Option<i64>,
+    /// Which side to truncate from when `truncate_prompt_tokens` is active.
+    /// Defaults to "left" if not specified and truncation is needed.
+    pub truncation_side: Option<String>,
     /// Whether to add special tokens (e.g. BOS) during prompt tokenization.
     pub add_special_tokens: bool,
     /// Override data parallel rank.
@@ -210,6 +217,8 @@ impl TextRequest {
             intermediate: true,
             priority: 0,
             cache_salt: None,
+            truncate_prompt_tokens: None,
+            truncation_side: None,
             add_special_tokens: false,
             data_parallel_rank: None,
             reasoning_parser_kwargs: None,

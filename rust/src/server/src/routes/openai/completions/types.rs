@@ -135,6 +135,9 @@ pub struct CompletionRequest {
     /// Truncate prompt tokens to this length
     pub truncate_prompt_tokens: Option<i64>,
 
+    /// Which side to truncate from when truncate_prompt_tokens is active
+    pub truncation_side: Option<String>,
+
     /// Restrict output to these token IDs only
     pub allowed_token_ids: Option<Vec<u32>>,
 
