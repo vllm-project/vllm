@@ -143,6 +143,10 @@ class Sampler:
         )
         return sampler_output
 
+    def needs_raw_logits(self, return_logprobs: bool) -> bool:
+        """Whether the unmodified logits must survive apply_sampling_params."""
+        return return_logprobs and self.logprobs_mode == "raw_logprobs"
+
     def apply_sampling_params(
         self,
         logits: torch.Tensor,
@@ -152,9 +156,13 @@ class Sampler:
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
         skip_top_k_top_p: bool = False,
+        in_place: bool = False,
     ) -> torch.Tensor:
-        # Copy logits to a new FP32 tensor.
-        logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
+        # The ops below all upcast to fp32 internally, so keep the caller's dtype.
+        # The copy only exists to leave the caller's logits intact for raw
+        # logprobs; skip it when they aren't needed.
+        if not in_place:
+            logits = logits.clone()
 
         # Apply logit bias (e.g., allowed_token_ids, min_tokens) in place.
         self.logit_bias_state.apply_logit_bias(
@@ -213,6 +221,7 @@ class Sampler:
             input_ids,
             expanded_local_pos,
             skip_top_k_top_p=True,
+            in_place=not self.needs_raw_logits(return_logprobs),
         )
         top_k, top_p = self.sampling_states.get_top_k_top_p(
             expanded_idx_mapping, idx_mapping_np

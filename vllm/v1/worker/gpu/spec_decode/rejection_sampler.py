@@ -110,6 +110,10 @@ class RejectionSampler:
 
         draft_sampled = input_batch.input_ids[input_batch.logits_indices]
         pos = input_batch.positions[input_batch.logits_indices]
+        return_logprobs = (
+            self.sampler.sampling_states.max_num_logprobs(input_batch.idx_mapping_np)
+            != NO_LOGPROBS
+        )
         processed_logits = self.sampler.apply_sampling_params(
             logits,
             input_batch.expanded_idx_mapping,
@@ -117,6 +121,7 @@ class RejectionSampler:
             pos,
             draft_sampled,
             input_batch.expanded_local_pos,
+            in_place=not self.sampler.needs_raw_logits(return_logprobs),
         )
         sampled, num_sampled = rejection_sample(
             processed_logits,
