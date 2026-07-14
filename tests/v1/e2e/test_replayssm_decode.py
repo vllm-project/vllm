@@ -9,10 +9,12 @@ from vllm.v1.metrics.reader import Counter
 from ...models.utils import check_logprobs_close
 from ...utils import large_gpu_mark, multi_gpu_test
 
-# Mamba2 (Nemotron-3) hybrid.
+# Mamba2 (Nemotron) and GDN (Qwen3.5) hybrids.
 MAMBA2_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
+GDN_MODEL = "Qwen/Qwen3.5-4B"
 MODELS = [
     pytest.param(MAMBA2_MODEL, marks=large_gpu_mark(min_gb=40)),
+    pytest.param(GDN_MODEL, marks=large_gpu_mark(min_gb=40)),
 ]
 
 PROMPTS = [
@@ -53,7 +55,7 @@ def test_replayssm_decode_matches_baseline(vllm_runner, model_name):
 
 
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize("model_name", [MAMBA2_MODEL])
+@pytest.mark.parametrize("model_name", [MAMBA2_MODEL, GDN_MODEL])
 def test_replayssm_decode_matches_baseline_tp2(vllm_runner, model_name):
     # Tensor-parallel correctness: ReplaySSM's caches and checkpoint state are
     # sharded per rank, so TP2 decode must still match the baseline at TP2.
