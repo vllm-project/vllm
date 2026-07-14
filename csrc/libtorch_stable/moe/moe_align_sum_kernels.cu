@@ -83,6 +83,21 @@ __global__ void batched_moe_align_block_size_kernel(
 }  // namespace batched_moe_align_block_size
 
 template <typename scalar_t>
+__device__ __forceinline__ int get_local_expert_id(
+    size_t idx, const scalar_t* __restrict__ topk_ids,
+    int32_t* __restrict__ expert_map, int32_t num_experts,
+    bool has_expert_map) {
+  int expert_id = topk_ids[idx];
+  if (expert_id >= num_experts || expert_id < 0) {
+    return -1;
+  }
+  if (has_expert_map) {
+    expert_id = expert_map[expert_id];
+  }
+  return expert_id;
+}
+
+template <typename scalar_t>
 __device__ void _moe_align_block_size(
     const scalar_t* __restrict__ topk_ids,
     int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ expert_ids,
@@ -126,20 +141,15 @@ __device__ void _moe_align_block_size(
   const size_t stride = blockDim.x;
 
   for (size_t i = tid; i < numel; i += stride) {
-    int expert_id = topk_ids[i];
-    if (expert_id >= num_experts) {
-      continue;
+    if (int expert_id = get_local_expert_id(i, topk_ids, expert_map,
+                                            num_experts, has_expert_map);
+        expert_id != -1) {
+      int warp_idx = expert_id / experts_per_warp;
+      int expert_offset = expert_id % experts_per_warp;
+      int mask = token_mask == nullptr ? 1 : token_mask[i / topk_num];
+      atomicAdd(&shared_counts[warp_idx * experts_per_warp + expert_offset],
+                mask);
     }
-    if (has_expert_map) {
-      expert_id = expert_map[expert_id];
-      // filter invalid experts
-      if (expert_id == -1) continue;
-    }
-    int warp_idx = expert_id / experts_per_warp;
-    int expert_offset = expert_id % experts_per_warp;
-    int mask = token_mask == nullptr ? 1 : token_mask[i / topk_num];
-    atomicAdd(&shared_counts[warp_idx * experts_per_warp + expert_offset],
-              mask);
   }
 
   __syncthreads();
@@ -227,14 +237,12 @@ __device__ void _moe_align_block_size_small_batch_expert(
   }
 
   for (size_t i = tid; i < numel; i += stride) {
-    int32_t expert_id = topk_ids[i];
-    if (has_expert_map) {
-      expert_id = expert_map[expert_id];
-      // filter invalid expert
-      if (expert_id == -1) continue;
+    if (int expert_id = get_local_expert_id(i, topk_ids, expert_map,
+                                            num_experts, has_expert_map);
+        expert_id != -1) {
+      int mask = token_mask == nullptr ? 1 : token_mask[i / topk_num];
+      tokens_cnts[(tid + 1) * num_experts + expert_id] += mask;
     }
-    int mask = token_mask == nullptr ? 1 : token_mask[i / topk_num];
-    tokens_cnts[(tid + 1) * num_experts + expert_id] += mask;
   }
 
   __syncthreads();
@@ -276,18 +284,16 @@ __device__ void _moe_align_block_size_small_batch_expert(
   }
 
   for (size_t i = tid; i < numel; i += stride) {
-    int32_t expert_id = topk_ids[i];
-    if (has_expert_map) {
-      expert_id = expert_map[expert_id];
-      // filter invalid expert
-      if (expert_id == -1) continue;
-    }
-    int32_t rank_post_pad =
-        tokens_cnts[tid * num_experts + expert_id] + cumsum[expert_id];
+    if (int expert_id = get_local_expert_id(i, topk_ids, expert_map,
+                                            num_experts, has_expert_map);
+        expert_id != -1) {
+      int32_t rank_post_pad =
+          tokens_cnts[tid * num_experts + expert_id] + cumsum[expert_id];
 
-    if (token_mask == nullptr || token_mask[i / topk_num]) {
-      sorted_token_ids[sorted_token_ids_offset + rank_post_pad] = i;
-      ++tokens_cnts[tid * num_experts + expert_id];
+      if (token_mask == nullptr || token_mask[i / topk_num]) {
+        sorted_token_ids[sorted_token_ids_offset + rank_post_pad] = i;
+        ++tokens_cnts[tid * num_experts + expert_id];
+      }
     }
   }
 }
@@ -303,22 +309,15 @@ __device__ void _count_and_sort_expert_tokens(
   const size_t stride = blockDim.x * gridDim.y;
 
   for (size_t i = tid; i < numel; i += stride) {
-    int32_t expert_id = topk_ids[i];
-    if (expert_id >= num_experts) {
-      continue;
-    }
-
-    if (has_expert_map) {
-      expert_id = expert_map[expert_id];
-      // filter invalid experts
-      if (expert_id == -1) continue;
-    }
-
-    if (token_mask == nullptr || token_mask[i / topk_num]) {
-      int32_t rank_post_pad = atomicAdd(
-          &cumsum_buffer[(model_offset * (num_experts + 1)) + expert_id], 1);
-      sorted_token_ids[max_num_tokens_padded * model_offset + rank_post_pad] =
-          i;
+    if (int expert_id = get_local_expert_id(i, topk_ids, expert_map,
+                                            num_experts, has_expert_map);
+        expert_id != -1) {
+      if (token_mask == nullptr || token_mask[i / topk_num]) {
+        int32_t rank_post_pad = atomicAdd(
+            &cumsum_buffer[(model_offset * (num_experts + 1)) + expert_id], 1);
+        sorted_token_ids[max_num_tokens_padded * model_offset + rank_post_pad] =
+            i;
+      }
     }
   }
 }
