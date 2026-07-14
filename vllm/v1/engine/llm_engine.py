@@ -319,17 +319,24 @@ class LLMEngine:
 
         # 4) Record stats
         with record_function_or_nullcontext("llm_engine step: record_stats"):
-            if (
-                self.logger_manager is not None
-                and outputs.scheduler_stats is not None
-                and len(outputs.outputs) > 0
-            ):
+            if self.logger_manager is not None and outputs.scheduler_stats is not None:
+                # Record even when this step produced no request outputs:
+                # Scheduler.make_stats() drains the prefix-cache counters
+                # every step and attaches them to a (possibly empty)
+                # EngineCoreOutputs, so skipping the record here would lose
+                # them permanently (e.g. a cache hit consumed by a non-final
+                # prefill chunk of an otherwise idle engine). IterationStats
+                # is populated only from request outputs, so on zero-output
+                # steps it is identically zero; pass None to avoid spurious
+                # 0 samples in the iteration-tokens histogram. Only the
+                # interval log stays tied to output-bearing steps.
                 self.logger_manager.record(
                     scheduler_stats=outputs.scheduler_stats,
-                    iteration_stats=iteration_stats,
+                    iteration_stats=iteration_stats if outputs.outputs else None,
                     mm_cache_stats=self.renderer.stat_mm_cache(),
                 )
-                self.do_log_stats_with_interval()
+                if len(outputs.outputs) > 0:
+                    self.do_log_stats_with_interval()
 
         return processed_outputs.request_outputs
 
