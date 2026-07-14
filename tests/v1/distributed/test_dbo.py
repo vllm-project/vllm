@@ -102,6 +102,7 @@ def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
                 "num_concurrent=512,max_retries=3"
             ),
             tasks=["gsm8k"],
+            limit=NUM_QUESTIONS,
         )
         # Validate accuracy is reasonable
         gsm8k = results["results"]["gsm8k"]
