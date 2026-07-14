@@ -15,7 +15,7 @@ steps:
     - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
-      native_ci: true
+      dind: false
       device: mi300_4
       timeout_in_minutes: 85
       depends_on:
@@ -66,7 +66,7 @@ steps:
     - DP_EP=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
-      native_ci: true
+      dind: false
       device: mi300_4
       timeout_in_minutes: 60
       depends_on:
@@ -92,7 +92,7 @@ steps:
     - CROSS_LAYERS_BLOCKS=True bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
-      native_ci: true
+      dind: false
       device: mi300_4
       timeout_in_minutes: 85
       depends_on:
@@ -118,7 +118,7 @@ steps:
     - HYBRID_SSM=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
-      native_ci: true
+      dind: false
       device: mi300_4
       timeout_in_minutes: 80
       depends_on:
@@ -175,7 +175,7 @@ steps:
     - bash v1/kv_connector/nixl_integration/config_sweep_spec_decode_test.sh
   mirror:
     amd:
-      native_ci: true
+      dind: false
       device: mi300_2
       timeout_in_minutes: 70
       depends_on:
