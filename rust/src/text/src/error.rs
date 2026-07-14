@@ -23,6 +23,15 @@ pub enum Error {
         #[source]
         source: Box<hf_hub::HFError>,
     },
+    #[error("model `{model_id}` metadata from Hugging Face Hub has no commit revision")]
+    HuggingFaceHubModelRevision { model_id: String },
+    #[error("failed to {operation} snapshot for model `{model_id}` through Hugging Face Hub")]
+    HuggingFaceHubSnapshot {
+        operation: &'static str,
+        model_id: String,
+        #[source]
+        source: Box<hf_hub::HFError>,
+    },
     #[error("failed to {operation} `{filename}` for model `{model_id}` through Hugging Face Hub")]
     HuggingFaceHubFile {
         operation: &'static str,
