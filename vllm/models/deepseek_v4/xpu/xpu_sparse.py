@@ -109,49 +109,14 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
         )
 
         # Weight is [N_total, K] where N_total = groups * o_lora_rank.
-        # Reshape to [groups, o_lora_rank, K] then transpose to [groups, K, N]
-        # and make contiguous for BMM.
-        wo_a_weight = (
-            torch.reshape(
-                wo_a_raw_weight, (self.n_local_groups, self.o_lora_rank, hidden_dim)
-            )
-            .transpose(1, 2)
-            .contiguous()
-        )
+        # Reshape to [groups, o_lora_rank, K] then transpose to [groups, K, N].
+        wo_a_weight = torch.reshape(
+            wo_a_raw_weight, (self.n_local_groups, self.o_lora_rank, hidden_dim)
+        ).transpose(1, 2)
 
-        scale_attr = (
-            "weight_scale_inv"
-            if hasattr(self.wo_a, "weight_scale_inv")
-            else "weight_scale"
-        )
-        wo_a_raw_scale = cast(torch.Tensor, getattr(self.wo_a, scale_attr))
-        block_fp8_scale_shape = (
-            self.n_local_groups * (self.o_lora_rank // self.BLOCK_FP8_SIZE),
-            hidden_dim // self.BLOCK_FP8_SIZE,
-        )
-        if wo_a_raw_scale.shape == block_fp8_scale_shape:
-            # Block FP8 (ModelOpt): scale is [groups*N_blk, K_blk] float32
-            wo_a_scale = torch.reshape(
-                wo_a_raw_scale,
-                (
-                    self.n_local_groups,
-                    self.o_lora_rank // self.BLOCK_FP8_SIZE,
-                    hidden_dim // self.BLOCK_FP8_SIZE,
-                ),
-            )
-            wo_a_scale = wo_a_scale.transpose(1, 2).contiguous()
-        else:
-            # MXFP8: scale is [N_total, K//32] e8m0.
-            # Reshape to [groups, N, K//32] then transpose to [groups, K//32, N]
-            wo_a_scale = (
-                torch.reshape(
-                    wo_a_raw_scale, (self.n_local_groups, self.o_lora_rank, -1)
-                )
-                .transpose(1, 2)
-                .contiguous()
-            )
-        if wo_a_scale.dtype == torch.uint8:
-            wo_a_scale = wo_a_scale.view(torch.float8_e8m0fnu)
+        # BMM scale is precomputed in process_weights_after_loading as
+        # [n_groups, K/bs, lora_rank/bs].
+        wo_a_scale = self.wo_a.bmm_scale
 
         z = torch.ops._xpu_C.fp8_bmm(
             o_fp8.transpose(0, 1),
