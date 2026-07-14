@@ -12,7 +12,7 @@ use super::{AudioModalitySupport, MultimodalModelInfo, PreparedMedia, item};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 
 /// Forward-kwargs name of the primary audio encoder input.
-const AUDIO_PRIMARY_KEY: &str = "input_audio_features";
+pub(super) const AUDIO_PRIMARY_KEY: &str = "input_audio_features";
 
 impl MultimodalModelInfo {
     /// Preprocess fetched audio clips as one batch and build per-item features.
@@ -25,10 +25,7 @@ impl MultimodalModelInfo {
             modality: Modality::Audio.to_string(),
         })?;
         let preprocessed = self.preprocess_audios(support, &clips).await?;
-        let replacements =
-            support
-                .spec
-                .prompt_replacements_for(&self.context, &preprocessed, Modality::Audio)?;
+        let replacements = support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
         if replacements.len() != clips.len() {
             bail_multimodal!(
                 "number of audio prompt replacements {} does not match number of audio clips {}",
@@ -41,7 +38,6 @@ impl MultimodalModelInfo {
         let items = item::build_batched_items(
             &support.spec,
             preprocessed,
-            AUDIO_PRIMARY_KEY,
             hashes,
             uuids,
             ModelDtype::Float32,
@@ -158,7 +154,6 @@ mod tests {
         let item = item::build_batched_items(
             &support.spec,
             preprocessed,
-            AUDIO_PRIMARY_KEY,
             vec!["<hash>".to_string()],
             vec![None],
             ModelDtype::Float32,

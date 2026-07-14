@@ -13,7 +13,7 @@ use super::{ModalitySupport, MultimodalModelInfo, PreparedMedia, item};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 
 /// Forward-kwargs name of the primary image encoder input.
-const IMAGE_PRIMARY_KEY: &str = "pixel_values";
+pub(super) const IMAGE_PRIMARY_KEY: &str = "pixel_values";
 
 impl MultimodalModelInfo {
     /// Preprocess all fetched image frames as one batch and build per-item
@@ -28,10 +28,7 @@ impl MultimodalModelInfo {
             modality: Modality::Image.to_string(),
         })?;
         let preprocessed = self.preprocess_images(support, &frames).await?;
-        let replacements =
-            support
-                .spec
-                .prompt_replacements_for(&self.context, &preprocessed, Modality::Image)?;
+        let replacements = support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
         if replacements.len() != frames.len() {
             bail_multimodal!(
                 "number of image prompt replacements {} does not match number of images {}",
@@ -40,14 +37,8 @@ impl MultimodalModelInfo {
             );
         }
         let hashes = frames.iter().map(|frame| frame.hash.clone()).collect();
-        let items = item::build_batched_items(
-            &support.spec,
-            preprocessed,
-            IMAGE_PRIMARY_KEY,
-            hashes,
-            uuids,
-            model_dtype,
-        )?;
+        let items =
+            item::build_batched_items(&support.spec, preprocessed, hashes, uuids, model_dtype)?;
 
         Ok(PreparedMedia {
             modality: Modality::Image,

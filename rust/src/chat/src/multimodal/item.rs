@@ -18,7 +18,6 @@ use crate::error::{Result, bail_multimodal, multimodal};
 pub(super) fn build_batched_items(
     spec: &ResolvedMultimodalSpec,
     preprocessed: PreprocessedEncoderInputs,
-    primary_key: &str,
     hashes: Vec<String>,
     uuids: Vec<Option<String>>,
     float_dtype: ModelDtype,
@@ -30,14 +29,14 @@ pub(super) fn build_batched_items(
             uuids.len()
         );
     }
-    let tensors = tensor::collect_tensors(preprocessed, primary_key, float_dtype)?;
+    let tensors = tensor::collect_tensors(preprocessed, spec.primary_key(), float_dtype)?;
 
     let mut items = Vec::with_capacity(len);
     for (index, (hash, uuid)) in izip!(hashes, uuids).enumerate() {
         let mut data = MmKwargsItem::new();
         for (key, tensor) in &tensors {
             let keep_on_cpu = spec.keep_on_cpu_keys.contains(key);
-            let (value, field) = match spec.field_layout_for(key, primary_key) {
+            let (value, field) = match spec.field_layout_for(key) {
                 Some(FieldLayout::Batched) => (
                     tensor.batched_value_at(index)?,
                     MmField::Batched(MmBatchedField { keep_on_cpu }),

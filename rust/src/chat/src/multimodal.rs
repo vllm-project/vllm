@@ -110,6 +110,7 @@ impl MultimodalModelContext {
 #[derive(Clone)]
 struct ResolvedMultimodalSpec {
     raw: &'static dyn ModelProcessorSpec,
+    modality: Modality,
     field_layouts: EncoderFieldLayouts,
     keep_on_cpu_keys: HashSet<String>,
 }
@@ -118,13 +119,23 @@ impl ResolvedMultimodalSpec {
     fn new(raw: &'static dyn ModelProcessorSpec, modality: Modality) -> Self {
         Self {
             raw,
+            modality,
             field_layouts: raw.encoder_field_layouts_for(modality),
             keep_on_cpu_keys: raw.keep_on_cpu_keys_for(modality).into_iter().collect(),
         }
     }
 
-    fn field_layout_for(&self, key: &str, primary_key: &str) -> Option<&FieldLayout> {
-        if key == primary_key {
+    fn primary_key(&self) -> &'static str {
+        match self.modality {
+            Modality::Image => image::IMAGE_PRIMARY_KEY,
+            Modality::Video => video::VIDEO_PRIMARY_KEY,
+            Modality::Audio => audio::AUDIO_PRIMARY_KEY,
+            Modality::ImageEmbeds => unreachable!("image embeds use no encoder preprocessor"),
+        }
+    }
+
+    fn field_layout_for(&self, key: &str) -> Option<&FieldLayout> {
+        if key == self.primary_key() {
             Some(&self.field_layouts.encoder_input)
         } else {
             self.field_layouts.model_specific.get(key)
@@ -135,9 +146,10 @@ impl ResolvedMultimodalSpec {
         &self,
         context: &MultimodalModelContext,
         preprocessed: &PreprocessedEncoderInputs,
-        modality: Modality,
     ) -> Result<Vec<PromptReplacement>> {
-        Ok(self.raw.prompt_replacements_for(&context.metadata(), preprocessed, modality)?)
+        Ok(self
+            .raw
+            .prompt_replacements_for(&context.metadata(), preprocessed, self.modality)?)
     }
 }
 
