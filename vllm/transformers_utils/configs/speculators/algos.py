@@ -155,6 +155,15 @@ def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
     pre_trained_config["eagle_aux_hidden_state_layer_ids"] = aux_layer_ids
     # DSpark indexes target layers as aux_id - 1 (matches the dense configs).
     pre_trained_config["target_layer_ids"] = [i - 1 for i in aux_layer_ids]
+    # DFlashQwen3Model sizes the aux-hidden fc from
+    # drafter_config["target_layer_ids"] (eagle_config | dflash_config) and
+    # otherwise falls back to num_hidden_layers, which only matches when the
+    # draft layer count equals the aux layer count. Mirror update_dflash so
+    # DSpark drafts with num_hidden_layers != len(aux_layer_ids) load.
+    pre_trained_config["dflash_config"] = {
+        "mask_token_id": config_dict["mask_token_id"],
+        "target_layer_ids": [i - 1 for i in aux_layer_ids],
+    }
 
     for key in (
         "draft_vocab_size",
