@@ -301,25 +301,25 @@ def test_capacity_manager_uses_stale_budget_with_current_assignment():
     )
 
     stage(confident)
-    handler._apply_staged_capacities()
+    handler._apply_current_assignment()
     # Only one copy staged: defaults (full k) must remain untouched.
     assert handler.draft_token_capacity_np.tolist() == [3, 3, 3, 3]
 
     stage(current)
-    handler._apply_staged_capacities()
+    handler._apply_current_assignment()
     # The first snapshot chooses four admissions, while stable current-score
     # ordering assigns three to req0 and one to req1.
     caps = handler.draft_token_capacity_np
     assert caps[2] == 3 and caps[0] == 1
     # Batch trimming does not advance the staging pipeline.
-    handler._apply_staged_capacities()
+    handler._apply_current_assignment()
     assert handler.draft_token_capacity_np.tolist() == caps.tolist()
 
     # Finished requests are skipped when scattering capacities.
     del req_states.req_id_to_index["req0"]
     handler.draft_token_capacity_np.fill(3)
     stage(current)
-    handler._apply_staged_capacities()
+    handler._apply_current_assignment()
     assert handler.draft_token_capacity_np[0] != 3  # req1 updated
     assert handler.draft_token_capacity_np[2] == 3  # req0 untouched
 

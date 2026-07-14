@@ -293,40 +293,11 @@ class ConfidenceManager:
         self._confidence_logits_np = self._confidence_logits_cpu.numpy()
         self._num_sampled_np = self._num_sampled_cpu.numpy()
         self._num_verified_np = np.empty(shape, dtype=np.int64)
-        self._current_capacity_cpu = torch.empty(
-            shape, dtype=torch.int32, pin_memory=True
-        )
-        self._current_capacity_np = self._current_capacity_cpu.numpy()
-        self._current_capacity = torch.empty(
-            req_states.max_num_reqs, dtype=torch.int32, device=device
-        )
-        num_candidates = req_states.max_num_reqs * self.num_speculative_steps
-        self._survival = torch.empty(
-            (req_states.max_num_reqs, self.num_speculative_steps),
-            dtype=torch.float32,
-            device=device,
-        )
-        self._sorted_survival = torch.empty(
-            num_candidates, dtype=torch.float32, device=device
-        )
-        self._sorted_indices = torch.empty(
-            num_candidates, dtype=torch.int64, device=device
-        )
-        self._capacity_ones = torch.ones(
-            num_candidates, dtype=torch.int32, device=device
-        )
-        self._temperatures_cpu = torch.ones(
-            self.num_speculative_steps, dtype=torch.float32, pin_memory=True
-        )
-        self._temperatures_np = self._temperatures_cpu.numpy()
-        self._temperatures = torch.ones(
-            self.num_speculative_steps, dtype=torch.float32, device=device
-        )
         self._req_ids: list[list[str]] = [[], []]
         self._num_bonus = [0, 0]
         self._copy_events = [torch.cuda.Event(blocking=True) for _ in range(2)]
         self._staged_idx: int | None = None
-        self._capacity_idx: int | None = None
+        self._assignment_idx: int | None = None
         self._last_idx: int | None = None
         self._next_idx = 0
         self._draft_token_budget: int | None = None
@@ -557,7 +528,7 @@ class ConfidenceManager:
         num_verified_np = (np.diff(input_batch.cu_num_logits_np) - num_bonus).astype(
             np.int64
         )
-        self._apply_staged_capacities()
+        self._apply_current_assignment()
         if self._staged_idx is not None:
             self._update_staged_confidences(self._staged_idx)
 
@@ -566,7 +537,6 @@ class ConfidenceManager:
         self._num_verified_np[idx, :num_reqs] = num_verified_np
         self._req_ids[idx] = list(input_batch.req_ids)
         self._num_bonus[idx] = num_bonus
-        self._rank_current_confidences(confidence_logits, num_reqs)
         current_stream = torch.cuda.current_stream(self.device)
         self.copy_stream.wait_stream(current_stream)
         with stream(self.copy_stream, current_stream):
@@ -576,76 +546,40 @@ class ConfidenceManager:
             self._num_sampled_cpu[idx, :num_reqs].copy_(
                 num_sampled[:num_reqs], non_blocking=True
             )
-            self._current_capacity_cpu[idx, :num_reqs].copy_(
-                self._current_capacity[:num_reqs], non_blocking=True
-            )
             num_sampled.record_stream(self.copy_stream)
             self._copy_events[idx].record()
         self._staged_idx = idx
-        self._capacity_idx = idx
+        self._assignment_idx = idx
 
-    def _rank_current_confidences(
-        self, confidence_logits: torch.Tensor, num_reqs: int
-    ) -> None:
-        temperatures: np.ndarray | float = 1.0
-        if self.online_sts is not None:
-            temperatures = self.online_sts.temperatures
-        self._temperatures_np[:] = temperatures
-        self._temperatures.copy_(self._temperatures_cpu, non_blocking=True)
-
-        survival = self._survival[:num_reqs]
-        torch.div(confidence_logits[:num_reqs], self._temperatures, out=survival)
-        torch.sigmoid(survival, out=survival)
-        torch.cumprod(survival, dim=1, out=survival)
-
-        total = num_reqs * self.num_speculative_steps
-        torch.sort(
-            survival.flatten(),
-            descending=True,
-            stable=True,
-            out=(
-                self._sorted_survival[:total],
-                self._sorted_indices[:total],
-            ),
-        )
-        if self.forced_capacity is not None:
-            self._current_capacity[:num_reqs].fill_(self.forced_capacity)
-            return
-        budget = total
-        if self._draft_token_budget is not None:
-            budget = min(self._draft_token_budget, total)
-        self._current_capacity[:num_reqs].zero_()
-        if budget > 0:
-            torch.div(
-                self._sorted_indices[:budget],
-                self.num_speculative_steps,
-                rounding_mode="floor",
-                out=self._sorted_indices[:budget],
-            )
-            self._current_capacity[:num_reqs].scatter_add_(
-                0,
-                self._sorted_indices[:budget],
-                self._capacity_ones[:budget],
-            )
-
-    def _apply_staged_capacities(self) -> None:
-        """Expose current GPU assignment to next-step host batch construction."""
-        idx = self._capacity_idx
+    def _apply_current_assignment(self) -> None:
+        """Assign the stale budget using the latest confidence snapshot."""
+        idx = self._assignment_idx
         if idx is None:
             return
         with gpu_sync_allowed():
             self._copy_events[idx].synchronize()
         req_ids = self._req_ids[idx]
+        num_reqs = len(req_ids)
+        temperatures: np.ndarray | float = 1.0
+        if self.online_sts is not None:
+            temperatures = self.online_sts.temperatures
+        survival = compute_prefix_survival(
+            self._confidence_logits_np[idx, :num_reqs], temperatures
+        )
+        budget = survival.size
+        if self._draft_token_budget is not None:
+            budget = min(self._draft_token_budget, budget)
+        capacities = assign_draft_token_budget(survival, budget)
+        if self.forced_capacity is not None:
+            capacities.fill(self.forced_capacity)
         slots = np.fromiter(
             (self.req_states.req_id_to_index.get(req_id, -1) for req_id in req_ids),
             dtype=np.int64,
-            count=len(req_ids),
+            count=num_reqs,
         )
         live = slots >= 0
-        self.draft_token_capacity_np[slots[live]] = self._current_capacity_np[
-            idx, : len(req_ids)
-        ][live]
-        self._capacity_idx = None
+        self.draft_token_capacity_np[slots[live]] = capacities[live]
+        self._assignment_idx = None
 
     def wait_for_staged_copy(self) -> None:
         """Protect the persistent confidence buffer before its next replay."""
@@ -722,7 +656,7 @@ class ConfidenceManager:
         input_batch: "InputBatch",
         draft_tokens: dict[str, list[int]],
     ) -> np.ndarray:
-        self._apply_staged_capacities()
+        self._apply_current_assignment()
         assert input_batch.num_draft_tokens_per_req is not None
         valid = input_batch.num_draft_tokens_per_req
         if input_batch.has_structured_output_reqs:
@@ -781,7 +715,7 @@ class VarlenConfidenceManager(ConfidenceManager):
         draft_tokens: dict[str, list[int]],
         has_structured_output_requests: bool = False,
     ) -> int:
-        self._apply_staged_capacities()
+        self._apply_current_assignment()
         num_reqs = len(num_tokens_per_req)
         req_ids = sorted(
             num_tokens_per_req,
