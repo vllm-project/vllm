@@ -7,6 +7,7 @@ from typing import NamedTuple
 import torch
 
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     MLAAttentionSpec,
@@ -54,6 +55,11 @@ def is_mla_cache_layer(
     except KeyError as e:
         raise ValueError(f"Missing KV cache spec for layer {layer_name}") from e
     return isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+
+
+def _content_packed_dim(spec: AttentionSpec) -> int:
+    head_size_v = getattr(spec, "head_size_v", spec.head_size)
+    return spec.head_size + head_size_v
 
 
 def _spec_dim_matches(value: int, expected: int | None) -> bool:
@@ -220,6 +226,30 @@ def get_layer_transfer_geometry(
             remote_kv_stride=stride[1],
             transfers_per_block=2,
             regions_per_block=2,
+            split_kv_regions=False,
+        )
+
+    if (
+        not is_mla_cache
+        and isinstance(spec, AttentionSpec)
+        and len(shape) == 4
+        and shape[1] == spec.num_kv_heads
+        and shape[2] == spec.block_size
+        and shape[3] == _content_packed_dim(spec)
+    ):
+        num_blocks, num_kv_heads, block_size, packed_dim = shape
+        slot_size_bytes = num_kv_heads * packed_dim * element_size
+        block_len = block_size * slot_size_bytes
+        return LayerTransferGeometry(
+            num_blocks=num_blocks,
+            block_size=block_size,
+            block_len=block_len,
+            slot_size_bytes=slot_size_bytes,
+            block_stride=stride[0],
+            local_kv_stride=None,
+            remote_kv_stride=None,
+            transfers_per_block=1,
+            regions_per_block=1,
             split_kv_regions=False,
         )
 
