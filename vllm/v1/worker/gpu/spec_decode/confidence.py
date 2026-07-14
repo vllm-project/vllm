@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -29,7 +30,6 @@ if TYPE_CHECKING:
 
 @triton.jit
 def _rewrite_compact_batch_kernel(
-    meta_ptr,  # [2 * (num_reqs + 1)] int32: new query_start_loc | cu_num_logits
     query_start_loc_ptr,
     cu_num_logits_ptr,
     input_ids_ptr,
@@ -66,16 +66,14 @@ def _rewrite_compact_batch_kernel(
             )
         tl.store(
             cu_num_logits_ptr + num_reqs,
-            tl.load(meta_ptr + 2 * num_reqs + 1),
+            tl.load(cu_num_logits_ptr + num_reqs),
         )
         return
 
-    start = tl.load(meta_ptr + req_idx)
-    end = tl.load(meta_ptr + req_idx + 1)
-    cu_start = tl.load(meta_ptr + num_reqs + 1 + req_idx)
-    cu_end = tl.load(meta_ptr + num_reqs + 1 + req_idx + 1)
-    tl.store(query_start_loc_ptr + req_idx, start)
-    tl.store(cu_num_logits_ptr + req_idx, cu_start)
+    start = tl.load(query_start_loc_ptr + req_idx)
+    end = tl.load(query_start_loc_ptr + req_idx + 1)
+    cu_start = tl.load(cu_num_logits_ptr + req_idx)
+    cu_end = tl.load(cu_num_logits_ptr + req_idx + 1)
 
     req_state_idx = tl.load(idx_mapping_ptr + req_idx)
     num_computed_tokens = tl.load(num_computed_tokens_ptr + req_state_idx)
@@ -119,15 +117,79 @@ def _rewrite_compact_batch_kernel(
         )
 
 
-def _get_draft_token_capacities(
-    idx_mapping_np: np.ndarray,
-    draft_token_capacity_np: np.ndarray,
-    valid_draft_tokens_per_req: np.ndarray | None = None,
-) -> np.ndarray:
-    capacities = draft_token_capacity_np[idx_mapping_np]
-    if valid_draft_tokens_per_req is not None:
-        capacities = np.minimum(capacities, valid_draft_tokens_per_req)
-    return capacities
+@triton.jit
+def _compute_prefix_survival_kernel(
+    confidence_logits_ptr,
+    confidence_logits_stride,
+    idx_mapping_ptr,
+    valid_draft_tokens_ptr,
+    temperatures_ptr,
+    survival_ptr,
+    NUM_STEPS: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + req_idx)
+    num_valid = tl.load(valid_draft_tokens_ptr + req_idx)
+    survival = 1.0
+    for step in tl.static_range(NUM_STEPS):
+        logit = tl.load(
+            confidence_logits_ptr + req_state_idx * confidence_logits_stride + step
+        )
+        temperature = tl.load(temperatures_ptr + step)
+        survival *= tl.sigmoid(logit / temperature)
+        tl.store(
+            survival_ptr + req_idx * NUM_STEPS + step,
+            survival,
+            mask=step < num_valid,
+        )
+        tl.store(
+            survival_ptr + req_idx * NUM_STEPS + step,
+            -float("inf"),
+            mask=step >= num_valid,
+        )
+
+
+@triton.jit
+def _scatter_confidence_logits_kernel(
+    source_ptr,
+    source_stride,
+    destination_ptr,
+    destination_stride,
+    idx_mapping_ptr,
+    NUM_STEPS: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + req_idx)
+    steps = tl.arange(0, BLOCK_SIZE)
+    mask = steps < NUM_STEPS
+    logits = tl.load(source_ptr + req_idx * source_stride + steps, mask=mask)
+    tl.store(
+        destination_ptr + req_state_idx * destination_stride + steps,
+        logits,
+        mask=mask,
+    )
+
+
+@triton.jit
+def _build_forward_skip_mask_kernel(
+    is_padding_ptr,
+    query_start_loc_ptr,
+    draft_capacity_ptr,
+    num_bonus_tokens,
+    BLOCK_SIZE: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    start = tl.load(query_start_loc_ptr + req_idx)
+    end = tl.load(query_start_loc_ptr + req_idx + 1)
+    kept = tl.load(draft_capacity_ptr + req_idx)
+    scheduled = end - start - num_bonus_tokens
+    offsets = tl.arange(0, BLOCK_SIZE)
+    tl.store(
+        is_padding_ptr + start + num_bonus_tokens + kept + offsets,
+        True,
+        mask=offsets < scheduled - kept,
+    )
 
 
 def _count_valid_draft_tokens(
@@ -153,52 +215,51 @@ def compute_prefix_survival(
     return np.cumprod(probs, axis=1)
 
 
-def assign_draft_token_budget(survival: np.ndarray, num_admitted: int) -> np.ndarray:
-    """Assign a fixed global token budget using current prefix scores."""
-    num_reqs, num_steps = survival.shape
-    admitted = np.argsort(-survival.reshape(-1), kind="stable")[:num_admitted]
-    capacities = np.zeros(num_reqs, dtype=np.int32)
-    np.add.at(capacities, admitted // num_steps, 1)
-    return capacities
-
-
-def allocate_draft_token_capacity(
+def select_draft_token_budget(
     survival: np.ndarray,
+    num_batch_requests: int,
+    num_sampling_requests: int,
+    num_required_target_tokens: int,
     budget_frac: float = 1.0,
-    sps_row: np.ndarray | None = None,
+    sps_table: np.ndarray | None = None,
     min_survival: float = 0.0,
-) -> np.ndarray:
-    """Allocate prefixes globally by survival score (DSpark Algorithm 1).
+) -> int:
+    """Choose the scalar draft budget from stale prefix scores.
 
-    An SPS curve chooses the admission count maximizing expected accepted
-    tokens per step. ``min_survival`` selects threshold mode instead.
+    Current GPU confidences assign this budget to requests. The SPS objective
+    includes all target tokens already required by the scheduler, while only
+    requests that sample this step contribute mandatory useful output.
     """
-    num_reqs, num_steps = survival.shape
-    if min_survival > 0.0:
-        return (survival >= min_survival).sum(axis=1).astype(np.int32)
-
     flat = survival.reshape(-1)
-    order = np.argsort(-flat, kind="stable")
-    scores = flat[order]
-    total = num_reqs * num_steps
+    scores = flat[np.isfinite(flat)]
+    if min_survival > 0.0:
+        return int((scores >= min_survival).sum())
+
+    scores = np.sort(scores)[::-1]
+    total = scores.size
     max_admissions = min(int(total * budget_frac) + 1, total)
     num_candidates = min(int((scores > 0.0).sum()), max_admissions)
     if num_candidates == 0:
-        return np.zeros(num_reqs, dtype=np.int32)
+        return 0
 
-    if sps_row is None:
-        num_admitted = num_candidates
-    else:
-        tau = num_reqs + np.cumsum(scores[:num_candidates])
-        theta = tau * sps_row[num_reqs + 1 : num_reqs + num_candidates + 1]
-        best = int(np.argmax(theta))
-        if num_reqs * sps_row[num_reqs] >= theta[best]:
-            return np.zeros(num_reqs, dtype=np.int32)
-        num_admitted = best + 1
+    if sps_table is None:
+        return num_candidates
 
-    capacities = np.zeros(num_reqs, dtype=np.int32)
-    np.add.at(capacities, order[:num_admitted] // num_steps, 1)
-    return capacities
+    sps_row = sps_table[num_batch_requests]
+    num_candidates = min(
+        num_candidates,
+        sps_row.size - num_required_target_tokens - 1,
+    )
+    if num_candidates <= 0:
+        return 0
+    expected_useful_tokens = num_sampling_requests + np.cumsum(scores[:num_candidates])
+    step_rates = sps_row[
+        num_required_target_tokens + 1 : num_required_target_tokens + num_candidates + 1
+    ]
+    throughput = expected_useful_tokens * step_rates
+    best = int(np.argmax(throughput))
+    baseline = num_sampling_requests * sps_row[num_required_target_tokens]
+    return 0 if baseline >= throughput[best] else best + 1
 
 
 def build_sps_table(
@@ -246,14 +307,10 @@ class ConfidenceManager:
         device: torch.device,
         speculative_config: "SpeculativeConfig",
     ):
+        self.max_num_tokens = max_num_tokens
         self.device = device
         self.req_states = req_states
         self.num_speculative_steps = req_states.num_speculative_steps
-        self.draft_token_capacity_np = np.full(
-            req_states.max_num_reqs,
-            self.num_speculative_steps,
-            dtype=np.int32,
-        )
         self.copy_stream = torch.cuda.Stream(device)
         self.varlen_spec_decode = False
 
@@ -261,11 +318,10 @@ class ConfidenceManager:
         self.capacity_budget_frac = speculative_config.dspark_budget_frac
         sps_curve = speculative_config.dspark_sps_curve
         self.wants_auto_sps_curve = sps_curve == "auto"
-        max_batch_tokens = req_states.max_num_reqs * (1 + self.num_speculative_steps)
         self.sps_table_np: np.ndarray | None = None
         if isinstance(sps_curve, list):
             self.sps_table_np = build_sps_table(
-                sps_curve, req_states.max_num_reqs, max_batch_tokens
+                sps_curve, req_states.max_num_reqs, max_num_tokens
             )
         # With "auto", allocation admits everything until the post-capture
         # profiling installs the measured table via set_sps_profile.
@@ -273,7 +329,46 @@ class ConfidenceManager:
         if speculative_config.dspark_online_sts:
             self.online_sts = DSparkOnlineSTS(self.num_speculative_steps)
 
-        # Two D2H slots preserve the prior confidences needed by STS.
+        max_num_reqs = req_states.max_num_reqs
+        num_candidates = max_num_reqs * self.num_speculative_steps
+        self._confidence_logits = torch.empty(
+            (max_num_reqs, self.num_speculative_steps),
+            dtype=torch.float32,
+            device=device,
+        )
+        self._survival = torch.empty(
+            (max_num_reqs, self.num_speculative_steps),
+            dtype=torch.float32,
+            device=device,
+        )
+        self._sorted_survival = torch.empty(
+            num_candidates, dtype=torch.float32, device=device
+        )
+        self._sorted_indices = torch.empty(
+            num_candidates, dtype=torch.int64, device=device
+        )
+        self._capacity_ones = torch.ones(
+            num_candidates, dtype=torch.int32, device=device
+        )
+        self._batch_draft_capacity = torch.empty(
+            max_num_reqs, dtype=torch.int32, device=device
+        )
+        self._valid_draft_tokens_cpu = torch.empty(
+            max_num_reqs, dtype=torch.int32, pin_memory=True
+        )
+        self._valid_draft_tokens_np = self._valid_draft_tokens_cpu.numpy()
+        self._valid_draft_tokens = torch.empty(
+            max_num_reqs, dtype=torch.int32, device=device
+        )
+        self._temperatures_cpu = torch.ones(
+            self.num_speculative_steps, dtype=torch.float32, pin_memory=True
+        )
+        self._temperatures_np = self._temperatures_cpu.numpy()
+        self._temperatures = torch.ones(
+            self.num_speculative_steps, dtype=torch.float32, device=device
+        )
+
+        # Two D2H slots preserve stale inputs for budget selection and STS.
         shape = (2, req_states.max_num_reqs)
         self._confidence_logits_cpu = torch.empty(
             (*shape, self.num_speculative_steps),
@@ -281,35 +376,34 @@ class ConfidenceManager:
             pin_memory=True,
         )
         self._num_sampled_cpu = torch.empty(shape, dtype=torch.int32, pin_memory=True)
+        self._num_verified_cpu = torch.empty(shape, dtype=torch.int32, pin_memory=True)
+        self._num_verified_gpu = torch.empty(shape, dtype=torch.int32, device=device)
         self._confidence_logits_np = self._confidence_logits_cpu.numpy()
         self._num_sampled_np = self._num_sampled_cpu.numpy()
-        self._num_verified_np = np.empty(shape, dtype=np.int64)
+        self._num_verified_np = self._num_verified_cpu.numpy()
         self._req_ids: list[list[str]] = [[], []]
         self._num_bonus = [0, 0]
         self._copy_events = [torch.cuda.Event(blocking=True) for _ in range(2)]
+        self._slot_valid = [False, False]
         self._staged_idx: int | None = None
-        self._assignment_idx: int | None = None
-        self._last_idx: int | None = None
         self._next_idx = 0
-        self._draft_token_budget: int | None = None
+        self._stale_req_ids: list[str] = []
+        self._stale_survival: np.ndarray | None = None
+        self._last_confidence_req_ids: list[str] = []
+        self._last_confidence_logits: np.ndarray | None = None
+        self._planned_draft_token_budget: int | None = None
         self.forced_capacity: int | None = None
-
-    def add_request(self, req_idx: int) -> None:
-        self.draft_token_capacity_np[req_idx] = self.num_speculative_steps
 
     def set_sps_profile(
         self,
         draft_curve: list[tuple[int, float]],
         verify_curve: list[tuple[int, float]],
     ) -> None:
-        max_batch_tokens = self.req_states.max_num_reqs * (
-            1 + self.num_speculative_steps
-        )
         self.sps_table_np = build_sps_table_from_costs(
             draft_curve,
             verify_curve,
             self.req_states.max_num_reqs,
-            max_batch_tokens,
+            self.max_num_tokens,
         )
 
     def profile_sps_curve(
@@ -329,7 +423,6 @@ class ConfidenceManager:
         import time
 
         from vllm import SamplingParams
-        from vllm.distributed.parallel_state import get_tp_group
         from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 
         max_reqs = min(
@@ -513,21 +606,31 @@ class ConfidenceManager:
         num_sampled: torch.Tensor,
         input_batch: "InputBatch",
     ) -> None:
-        """Stage confidence logits and sampler outcomes for host allocation."""
+        """Preserve current GPU scores and stage stale calibration inputs."""
         num_reqs = input_batch.num_reqs
         num_bonus = self._get_num_bonus_tokens(input_batch)
-        num_verified_np = (np.diff(input_batch.cu_num_logits_np) - num_bonus).astype(
-            np.int64
+        _scatter_confidence_logits_kernel[(num_reqs,)](
+            confidence_logits,
+            confidence_logits.stride(0),
+            self._confidence_logits,
+            self._confidence_logits.stride(0),
+            input_batch.idx_mapping,
+            NUM_STEPS=self.num_speculative_steps,
+            BLOCK_SIZE=triton.next_power_of_2(self.num_speculative_steps),
         )
-        self._apply_current_assignment()
-        if self._staged_idx is not None:
-            self._update_staged_confidences(self._staged_idx)
 
         idx = self._next_idx
         self._next_idx ^= 1
-        self._num_verified_np[idx, :num_reqs] = num_verified_np
+        if self._slot_valid[idx]:
+            with gpu_sync_allowed():
+                self._copy_events[idx].synchronize()
+            self._update_staged_confidences(idx)
+
         self._req_ids[idx] = list(input_batch.req_ids)
         self._num_bonus[idx] = num_bonus
+        self._num_verified_gpu[idx, :num_reqs].copy_(
+            self._batch_draft_capacity[:num_reqs]
+        )
         current_stream = torch.cuda.current_stream(self.device)
         self.copy_stream.wait_stream(current_stream)
         with stream(self.copy_stream, current_stream):
@@ -537,40 +640,13 @@ class ConfidenceManager:
             self._num_sampled_cpu[idx, :num_reqs].copy_(
                 num_sampled[:num_reqs], non_blocking=True
             )
+            self._num_verified_cpu[idx, :num_reqs].copy_(
+                self._num_verified_gpu[idx, :num_reqs], non_blocking=True
+            )
             num_sampled.record_stream(self.copy_stream)
             self._copy_events[idx].record()
+        self._slot_valid[idx] = True
         self._staged_idx = idx
-        self._assignment_idx = idx
-
-    def _apply_current_assignment(self) -> None:
-        """Assign the stale budget using the latest confidence snapshot."""
-        idx = self._assignment_idx
-        if idx is None:
-            return
-        with gpu_sync_allowed():
-            self._copy_events[idx].synchronize()
-        req_ids = self._req_ids[idx]
-        num_reqs = len(req_ids)
-        temperatures: np.ndarray | float = 1.0
-        if self.online_sts is not None:
-            temperatures = self.online_sts.temperatures
-        survival = compute_prefix_survival(
-            self._confidence_logits_np[idx, :num_reqs], temperatures
-        )
-        budget = survival.size
-        if self._draft_token_budget is not None:
-            budget = min(self._draft_token_budget, budget)
-        capacities = assign_draft_token_budget(survival, budget)
-        if self.forced_capacity is not None:
-            capacities.fill(self.forced_capacity)
-        slots = np.fromiter(
-            (self.req_states.req_id_to_index.get(req_id, -1) for req_id in req_ids),
-            dtype=np.int64,
-            count=num_reqs,
-        )
-        live = slots >= 0
-        self.draft_token_capacity_np[slots[live]] = capacities[live]
-        self._assignment_idx = None
 
     def wait_for_staged_copy(self) -> None:
         """Protect the persistent confidence buffer before its next replay."""
@@ -588,18 +664,17 @@ class ConfidenceManager:
         raise NotImplementedError
 
     def _update_staged_confidences(self, idx: int) -> None:
-        """Consume a stale confidence snapshot and update the token budget."""
+        """Consume a two-step-old snapshot for calibration and budgeting."""
         req_ids = self._req_ids[idx]
         num_reqs = len(req_ids)
         confidence_logits_np = self._confidence_logits_np[idx, :num_reqs]
         accepted_np = (
             self._num_sampled_np[idx, :num_reqs].astype(np.int64) - self._num_bonus[idx]
         )
-        prev_idx = self._last_idx
-        if self.online_sts is not None and prev_idx is not None:
-            # Outcomes in this slot verify confidences from the prior slot.
-            prev_ids = self._req_ids[prev_idx]
-            prev_row = {req_id: i for i, req_id in enumerate(prev_ids)}
+        if self.online_sts is not None and self._last_confidence_logits is not None:
+            prev_row = {
+                req_id: i for i, req_id in enumerate(self._last_confidence_req_ids)
+            }
             rows = np.array(
                 [prev_row.get(req_id, -1) for req_id in req_ids],
                 dtype=np.int64,
@@ -607,28 +682,128 @@ class ConfidenceManager:
             sel = rows >= 0
             if sel.any():
                 self.online_sts.update(
-                    self._confidence_logits_np[prev_idx, : len(prev_ids)][rows[sel]],
+                    self._last_confidence_logits[rows[sel]],
                     accepted_np[sel],
                     self._num_verified_np[idx, :num_reqs][sel],
                 )
-        self._last_idx = idx
+        self._last_confidence_req_ids = list(req_ids)
+        self._last_confidence_logits = confidence_logits_np.copy()
 
         temperatures: np.ndarray | float = 1.0
         if self.online_sts is not None:
             temperatures = self.online_sts.temperatures
-        survival = compute_prefix_survival(confidence_logits_np, temperatures)
-        sps_row = None
-        if self.sps_table_np is not None:
-            sps_row = self.sps_table_np[num_reqs]
-        capacities = allocate_draft_token_capacity(
-            survival,
-            self.capacity_budget_frac,
-            sps_row,
-            self.min_survival_probability,
+        self._stale_req_ids = list(req_ids)
+        self._stale_survival = compute_prefix_survival(
+            confidence_logits_np, temperatures
         )
+
+    def _plan_draft_token_budget(
+        self,
+        req_ids: list[str],
+        num_required_target_tokens_per_req: np.ndarray,
+        valid_draft_tokens_per_req: np.ndarray,
+    ) -> int:
+        num_batch_requests = len(req_ids)
         if self.forced_capacity is not None:
-            np.minimum(capacities, self.forced_capacity, out=capacities)
-        self._draft_token_budget = int(capacities.sum())
+            return int(
+                np.minimum(valid_draft_tokens_per_req, self.forced_capacity).sum()
+            )
+
+        survival = np.ones(
+            (num_batch_requests, self.num_speculative_steps), dtype=np.float64
+        )
+        if self._stale_survival is not None:
+            stale_rows = {req_id: i for i, req_id in enumerate(self._stale_req_ids)}
+            for row, req_id in enumerate(req_ids):
+                stale_row = stale_rows.get(req_id)
+                if stale_row is not None:
+                    survival[row] = self._stale_survival[stale_row]
+        steps = np.arange(self.num_speculative_steps)
+        survival[steps[None, :] >= valid_draft_tokens_per_req[:, None]] = -np.inf
+
+        slots = np.fromiter(
+            (self.req_states.req_id_to_index[req_id] for req_id in req_ids),
+            dtype=np.int32,
+            count=num_batch_requests,
+        )
+        num_computed_tokens = self.req_states.num_computed_tokens_np[slots]
+        prefill_lens = self.req_states.prefill_len.np[slots]
+        num_sampling_requests = int(
+            np.count_nonzero(
+                num_computed_tokens + num_required_target_tokens_per_req >= prefill_lens
+            )
+        )
+        budget = select_draft_token_budget(
+            survival,
+            num_batch_requests=num_batch_requests,
+            num_sampling_requests=num_sampling_requests,
+            num_required_target_tokens=int(num_required_target_tokens_per_req.sum()),
+            budget_frac=self.capacity_budget_frac,
+            sps_table=self.sps_table_np,
+            min_survival=self.min_survival_probability,
+        )
+        budget = min(budget, int(valid_draft_tokens_per_req.sum()))
+        return int(get_tp_group().broadcast_object(budget, src=0))
+
+    def _assign_draft_token_budget(
+        self,
+        input_batch: "InputBatch",
+        valid_draft_tokens_per_req: np.ndarray,
+        draft_token_budget: int,
+    ) -> torch.Tensor:
+        num_reqs = input_batch.num_reqs
+        valid_np = self._valid_draft_tokens_np[:num_reqs]
+        valid_np[:] = valid_draft_tokens_per_req
+        async_copy_to_gpu(valid_np, out=self._valid_draft_tokens[:num_reqs])
+        capacities = self._batch_draft_capacity[:num_reqs]
+        if self.forced_capacity is not None or draft_token_budget == int(
+            valid_draft_tokens_per_req.sum()
+        ):
+            capacities.copy_(self._valid_draft_tokens[:num_reqs])
+            if self.forced_capacity is not None:
+                capacities.clamp_(max=self.forced_capacity)
+            return capacities
+
+        temperatures: np.ndarray | float = 1.0
+        if self.online_sts is not None:
+            temperatures = self.online_sts.temperatures
+        self._temperatures_np[:] = temperatures
+        self._temperatures.copy_(self._temperatures_cpu, non_blocking=True)
+        _compute_prefix_survival_kernel[(num_reqs,)](
+            self._confidence_logits,
+            self._confidence_logits.stride(0),
+            input_batch.idx_mapping,
+            self._valid_draft_tokens,
+            self._temperatures,
+            self._survival,
+            NUM_STEPS=self.num_speculative_steps,
+        )
+        num_candidates = num_reqs * self.num_speculative_steps
+        torch.sort(
+            self._survival[:num_reqs].flatten(),
+            descending=True,
+            stable=True,
+            out=(
+                self._sorted_survival[:num_candidates],
+                self._sorted_indices[:num_candidates],
+            ),
+        )
+        capacities.zero_()
+        if draft_token_budget > 0:
+            admitted = self._sorted_indices[:draft_token_budget]
+            torch.div(
+                admitted,
+                self.num_speculative_steps,
+                rounding_mode="floor",
+                out=admitted,
+            )
+            capacities.scatter_add_(
+                0,
+                admitted,
+                self._capacity_ones[:draft_token_budget],
+            )
+        get_tp_group().broadcast(capacities, src=0)
+        return capacities
 
     def warmup(self, input_buffers: "InputBuffers") -> None:
         pass
@@ -641,25 +816,6 @@ class ConfidenceManager:
         )
         assert remainder == 0
         return num_bonus_tokens
-
-    def _get_draft_token_capacities(
-        self,
-        input_batch: "InputBatch",
-        draft_tokens: dict[str, list[int]],
-    ) -> np.ndarray:
-        self._apply_current_assignment()
-        assert input_batch.num_draft_tokens_per_req is not None
-        valid = input_batch.num_draft_tokens_per_req
-        if input_batch.has_structured_output_reqs:
-            valid = _count_valid_draft_tokens(
-                [draft_tokens.get(req_id, ()) for req_id in input_batch.req_ids],
-                input_batch.num_reqs,
-            )
-        return _get_draft_token_capacities(
-            input_batch.idx_mapping_np,
-            self.draft_token_capacity_np,
-            valid,
-        )
 
     def trim_batch(
         self,
@@ -679,13 +835,19 @@ class VarlenConfidenceManager(ConfidenceManager):
     ):
         super().__init__(max_num_tokens, req_states, device, speculative_config)
         self.varlen_spec_decode = True
-        # Persistent inputs and outputs for the fused batch rewrite.
         max_num_reqs = req_states.max_num_reqs
         max_num_logits = max_num_reqs * (1 + self.num_speculative_steps)
-        self._meta_np = np.empty(2 * (max_num_reqs + 1), dtype=np.int32)
-        self._meta = torch.empty(
-            2 * (max_num_reqs + 1), dtype=torch.int32, device=device
+        self._required_target_tokens_cpu = torch.empty(
+            max_num_reqs, dtype=torch.int32, pin_memory=True
         )
+        self._required_target_tokens_np = self._required_target_tokens_cpu.numpy()
+        self._required_target_tokens = torch.empty(
+            max_num_reqs, dtype=torch.int32, device=device
+        )
+        self._scheduled_tokens = torch.empty(
+            max_num_reqs, dtype=torch.int32, device=device
+        )
+        self._num_logits = torch.empty(max_num_reqs, dtype=torch.int32, device=device)
         self._cu_num_logits = torch.empty(
             max_num_reqs + 1, dtype=torch.int32, device=device
         )
@@ -698,7 +860,9 @@ class VarlenConfidenceManager(ConfidenceManager):
         self._logits_indices = torch.empty(
             max_num_logits, dtype=torch.int64, device=device
         )
-        self._planned_draft_tokens_per_req: np.ndarray | None = None
+        self._metadata_draft_tokens_per_req: np.ndarray | None = None
+        self._planned_required_target_tokens_per_req: np.ndarray | None = None
+        self._planned_valid_draft_tokens_per_req: np.ndarray | None = None
 
     def get_num_tokens(
         self,
@@ -706,11 +870,14 @@ class VarlenConfidenceManager(ConfidenceManager):
         draft_tokens: dict[str, list[int]],
         has_structured_output_requests: bool = False,
     ) -> int:
-        self._apply_current_assignment()
         num_reqs = len(num_tokens_per_req)
+        decode_query_len = 1 + self.num_speculative_steps
         req_ids = sorted(
             num_tokens_per_req,
-            key=num_tokens_per_req.get,  # type: ignore[arg-type]
+            key=lambda req_id: (
+                num_tokens_per_req[req_id] != decode_query_len,
+                num_tokens_per_req[req_id],
+            ),
         )
         num_scheduled_tokens = np.fromiter(
             (num_tokens_per_req[req_id] for req_id in req_ids),
@@ -728,34 +895,39 @@ class VarlenConfidenceManager(ConfidenceManager):
                 draft_token_lists, num_reqs
             )
         else:
-            # Otherwise the scheduler only sees -1 placeholders (real draft ids
-            # stay on the GPU), so every scheduled slot counts.
             valid_num_draft_tokens_per_req = num_draft_tokens_per_req
-        idx_mapping_np = np.fromiter(
-            (self.req_states.req_id_to_index[req_id] for req_id in req_ids),
-            dtype=np.int32,
-            count=num_reqs,
-        )
-        self._planned_draft_tokens_per_req = _get_draft_token_capacities(
-            idx_mapping_np,
-            self.draft_token_capacity_np,
+        required_target_tokens_per_req = num_scheduled_tokens - num_draft_tokens_per_req
+        draft_token_budget = self._plan_draft_token_budget(
+            req_ids,
+            required_target_tokens_per_req,
             valid_num_draft_tokens_per_req,
         )
-        total_num_draft_tokens = int(self._planned_draft_tokens_per_req.sum())
-        return int(
-            num_scheduled_tokens.sum()
-            - num_draft_tokens_per_req.sum()
-            + total_num_draft_tokens
-        )
+        self._planned_draft_token_budget = draft_token_budget
+        self._planned_required_target_tokens_per_req = required_target_tokens_per_req
+        self._planned_valid_draft_tokens_per_req = valid_num_draft_tokens_per_req
+
+        metadata_draft_tokens_per_req = np.zeros(num_reqs, dtype=np.int32)
+        remaining = draft_token_budget
+        for step in range(self.num_speculative_steps):
+            rows = np.flatnonzero(valid_num_draft_tokens_per_req > step)
+            admitted = min(remaining, rows.size)
+            metadata_draft_tokens_per_req[rows[:admitted]] += 1
+            remaining -= admitted
+            if remaining == 0:
+                break
+        self._metadata_draft_tokens_per_req = metadata_draft_tokens_per_req
+        return int(required_target_tokens_per_req.sum()) + draft_token_budget
 
     def warmup(self, input_buffers: "InputBuffers") -> None:
-        # JIT-compile the fused rewrite kernel.
         query_len = 1 + self.num_speculative_steps
-        self._meta_np[:4] = [0, query_len, 0, query_len]
-        async_copy_to_gpu(self._meta_np[:4], out=self._meta[:4])
+        input_buffers.query_start_loc[:2] = torch.tensor(
+            [0, query_len], dtype=torch.int32, device=self.device
+        )
+        self._cu_num_logits[:2] = torch.tensor(
+            [0, query_len], dtype=torch.int32, device=self.device
+        )
         idx_mapping = torch.zeros(1, dtype=torch.int32, device=self.device)
         _rewrite_compact_batch_kernel[(2,)](
-            self._meta,
             input_buffers.query_start_loc,
             self._cu_num_logits,
             input_buffers.input_ids,
@@ -779,27 +951,66 @@ class VarlenConfidenceManager(ConfidenceManager):
     def _rewrite_compact_batch(
         self,
         input_batch: "InputBatch",
-        num_scheduled_tokens: np.ndarray,
-        num_draft_tokens_per_req: np.ndarray,
+        required_target_tokens_per_req: np.ndarray,
+        valid_draft_tokens_per_req: np.ndarray,
+        metadata_draft_tokens_per_req: np.ndarray,
+        draft_token_budget: int,
         num_bonus_tokens: int,
     ) -> None:
         num_reqs = input_batch.num_reqs
-        num_tokens = int(num_scheduled_tokens.sum())
-        input_batch.num_scheduled_tokens = num_scheduled_tokens
+        num_tokens = int(required_target_tokens_per_req.sum()) + draft_token_budget
+        metadata_scheduled_tokens = (
+            required_target_tokens_per_req + metadata_draft_tokens_per_req
+        )
+        input_batch.num_scheduled_tokens = metadata_scheduled_tokens
         input_batch.num_tokens = num_tokens
-        input_batch.num_draft_tokens_per_req = num_draft_tokens_per_req
-        input_batch.num_draft_tokens = int(num_draft_tokens_per_req.sum())
+        input_batch.num_draft_tokens_per_req = metadata_draft_tokens_per_req
+        input_batch.num_draft_tokens = draft_token_budget
 
-        # Upload query and logits offsets together.
-        meta = self._meta_np[: 2 * (num_reqs + 1)]
-        query_start_loc_np = meta[: num_reqs + 1]
-        cu_num_logits_np = meta[num_reqs + 1 :]
+        capacities = self._assign_draft_token_budget(
+            input_batch,
+            valid_draft_tokens_per_req,
+            draft_token_budget,
+        )
+        required_np = self._required_target_tokens_np[:num_reqs]
+        required_np[:] = required_target_tokens_per_req
+        async_copy_to_gpu(
+            required_np,
+            out=self._required_target_tokens[:num_reqs],
+        )
+        torch.add(
+            self._required_target_tokens[:num_reqs],
+            capacities,
+            out=self._scheduled_tokens[:num_reqs],
+        )
+        input_batch.query_start_loc[:1].zero_()
+        torch.cumsum(
+            self._scheduled_tokens[:num_reqs],
+            dim=0,
+            out=input_batch.query_start_loc[1 : num_reqs + 1],
+        )
+        torch.add(
+            capacities,
+            num_bonus_tokens,
+            out=self._num_logits[:num_reqs],
+        )
+        self._cu_num_logits[:1].zero_()
+        torch.cumsum(
+            self._num_logits[:num_reqs],
+            dim=0,
+            out=self._cu_num_logits[1 : num_reqs + 1],
+        )
+
+        query_start_loc_np = np.empty(num_reqs + 1, dtype=np.int32)
+        cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
         query_start_loc_np[0] = 0
-        np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1:])
+        np.cumsum(metadata_scheduled_tokens, out=query_start_loc_np[1:])
         cu_num_logits_np[0] = 0
-        np.cumsum(num_draft_tokens_per_req + num_bonus_tokens, out=cu_num_logits_np[1:])
-        num_logits = int(cu_num_logits_np[-1])
-        async_copy_to_gpu(meta, out=self._meta[: meta.shape[0]])
+        np.cumsum(
+            metadata_draft_tokens_per_req + num_bonus_tokens,
+            out=cu_num_logits_np[1:],
+        )
+        num_logits = num_reqs * num_bonus_tokens + draft_token_budget
 
         input_batch.cu_num_logits_np = cu_num_logits_np
         input_batch.cu_num_logits = self._cu_num_logits[: num_reqs + 1]
@@ -815,7 +1026,6 @@ class VarlenConfidenceManager(ConfidenceManager):
         input_batch.query_start_loc_np = padded_query_start_loc_np
 
         _rewrite_compact_batch_kernel[(num_reqs + 1,)](
-            self._meta,
             input_batch.query_start_loc,
             self._cu_num_logits,
             input_batch.input_ids,
@@ -855,70 +1065,94 @@ class VarlenConfidenceManager(ConfidenceManager):
             input_batch.num_draft_tokens == 0
             or input_batch.num_draft_tokens_per_req is None
         ):
+            self._batch_draft_capacity[: input_batch.num_reqs].zero_()
             return
 
         num_bonus_tokens = self._get_num_bonus_tokens(input_batch)
-        num_draft_tokens_per_req = self._planned_draft_tokens_per_req
-        self._planned_draft_tokens_per_req = None
-        if num_draft_tokens_per_req is None:
-            num_draft_tokens_per_req = self._get_draft_token_capacities(
-                input_batch, draft_tokens
+        required_target_tokens_per_req = self._planned_required_target_tokens_per_req
+        valid_draft_tokens_per_req = self._planned_valid_draft_tokens_per_req
+        metadata_draft_tokens_per_req = self._metadata_draft_tokens_per_req
+        draft_token_budget = self._planned_draft_token_budget
+        self._planned_required_target_tokens_per_req = None
+        self._planned_valid_draft_tokens_per_req = None
+        self._metadata_draft_tokens_per_req = None
+        self._planned_draft_token_budget = None
+        if (
+            required_target_tokens_per_req is None
+            or valid_draft_tokens_per_req is None
+            or metadata_draft_tokens_per_req is None
+            or draft_token_budget is None
+        ):
+            scheduled_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
+            valid_draft_tokens_per_req = scheduled_draft_tokens_per_req
+            if input_batch.has_structured_output_reqs:
+                valid_draft_tokens_per_req = _count_valid_draft_tokens(
+                    [draft_tokens.get(req_id, ()) for req_id in input_batch.req_ids],
+                    input_batch.num_reqs,
+                )
+            required_target_tokens_per_req = (
+                input_batch.num_scheduled_tokens - scheduled_draft_tokens_per_req
             )
-        if int(num_draft_tokens_per_req.sum()) != input_batch.num_draft_tokens:
-            num_scheduled_tokens = (
-                input_batch.num_scheduled_tokens
-                - input_batch.num_draft_tokens_per_req
-                + num_draft_tokens_per_req
+            draft_token_budget = self._plan_draft_token_budget(
+                input_batch.req_ids,
+                required_target_tokens_per_req,
+                valid_draft_tokens_per_req,
             )
-            self._rewrite_compact_batch(
-                input_batch,
-                num_scheduled_tokens,
-                num_draft_tokens_per_req,
-                num_bonus_tokens,
-            )
+            metadata_draft_tokens_per_req = valid_draft_tokens_per_req.copy()
+        self._rewrite_compact_batch(
+            input_batch,
+            required_target_tokens_per_req,
+            valid_draft_tokens_per_req,
+            metadata_draft_tokens_per_req,
+            draft_token_budget,
+            num_bonus_tokens,
+        )
 
 
 class MaskedConfidenceManager(ConfidenceManager):
-    def __init__(
-        self,
-        max_num_tokens: int,
-        req_states: "RequestState",
-        device: torch.device,
-        speculative_config: "SpeculativeConfig",
-    ):
-        super().__init__(max_num_tokens, req_states, device, speculative_config)
-        self.forward_skip_mask_np = np.zeros(max_num_tokens, dtype=np.bool_)
-        self._mask_edges_np = np.empty(max_num_tokens + 1, dtype=np.int32)
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        if self.wants_auto_sps_curve:
+            self.wants_auto_sps_curve = False
+            logger.info_once(
+                "DSpark auto SPS profiling requires compact verification; "
+                "masked verification will use the configured threshold or budget."
+            )
 
     def _prepare_forward_skip_mask(
         self,
         input_batch: "InputBatch",
         num_bonus_tokens: int,
         draft_tokens: dict[str, list[int]],
-    ) -> bool:
+    ) -> None:
         assert input_batch.num_draft_tokens_per_req is not None
-        num_padded = input_batch.num_tokens_after_padding
-        mask = self.forward_skip_mask_np[:num_padded]
-        mask[:] = False
-        capacities = self._get_draft_token_capacities(input_batch, draft_tokens)
-        # Mark [start + bonus + kept, start + bonus + drafts) per request:
-        # +1 at each prune start, -1 past each prune end, then a cumsum.
-        starts = input_batch.query_start_loc_np[: input_batch.num_reqs]
-        prune_start = starts + num_bonus_tokens + capacities
-        prune_end = starts + num_bonus_tokens + input_batch.num_draft_tokens_per_req
-        edges = self._mask_edges_np[: num_padded + 1]
-        edges[:] = 0
-        np.add.at(edges, prune_start, 1)
-        np.add.at(edges, prune_end, -1)
-        np.cumsum(edges[:num_padded], out=edges[:num_padded])
-        np.greater(edges[:num_padded], 0, out=mask)
-        has_forward_skip_mask = bool(mask[: input_batch.num_tokens].any())
-        if has_forward_skip_mask:
-            async_copy_to_gpu(
-                mask[: input_batch.num_tokens],
-                out=input_batch.is_padding[: input_batch.num_tokens],
+        scheduled_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
+        valid_draft_tokens_per_req = scheduled_draft_tokens_per_req
+        if input_batch.has_structured_output_reqs:
+            valid_draft_tokens_per_req = _count_valid_draft_tokens(
+                [draft_tokens.get(req_id, ()) for req_id in input_batch.req_ids],
+                input_batch.num_reqs,
             )
-        return has_forward_skip_mask
+        required_target_tokens_per_req = (
+            input_batch.num_scheduled_tokens - scheduled_draft_tokens_per_req
+        )
+        draft_token_budget = self._plan_draft_token_budget(
+            input_batch.req_ids,
+            required_target_tokens_per_req,
+            valid_draft_tokens_per_req,
+        )
+        capacities = self._assign_draft_token_budget(
+            input_batch,
+            valid_draft_tokens_per_req,
+            draft_token_budget,
+        )
+        _build_forward_skip_mask_kernel[(input_batch.num_reqs,)](
+            input_batch.is_padding,
+            input_batch.query_start_loc,
+            capacities,
+            num_bonus_tokens,
+            BLOCK_SIZE=triton.next_power_of_2(self.num_speculative_steps),
+        )
 
     def trim_batch(
         self,
@@ -929,14 +1163,15 @@ class MaskedConfidenceManager(ConfidenceManager):
             input_batch.num_draft_tokens == 0
             or input_batch.num_draft_tokens_per_req is None
         ):
+            self._batch_draft_capacity[: input_batch.num_reqs].zero_()
             return
 
         num_bonus_tokens = self._get_num_bonus_tokens(input_batch)
-        if self._prepare_forward_skip_mask(input_batch, num_bonus_tokens, draft_tokens):
-            input_batch.input_ids[: input_batch.num_tokens].masked_fill_(
-                input_batch.is_padding[: input_batch.num_tokens],
-                0,
-            )
+        self._prepare_forward_skip_mask(input_batch, num_bonus_tokens, draft_tokens)
+        input_batch.input_ids[: input_batch.num_tokens].masked_fill_(
+            input_batch.is_padding[: input_batch.num_tokens],
+            0,
+        )
 
 
 def make_confidence_manager(

@@ -438,7 +438,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         if not use_native:
             assert self.decode_seq_lens_buffer.dim() == 1
             if (
-                min_decode_len == max_decode_len
+                not self.supports_varlen
+                and min_decode_len == max_decode_len
                 and num_decodes * max_decode_len == num_decode_tokens
             ):
                 # Uniform decode lengths with no cudagraph token padding.
@@ -563,25 +564,21 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         decode_lens: torch.Tensor,
         decode_lens_cpu: torch.Tensor,
         num_decode_tokens: int,
-        max_decode_len: int,
     ) -> torch.Tensor:
         """Build request ids for flattened SM100 varlen rows."""
         indices = self.decode_indices_buffer[:num_decode_tokens]
         actual_expanded = int(decode_lens_cpu.sum().item())
         num_decodes = decode_lens.shape[0]
-        if actual_expanded == num_decodes * max_decode_len == num_decode_tokens:
-            indices.copy_(self.arange_buffer[:num_decode_tokens] // max_decode_len)
-        else:
-            indices[:actual_expanded] = torch.repeat_interleave(
-                self.arange_buffer[:num_decodes],
-                decode_lens,
-                output_size=actual_expanded,
+        indices[:actual_expanded] = torch.repeat_interleave(
+            self.arange_buffer[:num_decodes],
+            decode_lens,
+            output_size=actual_expanded,
+        )
+        if actual_expanded < num_decode_tokens:
+            pad = num_decode_tokens - actual_expanded
+            indices[actual_expanded:num_decode_tokens] = (
+                num_decodes + self.arange_buffer[:pad]
             )
-            if actual_expanded < num_decode_tokens:
-                pad = num_decode_tokens - actual_expanded
-                indices[actual_expanded:num_decode_tokens] = (
-                    num_decodes + self.arange_buffer[:pad]
-                )
         return indices
 
     def build(
@@ -722,7 +719,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     decode_lens=decode_lens,
                     decode_lens_cpu=decode_lens_cpu,
                     num_decode_tokens=num_decode_tokens,
-                    max_decode_len=max_decode_len,
                 )
 
             seq_lens, block_table, decode_lens, batch_size, requires_padding = (

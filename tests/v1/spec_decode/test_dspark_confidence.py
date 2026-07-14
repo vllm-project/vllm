@@ -13,7 +13,13 @@ pytest.importorskip("triton")
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
 from vllm.config.compilation import CUDAGraphMode  # noqa: E402
-from vllm.v1.attention.backend import AttentionCGSupport  # noqa: E402
+from vllm.v1.attention.backend import (  # noqa: E402
+    AttentionCGSupport,
+    CommonAttentionMetadata,
+)
+from vllm.v1.attention.backends.mla.indexer import (  # noqa: E402
+    DeepseekV32IndexerMetadataBuilder,
+)
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # noqa: E402
 from vllm.v1.worker.gpu.cudagraph_utils import (  # noqa: E402
     BatchExecutionDescriptor,
@@ -26,11 +32,10 @@ from vllm.v1.worker.gpu.input_batch import (  # noqa: E402
 from vllm.v1.worker.gpu.spec_decode.confidence import (  # noqa: E402
     MaskedConfidenceManager,
     VarlenConfidenceManager,
-    allocate_draft_token_capacity,
-    assign_draft_token_budget,
     build_sps_table_from_costs,
     compute_prefix_survival,
     make_confidence_manager,
+    select_draft_token_budget,
 )
 from vllm.v1.worker.gpu.spec_decode.dspark.online_sts import (  # noqa: E402
     DSparkOnlineSTS,
@@ -52,6 +57,17 @@ def _spec_config(**overrides: Any) -> SimpleNamespace:
 
 def _logit(probs: np.ndarray) -> np.ndarray:
     return np.log(probs / (1.0 - probs))
+
+
+@pytest.fixture(autouse=True)
+def _single_rank_tp_group(monkeypatch):
+    group = SimpleNamespace(
+        broadcast=lambda tensor, src=0: tensor,
+        broadcast_object=lambda value, src=0: value,
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.spec_decode.confidence.get_tp_group", lambda: group
+    )
 
 
 @pytest.mark.parametrize(
@@ -88,6 +104,26 @@ def test_auto_verification_selects_supported_manager(cg_support, expected_type):
     assert isinstance(manager, expected_type)
 
 
+def test_masked_verification_does_not_auto_profile_sps():
+    device = torch.device("cuda")
+    manager = MaskedConfidenceManager(
+        max_num_tokens=8,
+        req_states=RequestState(
+            max_num_reqs=2,
+            max_model_len=4,
+            max_num_batched_tokens=8,
+            num_speculative_steps=2,
+            vocab_size=16,
+            device=device,
+        ),
+        device=device,
+        speculative_config=_spec_config(dspark_sps_curve="auto"),
+    )
+
+    assert not manager.wants_auto_sps_curve
+    assert manager.sps_table_np is None
+
+
 def test_prepare_pos_seq_lens_clears_active_padding():
     device = torch.device("cuda")
     is_padding = torch.ones(7, dtype=torch.bool, device=device)
@@ -103,7 +139,64 @@ def test_prepare_pos_seq_lens_clears_active_padding():
     assert is_padding.cpu().tolist() == [False] * 5 + [True] * 2
 
 
-def test_allocate_capacity_uses_global_prefix_order():
+def test_token_to_request_mapping_uses_device_offsets():
+    device = torch.device("cuda")
+    metadata = CommonAttentionMetadata(
+        query_start_loc=torch.tensor([0, 2, 5, -1], dtype=torch.int32, device=device),
+        query_start_loc_cpu=torch.tensor([0, 3, 5], dtype=torch.int32),
+        seq_lens=torch.tensor([2, 3], dtype=torch.int32, device=device),
+        num_reqs=2,
+        num_actual_tokens=5,
+        max_query_len=3,
+        max_seq_len=3,
+        block_table_tensor=torch.empty((2, 0), dtype=torch.int32, device=device),
+        slot_mapping=torch.empty(5, dtype=torch.int64, device=device),
+    )
+
+    mapping = metadata.token_to_req_indices(
+        torch.empty(5, dtype=torch.int32, device=device)
+    )
+
+    assert mapping.cpu().tolist() == [0, 0, 1, 1, 1]
+
+
+def test_token_to_request_mapping_ignores_cudagraph_token_padding():
+    device = torch.device("cuda")
+    metadata = CommonAttentionMetadata(
+        query_start_loc=torch.tensor([0, 2, 8, 5], dtype=torch.int32, device=device),
+        query_start_loc_cpu=torch.tensor([0, 3, 5, 5], dtype=torch.int32),
+        seq_lens=torch.tensor([2, 3, 0], dtype=torch.int32, device=device),
+        num_reqs=3,
+        num_actual_tokens=8,
+        max_query_len=3,
+        max_seq_len=3,
+        block_table_tensor=torch.empty((3, 0), dtype=torch.int32, device=device),
+        slot_mapping=torch.empty(8, dtype=torch.int64, device=device),
+    )
+
+    mapping = metadata.token_to_req_indices(
+        torch.empty(8, dtype=torch.int32, device=device)
+    )
+
+    assert mapping.cpu().tolist() == [0, 0, 1, 1, 1, 0, 0, 0]
+
+
+def test_varlen_indexer_indices_use_device_lengths():
+    device = torch.device("cuda")
+    builder = object.__new__(DeepseekV32IndexerMetadataBuilder)
+    builder.decode_indices_buffer = torch.empty(5, dtype=torch.int32, device=device)
+    builder.arange_buffer = torch.arange(5, dtype=torch.int32, device=device)
+
+    indices = builder._build_varlen_decode_indices(
+        decode_lens=torch.tensor([1, 2], dtype=torch.int32, device=device),
+        decode_lens_cpu=torch.tensor([2, 1], dtype=torch.int32),
+        num_decode_tokens=5,
+    )
+
+    assert indices.cpu().tolist() == [0, 1, 1, 2, 3]
+
+
+def test_select_budget_uses_global_prefix_order():
     survival = compute_prefix_survival(
         _logit(
             np.array(
@@ -115,35 +208,34 @@ def test_allocate_capacity_uses_global_prefix_order():
             )
         )
     )
-    capacities = allocate_draft_token_capacity(survival, min_survival=0.75)
-    assert capacities.tolist() == [2, 1, 0]
+    budget = select_draft_token_budget(survival, 3, 3, 3, min_survival=0.75)
+    assert budget == 3
 
 
-def test_allocate_capacity_uses_budgeted_global_prefix_order():
+def test_select_budget_applies_fraction_globally():
     survival = compute_prefix_survival(_logit(np.array([[0.90, 0.80], [0.80, 0.80]])))
-    capacities = allocate_draft_token_capacity(survival, budget_frac=0.5)
-    assert capacities.tolist() == [2, 1]
+    budget = select_draft_token_budget(survival, 2, 2, 2, budget_frac=0.5)
+    assert budget == 3
 
 
-def test_allocate_capacity_keeps_threshold_ties():
+def test_select_budget_is_hard_cap_under_ties():
     survival = compute_prefix_survival(_logit(np.array([[0.90, 0.80], [0.90, 0.80]])))
-    capacities = allocate_draft_token_capacity(survival, budget_frac=0.25)
-    assert capacities.tolist() == [1, 1]
+    budget = select_draft_token_budget(survival, 2, 2, 2, budget_frac=0.25)
+    assert budget == 2
 
 
-def test_allocate_capacity_budget_is_hard_cap_under_ties():
+def test_select_budget_is_hard_cap_for_saturated_scores():
     """Saturated (tied) survival scores must not escape the budget.
 
     With every confidence saturated to 1.0, a kth-score-threshold recount
     would admit all tokens; the budget must remain a hard cap on the total.
     """
     survival = compute_prefix_survival(np.full((4, 7), 40.0))
-    capacities = allocate_draft_token_capacity(survival, budget_frac=0.5)
-    assert int(capacities.sum()) == int(4 * 7 * 0.5) + 1
-    assert int(capacities.max()) <= 7
+    budget = select_draft_token_budget(survival, 4, 4, 4, budget_frac=0.5)
+    assert budget == int(4 * 7 * 0.5) + 1
 
 
-def test_allocate_capacity_never_admits_zero_survival():
+def test_select_budget_never_admits_zero_survival():
     """Zero-survival tokens are not candidates (DSpark Alg. 1: a_{r,j} > 0),
     so leftover budget must not be spent past the first dead position."""
     # Positions 0-1 confident, position 2 dead (sigmoid underflows to an
@@ -151,11 +243,11 @@ def test_allocate_capacity_never_admits_zero_survival():
     logits = np.full((2, 5), 40.0)
     logits[:, 2] = -800.0
     survival = compute_prefix_survival(logits)
-    capacities = allocate_draft_token_capacity(survival, budget_frac=0.9)
-    assert capacities.tolist() == [2, 2]
+    budget = select_draft_token_budget(survival, 2, 2, 2, budget_frac=0.9)
+    assert budget == 4
 
 
-def test_allocate_capacity_sps_curve_argmax():
+def test_select_budget_uses_sps_argmax():
     """With an SPS curve, verification lengths maximize tau * SPS(B)
     (DSpark Alg. 1) instead of spending the whole budget."""
     survival = compute_prefix_survival(_logit(np.array([[0.90, 0.80], [0.60, 0.50]])))
@@ -164,17 +256,34 @@ def test_allocate_capacity_sps_curve_argmax():
     # SPS drops sharply after B=4 so theta peaks at k=2:
     #   k=0: 2.00*1.00, k=1: 2.90*0.95=2.755, k=2: 3.62*0.90=3.258,
     #   k=3: 4.22*0.20=0.844, k=4: 4.52*0.10=0.452.
-    sps_row = np.array([1.0, 1.0, 1.0, 0.95, 0.90, 0.20, 0.10])
-    capacities = allocate_draft_token_capacity(survival, sps_row=sps_row)
-    assert capacities.tolist() == [2, 0]
+    sps_table = np.broadcast_to(
+        np.array([1.0, 1.0, 1.0, 0.95, 0.90, 0.20, 0.10]),
+        (3, 7),
+    )
+    budget = select_draft_token_budget(
+        survival,
+        num_batch_requests=2,
+        num_sampling_requests=2,
+        num_required_target_tokens=2,
+        sps_table=sps_table,
+    )
+    assert budget == 2
 
 
-def test_assign_draft_token_budget_uses_current_scores():
-    current_survival = np.array([[0.9, 0.8, 0.7], [0.95, 0.4, 0.3]])
+def test_select_budget_counts_only_requests_that_sample():
+    survival = np.array([[0.9, 0.8], [0.7, 0.6]])
+    sps_table = np.ones((3, 9))
+    sps_table[:, 5:] = 0.1
 
-    capacities = assign_draft_token_budget(current_survival, num_admitted=3)
+    budget = select_draft_token_budget(
+        survival,
+        num_batch_requests=2,
+        num_sampling_requests=1,
+        num_required_target_tokens=4,
+        sps_table=sps_table,
+    )
 
-    assert capacities.tolist() == [2, 1]
+    assert budget == 0
 
 
 def test_sps_table_combines_direct_draft_and_verification_costs():
@@ -189,23 +298,23 @@ def test_sps_table_combines_direct_draft_and_verification_costs():
     assert 1000.0 / table[8, 8] == pytest.approx(4.6)
 
 
-def test_allocate_capacity_temperature_desaturates_zeros():
+def test_select_budget_temperature_desaturates_zeros():
     """A confidence temperature > 1 keeps saturated-negative positions in the
     candidate set (no exact-zero survival), so the budget is spent instead of
     being truncated by miscalibrated zeros."""
     logits = np.full((2, 5), 40.0)
     logits[:, 2] = -800.0
-    caps_t1 = allocate_draft_token_capacity(
-        compute_prefix_survival(logits), budget_frac=0.9
+    budget_t1 = select_draft_token_budget(
+        compute_prefix_survival(logits), 2, 2, 2, budget_frac=0.9
     )
-    caps_t80 = allocate_draft_token_capacity(
-        compute_prefix_survival(logits, 80.0), budget_frac=0.9
+    budget_t80 = select_draft_token_budget(
+        compute_prefix_survival(logits, 80.0), 2, 2, 2, budget_frac=0.9
     )
     # T=1: exact-zero survival past position 2 truncates both requests.
-    assert caps_t1.tolist() == [2, 2]
+    assert budget_t1 == 4
     # T=80: sigmoid(-10) > 0, so the budget (int(10*0.9)+1 = 10 admissions,
     # capped at 5 per request) is fully spent.
-    assert caps_t80.tolist() == [5, 5]
+    assert budget_t80 == 10
 
 
 def test_online_sts_fits_order_preserving_temperatures():
@@ -248,8 +357,15 @@ def test_online_sts_fits_order_preserving_temperatures():
     assert np.array_equal(sts.temperatures, np.ones(3))
 
 
-def test_capacity_manager_uses_stale_budget_with_current_assignment():
-    """The prior host snapshot sets the budget; current GPU scores assign it."""
+def test_capacity_manager_assigns_scalar_budget_from_gpu_scores(monkeypatch):
+    broadcasts = []
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.spec_decode.confidence.get_tp_group",
+        lambda: SimpleNamespace(
+            broadcast=lambda tensor, src=0: broadcasts.append(tensor),
+            broadcast_object=lambda value, src=0: value,
+        ),
+    )
     device = torch.device("cuda")
     req_states = RequestState(
         max_num_reqs=4,
@@ -259,69 +375,44 @@ def test_capacity_manager_uses_stale_budget_with_current_assignment():
         vocab_size=32,
         device=device,
     )
-    req_states.req_id_to_index = {"req0": 2, "req1": 0}
+    req_states.req_id_to_index = {"req0": 0, "req1": 1}
     handler = VarlenConfidenceManager(
         max_num_tokens=16,
         req_states=req_states,
         device=device,
-        speculative_config=_spec_config(dspark_budget_frac=0.51),
+        speculative_config=_spec_config(),
     )
-    handler.add_request(2)
-    handler.add_request(0)
     input_batch: Any = SimpleNamespace(
         req_ids=["req0", "req1"],
         num_reqs=2,
-        idx_mapping_np=np.array([2, 0], dtype=np.int32),
-        num_tokens=0,
-        num_tokens_after_padding=0,
-        num_draft_tokens=0,
-        num_draft_tokens_per_req=None,
-        cu_num_logits_np=np.array([0, 1, 2], dtype=np.int32),
-        input_ids=torch.empty(0, dtype=torch.int32, device=device),
-        positions=torch.empty(0, dtype=torch.int64, device=device),
-        is_padding=torch.empty(0, dtype=torch.bool, device=device),
+        idx_mapping=torch.tensor([0, 1], dtype=torch.int32, device=device),
+        cu_num_logits_np=np.array([0, 4, 8], dtype=np.int32),
+        num_draft_tokens=6,
+    )
+    current_logits = torch.from_numpy(
+        _logit(np.array([[0.90, 0.80, 0.70], [0.95, 0.40, 0.30]]))
+    ).to(
+        device=device,
+        dtype=torch.float32,
+    )
+    handler._confidence_logits[:2].copy_(current_logits)
+
+    capacities = handler._assign_draft_token_budget(
+        input_batch,
+        valid_draft_tokens_per_req=np.array([3, 3], dtype=np.int32),
+        draft_token_budget=3,
     )
 
-    def stage(logits: torch.Tensor) -> None:
+    assert capacities.cpu().tolist() == [2, 1]
+
+    for _ in range(3):
         handler.stage_confidences(
-            logits,
-            torch.ones(2, dtype=torch.int32, device=device),
+            current_logits,
+            torch.tensor([2, 1], dtype=torch.int32, device=device),
             input_batch,
         )
-
-    # req0 confident on 2 positions, req1 on all 3; budget
-    # int(6*0.51)+1 = 4 admissions.
-    confident = torch.tensor(
-        [[8.0, 8.0, -800.0], [8.0, 8.0, 8.0]], dtype=torch.float32, device=device
-    )
-    current = torch.tensor(
-        [[20.0, 20.0, 20.0], [8.0, 8.0, 8.0]],
-        dtype=torch.float32,
-        device=device,
-    )
-
-    stage(confident)
-    handler._apply_current_assignment()
-    # Only one copy staged: defaults (full k) must remain untouched.
-    assert handler.draft_token_capacity_np.tolist() == [3, 3, 3, 3]
-
-    stage(current)
-    handler._apply_current_assignment()
-    # The first snapshot chooses four admissions, while stable current-score
-    # ordering assigns three to req0 and one to req1.
-    caps = handler.draft_token_capacity_np
-    assert caps[2] == 3 and caps[0] == 1
-    # Batch trimming does not advance the staging pipeline.
-    handler._apply_current_assignment()
-    assert handler.draft_token_capacity_np.tolist() == caps.tolist()
-
-    # Finished requests are skipped when scattering capacities.
-    del req_states.req_id_to_index["req0"]
-    handler.draft_token_capacity_np.fill(3)
-    stage(current)
-    handler._apply_current_assignment()
-    assert handler.draft_token_capacity_np[0] != 3  # req1 updated
-    assert handler.draft_token_capacity_np[2] == 3  # req0 untouched
+    assert handler._stale_survival is not None
+    assert len(broadcasts) == 1
 
 
 def test_varlen_capacity_manager_compacts_verifier_batch():
@@ -340,15 +431,20 @@ def test_varlen_capacity_manager_compacts_verifier_batch():
     req_states.draft_tokens[:2] = torch.tensor(
         [[11, 12, 13], [21, 22, 23]], dtype=torch.int64, device=device
     )
+    req_states.req_id_to_index = {"req0": 0, "req1": 1}
     handler = VarlenConfidenceManager(
         max_num_tokens=16,
         req_states=req_states,
         device=device,
-        speculative_config=_spec_config(),
+        speculative_config=_spec_config(dspark_budget_frac=0.34),
     )
-    handler.add_request(0)
-    handler.add_request(1)
-    handler.draft_token_capacity_np[:2] = np.array([1, 2], dtype=np.int32)
+    handler._confidence_logits[:2].copy_(
+        torch.from_numpy(_logit(np.array([[0.90, 0.10, 0.10], [0.95, 0.95, 0.10]]))).to(
+            device=device, dtype=torch.float32
+        )
+    )
+    draft_tokens = {"req0": [-1, -1, -1], "req1": [-1, -1, -1]}
+    assert handler.get_num_tokens({"req0": 4, "req1": 4}, draft_tokens) == 5
 
     input_ids = torch.tensor(
         [101, 11, 12, 13, 201, 21, 22, 23, 0, 0],
@@ -398,15 +494,19 @@ def test_varlen_capacity_manager_compacts_verifier_batch():
         prompt_lens=None,
     )
 
-    handler.trim_batch(input_batch, {})
+    handler.trim_batch(input_batch, draft_tokens)
 
     torch.accelerator.synchronize()
-    assert input_batch.num_scheduled_tokens.tolist() == [2, 3]
-    assert input_batch.num_draft_tokens_per_req.tolist() == [1, 2]
+    # CPU metadata carries only the scalar budget; GPU offsets follow current
+    # confidence ordering and may distribute that budget differently.
+    assert input_batch.num_scheduled_tokens.tolist() == [3, 2]
+    assert input_batch.num_draft_tokens_per_req.tolist() == [2, 1]
     assert input_batch.num_tokens == 5
     assert input_batch.num_draft_tokens == 3
-    assert input_batch.cu_num_logits_np.tolist() == [0, 2, 5]
-    assert input_batch.query_start_loc_np.tolist() == [0, 2, 5]
+    assert input_batch.cu_num_logits_np.tolist() == [0, 3, 5]
+    assert input_batch.query_start_loc_np.tolist() == [0, 3, 5]
+    assert input_batch.cu_num_logits.cpu().tolist() == [0, 2, 5]
+    assert input_batch.query_start_loc.cpu().tolist() == [0, 2, 5]
     assert input_batch.input_ids.shape[0] == input_batch.num_tokens_after_padding
     assert input_batch.input_ids[: input_batch.num_tokens].cpu().tolist() == [
         101,
@@ -439,15 +539,18 @@ def test_masked_capacity_manager_marks_pruned_tokens_for_forward_and_sampler():
         vocab_size=32,
         device=device,
     )
+    req_states.req_id_to_index = {"req0": 0, "req1": 1}
     handler = MaskedConfidenceManager(
         max_num_tokens=16,
         req_states=req_states,
         device=device,
-        speculative_config=_spec_config(),
+        speculative_config=_spec_config(dspark_budget_frac=0.34),
     )
-    handler.add_request(0)
-    handler.add_request(1)
-    handler.draft_token_capacity_np[:2] = np.array([1, 2], dtype=np.int32)
+    handler._confidence_logits[:2].copy_(
+        torch.from_numpy(_logit(np.array([[0.90, 0.10, 0.10], [0.95, 0.95, 0.10]]))).to(
+            device=device, dtype=torch.float32
+        )
+    )
 
     input_ids = torch.arange(16, dtype=torch.int32, device=device)
     input_batch = InputBatch(

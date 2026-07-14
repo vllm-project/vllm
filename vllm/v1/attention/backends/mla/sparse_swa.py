@@ -179,6 +179,7 @@ class DeepseekSparseSWAMetadata:
     num_prefills: int = 0
     num_decode_tokens: int = 0
     num_prefill_tokens: int = 0
+    max_decode_query_len: int = 1
 
     # Pre-computed prefill metadata shared across all DeepseekV4 attention layers.
     prefill_seq_lens: torch.Tensor | None = None
@@ -332,6 +333,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             2 if (spec_config is not None and spec_config.parallel_drafting) else 1
         )
         self.decode_threshold = 1 + spec_mult * self.num_speculative_tokens
+        self.max_decode_query_len = 1 + self.num_speculative_tokens
         self.reorder_batch_threshold = None
 
         hf_config = self.vllm_config.model_config.hf_config
@@ -549,6 +551,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             num_prefills=num_prefills,
             num_decode_tokens=num_decode_tokens,
             num_prefill_tokens=num_prefill_tokens,
+            max_decode_query_len=self.max_decode_query_len,
             tile_sched_swaonly=tile_sched[_LAYER_TYPE_SWAONLY],
             tile_sched_c4a=tile_sched[_LAYER_TYPE_C4A],
             tile_sched_c128a=tile_sched[_LAYER_TYPE_C128A],

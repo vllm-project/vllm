@@ -16,7 +16,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
-from vllm.utils.torch_utils import np_to_pinned_tensor
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -533,17 +532,21 @@ class CommonAttentionMetadata:
             assert self._token_to_req_indices_cache.shape[0] >= num_tokens
             return self._token_to_req_indices_cache[:num_tokens]
 
-        starts = np.asarray(self.query_start_loc_cpu, dtype=np.int32)
-        query_lens = np.diff(starts)
-        token_to_req_indices = np.repeat(
-            np.arange(query_lens.shape[0], dtype=np.int32), query_lens
+        num_mapped_tokens = int(self.query_start_loc_cpu[-1])
+        num_active_reqs = int(
+            torch.searchsorted(self.query_start_loc_cpu, num_mapped_tokens).item()
         )
-        num_mapped_tokens = token_to_req_indices.shape[0]
+        active_query_start_loc = self.query_start_loc[: num_active_reqs + 1].clamp(
+            max=num_mapped_tokens
+        )
+        query_lens = active_query_start_loc[1:] - active_query_start_loc[:-1]
         assert buffer.shape[0] >= max(num_mapped_tokens, num_tokens)
-        # copy from CPU to GPU
-        buffer[:num_mapped_tokens].copy_(
-            np_to_pinned_tensor(token_to_req_indices), non_blocking=True
+        token_to_req_indices = torch.repeat_interleave(
+            torch.arange(num_active_reqs, dtype=torch.int32, device=buffer.device),
+            query_lens,
+            output_size=num_mapped_tokens,
         )
+        buffer[:num_mapped_tokens].copy_(token_to_req_indices)
         if num_mapped_tokens < num_tokens:
             buffer[num_mapped_tokens:num_tokens].zero_()
         self._token_to_req_indices_cache = buffer[: max(num_mapped_tokens, num_tokens)]
