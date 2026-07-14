@@ -5,6 +5,7 @@ pub(crate) mod convert;
 mod types;
 mod validate;
 
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::result::Result;
 use std::sync::Arc;
@@ -18,16 +19,21 @@ use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt as _, pin_mut};
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 use tracing_futures::Instrument as _;
+use uuid::Uuid;
+use vllm_chat::ReasoningParser;
+use vllm_chat::ToolParser;
 use vllm_chat::{
     AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatEventStream, ChatEventStreamTrait,
-    CollectedAssistantMessage, FinishReason,
+    ChatTool, CollectedAssistantMessage, CombinedParser, FinishReason, ParserSelection,
+    ReasoningParserFactory, ToolParserFactory, UnifiedParser, UnifiedParserEvent,
+    UnifiedParserFactory, UnifiedParserOutput,
 };
 use vllm_engine_core_client::protocol::logprobs::TokenLogprob;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_text::BeamSearchOutput;
-use vllm_text::tokenizer::Tokenizer;
+use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 
 use self::convert::{ResponseOptions, prepare_chat_request};
 use crate::config::ApiServerOptions;
@@ -60,7 +66,7 @@ pub async fn chat_completions(
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let lora_resolution = state.resolve_model_with_loras(Some(&body.model)).await;
 
-    let prepared = match prepare_chat_request(body, &lora_resolution, request_context) {
+    let mut prepared = match prepare_chat_request(body, &lora_resolution, request_context) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
@@ -74,6 +80,15 @@ pub async fn chat_completions(
     let api_server_options = state.api_server_options;
 
     if prepared.chat_request.sampling_params.use_beam_search {
+        let model_id = state.chat.model_id().to_owned();
+        let tool_call_parser = state.chat.tool_call_parser().clone();
+        let reasoning_parser = state.chat.reasoning_parser().clone();
+        let tools = prepared.chat_request.tools.clone();
+
+        if !tools.is_empty() || prepared.options.include_reasoning {
+            prepared.chat_request.decode_options.skip_special_tokens = false;
+        }
+
         let beam_result = match state
             .chat
             .beam_search_chat(prepared.chat_request)
@@ -88,7 +103,7 @@ pub async fn chat_completions(
         };
 
         let tokenizer = state.chat.text().tokenizer();
-        let response = collect_beam_search_chat_completion(
+        let response = match collect_beam_search_chat_completion(
             beam_result,
             prepared.request_id,
             prepared.response_model,
@@ -96,7 +111,15 @@ pub async fn chat_completions(
             api_server_options,
             prepared.options,
             tokenizer.as_ref(),
-        );
+            tokenizer.clone(),
+            &model_id,
+            &tool_call_parser,
+            &reasoning_parser,
+            &tools,
+        ) {
+            Ok(response) => response,
+            Err(error) => return error.into_response(),
+        };
         return Json(response).into_response();
     }
 
@@ -310,6 +333,161 @@ fn build_beam_chat_logprobs(
     })
 }
 
+fn resolve_tool_parser(
+    tools: &[ChatTool],
+    model_id: &str,
+    selection: &ParserSelection,
+) -> Result<Box<dyn ToolParser>, ApiError> {
+    let factory = ToolParserFactory::global();
+    let parser_name = match selection {
+        ParserSelection::Auto => factory
+            .resolve_name_for_model(model_id)
+            .ok_or_else(|| server_error!("no tool parser available for model `{}`", model_id))?,
+        ParserSelection::None => {
+            return Err(server_error!("tool parsing disabled"));
+        }
+        ParserSelection::Explicit(name) => name.as_str(),
+    };
+    let parser = factory.create(parser_name, tools).map_err(|e| {
+        server_error!(
+            "failed to create tool parser `{}`: {}",
+            parser_name,
+            e.to_report_string()
+        )
+    })?;
+    Ok(parser)
+}
+
+fn resolve_optional_reasoning_parser(
+    model_id: &str,
+    tokenizer: DynTokenizer,
+    selection: &ParserSelection,
+) -> Option<Box<dyn ReasoningParser>> {
+    let factory = ReasoningParserFactory::global();
+    let parser_name = match selection {
+        ParserSelection::Auto => factory.resolve_name_for_model(model_id)?,
+        ParserSelection::None => return None,
+        ParserSelection::Explicit(name) => name,
+    };
+    match factory.create(parser_name, tokenizer) {
+        Ok(parser) => Some(parser),
+        Err(e) => {
+            warn!(
+                parser_name,
+                error = %e.to_report_string(),
+                "reasoning parser creation failed for model `{}`, reasoning parsing disabled",
+                model_id,
+            );
+            None
+        }
+    }
+}
+
+fn resolve_optional_unified_parser(
+    tools: &[ChatTool],
+    model_id: &str,
+    tokenizer: DynTokenizer,
+    selection: &ParserSelection,
+) -> Result<Option<Box<dyn UnifiedParser>>, ApiError> {
+    let factory = UnifiedParserFactory::global();
+    let parser_name = match selection {
+        ParserSelection::Auto => factory.resolve_name_for_model(model_id),
+        ParserSelection::None => None,
+        ParserSelection::Explicit(name) if factory.contains(name) => Some(name.as_str()),
+        ParserSelection::Explicit(_) => None,
+    };
+    let Some(parser_name) = parser_name else {
+        return Ok(None);
+    };
+    let parser = factory.create(parser_name, tools, tokenizer).map_err(|e| {
+        server_error!(
+            "failed to create unified parser `{}`: {}",
+            parser_name,
+            e.to_report_string()
+        )
+    })?;
+    Ok(Some(parser))
+}
+
+/// Parse decoded text through reasoning and tool parsers, returning extracted
+/// content, reasoning, and tool calls.
+fn parse_beam_chat_output(
+    decoded_text: &str,
+    model_id: &str,
+    tools: &[ChatTool],
+    tokenizer: DynTokenizer,
+    tool_call_parser: &ParserSelection,
+    reasoning_parser: &ParserSelection,
+) -> Result<(Option<String>, Option<String>, Vec<ToolCall>), ApiError> {
+    let has_tools = !tools.is_empty() && !matches!(tool_call_parser, ParserSelection::None);
+
+    let mut combined: Box<dyn UnifiedParser> = if tool_call_parser == reasoning_parser
+        && let Some(unified) =
+            resolve_optional_unified_parser(tools, model_id, tokenizer.clone(), tool_call_parser)?
+    {
+        unified
+    } else {
+        let tool_parser = if has_tools {
+            Some(resolve_tool_parser(tools, model_id, tool_call_parser)?)
+        } else {
+            None
+        };
+        let reasoning_parser_inst =
+            resolve_optional_reasoning_parser(model_id, tokenizer.clone(), reasoning_parser);
+        Box::new(CombinedParser::new(reasoning_parser_inst, tool_parser))
+    };
+
+    let mut output = UnifiedParserOutput::default();
+    combined.parse_into(decoded_text, &mut output).map_err(|e| {
+        server_error!(
+            "beam search output parsing failed: {}",
+            e.to_report_string()
+        )
+    })?;
+    output.append(combined.finish().map_err(|e| {
+        server_error!(
+            "beam search parsing finish failed: {}",
+            e.to_report_string()
+        )
+    })?);
+
+    let mut content = String::new();
+    let mut reasoning = String::new();
+    let mut acc: BTreeMap<usize, (String, String)> = BTreeMap::new();
+
+    for event in output.events {
+        match event {
+            UnifiedParserEvent::Text(text) => content.push_str(&text),
+            UnifiedParserEvent::Reasoning(text) => reasoning.push_str(&text),
+            UnifiedParserEvent::ToolCall(delta) => {
+                let entry = acc.entry(delta.tool_index).or_default();
+                if let Some(name) = delta.name {
+                    entry.0 = name;
+                }
+                entry.1.push_str(&delta.arguments);
+            }
+        }
+    }
+
+    let tool_calls: Vec<ToolCall> = acc
+        .into_iter()
+        .map(|(_idx, (name, arguments))| ToolCall {
+            id: format!("call_{}", &Uuid::new_v4().simple().to_string()[..24]),
+            tool_type: "function".to_string(),
+            function: FunctionCallResponse {
+                name,
+                arguments: Some(arguments),
+            },
+        })
+        .collect();
+
+    Ok((
+        Some(content).filter(|t| !t.is_empty()),
+        Some(reasoning).filter(|t| !t.is_empty()),
+        tool_calls,
+    ))
+}
+
 fn collect_beam_search_chat_completion(
     beam_result: BeamSearchOutput,
     request_id: String,
@@ -323,12 +501,17 @@ fn collect_beam_search_chat_completion(
     ResponseOptions {
         requested_logprobs,
         return_token_ids,
-        include_reasoning: _,
+        include_reasoning,
         echo,
         ..
     }: ResponseOptions,
     tokenizer: &dyn Tokenizer,
-) -> ChatCompletionResponse {
+    tokenizer_arc: DynTokenizer,
+    model_id: &str,
+    tool_call_parser: &ParserSelection,
+    reasoning_parser: &ParserSelection,
+    tools: &[ChatTool],
+) -> Result<ChatCompletionResponse, ApiError> {
     let prompt_len = beam_result.prompt_token_ids.len();
     let output_tokens: usize = beam_result
         .sequences
@@ -341,42 +524,61 @@ fn collect_beam_search_chat_completion(
         enable_prompt_tokens_details.then_some(0),
     );
 
-    let choices: Vec<ChatCompletionChoice> = beam_result
-        .sequences
-        .iter()
-        .enumerate()
-        .map(|(i, seq)| {
-            let generated_tokens = seq.tokens[beam_result.prompt_token_ids.len()..].to_vec();
-            let openai_finish_reason = seq
-                .finish_reason
-                .as_ref()
-                .map(|fr| chat_finish_reason_to_openai(fr, false).unwrap_or("error"))
-                .unwrap_or("length");
-            let stop_reason = seq
-                .stop_reason
-                .map(|token_id| serde_json::Value::Number(serde_json::Number::from(token_id)));
-            let decoded = tokenizer.decode(&generated_tokens, false).unwrap_or_default();
-            let logprobs = requested_logprobs
-                .then(|| build_beam_chat_logprobs(&seq.logprobs, &generated_tokens, tokenizer))
-                .flatten();
-            ChatCompletionChoice {
-                index: i as u32,
-                message: ChatCompletionMessage {
-                    role: AssistantRole,
-                    content: match &echo {
-                        Some(prefix) => Some(format!("{prefix}{decoded}")),
-                        None => Some(decoded).filter(|t| !t.is_empty()),
-                    },
-                    tool_calls: None,
-                    reasoning: None,
-                },
-                logprobs,
-                finish_reason: Some(openai_finish_reason.to_string()),
-                stop_reason,
-                token_ids: return_token_ids.then_some(generated_tokens),
-            }
-        })
-        .collect();
+    let mut choices = Vec::with_capacity(beam_result.sequences.len());
+    for (i, seq) in beam_result.sequences.iter().enumerate() {
+        let generated_tokens = seq.tokens[beam_result.prompt_token_ids.len()..].to_vec();
+        let openai_finish_reason = seq
+            .finish_reason
+            .as_ref()
+            .map(|fr| chat_finish_reason_to_openai(fr, false).unwrap_or("error"))
+            .unwrap_or("length");
+        let stop_reason = seq
+            .stop_reason
+            .map(|token_id| serde_json::Value::Number(serde_json::Number::from(token_id)));
+        let decoded = tokenizer.decode(&generated_tokens, false).unwrap_or_default();
+        let logprobs = requested_logprobs
+            .then(|| build_beam_chat_logprobs(&seq.logprobs, &generated_tokens, tokenizer))
+            .flatten();
+
+        let (raw_content, reasoning, tool_calls) = if decoded.is_empty() {
+            (None, None, None)
+        } else {
+            let (parsed_content, parsed_reasoning, parsed_tool_calls) = parse_beam_chat_output(
+                &decoded,
+                model_id,
+                tools,
+                tokenizer_arc.clone(),
+                tool_call_parser,
+                reasoning_parser,
+            )?;
+            let tool_calls = Some(parsed_tool_calls).filter(|c| !c.is_empty());
+            let reasoning = if include_reasoning {
+                parsed_reasoning
+            } else {
+                None
+            };
+            (parsed_content, reasoning, tool_calls)
+        };
+
+        let content = raw_content.map(|c| match &echo {
+            Some(prefix) => format!("{prefix}{c}"),
+            None => c,
+        });
+
+        choices.push(ChatCompletionChoice {
+            index: i as u32,
+            message: ChatCompletionMessage {
+                role: AssistantRole,
+                content,
+                tool_calls,
+                reasoning,
+            },
+            logprobs,
+            finish_reason: Some(openai_finish_reason.to_string()),
+            stop_reason,
+            token_ids: return_token_ids.then_some(generated_tokens),
+        });
+    }
 
     if enable_log_requests {
         info!(
@@ -388,7 +590,7 @@ fn collect_beam_search_chat_completion(
         );
     }
 
-    ChatCompletionResponse {
+    Ok(ChatCompletionResponse {
         id: request_id,
         object: "chat.completion".to_string(),
         created,
@@ -399,7 +601,7 @@ fn collect_beam_search_chat_completion(
         prompt_logprobs: None,
         prompt_token_ids: return_token_ids.then_some(beam_result.prompt_token_ids),
         kv_transfer_params: None,
-    }
+    })
 }
 
 /// Convert one internal chat event stream into OpenAI chat-completion chunks.

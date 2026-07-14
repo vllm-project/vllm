@@ -82,20 +82,6 @@ pub(super) fn validate_request_compat(
         );
     }
 
-    if request.use_beam_search && request.tools.is_some() {
-        bail_invalid_request!(
-            param = "tools",
-            "Tools are not currently supported with beam search."
-        );
-    }
-
-    if request.use_beam_search && request.include_reasoning {
-        bail_invalid_request!(
-            param = "include_reasoning",
-            "include_reasoning is not currently supported with beam search."
-        );
-    }
-
     // ---- Reject parameters that are accepted for deserialization but not yet
     // implemented ----
 
