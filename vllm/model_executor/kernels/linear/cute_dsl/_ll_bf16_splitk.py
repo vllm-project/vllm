@@ -338,9 +338,7 @@ class LLBf16SplitK:
         gB = cute.make_tensor(gB.iterator.align(16), gB.layout)
 
         smem = cutlass.utils.SmemAllocator()
-        storage_ptr = smem.allocate(
-            shared_storage.size_in_bytes(), byte_alignment=16
-        )  # type: ignore[attr-defined]
+        storage_ptr = smem.allocate(shared_storage.size_in_bytes(), byte_alignment=16)  # type: ignore[attr-defined]
         storage = shared_storage(storage_ptr)  # type: ignore[call-arg]
         sA = storage.a.get_tensor(sA_layout)
         sB = storage.b.get_tensor(sB_layout)

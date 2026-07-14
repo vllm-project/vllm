@@ -165,9 +165,7 @@ class LLBf16Gemm:
             N=N,
             divisibility=stride_divisibility,
         )
-        gemm = LLBf16Dotprod(
-            k=compile_key.K, bs=compile_key.bs, use_pdl=_use_pdl()
-        )
+        gemm = LLBf16Dotprod(k=compile_key.K, bs=compile_key.bs, use_pdl=_use_pdl())
         compiled = cute.compile(
             gemm,
             hidden_states,
