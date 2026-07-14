@@ -11,6 +11,8 @@ These tests verify:
 4. Error paths — unregistered specs, missing config, duplicate registration.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -74,7 +76,7 @@ def _make_vllm_config(
         enable_prefix_caching=True,
     )
 
-    cfg = extra_config or {}
+    cfg = dict(extra_config or {})
     if cpu_bytes_to_use is not None:
         cfg["cpu_bytes_to_use"] = cpu_bytes_to_use
     cfg["spec_name"] = spec_name
@@ -119,6 +121,31 @@ def _make_kv_cache_config():
                 ),
             )
         ],
+    )
+
+
+def _make_lightweight_offload_config(pcp_size: int = 1, dcp_size: int = 1):
+    return SimpleNamespace(
+        cache_config=SimpleNamespace(
+            block_size=16,
+            enable_prefix_caching=True,
+            hash_block_size=None,
+        ),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=pcp_size,
+            decode_context_parallel_size=dcp_size,
+            world_size=pcp_size,
+        ),
+        use_v2_model_runner=True,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="OffloadingConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "cpu_bytes_to_use": 65536,
+                "spec_name": "CPUOffloadingSpec",
+            },
+        ),
+        kv_events_config=None,
     )
 
 
@@ -184,6 +211,20 @@ def test_create_cpu_offloading_spec_end_to_end():
     spec = OffloadingSpecFactory.create_spec(config, kv_cache_config)
     assert isinstance(spec, CPUOffloadingSpec)
     assert spec.num_blocks > 0
+
+
+def test_create_cpu_offloading_spec_scales_blocks_by_dcp_only():
+    kv_cache_config = _make_kv_cache_config()
+
+    pcp_config = _make_lightweight_offload_config(pcp_size=2)
+    pcp_spec = OffloadingSpecFactory.create_spec(pcp_config, kv_cache_config)
+    assert pcp_spec.gpu_block_size == (16,)
+    assert pcp_spec.hash_block_size == 16
+
+    pcp_dcp_config = _make_lightweight_offload_config(pcp_size=2, dcp_size=2)
+    pcp_dcp_spec = OffloadingSpecFactory.create_spec(pcp_dcp_config, kv_cache_config)
+    assert pcp_dcp_spec.gpu_block_size == (32,)
+    assert pcp_dcp_spec.hash_block_size == 32
 
 
 # ---------------------------------------------------------------------------

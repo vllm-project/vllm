@@ -954,6 +954,8 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
 class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     """MLA attention implementation with forward_mqa and forward_mha methods."""
 
+    supports_pcp: bool = True
+
     @abstractmethod
     def __init__(
         self,

@@ -644,10 +644,14 @@ def resolve_kv_cache_block_sizes(
     """
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
-    pcp = vllm_config.parallel_config.prefill_context_parallel_size
+    pcp = (
+        1
+        if vllm_config.use_v2_model_runner
+        else vllm_config.parallel_config.prefill_context_parallel_size
+    )
     groups = kv_cache_config.kv_cache_groups
 
-    if len(groups) <= 1:  # Single group: block_size * dcp * pcp
+    if len(groups) <= 1:
         bs = cache_config.block_size * dcp * pcp
         return bs, bs
 

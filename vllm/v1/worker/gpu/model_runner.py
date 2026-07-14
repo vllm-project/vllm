@@ -96,6 +96,10 @@ from vllm.v1.worker.gpu.lora_utils import (
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
+from vllm.v1.worker.gpu.pcp_manager import (
+    PCPManager,
+    maybe_build_pcp_manager,
+)
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -204,6 +208,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
+
+        self.pcp_manager: PCPManager | None = None
 
         # Pooling models.
         self.is_pooling_model = self.model_config.runner_type == "pooling"
@@ -421,9 +427,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
             block_sizes.append(spec.block_size)
-            # When using DCP, each request's KV cache is sharded among different ranks.
-            # As a result, one block on the current rank covers `block_size * cp_size`
-            # tokens in the full, global (unsharded) sequence.
+            # When using DCP, each request's KV cache is sharded among ranks.
+            # As a result, one block on the current rank covers
+            # `block_size * dcp_size` tokens in the full sequence.
             max_num_blocks = cdiv(
                 block_table_max_model_len, spec.block_size * self.dcp_size
             )
@@ -452,6 +458,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
+        )
+        self.pcp_manager = maybe_build_pcp_manager(
+            self.vllm_config,
+            self.device,
+            self.supports_mm_inputs,
+            self.req_states,
+            self.block_tables,
         )
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config, self.kv_cache_config
@@ -920,7 +933,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Get query_start_loc.
         # num_reqs_padded is None for PIECEWISE graphs (no request padding needed)
         num_reqs_padded = batch_desc.num_reqs or num_reqs
-        query_start_loc_np = np.empty(self.max_num_reqs + 1, dtype=np.int32)
+        query_start_loc_np = np.empty(
+            self.input_buffers.max_num_reqs + 1, dtype=np.int32
+        )
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1 : num_reqs + 1])
         # Pad for full CUDA graph mode.
@@ -1039,7 +1054,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def prepare_attn(
         self, input_batch: InputBatch
-    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor, torch.Tensor]:
+        if self.pcp_manager is not None:
+            return self.pcp_manager.prepare_attn(input_batch)
+
         # Block tables: num_kv_cache_groups x [num_reqs_padded, max_num_blocks].
         block_tables = self.block_tables.gather_block_tables(
             input_batch.idx_mapping,
@@ -1053,16 +1071,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.positions,
             num_tokens_padded=input_batch.num_tokens_after_padding,
         )
-        return block_tables, slot_mappings
+        return block_tables, slot_mappings, slot_mappings
 
     def prepare_dummy_attn(
         self, input_batch: InputBatch
-    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor, torch.Tensor]:
+        if self.pcp_manager is not None:
+            return self.pcp_manager.prepare_dummy_attn(input_batch)
+
         block_tables = self.block_tables.get_dummy_block_tables(input_batch.num_reqs)
         slot_mappings = self.block_tables.get_dummy_slot_mappings(
             input_batch.num_tokens
         )
-        return block_tables, slot_mappings
+        return block_tables, slot_mappings, slot_mappings
 
     def sample(
         self,
@@ -1191,7 +1212,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
             input_batch = self.prepare_inputs(scheduler_output, batch_desc)
-            block_tables, slot_mappings = self.prepare_attn(input_batch)
+            if self.pcp_manager is not None:
+                input_batch = self.pcp_manager.partition_batch(input_batch)
+            block_tables, slot_mappings, cache_slot_mappings = self.prepare_attn(
+                input_batch
+            )
             # Mamba "align" pre-copy: migrate recurrent state across block
             # boundaries before the forward. Runs only on real batches, and
             # before model_state.prepare_attn gathers num_accepted_tokens so the
@@ -1219,7 +1244,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.input_buffers,
             )
             if not skip_attn_for_dummy_run:
-                block_tables, slot_mappings = self.prepare_dummy_attn(input_batch)
+                block_tables, slot_mappings, cache_slot_mappings = (
+                    self.prepare_dummy_attn(input_batch)
+                )
             else:
                 assert batch_desc.cg_mode != CUDAGraphMode.FULL, (
                     "Attention metadata must be prepared for dummy runs when using "
@@ -1227,13 +1254,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 block_tables = None
                 slot_mappings = None
+                cache_slot_mappings = None
 
         attn_metadata = None
         slot_mappings_by_layer = None
         if not (dummy_run and skip_attn_for_dummy_run):
             assert slot_mappings is not None
+            assert cache_slot_mappings is not None
             slot_mappings_by_layer = build_slot_mappings_by_layer(
-                slot_mappings, self.kv_cache_config
+                cache_slot_mappings, self.kv_cache_config
             )
             assert block_tables is not None
             attn_metadata = self.model_state.prepare_attn(
@@ -1317,7 +1346,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 has_lora=self.lora_config is not None,
                 num_active_loras=batch_desc.num_active_loras,
             )
-
             with set_forward_context(
                 attn_metadata,
                 self.vllm_config,
@@ -1408,6 +1436,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
 
         # Last rank: sample tokens
+        assert hidden_states is not None
+        if self.pcp_manager is not None:
+            hidden_states, input_batch = self.pcp_manager.restore_for_sampling(
+                hidden_states
+            )
+
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
         )

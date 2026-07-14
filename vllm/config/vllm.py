@@ -2094,9 +2094,10 @@ class VllmConfig:
         model_config = self.model_config
         speculative_config = self.speculative_config
 
-        if self.parallel_config.prefill_context_parallel_size > 1:
+        if self.parallel_config.prefill_context_parallel_size > 1 and not (
+            model_config is not None and model_config.use_mla
+        ):
             unsupported.append("prefill context parallelism")
-
         if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
             unsupported.append("stock torch.compile")
 
