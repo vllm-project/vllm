@@ -1016,6 +1016,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "KimiK25ForConditionalGeneration": _HfExamplesInfo(
         "moonshotai/Kimi-K2.5",
         trust_remote_code=True,
+        max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
     ),
     "KimiVLForConditionalGeneration": _HfExamplesInfo(
         "moonshotai/Kimi-VL-A3B-Instruct",
