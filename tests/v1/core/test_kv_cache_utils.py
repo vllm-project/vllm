@@ -32,6 +32,7 @@ from vllm.v1.core.kv_cache_utils import (
     get_kv_cache_configs,
     get_max_concurrency_for_kv_cache_config,
     get_request_block_hasher,
+    group_and_unify_kv_cache_specs,
     hash_block_tokens,
     init_none_hash,
     is_kv_cache_spec_uniform,
@@ -1949,6 +1950,48 @@ def new_mla_spec(cache_dtype_str=None):
         dtype=torch.float32,
         cache_dtype_str=cache_dtype_str,
     )
+
+
+def new_swa_mla_spec(head_size=576, sliding_window=128):
+    return SlidingWindowMLASpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=head_size,
+        dtype=torch.float32,
+        sliding_window=sliding_window,
+    )
+
+
+def test_group_and_unify_kv_cache_specs_no_swa_mla_returns_none():
+    # Without any SlidingWindowMLASpec the function does not apply.
+    specs = {"mla.0": new_mla_spec(), "mla.1": new_mla_spec()}
+    assert group_and_unify_kv_cache_specs(specs) is None
+
+
+def test_group_and_unify_kv_cache_specs_uniform_page_size_returns_none():
+    # A non-DeepseekV4 model that mixes full MLA and sliding-window MLA layers
+    # with a uniform page size must not fall into the DeepseekV4 tuple-packing
+    # path; it should defer to the generic uniform-page-size grouping instead.
+    mla_spec = new_mla_spec()
+    swa_spec = new_swa_mla_spec()
+    assert mla_spec.page_size_bytes == swa_spec.page_size_bytes
+    specs = {"mla.0": mla_spec, "mla.1": new_mla_spec(), "swa.0": swa_spec}
+    assert group_and_unify_kv_cache_specs(specs) is None
+
+
+def test_group_and_unify_kv_cache_specs_mixed_page_size_groups():
+    # DeepseekV4-style: differing page sizes across MLA and sliding-window MLA
+    # layers do require tuple packing, so grouping must still be produced.
+    mla_spec = new_mla_spec()
+    swa_spec = new_swa_mla_spec(head_size=1024)
+    assert mla_spec.page_size_bytes != swa_spec.page_size_bytes
+    specs = {"mla.0": mla_spec, "mla.1": new_mla_spec(), "swa.0": swa_spec}
+    grouped = group_and_unify_kv_cache_specs(specs)
+    assert grouped is not None
+    # One MLA group plus one sliding-window MLA group.
+    assert len(grouped) == 2
+    layer_names = {name for g in grouped for name in g.kv_cache_specs}
+    assert layer_names == {"mla.0", "mla.1", "swa.0"}
 
 
 def test_get_kv_cache_spec_kind_prefers_specific_attention_subclasses():

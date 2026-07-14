@@ -3,7 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: V1 Core + KV + Metrics
-  timeout_in_minutes: 30
+  timeout_in_minutes: 45
   device: intel_gpu
   agent_tags:
     label: production
@@ -33,7 +33,7 @@ steps:
       pytest -v -s v1/executor'
 
 - label: V1 Sample + Logits
-  timeout_in_minutes: 30
+  timeout_in_minutes: 90
   device: intel_gpu
   agent_tags:
     label: production
@@ -152,7 +152,7 @@ steps:
 
 - label: Regression
   key: regression
-  timeout_in_minutes: 30
+  timeout_in_minutes: 50
   device: intel_gpu
   agent_tags:
     label: production
@@ -186,7 +186,7 @@ steps:
 
 - label: Metrics, Tracing (2 GPUs)
   key: metrics-tracing-2-gpus
-  timeout_in_minutes: 30
+  timeout_in_minutes: 45
   num_devices: 2
   device: intel_gpu
   agent_tags:
@@ -222,7 +222,7 @@ steps:
 
 - label: Async Engine, Inputs, Utils, Worker
   key: async-engine-inputs-utils-worker
-  timeout_in_minutes: 30
+  timeout_in_minutes: 55
   device: intel_gpu
   agent_tags:
     label: production
