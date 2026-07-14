@@ -57,7 +57,7 @@ class TestJoinDecodedTextReturnsStr:
 
     @pytest.fixture
     def bare_scanner(self):
-        return TokenIDScanner({}, tokenizer=None, drop_token_ids=set())
+        return TokenIDScanner({}, tokenizer=None)
 
     def test_mixed_items(self, bare_scanner):
         items = [
@@ -263,43 +263,6 @@ class TestHoldbackTextRecovery:
         text_chunks = [r for r in result if isinstance(r, TextChunk)]
         combined = "".join(t.text for t in text_chunks)
         assert "reasoning end." in combined
-
-
-class TestDropTokens:
-    def test_drop_token_with_holdback(self, tokenizer):
-        """Drop tokens stripped; hold-back text preserved."""
-        drop_id = 300
-        tokenizer.decode.side_effect = lambda ids: {
-            CHANNEL_END_ID: CHANNEL_END,
-            drop_id: "<eos>",
-        }.get(ids[0], "?")
-
-        scanner = TokenIDScanner(
-            token_id_to_terminal={CHANNEL_END_ID: "THINK_END"},
-            tokenizer=tokenizer,
-            drop_token_ids={drop_id},
-        )
-
-        result = scanner.scan(
-            delta_text="holdback<eos>",
-            delta_token_ids=[drop_id, CHANNEL_END_ID],
-        )
-
-        assert len(result) == 0
-
-        result2 = scanner.scan(
-            delta_text="<channel|>content",
-            delta_token_ids=[20],
-        )
-        pre_lexed = [r for r in result2 if isinstance(r, PreLexedTerminal)]
-        assert len(pre_lexed) == 1
-        assert pre_lexed[0].terminal == "THINK_END"
-        texts = [r.text for r in result2 if isinstance(r, TextChunk)]
-        combined = "".join(texts)
-        assert "holdback" in combined
-        assert "<eos>" not in combined
-
-        assert len(scanner.flush_pending()) == 0
 
 
 class TestEndToEndReasoningHoldback:
