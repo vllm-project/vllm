@@ -71,7 +71,11 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     )
     FLASHINFER_MLA_SPARSE = (
         "vllm.v1.attention.backends.mla.flashinfer_mla_sparse."
-        "FlashInferMLASparseBackend"
+        "FlashInferMLASparseTRTLLMBackend"
+    )
+    FLASHINFER_MLA_SPARSE_SM120 = (
+        "vllm.v1.attention.backends.mla.flashinfer_mla_sparse."
+        "FlashInferMLASparseSM120Backend"
     )
     TRITON_MLA = "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend"
     CUTLASS_MLA = "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend"
@@ -91,8 +95,20 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         "vllm.models.deepseek_v4.amd.rocm.DeepseekV4ROCMAiterMLASparseBackend"
     )
     FLASH_ATTN_MLA = "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend"
+    FLASH_ATTN_MLA_SPARSE = (
+        "vllm.v1.attention.backends.mla.flashattn_mla_sparse.FlashAttnMLASparseBackend"
+    )
+    MINIMAX_M3_SPARSE = (
+        "vllm.models.minimax_m3.common.sparse_attention.MiniMaxM3SparseBackend"
+    )
     NO_ATTENTION = "vllm.v1.attention.backends.no_attention.NoAttentionBackend"
     FLEX_ATTENTION = "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
+    # HPC Attention Backend:
+    # powered by operators from https://github.com/Tencent/hpc-ops.
+    # Only supported on NVIDIA Hopper GPUs (e.g. H20, H200),
+    # currently limited to the Hy3 model,
+    # and requires a block size of 64.
+    HPC_ATTN = "vllm.v1.attention.backends.hpc_attn.HpcAttentionBackend"
     ROCM_AITER_UNIFIED_ATTN = (
         "vllm.v1.attention.backends.rocm_aiter_unified_attn."
         "RocmAiterUnifiedAttentionBackend"

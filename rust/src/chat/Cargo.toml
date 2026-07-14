@@ -21,25 +21,28 @@ serde.workspace = true
 serde-json-fmt.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
+strum.workspace = true
 subenum.workspace = true
 thiserror.workspace = true
 thiserror-ext.workspace = true
+time.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 trait-set.workspace = true
 uuid.workspace = true
 vllm-engine-core-client.workspace = true
 vllm-llm.workspace = true
-vllm-reasoning-parser.workspace = true
+vllm-parser.workspace = true
 vllm-text.workspace = true
 vllm-tokenizer.workspace = true
-vllm-tool-parser.workspace = true
+xgrammar-structural-tag.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
 bytes.workspace = true
 clap.workspace = true
 expect-test.workspace = true
+ndarray.workspace = true
 paste.workspace = true
 rmp-serde.workspace = true
 serial_test.workspace = true
@@ -48,6 +51,7 @@ tokio.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 vllm-engine-core-client = { workspace = true, features = ["test-util"] }
+vllm-tokenizer = { workspace = true, features = ["test-utils"] }
 zeromq.workspace = true
 
 [lints]

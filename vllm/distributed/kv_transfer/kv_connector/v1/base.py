@@ -498,11 +498,16 @@ class KVConnectorBase_V1(ABC):
         asynchronously loaded into, and second when any additional blocks
         are allocated, after the load/transfer is complete.
 
+        Decide whether to load based on ``num_external_tokens``, not on
+        whether ``blocks`` is empty: ``blocks`` may be non-empty even when
+        ``num_external_tokens == 0`` (e.g. a non-chosen sub-connector of
+        MultiConnector still receives the request's real blocks).
+
         Args:
             request (Request): the request object.
             blocks (KVCacheBlocks): the blocks allocated for the request.
-            num_external_tokens (int): the number of tokens that will be
-                loaded from the external KV cache.
+            num_external_tokens (int): the number of tokens to load from the
+                external KV cache. 0 means nothing should be loaded.
         """
         pass
 
@@ -568,6 +573,18 @@ class KVConnectorBase_V1(ABC):
             New KV cache events since the last call.
         """
         return ()
+
+    def has_pending_push_work(self) -> bool:
+        """Return True if the connector has push-mode work that requires
+        the engine main loop to keep stepping (e.g. a P-side request whose
+        KV blocks are waiting to be WRITTEN to a D node).
+
+        Connectors that don't implement push-based KV transfer should
+        leave this as False.
+        """
+        # TODO: replace with a more general connector hook for keeping the
+        # scheduler alive (e.g. extend has_unfinished_requests).
+        return False
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:

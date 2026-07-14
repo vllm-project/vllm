@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config.model import LogprobsMode
-from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words
@@ -65,7 +65,7 @@ class Sampler(nn.Module):
     ):
         super().__init__()
         self.topk_topp_sampler = TopKTopPSampler(logprobs_mode, use_fp64_gumbel)
-        self.pin_memory = is_pin_memory_available()
+        self.pin_memory = PIN_MEMORY
         self.logprobs_mode = logprobs_mode
         self.use_fp64_gumbel = use_fp64_gumbel
 

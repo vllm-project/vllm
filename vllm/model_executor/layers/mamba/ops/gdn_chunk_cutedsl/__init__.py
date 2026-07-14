@@ -174,31 +174,31 @@ def chunk_gated_delta_rule_cutedsl(
         When ``core_attn_out`` is provided, ``output`` is an unsqueezed view of
         that buffer.
     """
-    q_3d = q.squeeze(0)
-    k_3d = k.squeeze(0)
-    v_3d = v.squeeze(0)
-    g_2d = g.squeeze(0)
-    beta_2d = beta.squeeze(0)
+    q = q.squeeze(0)
+    k = k.squeeze(0)
+    v = v.squeeze(0)
+    g = g.squeeze(0)
+    beta = beta.squeeze(0)
 
-    _, _, head_k_dim = k_3d.shape
-    _, num_v_heads, head_v_dim = v_3d.shape
+    _, _, K_dim = k.shape
+    _, num_v_heads, V_dim = v.shape
     chunk_size = 64
     upper_bound_chunks = chunk_indices.shape[0]
     pad_t = upper_bound_chunks * chunk_size
     total_chunks_ptr = chunk_offsets[-1:]
 
-    g_cu = torch.empty_like(g_2d, dtype=torch.float32)
-    u = q_3d.new_empty(pad_t, num_v_heads, head_v_dim)
-    w = q_3d.new_empty(pad_t, num_v_heads, head_k_dim)
+    g_cu = torch.empty_like(g, dtype=torch.float32)
+    u = q.new_empty(pad_t, num_v_heads, V_dim)
+    w = q.new_empty(pad_t, num_v_heads, K_dim)
 
     num_sms = torch.cuda.get_device_properties(q.device).multi_processor_count
     kkt_inv_uw_cutedsl(
-        k_3d,
-        v_3d,
+        k,
+        v,
         u,
         w,
-        g_2d,
-        beta_2d,
+        g,
+        beta,
         g_cu,
         cu_seqlens,
         chunk_indices,
@@ -206,16 +206,11 @@ def chunk_gated_delta_rule_cutedsl(
         num_sms=num_sms,
     )
 
-    h = k_3d.new_empty(
-        upper_bound_chunks,
-        num_v_heads,
-        head_v_dim,
-        head_k_dim,
-    )
-    v_new = q_3d.new_empty(pad_t, num_v_heads, head_v_dim)
+    h = k.new_empty(upper_bound_chunks, num_v_heads, V_dim, K_dim)
+    v_new = q.new_empty(pad_t, num_v_heads, V_dim)
     final_state = torch.empty_like(initial_state)
     h_cutedsl(
-        k_3d,
+        k,
         u,
         w,
         v_new,
@@ -227,12 +222,12 @@ def chunk_gated_delta_rule_cutedsl(
         chunk_offsets,
     )
 
-    output = core_attn_out if core_attn_out is not None else torch.empty_like(v_3d)
-    scale = head_k_dim**-0.5
+    output = core_attn_out if core_attn_out is not None else torch.empty_like(v)
+    scale = K_dim**-0.5
     o_cutedsl(
-        q_3d,
-        k_3d,
-        v_new.view(upper_bound_chunks, chunk_size, num_v_heads, head_v_dim),
+        q,
+        k,
+        v_new,
         h,
         g_cu,
         output,
