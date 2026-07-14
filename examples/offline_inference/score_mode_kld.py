@@ -67,9 +67,27 @@ DETERMINISTIC_COMPILATION_CONFIG: dict[str, Any] = {
 
 
 def apply_deterministic_env() -> None:
-    """Disable timing-based autotuners controlled by environment variables."""
+    """Disable timing-based autotuners controlled by environment variables.
+
+    TORCHINDUCTOR_DETERMINISTIC is PyTorch's dedicated run-to-run
+    determinism mode: it bans all on-device benchmarking that affects
+    numerics (notably reduction config selection — split/persistent
+    reductions — which changes summation order). Pointwise autotuning is
+    numerics-safe and stays enabled. The env var is inherited by vLLM
+    worker subprocesses, where compilation actually happens.
+    """
+    os.environ.setdefault("TORCHINDUCTOR_DETERMINISTIC", "1")
     os.environ.setdefault("VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE", "0")
     os.environ.setdefault("VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING", "0")
+    try:
+        # Cover the in-process path too (env var above only takes effect
+        # at torch._inductor.config import time in fresh processes).
+        import torch._inductor.config as inductor_config
+
+        if hasattr(inductor_config, "deterministic"):
+            inductor_config.deterministic = True
+    except ImportError:
+        pass
 
 
 def apply_deterministic_llm_kwargs(llm_kwargs: dict[str, Any]) -> None:
@@ -454,6 +472,14 @@ def main():
         "run-to-run. Deterministic mode is the default for scoring.",
     )
     parser.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        help="Run without torch.compile/CUDA graphs. Guaranteed "
+        "bit-deterministic baseline: one fixed kernel set, no compilation, "
+        "no kernel selection of any kind. Slower; use for base KLD or to "
+        "measure the compiled stack's numeric impact vs eager.",
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -484,10 +510,13 @@ def main():
         llm_kwargs["quantization"] = args.quantization
     if args.language_model_only:
         llm_kwargs["language_model_only"] = True
-    if not args.no_deterministic:
+    if args.enforce_eager:
+        llm_kwargs["enforce_eager"] = True
+        print("Eager mode: no torch.compile/CUDA graphs (bit-deterministic KLD)")
+    elif not args.no_deterministic:
         apply_deterministic_llm_kwargs(llm_kwargs)
         print(
-            "Deterministic mode: combo kernels, Inductor runtime autotune, "
+            "Deterministic mode: combo kernels, Inductor benchmarking, "
             "and FlashInfer autotune disabled (bit-reproducible KLD)"
         )
 

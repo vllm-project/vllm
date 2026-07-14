@@ -154,6 +154,10 @@ between otherwise identical runs:
 - FlashInfer warmup autotuning (`enable_flashinfer_autotune`, enabled by
   default at optimization level >= 1 on SM90+): kernel tactics picked by
   per-process benchmarking
+- Inductor on-device benchmarking for reduction config selection
+  (split/persistent reductions), which changes summation order; disabled
+  via `TORCHINDUCTOR_DETERMINISTIC=1` (PyTorch's dedicated run-to-run
+  determinism mode)
 
 The example scripts disable all of these by default by passing:
 
@@ -174,10 +178,15 @@ llm = LLM(
 )
 ```
 
-with `VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE=0` and
-`VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING=0`. Kernel selection then
-uses fixed heuristics instead of timing; `torch.compile` speed is otherwise
-retained. Pass `--no-deterministic` to opt out.
+with `TORCHINDUCTOR_DETERMINISTIC=1`, `VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE=0`
+and `VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING=0`. Kernel selection
+then uses fixed heuristics instead of timing; `torch.compile` speed is
+otherwise retained. Pass `--no-deterministic` to opt out.
+
+If bit-exact reproducibility is required and the compiled path still shows
+run-to-run variation on your stack, `enforce_eager=True` (or
+`TORCH_COMPILE_DISABLE=1`) is the guaranteed-deterministic baseline: one
+fixed set of kernels, no compilation, no selection of any kind.
 
 !!! note
     The first run after changing any compilation-affecting configuration

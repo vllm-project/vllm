@@ -50,9 +50,17 @@ DETERMINISTIC_COMPILATION_CONFIG: dict[str, Any] = {
 
 
 def apply_deterministic_env() -> None:
-    """Disable timing-based autotuners controlled by environment variables."""
+    """Disable timing-based autotuners (see score_mode_kld.py for details)."""
+    os.environ.setdefault("TORCHINDUCTOR_DETERMINISTIC", "1")
     os.environ.setdefault("VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE", "0")
     os.environ.setdefault("VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING", "0")
+    try:
+        import torch._inductor.config as inductor_config
+
+        if hasattr(inductor_config, "deterministic"):
+            inductor_config.deterministic = True
+    except ImportError:
+        pass
 
 
 def apply_deterministic_llm_kwargs(llm_kwargs: dict[str, Any]) -> None:
@@ -332,6 +340,12 @@ def main():
         "run-to-run. Deterministic mode is the default for scoring.",
     )
     parser.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        help="Run without torch.compile/CUDA graphs. Guaranteed "
+        "bit-deterministic baseline; slower.",
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -358,10 +372,13 @@ def main():
     if args.quantization:
         llm_kwargs["quantization"] = args.quantization
 
-    if not args.no_deterministic:
+    if args.enforce_eager:
+        llm_kwargs["enforce_eager"] = True
+        print("Eager mode: no torch.compile/CUDA graphs (bit-deterministic PPL)")
+    elif not args.no_deterministic:
         apply_deterministic_llm_kwargs(llm_kwargs)
         print(
-            "Deterministic mode: combo kernels, Inductor runtime autotune, "
+            "Deterministic mode: combo kernels, Inductor benchmarking, "
             "and FlashInfer autotune disabled (bit-reproducible PPL)"
         )
 
