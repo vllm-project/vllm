@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use bytemuck::allocation::pod_collect_to_vec;
 use enum_as_inner::EnumAsInner;
 use half::{bf16, f16};
@@ -10,6 +13,21 @@ use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/5a0a8fc1ea7542394ff315138bd5677b7b53bca1/vllm/v1/serial_utils.py#L41-L43>
 const CUSTOM_TYPE_RAW_VIEW: i8 = 3;
+
+#[derive(Serialize)]
+#[serde(rename = "_ExtStruct")]
+struct MsgpackExtRef<'a>((i8, ByteSlice<'a>));
+
+struct ByteSlice<'a>(&'a [u8]);
+
+impl Serialize for ByteSlice<'_> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(self.0)
+    }
+}
 
 #[easy_ext::ext(ShapeExt)]
 impl [usize] {
@@ -184,7 +202,7 @@ impl Serialize for WireArrayData {
         match self {
             Self::AuxIndex(index) => serializer.serialize_u64(*index as u64),
             Self::RawView(bytes) => {
-                Value::Ext(CUSTOM_TYPE_RAW_VIEW, bytes.clone()).serialize(serializer)
+                MsgpackExtRef((CUSTOM_TYPE_RAW_VIEW, ByteSlice(bytes))).serialize(serializer)
             }
         }
     }
@@ -193,6 +211,21 @@ impl Serialize for WireArrayData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_view_serializes_as_msgpack_ext() {
+        let bytes = vec![1, 2, 3, 4];
+        let encoded =
+            rmp_serde::to_vec_named(&WireArrayData::RawView(bytes.clone())).expect("encode");
+        let expected = rmp_serde::to_vec_named(&Value::Ext(CUSTOM_TYPE_RAW_VIEW, bytes.clone()))
+            .expect("encode expected");
+
+        assert_eq!(encoded, expected);
+        assert_eq!(
+            rmpv::decode::read_value(&mut std::io::Cursor::new(encoded)).expect("decode"),
+            Value::Ext(CUSTOM_TYPE_RAW_VIEW, bytes)
+        );
+    }
 
     #[test]
     fn constructors_build_raw_view_tensors() {

@@ -101,46 +101,47 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
 
 def backend_to_kernel_cls(
     backend: UnquantizedMoeBackend,
-) -> type[mk.FusedMoEExperts]:
+) -> list[type[mk.FusedMoEExperts]]:
     if backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
         from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
-            TrtLlmBf16Experts,
+            TrtLlmBf16ExpertsModular,
+            TrtLlmBf16ExpertsMonolithic,
         )
 
-        return TrtLlmBf16Experts
+        return [TrtLlmBf16ExpertsMonolithic, TrtLlmBf16ExpertsModular]
 
     elif backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
         from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (  # noqa: E501
             FlashInferExperts,
         )
 
-        return FlashInferExperts
+        return [FlashInferExperts]
 
     elif backend == UnquantizedMoeBackend.AITER:
         from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             AiterExperts,
         )
 
-        return AiterExperts
+        return [AiterExperts]
 
     elif backend == UnquantizedMoeBackend.TRITON:
         from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
             TritonExperts,
         )
 
-        return TritonExperts
+        return [TritonExperts]
 
     elif backend == UnquantizedMoeBackend.BATCHED_TRITON:
         from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
             BatchedTritonExperts,
         )
 
-        return BatchedTritonExperts
+        return [BatchedTritonExperts]
 
     elif backend == UnquantizedMoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExperts
 
-        return XPUExperts
+        return [XPUExperts]
 
     else:
         raise ValueError(f"Unknown unquantized MoE backend: {backend.value}")
@@ -183,7 +184,7 @@ def select_unquantized_moe_backend(
     if moe_config.is_lora_enabled:
         return UnquantizedMoeBackend.TRITON, backend_to_kernel_cls(
             UnquantizedMoeBackend.TRITON
-        )
+        )[0]
 
     # NOTE: the kernels are selected in the following order.
     AVAILABLE_BACKENDS = _get_priority_backends(moe_config)
@@ -222,17 +223,20 @@ def select_unquantized_moe_backend(
         config: FusedMoEConfig,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
-        k_cls = backend_to_kernel_cls(backend)
-        supported, reason = k_cls.is_supported_config(
-            k_cls, config, None, None, activation_format
-        )
-        if supported:
-            logger.info_once(_make_log_backend(backend))
-            return backend, k_cls
+        reason = None
+        for k_cls in backend_to_kernel_cls(backend):
+            supported, reason = k_cls.is_supported_config(
+                k_cls, config, None, None, activation_format
+            )
+            if supported:
+                logger.info_once(_make_log_backend(backend))
+                return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
 
     runner_backend = moe_config.moe_backend
-    if runner_backend != "auto":
+    # 'humming' is quantization-only; an unquantized layer (e.g. excluded via
+    # modules_to_not_convert) falls through to auto instead of erroring.
+    if runner_backend not in ["auto", "humming"]:
         requested_backend = map_unquantized_backend(runner_backend)
         if (
             activation_format == mk.FusedMoEActivationFormat.BatchedExperts
@@ -252,15 +256,15 @@ def select_unquantized_moe_backend(
             return _return_or_raise(backend, moe_config, activation_format)
 
     for backend in AVAILABLE_BACKENDS:
-        k_cls = backend_to_kernel_cls(backend)
-        supported, reason = k_cls.is_supported_config(
-            k_cls, moe_config, None, None, activation_format
-        )
-        if supported:
-            logger.info_once(_make_log_backend(backend))
-            return backend, k_cls
+        for k_cls in backend_to_kernel_cls(backend):
+            supported, reason = k_cls.is_supported_config(
+                k_cls, moe_config, None, None, activation_format
+            )
+            if supported:
+                logger.info_once(_make_log_backend(backend))
+                return backend, k_cls
 
-        logger.debug_once(_make_log_unsupported(backend, reason))
+            logger.debug_once(_make_log_unsupported(backend, reason))
 
     raise NotImplementedError(
         "No Unquantized MoE backend supports the deployment configuration."
@@ -301,6 +305,13 @@ def convert_to_unquantized_kernel_format(
             is_gated_act_gemm=is_act_and_mul,
         )
 
+    if (
+        unquantized_backend == UnquantizedMoeBackend.TRITON
+        and current_platform.is_rocm()
+        and envs.VLLM_ROCM_MOE_PADDING
+    ):
+        # Skip .contiguous(): it would undo the ROCm MoE weight padding.
+        return w13_weight, w2_weight
     return w13_weight.contiguous(), w2_weight.contiguous()
 
 
@@ -323,6 +334,7 @@ def make_unquantized_moe_kernel(
     assert prepare_finalize is not None
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
+    logger.info_once("Using %s MoE backend", experts_cls.__name__)
 
     # Create Experts
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
@@ -374,7 +386,7 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
 
     def backend_to_kernel_cls(
         self, backend: UnquantizedMoeBackend
-    ) -> type[mk.FusedMoEExperts]:
+    ) -> list[type[mk.FusedMoEExperts]]:
         return backend_to_kernel_cls(backend)
 
     def map_backend(self, runner_backend: MoEBackend) -> UnquantizedMoeBackend:

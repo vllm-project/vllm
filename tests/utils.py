@@ -604,6 +604,13 @@ class RemoteVLLMServer:
                         mem_info = nvmlDeviceGetMemoryInfo(handle)
                         total_used += mem_info.used
                     return total_used
+            elif current_platform.is_xpu():
+                total_used = 0
+                device_count = current_platform.device_count()
+                for i in range(device_count):
+                    free, total = torch.xpu.mem_get_info(i)
+                    total_used += total - free
+                return total_used
         except Exception as e:
             print(f"[RemoteOpenAIServer] Could not query GPU memory: {e}")
             return None
@@ -1450,6 +1457,46 @@ def multi_process_parallel(
         ray.get(refs)
     finally:
         ray.shutdown()
+
+
+def assert_rocm_custom_allreduce_backend_state(
+    use_aiter_custom_ar: bool,
+    quick_reduce_quantization: str,
+) -> None:
+    from vllm.distributed.parallel_state import get_tp_group
+
+    device_communicator = get_tp_group().device_communicator
+    aiter_ar_comm = device_communicator.aiter_ar_comm
+    if use_aiter_custom_ar:
+        assert aiter_ar_comm is not None, "AITER CustomAllreduce was not initialized."
+        assert not aiter_ar_comm.disabled, "AITER CustomAllreduce is disabled."
+        assert device_communicator.ca_comm is None, (
+            "vLLM CustomAllreduce should not be initialized when AITER CA is used."
+        )
+    else:
+        assert aiter_ar_comm is None, (
+            "AITER CustomAllreduce should not be initialized when disabled."
+        )
+        assert device_communicator.ca_comm is not None, (
+            "vLLM CustomAllreduce should be initialized when AITER CA is disabled."
+        )
+
+    qr_comm = device_communicator.qr_comm
+    assert qr_comm is not None, "QuickReduce communicator was not initialized."
+    if quick_reduce_quantization == "NONE":
+        assert qr_comm.disabled, "QuickReduce should be disabled."
+    else:
+        assert not qr_comm.disabled, "QuickReduce should be enabled."
+
+
+def assert_rocm_custom_allreduce_backend_state_on_worker(
+    _worker,
+    use_aiter_custom_ar: bool,
+    quick_reduce_quantization: str,
+) -> None:
+    assert_rocm_custom_allreduce_backend_state(
+        use_aiter_custom_ar, quick_reduce_quantization
+    )
 
 
 @contextmanager

@@ -166,6 +166,32 @@ def get_per_layer_parameters(
     return per_layer_params
 
 
+def get_num_attention_heads_from_layers(
+    vllm_config: VllmConfig, layer_names: list[str]
+) -> int | None:
+    """Per-TP-rank ``num_heads`` shared by the named Attention layers.
+
+    Use in metadata builders whose plan-time allocations depend on the
+    head count: the model-wide ``get_num_attention_heads()`` is wrong
+    for models with non-uniform per-layer head counts. All layers in
+    one attention group must agree on ``num_heads``; this is asserted.
+    Returns ``None`` when no matching Attention layer is found.
+    """
+    attn_layers = get_layers_from_vllm_config(
+        vllm_config,
+        AttentionLayerBase,  # type: ignore[type-abstract]
+        layer_names,
+    )
+    if not attn_layers:
+        return None
+    heads = {layer.impl.num_heads for layer in attn_layers.values()}
+    assert len(heads) == 1, (
+        f"All layers in one attention group must share num_heads; "
+        f"got {heads} for {layer_names}."
+    )
+    return heads.pop()
+
+
 def infer_global_hyperparameters(
     per_layer_params: dict[str, PerLayerParameters],
 ) -> PerLayerParameters:
@@ -866,20 +892,20 @@ def get_dcp_local_seq_lens(
     use this function to calculate split decode seq_lens of each dcp rank.
     Only consider dcp now, we can extend the case of cp based on this.
     """
-    num_requests = seq_lens.size(0)
+    seq_lens_i32 = seq_lens.to(torch.int32)
     if dcp_rank is None:
-        rank_offsets = (
-            torch.arange(dcp_size, dtype=torch.int32, device=seq_lens.device)
-            .unsqueeze(0)
-            .repeat(num_requests, 1)
+        rank_offsets = torch.arange(
+            dcp_size,
+            dtype=torch.int32,
+            device=seq_lens.device,
+        ).view(
+            *((1,) * seq_lens_i32.dim()),
+            dcp_size,
         )
+        seq_lens_tiled = seq_lens_i32.unsqueeze(-1)
     else:
-        rank_offsets = torch.tensor(
-            [[dcp_rank]], dtype=torch.int32, device=seq_lens.device
-        )
-    seq_lens_tiled = (
-        seq_lens.to(torch.int32).unsqueeze(-1).repeat(1, rank_offsets.shape[1])
-    )
+        rank_offsets = torch.tensor(dcp_rank, dtype=torch.int32, device=seq_lens.device)
+        seq_lens_tiled = seq_lens_i32
     base = (
         seq_lens_tiled
         // cp_kv_cache_interleave_size
@@ -893,7 +919,7 @@ def get_dcp_local_seq_lens(
         cp_kv_cache_interleave_size,
     )
     dcp_local_seq_lens = base + remainder
-    return dcp_local_seq_lens.squeeze(1)
+    return dcp_local_seq_lens
 
 
 def mamba_get_block_table_tensor(
