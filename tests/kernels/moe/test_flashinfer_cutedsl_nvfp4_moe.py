@@ -25,8 +25,8 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe import (
-    FlashInferCuteDSLExperts,
+from vllm.model_executor.layers.fused_moe.experts import (
+    flashinfer_cutedsl_moe,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     NvFp4MoeBackend,
@@ -51,6 +51,7 @@ if pytest and (
 _SWIGLU_ALPHA = 1.702
 _SWIGLU_BETA = 1.0
 _SWIGLU_LIMIT = 7.0
+_SWIGLU_KWARGS = ("swiglu_alpha", "swiglu_beta", "swiglu_limit")
 
 
 def _oai_swiglu_uninterleave(x: torch.Tensor) -> torch.Tensor:
@@ -156,6 +157,86 @@ def _dequantize_nvfp4_inputs_and_weights(
 
 
 @pytest.mark.parametrize(
+    ("gemm1_alpha", "gemm1_beta", "gemm1_clamp_limit", "expected_kwargs"),
+    [
+        (None, None, None, {}),
+        (1.5, None, 0.0, {"swiglu_alpha": 1.5, "swiglu_limit": 0.0}),
+    ],
+)
+def test_flashinfer_cutedsl_nvfp4_moe_swiglu_kwargs(
+    monkeypatch,
+    gemm1_alpha: float | None,
+    gemm1_beta: float | None,
+    gemm1_clamp_limit: float | None,
+    expected_kwargs: dict[str, float],
+):
+    scale = torch.ones(1)
+    quant_config = SimpleNamespace(
+        quant_dtype="nvfp4",
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
+        gemm1_clamp_limit=gemm1_clamp_limit,
+        w1_scale=scale,
+        w2_scale=scale,
+        g1_alphas=scale,
+        g2_alphas=scale,
+        a2_gscale=scale,
+    )
+    moe_config = SimpleNamespace(
+        in_dtype=torch.bfloat16,
+        hidden_dim=1,
+        intermediate_size_per_partition=1,
+        experts_per_token=1,
+        num_local_experts=1,
+        num_experts=1,
+        moe_parallel_config=SimpleNamespace(ep_rank=0),
+    )
+    experts = flashinfer_cutedsl_moe.FlashInferCuteDSLExperts(
+        moe_config=moe_config,
+        quant_config=quant_config,
+    )
+
+    kernel_kwargs = {}
+
+    def fake_flashinfer_kernel(**kwargs):
+        kernel_kwargs.update(kwargs)
+
+    monkeypatch.setattr(
+        flashinfer_cutedsl_moe,
+        "has_flashinfer_cutedsl_moe_nvfp4_activation_type",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        flashinfer_cutedsl_moe,
+        "flashinfer_cute_dsl_fused_moe_nvfp4",
+        fake_flashinfer_kernel,
+    )
+
+    experts.apply(
+        output=torch.empty(1, 1),
+        hidden_states=torch.empty(1, 1),
+        w1=torch.empty(1),
+        w2=torch.empty(1),
+        topk_weights=torch.ones(1, 1),
+        topk_ids=torch.zeros(1, 1, dtype=torch.int64),
+        activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        global_num_experts=1,
+        expert_map=None,
+        a1q_scale=torch.ones(1, 1),
+        a2_scale=None,
+        workspace13=None,
+        workspace2=None,
+        expert_tokens_meta=None,
+        apply_router_weight_on_input=False,
+    )
+
+    actual_kwargs = {
+        name: kernel_kwargs[name] for name in _SWIGLU_KWARGS if name in kernel_kwargs
+    }
+    assert actual_kwargs == expected_kwargs
+
+
+@pytest.mark.parametrize(
     "activation",
     [MoEActivation.SWIGLUOAI_UNINTERLEAVE, MoEActivation.RELU2_NO_MUL],
 )
@@ -243,7 +324,7 @@ def test_flashinfer_cutedsl_nvfp4_moe_oai_and_relu2(
             swiglu_limit=_SWIGLU_LIMIT if activation.is_gated else None,
         )
 
-        experts = FlashInferCuteDSLExperts(
+        experts = flashinfer_cutedsl_moe.FlashInferCuteDSLExperts(
             moe_config=moe_config,
             quant_config=quant_config,
         )

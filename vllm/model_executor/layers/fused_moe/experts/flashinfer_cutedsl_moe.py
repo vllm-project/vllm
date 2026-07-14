@@ -60,21 +60,9 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         self.global_num_experts = moe_config.num_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
         self.local_expert_offset = self.ep_rank * self.local_num_experts
-        self.gemm1_alpha = (
-            float(quant_config.gemm1_alpha)
-            if quant_config.gemm1_alpha is not None
-            else 1.702
-        )
-        self.gemm1_beta = (
-            float(quant_config.gemm1_beta)
-            if quant_config.gemm1_beta is not None
-            else 1.0
-        )
-        self.gemm1_clamp_limit = (
-            float(quant_config.gemm1_clamp_limit)
-            if quant_config.gemm1_clamp_limit is not None
-            else 7.0
-        )
+        self.gemm1_alpha = quant_config.gemm1_alpha
+        self.gemm1_beta = quant_config.gemm1_beta
+        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
@@ -185,14 +173,9 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
                 "FlashInfer CuteDSL NvFP4 MoE does not support activation_type kwargs."
             )
 
-        swiglu_params: tuple[float, float, float] | None = None
+        swiglu_params: tuple[float | None, float | None, float | None] | None = None
         if activation == MoEActivation.SILU:
-            if self.quant_config.gemm1_clamp_limit is not None:
-                swiglu_params = (
-                    1.0,
-                    0.0,
-                    float(self.quant_config.gemm1_clamp_limit),
-                )
+            swiglu_params = (None, None, self.gemm1_clamp_limit)
         elif activation in (
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
@@ -205,20 +188,19 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         elif activation != MoEActivation.RELU2_NO_MUL:
             raise ValueError(f"Unsupported FlashInfer CuteDSL activation: {activation}")
 
-        if swiglu_params is not None:
+        if swiglu_params is not None and any(
+            param is not None for param in swiglu_params
+        ):
             if not has_activation_type:
                 raise RuntimeError(
                     "FlashInfer CuteDSL NvFP4 MoE does not support activation_type "
                     "and SwiGLU parameter kwargs."
                 )
-            swiglu_alpha, swiglu_beta, swiglu_limit = swiglu_params
-            activation_kwargs.update(
-                {
-                    "swiglu_alpha": swiglu_alpha,
-                    "swiglu_beta": swiglu_beta,
-                    "swiglu_limit": swiglu_limit,
-                }
-            )
+            for name, param in zip(
+                ("swiglu_alpha", "swiglu_beta", "swiglu_limit"), swiglu_params
+            ):
+                if param is not None:
+                    activation_kwargs[name] = param
 
         flashinfer_cute_dsl_fused_moe_nvfp4(
             x=hidden_states,
