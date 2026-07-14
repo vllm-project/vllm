@@ -13,10 +13,23 @@ from tests.kernels.quant_utils import (
 )
 from tests.kernels.utils import fp8_ulp_distance
 from vllm.config import VllmConfig
-from vllm.model_executor.kernels.linear.scaled_mm.cutlass import cutlass_scaled_mm
+from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+    CutlassFp8BlockScaledMMKernel,
+    cutlass_scaled_mm,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
+    FP8ScaledMMLinearLayerConfig,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.triton import (
+    TritonFp8BlockScaledMMKernel,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
     w8a8_triton_block_scaled_mm,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    create_fp8_quant_key,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
@@ -156,13 +169,20 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="CUTLASS only supported on CUDA platform."
 )
+@pytest.mark.parametrize("M", [1, 32, 256])
+@pytest.mark.parametrize(
+    ("N", "K"),
+    [
+        # weight.shape[0] % 128 != 0, like DSV3 kv_a_proj_with_mqa; on SM12x
+        # the kernel requires N padded to the 128 scale block (#47990).
+        (576, 7168),
+        (2112, 1536),
+        # aligned control
+        (512, 7168),
+    ],
+)
 @torch.inference_mode()
-def test_w8a8_block_fp8_cutlass_matmul():
-    # Test simple case where weight.shape % 128 != 0,
-    # like in DSV3 kv_a_proj_with_mqa
-    M = 32
-    N = 576
-    K = 7168
+def test_w8a8_block_fp8_cutlass_matmul(M, N, K):
     block_size = [128, 128]
     out_dtype = torch.bfloat16
     seed = 0
@@ -198,6 +218,92 @@ def test_w8a8_block_fp8_cutlass_matmul():
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
     ) / torch.mean(torch.abs(ref_out.to(torch.float32)))
     assert rel_diff < 0.001
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="CUTLASS only supported on CUDA platform."
+)
+@torch.inference_mode()
+def test_cutlass_fp8_block_kernel_unaligned_n_layer(default_vllm_config):
+    # Layer-level path for weight.shape[0] % 128 != 0 (#47990): on SM12x the
+    # kernel zero-pads N to the 128 scale block at load time and slices the
+    # padding off at apply time; on other architectures the weight is
+    # untouched. Uses a 3D input to also cover the logical output_shape.
+    N, K = 576, 7168
+    batch, seq = 2, 16
+    torch.manual_seed(0)
+
+    is_supported, reason = CutlassFp8BlockScaledMMKernel.is_supported()
+    if not is_supported:
+        pytest.skip(reason)
+
+    fp8_info = torch.finfo(torch.float8_e4m3fn)
+    weight_fp32 = (torch.rand(N, K, dtype=torch.float32) - 0.5) * 2 * fp8_info.max
+    weight = weight_fp32.clamp(fp8_info.min, fp8_info.max).to(torch.float8_e4m3fn)
+    weight_scale = (
+        torch.rand((N + 127) // 128, (K + 127) // 128, dtype=torch.float32) * 1e-2
+    )
+
+    config = FP8ScaledMMLinearLayerConfig(
+        weight_quant_key=create_fp8_quant_key(
+            static=True, group_shape=GroupShape(128, 128)
+        ),
+        activation_quant_key=create_fp8_quant_key(
+            static=False, group_shape=GroupShape(1, 128)
+        ),
+        weight_shape=(N, K),
+        input_dtype=torch.bfloat16,
+        out_dtype=torch.bfloat16,
+    )
+    kernel = CutlassFp8BlockScaledMMKernel(config)
+    triton_kernel = TritonFp8BlockScaledMMKernel(config)
+
+    def make_layer():
+        layer = torch.nn.Module()
+        layer.weight = torch.nn.Parameter(weight.clone(), requires_grad=False)
+        layer.weight_scale_inv = torch.nn.Parameter(
+            weight_scale.clone(), requires_grad=False
+        )
+        layer.input_scale = None
+        return layer
+
+    layer = make_layer()
+    kernel.process_weights_after_loading(layer)
+    expected_rows = 640 if current_platform.is_device_capability_family(120) else N
+    assert layer.weight.shape[0] == expected_rows
+
+    ref_layer = make_layer()
+    triton_kernel.process_weights_after_loading(ref_layer)
+    assert ref_layer.weight.shape[0] == N
+
+    x = torch.randn(batch, seq, K, dtype=torch.bfloat16)
+    bias = torch.randn(N, dtype=torch.bfloat16)
+    out = kernel.apply_weights(layer, x, bias)
+    assert out.shape == (batch, seq, N)
+
+    # Both kernels share the base apply_weights and QuantFP8 activation
+    # quantization, so the comparison isolates the GEMM (and the pad/slice).
+    ref_out = triton_kernel.apply_weights(ref_layer, x, bias)
+    rel_diff = torch.mean(
+        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
+    ) / torch.mean(torch.abs(ref_out.to(torch.float32)))
+    assert rel_diff < 0.001
+
+    # Loose sanity check against the native reference (quantized with an
+    # independent implementation, hence the wide tolerance).
+    x_fp8, x_scale = per_token_group_quant_fp8(
+        x.view(-1, K).float(), 128, column_major_scales=False
+    )
+    native_ref = (
+        native_w8a8_block_matmul(
+            x_fp8, weight, x_scale, weight_scale, [128, 128], torch.bfloat16
+        )
+        + bias
+    )
+    native_rel_diff = torch.mean(
+        torch.abs(out.view(-1, N).to(torch.float32) - native_ref.to(torch.float32))
+    ) / torch.mean(torch.abs(native_ref.to(torch.float32)))
+    assert native_rel_diff < 0.05
 
 
 @pytest.mark.skipif(
