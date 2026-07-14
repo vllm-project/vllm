@@ -713,6 +713,7 @@ class ParserEngine(Parser):
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
 
+        carried_deferred = self._deferred_content
         seen_tool_event = False
         suppress = self._suppress_tool_calls
         for event in events:
@@ -749,7 +750,14 @@ class ParserEngine(Parser):
             tool_call_deltas = self._coalesce_tool_call_deltas(tool_call_deltas)
 
         if self._deferred_content and (not seen_tool_event or not tool_call_deltas):
-            content_parts.insert(0, self._deferred_content)
+            # Deferred content carried in from a previous delta precedes this
+            # delta's content; content deferred during this call (text after
+            # an unpromoted tool event) follows it.
+            deferred_now = self._deferred_content[len(carried_deferred) :]
+            if carried_deferred:
+                content_parts.insert(0, carried_deferred)
+            if deferred_now:
+                content_parts.append(deferred_now)
             self._deferred_content = ""
 
         content_str = "".join(content_parts)
