@@ -8,7 +8,7 @@ import torch
 
 from vllm.exceptions import VLLMValidationError
 from vllm.utils.async_utils import make_async
-from vllm.utils.sparse_utils import sparse_invariants_checked
+from vllm.utils.sparse_utils import check_sparse_tensor_invariants_threadsafe
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -24,7 +24,7 @@ def safe_load_prompt_embeds(
             parameter="prompt_embeds",
         )
 
-    with sparse_invariants_checked():
+    with check_sparse_tensor_invariants_threadsafe():
         tensor = torch.load(
             BytesIO(pybase64.b64decode(embed, validate=True)),
             weights_only=True,
