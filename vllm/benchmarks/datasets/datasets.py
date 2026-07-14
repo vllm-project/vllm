@@ -4207,6 +4207,19 @@ class ASRDataset(HuggingFaceDataset):
                     y, sr = sf.read(audio_buffer, dtype="float32")
                 duration_s = get_audio_duration(y=y, sr=sr)
                 mm_content = {"audio": (y, sr)}
+            elif audio.__class__.__name__ == "AudioDecoder":
+                # datasets>=4.0 decodes Audio columns lazily into a
+                # torchcodec-backed AudioDecoder instead of a dict/array.
+                samples = audio.get_all_samples()
+                y = samples.data
+                sr = int(samples.sample_rate)
+                if hasattr(y, "numpy"):
+                    y = y.numpy()
+                y = np.asarray(y, dtype=np.float32)
+                if y.ndim > 1:
+                    y = y.mean(axis=0)
+                duration_s = get_audio_duration(y=y, sr=sr)
+                mm_content = {"audio": (y, sr)}
             else:
                 raise ValueError(
                     "ASR samples must provide decoded audio arrays, "
