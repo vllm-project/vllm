@@ -42,6 +42,7 @@ anyhow.workspace = true
 bytes.workspace = true
 clap.workspace = true
 expect-test.workspace = true
+ndarray.workspace = true
 paste.workspace = true
 rmp-serde.workspace = true
 serial_test.workspace = true

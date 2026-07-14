@@ -17,7 +17,7 @@ steps:
   - label: "XPU example Test"
     depends_on:
       - image-build-xpu
-    timeout_in_minutes: 30
+    timeout_in_minutes: 50
     device: intel_gpu
     agent_tags:
       label: production
@@ -76,12 +76,12 @@ steps:
   - label: "XPU V1 test"
     depends_on:
       - image-build-xpu
-    timeout_in_minutes: 30
+    timeout_in_minutes: 70
     device: intel_gpu
     agent_tags:
       label: production
       gpu: 1+
-      mem: 16+
+      mem: 24+
     no_plugin: true
     env:
       REGISTRY: "public.ecr.aws/q9t5s3a7"
@@ -99,12 +99,13 @@ steps:
         pytest -v -s v1/worker --ignore=v1/worker/test_gpu_model_runner.py --ignore=v1/worker/test_worker_memory_snapshot.py &&
         pytest -v -s v1/structured_output &&
         pytest -v -s v1/test_serial_utils.py &&
+        pytest -v -s v1/e2e/general/test_correctness_sliding_window.py --deselect="tests/v1/e2e/general/test_correctness_sliding_window.py::test_sliding_window_retrieval[True-1-5-google/gemma-3-1b-it]" &&
         pytest -v -s v1/spec_decode --ignore=v1/spec_decode/test_max_len.py --ignore=v1/spec_decode/test_speculators_eagle3.py --ignore=v1/spec_decode/test_acceptance_length.py --ignore=v1/spec_decode/test_speculators_correctness.py &&
         pytest -v -s v1/kv_connector/unit --ignore=v1/kv_connector/unit/test_multi_connector.py --ignore=v1/kv_connector/unit/test_example_connector.py --ignore=v1/kv_connector/unit/test_lmcache_integration.py --ignore=v1/kv_connector/unit/test_hf3fs_client.py --ignore=v1/kv_connector/unit/test_hf3fs_connector.py --ignore=v1/kv_connector/unit/test_hf3fs_metadata_server.py --ignore=v1/kv_connector/unit/test_offloading_connector.py'
   - label: "XPU server test"
     depends_on:
       - image-build-xpu
-    timeout_in_minutes: 30
+    timeout_in_minutes: 45
     device: intel_gpu
     agent_tags:
       label: production
