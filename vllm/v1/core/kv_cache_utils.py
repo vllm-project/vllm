@@ -7,7 +7,7 @@ import hashlib
 import math
 import os
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
@@ -860,7 +860,8 @@ def check_enough_kv_cache_memory(
 
 
 def create_kv_cache_group_specs(
-    kv_cache_spec: dict[str, KVCacheSpec], grouped_layer_names: list[list[str]]
+    kv_cache_spec: Mapping[str, KVCacheSpec],
+    grouped_layer_names: list[list[str]],
 ) -> list[KVCacheGroupSpec]:
     """
     Create KVCacheGroupSpec object for each kv cache group layer.
@@ -928,14 +929,14 @@ def get_max_concurrency_for_kv_cache_config(
     a representative per-layer spec (scheduler config), so both capacity
     call sites agree.
     """
-    num_blocks_per_request = sum(
-        cdiv(
-            group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
-            group.kv_cache_spec.page_size_bytes,
-        )
-        for group in kv_cache_config.kv_cache_groups
+    max_memory_usage_per_request = _max_memory_usage_bytes_from_groups(
+        vllm_config, kv_cache_config.kv_cache_groups
     )
-    max_concurrency = kv_cache_config.num_blocks / num_blocks_per_request
+    memory_per_block = _pool_bytes_per_block(
+        vllm_config, kv_cache_config.kv_cache_groups
+    )
+    num_block_per_request = cdiv(max_memory_usage_per_request, memory_per_block)
+    max_concurrency = kv_cache_config.num_blocks / num_block_per_request
     return max_concurrency
 
 
@@ -947,6 +948,13 @@ def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
     if vllm_config.cache_config.num_gpu_blocks_override is not None:
         num_blocks = vllm_config.cache_config.num_gpu_blocks_override
     return num_blocks
+
+
+def _group_bytes_per_block(group: KVCacheGroupSpec) -> int:
+    """Return bytes per block across all physical layers in a mixed group."""
+    if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
+        return group.kv_cache_spec.page_size_bytes
+    return group.kv_cache_spec.page_size_bytes * len(group.layer_names)
 
 
 def _pool_bytes_per_block(
@@ -970,9 +978,9 @@ def _pool_bytes_per_block(
         isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs) for g in kv_cache_groups
     ):
         # Mixed groups: UniformTypeKVCacheSpecs + other types (e.g. MambaSpec).
-        # Sum per-group page sizes, matching the mixed allocator in
+        # Sum physical layer page sizes, matching the mixed allocator in
         # get_kv_cache_config_from_groups.
-        return sum(g.kv_cache_spec.page_size_bytes for g in kv_cache_groups)
+        return sum(_group_bytes_per_block(g) for g in kv_cache_groups)
     group_size = max(len(g.layer_names) for g in kv_cache_groups)
     page_size = get_uniform_page_size([g.kv_cache_spec for g in kv_cache_groups])
     return page_size * group_size
@@ -1390,7 +1398,7 @@ def get_kv_cache_config_from_groups(
         # some other types (e.g. MambaSpec for linear attention).
         # Each layer gets its own tensor allocation.
         total_page_size = sum(
-            group.kv_cache_spec.page_size_bytes for group in kv_cache_groups
+            _group_bytes_per_block(group) for group in kv_cache_groups
         )
         num_blocks = available_memory // total_page_size
         num_blocks = may_override_num_blocks(vllm_config, num_blocks)
@@ -1927,12 +1935,23 @@ def get_kv_cache_groups(
             )
             groups.append(KVCacheGroupSpec([name], aligned))
 
-    # Add mamba layers back as separate groups.  No page-size padding is
+    # Add mamba layers back as balanced groups. No page-size padding is
     # needed because MambaSpec groups manage their own block tables
-    # independently from attention groups.
+    # independently from attention groups. Group by position within each
+    # consecutive run of mamba layers, so (M, M, M, A) * 11 + M yields
+    # three groups containing 12, 11, and 11 layers respectively.
     if mamba_specs:
-        for name, mamba_spec in mamba_specs.items():
-            groups.append(KVCacheGroupSpec([name], mamba_spec))
+        mamba_grouped_names: list[list[str]] = []
+        run_pos = 0
+        for name in kv_cache_spec:
+            if name not in mamba_specs:
+                run_pos = 0
+                continue
+            if run_pos == len(mamba_grouped_names):
+                mamba_grouped_names.append([])
+            mamba_grouped_names[run_pos].append(name)
+            run_pos += 1
+        groups.extend(create_kv_cache_group_specs(mamba_specs, mamba_grouped_names))
 
     return groups
 
@@ -2053,7 +2072,9 @@ def _max_memory_usage_bytes_from_groups(
                     for spec in per_layer_specs.values()
                 )
             else:
-                total += group.kv_cache_spec.max_memory_usage_bytes(vllm_config)
+                total += group.kv_cache_spec.max_memory_usage_bytes(vllm_config) * len(
+                    group.layer_names
+                )
         return total
 
     # General case: group_size pools, each shared by one layer per group

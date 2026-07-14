@@ -2097,34 +2097,100 @@ def test_generate_scheduler_kv_cache_config():
     )
 
 
-def test_mixed_precision_kv_cache_with_uniform_type_specs():
-    fp8_spec = new_kv_cache_spec(dtype=torch.float8_e4m3fn)
-    bf16_spec = new_kv_cache_spec(dtype=torch.bfloat16)
-    worker_config = KVCacheConfig(
-        num_blocks=10,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["fp8_layer"],
-                UniformTypeKVCacheSpecs(
-                    block_size=16, kv_cache_specs={"fp8_layer": fp8_spec}
-                ),
-            ),
-            KVCacheGroupSpec(
-                ["bf16_layer"],
-                UniformTypeKVCacheSpecs(
-                    block_size=16, kv_cache_specs={"bf16_layer": bf16_spec}
-                ),
-            ),
-        ],
+def test_get_kv_cache_config_balanced_mamba_hybrid():
+    """Balance GLM-5-Next KDA runs without undercounting state memory."""
+    model_config = ModelConfig(max_model_len=8192)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    kv_cache_spec: dict[str, KVCacheSpec] = {}
+    mamba_layers = []
+    for i in range(45):
+        if i % 4 == 3:
+            kv_cache_spec[f"layers.{i}.attn"] = MLAAttentionSpec(
+                block_size=1024,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.bfloat16,
+            )
+            kv_cache_spec[f"layers.{i}.indexer"] = MLAAttentionSpec(
+                block_size=1024,
+                num_kv_heads=1,
+                head_size=132,
+                dtype=torch.uint8,
+                compress_ratio=16,
+            )
+        else:
+            name = f"layers.{i}.linear_attn"
+            kv_cache_spec[name] = new_mamba_spec()
+            mamba_layers.append(name)
+
+    groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
+    uniform_groups = [
+        group
+        for group in groups
+        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+    ]
+    mamba_groups = [
+        group for group in groups if isinstance(group.kv_cache_spec, MambaSpec)
+    ]
+
+    assert len(groups) == 4
+    assert len(uniform_groups) == 1
+    assert len(uniform_groups[0].layer_names) == 22
+    assert uniform_groups[0].kv_cache_spec.get_num_layer_tuples() == 11
+    assert [len(group.layer_names) for group in mamba_groups] == [12, 11, 11]
+    assert mamba_groups[0].layer_names == [
+        f"layers.{i}.linear_attn" for i in [*range(0, 44, 4), 44]
+    ]
+    assert mamba_groups[1].layer_names == [
+        f"layers.{i}.linear_attn" for i in range(1, 44, 4)
+    ]
+    assert mamba_groups[2].layer_names == [
+        f"layers.{i}.linear_attn" for i in range(2, 44, 4)
+    ]
+    grouped_mamba_layers = [
+        name for group in mamba_groups for name in group.layer_names
+    ]
+    assert sorted(grouped_mamba_layers) == sorted(mamba_layers)
+
+    expected_max_memory = sum(
+        spec.max_memory_usage_bytes(vllm_config) for spec in kv_cache_spec.values()
     )
-    scheduler_config = generate_scheduler_kv_cache_config([worker_config])
+    assert (
+        kv_cache_utils._max_memory_usage_bytes_from_groups(vllm_config, groups)
+        == expected_max_memory
+    )
 
-    assert worker_config.needs_kv_cache_zeroing
-    assert scheduler_config.needs_kv_cache_zeroing
+    bytes_per_block = kv_cache_utils._pool_bytes_per_block(vllm_config, groups)
+    assert bytes_per_block == sum(
+        spec.page_size_bytes for spec in kv_cache_spec.values()
+    )
+    available_memory = bytes_per_block * 100 + 1
+    kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        vllm_config, groups, available_memory
+    )
+
+    assert kv_cache_config.num_blocks == 100
+    assert sum(tensor.size for tensor in kv_cache_config.kv_cache_tensors) == (
+        bytes_per_block * 100
+    )
+    assert len(kv_cache_config.kv_cache_tensors) == 45
+    assert (
+        sum(len(tensor.shared_by) == 2 for tensor in kv_cache_config.kv_cache_tensors)
+        == 11
+    )
+    assert (
+        sum(len(tensor.shared_by) == 1 for tensor in kv_cache_config.kv_cache_tensors)
+        == 34
+    )
+
+    blocks_per_request = (expected_max_memory + bytes_per_block - 1) // bytes_per_block
+    assert get_max_concurrency_for_kv_cache_config(
+        vllm_config, kv_cache_config
+    ) == pytest.approx(100 / blocks_per_request)
 
 
-def new_mla_spec(cache_dtype_str=None, block_size=16):
+def new_mla_spec(cache_dtype_str=None):
     # head_size = kv_lora_rank(512) + qk_rope_head_dim(64) = 576
     return MLAAttentionSpec(
         block_size=block_size,
