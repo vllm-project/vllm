@@ -1,14 +1,16 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Unified parser interface for reasoning and tool-call deltas.
 
 mod combined;
 mod gemma4;
 
+pub use combined::CombinedParser;
+pub use gemma4::Gemma4UnifiedParser;
 use thiserror::Error;
 use thiserror_ext::Macro;
 use vllm_tokenizer::DynTokenizer;
-
-pub use combined::CombinedParser;
-pub use gemma4::Gemma4UnifiedParser;
 
 use crate::reasoning::ReasoningError;
 use crate::tool::{
