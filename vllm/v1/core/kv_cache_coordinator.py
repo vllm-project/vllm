@@ -415,7 +415,10 @@ class KVCacheCoordinator(ABC):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
+        """Returns the per-group hit blocks, the hit length, and the number of
+        ``num_uncached_common_prefix_tokens`` (a shared prefix that a
+        sparse-retention group has not cached yet; 0 unless hybrid)."""
         pass
 
     def new_step_starts(self) -> None:
@@ -467,11 +470,11 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(self.num_single_type_manager)
         )
-        return blocks, 0
+        return blocks, 0, 0
 
 
 class UnitaryKVCacheCoordinator(KVCacheCoordinator):
@@ -531,7 +534,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         hit_blocks, hit_length = self.single_type_managers[0].find_longest_cache_hit(
             block_hashes=block_hashes,
             max_length=max_cache_hit_length,
@@ -543,7 +546,8 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
         )
-        return hit_blocks, hit_length
+        # Single group: nothing "uncached common" -- no other group to lag it.
+        return hit_blocks, hit_length, 0
 
 
 class SpecGroup(NamedTuple):
@@ -722,7 +726,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         """
         Find the longest cache hit using an iterative fixed-point algorithm.
 
@@ -738,7 +742,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         Returns:
             A tuple containing:
                 - A tuple of the cache hit blocks for each single type manager.
-                - The number of tokens of the longest cache hit.
+                - The number of tokens of the reconciled (combined) cache hit.
+                - ``num_uncached_common_prefix_tokens``: a shared prefix that a
+                  sparse-retention group has not cached yet (0 unless hybrid).
         """
 
         num_groups = len(self.kv_cache_config.kv_cache_groups)
@@ -841,12 +847,14 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     del blks[num_blocks:]
                     hit_length_by_group[group_id] = hit_length
 
-        # Uncached shared prefix detection: If any attn. group cached a longer prefix
-        # than the current prefix, it is an uncached common prefix across requests:
-        self.num_uncached_common_prefix_tokens = longest_hit_length - hit_length
-        return tuple(
+        # Uncached shared prefix detection: if any attn. group cached a longer
+        # prefix than the reconciled hit, it is an uncached common prefix across
+        # requests that a sparse-retention group hasn't cached yet.
+        num_uncached_common_prefix_tokens = longest_hit_length - hit_length
+        cache_hit_blocks = tuple(
             blocks if blocks is not None else [] for blocks in hit_blocks_by_group
-        ), hit_length
+        )
+        return cache_hit_blocks, hit_length, num_uncached_common_prefix_tokens
 
     def find_longest_cache_hit_per_group(
         self,
