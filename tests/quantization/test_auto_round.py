@@ -209,6 +209,27 @@ def test_inc_config_parser_parallel_lm_head_defaults_to_unquantized() -> None:
     assert layer_config.bits == 16
 
 
+def test_inc_config_parser_suffix_match_for_lm_head() -> None:
+    """Short extra_config key should match fully-qualified lm_head layer name."""
+    layer = object.__new__(ParallelLMHead)
+    config = make_config(
+        extra_config={
+            "lm_head": {
+                "bits": 4,
+                "group_size": 128,
+                "sym": True,
+            }
+        }
+    )
+
+    layer_config = config.config_parser.resolve(layer, "model.language_model.lm_head")
+
+    assert layer_config.quantized is True
+    assert layer_config.bits == 4
+    assert layer_config.group_size == 128
+    assert layer_config.sym is True
+
+
 def test_inc_config_parser_fused_moe_requires_consistent_configs() -> None:
     config = make_config(
         extra_config={
@@ -507,6 +528,34 @@ def test_inc_get_quant_method_linear_uses_resolved_scheme(monkeypatch) -> None:
     )
 
     method = config.get_quant_method(layer, "layer")
+
+    assert method is sentinel
+
+
+def test_inc_get_quant_method_lm_head_uses_suffix_match(monkeypatch) -> None:
+    """lm_head extra_config should apply to fully-qualified prefix."""
+    config = make_config(
+        extra_config={
+            "lm_head": {
+                "bits": 4,
+                "group_size": 128,
+                "sym": True,
+            }
+        }
+    )
+    layer = object.__new__(ParallelLMHead)
+    sentinel = object()
+
+    class DummyScheme:
+        def get_linear_method(self, _config, _layer, _prefix, _layer_config):
+            return sentinel
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.factory.resolve_scheme",
+        lambda _layer_config: DummyScheme(),
+    )
+
+    method = config.get_quant_method(layer, "model.language_model.lm_head")
 
     assert method is sentinel
 
