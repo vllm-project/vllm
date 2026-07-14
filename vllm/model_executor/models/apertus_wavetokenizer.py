@@ -672,15 +672,11 @@ class EncodecFeatures(FeatureExtractor):
                     f"Unsupported encodec_model: {encodec_model}. "
                     "Supported options are 'encodec_24khz'.",
                     )
-        for param in self.encodec.parameters():
-            param.requires_grad = True
         self.bandwidths = list(bandwidths)
 
     def infer(
             self, audio: torch.Tensor, bandwidth_id: torch.Tensor,
             ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if self.training:
-            self.encodec.train()
         audio = audio.unsqueeze(1)
         emb = self.encodec.encoder(audio)
         q_res = self.encodec.quantizer.infer(
@@ -806,7 +802,8 @@ class WavTokenizer40(WavTokenizerBase):
         state_dict = {}
         for k, v in state_dict_raw.items():
             if k.startswith("feature_extractor."):
-                if not k.startswith("feature_extractor.encodec.decoder"):
+                if not k.startswith("feature_extra"
+                                    "ctor.encodec.decoder"):
                     state_dict[k] = v
 
         self.model.load_state_dict(state_dict)
