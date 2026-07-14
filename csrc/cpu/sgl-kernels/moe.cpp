@@ -8,6 +8,8 @@
 #include "common.h"
 #include "gemm.h"
 
+#include <limits>
+
 namespace {
 
 // [NOTE]: Fused MoE kernel with AMX
@@ -1011,11 +1013,14 @@ at::Tensor fused_experts_cpu(
   //   7. intermediate_cache0 : [M * topk, 2N]
   //   8. B_tmp : [T, MAX_CACHE_BLOCK_SIZE, BLOCK_N, std::max(K, N)]
   //
-  int64_t buffer_size_nbytes =
-      M * topk * N * 2 + M * topk * K * 2 +
-      num_threads * BLOCK_M * K *
+  __int128 buffer_size_wide =
+      static_cast<__int128>(M) * topk * N * 2 + static_cast<__int128>(M) * topk * K * 2 +
+      static_cast<__int128>(num_threads) * BLOCK_M * K *
           (moe_comp_method == CPUQuantMethod::INT8_W8A8 | moe_comp_method == CPUQuantMethod::INT4_W4A8 ? 1 : 2) +
-      num_threads * 2 * BLOCK_M * BLOCK_N * sizeof(float);
+      static_cast<__int128>(num_threads) * 2 * BLOCK_M * BLOCK_N * sizeof(float);
+  TORCH_CHECK(buffer_size_wide <= static_cast<__int128>(std::numeric_limits<int64_t>::max()),
+              "Integer overflow in buffer size calculation for fused MoE.");
+  int64_t buffer_size_nbytes = static_cast<int64_t>(buffer_size_wide);
 
   if (moe_comp_method == CPUQuantMethod::INT8_W8A8) {
     buffer_size_nbytes += std::max(M * K, M * topk * N) + M * topk * sizeof(float);
@@ -1194,14 +1199,20 @@ at::Tensor fused_experts_cpu(
       int64_t Kc_val = K / _block_k_val;
       int64_t packed_block_bytes =
           BLOCK_N * (_block_k_val / 2 + sizeof(int32_t));
-      int64_t required_w1 = E * 2 * NB_int4 * Kc_val * packed_block_bytes;
+      __int128 required_w1_wide = static_cast<__int128>(E) * 2 * NB_int4 * Kc_val * packed_block_bytes;
+      TORCH_CHECK(required_w1_wide <= static_cast<__int128>(std::numeric_limits<int64_t>::max()),
+                  "Integer overflow in required_w1 size calculation for INT4 W4A8.");
+      int64_t required_w1 = static_cast<int64_t>(required_w1_wide);
       TORCH_CHECK(packed_w1.numel() >= required_w1,
                   "packed_w1 too small for INT4 W4A8: need ",
                   required_w1, " elements, got ", packed_w1.numel(), ".");
       TORCH_CHECK(N % _block_k_val == 0,
                   "N must be divisible by block_k for INT4 W4A8.");
       int64_t Kc2_val = N / _block_k_val;
-      int64_t required_w2 = E * NB2_int4 * Kc2_val * packed_block_bytes;
+      __int128 required_w2_wide = static_cast<__int128>(E) * NB2_int4 * Kc2_val * packed_block_bytes;
+      TORCH_CHECK(required_w2_wide <= static_cast<__int128>(std::numeric_limits<int64_t>::max()),
+                  "Integer overflow in required_w2 size calculation for INT4 W4A8.");
+      int64_t required_w2 = static_cast<int64_t>(required_w2_wide);
       TORCH_CHECK(packed_w2.numel() >= required_w2,
                   "packed_w2 too small for INT4 W4A8: need ",
                   required_w2, " elements, got ", packed_w2.numel(), ".");
