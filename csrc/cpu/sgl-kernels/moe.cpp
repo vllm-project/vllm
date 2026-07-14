@@ -902,6 +902,21 @@ at::Tensor fused_experts_cpu(
 
   int64_t M = hidden_states.size(0);
   int64_t K = hidden_states.size(1);
+
+  if (moe_comp_method == CPUQuantMethod::INT4_W4A8) {
+    TORCH_CHECK(w1_scale.has_value(), "missing w1_scale for INT4 W4A8.");
+    TORCH_CHECK(w2_scale.has_value(), "missing w2_scale for INT4 W4A8.");
+    TORCH_CHECK(w1_zero.has_value(), "missing w1_zero for INT4 W4A8.");
+    TORCH_CHECK(w2_zero.has_value(), "missing w2_zero for INT4 W4A8.");
+    TORCH_CHECK(w1_scale.value().dim() == 4,
+                "expect w1_scale to be 4D for INT4 W4A8, got ",
+                w1_scale.value().dim(), "D.");
+    TORCH_CHECK(w1_scale.value().size(2) > 0,
+                "w1_scale num_groups (dim 2) must be positive for INT4 W4A8.");
+    TORCH_CHECK(K % w1_scale.value().size(2) == 0,
+                "K must be divisible by w1_scale num_groups for INT4 W4A8.");
+  }
+
   int64_t N = moe_comp_method == CPUQuantMethod::INT4_W4A8 ? w1_scale.value().size(1) * w1_scale.value().size(3) / 2
                                                            : w1.size(1) / 2;
   int64_t E = w1.size(0);
@@ -917,10 +932,21 @@ at::Tensor fused_experts_cpu(
 
   // check weight shapes
   CHECK_EQ(w2.size(0), E);
-  if (!(moe_comp_method == CPUQuantMethod::INT4_W4A8)) {
+  if (moe_comp_method == CPUQuantMethod::INT4_W4A8) {
+    TORCH_CHECK(w1_scale.value().size(0) == E,
+                "w1_scale expert count mismatch for INT4 W4A8.");
+    TORCH_CHECK(w2_scale.value().size(0) == E,
+                "w2_scale expert count mismatch for INT4 W4A8.");
+    TORCH_CHECK(w1_scale.value().size(1) == packed_w1.size(1),
+                "w1_scale N-block count (dim 1) must match "
+                "packed_w1 for INT4 W4A8.");
+    TORCH_CHECK(w2_scale.value().size(1) == packed_w2.size(1),
+                "w2_scale N-block count (dim 1) must match "
+                "packed_w2 for INT4 W4A8.");
+  } else {
     CHECK_EQ(w2.size(1), K);
-    CHECK_EQ(packed_w1.size(2), packed_K / (moe_comp_method == CPUQuantMethod::INT4_W4A8 ? 2 : 1));
-    CHECK_EQ(packed_w2.size(2), packed_N / (moe_comp_method == CPUQuantMethod::INT4_W4A8 ? 2 : 1));
+    CHECK_EQ(packed_w1.size(2), packed_K);
+    CHECK_EQ(packed_w2.size(2), packed_N);
   }
   // check scales
   check_moe_scales(
@@ -1138,8 +1164,47 @@ at::Tensor fused_experts_cpu(
       // weight + compensation shape = [Nc, Kc, block_n * block_k / 2 + block_n*sizeof(int32_t)]
       // scales/qzeros shape = [E, Nc, G, block_n]
       int64_t num_groups = w1_scale.value().size(2);
+      TORCH_CHECK(num_groups > 0,
+                  "w1_scale num_groups must be positive for INT4 W4A8.");
+      TORCH_CHECK(K % num_groups == 0,
+                  "K must be divisible by num_groups for INT4 W4A8.");
       const int group_size = K / num_groups;
-      // TODO: check scales and zeros
+
+      int64_t NB_int4 = div_up(N, BLOCK_N);
+      TORCH_CHECK(
+          w1_scale.value().numel() == E * 2 * NB_int4 * num_groups * BLOCK_N,
+          "w1_scale size mismatch for INT4 W4A8.");
+      int64_t NB2_int4 = div_up(K, BLOCK_N);
+      TORCH_CHECK(N % group_size == 0,
+                  "N must be divisible by group_size for INT4 W4A8.");
+      int64_t num_groups_w2 = N / group_size;
+      TORCH_CHECK(
+          w2_scale.value().numel() == E * NB2_int4 * num_groups_w2 * BLOCK_N,
+          "w2_scale size mismatch for INT4 W4A8.");
+      TORCH_CHECK(w1_zero.value().numel() == E * num_groups * 2 * N,
+                  "w1_zero size mismatch for INT4 W4A8.");
+      TORCH_CHECK(w2_zero.value().numel() == E * num_groups_w2 * K,
+                  "w2_zero size mismatch for INT4 W4A8.");
+
+      int64_t _block_k_val = get_4bit_block_k_size(group_size);
+      TORCH_CHECK(_block_k_val > 0,
+                  "block_k must be positive for INT4 W4A8.");
+      TORCH_CHECK(K % _block_k_val == 0,
+                  "K must be divisible by block_k for INT4 W4A8.");
+      int64_t Kc_val = K / _block_k_val;
+      int64_t packed_block_bytes =
+          BLOCK_N * (_block_k_val / 2 + sizeof(int32_t));
+      int64_t required_w1 = E * 2 * NB_int4 * Kc_val * packed_block_bytes;
+      TORCH_CHECK(packed_w1.numel() >= required_w1,
+                  "packed_w1 too small for INT4 W4A8: need ",
+                  required_w1, " elements, got ", packed_w1.numel(), ".");
+      TORCH_CHECK(N % _block_k_val == 0,
+                  "N must be divisible by block_k for INT4 W4A8.");
+      int64_t Kc2_val = N / _block_k_val;
+      int64_t required_w2 = E * NB2_int4 * Kc2_val * packed_block_bytes;
+      TORCH_CHECK(packed_w2.numel() >= required_w2,
+                  "packed_w2 too small for INT4 W4A8: need ",
+                  required_w2, " elements, got ", packed_w2.numel(), ".");
       fused_experts_int4_w4a8_kernel_impl<scalar_t>(
           out_hidden_states.data_ptr<scalar_t>(),
           intermediate_cache0,
