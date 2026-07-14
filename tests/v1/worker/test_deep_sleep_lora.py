@@ -2,16 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Regression tests for level-2 sleep/wake with LoRA enabled (#39934).
 
-Two bugs fixed:
+Three bugs fixed:
 1. LoRA wrapping moves parameters under base_layer, breaking
    named_parameters() name resolution during reload_weights().
 2. LoRA stacked tensors (lora_a_stacked, lora_b_stacked) are plain
    attributes not restored by reload — must be explicitly re-zeroed.
+3. sharded_to_full_mapping_gpu (TP>1 logit reordering) is not a LoRA
+   tensor and must NOT be zeroed, but it also isn't restored by
+   reload_weights — must be rebuilt from its CPU-side source.
 
 These tests validate that:
 - Single and multi-cycle sleep/wake/reload produce deterministic output
 - LoRA stacked tensors are properly zeroed (not left with stale GPU data)
-- sharded_to_full_mapping_gpu (TP>1) is NOT zeroed by zero_lora_state
+- sharded_to_full_mapping_gpu (TP>1) is NOT zeroed by zero_lora_state,
+  and IS correctly restored across TP=2/4/8
 - The fix works across different models
 """
 
@@ -22,6 +26,10 @@ from tests.utils import create_new_process_for_each_test, multi_gpu_test
 from vllm import LLM, SamplingParams
 
 MODEL = "hmellor/tiny-random-LlamaForCausalLM"
+# TP tests shard across up to 8 ranks; tiny-random-Llama only has 4
+# attention/KV heads and cannot be sharded past TP=4. Use a model with
+# enough heads (16 attn / 8 KV) for the TP=8 case.
+MODEL_MULTI_GPU = "Qwen/Qwen3-0.6B"
 PROMPT = "How are you?"
 SAMPLING_PARAMS = SamplingParams(temperature=0, max_tokens=10)
 
@@ -32,6 +40,31 @@ def _sleep_wake_reload(llm: LLM) -> None:
     llm.wake_up(tags=["weights"])
     llm.collective_rpc("reload_weights")
     llm.wake_up(tags=["kv_cache"])
+
+
+def _run_tp_sleep_wake(tensor_parallel_size: int) -> None:
+    """Shared body for TP>1 sleep/wake/reload regression tests.
+
+    Validates that reload_weights succeeds under tensor parallelism and
+    that sharded_to_full_mapping_gpu is correctly restored (not left as
+    stale garbage) across single- and multi-cycle sleep/wake.
+    """
+    llm = LLM(MODEL_MULTI_GPU,
+              enable_sleep_mode=True,
+              enable_lora=True,
+              max_lora_rank=8,
+              enforce_eager=True,
+              tensor_parallel_size=tensor_parallel_size)
+
+    output_before = llm.generate(PROMPT, SAMPLING_PARAMS)
+    _sleep_wake_reload(llm)
+    output_after = llm.generate(PROMPT, SAMPLING_PARAMS)
+    assert output_before[0].outputs[0].text == output_after[0].outputs[0].text
+
+    for _ in range(2):
+        _sleep_wake_reload(llm)
+    output_final = llm.generate(PROMPT, SAMPLING_PARAMS)
+    assert output_before[0].outputs[0].text == output_final[0].outputs[0].text
 
 
 # ---- Single-GPU tests ----
@@ -151,33 +184,27 @@ def test_deep_sleep_lora_preserves_non_lora_tensors():
     assert output_before[0].outputs[0].text == output_after[0].outputs[0].text
 
 
-# ---- Multi-GPU (TP>1) test ----
+# ---- Multi-GPU (TP>1) tests ----
+#
+# sharded_to_full_mapping_gpu is only allocated when TP>1 (it reorders
+# gathered logits back to full-vocab order across ranks). These tests
+# cover a range of TP sizes since the restore path rebuilds it from a
+# CPU-side list whose sharding depends on tp_size/tp_rank.
 
 
 @multi_gpu_test(num_gpus=2)
 def test_deep_sleep_lora_tp2():
-    """Level-2 sleep/wake/reload with LoRA at TP=2.
+    """Level-2 sleep/wake/reload with LoRA at TP=2."""
+    _run_tp_sleep_wake(tensor_parallel_size=2)
 
-    Validates that:
-    - reload_weights succeeds under tensor parallelism
-    - sharded_to_full_mapping_gpu is preserved (not zeroed)
-    - Output is deterministic across sleep/wake cycles
-    """
-    llm = LLM(MODEL,
-              enable_sleep_mode=True,
-              enable_lora=True,
-              max_lora_rank=8,
-              enforce_eager=True,
-              tensor_parallel_size=2)
 
-    output_before = llm.generate(PROMPT, SAMPLING_PARAMS)
-    _sleep_wake_reload(llm)
-    output_after = llm.generate(PROMPT, SAMPLING_PARAMS)
+@multi_gpu_test(num_gpus=4)
+def test_deep_sleep_lora_tp4():
+    """Level-2 sleep/wake/reload with LoRA at TP=4."""
+    _run_tp_sleep_wake(tensor_parallel_size=4)
 
-    assert output_before[0].outputs[0].text == output_after[0].outputs[0].text
 
-    # Multi-cycle at TP=2
-    for _ in range(2):
-        _sleep_wake_reload(llm)
-    output_final = llm.generate(PROMPT, SAMPLING_PARAMS)
-    assert output_before[0].outputs[0].text == output_final[0].outputs[0].text
+@multi_gpu_test(num_gpus=8)
+def test_deep_sleep_lora_tp8():
+    """Level-2 sleep/wake/reload with LoRA at TP=8."""
+    _run_tp_sleep_wake(tensor_parallel_size=8)
