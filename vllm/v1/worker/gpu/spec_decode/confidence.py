@@ -162,9 +162,6 @@ def assign_draft_token_budget(survival: np.ndarray, num_admitted: int) -> np.nda
     return capacities
 
 
-THETA_MARGIN = 1.05
-
-
 def allocate_draft_token_capacity(
     survival: np.ndarray,
     budget_frac: float = 1.0,
@@ -195,13 +192,7 @@ def allocate_draft_token_capacity(
         tau = num_reqs + np.cumsum(scores[:num_candidates])
         theta = tau * sps_row[num_reqs + 1 : num_reqs + num_candidates + 1]
         best = int(np.argmax(theta))
-        # Predicted survival and the profiled step-rate table both carry
-        # error (tail-censored calibration, interpolated rows); pruning
-        # trades real acceptance for predicted step time, so act only when
-        # the predicted gain over admitting every candidate clears a margin.
-        if theta[best] < THETA_MARGIN * theta[num_candidates - 1]:
-            best = num_candidates - 1
-        elif num_reqs * sps_row[num_reqs] >= theta[best]:
+        if num_reqs * sps_row[num_reqs] >= theta[best]:
             return np.zeros(num_reqs, dtype=np.int32)
         num_admitted = best + 1
 
