@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, cast
+from collections.abc import Sequence
+from typing import Any
 
 from vllm import PoolingParams, PoolingRequestOutput
 from vllm.logger import init_logger
@@ -134,10 +135,16 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
 
         num_requests = len(prompts_seq)
 
+        pooling_params: PoolingParams | Sequence[PoolingParams]
+        if ctx.pooling_params is None:
+            pooling_params = PoolingParams()
+        else:
+            pooling_params = ctx.pooling_params
+
         params_seq: list[PoolingParams] = [
             self.io_processor.merge_pooling_params(param)
             for param in self._params_to_seq(
-                ctx.pooling_params,
+                pooling_params,
                 num_requests,
             )
         ]

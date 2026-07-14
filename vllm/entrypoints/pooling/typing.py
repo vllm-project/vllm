@@ -10,7 +10,7 @@ from pydantic import ConfigDict
 
 from vllm import PoolingParams, PoolingRequestOutput, PromptType
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
-from vllm.inputs import EngineInput
+from vllm.inputs import DataPrompt, EngineInput
 from vllm.lora.request import LoRARequest
 from vllm.renderers import ChatParams, TokenizeParams
 from vllm.renderers.inputs import DictPrompt
@@ -116,24 +116,23 @@ class PoolingServeContext(Generic[PoolingRequestT]):
 @dataclass
 class OfflineInputsContext:
     pooling_task: PoolingTask
-    prompts: Sequence[PromptType]
+    prompts: PromptType | Sequence[PromptType] | DataPrompt
+
     pooling_params: PoolingParams | Sequence[PoolingParams] | None
-    tokenization_kwargs: dict[str, Any]
-    lora_request: Sequence[LoRARequest | None]
+    tokenization_kwargs: dict[str, Any] | None = None
+    lora_request: Sequence[LoRARequest | None] | None = None
     priorities: Sequence[int] | None = None
-    num_requests: int = 0
 
 
 @dataclass
 class OfflineInputsScoringContext:
     scoring_data: ScoringData
+    chat_template: str | None
+
     pooling_params: PoolingParams
     tokenization_kwargs: dict[str, Any]
     lora_request: Sequence[LoRARequest | None]
     priorities: Sequence[int] | None = None
-
-    # for scoring
-    chat_template: str | None = None
 
 
 @dataclass
