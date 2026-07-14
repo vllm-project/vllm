@@ -49,7 +49,8 @@ def _build_sparse_block_table_kernel(
 ):
     pid_b = tl.program_id(0)
     seq_len = tl.load(seq_lens_ptr + pid_b)
-    last_blk = (seq_len - 1) // SPARSE_BLOCK_SIZE_C
+    has_tokens = seq_len > 0
+    last_blk = tl.maximum((seq_len - 1) // SPARSE_BLOCK_SIZE_C, 0)
 
     topk_row = topk_ptr + pid_b * stride_topk_n
     bt_row = block_table_ptr + pid_b * stride_bt_b
@@ -57,7 +58,7 @@ def _build_sparse_block_table_kernel(
 
     off_t = tl.arange(0, BLOCK_SIZE_T)
     blk = tl.load(topk_row + off_t * stride_topk_k, mask=off_t < max_topk, other=-1)
-    valid = blk >= 0
+    valid = has_tokens & (blk >= 0)
     is_tail = valid & (blk == last_blk)
     is_full = valid & (blk != last_blk)
 
@@ -82,7 +83,7 @@ def _build_sparse_block_table_kernel(
         mask=(off_w >= n_used) & (off_w < row_width),
     )
 
-    tail_tokens = seq_len - last_blk * SPARSE_BLOCK_SIZE_C
+    tail_tokens = tl.where(has_tokens, seq_len - last_blk * SPARSE_BLOCK_SIZE_C, 0)
     has_tail = tl.sum(is_tail.to(tl.int32), axis=0) > 0
     ctx = n_full * SPARSE_BLOCK_SIZE_C + tl.where(has_tail, tail_tokens, 0)
     ctx = tl.where(has_tail, ctx, tl.minimum(n_valid * SPARSE_BLOCK_SIZE_C, seq_len))
@@ -140,7 +141,8 @@ def _build_sparse_block_table_prefill_kernel(
     pid_n = tl.program_id(0)
     req_id = tl.load(req_id_ptr + pid_n)
     abs_pos = tl.load(abs_pos_ptr + pid_n)
-    causal_len = abs_pos + 1
+    # Padded speculative rows can have negative positions; clamp to empty range.
+    causal_len = tl.maximum(abs_pos + 1, 0)
     self_blk = abs_pos // SPARSE_BLOCK_SIZE_C
 
     topk_row = topk_ptr + pid_n * stride_topk_n
@@ -149,7 +151,7 @@ def _build_sparse_block_table_prefill_kernel(
 
     off_t = tl.arange(0, BLOCK_SIZE_T)
     blk = tl.load(topk_row + off_t * stride_topk_k, mask=off_t < max_topk, other=-1)
-    valid = (blk >= 0) & (blk <= self_blk)
+    valid = (causal_len > 0) & (blk >= 0) & (blk <= self_blk)
     is_tail = valid & (blk == self_blk)
     is_full = valid & (blk < self_blk)
 
@@ -212,6 +214,34 @@ def minimax_m3_build_sparse_block_table_prefill(
         BLOCK_SIZE_T=triton.next_power_of_2(topk),
     )
     return sparse_bt, sparse_ctx
+
+
+@torch.no_grad()
+def minimax_m3_build_sparse_block_table_decode(
+    topk_idx: torch.Tensor,  # [1, batch * decode_query_len, topk]
+    block_table: torch.Tensor,  # [batch, max_blocks]
+    seq_lens: torch.Tensor,  # [batch]
+    decode_query_len: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build one page-16 sparse block table row per decode query token."""
+    if decode_query_len == 1:
+        return minimax_m3_build_sparse_block_table(topk_idx, block_table, seq_lens)
+
+    total_q = topk_idx.shape[1]
+    expected_q = block_table.shape[0] * decode_query_len
+    assert total_q == expected_q, (
+        "MiniMax-M3 decode top-k rows must equal batch * decode_query_len: "
+        f"{total_q} != {expected_q}"
+    )
+    pos = torch.arange(total_q, dtype=torch.int32, device=topk_idx.device)
+    query_req_id = torch.div(pos, decode_query_len, rounding_mode="floor")
+    q_offset = pos - query_req_id * decode_query_len
+    query_abs_pos = (seq_lens[query_req_id] - decode_query_len + q_offset).to(
+        torch.int32
+    )
+    return minimax_m3_build_sparse_block_table_prefill(
+        topk_idx, block_table, query_req_id, query_abs_pos
+    )
 
 
 @triton.jit
@@ -317,20 +347,21 @@ def _gluon_scale_arg(
 
 @torch.no_grad()
 def minimax_m3_sparse_attn_decode_aiter(
-    q: torch.Tensor,  # [batch, num_heads, head_dim]
+    q: torch.Tensor,  # [batch * decode_query_len, num_heads, head_dim]
     k_cache: torch.Tensor,  # [phys16, num_kv_heads, head_dim // x, 16, x]
     v_cache: torch.Tensor,  # [phys16, num_kv_heads, 16 // x, head_dim, x]
-    topk_idx: torch.Tensor,  # [1, batch, topk]
+    topk_idx: torch.Tensor,  # [1, batch * decode_query_len, topk]
     block_table: torch.Tensor,  # [batch, max_blocks]
     seq_lens: torch.Tensor,  # [batch]
     num_kv_heads: int,
     sm_scale: float,
-    output: torch.Tensor,  # [batch, num_heads, head_dim]
+    output: torch.Tensor,  # [batch * decode_query_len, num_heads, head_dim]
     k_scale: torch.Tensor | None = None,
     v_scale: torch.Tensor | None = None,
+    decode_query_len: int = 1,
 ) -> None:
-    sparse_bt, sparse_ctx = minimax_m3_build_sparse_block_table(
-        topk_idx, block_table, seq_lens
+    sparse_bt, sparse_ctx = minimax_m3_build_sparse_block_table_decode(
+        topk_idx, block_table, seq_lens, decode_query_len
     )
     _run_gluon_decode(
         q,
