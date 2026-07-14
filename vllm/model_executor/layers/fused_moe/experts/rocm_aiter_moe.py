@@ -367,16 +367,12 @@ def rocm_aiter_fused_experts(
         # `rocm_aiter_ops.shuffle_weight_a16w4` in `oracle/mxfp4.py`,
         # which always sets `is_guinterleave=True`.
         # Hence, we pass in GateMode.INTERLEAVE to match the weight shuffling.
-        # Import ``GateMode`` lazily: some aiter builds lack ``aiter.ops.flydsl``,
-        # and the common fp8 CK path (e.g. MiniMax) must keep working without it.
+        from aiter.ops.flydsl.moe_common import GateMode
+
         gate_mode = ""
         if quant_config.use_mxfp4_w4a16:
-            from aiter.ops.flydsl.moe_common import GateMode
-
             gate_mode = GateMode.INTERLEAVE.value
         elif activation_interleave is not None:
-            from aiter.ops.flydsl.moe_common import GateMode
-
             gate_mode = (
                 GateMode.INTERLEAVE.value
                 if activation_interleave

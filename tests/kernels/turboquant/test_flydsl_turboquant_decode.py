@@ -17,9 +17,19 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950
 
-if not (current_platform.is_rocm() and on_gfx950()):
+# Guard the ROCm-only import: `vllm.platforms.rocm` pulls in amdsmi and other
+# ROCm-specific modules that are not importable on non-ROCm platforms, so it
+# must not be imported at module load time on CUDA/CPU CI.
+if not current_platform.is_rocm():
+    pytest.skip(
+        "TurboQuant FlyDSL decode only runs on ROCm gfx950.",
+        allow_module_level=True,
+    )
+
+from vllm.platforms.rocm import on_gfx950  # noqa: E402
+
+if not on_gfx950():
     pytest.skip(
         "TurboQuant FlyDSL decode only runs on ROCm gfx950.",
         allow_module_level=True,
