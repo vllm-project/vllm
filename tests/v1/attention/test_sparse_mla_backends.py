@@ -40,6 +40,7 @@ from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
 )
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseBackend,
+    FlashMLASparseImpl,
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.mla.indexer import split_indexer_prefill_chunks
@@ -719,6 +720,120 @@ def test_triton_convert_req_index_to_global_index_with_prefill_workspace(block_s
     )
 
     torch.testing.assert_close(result, reference_result, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() < (9, 0),
+    reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
+)
+def test_triton_convert_rejects_req_id_longer_than_token_indices():
+    """Guard against the #47327 regression: the kernel grid is sized by
+    req_id but the output is allocated like token_indices, so a full-batch
+    req_id combined with an MQA-subset token_indices wrote past the end of
+    the output buffer. The wrapper must reject the length mismatch instead
+    of corrupting memory."""
+    device = torch.device(DEVICE_TYPE)
+    num_topk_tokens = 128
+    block_size = 64
+    block_table = torch.arange(40, dtype=torch.int32, device=device).view(4, 10)
+
+    # Full batch: 2 decode tokens + 10 prefill tokens
+    req_id_full = torch.tensor(
+        [0, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3], dtype=torch.int32, device=device
+    )
+    num_mqa_tokens = 2
+    token_indices = torch.randint(
+        0,
+        block_size * 10,
+        (num_mqa_tokens, num_topk_tokens),
+        dtype=torch.int32,
+        device=device,
+    )
+
+    with pytest.raises(AssertionError, match="must cover the same tokens"):
+        triton_convert_req_index_to_global_index(
+            req_id_full,
+            block_table,
+            token_indices,
+            BLOCK_SIZE=block_size,
+            NUM_TOPK_TOKENS=num_topk_tokens,
+        )
+
+    # The sliced call is the intended usage and must match the reference.
+    result = triton_convert_req_index_to_global_index(
+        req_id_full[:num_mqa_tokens],
+        block_table,
+        token_indices,
+        BLOCK_SIZE=block_size,
+        NUM_TOPK_TOKENS=num_topk_tokens,
+    )
+    reference = _triton_convert_reference_impl(
+        req_id_full[:num_mqa_tokens],
+        block_table,
+        token_indices,
+        block_size,
+        num_topk_tokens,
+    )
+    torch.testing.assert_close(result, reference, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() < (9, 0),
+    reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
+)
+def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
+    """Guard against the #47327 regression: when the dense-MHA prefill split
+    is active, forward_mqa only receives the leading decode tokens, but
+    _forward_bf16_kv passed the full-batch req_id_per_token to the index
+    conversion, making it write past the end of its output buffer. The call
+    site must slice req_id_per_token to the MQA tokens."""
+    device = torch.device(DEVICE_TYPE)
+    num_topk_tokens = 128
+    block_size = 64
+    num_batch_tokens = 12
+    num_mqa_tokens = 2
+
+    attn_metadata = SimpleNamespace(
+        req_id_per_token=torch.tensor(
+            [0, 1] + [2] * 5 + [3] * 5, dtype=torch.int32, device=device
+        ),
+        block_table=torch.arange(40, dtype=torch.int32, device=device).view(4, 10),
+        block_size=block_size,
+    )
+    assert attn_metadata.req_id_per_token.shape[0] == num_batch_tokens
+
+    q = torch.zeros(num_mqa_tokens, 4, 576, dtype=torch.bfloat16, device=device)
+    kv_cache = torch.zeros(40 * block_size, 576, dtype=torch.bfloat16, device=device)
+    topk_indices = torch.randint(
+        0,
+        block_size * 10,
+        (num_mqa_tokens, num_topk_tokens),
+        dtype=torch.int32,
+        device=device,
+    )
+
+    captured = {}
+
+    def _stub_kernel(q, kv, indices, lengths):
+        captured["indices"] = indices
+        return torch.zeros(q.shape[0], q.shape[1], 512, dtype=q.dtype, device=q.device)
+
+    stub_impl = SimpleNamespace(_bf16_flash_mla_kernel=_stub_kernel)
+
+    out = FlashMLASparseImpl._forward_bf16_kv(
+        stub_impl, q, kv_cache, topk_indices, attn_metadata
+    )
+
+    assert out.shape[0] == num_mqa_tokens
+    assert captured["indices"].shape[0] == num_mqa_tokens
+    reference = _triton_convert_reference_impl(
+        attn_metadata.req_id_per_token[:num_mqa_tokens],
+        attn_metadata.block_table,
+        topk_indices,
+        block_size,
+        num_topk_tokens,
+    )
+    torch.testing.assert_close(captured["indices"], reference, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(

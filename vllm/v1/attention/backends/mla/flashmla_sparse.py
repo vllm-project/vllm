@@ -597,9 +597,10 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         attn_metadata: FlashMLASparseMetadata,
     ) -> torch.Tensor:
         # Convert per-request indices to global slots (decode) or workspace
-        # offsets (prefill).
+        # offsets (prefill). req_id_per_token covers the whole batch; slice it
+        # to the MQA tokens (q may exclude prefill tokens routed to dense MHA).
         topk_indices, topk_length = triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token,
+            attn_metadata.req_id_per_token[: topk_indices.shape[0]],
             attn_metadata.block_table,
             topk_indices,
             BLOCK_SIZE=attn_metadata.block_size,
@@ -640,7 +641,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         # prefill_workspace_starts has been adjusted in-place per chunk so
         # prefill indices automatically come out chunk-local
         topk_indices, topk_length = triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token,
+            attn_metadata.req_id_per_token[: topk_indices.shape[0]],
             attn_metadata.block_table,
             topk_indices,
             BLOCK_SIZE=attn_metadata.block_size,
@@ -738,7 +739,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         # Convert per-request indices to global slots (decode) or workspace
         # offsets (prefill).
         topk_indices = triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token,
+            attn_metadata.req_id_per_token[: topk_indices.shape[0]],
             attn_metadata.block_table,
             topk_indices,
             BLOCK_SIZE=attn_metadata.block_size,
