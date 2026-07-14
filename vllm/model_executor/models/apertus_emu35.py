@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import reduce
 from torch import einsum
+from safetensors.torch import load_file
 
 
 def nonlinearity(x: torch.Tensor) -> torch.Tensor:
@@ -20,22 +21,6 @@ def nonlinearity(x: torch.Tensor) -> torch.Tensor:
 
 def Normalize(in_channels: int) -> nn.GroupNorm:
     return nn.GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True)
-
-
-class Upsample(nn.Module):
-    def __init__(self, in_channels: int, with_conv: bool):
-        super().__init__()
-        self.with_conv = with_conv
-        if self.with_conv:
-            self.conv = nn.Conv2d(
-                in_channels, in_channels, kernel_size=3, stride=1, padding=1
-            )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.interpolate(x, scale_factor=2.0, mode="nearest")
-        if self.with_conv:
-            x = self.conv(x)
-        return x
 
 
 class Downsample(nn.Module):
@@ -264,119 +249,6 @@ class Encoder(nn.Module):
         return h
 
 
-class Decoder(nn.Module):
-    def __init__(
-        self,
-        *,
-        ch: int,
-        out_ch: int,
-        ch_mult: tuple[int, ...] = (1, 2, 4, 8),
-        num_res_blocks: int,
-        attn_resolutions: list[int],
-        dropout: float = 0.0,
-        resamp_with_conv: bool = True,
-        in_channels: int,
-        resolution: int,
-        z_channels: int,
-        give_pre_end: bool = False,
-        **ignore_kwargs,
-    ):
-        super().__init__()
-        self.ch = ch
-        self.temb_ch = 0
-        self.num_resolutions = len(ch_mult)
-        self.num_res_blocks = num_res_blocks
-        self.resolution = resolution
-        self.in_channels = in_channels
-        self.give_pre_end = give_pre_end
-
-        block_in = ch * ch_mult[self.num_resolutions - 1]
-        curr_res = resolution // 2 ** (self.num_resolutions - 1)
-        self.z_shape = (1, z_channels, curr_res, curr_res)
-
-        self.conv_in = nn.Conv2d(
-            z_channels, block_in, kernel_size=3, stride=1, padding=1
-        )
-
-        self.mid = nn.Module()
-        self.mid.block_1 = ResnetBlock(
-            in_channels=block_in,
-            out_channels=block_in,
-            temb_channels=self.temb_ch,
-            dropout=dropout,
-        )
-        self.mid.attn_1 = AttnBlock(block_in)
-        self.mid.block_2 = ResnetBlock(
-            in_channels=block_in,
-            out_channels=block_in,
-            temb_channels=self.temb_ch,
-            dropout=dropout,
-        )
-
-        self.up = nn.ModuleList()
-        for i_level in reversed(range(self.num_resolutions)):
-            block = nn.ModuleList()
-            attn = nn.ModuleList()
-            block_out = ch * ch_mult[i_level]
-            for i_block in range(self.num_res_blocks + 1):
-                block.append(
-                    ResnetBlock(
-                        in_channels=block_in,
-                        out_channels=block_out,
-                        temb_channels=self.temb_ch,
-                        dropout=dropout,
-                    )
-                )
-                block_in = block_out
-                if curr_res in attn_resolutions:
-                    attn.append(AttnBlock(block_in))
-            up = nn.Module()
-            up.block = block
-            up.attn = attn
-            if i_level != 0:
-                up.upsample = Upsample(block_in, resamp_with_conv)
-                curr_res = curr_res * 2
-            self.up.insert(0, up)
-
-        self.norm_out = Normalize(block_in)
-        self.conv_out = nn.Conv2d(block_in, out_ch, kernel_size=3, stride=1, padding=1)
-
-    def forward(
-        self, z: torch.Tensor, return_intermediate_feature: bool = False
-    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
-        self.last_z_shape = z.shape
-        temb = None
-        h = self.conv_in(z)
-
-        h = self.mid.block_1(h, temb)
-        h = self.mid.attn_1(h)
-        h = self.mid.block_2(h, temb)
-
-        im_feat_list = []
-        for i_level in reversed(range(self.num_resolutions)):
-            for i_block in range(self.num_res_blocks + 1):
-                h = self.up[i_level].block[i_block](h, temb)
-                if len(self.up[i_level].attn) > 0:
-                    h = self.up[i_level].attn[i_block](h)
-
-            if i_level != 0:
-                h = self.up[i_level].upsample(h)
-
-            im_feat_list.append(h)
-
-        if self.give_pre_end:
-            return h
-
-        h = self.norm_out(h)
-        h = nonlinearity(h)
-        h = self.conv_out(h)
-
-        if return_intermediate_feature:
-            return h, im_feat_list
-
-        return h
-
-
 def compute_entropy_loss(
     logits,
     temperature=0.01,
@@ -579,7 +451,6 @@ class IBQ(nn.Module):
         super().__init__()
 
         self.encoder = Encoder(**ddconfig)
-        self.decoder = Decoder(**ddconfig)
 
         self.quantize = IndexPropagationQuantize(
             n_embed,
@@ -593,7 +464,6 @@ class IBQ(nn.Module):
         )
 
         self.quant_conv = nn.Conv2d(ddconfig["z_channels"], embed_dim, 1)
-        self.post_quant_conv = nn.Conv2d(embed_dim, ddconfig["z_channels"], 1)
 
     def encode(
         self, x: torch.Tensor
@@ -602,31 +472,6 @@ class IBQ(nn.Module):
         h = self.quant_conv(h)
         quant, emb_loss, info = self.quantize(h)
         return quant, emb_loss, info
-
-    def decode(
-        self, quant: torch.Tensor, return_intermediate_feature: bool = False
-    ) -> torch.Tensor:
-        quant = self.post_quant_conv(quant)
-        dec = self.decoder(
-            quant, return_intermediate_feature=return_intermediate_feature
-        )
-        return dec
-
-    def decode_code(
-        self, code_b: torch.Tensor, shape: tuple[int, ...] | None = None
-    ) -> torch.Tensor:
-        quant_b = self.quantize.get_codebook_entry(code_b, shape=shape)
-        dec = self.decode(quant_b)
-        return dec
-
-    def forward(
-        self, input: torch.Tensor, return_intermediate_feature: bool = False
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        quant, diff, _ = self.encode(input)
-        dec = self.decode(
-            quant, return_intermediate_feature=return_intermediate_feature
-        )
-        return dec, diff
 
 
 def build_vision_tokenizer(
@@ -678,8 +523,6 @@ def build_vision_tokenizer(
     tokenizer = IBQ(**cfg)
 
     if osp.exists(safetensors_path):
-        from safetensors.torch import load_file
-
         ckpt = load_file(safetensors_path, device="cpu")
         tokenizer.load_state_dict(ckpt)
     elif osp.exists(ckpt_path):

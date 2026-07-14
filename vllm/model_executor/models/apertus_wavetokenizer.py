@@ -19,6 +19,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from torch.nn.utils import weight_norm
+from safetensors.torch import load_file
 
 try:
     import torch._dynamo as dynamo
@@ -788,7 +789,6 @@ class WavTokenizer40(WavTokenizerBase):
 
         # Load weights
         if os.path.exists(safetensors_path):
-            from safetensors.torch import load_file
             state_dict_raw = load_file(safetensors_path, device="cpu")
         elif os.path.exists(ckpt_path):
             raw_state = torch.load(ckpt_path, map_location="cpu")
