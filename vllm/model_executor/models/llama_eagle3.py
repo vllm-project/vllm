@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
@@ -320,7 +320,6 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         input_ids: torch.Tensor,
         multimodal_embeddings: NestedTensors | None = None,
         is_multimodal: torch.Tensor | None = None,
-        embedding_modalities: Sequence[str] | None = None,
     ) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 

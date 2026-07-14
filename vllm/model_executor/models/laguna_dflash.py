@@ -7,7 +7,7 @@ or all sliding). The draft checkpoint shares token embedding and lm_head
 weights with the target model through the generic spec-decode proposer.
 """
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 
 import torch
 from torch import nn
@@ -277,7 +277,6 @@ class DFlashLagunaForCausalLM(nn.Module, SupportsEagle3):
         input_ids: torch.Tensor,
         multimodal_embeddings: NestedTensors | None = None,
         is_multimodal: torch.Tensor | None = None,
-        embedding_modalities: Sequence[str] | None = None,
     ) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 

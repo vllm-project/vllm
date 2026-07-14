@@ -104,7 +104,12 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
-from vllm.multimodal.utils import get_mm_features_in_window, group_and_batch_mm_kwargs
+from vllm.multimodal.utils import (
+    copy_mm_embedding_modality,
+    get_mm_features_in_window,
+    group_and_batch_mm_kwargs,
+    set_mm_embedding_modality,
+)
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
@@ -3166,11 +3171,10 @@ class GPUModelRunner(
         self,
         scheduler_output: "SchedulerOutput",
         shift_computed_tokens: int = 0,
-    ) -> tuple[list[torch.Tensor], torch.Tensor, list[str]]:
+    ) -> tuple[list[torch.Tensor], torch.Tensor]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
         mm_embeds = list[torch.Tensor]()
-        mm_embed_modalities: list[str] = []
         is_mm_embed = torch.zeros(
             total_num_scheduled_tokens,
             dtype=torch.bool,
@@ -3184,7 +3188,6 @@ class GPUModelRunner(
 
         for req_id in self.input_batch.req_ids:
             mm_embeds_req: list[torch.Tensor] = []
-            mm_embed_modalities_req: list[str] = []
 
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             req_state = self.requests[req_id]
@@ -3245,12 +3248,13 @@ class GPUModelRunner(
                     is_mm_embed[
                         req_start_pos + start_idx : req_start_pos + end_idx
                     ] |= is_embed
+                set_mm_embedding_modality(mm_embeds_item, mm_feature.modality)
                 mm_embeds_req.append(mm_embeds_item)
-                mm_embed_modalities_req.append(mm_feature.modality)
 
             if self.is_multimodal_pruning_enabled and self.uses_mrope:
                 assert req_state.mrope_positions is not None
                 should_sync_mrope_positions = True
+                old_mm_embeds_req = mm_embeds_req
                 mm_embeds_req, new_mrope_positions, new_delta = (
                     self.model.recompute_mrope_positions(
                         input_ids=req_state.prompt_token_ids,
@@ -3259,11 +3263,14 @@ class GPUModelRunner(
                         num_computed_tokens=req_state.num_computed_tokens,
                     )
                 )
+                mm_embeds_req = [
+                    copy_mm_embedding_modality(src, dst)
+                    for src, dst in zip(old_mm_embeds_req, mm_embeds_req)
+                ]
                 req_state.mrope_positions.copy_(new_mrope_positions)
                 req_state.mrope_position_delta = new_delta
 
             mm_embeds.extend(mm_embeds_req)
-            mm_embed_modalities.extend(mm_embed_modalities_req)
             req_start_idx += num_scheduled_tokens
 
         if should_sync_mrope_positions:
@@ -3274,7 +3281,7 @@ class GPUModelRunner(
             self._calc_xdrope_positions(scheduler_output)
             self.xdrope_positions.copy_to_gpu(total_num_scheduled_tokens)
 
-        return mm_embeds, is_mm_embed, mm_embed_modalities
+        return mm_embeds, is_mm_embed
 
     def get_model(self) -> nn.Module:
         if not hasattr(self, "model"):
@@ -3509,7 +3516,7 @@ class GPUModelRunner(
                 encoder_cache=self.encoder_cache,
             ) as ec_connector_output:
                 self._execute_mm_encoder(scheduler_output)
-                mm_embeds, is_mm_embed, mm_embed_modalities = (
+                mm_embeds, is_mm_embed = (
                     self._gather_mm_embeddings(scheduler_output)
                 )
 
@@ -3533,7 +3540,6 @@ class GPUModelRunner(
                     safe_input_ids,
                     multimodal_embeddings=mm_embeds,
                     is_multimodal=is_mm_embed,
-                    embedding_modalities=mm_embed_modalities,
                 )
                 target = self.inputs_embeds.gpu[:num_scheduled_tokens]
                 self.inputs_embeds.gpu[:num_scheduled_tokens] = torch.where(
@@ -3546,7 +3552,6 @@ class GPUModelRunner(
                     self.input_ids.gpu[:num_scheduled_tokens],
                     multimodal_embeddings=mm_embeds,
                     is_multimodal=is_mm_embed,
-                    embedding_modalities=mm_embed_modalities,
                 )
 
                 # TODO(woosuk): Avoid the copy. Optimize.
@@ -5196,13 +5201,13 @@ class GPUModelRunner(
                         target_hidden_states = hidden_states[:total_num_tokens]
 
             if self.supports_mm_inputs and self.drafter.supports_mm_inputs:
-                mm_embeds, is_mm_embed, mm_embed_modalities = (
+                mm_embeds, is_mm_embed = (
                     self._gather_mm_embeddings(
                         scheduler_output,
                         shift_computed_tokens=1,
                     )
                 )
-                mm_embed_inputs = (mm_embeds, is_mm_embed, mm_embed_modalities)
+                mm_embed_inputs = (mm_embeds, is_mm_embed)
             else:
                 mm_embed_inputs = None
 

@@ -74,13 +74,13 @@ def test_draft_lookahead_uses_boundary_feature_when_cached():
     f1 = _feature("h1", offset=8, length=8)  # starts exactly at processed_end
     runner = _make_runner([f0, f1], cached=[f0, f1])
 
-    mm_embeds, is_mm_embed, mm_modalities = _gather(
+    mm_embeds, is_mm_embed = _gather(
         runner, num_scheduled=8, draft_lookahead=1
     )
 
     # f0 covers positions 0..6 (+1 skew); f1's first embed covers position 7.
     assert len(mm_embeds) == 2
-    assert mm_modalities == ["image", "image"]
+    assert [getattr(e, "modality") for e in mm_embeds] == ["image", "image"]
     assert bool(is_mm_embed[7])
     assert int(is_mm_embed.sum()) == 8
 
@@ -93,13 +93,13 @@ def test_draft_lookahead_tolerates_missing_boundary_feature():
     f1 = _feature("h1", offset=8, length=8)  # boundary feature, not cached
     runner = _make_runner([f0, f1], cached=[f0])
 
-    mm_embeds, is_mm_embed, mm_modalities = _gather(
+    mm_embeds, is_mm_embed = _gather(
         runner, num_scheduled=8, draft_lookahead=1
     )
 
     # Only f0 is gathered; f1's boundary position falls back silently.
     assert len(mm_embeds) == 1
-    assert mm_modalities == ["image"]
+    assert [getattr(e, "modality") for e in mm_embeds] == ["image"]
     assert not bool(is_mm_embed[7])
     assert int(is_mm_embed.sum()) == 7
 
@@ -147,7 +147,7 @@ def test_multi_request_batch_gathers_per_request(draft_lookahead):
         device=torch.device("cpu"),
     )
 
-    mm_embeds, is_mm_embed, mm_modalities = runner.gather_mm_embeddings(
+    mm_embeds, is_mm_embed = runner.gather_mm_embeddings(
         req_ids=["req0", "req1"],
         total_num_scheduled_tokens=16,
         num_scheduled_tokens=np.array([8, 8]),
@@ -160,12 +160,12 @@ def test_multi_request_batch_gathers_per_request(draft_lookahead):
     # Both requests contribute a feature; with the +1 skew each marks 7 of its
     # 8 positions (the skew drops one), otherwise all 8.
     assert len(mm_embeds) == 2
-    assert mm_modalities == ["image", "image"]
+    assert [getattr(e, "modality") for e in mm_embeds] == ["image", "image"]
     assert int(is_mm_embed.sum()) == (14 if draft_lookahead else 16)
 
 
 def test_gather_preserves_mixed_modalities():
-    """Modalities must be returned in the same order as gathered embeddings."""
+    """Modalities must be attached on tensors in gather order."""
     video = MultiModalFeatureSpec(
         data=None,
         modality="video",
@@ -180,10 +180,10 @@ def test_gather_preserves_mixed_modalities():
     )
     runner = _make_runner([video, audio], cached=[video, audio])
 
-    mm_embeds, is_mm_embed, mm_modalities = _gather(
+    mm_embeds, is_mm_embed = _gather(
         runner, num_scheduled=8, draft_lookahead=0
     )
 
     assert len(mm_embeds) == 2
-    assert mm_modalities == ["video", "audio"]
+    assert [getattr(e, "modality") for e in mm_embeds] == ["video", "audio"]
     assert int(is_mm_embed.sum()) == 8

@@ -1528,7 +1528,6 @@ class Gemma4ForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        embedding_modalities: Sequence[str] | None = None,
     ) -> torch.Tensor:
         # Cache per-layer embeddings (PLE) for the language model's
         # forward pass.  During profiling embed_input_ids is not called,
@@ -1566,7 +1565,6 @@ class Gemma4ForConditionalGeneration(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            embedding_modalities=embedding_modalities,
         )
 
     # ------------------------------------------------------------------ #

@@ -587,7 +587,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # dummy run the eagle speculator's propose to ensure DP/EP sync.
         if self.speculator is not None:
             assert self.sampler is not None
-            mm_inputs: tuple[list[torch.Tensor], torch.Tensor, list[str]] | None = None
+            mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
             if self.speculator.supports_mm_inputs:
                 mm_inputs = (
                     [],
@@ -1446,7 +1446,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             copy_stream=self.output_copy_stream,
         )
 
-        mm_inputs: tuple[list[torch.Tensor], torch.Tensor, list[str]] | None = None
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
         if self.speculator is not None and self.speculator.supports_mm_inputs:
             # Get cached multimodal embeddings for draft forward.
             # NOTE: This is done here because postprocess updates

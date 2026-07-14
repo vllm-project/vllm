@@ -1819,7 +1819,6 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        embedding_modalities: Sequence[str] | None = None,
     ) -> torch.Tensor:
         inputs_embeds = self._embed_text_input_ids(
             input_ids,
@@ -1914,18 +1913,12 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             self._set_deepstack_input_embeds(deepstack_input_embeds)
 
         if is_interleaved:
-            if embedding_modalities is None:
-                raise ValueError(
-                    "embedding_modalities is required for interleaved "
-                    "audio-in-video embedding merge"
-                )
             return merge_interleaved_embeddings(
                 inputs_embeds,
                 multimodal_embeddings,
                 is_video,
                 is_audio,
                 is_multimodal,
-                embedding_modalities,
             )
 
         # Default: standard merge (no interleaving), same as parent class.

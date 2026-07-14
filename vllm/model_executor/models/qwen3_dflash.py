@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import io
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 
 import torch
 import torch.nn.functional as F
@@ -698,7 +698,6 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         input_ids: torch.Tensor,
         multimodal_embeddings: NestedTensors | None = None,
         is_multimodal: torch.Tensor | None = None,
-        embedding_modalities: Sequence[str] | None = None,
     ) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 

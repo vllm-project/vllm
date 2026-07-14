@@ -64,7 +64,7 @@ def test_draft_shift_uses_boundary_feature_when_cached():
     position rather than ignored."""
     f0 = _feature("h0", offset=0, length=8)
     f1 = _feature("h1", offset=8, length=8)  # starts exactly at processed_end
-    mm_embeds, is_mm_embed, _ = _gather([f0, f1], [f0, f1], num_scheduled=8, shift=1)
+    mm_embeds, is_mm_embed = _gather([f0, f1], [f0, f1], num_scheduled=8, shift=1)
 
     # f0 covers positions 0..6 (+1 skew); f1's first embed covers position 7.
     assert len(mm_embeds) == 2
@@ -77,7 +77,7 @@ def test_draft_shift_tolerates_missing_boundary_feature():
     encoded, fall back to the token embedding instead of raising."""
     f0 = _feature("h0", offset=0, length=8)
     f1 = _feature("h1", offset=8, length=8)  # boundary feature, not cached
-    mm_embeds, is_mm_embed, _ = _gather([f0, f1], [f0], num_scheduled=8, shift=1)
+    mm_embeds, is_mm_embed = _gather([f0, f1], [f0], num_scheduled=8, shift=1)
 
     assert len(mm_embeds) == 1  # only f0; f1's boundary position falls back
     assert not bool(is_mm_embed[7])

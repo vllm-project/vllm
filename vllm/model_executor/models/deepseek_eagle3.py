@@ -4,7 +4,7 @@
 """Eagle3 speculative decoding model for DeepseekV2/V3 with MLP (no MoE)."""
 
 import copy
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
@@ -327,7 +327,6 @@ class Eagle3DeepseekV2ForCausalLM(LocalArgmaxMixin, DeepseekV2ForCausalLM):
         input_ids: torch.Tensor,
         multimodal_embeddings: NestedTensors | None = None,
         is_multimodal: torch.Tensor | None = None,
-        embedding_modalities: Sequence[str] | None = None,
     ) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 

@@ -262,7 +262,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
         self,
         num_tokens: int,
         num_input_tokens: int,
-        mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor, list[str]] | None,
+        mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None,
     ) -> tuple[dict[str, Any], int]:
         # Context and query positions/slots were written to separate
         # buffers by the kernel — no copy needed.

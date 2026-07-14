@@ -356,7 +356,6 @@ class SupportsMultiModal(Protocol):
         multimodal_embeddings: MultiModalEmbeddings,
         *,
         is_multimodal: torch.Tensor,
-        embedding_modalities: Sequence[str] | None = None,
     ) -> Tensor: ...
 
     def _embed_text_input_ids(
@@ -384,7 +383,6 @@ class SupportsMultiModal(Protocol):
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: Tensor | None = None,
-        embedding_modalities: Sequence[str] | None = None,
     ) -> Tensor:
         """
         Apply token embeddings to `input_ids`.

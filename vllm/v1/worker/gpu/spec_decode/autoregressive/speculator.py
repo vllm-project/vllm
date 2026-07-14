@@ -148,7 +148,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
-        mm_inputs: tuple[list[torch.Tensor], torch.Tensor, list[str]] | None = None,
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
     ) -> torch.Tensor:
         num_tokens = input_batch.num_tokens_after_padding
@@ -278,7 +278,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-        mm_inputs: tuple[list[torch.Tensor], torch.Tensor, list[str]] | None = None,
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
         with set_forward_context(
@@ -293,8 +293,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             inputs_embeds = None
             if self.supports_mm_inputs:
                 # Merge multimodal embeddings with input ids.
-                mm_embeds, is_mm_embed, mm_embed_modalities = mm_inputs or (
-                    None,
+                mm_embeds, is_mm_embed = mm_inputs or (
                     None,
                     None,
                 )
@@ -305,7 +304,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                     self.input_buffers.input_ids[:num_input_tokens],
                     multimodal_embeddings=mm_embeds,
                     is_multimodal=is_mm_embed,
-                    embedding_modalities=mm_embed_modalities,
                 )
                 inputs_embeds = self.inputs_embeds[:num_tokens]
 
@@ -342,7 +340,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-        mm_inputs: tuple[list[torch.Tensor], torch.Tensor, list[str]] | None = None,
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> None:
         last_token_indices = self.last_token_indices[:num_reqs]
         positions = self.input_buffers.positions[last_token_indices]
