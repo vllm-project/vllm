@@ -207,6 +207,24 @@ class ParallelConfig:
 
     enable_dbo: bool = False
     """Enable dual batch overlap for the model executor."""
+
+    sp_threshold: int | None = None
+    """Sequence-parallelism engage threshold, in tokens. A single umbrella knob
+    covering both mechanisms:
+
+    - the compile-based `SequenceParallelismPass` (drives
+      `compilation_config.pass_config.enable_sp` / `sp_min_token_num`), used by
+      torch.compile models, and
+    - the eager, in-forward SP applied by models that run without
+      torch.compile (e.g. DeepSeek V4's per-token mHC residual stream).
+
+    Values:
+    - `None` (default): sequence parallelism is not used. For the compile pass
+      this defers to the optimization-level default.
+    - `N > 0`: use SP, engaging only on forwards with at least `N` tokens (so
+      smaller forwards such as decode run plain TP).
+
+    Only takes effect when `tensor_parallel_size > 1`."""
     ubatch_size: int = Field(default=0, ge=0)
     """Number of ubatch size."""
 
@@ -629,6 +647,14 @@ class ParallelConfig:
         # If we get here all retries have failed.
         assert last_exc is not None
         raise last_exc
+
+    @property
+    def enable_sp(self) -> bool:
+        return self.tensor_parallel_size > 1 and self.sp_threshold is not None
+
+    @property
+    def sequence_parallel_size(self) -> int:
+        return self.tensor_parallel_size if self.enable_sp else 1
 
     # The all_reduce at the end of attention (during o_proj) means that
     # inputs are replicated across each rank of the tensor parallel group.
