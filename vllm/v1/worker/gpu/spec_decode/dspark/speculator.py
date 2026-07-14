@@ -40,6 +40,9 @@ class DSparkSpeculator(DFlashSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
+        # Whether to sample from the anchor position. When True, uses anchor-as-first
+        # (N slots, each position predicts the next token). When False, uses 1+N
+        # fill-in block (anchor is a bonus token).
         self.sample_from_anchor = getattr(
             self.draft_model_config.hf_config, "sample_from_anchor", True
         )

@@ -106,6 +106,9 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
         DFlash drafter. Mapped to both eagle_aux_hidden_state_layer_ids
         (for gpu_model_runner) and dflash_config.target_layer_ids (for the
         DFlash model).
+    - sample_from_anchor: Whether to sample from the anchor position. Default
+        False (anchor is a bonus token, only mask tokens predict, yielding
+        block_size - 1 speculative tokens).
     """
     pre_trained_config["architectures"] = ["DFlashDraftModel"]
     pre_trained_config["draft_vocab_size"] = config_dict.get("draft_vocab_size")
@@ -147,6 +150,9 @@ def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
     - aux_hidden_state_layer_ids (required): target layer indices feeding the
         drafter. Mapped to both eagle_aux_hidden_state_layer_ids and
         target_layer_ids (DSpark's i-1 layer semantics).
+    - sample_from_anchor: Whether to sample from the anchor position. Default
+        True (sample from anchor and all mask positions, yielding block_size
+        speculative tokens).
     """
     pre_trained_config["architectures"] = ["Qwen3DSparkModel"]
     pre_trained_config["sample_from_anchor"] = config_dict.get(
