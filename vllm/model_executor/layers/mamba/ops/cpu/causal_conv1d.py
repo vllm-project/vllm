@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
@@ -178,7 +179,6 @@ def causal_conv1d_update_cpu(
     return out.to(original_x_dtype)
 
 
-import torch.nn.functional as F
 
 def causal_conv1d_torch(
     x: torch.Tensor,

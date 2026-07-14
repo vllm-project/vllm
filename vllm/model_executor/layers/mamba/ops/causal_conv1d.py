@@ -1279,10 +1279,10 @@ def causal_conv1d_update(
     )
 
 
-from vllm.platforms import current_platform
+from vllm.platforms import current_platform  # noqa: F401, E402
 
 if current_platform.is_cpu():
-    from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
+    from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (  # noqa: F401, E402
         causal_conv1d_fn_cpu as causal_conv1d_fn,
         causal_conv1d_update_cpu as causal_conv1d_update,
     )

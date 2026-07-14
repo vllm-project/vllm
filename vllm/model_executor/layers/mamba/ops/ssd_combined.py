@@ -252,15 +252,14 @@ def mamba_chunk_scan_combined_varlen(
         last_chunk_indices=last_chunk_indices,
         dt_softplus=dt_softplus,
         dt_limit=dt_limit,
-        return_intermediate_states=return_intermediate_states,
         state_dtype=state_dtype,
     )
     return varlen_states
 
 
-from vllm.platforms import current_platform
+from vllm.platforms import current_platform  # noqa: F401, E402
 
 if current_platform.is_cpu():
-    from vllm.model_executor.layers.mamba.ops.cpu.mamba_ssm import (
+    from vllm.model_executor.layers.mamba.ops.cpu.mamba_ssm import (  # noqa: F401, E402
         _mamba_chunk_scan_combined_fwd_cpu as _mamba_chunk_scan_combined_fwd,
     )
