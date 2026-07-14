@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 mod convert;
 mod types;
 mod validate;
@@ -212,6 +215,7 @@ async fn collect_completion(
         usage: Some(usage),
         system_fingerprint: None,
         kv_transfer_params: collected.kv_transfer_params,
+        ec_transfer_params: collected.ec_transfer_params,
     })
 }
 
@@ -682,6 +686,7 @@ mod tests {
                         "repetition_detected".to_string(),
                     ))),
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }),
         ]);
@@ -786,6 +791,7 @@ mod tests {
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }),
         ]);
@@ -837,6 +843,7 @@ mod tests {
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }),
         ]);
@@ -891,6 +898,7 @@ mod tests {
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }),
         ]);
@@ -962,6 +970,7 @@ mod tests {
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }),
         ]);
@@ -1035,6 +1044,7 @@ mod tests {
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }),
         ]);
