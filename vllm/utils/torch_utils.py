@@ -416,26 +416,24 @@ def nvfp4_kv_cache_full_dim(head_size: int) -> int:
     return head_size // 2 + head_size // 16
 
 
-def _nvfp4_split_data_scale(
+def nvfp4_split_data_scale(
     kv_side: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Split a single NVFP4 KV-side buffer into data and scale views.
+    """Split one side (K or V) of an NVFP4 KV cache into data and scale.
 
-    The input is a 4D tensor for one KV side (K or V) whose last
-    dimension is ``full_dim = data_dim + scale_dim``.  The physical
-    layout within each side is [data | scale], both packed contiguously.
+    The input is a 4D uint8 tensor whose last dimension is
+    ``full_dim = data_dim + scale_dim``.  The physical layout within each
+    side is ``[data | scale]``, both packed contiguously.
+
+    The caller is responsible for slicing K and V from the combined cache
+    first (e.g. ``kv_cache.split(num_kv_heads, dim=1)``).
 
     Args:
-        kv_side: 4D uint8 tensor with shape
-            ``(num_pages, dim_1, dim_2, full_dim)``.
-            May be in any permutation order (NHD or HND).
+        kv_side: 4D uint8 tensor ``(B, H, N, full_dim)``.
 
     Returns:
-        ``(data, scale)`` where
-        ``data`` is a uint8 view with shape
-        ``(num_pages, dim_1, dim_2, data_dim)``.
-        ``scale`` is a float8_e4m3fn view with shape
-        ``(num_pages, dim_1, dim_2, scale_dim)``.
+        ``(data, scale)`` where *data* is uint8 and *scale* is
+        float8_e4m3fn, both views of the same storage.
     """
     num_pages = kv_side.shape[0]
     dim_1, dim_2 = kv_side.shape[1], kv_side.shape[2]
@@ -466,38 +464,6 @@ def _nvfp4_split_data_scale(
     ).view(torch.float8_e4m3fn)
 
     return data, scale
-
-
-def nvfp4_kv_cache_split_views(kv_cache: torch.Tensor) -> tuple[tuple, tuple]:
-    """Split an NVFP4 KV cache tensor into data and scale views.
-
-    Accepts either a 5D tensor ``(num_pages, 2, dim_2, dim_3, full_dim)``
-    or a 4D single-side tensor ``(num_pages, dim_2, dim_3, full_dim)``.
-
-    Per-page layout: [K_data | K_scale | V_data | V_scale].
-    Each KV side is self-contained (data followed by its scale), so the
-    5D case simply splits each side independently.
-
-    The returned views are in the same dim order as the input (NHD or
-    HND), so callers get views matching whichever order they passed in.
-
-    Args:
-        kv_cache: 5D or 4D uint8 tensor where the last dimension is
-            ``full_dim = data_dim + scale_dim = 9 * head_size / 16``.
-
-    Returns:
-        For 5D input:
-            ``(k_data, v_data), (k_scale, v_scale)``
-        For 4D input (single KV side):
-            ``(data,), (scale,)``
-    """
-    if kv_cache.dim() == 4:
-        data, scale = _nvfp4_split_data_scale(kv_cache)
-        return (data,), (scale,)
-
-    k_data, k_scale = _nvfp4_split_data_scale(kv_cache[:, 0])
-    v_data, v_scale = _nvfp4_split_data_scale(kv_cache[:, 1])
-    return (k_data, v_data), (k_scale, v_scale)
 
 
 def create_kv_caches_with_random_flash(
