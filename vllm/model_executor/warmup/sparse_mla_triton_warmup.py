@@ -29,6 +29,7 @@ _GENERIC_SPARSE_MLA_BACKENDS = frozenset(
         "FLASHINFER_MLA_SPARSE_SM120",
     }
 )
+_INDEXER_PREFILL_CHUNK_METADATA_BACKENDS = frozenset({"DEEPSEEK_V32_INDEXER"})
 
 _SPARSE_PREFILL_METADATA_NUM_PREFILLS = (1, 2, 4, 8)
 _SPARSE_PREFILL_METADATA_NUM_DECODES = (0, 1, 2)
@@ -325,6 +326,12 @@ def sparse_mla_triton_warmup_if_needed(worker: "Worker") -> None:
                 runner,
                 num_tokens,
                 compress_ratios=(1,),
+            )
+        elif _has_attention_backend(runner, _INDEXER_PREFILL_CHUNK_METADATA_BACKENDS):
+            _warm_prefill_chunk_metadata_kernel(
+                getattr(runner, "device", torch.device("cuda")),
+                compress_ratio=1,
+                query_len=num_tokens,
             )
     except Exception:
         logger.warning("Skipping sparse MLA Triton warmup.", exc_info=True)
