@@ -335,6 +335,24 @@ def _canonicalize_sparse_mla_kv_cache_dtype(
     return kv_cache_dtype
 
 
+def _dense_mha_context_gather_unsupported(
+    kv_cache_dtype: str,
+    prefill: "MLACommonPrefillMetadata | None",
+) -> bool:
+    """Whether the dense-MHA prefill path would have to gather cached context
+    it cannot read. The chunked-context gather kernels do not understand the
+    fp8_ds_mla cache layout (656B entries: fp8 NoPE + inline tile scales +
+    bf16 RoPE): cp_gather_cache rejects the uint8/bf16 dtype mismatch and
+    gather_and_maybe_dequant_cache dequantizes the raw bytes as flat fp8,
+    producing corrupted K/V. Such prefills must stay on the top-k MQA path.
+    """
+    return (
+        kv_cache_dtype == "fp8_ds_mla"
+        and prefill is not None
+        and prefill.chunked_context is not None
+    )
+
+
 class MLAAttention(nn.Module, AttentionLayerBase):
     """Multi-Head Latent Attention layer.
 
@@ -720,6 +738,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self.prefill_backend is not None
                 and prefill_max_seq_len <= attn_metadata.topk_tokens  # type: ignore[attr-defined]
                 and not self._vllm_config.attention_config.sparse_mla_force_mqa
+                and not _dense_mha_context_gather_unsupported(
+                    self.kv_cache_dtype, attn_metadata.prefill
+                )
             )
             if not use_mha:
                 num_mqa_tokens = q.size(0)

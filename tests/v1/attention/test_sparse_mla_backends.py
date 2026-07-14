@@ -1239,3 +1239,33 @@ def test_triton_convert_returns_valid_counts():
     )
     assert isinstance(result_only, torch.Tensor)
     torch.testing.assert_close(result_only, result, rtol=0, atol=0)
+
+
+def test_fp8_ds_mla_context_prefill_stays_on_mqa_path():
+    """Guard against the #47327 regression: the dense-MHA prefill path cannot
+    gather cached context from an fp8_ds_mla cache (cp_gather_cache rejects
+    the uint8/bf16 dtype mismatch under DCP; gather_and_maybe_dequant_cache
+    silently dequantizes the 656B entries as flat fp8 otherwise), so use_mha
+    must be blocked exactly when kv cache is fp8_ds_mla and the prefill has
+    chunked context — and stay available when there is no context, keeping
+    the fast path for short no-context prefills."""
+    from vllm.model_executor.layers.attention.mla_attention import (
+        _canonicalize_sparse_mla_kv_cache_dtype,
+        _dense_mha_context_gather_unsupported,
+    )
+
+    with_context = SimpleNamespace(chunked_context=object())
+    no_context = SimpleNamespace(chunked_context=None)
+
+    assert _dense_mha_context_gather_unsupported("fp8_ds_mla", with_context)
+    assert not _dense_mha_context_gather_unsupported("fp8_ds_mla", no_context)
+    assert not _dense_mha_context_gather_unsupported("fp8_ds_mla", None)
+    assert not _dense_mha_context_gather_unsupported("auto", with_context)
+
+    # kv-cache dtype aliases are canonicalized to fp8_ds_mla before the layer
+    # stores kv_cache_dtype, so they cannot bypass the gate.
+    for alias in ("fp8", "fp8_e4m3"):
+        assert (
+            _canonicalize_sparse_mla_kv_cache_dtype(FlashMLASparseBackend, alias)
+            == "fp8_ds_mla"
+        )
