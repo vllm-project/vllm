@@ -177,7 +177,9 @@ class HYV3MoEFused(nn.Module):
         else:
             self.shared_mlp = None
 
-        self.expert_bias = nn.Parameter(torch.empty(config.num_experts))
+        self.expert_bias = nn.Parameter(
+            torch.empty(config.num_experts, dtype=torch.float32)
+        )
         scoring_func = "sigmoid"
         e_score_correction_bias = self.expert_bias
 
