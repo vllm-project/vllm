@@ -37,6 +37,8 @@ from vllm.v1.kv_cache_interface import (
 
 
 def _prefer_two_stage_compressor() -> bool:
+    # Platforms that favor the triton variant of two-stage compressor split.
+    # Currently only tested on ROCm
     return current_platform.is_rocm()
 
 
