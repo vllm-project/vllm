@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
 import weakref
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 import torch.distributed
@@ -11,7 +11,6 @@ from vllm.config import ParallelConfig
 from vllm.distributed import (
     stateless_destroy_torch_distributed_process_group,
 )
-from vllm.distributed.elastic_ep.async_utils import SingleMethodAsyncRunner
 from vllm.distributed.utils import get_cached_tcp_store_client
 from vllm.logger import init_logger
 from vllm.v1.engine import (
@@ -86,7 +85,9 @@ class ElasticEPScalingState:
         self.scale_type = scale_type
         self.reconfig_request = reconfig_request
         self.commit_requested = False
-        self._prepare_runner = SingleMethodAsyncRunner()
+        self._prepare_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="ElasticEPPrepare"
+        )
         self._prepare_future: Future[Any] | None = None
         self._new_dp_sync: tuple[object, Any] | None = None
         self.state: EngineState
@@ -131,13 +132,13 @@ class ElasticEPScalingState:
                 self.reconfig_request.new_data_parallel_master_ip,
                 self.reconfig_request.coord_store_port,
             )
-            self._prepare_future = self._prepare_runner.start(
+            self._prepare_future = self._prepare_executor.submit(
                 coord_store.wait, done_keys
             )
         if not self._prepare_future.done():
             return False
 
-        self._prepare_runner.clear()
+        self._prepare_future.result()
         self._collective_rpc("elastic_ep_execute", args=("clear_async",))
         self._prepare_future = None
         return True
@@ -317,11 +318,13 @@ class ElasticEPScalingState:
             return True
 
         if self._prepare_future is None:
-            self._prepare_future = self._prepare_runner.start(self._init_new_dp_group)
+            self._prepare_future = self._prepare_executor.submit(
+                self._init_new_dp_group
+            )
         if not self._prepare_future.done():
             return False
 
-        self.new_dp_group, self.new_dp_store = self._prepare_runner.clear()
+        self.new_dp_group, self.new_dp_store = self._prepare_future.result()
         self._prepare_future = None
         return True
 
