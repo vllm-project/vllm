@@ -512,7 +512,6 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
             )
 
             valid_codes_embeds = []
-
             for audio in audio_items:
                 with torch.inference_mode():
                     valid_codes_i = self.audio_tower.encode_audio(

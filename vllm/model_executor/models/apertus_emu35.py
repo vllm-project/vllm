@@ -11,8 +11,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import reduce
-from torch import einsum
 from safetensors.torch import load_file
+from torch import einsum
 
 
 def nonlinearity(x: torch.Tensor) -> torch.Tensor:
