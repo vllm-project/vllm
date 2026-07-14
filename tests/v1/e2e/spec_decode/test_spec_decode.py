@@ -445,7 +445,9 @@ def _run_eagle_correctness(
         # keep the default gpu_memory_utilization.
         gpu_memory_utilization_kwargs = (
             {"gpu_memory_utilization": 0.85}
-            if attn_backend == "TRITON_ATTN" and "Llama-4-Scout" in model_name
+            if current_platform.is_rocm()
+            and attn_backend == "TRITON_ATTN"
+            and "Llama-4-Scout" in model_name
             else {}
         )
 
