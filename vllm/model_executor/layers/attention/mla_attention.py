@@ -392,16 +392,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             calculate_kv_scales = False
         self.quant_config = quant_config
 
-        # Skip quantization for specified layers
         if cache_config is not None and cache_config.kv_cache_dtype_skip_layers:
             from vllm.model_executor.models.utils import extract_layer_index
 
-            skip = False
-            # Check layer index
             layer_idx = extract_layer_index(prefix)
             if str(layer_idx) in cache_config.kv_cache_dtype_skip_layers:
-                skip = True
-            if skip:
                 kv_cache_dtype = "auto"
                 calculate_kv_scales = False
             logger.debug(
