@@ -180,9 +180,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         # Cached decode kernel: persistent per-decode-row ring write position.
         # write_pos is derived per request each step (decode_step % max_cache_len)
         # so recycled paged blocks need no zero-init.
-        self.use_cached_kernel: bool = (
-            vllm_config.cache_config.use_replayssm
-        )
+        self.use_cached_kernel: bool = vllm_config.cache_config.use_replayssm
         self.max_cache_len: int = vllm_config.cache_config.replayssm_buffer_len
         if self.use_cached_kernel:
             self.decode_write_pos_d: torch.Tensor = torch.empty(
@@ -194,9 +192,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         # Cached-SPEC decode: block-keyed cursors (sized num_gpu_blocks),
         # allocated lazily on first build (num_gpu_blocks is unknown here), and
         # advanced once per step by commit_gdn_replayssm_spec.
-        self.use_cache_spec_kernel: bool = (
-            vllm_config.cache_config.use_replayssm_spec
-        )
+        self.use_cache_spec_kernel: bool = vllm_config.cache_config.use_replayssm_spec
         self.max_spec_len: int = 1 + self.num_spec
         # L = B + max_spec_len history window; physical pow2 ring = next_pow2(L).
         self.spec_flush_threshold = self.max_cache_len + self.max_spec_len
@@ -250,8 +246,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 )
 
         if spec_sequence_masks is None:
+            # ReplaySSM routes single-token prefill-as-decode rows to prefill.
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-                split_decodes_and_prefills(m, decode_threshold=1)
+                split_decodes_and_prefills(
+                    m,
+                    decode_threshold=1,
+                    treat_short_extends_as_decodes=not self.use_cached_kernel,
+                )
             )
             num_spec_decode_tokens = 0
             spec_token_indx = None
@@ -542,12 +543,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 num_prompt_d = num_prompt_tokens_cpu.to(
                     context_lens_tensor.device, non_blocking=True
                 )
-                first_decode_full = (context_lens_tensor == num_prompt_d).to(
-                    torch.int8
-                )
-                spec_row_idx = (
-                    spec_sequence_masks_cpu.nonzero(as_tuple=True)[0]
-                    .to(query_start_loc.device, non_blocking=True)
+                first_decode_full = (context_lens_tensor == num_prompt_d).to(torch.int8)
+                spec_row_idx = spec_sequence_masks_cpu.nonzero(as_tuple=True)[0].to(
+                    query_start_loc.device, non_blocking=True
                 )
                 first_decode_d = first_decode_full.index_select(0, spec_row_idx)
                 reset_gdn_replayssm_spec_cursors(
