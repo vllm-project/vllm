@@ -460,6 +460,9 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
  && git checkout ${DEEPEP_BRANCH} \
  && LDFLAGS="-fuse-ld=mold" MAX_JOBS="${MAX_JOBS:-$(nproc)}" python3 setup.py --variant rocm --rocm-explicit-ctx --nic ${DEEPEP_NIC} bdist_wheel --dist-dir=/app/deep_install
 
+# Make the wheel contents part of downstream install-layer cache keys.
+RUN sha256sum /app/deep_install/*.whl > /app/deep_install/wheels.sha256
+
 # MoRI runtime dependencies live in Dockerfile.rocm so NIC backend changes do
 # not force users to rebuild the long-lived Dockerfile.rocm_base image.
 FROM base AS mori_base
@@ -633,25 +636,27 @@ COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/rust-toolchain.toml 
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 
 # -----------------------
-# CI base image (Tier 1) - stable, rarely changing CI dependencies.
-# Per-PR test builds pull this as CI_BASE_IMAGE so the test stage only layers
-# in the vLLM artifacts for the current commit.
-FROM mori_base AS ci_base
-ARG COMMON_WORKDIR
+# ROCm communication runtime used by the long-lived CI base image.
+# Keep this separate from release final so CI dependencies can evolve and
+# cache independently without changing release-image contents.
+FROM build_rixl AS ci_rixl_wheel_manifest
+RUN sha256sum /app/install/*.whl > /app/install/wheels.sha256
 
-ENV CARGO_HOME=/root/.cargo
-ENV RUSTUP_HOME=/root/.rustup
-ENV PATH=${CARGO_HOME}/bin:${PATH}
+FROM mori_base AS ci_comm_runtime
+ARG DEEPEP_NIC="cx7"
 
-# Bake the Rust/protoc toolchain into ci_base so Rust build/test steps do not
-# need to fetch it on each per-commit image build.
-COPY --from=rust-toolchain /root/.cargo /root/.cargo
-COPY --from=rust-toolchain /root/.rustup /root/.rustup
-COPY --from=rust-toolchain /usr/local/bin/protoc /usr/local/bin/protoc
-COPY --from=rust-toolchain /usr/local/include/google /usr/local/include/google
+ENV ROCSHMEM_DIR=/opt/rocshmem
+ENV LD_LIBRARY_PATH=${ROCSHMEM_DIR}/lib:${LD_LIBRARY_PATH}
+
+# RDMA userspace libraries needed by UCX/RIXL and DeepEP.
+RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
+    librdmacm1 \
+    libibverbs1 \
+    ibverbs-providers \
+    ibverbs-utils \
+    && rm -rf /var/lib/apt/lists/*
 
 # Update rdma-core to support latest rocshmem.
-ARG DEEPEP_NIC
 RUN if [ "${DEEPEP_NIC}" = "cx7" ] || [ "${DEEPEP_NIC}" = "io" ]; then \
     git clone --branch v62.0 --depth 1 https://github.com/linux-rdma/rdma-core.git /tmp/rdma-core && \
     cd /tmp/rdma-core && \
@@ -660,20 +665,27 @@ RUN if [ "${DEEPEP_NIC}" = "cx7" ] || [ "${DEEPEP_NIC}" = "io" ]; then \
     ninja && ninja install && ldconfig && rm -rf /tmp/rdma-core; \
 fi
 
-# Install RIXL + DeepEP wheels.
-RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \
-    --mount=type=bind,from=build_deepep,src=/app/deep_install,target=/deep_install \
-    uv pip install --system /rixl_install/*.whl /deep_install/*.whl
-
-# Copy ROCShmem runtime libraries.
 COPY --from=build_rocshmem /opt/rocshmem /opt/rocshmem
 
-# RDMA userspace libraries plus FFmpeg dev libs needed by torchcodec.
+# Copy only checksums so wheel changes invalidate the bind-mounted install layer.
+COPY --from=ci_rixl_wheel_manifest /app/install/wheels.sha256 /tmp/rixl-wheels.sha256
+COPY --from=build_deepep /app/deep_install/wheels.sha256 /tmp/deepep-wheels.sha256
+
+# Install the repaired RIXL wheel and the ROCm DeepEP wheel.
+RUN --mount=type=bind,from=ci_rixl_wheel_manifest,src=/app/install,target=/rixl_install \
+    --mount=type=bind,from=build_deepep,src=/app/deep_install,target=/deep_install \
+    --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system /rixl_install/*.whl /deep_install/*.whl
+
+# -----------------------
+# CI base image (Tier 1) - stable, rarely changing CI dependencies.
+# Per-PR test builds pull this as CI_BASE_IMAGE so the test stage only layers
+# in the vLLM artifacts for the current commit.
+FROM ci_comm_runtime AS ci_base
+ARG COMMON_WORKDIR
+
+# FFmpeg dev libs needed by torchcodec.
 RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
-    librdmacm1 \
-    libibverbs1 \
-    ibverbs-providers \
-    ibverbs-utils \
     unzip \
     pkg-config ffmpeg libavcodec-dev libavformat-dev libavutil-dev \
     libswscale-dev libavdevice-dev libavfilter-dev libswresample-dev \
@@ -733,6 +745,17 @@ COPY tests/vllm_test_utils /tmp/vllm_test_utils
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system /tmp/vllm_test_utils \
     && rm -rf /tmp/vllm_test_utils
+
+# Join the independently built Rust/protoc toolchain only after Python and
+# runtime dependencies are installed. Toolchain changes no longer invalidate
+# those layers, and BuildKit can prepare this stage in parallel.
+ENV CARGO_HOME=/root/.cargo
+ENV RUSTUP_HOME=/root/.rustup
+ENV PATH=${CARGO_HOME}/bin:${PATH}
+COPY --from=rust-toolchain /root/.cargo /root/.cargo
+COPY --from=rust-toolchain /root/.rustup /root/.rustup
+COPY --from=rust-toolchain /usr/local/bin/protoc /usr/local/bin/protoc
+COPY --from=rust-toolchain /usr/local/include/google /usr/local/include/google
 
 # -----------------------
 # Test vLLM image (Tier 2) - vLLM-only layer on top of ci_base.

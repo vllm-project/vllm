@@ -368,6 +368,13 @@ variable "CI_BASE_IMAGE_TAG_STABLE" {
   default = ""
 }
 
+# Read-only fallback for rebuilding a new content-addressed ci_base. The
+# stable image's inline cache can reuse unchanged CI layers without making
+# this ref an output tag for pull-request builds.
+variable "CI_BASE_CACHE_FALLBACK_IMAGE" {
+  default = "rocm/vllm-dev:ci_base"
+}
+
 # Cache-only targets for upstream dependency stages. These persist each stage
 # in the registry cache keyed by its upstream commit hash. When ci_base rebuilds
 # (e.g., requirements change), these stages are cache hits if their upstream
@@ -411,6 +418,7 @@ target "ci-base-rocm-ci" {
       CI_BASE_IMAGE_TAG_COMMIT_EXTRA != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG_COMMIT_EXTRA}" : "",
       CI_BASE_IMAGE_TAG_CONTENT_EXTRA != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG_CONTENT_EXTRA}" : "",
       CI_BASE_IMAGE_TAG_STABLE != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG_STABLE}" : "",
+      CI_BASE_CACHE_FALLBACK_IMAGE != "" && CI_BASE_CACHE_FALLBACK_IMAGE != CI_BASE_IMAGE_TAG && CI_BASE_CACHE_FALLBACK_IMAGE != CI_BASE_IMAGE_TAG_STABLE ? "type=registry,ref=${CI_BASE_CACHE_FALLBACK_IMAGE}" : "",
     ]),
     # Import upstream dependency caches so RIXL/ROCShmem/DeepEP stages
     # are cache hits even when ci_base itself needs rebuilding.
