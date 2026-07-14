@@ -4,9 +4,48 @@
 from unittest.mock import Mock
 
 import pytest
+import torch
 from transformers import PretrainedConfig
 
 from vllm.multimodal.processing import InputProcessingContext
+
+
+def test_pack_qwen3_audio_features_keeps_flat_input():
+    from vllm.model_executor.models.qwen3_omni_moe_thinker import (
+        _pack_qwen3_audio_features,
+    )
+
+    features = torch.arange(20).reshape(2, 10)
+
+    packed = _pack_qwen3_audio_features(features, torch.tensor([4, 6]))
+
+    assert packed is features
+
+
+@pytest.mark.parametrize("as_list", [False, True])
+def test_pack_qwen3_audio_features_trims_and_concatenates_items(as_list: bool):
+    from vllm.model_executor.models.qwen3_omni_moe_thinker import (
+        Qwen3AudioFeatureInputs,
+        _pack_qwen3_audio_features,
+    )
+
+    first = torch.tensor([[1, 2, 9, 9], [3, 4, 9, 9]])
+    second = torch.tensor([[5, 6, 7, 9], [8, 9, 10, 9]])
+    features = [first[:, :3], second] if as_list else torch.stack([first, second])
+    lengths = torch.tensor([2, 3])
+
+    audio_input = Qwen3AudioFeatureInputs(
+        type="audio_features",
+        input_features=features,
+        audio_feature_lengths=lengths,
+        feature_attention_mask=[torch.ones(2), torch.ones(3)],
+    )
+    packed = _pack_qwen3_audio_features(
+        audio_input["input_features"], audio_input["audio_feature_lengths"]
+    )
+
+    expected = torch.tensor([[1, 2, 5, 6, 7], [3, 4, 8, 9, 10]])
+    torch.testing.assert_close(packed, expected)
 
 
 # Helper function to print input IDs with coalesced audio/video tokens.

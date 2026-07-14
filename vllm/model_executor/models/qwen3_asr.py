@@ -48,9 +48,10 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 from vllm.model_executor.models.qwen3_omni_moe_thinker import (
-    Qwen2_5OmniAudioFeatureInputs,
+    Qwen3AudioFeatureInputs,
     Qwen3OmniMoeAudioEncoder,
     Qwen3OmniMoeThinkerMultiModalProcessor,
+    _pack_qwen3_audio_features,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -405,14 +406,14 @@ class Qwen3ASRForConditionalGeneration(
 
     def _parse_and_validate_audio_input(
         self, **kwargs: object
-    ) -> Qwen2_5OmniAudioFeatureInputs | None:
+    ) -> Qwen3AudioFeatureInputs | None:
         input_audio_features = kwargs.pop("input_audio_features", None)
         audio_feature_lengths = kwargs.pop("audio_feature_lengths", None)
         feature_attention_mask = kwargs.pop("feature_attention_mask", None)
         if input_audio_features is None:
             return None
 
-        return Qwen2_5OmniAudioFeatureInputs(
+        return Qwen3AudioFeatureInputs(
             type="audio_features",
             input_features=input_audio_features,
             audio_feature_lengths=audio_feature_lengths,
@@ -436,10 +437,13 @@ class Qwen3ASRForConditionalGeneration(
 
     def _process_audio_input(
         self,
-        audio_input: Qwen2_5OmniAudioFeatureInputs,
+        audio_input: Qwen3AudioFeatureInputs,
     ) -> torch.Tensor:
         input_features = audio_input["input_features"]
         audio_feature_lengths = audio_input["audio_feature_lengths"]
+        input_features = _pack_qwen3_audio_features(
+            input_features, audio_feature_lengths
+        )
 
         audio_output_lengths = _get_feat_extract_output_lengths(audio_feature_lengths)
 
