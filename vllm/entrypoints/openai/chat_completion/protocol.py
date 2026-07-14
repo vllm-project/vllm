@@ -134,6 +134,9 @@ class ChatCompletionResponse(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
+    ec_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="ECTransfer parameters."
+    )
     metrics: PerRequestTimingMetrics | None = None
 
 
@@ -267,6 +270,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
     prompt_logprobs: int | None = None
+    logprob_token_ids: list[int] | None = Field(
+        default=None,
+        description=(
+            "Specific vocab token IDs to return logprobs for at each generated "
+            "position, in addition to the sampled token. More efficient than "
+            "`top_logprobs=-1` when only a small fixed label set is needed "
+            "(e.g. multilabel scoring "
+            "where each label corresponds to a known vocab id). When set, "
+            "this explicit token selection takes precedence over the natural "
+            "top-k selected by `top_logprobs`. Requires `logprobs=True`."
+        ),
+    )
     allowed_token_ids: list[int] | None = None
     bad_words: list[str] = Field(default_factory=list)
     # --8<-- [end:chat-completion-sampling-params]
@@ -437,6 +452,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
+    )
+
+    ec_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "ECTransfer parameters used for encoder-cache disaggregated serving."
+        ),
     )
 
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
@@ -665,6 +687,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
+        if self.ec_transfer_params:
+            # Pass in ec_transfer_params via extra_args
+            extra_args["ec_transfer_params"] = self.ec_transfer_params
         return SamplingParams.from_optional(
             n=self.n,
             presence_penalty=self.presence_penalty,
@@ -677,8 +702,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
             seed=self.seed,
             stop=self.stop,
             stop_token_ids=stop_token_ids,
-            logprobs=self.top_logprobs if self.logprobs else None,
+            logprobs=(
+                self.top_logprobs
+                if self.logprobs and not self.logprob_token_ids
+                else None
+            ),
             prompt_logprobs=prompt_logprobs,
+            logprob_token_ids=self.logprob_token_ids or None,
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens,
             min_tokens=self.min_tokens,
@@ -743,6 +773,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_logprobs(cls, data):
+        if data.get("logprob_token_ids") and data.get("use_beam_search"):
+            raise VLLMValidationError(
+                "`logprob_token_ids` is not supported with beam search.",
+                parameter="logprob_token_ids",
+            )
+
+        if data.get("logprob_token_ids") and not data.get("logprobs"):
+            raise VLLMValidationError(
+                "when using `logprob_token_ids`, `logprobs` must be set to true.",
+                parameter="logprob_token_ids",
+            )
+
         if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
             if data.get("stream") and (prompt_logprobs > 0 or prompt_logprobs == -1):
                 raise VLLMValidationError(
@@ -996,6 +1038,14 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     logit_bias: dict[str, float] | None = None
     logprobs: bool | None = False
     top_logprobs: int | None = 0
+    logprob_token_ids: list[int] | None = Field(
+        default=None,
+        description=(
+            "Specific vocab token IDs to return logprobs for at each generated "
+            "position, in addition to the sampled token. Requires "
+            "`logprobs=True`."
+        ),
+    )
     max_tokens: int | None = None
     max_completion_tokens: int | None = None
     n: int | None = 1
@@ -1044,6 +1094,10 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
             raise ValueError(
                 "Batch chat completions do not support beam search. "
                 "Please set `use_beam_search` to False."
+            )
+        if data.get("logprob_token_ids") and not data.get("logprobs"):
+            raise ValueError(
+                "when using `logprob_token_ids`, `logprobs` must be set to true."
             )
         response_format = data.get("response_format")
         rf_type = (
