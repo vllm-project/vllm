@@ -11,6 +11,7 @@ from tests.tool_parsers.utils import (
     run_tool_extraction,
     run_tool_extraction_streaming,
 )
+from vllm import envs
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
@@ -26,7 +27,14 @@ def kimi_k2_tokenizer():
 
 
 @pytest.fixture
-def parser(kimi_k2_tokenizer):
+def parser(kimi_k2_tokenizer, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", False, raising=False)
+    return KimiK2ToolParser(kimi_k2_tokenizer)
+
+
+@pytest.fixture
+def validated_parser(kimi_k2_tokenizer, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", True, raising=False)
     return KimiK2ToolParser(kimi_k2_tokenizer)
 
 
@@ -148,8 +156,46 @@ class TestExtractToolCalls:
             # id format: "something:digit"
             assert tc.id.split(":")[-1].isdigit()
 
-    def test_invalid_json_still_extracted(self, parser):
-        """Tool calls with invalid JSON are still returned (arguments as-is)."""
+    @pytest.mark.parametrize(
+        "invalid_args",
+        [
+            pytest.param('{"city": "Beijing"', id="truncated_json"),
+            pytest.param('{"a": 1}{"b": 2}', id="multiple_json_values"),
+            pytest.param('{"a": 1} trailing', id="trailing_data"),
+        ],
+    )
+    def test_invalid_json_tool_call_skipped(self, validated_parser, invalid_args):
+        model_output = (
+            "Help. "
+            + SECTION_BEGIN
+            + _tool("functions.bad:0", invalid_args)
+            + _tool("functions.good:1", '{"city": "Shanghai"}')
+            + SECTION_END
+        )
+        content, tool_calls = run_tool_extraction(
+            validated_parser, model_output, streaming=False
+        )
+        assert len(tool_calls) == 1
+        assert tool_calls[0].function.name == "good"
+        assert json.loads(tool_calls[0].function.arguments) == {"city": "Shanghai"}
+
+    def test_truncated_tool_call_skipped(self, validated_parser):
+        model_output = (
+            "Help. "
+            + SECTION_BEGIN
+            + TOOL_BEGIN
+            + "functions.get_weather:0 "
+            + ARG_BEGIN
+            + '{"city": "Bei'
+        )
+
+        content, tool_calls = run_tool_extraction(
+            validated_parser, model_output, streaming=False
+        )
+
+        assert tool_calls == []
+
+    def test_invalid_json_keeps_upstream_behavior_without_validations(self, parser):
         model_output = (
             "Help. "
             + SECTION_BEGIN
@@ -157,10 +203,11 @@ class TestExtractToolCalls:
             + _tool("functions.good:1", '{"city": "Shanghai"}')
             + SECTION_END
         )
-        content, tool_calls = run_tool_extraction(parser, model_output, streaming=False)
-        assert len(tool_calls) == 2
-        assert tool_calls[0].function.name == "bad"
-        assert tool_calls[1].function.name == "good"
+
+        _, tool_calls = run_tool_extraction(parser, model_output, streaming=False)
+
+        assert [call.function.name for call in tool_calls] == ["bad", "good"]
+        assert tool_calls[0].function.arguments == '{"city": "Beijing"'
 
     def test_invalid_funcall_id_skipped(self, parser):
         """Tool calls with malformed id (no colon+digit) are skipped."""
@@ -410,8 +457,8 @@ class TestStreamingEdgeCases:
         ids = [tc.id for tc in rec.tool_calls]
         assert len(set(ids)) == 3  # unique ids
 
-    def test_truncated_tool_call_no_end_marker(self, parser):
-        """Stream ending mid-tool-call (max_tokens) doesn't crash."""
+    def test_truncated_tool_call_no_end_marker(self, validated_parser):
+        """A max_tokens cutoff must not expose a partial tool call."""
         deltas = [
             "I'll check. ",
             SECTION_BEGIN,
@@ -421,16 +468,54 @@ class TestStreamingEdgeCases:
             '{"city": "Bei',
             # Stream ends here — no TOOL_END, no SECTION_END
         ]
-        rec = run_tool_extraction_streaming(parser, deltas)
+        rec = run_tool_extraction_streaming(validated_parser, deltas)
 
-        # Should not crash; tool name and partial args extracted
-        assert len(rec.tool_calls) == 1
-        assert rec.tool_calls[0].function.name == "get_weather"
-        assert rec.tool_calls[0].id == "functions.get_weather:0"
-        assert rec.tool_calls[0].function.arguments == '{"city": "Bei'
+        finish_delta = validated_parser.finish_streaming()
+
+        assert rec.tool_calls == []
+        assert finish_delta is None or not finish_delta.tool_calls
         # No markers leaked into content
         for marker in [SECTION_BEGIN, SECTION_END, TOOL_BEGIN, TOOL_END, ARG_BEGIN]:
             assert marker not in rec.other_content
+
+    @pytest.mark.parametrize(
+        "invalid_args",
+        [
+            pytest.param('{"a": 1}{"b": 2}', id="multiple_json_values"),
+            pytest.param('{"a": 1} trailing', id="trailing_data"),
+        ],
+    )
+    def test_invalid_json_tool_call_not_streamed(self, validated_parser, invalid_args):
+        deltas = _split_tool_output_to_deltas(
+            "Help. ",
+            [
+                ("functions.bad:0", invalid_args),
+                ("functions.good:1", '{"city": "Shanghai"}'),
+            ],
+        )
+
+        rec = run_tool_extraction_streaming(validated_parser, deltas)
+
+        assert len(rec.tool_calls) == 1
+        assert rec.tool_calls[0].function.name == "good"
+        assert rec.tool_calls[0].id == "functions.good:1"
+        assert json.loads(rec.tool_calls[0].function.arguments) == {"city": "Shanghai"}
+
+    def test_truncated_stream_keeps_upstream_behavior_without_validations(self, parser):
+        deltas = [
+            "I'll check. ",
+            SECTION_BEGIN,
+            TOOL_BEGIN,
+            "functions.get_weather:0 ",
+            ARG_BEGIN,
+            '{"city": "Bei',
+        ]
+
+        rec = run_tool_extraction_streaming(parser, deltas)
+
+        assert len(rec.tool_calls) == 1
+        assert rec.tool_calls[0].function.name == "get_weather"
+        assert rec.tool_calls[0].function.arguments == '{"city": "Bei'
 
     def test_content_after_tool_section(self, parser):
         """Trailing text after section_end doesn't crash or leak markers."""

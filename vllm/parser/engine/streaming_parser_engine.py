@@ -256,7 +256,10 @@ class StreamingParserEngine:
             ParserState.TOOL_NAME,
             ParserState.TOOL_BETWEEN,
         ):
-            if self.tool_index >= 0:
+            if (
+                self.config.close_incomplete_tool_call_on_finish
+                and self.tool_index >= 0
+            ):
                 events.append(
                     SemanticEvent(
                         EventType.TOOL_CALL_END,

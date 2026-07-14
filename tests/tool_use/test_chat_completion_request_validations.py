@@ -3,6 +3,7 @@
 
 import pytest
 
+from vllm import envs
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 
 
@@ -35,6 +36,90 @@ def test_chat_completion_request_with_no_tools():
                 "tools": [],
             }
         )
+
+
+def test_empty_tools_accepted_with_kimi_validations(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", True, raising=False)
+
+    request = ChatCompletionRequest.model_validate(
+        {
+            "messages": [{"role": "user", "content": "Hello"}],
+            "model": "facebook/opt-125m",
+            "tools": [],
+            "tool_choice": "auto",
+        }
+    )
+
+    assert request.tools is None
+    assert request.tool_choice == "none"
+
+
+@pytest.mark.parametrize(
+    ("thinking_type", "enabled"),
+    [("enabled", True), ("disabled", False)],
+)
+def test_top_level_thinking_normalized_with_kimi_validations(
+    monkeypatch: pytest.MonkeyPatch,
+    thinking_type: str,
+    enabled: bool,
+):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", True, raising=False)
+
+    request = ChatCompletionRequest.model_validate(
+        {
+            "messages": [{"role": "user", "content": "Hello"}],
+            "model": "facebook/opt-125m",
+            "thinking": {"type": thinking_type},
+        }
+    )
+
+    assert request.chat_template_kwargs == {
+        "thinking": enabled,
+        "enable_thinking": enabled,
+    }
+    assert not hasattr(request, "thinking")
+
+
+def test_explicit_chat_template_kwargs_override_top_level_thinking(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", True, raising=False)
+
+    request = ChatCompletionRequest.model_validate(
+        {
+            "messages": [{"role": "user", "content": "Hello"}],
+            "model": "facebook/opt-125m",
+            "thinking": {"type": "disabled"},
+            "chat_template_kwargs": {
+                "thinking": True,
+                "enable_thinking": True,
+            },
+        }
+    )
+
+    assert request.chat_template_kwargs == {
+        "thinking": True,
+        "enable_thinking": True,
+    }
+
+
+def test_top_level_thinking_is_ignored_without_kimi_validations(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", False, raising=False)
+
+    request = ChatCompletionRequest.model_validate(
+        {
+            "messages": [{"role": "user", "content": "Hello"}],
+            "model": "facebook/opt-125m",
+            "thinking": {"type": "disabled"},
+        }
+    )
+
+    assert request.chat_template_kwargs is None
+    assert request.thinking == {"type": "disabled"}
 
 
 @pytest.mark.parametrize("tool_choice", ["auto", "required"])

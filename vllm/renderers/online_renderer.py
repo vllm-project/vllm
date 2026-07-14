@@ -61,6 +61,7 @@ class OnlineRenderer:
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
         reasoning_parser: str | None = None,
+        enable_structured_outputs_in_reasoning: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         log_error_stack: bool = False,
     ) -> None:
@@ -69,6 +70,9 @@ class OnlineRenderer:
         self.request_logger = request_logger
 
         self.enable_auto_tools = enable_auto_tools
+        self.enable_structured_outputs_in_reasoning = (
+            enable_structured_outputs_in_reasoning
+        )
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
         self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
         self.parser: type[Parser] | None = ParserManager.get_parser(
@@ -415,6 +419,9 @@ class OnlineRenderer:
                     request.tools,
                     model_config=self.model_config,
                     chat_template_kwargs=chat_params.chat_template_kwargs,
+                    enable_structured_outputs_in_reasoning=(
+                        self.enable_structured_outputs_in_reasoning
+                    ),
                 ).adjust_request(
                     request=request,
                 )

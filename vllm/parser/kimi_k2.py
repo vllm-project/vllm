@@ -16,11 +16,14 @@ call id. The function name is the final component before ``:N``.
 from __future__ import annotations
 
 import functools
+import json
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import regex as re
 
+from vllm import envs
 from vllm.entrypoints.openai.engine.protocol import DeltaFunctionCall, DeltaToolCall
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
@@ -164,10 +167,16 @@ class KimiK2Parser(ParserEngine):
             if thinking is None and enable_thinking is None
             else bool(thinking) or bool(enable_thinking)
         )
-        kwargs.setdefault(
-            "parser_engine_config",
-            kimi_k2_config(thinking=self.thinking_enabled),
+        self._validate_complete_tool_calls = envs.NOVITA_ENABLE_KIMI_VALIDATIONS
+        parser_engine_config = kwargs.get(
+            "parser_engine_config", kimi_k2_config(thinking=self.thinking_enabled)
         )
+        if self._validate_complete_tool_calls:
+            parser_engine_config = replace(
+                parser_engine_config,
+                close_incomplete_tool_call_on_finish=False,
+            )
+        kwargs["parser_engine_config"] = parser_engine_config
         super().__init__(tokenizer, tools, **kwargs)
 
         vocab = self.vocab
@@ -205,17 +214,58 @@ class KimiK2Parser(ParserEngine):
 
     def _handle_tool_end(self, event, deltas) -> None:
         idx = event.tool_index
-        if 0 <= idx < len(self._tool_slots) and not self._tool_slots[idx].name_sent:
-            tool_id, tool_name = self._extract_tool_id_and_name(
-                self._tool_slots[idx].name
+        if not self._validate_complete_tool_calls:
+            if 0 <= idx < len(self._tool_slots) and not self._tool_slots[idx].name_sent:
+                tool_id, tool_name = self._extract_tool_id_and_name(
+                    self._tool_slots[idx].name
+                )
+                if tool_name:
+                    self._tool_slots[idx].id = tool_id or ""
+                    self._tool_slots[idx].name = tool_name
+            super()._handle_tool_end(event, deltas)
+            return
+
+        if not 0 <= idx < len(self._tool_slots):
+            return
+
+        slot = self._tool_slots[idx]
+        tool_id, tool_name = self._extract_tool_id_and_name(slot.name)
+        if not tool_name:
+            return
+
+        args_json = slot.args.strip() or "{}"
+        try:
+            parsed_args = json.loads(args_json)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(parsed_args, dict):
+            return
+
+        slot.id = tool_id or ""
+        slot.name = tool_name
+        if not self._is_valid_tool_name(tool_name):
+            return
+
+        slot.complete = True
+        slot.name_sent = True
+        args_json = self._fix_arg_types(args_json, tool_name)
+        output_idx = sum(prev.complete for prev in self._tool_slots[:idx])
+        deltas.append(
+            DeltaToolCall(
+                index=output_idx,
+                id=slot.id,
+                type="function",
+                function=DeltaFunctionCall(name=tool_name, arguments=args_json),
             )
-            if tool_name:
-                self._tool_slots[idx].id = tool_id or ""
-                self._tool_slots[idx].name = tool_name
-        super()._handle_tool_end(event, deltas)
+        )
 
     def _handle_arg_chunk(self, event, deltas) -> None:
         idx = event.tool_index
+        if self._validate_complete_tool_calls:
+            if event.value and 0 <= idx < len(self._tool_slots):
+                self._tool_slots[idx].append_args(event.value)
+            return
+
         name_sent_before = (
             0 <= idx < len(self._tool_slots) and self._tool_slots[idx].name_sent
         )
@@ -232,6 +282,11 @@ class KimiK2Parser(ParserEngine):
                     function=DeltaFunctionCall(arguments=event.value),
                 )
             )
+
+    def _should_include_tool_slot(self, slot) -> bool:
+        if not self._validate_complete_tool_calls:
+            return True
+        return slot.complete
 
     def _extract_args_json(self, raw_args: str, func_name: str) -> str:
         return raw_args.strip() or "{}"

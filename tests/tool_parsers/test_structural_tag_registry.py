@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 from xgrammar import StructuralTag
 
+from vllm import envs
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
@@ -288,6 +289,113 @@ def test_unified_parser_get_structural_tag_disables_reasoning(
     assert captured == [False]
 
 
+@pytest.mark.parametrize(
+    (
+        "kimi_validations",
+        "enable_in_reasoning",
+        "chat_template_kwargs",
+        "expected",
+    ),
+    [
+        (True, True, None, True),
+        (True, True, {"thinking": True}, True),
+        (True, True, {"thinking": False}, False),
+        (True, True, {"enable_thinking": False}, False),
+        (True, True, {"thinking": False, "enable_thinking": True}, True),
+        (True, False, {"thinking": True}, False),
+        (False, True, {"thinking": True}, False),
+    ],
+)
+def test_kimi_auto_structural_tag_reasoning_matches_effective_thinking(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_tools: list[ChatCompletionToolsParam],
+    kimi_validations: bool,
+    enable_in_reasoning: bool,
+    chat_template_kwargs: dict | None,
+    expected: bool,
+):
+    monkeypatch.setattr(
+        envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", kimi_validations, raising=False
+    )
+    captured: list[bool] = []
+
+    def fake_get_model_structural_tag(*, reasoning: bool, **kwargs):
+        captured.append(reasoning)
+        return None
+
+    monkeypatch.setattr(
+        "vllm.tool_parsers.structural_tag_registry.get_model_structural_tag",
+        fake_get_model_structural_tag,
+    )
+
+    class TestParser(DelegatingParser):
+        tool_parser_cls = KimiK2ToolParser
+
+    request = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools,
+        tool_choice="auto",
+    )
+    parser = TestParser(
+        MagicMock(),
+        tools=sample_tools,
+        chat_template_kwargs=chat_template_kwargs,
+        enable_structured_outputs_in_reasoning=enable_in_reasoning,
+    )
+
+    parser.adjust_request(request)
+
+    assert captured == [expected]
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        "required",
+        ChatCompletionNamedToolChoiceParam(
+            function=ChatCompletionNamedFunction(name="get_weather")
+        ),
+    ],
+)
+def test_kimi_non_auto_structural_tags_keep_reasoning_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_tools: list[ChatCompletionToolsParam],
+    tool_choice,
+):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", True, raising=False)
+    captured: list[bool] = []
+
+    def fake_get_model_structural_tag(*, reasoning: bool, **kwargs):
+        captured.append(reasoning)
+        return None
+
+    monkeypatch.setattr(
+        "vllm.tool_parsers.structural_tag_registry.get_model_structural_tag",
+        fake_get_model_structural_tag,
+    )
+
+    class TestParser(DelegatingParser):
+        tool_parser_cls = KimiK2ToolParser
+
+    request = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools,
+    )
+    request.tool_choice = tool_choice
+    parser = TestParser(
+        MagicMock(),
+        tools=sample_tools,
+        chat_template_kwargs={"thinking": True},
+        enable_structured_outputs_in_reasoning=True,
+    )
+
+    parser.adjust_request(request)
+
+    assert captured == [False]
+
+
 def test_xgrammar_function_parameters_are_preserved(
     monkeypatch: pytest.MonkeyPatch,
     sample_tools_strict: list[ChatCompletionToolsParam],
@@ -317,7 +425,97 @@ def test_xgrammar_function_parameters_are_preserved(
     assert sample_tools_strict[0].function.parameters is not None
 
 
-@pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
+def test_kimi_auto_tools_ignore_strict_and_preserve_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", True, raising=False)
+    captured: list[list[dict]] = []
+
+    def fake_get_xgrammar_model_structural_tag(*, tools: list[dict], **kwargs):
+        captured.append(tools)
+        return None
+
+    monkeypatch.setattr(
+        "vllm.tool_parsers.structural_tag_registry.get_xgrammar_model_structural_tag",
+        fake_get_xgrammar_model_structural_tag,
+    )
+    parameters = {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
+    }
+
+    for strict in (None, True, False):
+        function = {"name": "get_weather", "parameters": parameters}
+        if strict is not None:
+            function["strict"] = strict
+        tools = [ChatCompletionToolsParam(type="function", function=function)]
+        get_model_structural_tag(
+            model="kimi",
+            tools=tools,
+            tool_choice="auto",
+            reasoning=False,
+        )
+
+    assert captured[0] == captured[1] == captured[2]
+    assert captured[0][0]["function"]["parameters"] == parameters
+    assert "strict" not in captured[0][0]["function"]
+
+
+def test_kimi_auto_tool_choice_uses_structural_tag_without_strict(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", True, raising=False)
+    tag = get_model_structural_tag(
+        model="kimi",
+        tools=sample_tools,
+        tool_choice="auto",
+        reasoning=False,
+    )
+
+    assert isinstance(tag, StructuralTag)
+
+
+@pytest.mark.parametrize("strict", [None, False])
+def test_kimi_auto_tool_choice_keeps_upstream_behavior_without_validations(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_tools: list[ChatCompletionToolsParam],
+    strict: bool | None,
+):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", False, raising=False)
+
+    tools = [tool.model_copy(deep=True) for tool in sample_tools]
+    tools[0].function.strict = strict
+    tag = get_model_structural_tag(
+        model="kimi",
+        tools=tools,
+        tool_choice="auto",
+        reasoning=False,
+    )
+
+    assert tag is None
+
+
+def test_kimi_auto_strict_tool_keeps_upstream_behavior_without_validations(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_tools_strict: list[ChatCompletionToolsParam],
+):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", False, raising=False)
+
+    tag = get_model_structural_tag(
+        model="kimi",
+        tools=sample_tools_strict,
+        tool_choice="auto",
+        reasoning=False,
+    )
+
+    assert isinstance(tag, StructuralTag)
+
+
+@pytest.mark.parametrize(
+    "model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS - {"kimi"})
+)
 def test_auto_tool_choice_skips_structural_tag_without_strict(
     model: str,
     sample_tools: list[ChatCompletionToolsParam],

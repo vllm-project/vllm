@@ -18,6 +18,7 @@ from tests.entrypoints.openai.utils import (
     verify_harmony_messages,
 )
 from tests.utils import RemoteOpenAIServer
+from vllm import envs
 from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.config import MultiModalConfig
 from vllm.entrypoints.generate.base.serving import build_per_request_timing_metrics
@@ -32,6 +33,7 @@ from vllm.entrypoints.openai.chat_completion.serving import (
 )
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
+    FunctionCall,
     RequestResponseMetadata,
 )
 from vllm.entrypoints.openai.models.serving import (
@@ -616,6 +618,163 @@ def _build_serving_chat(
     )
 
     return serving_chat
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kimi_validations", "expected_reasoning"),
+    [(True, [True]), (False, [])],
+)
+async def test_online_renderer_propagates_structured_outputs_in_reasoning(
+    monkeypatch,
+    kimi_validations,
+    expected_reasoning,
+):
+    from vllm.tool_parsers import structural_tag_registry
+
+    monkeypatch.setattr(
+        envs,
+        "NOVITA_ENABLE_KIMI_VALIDATIONS",
+        kimi_validations,
+        raising=False,
+    )
+    captured_reasoning: list[bool] = []
+    get_structural_tag = structural_tag_registry.get_xgrammar_model_structural_tag
+
+    def record_reasoning(*args, reasoning: bool, **kwargs):
+        captured_reasoning.append(reasoning)
+        return get_structural_tag(*args, reasoning=reasoning, **kwargs)
+
+    monkeypatch.setattr(
+        structural_tag_registry,
+        "get_xgrammar_model_structural_tag",
+        record_reasoning,
+    )
+
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+    online_renderer = OnlineRenderer(
+        model_config=mock_engine.model_config,
+        renderer=mock_engine.renderer,
+        request_logger=None,
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        enable_auto_tools=True,
+        tool_parser="kimi_k2",
+        reasoning_parser="kimi_k2",
+        enable_structured_outputs_in_reasoning=True,
+    )
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Use get_weather."}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                },
+            }
+        ],
+        tool_choice="auto",
+        chat_template_kwargs={"thinking": True},
+    )
+
+    result = await online_renderer.render_chat(request)
+
+    assert not isinstance(result, ErrorResponse)
+    assert (request.structured_outputs is not None) is kimi_validations
+    assert captured_reasoning == expected_reasoning
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kimi_validations", "expected_finish_reason"),
+    [(True, "length"), (False, "tool_calls")],
+)
+async def test_nonstreaming_tool_call_length_finish_reason_is_env_gated(
+    monkeypatch,
+    kimi_validations,
+    expected_finish_reason,
+):
+    monkeypatch.setattr(
+        envs,
+        "NOVITA_ENABLE_KIMI_VALIDATIONS",
+        kimi_validations,
+        raising=False,
+    )
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+    serving = _build_serving_chat(
+        mock_engine,
+        tool_parser="hermes",
+        enable_auto_tools=True,
+    )
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Use get_weather."}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ],
+        tool_choice="auto",
+    )
+    parser = MagicMock()
+    parser.parse.return_value = (
+        None,
+        None,
+        [
+            FunctionCall(
+                id="call_0",
+                name="get_weather",
+                arguments='{"city": "Tokyo"}',
+            )
+        ],
+    )
+    output = RequestOutput(
+        request_id="test-id",
+        prompt="Test prompt",
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text="tool output",
+                token_ids=[100, 101],
+                cumulative_logprob=None,
+                logprobs=None,
+                finish_reason="length",
+            )
+        ],
+        finished=True,
+    )
+
+    response = await serving.chat_completion_full_generator(
+        request,
+        _single_request_output(output),
+        "chatcmpl-test-id",
+        MODEL_NAME,
+        conversation=[],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+        parser=parser,
+    )
+
+    assert isinstance(response, ChatCompletionResponse)
+    assert response.choices[0].message.tool_calls
+    assert response.choices[0].finish_reason == expected_finish_reason
 
 
 def _build_minimal_metrics_serving_chat(
@@ -2134,10 +2293,29 @@ async def test_tool_choice_validation_without_parser():
 
 
 @pytest.mark.asyncio
-async def test_streaming_n_gt1_independent_tool_parsers():
+@pytest.mark.parametrize(
+    ("kimi_validations", "engine_finish_reason", "expected_finish_reason"),
+    [
+        (True, "stop", "tool_calls"),
+        (True, "length", "length"),
+        (False, "length", "tool_calls"),
+    ],
+)
+async def test_streaming_n_gt1_independent_tool_parsers(
+    monkeypatch,
+    kimi_validations,
+    engine_finish_reason,
+    expected_finish_reason,
+):
     """n>1 streaming must use independent parser instances
     and token-id histories per choice.
     """
+    monkeypatch.setattr(
+        envs,
+        "NOVITA_ENABLE_KIMI_VALIDATIONS",
+        kimi_validations,
+        raising=False,
+    )
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
@@ -2239,7 +2417,7 @@ async def test_streaming_n_gt1_independent_tool_parsers():
                     token_ids=[],
                     cumulative_logprob=0.0,
                     logprobs=None,
-                    finish_reason="stop",
+                    finish_reason=engine_finish_reason,
                 )
                 for choice_idx in range(num_choices)
             ],
@@ -2303,7 +2481,8 @@ async def test_streaming_n_gt1_independent_tool_parsers():
         assert len(reasons) == 1, (
             f"Choice {choice_idx}: expected exactly 1 finish_reason, got {reasons}"
         )
-        assert reasons[0] == "tool_calls", (
-            f"Choice {choice_idx}: expected finish_reason='tool_calls', "
+        assert reasons[0] == expected_finish_reason, (
+            f"Choice {choice_idx}: expected finish_reason="
+            f"'{expected_finish_reason}', "
             f"got '{reasons[0]}'"
         )

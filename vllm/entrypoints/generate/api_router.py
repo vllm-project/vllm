@@ -126,6 +126,9 @@ async def init_generate_state(
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
         reasoning_parser=args.structured_outputs_config.reasoning_parser,
+        enable_structured_outputs_in_reasoning=(
+            args.structured_outputs_config.enable_in_reasoning
+        ),
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
         enable_log_outputs=args.enable_log_outputs,

@@ -13,6 +13,7 @@ import numpy as np
 import pybase64 as base64
 from fastapi import Request
 
+from vllm import envs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
@@ -117,6 +118,7 @@ class OpenAIServingChat(GenerateBaseServing):
         trust_request_chat_template: bool = False,
         return_tokens_as_token_ids: bool = False,
         reasoning_parser: str = "",
+        enable_structured_outputs_in_reasoning: bool = False,
         enable_auto_tools: bool = False,
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
@@ -144,6 +146,9 @@ class OpenAIServingChat(GenerateBaseServing):
         self.enable_log_deltas = enable_log_deltas
 
         self.enable_auto_tools: bool = enable_auto_tools
+        self.enable_structured_outputs_in_reasoning = (
+            enable_structured_outputs_in_reasoning
+        )
         self.parser_cls = ParserManager.get_parser(
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,
@@ -262,6 +267,9 @@ class OpenAIServingChat(GenerateBaseServing):
                 request.tools,
                 chat_template_kwargs=chat_template_kwargs,
                 model_config=self.model_config,
+                enable_structured_outputs_in_reasoning=(
+                    self.enable_structured_outputs_in_reasoning
+                ),
             )
         result = await self.render_chat_request(request)
         if isinstance(result, ErrorResponse):
@@ -448,6 +456,9 @@ class OpenAIServingChat(GenerateBaseServing):
                         request.tools,
                         chat_template_kwargs=chat_template_kwargs,
                         model_config=self.model_config,
+                        enable_structured_outputs_in_reasoning=(
+                            self.enable_structured_outputs_in_reasoning
+                        ),
                     )
                     for _ in range(num_choices)
                 ]
@@ -691,7 +702,14 @@ class OpenAIServingChat(GenerateBaseServing):
                         # finish_reason is:
                         # "tool_calls" for "auto" or "required" tool calls,
                         # and "stop" for named tool calls.
-                        if tools_streamed[i] and not tool_choice_function_name:
+                        if (
+                            tools_streamed[i]
+                            and not tool_choice_function_name
+                            and (
+                                not envs.NOVITA_ENABLE_KIMI_VALIDATIONS
+                                or output.finish_reason == "stop"
+                            )
+                        ):
                             finish_reason_ = "tool_calls"
                         else:
                             finish_reason_ = (
@@ -957,7 +975,13 @@ class OpenAIServingChat(GenerateBaseServing):
             # In OpenAI's API, when a tool is called, the finish_reason is:
             # "tool_calls" for "auto" or "required" tool calls,
             # and "stop" for named tool calls.
-            is_finish_reason_tool_calls = auto_tools_called or (
+            is_finish_reason_tool_calls = (
+                auto_tools_called
+                and (
+                    not envs.NOVITA_ENABLE_KIMI_VALIDATIONS
+                    or output.finish_reason == "stop"
+                )
+            ) or (
                 request.tool_choice
                 and request.tool_choice == "required"
                 and output.finish_reason == "stop"

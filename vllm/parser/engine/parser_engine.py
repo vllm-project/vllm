@@ -54,6 +54,7 @@ class ToolCallSlot:
         "name_sent",
         "string_keys",
         "streamed_json",
+        "complete",
     )
 
     def __init__(self) -> None:
@@ -64,6 +65,7 @@ class ToolCallSlot:
         self.name_sent: bool = False
         self.string_keys: set[str] | None = None
         self.streamed_json: str = ""
+        self.complete: bool = False
 
     @property
     def args(self) -> str:
@@ -1017,6 +1019,8 @@ class ParserEngine(Parser):
 
         tool_calls: list[ToolCall] = []
         for idx, slot in enumerate(self._tool_slots):
+            if not self._should_include_tool_slot(slot):
+                continue
             if not slot.name and not slot.args:
                 continue
 
@@ -1058,6 +1062,9 @@ class ParserEngine(Parser):
             tool_calls=tool_calls,
             content=content,
         )
+
+    def _should_include_tool_slot(self, slot: ToolCallSlot) -> bool:
+        return True
 
     @staticmethod
     def _extract_args_value(parsed: dict) -> str | None:

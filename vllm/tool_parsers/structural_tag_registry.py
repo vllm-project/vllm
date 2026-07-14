@@ -25,6 +25,7 @@ from xgrammar.structural_tag import (
     TriggeredTagsFormat,
 )
 
+from vllm import envs
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
@@ -106,10 +107,20 @@ def get_model_structural_tag(
     if not tools or tool_choice == "none":
         return None
 
-    if tool_choice == "auto" and not _any_tool_strict(tools):
+    kimi_auto_enabled = (
+        envs.NOVITA_ENABLE_KIMI_VALIDATIONS
+        and model == "kimi"
+        and tool_choice == "auto"
+    )
+    if tool_choice == "auto" and not kimi_auto_enabled and not _any_tool_strict(tools):
         return None
 
     dumped_tools = [_dump_tool_for_xgrammar(tool) for tool in tools]
+    if kimi_auto_enabled:
+        for tool in dumped_tools:
+            function = tool.get("function")
+            if isinstance(function, dict):
+                function.pop("strict", None)
     dumped_tool_choice = _dump_tool_choice_for_xgrammar(tool_choice)
 
     if model in _VLLM_STRUCTURAL_TAG_REGISTRY:

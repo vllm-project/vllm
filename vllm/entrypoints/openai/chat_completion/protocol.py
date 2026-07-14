@@ -13,6 +13,7 @@ from openai.types.chat.chat_completion_audio import (
 from openai.types.chat.chat_completion_message import Annotation as OpenAIAnnotation
 from pydantic import Field, PrivateAttr, model_serializer, model_validator
 
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.config.utils import replace
 from vllm.entrypoints.chat_utils import (
@@ -471,6 +472,34 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def _normalize_kimi_thinking(cls, data: Any) -> Any:
+        if not envs.NOVITA_ENABLE_KIMI_VALIDATIONS or not isinstance(data, dict):
+            return data
+
+        thinking = data.get("thinking")
+        if not isinstance(thinking, dict) or thinking.get("type") not in (
+            "enabled",
+            "disabled",
+        ):
+            return data
+
+        chat_template_kwargs = data.get("chat_template_kwargs")
+        if chat_template_kwargs is not None and not isinstance(
+            chat_template_kwargs, dict
+        ):
+            return data
+
+        enabled = thinking["type"] == "enabled"
+        data = dict(data)
+        data["chat_template_kwargs"] = {
+            "thinking": enabled,
+            "enable_thinking": enabled,
+        } | (chat_template_kwargs or {})
+        data.pop("thinking", None)
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def _normalize_messages_before(cls, data: Any) -> Any:
         """Pre-process message dicts before Pydantic field validation.
 
@@ -836,10 +865,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
         # Reject empty tools array, matching OpenAI API behavior
         if data.get("tools") == []:
-            raise ValueError(
-                "`tools` must not be an empty array. "
-                "Either provide at least one tool or omit the field entirely."
-            )
+            if envs.NOVITA_ENABLE_KIMI_VALIDATIONS:
+                data = dict(data)
+                data.pop("tools", None)
+                data.pop("tool_choice", None)
+            else:
+                raise ValueError(
+                    "`tools` must not be an empty array. "
+                    "Either provide at least one tool or omit the field entirely."
+                )
 
         # if "tool_choice" is not specified but tools are provided,
         # default to "auto" tool_choice

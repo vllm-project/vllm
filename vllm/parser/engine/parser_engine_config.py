@@ -78,6 +78,10 @@ class ParserEngineConfig:
 
     tool_args_json: bool = True
 
+    # Emit TOOL_CALL_END at EOF for parsers that historically accepted
+    # unterminated tool calls.
+    close_incomplete_tool_call_on_finish: bool = True
+
     arg_structural_chars: frozenset[str] | None = None
 
     # Special tokens exempt from auto-drop but not state-machine terminals.

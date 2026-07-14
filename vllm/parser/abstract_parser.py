@@ -11,6 +11,7 @@ from functools import cached_property
 from openai.types.responses import ToolChoiceFunction
 from pydantic import TypeAdapter, ValidationError
 
+from vllm import envs
 from vllm.entrypoints.chat_utils import (
     get_tool_call_id_type,
     make_tool_call_id,
@@ -115,9 +116,14 @@ class Parser:
         tools: list[Tool] | None = None,
         *args,
         model_config=None,
+        enable_structured_outputs_in_reasoning: bool = False,
         **kwargs,
     ):
         self.model_tokenizer = tokenizer
+        self._chat_template_kwargs = kwargs.get("chat_template_kwargs") or {}
+        self._enable_structured_outputs_in_reasoning = (
+            enable_structured_outputs_in_reasoning
+        )
         self._reasoning_parser: ReasoningParser | None = None
         self._tool_parser: ToolParser | None = None
         if self.__class__.reasoning_parser_cls is not None:
@@ -540,9 +546,10 @@ class DelegatingParser(Parser):
         if not need_tool_calling:
             return request
 
+        reasoning = self._should_enable_structural_tag_reasoning(request)
         structure_tag = self._tool_parser.get_structural_tag(
             request,
-            reasoning=False,
+            reasoning=reasoning,
         )
         if structure_tag is None:
             return request
@@ -556,6 +563,24 @@ class DelegatingParser(Parser):
         else:
             request.response_format = None
         return request
+
+    def _should_enable_structural_tag_reasoning(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> bool:
+        if (
+            not envs.NOVITA_ENABLE_KIMI_VALIDATIONS
+            or not self._enable_structured_outputs_in_reasoning
+            or self._tool_parser is None
+            or self._tool_parser.structural_tag_model != "kimi"
+            or request.tool_choice != "auto"
+        ):
+            return False
+
+        thinking = self._chat_template_kwargs.get("thinking")
+        enable_thinking = self._chat_template_kwargs.get("enable_thinking")
+        if thinking is None and enable_thinking is None:
+            return True
+        return bool(thinking) or bool(enable_thinking)
 
     def extract_reasoning_streaming(
         self,
