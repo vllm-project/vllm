@@ -216,12 +216,10 @@ class NixlBaseConnectorWorker:
         if n_regions == 0 or self.num_regions == 0:
             return [False] * num_fa_descs
         nblk = num_fa_descs // self.num_regions
-        virtually_split = self.transfer_topo.virtually_split_kv_in_blocks
         flags: list[bool] = []
         for i in range(n_regions):
             replicated = self._is_region_replicated(i)
-            num_streams = 1 if replicated or not virtually_split else 2
-            flags.extend([replicated] * (num_streams * nblk))
+            flags.extend([replicated] * nblk)
         assert len(flags) == num_fa_descs, (
             f"FA desc flags {len(flags)} != num_fa_descs {num_fa_descs}"
         )
@@ -267,6 +265,12 @@ class NixlBaseConnectorWorker:
         )
         # NOTE (NickLucche): For now we use a hardcoded value for a simpler interface.
         self._lease_extension = kv_lease_duration * 2 // 3
+
+        self._bidirectional_kv_xfer_enabled: bool = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "bidirectional_kv_xfer", False
+            )
+        )
 
         self._is_hma_required = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
@@ -342,6 +346,8 @@ class NixlBaseConnectorWorker:
         self._remote_agents: dict[EngineId, dict[tuple[int, int], str]] = defaultdict(
             dict
         )
+        # Map of engine_id -> clock offset.
+        self._engine_clock_offset: dict[EngineId, float] = {}
 
         # Metadata.
         self.engine_id: EngineId = engine_id
@@ -472,7 +478,9 @@ class NixlBaseConnectorWorker:
             thread_name_prefix="vllm-nixl-handshake-initiator",
         )
         self._ready_requests = queue.Queue[tuple[ReqId, ReqMeta]]()
-        self._handshake_futures: dict[EngineId, Future[dict[tuple[int, int], str]]] = {}
+        self._handshake_futures: dict[
+            EngineId, Future[tuple[dict[tuple[int, int], str], float]]
+        ] = {}
         # Protects _handshake_futures and _remote_agents.
         self._handshake_lock = threading.RLock()
 
@@ -561,7 +569,7 @@ class NixlBaseConnectorWorker:
         expected_engine_id: str,
         remote_pp_size: int = 1,
         notif_agents_only: bool = False,
-    ) -> dict[tuple[int, int], str]:
+    ) -> tuple[dict[tuple[int, int], str], float]:
         """Do a NIXL handshake with a remote instance."""
 
         # the first time we connect to a remote agent.
@@ -585,6 +593,11 @@ class NixlBaseConnectorWorker:
         p_remote_ranks = self.transfer_topo.handshake_target_ranks(remote_tp_size)
         remote_rank_to_agent_name: dict[tuple[int, int], str] = {}
         path = make_zmq_path("tcp", host, port)
+        # Clock offset to the peer, estimated from the handshake round-trip.
+        # Keep the lowest-RTT sample: hop cost is ~uniform across ranks, so a
+        # higher RTT is just noise that skews the midpoint estimate.
+        best_rtt = float("inf")
+        best_offset: float | None = None
 
         with zmq_ctx(zmq.REQ, path) as sock:
             for remote_pp_rank, remote_rank in itertools.product(
@@ -597,15 +610,24 @@ class NixlBaseConnectorWorker:
                     remote_rank,
                 )
 
-                start_time = time.perf_counter()
                 # Send query for the request.
                 msg = msgspec.msgpack.encode(
                     (GET_META_MSG, remote_pp_rank, remote_rank)
                 )
                 # Set receive timeout to 5 seconds to avoid hanging on dead server
                 sock.setsockopt(zmq.RCVTIMEO, 5000)  # milliseconds
+                start_time = time.perf_counter()
                 sock.send(msg)
-                handshake_bytes = sock.recv()
+                reply_parts = sock.recv_multipart()
+                recv_time = time.perf_counter()
+                assert len(reply_parts) == 2
+                handshake_bytes = reply_parts[0]
+
+                remote_perf = msgspec.msgpack.decode(reply_parts[1])
+                rtt = recv_time - start_time
+                if rtt < best_rtt:
+                    best_rtt = rtt
+                    best_offset = remote_perf - (start_time + recv_time) / 2
 
                 # Decode handshake payload to get compatibility hash
                 handshake_decoder = msgspec.msgpack.Decoder(NixlHandshakePayload)
@@ -683,7 +705,9 @@ class NixlBaseConnectorWorker:
                 )
                 remote_ranks = (remote_pp_rank, remote_rank)
                 remote_rank_to_agent_name[remote_ranks] = remote_agent_name
-        return remote_rank_to_agent_name
+
+        assert best_offset is not None
+        return remote_rank_to_agent_name, best_offset
 
     def _add_notif_only_remote_agent(
         self, metadata: NixlAgentMetadata, remote_tp_size: int
@@ -712,31 +736,31 @@ class NixlBaseConnectorWorker:
         NOT directly supported by NIXL (e.g., tpu)
         """
         xfer_buffers: dict[str, torch.Tensor] = {}
-        inv_order = [0, 1, 3, 2, 4]
         try:
             for layer_name, kv_cache in kv_caches.items():
                 kv_shape = kv_cache.shape
                 kv_dtype = kv_cache.dtype
                 permute_shape = False
-                if (
-                    self.kv_cache_layout == "NHD"
-                    and self.vllm_config.kv_transfer_config is not None
-                    and self.vllm_config.kv_transfer_config.enable_permute_local_kv
-                ):
-                    logger.info_once(
-                        "'enable_permute_local_kv' flag is enabled while "
-                        "device KV Layout is NHD. Init host buffer with"
-                        " HND to better support Decode/Prefill TP_ratio > 1."
-                    )
-                    # Since NHD will not support Decode/Prefill TP_ratio > 1,
-                    # we can leverage host_buffer for permute
-                    self.host_buffer_kv_cache_layout = "HND"
-                    kv_shape = (
-                        tuple(kv_shape[i] for i in inv_order)
-                        if not self.use_mla
-                        else kv_shape
-                    )
-                    permute_shape = not self.use_mla
+                inv_order = (0, 2, 1, 3)
+                if not self.use_mla:
+                    assert kv_cache.ndim == 4
+
+                    if self.kv_cache_layout == "NHD":
+                        if self.kv_transfer_config.enable_permute_local_kv:
+                            logger.info_once(
+                                "'enable_permute_local_kv' flag is enabled while "
+                                "device KV Layout is NHD. Init host buffer with"
+                                " HND to better support Decode/Prefill TP_ratio > 1."
+                            )
+                            # Since NHD will not support Decode/Prefill TP_ratio > 1,
+                            # we can leverage host_buffer for permute.
+                            self.host_buffer_kv_cache_layout = "HND"
+                        else:
+                            # Packed KV layout is logical (B, H, N, 2*D). Allocate
+                            # (B, N, H, 2*D) and view it as logical (B, H, N, 2*D)
+                            # so raw NIXL transfers see NHD physical strides.
+                            kv_shape = tuple(kv_shape[i] for i in inv_order)
+                            permute_shape = True
 
                 xfer_buffers[layer_name] = torch.empty(
                     kv_shape, dtype=kv_dtype, device="cpu"
@@ -820,7 +844,7 @@ class NixlBaseConnectorWorker:
         tp_size: int,
         pp_size: int = 1,
         notif_agents_only: bool = False,
-    ) -> Future[dict[tuple[int, int], str]] | None:
+    ) -> Future[tuple[dict[tuple[int, int], str], float]] | None:
         """
         Ensure a handshake is in-flight (or already done) for *engine_id*.
 
@@ -848,11 +872,16 @@ class NixlBaseConnectorWorker:
             )
             self._handshake_futures[engine_id] = fut
 
-            def done_callback(f: Future[dict[tuple[int, int], str]], eid=engine_id):
+            def done_callback(
+                f: Future[tuple[dict[tuple[int, int], str], float]],
+                eid=engine_id,
+            ):
                 with self._handshake_lock:
                     del self._handshake_futures[eid]
                     try:
-                        self._remote_agents[eid] = f.result()
+                        remote_agents, clock_offset = f.result()
+                        self._remote_agents[eid] = remote_agents
+                        self._engine_clock_offset[eid] = clock_offset
                         self._engine_last_active[eid] = time.perf_counter()
                     except Exception as e:
                         self._log_failure(
@@ -1151,9 +1180,7 @@ class NixlBaseConnectorWorker:
                         f"backend={self.backend_name}, "
                         "all_backends="
                         f"{[backend.get_name() for backend in self.attn_backends]}, "
-                        f"kv_cache_layout={self.kv_cache_layout}, "
-                        "blocks_first="
-                        f"{self.transfer_topo.is_kv_layout_blocks_first}"
+                        f"kv_cache_layout={self.kv_cache_layout}"
                     )
 
                 # Need to make sure the device ID is non-negative for NIXL,
@@ -1183,22 +1210,6 @@ class NixlBaseConnectorWorker:
             assert num_local_layers > 0 and self.num_regions % num_local_layers == 0
             regions_per_layer = self.num_regions // num_local_layers
             self._remote_region_offset = regions_per_layer * start_layer
-
-        if self.transfer_topo.virtually_split_kv_in_blocks:
-            # NOTE (NickLucche) When FlashInfer is used, memory is registered
-            # with joint KV for each block. This minimizes the overhead in
-            # registerMem allowing faster descs queries. In order to be able to
-            # split on kv_heads dim as required by heterogeneous TP, one must
-            # be able to index K/V separately. Hence we double the number
-            # of 'virtual' regions here and halve `block_len` below.
-            # Similarly for Mamba layers, we register SSM+Conv as a single region and
-            # then duplicate it logically to be able to index SSM/Conv separately.
-            # Exception: key-only REPLICATE regions (MLA) have no V half, so
-            # they contribute a single desc stream and are not doubled.
-            self.num_regions = sum(
-                1 if self._is_region_replicated(i) else 2
-                for i in range(len(self._region_is_mla))
-            )
 
         # Total local FA descriptors (boundary between FA and mamba descs).
         self.num_descs = self.num_regions * self.num_blocks
@@ -1363,22 +1374,6 @@ class NixlBaseConnectorWorker:
                 block_offset = block_id * page_stride
                 addr = base_addr + block_offset
                 result.append((addr, kv_block_len, self.device_id))
-
-            if (
-                self.transfer_topo.virtually_split_kv_in_blocks
-                and not self._is_region_replicated(i)
-            ):
-                # Separate and interleave K/V regions to maintain the same
-                # descs ordering. This is needed for selecting contiguous heads
-                # when split across TP ranks. (Skipped for key-only REPLICATE.)
-                second_split = self.get_backend_aware_kv_block_len(
-                    layer_idx=i, first_split=False, mamba_view=False
-                )
-                for block_id in range(num_blocks):
-                    block_offset = block_id * page_stride
-                    addr = base_addr + block_offset
-                    v_addr = addr + kv_block_len
-                    result.append((v_addr, second_split, self.device_id))
         return result
 
     def _build_fa_remote(
@@ -1423,20 +1418,6 @@ class NixlBaseConnectorWorker:
                 # tp rank of size local_block_len.
                 addr = base_addr + block_offset + rank_offset
                 result.append((addr, local_block_len, nixl_agent_meta.device_id))
-
-            emits_v = self.transfer_topo.virtually_split_kv_in_blocks and not replicated
-            if emits_v:
-                # With FlashInfer index V separately to allow head splitting.
-                second_split = self.get_backend_aware_kv_block_len(
-                    layer_idx=i, first_split=False, mamba_view=False
-                )
-                second_split = second_split // num_reads
-                for block_id in range(num_blocks):
-                    block_offset = block_id * page_size
-                    addr = base_addr + block_offset + rank_offset
-                    # Hop over the first split of remote page, K, to read V.
-                    v_addr = addr + nixl_agent_meta.block_lens[i] // 2
-                    result.append((v_addr, second_split, nixl_agent_meta.device_id))
         return result
 
     def register_local_xfer_handler(
@@ -1927,24 +1908,18 @@ class NixlBaseConnectorWorker:
                 block_size_ratio,
             )
 
-        split_k_and_v = self.transfer_topo.split_k_and_v
-
         for block_ids in block_ids_list:
             indices = torch.tensor(block_ids, device=self.device_type, dtype=torch.long)
 
-            for _, cache_or_caches in self.device_kv_caches.items():
-                cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
-                for cache in cache_list:
-                    if self.enable_permute_local_kv and block_size_ratio > 1:
-                        kv_postprocess_blksize_and_layout_on_receive(
-                            cache, indices, block_size_ratio
-                        )
-                    elif self.enable_permute_local_kv:
-                        kv_postprocess_layout_on_receive(cache, indices)
-                    else:
-                        kv_postprocess_blksize_on_receive(
-                            cache, indices, block_size_ratio
-                        )
+            for cache in self.device_kv_caches.values():
+                if self.enable_permute_local_kv and block_size_ratio > 1:
+                    kv_postprocess_blksize_and_layout_on_receive(
+                        cache, indices, block_size_ratio
+                    )
+                elif self.enable_permute_local_kv:
+                    kv_postprocess_layout_on_receive(cache, indices)
+                else:
+                    kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio)
 
     def post_process_device_kv_on_receive_heterogeneous_attn(
         self, block_ids: list[int]
@@ -2398,12 +2373,10 @@ class NixlBaseConnectorWorker:
            |1st_split-2nd_split|         |1st_split-2nd_split |
         """
         assert self.transfer_topo is not None
-        virtually_split = self.transfer_topo.virtually_split_kv_in_blocks
-        if virtually_split and mamba_view:
+        if self.transfer_topo.virtually_split_kv_in_blocks and mamba_view:
             block_len = self._mamba_ssm_size[not first_split]
         else:
-            half_block = virtually_split and not self._is_region_replicated(layer_idx)
-            block_len = self.block_len_per_layer[layer_idx] // (2 if half_block else 1)
+            block_len = self.block_len_per_layer[layer_idx]
         return block_len
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
@@ -2479,6 +2452,8 @@ class NixlBaseConnectorWorker:
         if self.transfer_topo is not None:
             self.transfer_topo.unregister_remote_engine(engine_id)
 
+        # Drop the cached clock offset; it is re-measured on the next handshake.
+        self._engine_clock_offset.pop(engine_id, None)
         # Push P-side engines are tracked in _remote_agents but not in
         # _engine_last_active (they don't participate in stale eviction), so
         # tolerate a missing entry.
