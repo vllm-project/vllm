@@ -43,6 +43,31 @@ for package_name in ("nixl", "nixl-cu12", "nixl-cu13"):
     print(f"{package_name}: {version}")
 PY
 
+# The mooncake-transfer-engine PyPI wheel is built against CUDA 12: its compiled
+# extension hard-links libcudart.so.12, which the CUDA 13 runtime image does not
+# ship. Supply the CUDA 12 runtime so `import mooncake.engine` resolves.
+if ! python3 -c "import mooncake.engine" 2>/dev/null; then
+    echo "mooncake import failed; installing CUDA 12 runtime for libcudart.so.12"
+    uv pip install --system nvidia-cuda-runtime-cu12
+    CUDART12=$(python3 - <<'PY'
+import importlib.util
+import os.path
+
+spec = importlib.util.find_spec("nvidia.cuda_runtime")
+path = ""
+if spec and spec.origin:
+    candidate = os.path.join(os.path.dirname(spec.origin), "lib", "libcudart.so.12")
+    if os.path.exists(candidate):
+        path = candidate
+print(path)
+PY
+)
+    if [ -n "${CUDART12}" ]; then
+        ln -sf "${CUDART12}" /usr/local/cuda/lib64/libcudart.so.12
+        ldconfig 2>/dev/null || true
+    fi
+fi
+
 # Env diagnostics + import canary. Surfaces the real reason mooncake can't load
 # (instead of the silent "Mooncake is not available" at engine startup) and, on
 # failure, runs ldd on the compiled extension to name the unresolved library.
