@@ -210,6 +210,8 @@ impl ChatLlm {
             sampling_params: request.sampling_params,
             decode_options: request.decode_options,
             intermediate: request.intermediate,
+            truncate_prompt_tokens: request.truncate_prompt_tokens,
+            truncation_side: request.truncation_side.clone(),
             priority: request.priority,
             cache_salt: request.cache_salt,
             add_special_tokens: request.add_special_tokens,
