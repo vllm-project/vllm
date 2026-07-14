@@ -14,11 +14,13 @@ from vllm.utils.torch_utils import direct_register_custom_op
 class GateLinear(ReplicatedLinear):
     """MoE gate linear layer with multi-tier GEMM dispatch:
 
-    1. DSV3 specialized kernel (SM90+, M<=16, H=7168 E=256/384, H=6144 E=256)
-    2. fp32 specialized kernel  (SM90+, bf16/fp32 in, fp32 out, M<=32,
+    1. cuteDSL ll_bf16_gemm (SM90+, M<=16, bf16 in, fp32 out,
+       K divisible by 8)
+    2. DSV3 specialized kernel (SM90+, M<=16, H=7168 E=256/384, H=6144 E=256)
+    3. fp32 specialized kernel  (SM90+, bf16/fp32 in, fp32 out, M<=32,
        (H, E) in {(3072, 256), (6144, 128), (6144, 256)})
-    3. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 weight + fp32 out_dtype)
-    4. F.linear via ReplicatedLinear (ultimate fallback)
+    4. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 weight + fp32 out_dtype)
+    5. F.linear via ReplicatedLinear (ultimate fallback)
 
     The ``out_dtype`` attribute is mutable and can be set after init
     (e.g. when the required dtype depends on the expert quantization
@@ -99,6 +101,21 @@ class GateLinear(ReplicatedLinear):
             and self.out_dtype == torch.float32
         )
 
+        # cuteDSL ll_bf16_gemm eligibility. Any dims supported, but SM90+ required bc:
+        # 1. PDL support. Both dot-product and split-K kernels.
+        # 2. Thread Block Clusters. Split-K kernel for cross-CTA reduction.
+        self.allow_ll_bf16_gemm = False
+        if can_use_specialized_kernels:
+            from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+                is_available,
+            )
+
+            self.allow_ll_bf16_gemm = (
+                self.weight.dtype == torch.bfloat16
+                and self.out_dtype == torch.float32
+                and is_available()
+            )
+
     def set_out_dtype(self, out_dtype: torch.dtype) -> None:
         """Set output dtype for the router logits after init.
 
@@ -116,10 +133,31 @@ class GateLinear(ReplicatedLinear):
         ):
             self.allow_cublas_router_gemm = self.weight.dtype == torch.bfloat16
 
+        # out_dtype may start as None -> recompute eligibility here
+        if self.allow_specialized_router_gemm:
+            from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+                is_available,
+            )
+
+            self.allow_ll_bf16_gemm = (
+                self.weight.dtype == torch.bfloat16
+                and out_dtype == torch.float32
+                and is_available()
+            )
+
     def forward(
         self, x: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        # Tier 1: DSV3 specialized kernel
+        # Tier 1: cuteDSL ll_bf16_gemm (SM90+, any dims)
+        if self.allow_ll_bf16_gemm and x.shape[0] <= 16 and x.dtype == torch.bfloat16:
+            from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+                ll_bf16_gemm,
+            )
+
+            output = ll_bf16_gemm(x, self.weight)
+            return output, None
+
+        # Tier 2: DSV3 specialized kernel (fallback for when cuteDSL unavailable)
         if self.allow_dsv3_router_gemm and x.shape[0] <= self._dsv3_max_batch:
             output = ops.dsv3_router_gemm(
                 hidden_states=x,
@@ -128,7 +166,7 @@ class GateLinear(ReplicatedLinear):
             )
             return output, None
 
-        # Tier 2: fp32 specialized kernel (H=3072, E=256, M<=32)
+        # Tier 3: fp32 specialized kernel (H=3072, E=256, M<=32)
         # Dispatch is wrapped in a custom op so that torch.compile/CUDA-graph
         # capture does not freeze the runtime num_tokens branch.
         if self.allow_fp32_router_gemm and x.dtype in (
@@ -138,12 +176,12 @@ class GateLinear(ReplicatedLinear):
             output = torch.ops.vllm.fp32_router_gemm_dispatch(x, self.weight)
             return output, None
 
-        # Tier 3: cuBLAS bf16→fp32
+        # Tier 4: cuBLAS bf16→fp32
         if self.allow_cublas_router_gemm and x.dtype == torch.bfloat16:
             output = torch.mm(x, self.weight.T, out_dtype=torch.float32)
             return output, None
 
-        # Tier 4: F.linear (ReplicatedLinear)
+        # Tier 5: F.linear (ReplicatedLinear)
         if self.out_dtype is not None and x.dtype != self.weight.dtype:
             x = x.to(self.weight.dtype)
         output, output_bias = super().forward(x)
