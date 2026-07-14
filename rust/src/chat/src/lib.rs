@@ -34,8 +34,12 @@ pub use parser::reasoning::{
     ReasoningDelta, ReasoningError, ReasoningParser, ReasoningParserFactory,
 };
 pub use parser::tool::{ToolParser, ToolParserError, ToolParserFactory};
+pub use parser::unified::UnifiedParserFactory;
 pub use parser::{ParserSelection, ToolStrictLevel, validate_parser_overrides};
 pub use reasoning::EffortValue;
+pub use vllm_parser::unified::{
+    CombinedParser, UnifiedParser, UnifiedParserEvent, UnifiedParserOutput,
+};
 pub use renderer::hf::ChatTemplateContentFormatOption;
 pub use renderer::{
     ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DeepSeekV41ChatRenderer,
@@ -440,6 +444,16 @@ impl ChatLlm {
     /// Return the model ID reported by the underlying text backend.
     pub fn model_id(&self) -> &str {
         self.text.model_id()
+    }
+
+    /// Return the tool-call parser selection.
+    pub fn tool_call_parser(&self) -> &ParserSelection {
+        &self.processor.tool_call_parser
+    }
+
+    /// Return the reasoning parser selection.
+    pub fn reasoning_parser(&self) -> &ParserSelection {
+        &self.processor.reasoning_parser
     }
 
     /// Expose the underlying engine-core client for low-level utility/admin

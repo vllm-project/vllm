@@ -173,13 +173,13 @@ pub(crate) async fn run_beam_search(
     prompt_token_ids: Vec<u32>,
     params: BeamSearchParams,
 ) -> Result<BeamSearchOutput> {
-    let beam_width = params.beam_width.max(1).min(MAX_BEAM_WIDTH) as usize;
     if params.beam_width > MAX_BEAM_WIDTH {
         warn!(
             "beam_width {} exceeds MAX_BEAM_WIDTH, clamping to {MAX_BEAM_WIDTH}",
             params.beam_width
         );
     }
+    let beam_width = params.beam_width.max(1).min(MAX_BEAM_WIDTH) as usize;
     let logprobs_num = 2 * beam_width;
 
     let mut active: Vec<BeamSearchSequence> = vec![BeamSearchSequence {
