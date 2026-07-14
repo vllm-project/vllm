@@ -135,6 +135,10 @@ class PoolingIOProcessor:
         for param in params_seq:
             if param.task is None:
                 param.task = pooling_task
+            elif pooling_task == "plugin":
+                # `plugin` task uses io_processor.parse_request to verify inputs.
+                # We actually allow plugin to overwrite pooling_task.
+                pass
             elif param.task != pooling_task:
                 msg = f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
                 raise ValueError(msg)

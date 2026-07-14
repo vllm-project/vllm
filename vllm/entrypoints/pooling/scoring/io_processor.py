@@ -229,7 +229,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
             pooling_params=ctx.pooling_params
         )
 
-        scoring_data = ctx.prompts
+        scoring_data = ctx.scoring_data
         if max_tokens_per_query > 0 or max_tokens_per_doc > 0:
             scoring_data = self._truncate_scoring_data(
                 scoring_data, max_tokens_per_query, max_tokens_per_doc
