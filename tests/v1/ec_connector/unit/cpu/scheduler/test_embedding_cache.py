@@ -304,3 +304,30 @@ def test_concurrent_alloc_evict():
         t.join()
 
     assert not errors, errors
+
+
+# ── discard ──────────────────────────────────────────────────────────────────
+
+
+def test_discard_not_ready_returns_blocks():
+    cache = EmbeddingCache(num_blocks=4)
+    entry = cache.alloc("h", 3)
+    assert entry is not None
+    cache.discard("h")
+    assert cache.get("h") is None
+    # All blocks reclaimed: a fresh 4-block alloc now fits.
+    assert cache.alloc("h2", 4) is not None
+
+
+def test_discard_rejects_ready_entry():
+    cache = EmbeddingCache(num_blocks=4)
+    cache.alloc("h", 1)
+    cache.mark_ready("h")
+    with pytest.raises(AssertionError):
+        cache.discard("h")
+
+
+def test_discard_rejects_absent_key():
+    cache = EmbeddingCache(num_blocks=4)
+    with pytest.raises(KeyError):
+        cache.discard("nope")
