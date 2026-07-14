@@ -46,6 +46,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     KVCacheSpecKind,
     KVCacheTensor,
+    KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
     SinkFullAttentionSpec,
@@ -118,6 +119,7 @@ def new_kv_cache_spec(
     sliding_window=None,
     attention_chunk_size=None,
     indexes_kv_by_block_stride=False,
+    kv_quant_mode=KVQuantMode.NONE,
 ):
     return FullAttentionSpec(
         block_size=block_size,
@@ -128,6 +130,7 @@ def new_kv_cache_spec(
         sliding_window=sliding_window,
         attention_chunk_size=attention_chunk_size,
         indexes_kv_by_block_stride=indexes_kv_by_block_stride,
+        kv_quant_mode=kv_quant_mode,
     )
 
 
@@ -2418,6 +2421,34 @@ def test_unify_kv_cache_page_size_padding_requires_backend_support():
 
     with pytest.raises(NotImplementedError):
         kv_cache_utils.unify_kv_cache_spec_page_size(specs)
+
+
+def test_unpadded_page_size_without_quant_matches_real_page():
+    # Without quantization the offload transfer width is just the raw page.
+    spec = new_kv_cache_spec()
+    assert spec.unpadded_page_size_bytes == spec.real_page_size_bytes
+    assert spec.page_size_bytes == spec.unpadded_page_size_bytes
+
+
+def test_unpadded_page_size_includes_per_token_head_scales():
+    # Per-token-head quant carries inline fp32 scales that are carved from the
+    # raw KV allocation, so they must be budgeted into the offload width.
+    spec = new_kv_cache_spec(
+        dtype=torch.uint8, kv_quant_mode=KVQuantMode.FP8_PER_TOKEN_HEAD
+    )
+    scales = 2 * spec.block_size * spec.num_kv_heads * 4
+    assert spec.unpadded_page_size_bytes == spec.real_page_size_bytes + scales
+    assert spec.page_size_bytes == spec.unpadded_page_size_bytes
+
+
+def test_page_size_padded_wins():
+    # An explicit padded page size takes precedence over the unpadded size.
+    spec = new_kv_cache_spec(
+        dtype=torch.uint8,
+        kv_quant_mode=KVQuantMode.FP8_PER_TOKEN_HEAD,
+        page_size_padded=65536,
+    )
+    assert spec.page_size_bytes == 65536
 
 
 def test_unify_hybrid_kv_cache_specs():
