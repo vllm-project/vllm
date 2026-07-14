@@ -350,85 +350,69 @@ class Scheduler(SchedulerInterface):
         num_new_tokens: int,
         num_new_local_computed_tokens: int = 0,
         num_external_computed_tokens: int = 0,
-        num_uncached_common_prefix_tokens: int = 0,
     ) -> int:
-        num_computed_tokens = (
+        """Clip a prefill chunk so it ends where Mamba state must be cached.
+
+        In "align" cache mode the SSM state is only materialized at chunk
+        ends, so chunk ends are steered onto cacheable positions: block
+        boundaries by default, plus mandatory early stops (the prompt's
+        partial-tail hash boundary, a detected shared-prefix junction).
+        """
+        start = (
             request.num_computed_tokens
             + num_new_local_computed_tokens
             + num_external_computed_tokens
         )
-        # Perform block-aligned splitting at prefill phase, including:
-        # * non-resumed requests: num_computed_tokens < num_prompt_tokens + 0
-        # * resumed requests: num_computed_tokens < (
-        #                       num_prompt_tokens + num_output_tokens
-        #                     )
-        # NOTE: Use `request.num_tokens - 1` to bypass normal decoding.
-        if num_computed_tokens < max(request.num_prompt_tokens, request.num_tokens - 1):
-            # To enable block-aligned caching of the Mamba state, `num_new_tokens`
-            # must be a multiple of `block_size`.
-            # As an exception, if `num_new_tokens` is less than `block_size`, the
-            # state is simply not cached, requiring no special handling.
-            # Additionally, when Eagle mode is enabled, FullAttn prunes the last
-            # matching block. To prevent this from causing a Mamba cache miss, the
-            # last chunk must be not smaller than `block_size`.
-            block_size = self.cache_config.block_size
-            last_cache_position = request.num_tokens - request.num_tokens % block_size
-            # eagle prune
-            if self.use_eagle:
-                last_cache_position = max(last_cache_position - block_size, 0)
-            num_computed_tokens_after_sched = num_computed_tokens + num_new_tokens
-            next_boundary = (num_computed_tokens // block_size + 1) * block_size
-            if (
-                num_computed_tokens % block_size != 0
-                and next_boundary <= last_cache_position
-                and num_computed_tokens_after_sched > next_boundary
-            ):
-                # Resumed mid-block (partial hash hit): stop the first chunk
-                # at the next block boundary so chunk ends re-align to blocks
-                # and the boundary state is materialized before running past.
-                num_new_tokens = next_boundary - num_computed_tokens
-            elif num_computed_tokens_after_sched < last_cache_position:
-                # Align the chunk END (not its length) to block_size;
-                # identical to flooring the length when the start is
-                # block-aligned. May yield 0 (insufficient budget to reach
-                # the next boundary); the caller then skips the request.
-                aligned_end = num_computed_tokens_after_sched // block_size * block_size
-                num_new_tokens = max(aligned_end - num_computed_tokens, 0)
-            elif (
-                num_computed_tokens
-                < last_cache_position
-                < num_computed_tokens_after_sched
-            ):
-                # force to cache the last chunk
-                num_new_tokens = last_cache_position - num_computed_tokens
-            elif self.mamba_partial_cache_hit:
-                # Prefill of the final partial block: stop once at the
-                # prompt's last hash boundary so the mamba partial tail entry
-                # can be registered.
-                tail_boundary = (
-                    request.num_prompt_tokens
-                    // self.hash_block_size
-                    * self.hash_block_size
-                )
-                if (
-                    num_computed_tokens
-                    < tail_boundary
-                    < num_computed_tokens_after_sched
-                    and tail_boundary < request.num_prompt_tokens
-                    and tail_boundary > last_cache_position
-                ):
-                    num_new_tokens = tail_boundary - num_computed_tokens
+        # Split only during prefill: `request.num_tokens - 1` extends this to
+        # resumed requests replaying their output tokens.
+        if start >= max(request.num_prompt_tokens, request.num_tokens - 1):
+            return num_new_tokens
 
-            # Marconi cache admission optimization:
-            # cache common prefixes by scheduling num_new_tokens = common prefix length
-            if (
-                num_uncached_common_prefix_tokens >= block_size
-                and num_new_tokens > num_uncached_common_prefix_tokens
-            ):
-                num_new_tokens = num_uncached_common_prefix_tokens
-                # keep alignment to block_size
-                num_new_tokens = num_new_tokens // block_size * block_size
-        return num_new_tokens
+        block_size = self.cache_config.block_size
+        # The last block-aligned position whose state can be cached. With
+        # Eagle, FullAttn prunes the last matching block, so back off one
+        # block to avoid a Mamba cache miss.
+        last_cache_position = request.num_tokens - request.num_tokens % block_size
+        if self.use_eagle:
+            last_cache_position = max(last_cache_position - block_size, 0)
+
+        end = start + num_new_tokens
+        # Until `last_cache_position`, chunk ends must land on block
+        # boundaries. May yield an empty chunk (budget cannot reach the next
+        # boundary); the caller then skips the request.
+        if end < last_cache_position:
+            end = end // block_size * block_size
+
+        next_block_boundary = (start // block_size + 1) * block_size
+        tail_boundary = (
+            request.num_prompt_tokens // self.hash_block_size * self.hash_block_size
+            if self.mamba_partial_cache_hit
+            else 0
+        )
+        stops = (
+            # Resumed mid-block (fine-grained partial hash hit): re-align to
+            # the block grid before running on, so the crossed boundary's
+            # state is materialized (unless it is past the cacheable range).
+            next_block_boundary
+            if start % block_size != 0 and next_block_boundary <= last_cache_position
+            else 0,
+            # Never run past the last cacheable block boundary mid-chunk.
+            last_cache_position,
+            # Fine-grained hits: the prompt's partial-tail entry can only be
+            # registered by a chunk ending exactly at its last hash boundary.
+            tail_boundary
+            if last_cache_position < tail_boundary < request.num_prompt_tokens
+            else 0,
+            # Marconi shared-prefix junction, block-floored (a sub-block
+            # junction's state is not separately cacheable): cache its state
+            # so sibling requests sharing the prefix can reuse it.
+            start + (request.shared_prefix_boundary - start) // block_size * block_size
+            if start < request.shared_prefix_boundary < end
+            else 0,
+        )
+        # Stop at the earliest mandatory position strictly inside the chunk.
+        end = min((s for s in stops if start < s < end), default=end)
+        return max(end - start, 0)
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
@@ -718,7 +702,6 @@ class Scheduler(SchedulerInterface):
                 num_external_computed_tokens = 0
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
-                num_uncached_common_prefix_tokens = 0
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
@@ -733,8 +716,7 @@ class Scheduler(SchedulerInterface):
                     ):
                         computed, per_group_hits = (
                             self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
-                                request.block_hashes,
-                                request.num_tokens - 1,
+                                request.block_hashes, request.num_tokens - 1
                             )
                         )
                         new_computed_blocks = (
@@ -750,6 +732,9 @@ class Scheduler(SchedulerInterface):
                         # the last block) is transferred unconditionally by
                         # _apply_prefix_caching in nixl/worker.py.
                         num_new_local_computed_tokens = max(per_group_hits)
+                        # The per-group lookup does not detect an uncached shared
+                        # prefix, so there is no junction to pin in this path.
+                        request.shared_prefix_boundary = 0
                         if self.kv_cache_manager.log_stats:
                             assert self.kv_cache_manager.prefix_cache_stats is not None
                             self.kv_cache_manager.prefix_cache_stats.record(
@@ -758,17 +743,15 @@ class Scheduler(SchedulerInterface):
                                 preempted=request.num_preemptions > 0,
                             )
                     else:
-                        new_computed_blocks, num_new_local_computed_tokens = (
-                            self.kv_cache_manager.get_computed_blocks(request)
-                        )
-
-                    # In case of hybrid models, obtain hint for Marconi-style APC logic
-                    if self.has_mamba_layers:
-                        num_uncached_common_prefix_tokens = getattr(
-                            self.kv_cache_manager.coordinator,
-                            "num_uncached_common_prefix_tokens",
-                            0,
-                        )
+                        (
+                            new_computed_blocks,
+                            num_new_local_computed_tokens,
+                            # Junction to pin (Marconi-style APC) so its
+                            # sparse-retention state (Mamba block / sliding-window
+                            # tail) survives retention and serves a later hit; 0
+                            # if no uncached shared prefix was detected.
+                            request.shared_prefix_boundary,
+                        ) = self.kv_cache_manager.get_computed_blocks(request)
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -906,7 +889,6 @@ class Scheduler(SchedulerInterface):
                         num_new_tokens,
                         num_new_local_computed_tokens,
                         num_external_computed_tokens,
-                        num_uncached_common_prefix_tokens,
                     )
                     if num_new_tokens == 0:
                         break
