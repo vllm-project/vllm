@@ -254,3 +254,16 @@ vllm/grpc/vllm_engine_pb2.pyi
 
 # Ignore generated cpu headers 
 csrc/cpu/cpu_attn_dispatch_generated.h
+
+# LongCat-Next miscellaneous files
+longcat_next_misc/
+vllm_pm2_start.cjs
+
+# Codegraph internal files
+.codegraph/
+
+# Test scripts (local testing only)
+scripts/test_*.sh
+scripts/test_*.py
+scripts/verify_*.py
+scripts/final_verification.py

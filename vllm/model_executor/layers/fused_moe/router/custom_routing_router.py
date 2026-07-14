@@ -50,7 +50,7 @@ class CustomRoutingRouter(BaseRouter):
         indices_type: torch.dtype | None,
         *,
         input_ids: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Compute routing using the custom routing function."""
         topk_weights, topk_ids = self.custom_routing_function(
             hidden_states=hidden_states,
@@ -61,4 +61,4 @@ class CustomRoutingRouter(BaseRouter):
 
         return topk_weights.to(torch.float32), topk_ids.to(
             torch.int32 if indices_type is None else indices_type
-        )
+        ), None

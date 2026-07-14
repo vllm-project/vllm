@@ -7284,6 +7284,9 @@ class GPUModelRunner(
             logger.debug("%s reuses KV cache of %s", layer_name, target_layer_name)
             kv_caches[layer_name] = kv_caches[target_layer_name]
 
+        num_attn_module = (
+            2 if self.model_config.hf_config.model_type in ("longcat_flash", "longcat_next") else 1
+        )
         bind_kv_cache(
             kv_caches,
             self.compilation_config.static_forward_context,

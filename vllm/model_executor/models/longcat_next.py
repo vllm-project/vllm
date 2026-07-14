@@ -24,12 +24,14 @@ from vllm.distributed import get_pp_group
 from vllm.inputs import MultiModalDataDict, PromptType
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -70,6 +72,7 @@ from .utils import (
 from .whisper import WhisperEncoder
 
 # Magic number constants for clarity
+_INT4_QUANTIZATION_CHUNK_ROWS = 1_048_576  # ~512 MiB bf16 per chunk
 _ATTENTION_HEAD_DIM = 128
 _VISUAL_CODE_SIZE = 448 // 14  # 32
 _SINUSOID_MAX_TIMESCALE = 10000.0
@@ -84,6 +87,228 @@ _IMAGE_NEWLINE_TOKEN_ID = 131109
 _AUDIO_START_TOKEN_ID = 131103
 _AUDIO_END_TOKEN_ID = 131104
 _AUDIO_PAD_TOKEN_ID = 131105
+
+
+class Int4PerChannelEmbeddingMethod(QuantizeMethodBase):
+    """Online int4 per-channel quantization for huge vocabulary embeddings.
+
+    Used for LongCat-Next's n-gram embeddings, which dominate the parameter
+    count. Weights are packed two 4-bit values per byte and dequantized on-the-fly
+    during lookup, cutting storage to ~0.5 bytes per parameter.
+    """
+
+    def __init__(self, layer: torch.nn.Module) -> None:
+        super().__init__()
+        self.weight_block_size = None
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        # The Int4VocabParallelEmbedding class replaces this weight with a
+        # packed uint8 buffer immediately after init, so this path is only used
+        # to satisfy the base-class contract.
+        weight = torch.nn.Parameter(
+            torch.empty(
+                sum(output_partition_sizes),
+                input_size_per_partition,
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        from vllm.model_executor.parameter import set_weight_attrs
+
+        set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
+        layer.register_parameter("weight", weight)
+        set_weight_attrs(weight, extra_weight_attrs)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if getattr(layer, "_already_int4_quantized", False):
+            return
+        weight = layer.weight
+        hidden_size = weight.shape[1]
+        if hidden_size % 2 != 0:
+            raise ValueError(
+                f"Int4 embedding requires even embedding_dim, got {hidden_size}"
+            )
+
+        # Per-channel symmetric int4 scale: range [-7, 7].
+        max_abs = weight.abs().max(dim=0, keepdim=True).values
+        scale = (max_abs / 7.0).to(weight.dtype)
+        q = (weight / scale).round().clamp(-7, 7).to(torch.int8)
+        # Offset to unsigned 4-bit values [0, 14] and pack two per byte.
+        q_uint4 = (q + 8).to(torch.uint8)
+        packed = q_uint4[:, ::2] | (q_uint4[:, 1::2] << 4)
+
+        replace_parameter(
+            layer, "weight", torch.nn.Parameter(packed, requires_grad=False)
+        )
+        layer.register_parameter(
+            "weight_scale",
+            torch.nn.Parameter(scale, requires_grad=False),
+        )
+        layer._already_int4_quantized = True
+        torch.accelerator.empty_cache()
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError(
+            "Int4PerChannelEmbeddingMethod only supports embedding"
+        )
+
+    def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
+        # Unpack and dequantize only the selected rows.
+        packed = layer.weight[input_]
+        low = (packed & 0xF).to(torch.int16)
+        high = (packed >> 4).to(torch.int16)
+        q_uint4 = torch.stack([low, high], dim=-1).view(packed.shape[0], -1)
+        q = q_uint4.to(layer.params_dtype) - 8.0
+        return q * layer.weight_scale
+
+
+class Int4VocabParallelEmbedding(VocabParallelEmbedding):
+    """VocabParallelEmbedding that stores its weight in int4 per-channel format.
+
+    Unlike the base class, the int4 weight is allocated directly at init time
+    so the full bf16/fp16 weight is never kept on the GPU.  The checkpoint weight
+    is quantized on-the-fly inside the weight loader.
+    """
+
+    def __init__(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        params_dtype: torch.dtype | None = None,
+        org_num_embeddings: int | None = None,
+        padding_size: int = 64,
+        prefix: str = "",
+    ) -> None:
+        if embedding_dim % 2 != 0:
+            raise ValueError(
+                f"Int4VocabParallelEmbedding requires even embedding_dim, "
+                f"got {embedding_dim}"
+            )
+
+        # Let the base class compute TP shard metadata and allocate a temporary
+        # full-precision weight.  We replace it with a packed int4 buffer below.
+        super().__init__(
+            num_embeddings=num_embeddings,
+            embedding_dim=embedding_dim,
+            params_dtype=params_dtype,
+            org_num_embeddings=org_num_embeddings,
+            padding_size=padding_size,
+            quant_config=None,
+            prefix=prefix,
+        )
+
+        device = self.weight.device
+        packed_shape = (
+            self.num_embeddings_per_partition,
+            self.embedding_dim // 2,
+        )
+        packed = torch.nn.Parameter(
+            torch.empty(packed_shape, dtype=torch.uint8, device=device),
+            requires_grad=False,
+        )
+        scale = torch.nn.Parameter(
+            torch.empty(1, self.embedding_dim, dtype=self.params_dtype, device=device),
+            requires_grad=False,
+        )
+
+        replace_parameter(self, "weight", packed)
+        self.register_parameter("weight_scale", scale)
+
+        # replace_parameter copies the old parameter's weight_loader onto a new
+        # Parameter object, so we must install the int4 loader on self.weight.
+        if hasattr(self.weight, "weight_loader"):
+            delattr(self.weight, "weight_loader")
+        set_weight_attrs(
+            self.weight,
+            {
+                "weight_loader": self._int4_weight_loader,
+                "input_dim": 1,
+                "output_dim": 0,
+            },
+        )
+
+        # Install the int4 embedding method so forward() uses the unpack path.
+        self.quant_method = Int4PerChannelEmbeddingMethod(self)
+        # The weight loader already quantizes the checkpoint; skip a second pass.
+        self._already_int4_quantized = True
+
+    def _pick_staging_device(self, target_device: torch.device) -> torch.device:
+        """Pick an idle GPU for staging quantization chunks.
+
+        The target GPU is usually full of model weights, so we stream chunks
+        to another GPU that has free memory. Falls back to CPU if no GPU is
+        available.
+
+        NOTE: For multi-worker startup the "most free" GPU can be contended
+        by several concurrent loaders, so we conservatively use CPU to avoid
+        sporadic OOMs during N-gram embedding quantization.
+        """
+        return torch.device("cpu")
+
+    def _int4_weight_loader(
+        self, param: torch.nn.Parameter, loaded_weight: torch.Tensor
+    ) -> None:
+        """Shard the loaded bf16/fp16 weight and quantize to int4 in-place."""
+        start_idx = self.shard_indices.org_vocab_start_index
+        shard_size = self.shard_indices.org_vocab_end_index - start_idx
+
+        if shard_size <= 0:
+            param.data.fill_(0)
+            self.weight_scale.data.fill_(0)
+            return
+
+        # Keep the full bf16 shard on CPU so it does not compete with the
+        # model weights on the target GPU. We then stream modest chunks to an
+        # idle staging GPU for fast quantization.
+        loaded_shard_cpu = loaded_weight.narrow(0, start_idx, shard_size).detach().cpu()
+
+        target_device = param.device
+        staging_device = self._pick_staging_device(target_device)
+
+        # ~512 MiB bf16 per chunk keeps staging memory modest.
+        chunk_rows = _INT4_QUANTIZATION_CHUNK_ROWS
+
+        # First pass: compute per-channel max abs.
+        max_abs = torch.zeros(
+            1, self.embedding_dim, dtype=torch.float32, device=staging_device
+        )
+        for row_start in range(0, shard_size, chunk_rows):
+            row_end = min(row_start + chunk_rows, shard_size)
+            chunk = loaded_shard_cpu[row_start:row_end].to(staging_device)
+            chunk_max = chunk.abs().amax(dim=0, keepdim=True)
+            max_abs = torch.maximum(max_abs, chunk_max)
+        scale = (max_abs / 7.0).to(self.params_dtype)
+
+        # Second pass: quantize each chunk and copy the packed result back.
+        for row_start in range(0, shard_size, chunk_rows):
+            row_end = min(row_start + chunk_rows, shard_size)
+            chunk = loaded_shard_cpu[row_start:row_end].to(staging_device)
+            q = (
+                (chunk.to(torch.float32) / scale.to(torch.float32))
+                .round()
+                .clamp(-7, 7)
+                .to(torch.int8)
+            )
+            q_uint4 = (q + 8).to(torch.uint8)
+            packed = q_uint4[:, ::2] | (q_uint4[:, 1::2] << 4)
+            param.data[row_start:row_end].copy_(packed)
+
+        param.data[shard_size:].fill_(0)
+        self.weight_scale.data.copy_(scale)
 
 
 class NgramEmbedding(nn.Module):
@@ -123,6 +348,7 @@ class NgramEmbedding(nn.Module):
                 # Use VocabParallelEmbedding for TP sharding per embedder
                 self.embedders.append(
                     VocabParallelEmbedding(
+                    Int4VocabParallelEmbedding(
                         emb_vocab_dim,
                         emb_dim_per_embedder,
                     )
@@ -255,6 +481,10 @@ class NgramEmbedding(nn.Module):
         # are unsafe inside CUDA graph capture regions.
         oe_ignored_mask = isin_list(input_ids, self.config.oe_ignored_token_ids)
         context_ignored_mask = isin_list(context, self.config.oe_ignored_token_ids)
+        oe_ignored_mask = isin_list(input_ids,
+                                    self.config.oe_ignored_token_ids)
+        context_ignored_mask = isin_list(context,
+                                         self.config.oe_ignored_token_ids)
         context = context.clone()
         context[context_ignored_mask] = 0
 
@@ -898,10 +1128,14 @@ class LongcatNextVisualTokenizer(nn.Module):
 
         # Visual encoder (Qwen2.5-VL style ViT without merger)
         self.visual_model = LongcatNextVisualEncoder(
+        from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VisionTransformer
+
+        self.visual_model = Qwen2_5_VisionTransformer(
             vision_config=config.visual_config,
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "visual_model"),
+            skip_merger=True,
         )
 
         # Bridge + quantizer
@@ -929,6 +1163,12 @@ class LongcatNextVisualTokenizer(nn.Module):
         window_index = encoder_metadata["window_index"]
 
         # Run visual encoder (LongcatNextVisualEncoder returns window-indexed output)
+        encoder_metadata = self.visual_model.prepare_encoder_metadata(
+            grid_thw.tolist()
+        )
+        window_index = encoder_metadata["window_index"]
+
+        # Run visual encoder (skip_merger=True returns window-indexed output)
         visual_embed = self.visual_model(
             pixel_values,
             grid_thw=None,
@@ -1037,6 +1277,9 @@ class LongcatNextWhisperEncoder(WhisperEncoder):
             # Match original: float32 addition for numerical precision
             pos_embed = self.embed_positions.weight[: embeds.size(0)]
             embeds = (embeds.float() + pos_embed).to(embeds.dtype)
+            embeds = (embeds.float() + self.embed_positions.weight[: embeds.size(0)]).to(
+                embeds.dtype
+            )
             hidden_states_list.append(embeds)
         # [bs, max_seq_len, d_model]
         hidden_states = torch.stack(hidden_states_list, dim=0)
@@ -1083,6 +1326,7 @@ class LongcatNextWhisperEncoder(WhisperEncoder):
                 start = int(cu_seqlens_cpu[i])
                 end = int(cu_seqlens_cpu[i + 1])
                 result[i, : end - start] = packed_hidden[start:end]
+                result[i, :end - start] = packed_hidden[start:end]
             # Padded positions remain zero (implicit mask)
         else:
             result = packed_hidden.view(bs, max_len, dim)
@@ -1135,6 +1379,9 @@ class LongcatNextWhisperEncoder(WhisperEncoder):
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = getattr(
+                    param, "weight_loader", default_weight_loader
+                )
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
@@ -1142,6 +1389,9 @@ class LongcatNextWhisperEncoder(WhisperEncoder):
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = getattr(
+                    param, "weight_loader", default_weight_loader
+                )
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -1721,6 +1971,10 @@ class LongcatNextMultiModalProcessor(
                 for path in audio_paths:
                     with contextlib.suppress(OSError):
                         os.unlink(path)
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
 
         return BatchFeature(
             data=merged_data,
@@ -2138,6 +2392,10 @@ class LongcatNextForCausalLM(
         # >= text_vocab_size, so _has_oov_mm_tokens becomes True. This causes
         # _embed_text_input_ids to mask them to 0 BEFORE ngram embedding,
         # matching the HF model which explicitly zeroes them at line 153:
+        # All multimodal tokens (131103-131109, 131116, 131120-131124) are >= text_vocab_size, so
+        # _has_oov_mm_tokens becomes True. This causes _embed_text_input_ids
+        # to mask them to 0 BEFORE ngram embedding, matching the HF model
+        # which explicitly zeroes them at line 153:
         #   input_ids[:, special_audio_mask | special_visual_mask] = 0
         # Without this, the multimodal token IDs pollute the n-gram hash
         # context for surrounding text tokens, degrading output quality.
@@ -2204,6 +2462,9 @@ class LongcatNextForCausalLM(
             # Audio Tower
             with self._mark_tower_model(vllm_config, "audio"):
                 self.audio_tower = self._build_audio_tower(config, vllm_config, prefix)
+                self.audio_tower = self._build_audio_tower(
+                    config, vllm_config, prefix
+                )
         else:
             self.visual = None
             self.audio_tower = None

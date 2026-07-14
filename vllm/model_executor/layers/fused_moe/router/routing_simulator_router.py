@@ -118,7 +118,7 @@ class DistributionBasedRouting(RoutingStrategy):
         # Generate weights based on the distribution
         topk_weights = self._generate_weights(num_tokens, top_k, hidden_states.device)
 
-        return topk_weights, topk_ids
+        return topk_weights, topk_ids, None
 
     def _sample_expert_ids(
         self,
@@ -331,7 +331,7 @@ class RoutingSimulatorRouter(BaseRouter):
         indices_type: torch.dtype | None,
         *,
         input_ids: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Use routing simulator to compute routing."""
         routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
         topk_weights, topk_ids = RoutingSimulator.simulate_routing(
@@ -341,4 +341,4 @@ class RoutingSimulatorRouter(BaseRouter):
             top_k=self.top_k,
             indices_type=indices_type,
         )
-        return topk_weights, topk_ids
+        return topk_weights, topk_ids, None

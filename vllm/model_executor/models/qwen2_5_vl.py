@@ -619,6 +619,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        skip_merger: bool = False,
     ) -> None:
         super().__init__()
 
@@ -629,6 +630,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         self.hidden_size = vision_config.hidden_size
         self.num_heads = vision_config.num_heads
         self.out_hidden_size = vision_config.out_hidden_size
+        self.skip_merger = skip_merger
 
         # args for get_window_index_thw
         self.window_size = vision_config.window_size
@@ -686,14 +688,15 @@ class Qwen2_5_VisionTransformer(nn.Module):
             ]
         )
 
-        self.merger = Qwen2_5_VisionPatchMerger(
-            d_model=vision_config.out_hidden_size,
-            context_dim=self.hidden_size,
-            norm_layer=norm_layer,
-            spatial_merge_size=self.spatial_merge_size,
-            quant_config=quant_config,
-            prefix=f"{prefix}.merger",
-        )
+        if not skip_merger:
+            self.merger = Qwen2_5_VisionPatchMerger(
+                d_model=vision_config.out_hidden_size,
+                context_dim=self.hidden_size,
+                norm_layer=norm_layer,
+                spatial_merge_size=self.spatial_merge_size,
+                quant_config=quant_config,
+                prefix=f"{prefix}.merger",
+            )
 
     @property
     def dtype(self) -> torch.dtype:
@@ -1111,8 +1114,11 @@ class Qwen2_5_VisionTransformer(nn.Module):
             hidden_states = cast_overflow_tensors(hidden_states)
 
         # adapter
-        hidden_states = self.merger(hidden_states)
-        hidden_states = hidden_states[reverse_indices, :]
+        if not self.skip_merger:
+            hidden_states = self.merger(hidden_states)
+            hidden_states = hidden_states[reverse_indices, :]
+        else:
+            hidden_states = hidden_states.squeeze(1)
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1128,6 +1134,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
+            # Skip merger weights when skip_merger=True
+            if self.skip_merger and "merger" in name:
+                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
