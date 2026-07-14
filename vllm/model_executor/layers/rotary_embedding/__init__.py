@@ -254,10 +254,14 @@ def get_rope(
                 "beta_slow",
                 "apply_yarn_scaling",
                 "truncate",
+                "mscale",
+                "mscale_all_dim",
             )
         }
         if "mrope_section" in rope_parameters:
             extra_kwargs.pop("apply_yarn_scaling", None)
+            extra_kwargs.pop("mscale", None)
+            extra_kwargs.pop("mscale_all_dim", None)
             rotary_emb = MRotaryEmbedding(
                 head_size,
                 rotary_dim,
