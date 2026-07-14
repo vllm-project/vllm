@@ -11,7 +11,7 @@ only one window's logits in memory at a time; KL divergence is computed
 on GPU when reference logits are provided in the prompt.
 
 Usage:
-    # Two-phase: generate reference logits then compute KLD
+    # Two-phase: generate reference logits then compute KLD (eager by default)
     python examples/score_mode_kld.py \\
         --model /path/to/quantized_model \\
         --reference-model /path/to/reference_model \\
@@ -22,6 +22,9 @@ Usage:
         --model /path/to/quantized_model \\
         --reference-logits /path/to/ref_logits_dir/ \\
         --dataset wikitext --dataset-config wikitext-2-raw-v1
+
+    # Speed experiments only (NOT bit-reproducible):
+    python examples/score_mode_kld.py ... --compiled
 """
 
 import argparse
@@ -42,18 +45,10 @@ from vllm.inputs import TokensPrompt
 
 logger = logging.getLogger(__name__)
 
-# Several parts of the compiled stack select kernels by *timing* candidates,
-# so run-to-run timing noise changes which kernel wins, changing float
-# reduction order and thus logits. All timing-based selectors must be
-# disabled for bit-reproducible scoring:
-#   - combo_kernels / benchmark_combo_kernel: horizontal fusion picked by
-#     compile-time benchmarking.
-#   - triton.autotune_pointwise: Inductor generates multiple Triton configs
-#     per pointwise/reduction kernel and benchmarks them at first call in
-#     every process.
-#   - max_autotune / coordinate_descent_tuning: static-shape autotuning.
-# Heuristic (non-timed) selection is used instead; torch.compile speed is
-# otherwise retained.
+# Best-effort compiled determinism config (--compiled only). Eager execution
+# (the default) is the only mode proven bit-reproducible run-to-run on the
+# current stack. This config disables known timing-based selectors but does
+# not guarantee reproducibility; see docs/features/score_mode.md.
 DETERMINISTIC_COMPILATION_CONFIG: dict[str, Any] = {
     "inductor_compile_config": {
         "combo_kernels": False,
@@ -67,14 +62,10 @@ DETERMINISTIC_COMPILATION_CONFIG: dict[str, Any] = {
 
 
 def apply_deterministic_env() -> None:
-    """Disable timing-based autotuners controlled by environment variables.
+    """Best-effort: disable timing-based autotuners via environment variables.
 
-    TORCHINDUCTOR_DETERMINISTIC is PyTorch's dedicated run-to-run
-    determinism mode: it bans all on-device benchmarking that affects
-    numerics (notably reduction config selection — split/persistent
-    reductions — which changes summation order). Pointwise autotuning is
-    numerics-safe and stays enabled. The env var is inherited by vLLM
-    worker subprocesses, where compilation actually happens.
+    Used only with ``--compiled``. Does not make compiled scoring
+    bit-reproducible; eager mode is required for that.
     """
     os.environ.setdefault("TORCHINDUCTOR_DETERMINISTIC", "1")
     os.environ.setdefault("VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE", "0")
@@ -90,16 +81,16 @@ def apply_deterministic_env() -> None:
         pass
 
 
-def apply_deterministic_llm_kwargs(llm_kwargs: dict[str, Any]) -> None:
-    """Apply all determinism settings to LLM kwargs.
-
-    Besides Inductor, vLLM's FlashInfer warmup autotuner (enabled by default
-    at optimization level >= 1 on SM90+) also picks kernel tactics by timing
-    them per process; disable it so FlashInfer uses fixed heuristics.
-    """
+def apply_compiled_llm_kwargs(llm_kwargs: dict[str, Any]) -> None:
+    """Apply best-effort compiled determinism settings (--compiled only)."""
     apply_deterministic_env()
     llm_kwargs["compilation_config"] = DETERMINISTIC_COMPILATION_CONFIG
     llm_kwargs["enable_flashinfer_autotune"] = False
+
+
+def apply_eager_llm_kwargs(llm_kwargs: dict[str, Any]) -> None:
+    """Apply guaranteed bit-reproducible eager execution (default)."""
+    llm_kwargs["enforce_eager"] = True
 
 
 def load_dataset_texts(
@@ -465,26 +456,11 @@ def main():
         "to save GPU memory",
     )
     parser.add_argument(
-        "--no-deterministic",
+        "--compiled",
         action="store_true",
-        help="Allow timing-based Inductor kernel selection (combo kernels). "
-        "Faster warmup is possible but KLD becomes non-reproducible "
-        "run-to-run. Deterministic mode is the default for scoring.",
-    )
-    parser.add_argument(
-        "--enforce-eager",
-        action="store_true",
-        help="Run without torch.compile/CUDA graphs. Guaranteed "
-        "bit-deterministic baseline: one fixed kernel set, no compilation, "
-        "no kernel selection of any kind. Slower; use for base KLD or to "
-        "measure the compiled stack's numeric impact vs eager.",
-    )
-    parser.add_argument(
-        "--no-cudagraphs",
-        action="store_true",
-        help="Keep compiled kernels but disable CUDA graph capture/replay. "
-        "Diagnostic flag to bisect whether run-to-run variation comes from "
-        "Inductor kernels or from CUDA graphs.",
+        help="Use torch.compile with best-effort determinism settings. "
+        "Faster but NOT bit-reproducible run-to-run on the current stack; "
+        "for speed experiments only. Eager mode is the default.",
     )
     parser.add_argument(
         "--verbose",
@@ -517,20 +493,15 @@ def main():
         llm_kwargs["quantization"] = args.quantization
     if args.language_model_only:
         llm_kwargs["language_model_only"] = True
-    if args.enforce_eager:
-        llm_kwargs["enforce_eager"] = True
-        print("Eager mode: no torch.compile/CUDA graphs (bit-deterministic KLD)")
-    elif not args.no_deterministic:
-        apply_deterministic_llm_kwargs(llm_kwargs)
+    if args.compiled:
+        apply_compiled_llm_kwargs(llm_kwargs)
         print(
-            "Deterministic mode: combo kernels, Inductor benchmarking, "
-            "and FlashInfer autotune disabled (bit-reproducible KLD)"
+            "WARNING: --compiled mode is NOT bit-reproducible run-to-run. "
+            "Use default eager mode for authoritative KLD scoring."
         )
-    if args.no_cudagraphs and not args.enforce_eager:
-        compilation_config = dict(llm_kwargs.get("compilation_config") or {})
-        compilation_config["cudagraph_mode"] = "NONE"
-        llm_kwargs["compilation_config"] = compilation_config
-        print("CUDA graphs disabled (compiled kernels still active)")
+    else:
+        apply_eager_llm_kwargs(llm_kwargs)
+        print("Deterministic (eager) mode: bit-reproducible scoring")
 
     print("\nCalculating KLD...")
     print(f"  Context length: {args.context_length}")

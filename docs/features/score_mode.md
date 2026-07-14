@@ -139,72 +139,95 @@ reference logits caching, see the example script:
 ## Determinism
 
 Scoring is only meaningful if the same command produces the same score every
-time. Several parts of the compiled stack select kernels by *timing*
-candidates, so run-to-run timing noise can change which kernel wins, changing
-floating-point reduction order and thus logits (and therefore PPL/KLD)
-between otherwise identical runs:
+time. Investigation on this fork found:
 
-- `combo_kernels` / `benchmark_combo_kernel` (enabled by default in
-  `CompilationConfig` on torch >= 2.9)
-- Inductor runtime Triton autotuning (`triton.autotune_pointwise`, on by
-  default): multiple candidate configs per generated kernel are benchmarked
-  at first call in every process
-- `max_autotune` / `coordinate_descent_tuning` (only active for static
-  `compile_sizes`)
-- FlashInfer warmup autotuning (`enable_flashinfer_autotune`, enabled by
-  default at optimization level >= 1 on SM90+): kernel tactics picked by
-  per-process benchmarking
-- Inductor on-device benchmarking for reduction config selection
-  (split/persistent reductions), which changes summation order; disabled
-  via `TORCHINDUCTOR_DETERMINISTIC=1` (PyTorch's dedicated run-to-run
-  determinism mode)
+- **Eager execution** (`enforce_eager=True`) is bit-reproducible on the first
+  run: identical Mean KLD across repeated runs, and byte-identical reference
+  logits across independent generations (verified via `sha256sum`).
+- The **compiled stack** wobbles run-to-run even with every known timing-based
+  selector disabled (`combo_kernels`, Inductor pointwise autotune,
+  `TORCHINDUCTOR_DETERMINISTIC=1`, FlashInfer autotune). It converges to an
+  attractor value only after repeated warm runs and deviates again after idle
+  time. Not certifiable for scoring.
+- **CUDA graphs** are numerically neutral (identical converged KLD with and
+  without graph capture on the tested stack).
+- Reference logits and test runs must use the **same execution stack**. An
+  eager-vs-compiled baseline offset was directly measured (~0.001 KLD).
 
-The example scripts disable all of these by default by passing:
+### Rules
+
+1. **Scoring runs eager.** The example scripts use eager mode by default. API
+   users must pass `enforce_eager=True`. One pass is sufficient; the first run
+   is already exact.
+2. **Never mix stacks.** References and every scored model must use the same
+   execution mode on the same GPU, driver, and PyTorch build. Regenerate
+   references after any of those change.
+3. **`--compiled` is for speed experiments only.** It applies best-effort
+   determinism settings but is **not** bit-reproducible run-to-run on the
+   current stack.
+
+### Exact commands (always deterministic)
+
+Generate reference logits and score a quant (one pass each; no extra flags):
+
+```bash
+python3 examples/offline_inference/score_mode_kld.py \
+  --model /path/to/QUANT_MODEL \
+  --reference-model /path/to/BF16_MODEL \
+  --dataset wikitext --dataset-config wikitext-2-raw-v1 \
+  --tensor-parallel-size 1 --gpu-memory-utilization 0.85
+
+python3 examples/offline_inference/score_mode_kld.py \
+  --model /path/to/QUANT_MODEL \
+  --reference-logits ./ref_logits_BF16_MODEL_ctx2048_s512 \
+  --dataset wikitext --dataset-config wikitext-2-raw-v1 \
+  --tensor-parallel-size 1 --gpu-memory-utilization 0.85
+```
+
+Perplexity uses the same default (eager); see
+[score_mode_perplexity.py](../../examples/offline_inference/score_mode_perplexity.py).
+
+### API usage (eager, deterministic)
 
 ```python
 llm = LLM(
     model=...,
-    compilation_config={
-        "inductor_compile_config": {
-            "combo_kernels": False,
-            "benchmark_combo_kernel": False,
-            "triton.autotune_pointwise": False,
-            "max_autotune": False,
-            "coordinate_descent_tuning": False,
-            "benchmark_fusion": False,
-        },
-    },
-    enable_flashinfer_autotune=False,
+    enforce_eager=True,
+    enable_prefix_caching=False,
 )
 ```
 
-with `TORCHINDUCTOR_DETERMINISTIC=1`, `VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE=0`
-and `VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING=0`. Kernel selection
-then uses fixed heuristics instead of timing; `torch.compile` speed is
-otherwise retained. Pass `--no-deterministic` to opt out.
+### Verify reference logits are byte-identical
 
-If bit-exact reproducibility is required and the compiled path still shows
-run-to-run variation on your stack, `enforce_eager=True` (or
-`TORCH_COMPILE_DISABLE=1`) is the guaranteed-deterministic baseline: one
-fixed set of kernels, no compilation, no selection of any kind.
+Generate references twice into separate directories, then diff hashes:
 
-!!! note
-    The first run after changing any compilation-affecting configuration
-    compiles fresh; subsequent runs load from the compile cache. Always
-    compare scores between runs that both hit a warm cache (i.e. discard
-    the first run after a config change or vLLM rebuild).
+```bash
+diff <(cd ref_eager_a && sha256sum logits_*.safetensors) \
+     <(cd ref_eager_b && sha256sum logits_*.safetensors)
+```
 
-Notes:
+An empty diff confirms single-pass reference generation is safe.
 
-- Kernel rounding noise is orders of magnitude smaller than quantization
-  effects, but KLD is sensitive enough to detect it. Reference logits and
-  test runs must be produced under the same kernel configuration; never mix
-  references generated with combo kernels enabled and disabled.
-- Determinism is guaranteed run-to-run on the same GPU/driver/PyTorch
-  version. Different hardware or software versions generate different
-  kernels and yield slightly different (internally consistent) baselines.
-- For a fully eager fallback, set `TORCH_COMPILE_DISABLE=1` (slower, and a
-  slightly different baseline than compiled mode).
+### Compiled mode (`--compiled`, not for authoritative scoring)
+
+Pass `--compiled` to the example scripts to enable `torch.compile` with
+best-effort settings (combo kernels off, Inductor autotune off,
+`TORCHINDUCTOR_DETERMINISTIC=1`, FlashInfer autotune off). This is faster but
+**not** bit-reproducible run-to-run. Evidence: repeated runs converge to an
+attractor then deviate after idle gaps; disabling CUDA graphs does not change
+the converged value.
+
+### Rounding noise vs accuracy
+
+Quantization effects (~1e-2 KLD) dwarf kernel rounding noise (~1e-7). Compiled
+wobble corrupts **reproducibility**, not model accuracy. Argmax token flips from
+kernel rounding occur only at model-declared ties (top-1/top-2 logit gap
+under ~1e-3). Verify with the forensic diagnostic:
+
+[examples/offline_inference/score_mode_argmax_diag.py](../../examples/offline_inference/score_mode_argmax_diag.py)
+
+Generate logits under default (compiled wobble) or `--deterministic` (eager
+ground truth), then `compare` two directories.
 
 ## Constraints
 

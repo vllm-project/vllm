@@ -33,10 +33,8 @@ from vllm.inputs import TokensPrompt
 
 logger = logging.getLogger(__name__)
 
-# Several parts of the compiled stack select kernels by *timing* candidates,
-# so run-to-run timing noise changes which kernel wins, changing float
-# reduction order and thus logits. All timing-based selectors must be
-# disabled for bit-reproducible scoring. See score_mode_kld.py for details.
+# Best-effort compiled determinism config (--compiled only). See
+# score_mode_kld.py and docs/features/score_mode.md.
 DETERMINISTIC_COMPILATION_CONFIG: dict[str, Any] = {
     "inductor_compile_config": {
         "combo_kernels": False,
@@ -50,7 +48,7 @@ DETERMINISTIC_COMPILATION_CONFIG: dict[str, Any] = {
 
 
 def apply_deterministic_env() -> None:
-    """Disable timing-based autotuners (see score_mode_kld.py for details)."""
+    """Best-effort: disable timing-based autotuners (--compiled only)."""
     os.environ.setdefault("TORCHINDUCTOR_DETERMINISTIC", "1")
     os.environ.setdefault("VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE", "0")
     os.environ.setdefault("VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING", "0")
@@ -63,11 +61,16 @@ def apply_deterministic_env() -> None:
         pass
 
 
-def apply_deterministic_llm_kwargs(llm_kwargs: dict[str, Any]) -> None:
-    """Apply all determinism settings to LLM kwargs (see score_mode_kld.py)."""
+def apply_compiled_llm_kwargs(llm_kwargs: dict[str, Any]) -> None:
+    """Apply best-effort compiled determinism settings (--compiled only)."""
     apply_deterministic_env()
     llm_kwargs["compilation_config"] = DETERMINISTIC_COMPILATION_CONFIG
     llm_kwargs["enable_flashinfer_autotune"] = False
+
+
+def apply_eager_llm_kwargs(llm_kwargs: dict[str, Any]) -> None:
+    """Apply guaranteed bit-reproducible eager execution (default)."""
+    llm_kwargs["enforce_eager"] = True
 
 
 def _extract_logprobs_from_window(
@@ -333,17 +336,11 @@ def main():
         help="Trust remote code when loading model",
     )
     parser.add_argument(
-        "--no-deterministic",
+        "--compiled",
         action="store_true",
-        help="Allow timing-based Inductor kernel selection (combo kernels). "
-        "Faster warmup is possible but perplexity becomes non-reproducible "
-        "run-to-run. Deterministic mode is the default for scoring.",
-    )
-    parser.add_argument(
-        "--enforce-eager",
-        action="store_true",
-        help="Run without torch.compile/CUDA graphs. Guaranteed "
-        "bit-deterministic baseline; slower.",
+        help="Use torch.compile with best-effort determinism settings. "
+        "Faster but NOT bit-reproducible run-to-run; for speed experiments "
+        "only. Eager mode is the default.",
     )
     parser.add_argument(
         "--verbose",
@@ -372,15 +369,15 @@ def main():
     if args.quantization:
         llm_kwargs["quantization"] = args.quantization
 
-    if args.enforce_eager:
-        llm_kwargs["enforce_eager"] = True
-        print("Eager mode: no torch.compile/CUDA graphs (bit-deterministic PPL)")
-    elif not args.no_deterministic:
-        apply_deterministic_llm_kwargs(llm_kwargs)
+    if args.compiled:
+        apply_compiled_llm_kwargs(llm_kwargs)
         print(
-            "Deterministic mode: combo kernels, Inductor benchmarking, "
-            "and FlashInfer autotune disabled (bit-reproducible PPL)"
+            "WARNING: --compiled mode is NOT bit-reproducible run-to-run. "
+            "Use default eager mode for authoritative perplexity scoring."
         )
+    else:
+        apply_eager_llm_kwargs(llm_kwargs)
+        print("Deterministic (eager) mode: bit-reproducible scoring")
 
     print(f"Initializing LLM with model: {args.model}")
     llm = LLM(model=args.model, **llm_kwargs)

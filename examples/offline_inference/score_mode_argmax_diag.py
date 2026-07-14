@@ -19,13 +19,18 @@ noise. Flips at large gaps indicate a real correctness bug in the
 timing-selected kernels.
 
 Usage:
-    # Step 1: generate logits twice (separate processes, wobbling config)
+    # Step 1: generate logits twice (default = compiled wobble diagnostic)
     python examples/offline_inference/score_mode_argmax_diag.py generate \\
         --model /path/to/model --output-dir ./diag_run_a \\
         --dataset wikitext --dataset-config wikitext-2-raw-v1
     python examples/offline_inference/score_mode_argmax_diag.py generate \\
         --model /path/to/model --output-dir ./diag_run_b \\
         --dataset wikitext --dataset-config wikitext-2-raw-v1
+
+    # Eager ground-truth baseline (byte-identical across runs):
+    python examples/offline_inference/score_mode_argmax_diag.py generate \\
+        --model /path/to/model --output-dir ./diag_eager \\
+        --dataset wikitext --dataset-config wikitext-2-raw-v1 --deterministic
 
     # Step 2: compare
     python examples/offline_inference/score_mode_argmax_diag.py compare \\
@@ -40,7 +45,8 @@ import torch
 from safetensors.torch import safe_open, save_file
 
 from score_mode_kld import (
-    apply_deterministic_llm_kwargs,
+    apply_compiled_llm_kwargs,
+    apply_eager_llm_kwargs,
     load_dataset_texts,
 )
 
@@ -81,10 +87,13 @@ def generate_logits(args: argparse.Namespace) -> None:
         "max_model_len": args.context_length * 2,
     }
     if args.deterministic:
-        apply_deterministic_llm_kwargs(llm_kwargs)
-        print("Deterministic config: all timing-based autotuners disabled")
+        apply_eager_llm_kwargs(llm_kwargs)
+        print("Eager mode: bit-reproducible logits (ground-truth baseline)")
+    elif args.compiled:
+        apply_compiled_llm_kwargs(llm_kwargs)
+        print("Compiled mode: best-effort determinism (may still wobble)")
     else:
-        print("Wobbling config: combo kernels active (diagnostic target)")
+        print("Default compiled mode: timing-based kernel selection active")
 
     os.makedirs(args.output_dir, exist_ok=True)
     llm = LLM(model=args.model, **llm_kwargs)
@@ -222,8 +231,14 @@ def main() -> None:
     gen.add_argument(
         "--deterministic",
         action="store_true",
-        help="Use the frozen (combo-kernels-off) config instead of the "
-        "wobbling one; two such runs should be bit-identical",
+        help="Use eager execution (enforce_eager). Two such runs are "
+        "byte-identical; this is the scoring ground-truth baseline.",
+    )
+    gen.add_argument(
+        "--compiled",
+        action="store_true",
+        help="Use torch.compile with best-effort determinism settings. "
+        "May still wobble run-to-run. Mutually exclusive with --deterministic.",
     )
 
     cmp_p = sub.add_parser("compare", help="Compare two generated logit dirs")
@@ -232,6 +247,8 @@ def main() -> None:
 
     args = parser.parse_args()
     if args.mode == "generate":
+        if getattr(args, "deterministic", False) and getattr(args, "compiled", False):
+            parser.error("--deterministic and --compiled are mutually exclusive")
         generate_logits(args)
     else:
         compare_logits(args)
