@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
 import time
 import weakref
 from collections.abc import Callable, Mapping
@@ -28,6 +29,7 @@ from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.v1.engine import EngineCoreRequest, PauseMode
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.input_processor import InputProcessor
@@ -139,6 +141,25 @@ class LLMEngine:
 
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
+
+        # Initialized on every path so shutdown()/the finalizer are always safe.
+        self._frozen_gc_heap = False
+        self._heap_unfreezer: weakref.finalize | None = None
+        if multiprocess_mode:
+            # In multiprocess mode the EngineCore child freezes its own heap
+            # (EngineCore.__init__), but this front-end process is never
+            # frozen -- unlike the online server, which freezes it from the
+            # serve lifespan. Freeze it here, after warmup, so oldest-
+            # generation GC pauses in the process that runs step() do not grow
+            # over long-lived runs.
+            freeze_gc_heap()
+            self._frozen_gc_heap = True
+            # Backstop unfreeze for callers that drop the engine without an
+            # explicit shutdown(). The callback holds no reference to self, so
+            # it never pins the frozen engine graph; it runs on collection in
+            # the acyclic case and otherwise at interpreter exit. shutdown() is
+            # the deterministic path.
+            self._heap_unfreezer = weakref.finalize(self, gc.unfreeze)
 
     @classmethod
     def from_vllm_config(
@@ -441,6 +462,30 @@ class LLMEngine:
         for module in model.modules():
             if isinstance(module, TorchCompileWithNoGuardsWrapper):
                 module.cleanup()
+
+    def shutdown(self, timeout: float | None = None) -> None:
+        """Tear down the engine and release its resources.
+
+        Undoes the multiprocess front-end ``gc.freeze()`` from ``__init__``
+        (gh #48229) and shuts down the ``EngineCore`` client. Safe to call
+        more than once. Offline callers that repeatedly build and drop
+        ``LLM`` instances in one process should call this (directly or via the
+        ``LLM`` context manager) so each frozen front-end heap is released
+        deterministically instead of stranded in the permanent GC generation.
+
+        Args:
+            timeout: Optional shutdown timeout forwarded to the ``EngineCore``
+                client.
+        """
+        if getattr(self, "_frozen_gc_heap", False):
+            self._frozen_gc_heap = False
+            if self._heap_unfreezer is not None:
+                self._heap_unfreezer.detach()
+                self._heap_unfreezer = None
+            gc.unfreeze()
+        engine_core = getattr(self, "engine_core", None)
+        if engine_core is not None:
+            engine_core.shutdown(timeout=timeout)
 
     def __del__(self):
         dp_group = getattr(self, "dp_group", None)
