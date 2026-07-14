@@ -1288,6 +1288,24 @@ class Platform:
         """
         return False
 
+    @classmethod
+    def validate_environ(cls, hard_fail: bool) -> None:
+        """
+        Validate environment variables for the current platform.
+        """
+        from vllm import envs
+
+        for env in os.environ:
+            if env.startswith("VLLM_") and env not in envs.environment_variables:
+                if hard_fail:
+                    raise ValueError(
+                        f"Unknown vLLM environment variable detected: {env}"
+                    )
+                else:
+                    logger.warning(
+                        "Unknown vLLM environment variable detected: %s", env
+                    )
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED
