@@ -185,6 +185,43 @@ def _assert_topk_indices_equal_unordered(
         assert set(actual_row) == set(expected_row)
 
 
+def _reference_decode_index_score(
+    idx_q: torch.Tensor,
+    index_kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    decode_query_len: int,
+    score_block_stride: int,
+) -> torch.Tensor:
+    total_q, num_idx_heads, _ = idx_q.shape
+    out = torch.full(
+        (num_idx_heads, total_q, score_block_stride),
+        -float("inf"),
+        device=idx_q.device,
+        dtype=torch.float32,
+    )
+    for req_id, seq_len in enumerate(seq_lens.tolist()):
+        num_blocks = (seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+        token_start = req_id * decode_query_len
+        q = idx_q[token_start : token_start + decode_query_len].float()
+        pages = block_table[req_id, :num_blocks]
+        k = index_kv_cache[pages].reshape(num_blocks * BLOCK_SIZE, -1).float()
+        score = torch.einsum("qhd,kd->hqk", q, k)
+        q_pos = (
+            seq_len
+            - decode_query_len
+            + torch.arange(decode_query_len, device=idx_q.device)
+        )
+        k_pos = torch.arange(k.shape[0], device=idx_q.device)
+        score.masked_fill_(k_pos[None, :] > q_pos[:, None], -float("inf"))
+        out[:, token_start : token_start + decode_query_len, :num_blocks] = (
+            score.reshape(num_idx_heads, decode_query_len, num_blocks, BLOCK_SIZE)
+            .max(dim=3)
+            .values
+        )
+    return out
+
+
 def test_prefill_index_topk_correctness():
     topk = 6
     init_blocks = 0
@@ -639,6 +676,80 @@ def test_decode_index_topk_fp8(num_idx_heads: int):
         local_blocks,
     )
     _assert_topk_indices_equal_unordered(actual, expected)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="CuteDSL index decode score requires Blackwell.",
+)
+@pytest.mark.parametrize(
+    ("dtype", "decode_query_len", "max_decode_query_len"),
+    [
+        (torch.bfloat16, 1, 1),
+        (torch.bfloat16, 3, 8),
+        (torch.float8_e4m3fn, 1, 1),
+        (torch.float8_e4m3fn, 3, 8),
+        (torch.float8_e4m3fn, 8, 8),
+    ],
+)
+def test_decode_index_score_cutedsl_correctness(
+    dtype: torch.dtype,
+    decode_query_len: int,
+    max_decode_query_len: int,
+):
+    pytest.importorskip("cutlass")
+    from vllm.models.minimax_m3.nvidia.ops import (
+        minimax_m3_index_decode_score_cutedsl,
+    )
+
+    torch.manual_seed(0)
+    init_blocks, local_blocks = 0, 0
+    num_idx_heads, head_dim = 4, 128
+    active_seq_lens = torch.tensor((1025, 4097), device="cuda", dtype=torch.int32)
+    batch = active_seq_lens.numel()
+    total_q = batch * decode_query_len
+    max_seq_len = int(active_seq_lens.max())
+    max_blocks = (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+    score_block_stride = ((max_blocks + 15) // 16) * 16
+    num_pages = batch * max_blocks
+
+    block_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32).reshape(
+        batch, max_blocks
+    )
+    idx_q = torch.randn(total_q, num_idx_heads, head_dim, device="cuda").to(dtype)
+    index_kv_cache = torch.randn(num_pages, BLOCK_SIZE, head_dim, device="cuda").to(
+        dtype
+    )
+    unified_score = torch.full(
+        (total_q, num_idx_heads, score_block_stride),
+        -float("inf"),
+        device="cuda",
+        dtype=torch.float32,
+    )
+    score = unified_score.transpose(0, 1)
+
+    minimax_m3_index_decode_score_cutedsl(
+        idx_q,
+        index_kv_cache,
+        block_table,
+        active_seq_lens,
+        max_seq_len=max_seq_len,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+        num_kv_heads=num_idx_heads,
+        decode_query_len=decode_query_len,
+        max_decode_query_len=max_decode_query_len,
+        score_out=score,
+    )
+    expected = _reference_decode_index_score(
+        idx_q,
+        index_kv_cache,
+        block_table,
+        active_seq_lens,
+        decode_query_len,
+        score_block_stride,
+    )
+    torch.testing.assert_close(score, expected)
 
 
 # Sparse attention kernels.
