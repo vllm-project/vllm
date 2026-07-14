@@ -48,6 +48,7 @@ from vllm.v1.kv_cache_interface import (
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention import MLAAttention
+    from vllm.model_executor.model_loader.reload import ReloadPlanBuilder
 
 logger = init_logger(__name__)
 
@@ -596,6 +597,25 @@ class Attention(nn.Module, AttentionLayerBase):
         s += f", scale={self.impl.scale}"  # type: ignore
         s += f", backend={self.impl.__class__.__name__}"
         return s
+
+    def build_reload_plan(
+        self,
+        builder: "ReloadPlanBuilder",
+        prefix: str,
+    ) -> None:
+        """Declare backend-owned tensors rebuilt after checkpoint loading."""
+        sinks = getattr(self.impl, "sinks", None)
+        if not isinstance(sinks, torch.Tensor):
+            return
+        node_name = f"{prefix}.attention_sinks" if prefix else "attention_sinks"
+        source = getattr(self.impl, "_reload_sinks_source", sinks)
+        builder.derived(
+            node_name,
+            owner=self.impl,
+            owner_key="attention_sinks",
+            outputs=("sinks",),
+            depends_on=builder.inputs_for_tensor(source),
+        )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         self.impl.process_weights_after_loading(act_dtype)

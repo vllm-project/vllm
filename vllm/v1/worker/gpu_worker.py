@@ -1206,6 +1206,13 @@ class Worker(WorkerBase):
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
+    def _get_reload_coordinator(self) -> Any:
+        if not self.use_v2_model_runner:
+            raise NotImplementedError(
+                "Sealed weight reload transactions require the v2 model runner"
+            )
+        return self.model_runner.reload_coordinator  # type: ignore[attr-defined]
+
     def start_weight_update(self) -> None:
         """
         Start a new weight update session.
@@ -1239,11 +1246,17 @@ class Worker(WorkerBase):
                 "active. Call finish_weight_update first."
             )
 
+        coordinator = self._get_reload_coordinator()
         try:
             if is_draft:
                 self._set_draft_weight_update_target()
+            coordinator.begin(
+                self.weight_transfer_engine.model,
+                self.weight_transfer_engine.model_config,
+            )
             self.weight_transfer_engine.start_weight_update()
         except BaseException:
+            coordinator.abort()
             self.weight_transfer_engine.reset_weight_update_target()
             raise
         self._weight_update_active = True
@@ -1268,15 +1281,27 @@ class Worker(WorkerBase):
                 "start_weight_update must be called before update_weights."
             )
 
+        coordinator = self._get_reload_coordinator()
         try:
+            coordinator.record_inputs(update_info)
             self.weight_transfer_engine.update_weights(update_info)
         except BaseException:
+            coordinator.abort()
             self._weight_update_active = False
             self.weight_transfer_engine.reset_weight_update_target()
             raise
 
     def finish_weight_update(self) -> None:
-        """Finish the current weight update session."""
+        """Prepare and commit one local weight update session."""
+        try:
+            self.prepare_weight_update()
+            self.commit_weight_update()
+        except BaseException:
+            self._get_reload_coordinator().abort()
+            raise
+
+    def prepare_weight_update(self) -> None:
+        """Finalize backend transforms and validate without publishing an epoch."""
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
 
@@ -1285,7 +1310,34 @@ class Worker(WorkerBase):
                 "finish_weight_update called without a matching start_weight_update."
             )
 
-        self.weight_transfer_engine.finish_weight_update()
+        coordinator = self._get_reload_coordinator()
+        try:
+            coordinator.start_finalizing()
+            self.weight_transfer_engine.finish_weight_update()
+            coordinator.prepare()
+        except BaseException:
+            coordinator.abort()
+            raise
+
+    def commit_weight_update(self) -> None:
+        """Publish a weight update after every worker prepared successfully."""
+        self._check_weight_transfer_engine()
+        assert self.weight_transfer_engine is not None
+        if not self._weight_update_active:
+            raise RuntimeError(
+                "commit_weight_update called without a prepared weight update."
+            )
+        coordinator = self._get_reload_coordinator()
+        coordinator.commit()
+        self.weight_transfer_engine.reset_weight_update_target()
+        self._weight_update_active = False
+
+    def abort_weight_update(self) -> None:
+        """Fail a prepared distributed update and release its transport target."""
+        self._check_weight_transfer_engine()
+        assert self.weight_transfer_engine is not None
+        coordinator = self._get_reload_coordinator()
+        coordinator.abort()
         self.weight_transfer_engine.reset_weight_update_target()
         self._weight_update_active = False
 

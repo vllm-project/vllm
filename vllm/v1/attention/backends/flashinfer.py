@@ -1580,8 +1580,18 @@ class FlashInferImpl(AttentionImpl):
 
     # FlashInfer requires attention sinks to be float32
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        if self.sinks is not None and self.sinks.dtype != torch.float32:
-            self.sinks = self.sinks.to(torch.float32)
+        source = getattr(self, "_reload_sinks_source", self.sinks)
+        if source is None:
+            return
+        self._reload_sinks_source = source
+        sinks = source.to(torch.float32)
+        from vllm.model_executor.model_loader.reload import refresh_reload_derived
+
+        refresh_reload_derived(
+            self,
+            "attention_sinks",
+            {"sinks": sinks},
+        )
 
     def get_xqa_bmm1_scale(self, layer: torch.nn.Module, q_data_type: torch.dtype):
         bmm1_scale = self.scale

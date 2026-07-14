@@ -24,6 +24,20 @@ __all__ = [
     "finalize_layerwise_reload",
     "set_torchao_reload_attrs",
     "support_quantized_model_reload_from_hp_weights",
+    "ReloadCapability",
+    "ReloadCapabilityError",
+    "ReloadInputError",
+    "ReloadLifecycleError",
+    "ReloadPlan",
+    "ReloadPlanBuilder",
+    "ReloadPlanCompileError",
+    "ReloadStatePolicy",
+    "ReloadStatePolicyError",
+    "ReloadStorageIdentityError",
+    "ReloadTransaction",
+    "ReloadTransactionState",
+    "StaleDerivedSlotError",
+    "refresh_reload_derived",
 ]
 
 from .layerwise import (
@@ -31,6 +45,22 @@ from .layerwise import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
     record_metadata_for_reloading,
+)
+from .plan import (
+    ReloadCapability,
+    ReloadCapabilityError,
+    ReloadInputError,
+    ReloadLifecycleError,
+    ReloadPlan,
+    ReloadPlanBuilder,
+    ReloadPlanCompileError,
+    ReloadStatePolicy,
+    ReloadStatePolicyError,
+    ReloadStorageIdentityError,
+    ReloadTransaction,
+    ReloadTransactionState,
+    StaleDerivedSlotError,
+    refresh_reload_derived,
 )
 from .torchao_decorator import (
     set_torchao_reload_attrs,

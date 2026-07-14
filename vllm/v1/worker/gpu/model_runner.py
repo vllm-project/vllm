@@ -112,6 +112,7 @@ from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.reload_coordinator import ReloadCoordinator
 from vllm.v1.worker.utils import KVBlockZeroer, copy_kv_cache_blocks_inplace
 
 logger = init_logger(__name__)
@@ -237,6 +238,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
         self.cudagraph_manager: ModelCudaGraphManager | None = None
+        self.reload_coordinator = ReloadCoordinator(self)
 
         # LoRA-related workers.
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
@@ -368,6 +370,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 device=self.device,
             )
 
+        # Seal the refit contract before compilation or CUDA graph capture.
+        self.reload_coordinator.plan_for(self.model, self.model_config)
+        if (draft_model := self.get_draft_model()) is not None:
+            assert self.speculative_config is not None
+            draft_config = self.speculative_config.draft_model_config
+            assert draft_config is not None
+            self.reload_coordinator.plan_for(draft_model, draft_config)
+
     def get_model(self) -> nn.Module:
         return self.model
 
@@ -378,10 +388,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return speculator.model
 
     def reload_weights(self, *args, **kwargs) -> None:
-        # TODO(Wentao): Use full version instead of import when fully migrated to v2
-        from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
-
-        GPUModelRunnerV1.reload_weights(self, *args, **kwargs)  # type: ignore[arg-type]
+        self.reload_coordinator.reload_weights(*args, **kwargs)
 
     def update_config(self, *args, **kwargs) -> None:
         # TODO(Wentao): Use full version instead of import when fully migrated to v2

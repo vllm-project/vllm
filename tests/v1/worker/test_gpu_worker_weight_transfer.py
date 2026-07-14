@@ -21,6 +21,8 @@ class _RecordingEngine:
         self.finished = False
         self.reset_count = 0
         self.update_calls: list[dict] = []
+        self.model = object()
+        self.model_config = object()
 
     def start_weight_update(self) -> None:
         self.started = True
@@ -37,9 +39,38 @@ class _RecordingEngine:
         self.reset_count += 1
 
 
+class _RecordingModelRunner:
+    def __init__(self, raise_on_commit: bool = False):
+        self.raise_on_commit = raise_on_commit
+        self.events: list[str] = []
+        self.reload_coordinator = self
+
+    def begin(self, model, model_config) -> None:
+        self.events.append("begin")
+
+    def record_inputs(self, update_info: dict) -> None:
+        self.events.append("record")
+
+    def start_finalizing(self) -> None:
+        self.events.append("finalize")
+
+    def prepare(self) -> None:
+        self.events.append("prepare")
+
+    def commit(self) -> None:
+        self.events.append("commit")
+        if self.raise_on_commit:
+            raise RuntimeError("commit failed")
+
+    def abort(self) -> None:
+        self.events.append("abort")
+
+
 def _make_worker(engine: _RecordingEngine | None) -> Worker:
     worker = object.__new__(Worker)
     worker.weight_transfer_engine = engine
+    worker.model_runner = _RecordingModelRunner()
+    worker.use_v2_model_runner = True
     worker._weight_update_active = False
     return worker
 
@@ -60,6 +91,13 @@ def test_start_update_finish_delegates_to_engine():
     assert engine.finished is True
     assert engine.reset_count == 1
     assert worker._weight_update_active is False
+    assert worker.model_runner.events == [
+        "begin",
+        "record",
+        "finalize",
+        "prepare",
+        "commit",
+    ]
 
 
 def test_double_start_raises():
@@ -67,6 +105,27 @@ def test_double_start_raises():
     Worker.start_weight_update(worker)
     with pytest.raises(RuntimeError, match="already"):
         Worker.start_weight_update(worker)
+
+
+def test_reload_commit_failure_keeps_update_active():
+    engine = _RecordingEngine()
+    worker = _make_worker(engine)
+    worker.model_runner = _RecordingModelRunner(raise_on_commit=True)
+    Worker.start_weight_update(worker)
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        Worker.finish_weight_update(worker)
+
+    assert engine.finished is True
+    assert engine.reset_count == 0
+    assert worker._weight_update_active is True
+    assert worker.model_runner.events == [
+        "begin",
+        "finalize",
+        "prepare",
+        "commit",
+        "abort",
+    ]
 
 
 def test_update_without_start_raises():
@@ -92,9 +151,21 @@ def test_update_resets_active_on_error():
     # A failed update ends the session so the next start is clean.
     assert engine.reset_count == 1
     assert worker._weight_update_active is False
+    assert worker.model_runner.events == ["begin", "record", "abort"]
 
 
 def test_missing_engine_raises():
     worker = _make_worker(None)
     with pytest.raises(RuntimeError, match="Weight transfer not configured"):
         Worker.start_weight_update(worker)
+
+
+def test_sealed_reload_rejects_v1_model_runner():
+    engine = _RecordingEngine()
+    worker = _make_worker(engine)
+    worker.use_v2_model_runner = False
+
+    with pytest.raises(NotImplementedError, match="v2 model runner"):
+        Worker.start_weight_update(worker)
+
+    assert engine.started is False

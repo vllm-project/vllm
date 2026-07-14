@@ -897,8 +897,23 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         )
 
     def finish_weight_update(self) -> None:
-        """Finish the current weight update."""
-        self.llm_engine.collective_rpc("finish_weight_update")
+        """Atomically publish a weight update after every worker validates it."""
+        try:
+            self.llm_engine.collective_rpc("prepare_weight_update")
+        except BaseException:
+            try:
+                self.llm_engine.collective_rpc("abort_weight_update")
+            except BaseException:
+                logger.exception("Failed to abort weight update on every worker")
+            raise
+        try:
+            self.llm_engine.collective_rpc("commit_weight_update")
+        except BaseException:
+            try:
+                self.llm_engine.collective_rpc("abort_weight_update")
+            except BaseException:
+                logger.exception("Failed to abort weight update on every worker")
+            raise
 
     def __repr__(self) -> str:
         """Return a transformers-style hierarchical view of the model."""

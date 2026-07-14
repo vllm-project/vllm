@@ -1108,5 +1108,20 @@ class AsyncLLM(EngineClient):
         )
 
     async def finish_weight_update(self) -> None:
-        """Finish the current weight update."""
-        await self.collective_rpc("finish_weight_update")
+        """Atomically publish a weight update after every worker validates it."""
+        try:
+            await self.collective_rpc("prepare_weight_update")
+        except BaseException:
+            try:
+                await self.collective_rpc("abort_weight_update")
+            except BaseException:
+                logger.exception("Failed to abort weight update on every worker")
+            raise
+        try:
+            await self.collective_rpc("commit_weight_update")
+        except BaseException:
+            try:
+                await self.collective_rpc("abort_weight_update")
+            except BaseException:
+                logger.exception("Failed to abort weight update on every worker")
+            raise

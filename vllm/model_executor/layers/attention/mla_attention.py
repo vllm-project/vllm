@@ -191,7 +191,7 @@ import functools
 from abc import abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import ClassVar, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar, cast
 
 import torch
 import torch.nn as nn
@@ -278,6 +278,9 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.model_loader.reload import ReloadPlanBuilder
 
 logger = init_logger(__name__)
 
@@ -872,6 +875,23 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         return output_padded
 
+    def build_reload_plan(self, builder: "ReloadPlanBuilder", prefix: str) -> None:
+        """Declare the graph-visible projection derived from ``kv_b_proj``."""
+        outputs: tuple[str, ...]
+        if self.is_aiter_triton_fp4_bmm_enabled or self.is_aiter_triton_fp8_bmm_enabled:
+            outputs = ("W_K", "W_K_scale", "W_V", "W_V_scale")
+        else:
+            outputs = ("W_UV", "W_UK_T")
+        node_name = f"{prefix}.mla_projection" if prefix else "mla_projection"
+        input_prefix = f"{prefix}.kv_b_proj" if prefix else "kv_b_proj"
+        builder.derived(
+            node_name,
+            owner=self,
+            owner_key="mla_projection",
+            outputs=outputs,
+            depends_on=builder.input_names(prefix=input_prefix),
+        )
+
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # we currently do not have quantized bmm's which are needed for
         # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
@@ -906,23 +926,33 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 quark_quantize_weight_to_mxfp4,
             )
 
-            self.W_K, self.W_K_scale = quark_quantize_weight_to_mxfp4(W_UK)
+            W_K, W_K_scale = quark_quantize_weight_to_mxfp4(W_UK)
             # Convert from (L, N, P) to (N, L, P)
-            self.W_K = self.W_K.transpose(0, 1)
-            self.W_K_scale = self.W_K_scale.transpose(0, 1)
+            W_K = W_K.transpose(0, 1)
+            W_K_scale = W_K_scale.transpose(0, 1)
 
-            self.W_V, self.W_V_scale = quark_quantize_weight_to_mxfp4(
-                W_UV.permute(1, 2, 0)
-            )
+            W_V, W_V_scale = quark_quantize_weight_to_mxfp4(W_UV.permute(1, 2, 0))
+            derived_values = {
+                "W_K": W_K,
+                "W_K_scale": W_K_scale,
+                "W_V": W_V,
+                "W_V_scale": W_V_scale,
+            }
         elif self.is_aiter_triton_fp8_bmm_enabled:
             W_K = W_UK.transpose(0, 1)  # 16 512 128
             W_V = W_UV.permute(1, 2, 0)  # 16 128 512
-            self.W_K, self.W_K_scale = dynamic_per_batched_tensor_quant(
+            W_K, W_K_scale = dynamic_per_batched_tensor_quant(
                 W_K, dtype=current_platform.fp8_dtype()
             )
-            self.W_V, self.W_V_scale = dynamic_per_batched_tensor_quant(
+            W_V, W_V_scale = dynamic_per_batched_tensor_quant(
                 W_V, dtype=current_platform.fp8_dtype()
             )
+            derived_values = {
+                "W_K": W_K,
+                "W_K_scale": W_K_scale,
+                "W_V": W_V,
+                "W_V_scale": W_V_scale,
+            }
 
             # The kernel operates on non-padded inputs. Hence, pre-compiling
             # triton kernel to avoid runtime compilation for unseen batch sizes
@@ -939,27 +969,37 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             for m in pre_compilation_list:
                 x = torch.empty(
-                    (self.W_K.shape[0], m, self.W_K.shape[2]),
+                    (W_K.shape[0], m, W_K.shape[2]),
                     dtype=torch.bfloat16,
-                    device=self.W_K.device,
+                    device=W_K.device,
                 )
                 rocm_aiter_ops.triton_fp8_bmm(
-                    x, self.W_K, self.W_K_scale, group_size=128, transpose_bm=True
+                    x, W_K, W_K_scale, group_size=128, transpose_bm=True
                 )
 
                 x = torch.empty(
-                    (self.W_V.shape[0], m, self.W_V.shape[2]),
+                    (W_V.shape[0], m, W_V.shape[2]),
                     dtype=torch.bfloat16,
-                    device=self.W_V.device,
+                    device=W_V.device,
                 )
                 rocm_aiter_ops.triton_fp8_bmm(
-                    x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True
+                    x, W_V, W_V_scale, group_size=128, transpose_bm=True
                 )
         else:
             # Convert from (L, N, V) to (N, L, V)
-            self.W_UV = W_UV.transpose(0, 1)
+            runtime_w_uv = W_UV.transpose(0, 1)
             # Convert from (L, N, P) to (N, P, L)
-            self.W_UK_T = W_UK.permute(1, 2, 0)
+            runtime_w_uk_t = W_UK.permute(1, 2, 0)
+            derived_values = {
+                "W_UV": runtime_w_uv,
+                "W_UK_T": runtime_w_uk_t,
+            }
+
+        from vllm.model_executor.model_loader.reload import (
+            refresh_reload_derived,
+        )
+
+        refresh_reload_derived(self, "mla_projection", derived_values)
 
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
