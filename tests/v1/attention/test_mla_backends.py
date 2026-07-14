@@ -45,6 +45,7 @@ from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.v1.kv_cache_interface import (
     KVQuantMode,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
 )
 
 BACKENDS_TO_TEST = [
@@ -970,6 +971,7 @@ def run_attention_backend(
     k_scale: float,
     kv_cache_dtype: str = "auto",
     prefill_backend: MLAPrefillBackendEnum | None = None,
+    sliding_window: int | None = None,
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
 
@@ -1000,7 +1002,7 @@ def run_attention_backend(
             scale=scale,
             num_kv_heads=num_kv_heads,
             alibi_slopes=None,
-            sliding_window=None,
+            sliding_window=sliding_window,
             kv_cache_dtype=kv_cache_dtype,
             logits_soft_cap=None,
             attn_type="decoder",
@@ -1599,3 +1601,494 @@ def test_backend_correctness(
         summary = f"{len(failures)} backend(s) failed: {', '.join(backend_names)}"
         detailed_msg = "\n".join(failures)
         pytest.fail(f"{summary}\n{detailed_msg}")
+
+
+def test_triton_mla_sliding_window_correctness(
+    default_vllm_config, dist_init, workspace_init
+):
+    """TritonMLAImpl decode output with sliding window matches windowed SDPA reference.
+
+    Verifies both that the window is applied (output differs from full attention)
+    and that it is applied correctly (output matches windowed SDPA reference).
+    """
+    if AttentionBackendEnum.TRITON_MLA not in BACKENDS_TO_TEST:
+        pytest.skip("TRITON_MLA not available on this platform")
+
+    sliding_window = 32
+    # seq_lens must all exceed sliding_window so masking is active.
+    batch_spec = BatchSpec(seq_lens=[64, 128, 96], query_lens=[1, 1, 1])
+    model = "deepseek-ai/DeepSeek-R1"
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    block_size = BACKEND_BLOCK_SIZES[AttentionBackendEnum.TRITON_MLA]
+
+    required_blocks = sum(
+        (s + block_size - 1) // block_size for s in batch_spec.seq_lens
+    )
+    num_gpu_blocks = required_blocks + 1 + 10
+
+    vllm_config = create_vllm_config(
+        model_name=model,
+        tensor_parallel_size=1,
+        max_model_len=max(batch_spec.seq_lens),
+        num_gpu_blocks=num_gpu_blocks,
+        block_size=block_size,
+    )
+
+    num_q_heads = vllm_config.model_config.get_num_attention_heads(
+        vllm_config.parallel_config
+    )
+    head_size = vllm_config.model_config.get_head_size()
+    dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
+    kv_lora_rank = 512
+    qk_rope_head_dim = 64
+    qk_nope_head_dim = 128
+    v_head_dim = 128
+    scale = (qk_nope_head_dim + qk_rope_head_dim) ** -0.5
+
+    weight_scale = kv_lora_rank**-0.5
+    W_UK = (
+        torch.randn(
+            kv_lora_rank, num_q_heads, qk_nope_head_dim, dtype=dtype, device=device
+        )
+        * weight_scale
+    )
+    W_UV = (
+        torch.randn(kv_lora_rank, num_q_heads, v_head_dim, dtype=dtype, device=device)
+        * weight_scale
+    )
+
+    all_q_vllm, all_kv_c_vllm, all_k_pe_vllm = [], [], []
+    all_sdpa_windowed, all_sdpa_full = [], []
+    kv_c_contexts, k_pe_contexts = [], []
+
+    for s_len in batch_spec.seq_lens:
+        # query_len=1 for all sequences
+        context_len = s_len - 1
+
+        q_c = torch.randn(
+            1,
+            num_q_heads,
+            qk_nope_head_dim + qk_rope_head_dim,
+            dtype=dtype,
+            device=device,
+        )
+        kv_c_full = torch.randn(s_len, kv_lora_rank, dtype=dtype, device=device)
+        k_pe_full = torch.randn(s_len, 1, qk_rope_head_dim, dtype=dtype, device=device)
+
+        q_nope, q_pe = q_c.split([qk_nope_head_dim, qk_rope_head_dim], dim=-1)
+        ql_nope = torch.einsum("qnh,lnh->qnl", q_nope, W_UK)
+        q_mqa = torch.cat([ql_nope, q_pe], dim=-1)
+        k_mqa = (
+            torch.cat([kv_c_full, k_pe_full.squeeze(1)], dim=-1)
+            .unsqueeze(1)
+            .expand(-1, num_q_heads, -1)
+        )
+        v_mqa = kv_c_full.unsqueeze(1).expand(-1, num_q_heads, -1)
+
+        # SDPA expects (N=1, H, L, D)
+        q_sdpa = q_mqa.unsqueeze(0).transpose(1, 2)
+        k_sdpa = k_mqa.unsqueeze(0).transpose(1, 2)
+        v_sdpa = v_mqa.unsqueeze(0).transpose(1, 2)
+
+        # Full-attention mask: decode token attends to all KV positions
+        full_mask = torch.ones(1, s_len, dtype=torch.bool, device=device)
+
+        # Sliding-window mask: only the last `sliding_window` positions are visible
+        kv_positions = torch.arange(s_len, device=device)
+        windowed_mask = (context_len - kv_positions < sliding_window).unsqueeze(0)
+
+        def _run_sdpa(q, k, v, mask):
+            out = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, attn_mask=mask, scale=scale
+            )
+            # (N=1, H, q_len=1, kv_lora_rank) -> (q_len, H, kv_lora_rank)
+            out = out.transpose(1, 2).squeeze(0)
+            return torch.einsum("qnl,lnv->qnv", out, W_UV).flatten(-2)
+
+        all_sdpa_full.append(_run_sdpa(q_sdpa, k_sdpa, v_sdpa, full_mask))
+        all_sdpa_windowed.append(_run_sdpa(q_sdpa, k_sdpa, v_sdpa, windowed_mask))
+
+        all_q_vllm.append(q_c)
+        all_kv_c_vllm.append(kv_c_full[-1:])
+        all_k_pe_vllm.append(k_pe_full[-1:])
+        kv_c_contexts.append(kv_c_full[:-1])
+        k_pe_contexts.append(k_pe_full[:-1])
+
+    query_vllm = torch.cat(all_q_vllm, dim=0)
+    kv_c_vllm = torch.cat(all_kv_c_vllm, dim=0)
+    k_pe_vllm = torch.cat(all_k_pe_vllm, dim=0)
+    sdpa_windowed_ref = torch.cat(all_sdpa_windowed, dim=0)
+    sdpa_full_ref = torch.cat(all_sdpa_full, dim=0)
+
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+
+    kv_b_proj_weight = torch.cat([W_UK, W_UV], dim=-1).view(
+        kv_lora_rank, num_q_heads * (qk_nope_head_dim + v_head_dim)
+    )
+    mock_kv_b_proj = ColumnParallelLinear(
+        input_size=kv_lora_rank,
+        output_size=num_q_heads * (qk_nope_head_dim + v_head_dim),
+        bias=False,
+    ).to(device=device, dtype=dtype)
+    mock_kv_b_proj.weight = torch.nn.Parameter(kv_b_proj_weight.T, requires_grad=False)
+
+    common_attn_metadata = create_common_attn_metadata(batch_spec, block_size, device)
+
+    required_divisor = 128 // block_size
+    current_block_num = common_attn_metadata.block_table_tensor.shape[1]
+    if current_block_num % required_divisor != 0:
+        padded = (
+            (current_block_num + required_divisor - 1) // required_divisor
+        ) * required_divisor
+        padding = torch.zeros(
+            (
+                common_attn_metadata.block_table_tensor.shape[0],
+                padded - current_block_num,
+            ),
+            dtype=torch.int32,
+            device=device,
+        )
+        common_attn_metadata.block_table_tensor = torch.cat(
+            [common_attn_metadata.block_table_tensor, padding], dim=1
+        )
+
+    kv_cache = create_and_prepopulate_kv_cache(
+        kv_c_contexts=kv_c_contexts,
+        k_pe_contexts=k_pe_contexts,
+        block_size=block_size,
+        head_size=head_size,
+        dtype=dtype,
+        device=device,
+        num_blocks=num_gpu_blocks,
+        common_attn_metadata=common_attn_metadata,
+    )
+
+    # The window is applied by the decode kernel via impl.sliding_window_size,
+    # not the KV cache spec, so the spec stays a standard full-attention MLA spec.
+    kv_cache_spec = MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=vllm_config.model_config.get_num_kv_heads(
+            vllm_config.parallel_config
+        ),
+        head_size=head_size,
+        dtype=vllm_config.model_config.dtype,
+        cache_dtype_str="auto",
+    )
+
+    backend_output = run_attention_backend(
+        AttentionBackendEnum.TRITON_MLA,
+        kv_cache_spec,
+        ["placeholder"],
+        vllm_config,
+        device,
+        common_attn_metadata,
+        query_vllm,
+        kv_c_vllm,
+        k_pe_vllm,
+        kv_cache,
+        kv_lora_rank,
+        qk_nope_head_dim,
+        qk_rope_head_dim,
+        v_head_dim,
+        mock_kv_b_proj,
+        q_scale=1.0,
+        k_scale=1.0,
+        sliding_window=sliding_window,
+    )
+
+    assert torch.isfinite(backend_output).all(), "TRITON_MLA produced non-finite values"
+
+    # The window must be active: windowed and full-attention refs must differ.
+    assert not torch.allclose(sdpa_windowed_ref, sdpa_full_ref), (
+        "Windowed and full-attention SDPA references are identical — "
+        "the test is not exercising the window (seq_lens may be <= sliding_window)"
+    )
+
+    # Output must match windowed reference (window correctly applied).
+    assert torch.allclose(backend_output, sdpa_windowed_ref, rtol=1e-2, atol=5e-1), (
+        f"TRITON_MLA output differs from windowed SDPA. "
+        f"Max diff: {torch.max(torch.abs(backend_output - sdpa_windowed_ref)):.6f}"
+    )
+
+    # Output must not match full-attention reference (window was not silently dropped).
+    assert not torch.allclose(backend_output, sdpa_full_ref, atol=1e-2), (
+        "TRITON_MLA output matches full-attention SDPA — sliding window was not applied"
+    )
+
+
+def _windowed_causal_mask(
+    q_len: int,
+    s_len: int,
+    context_len: int,
+    sliding_window: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """(q_len, s_len) bool mask: query i (abs pos context_len+i) attends to kv j
+    iff j <= context_len+i (causal) and (context_len+i) - j < sliding_window."""
+    q_pos = context_len + torch.arange(q_len, device=device).unsqueeze(1)
+    kv_pos = torch.arange(s_len, device=device).unsqueeze(0)
+    causal = kv_pos <= q_pos
+    window = (q_pos - kv_pos) < sliding_window
+    return causal & window
+
+
+@pytest.mark.parametrize(
+    "batch_spec_name",
+    ["prefill_no_context", "prefill_with_context"],
+)
+def test_triton_mla_sliding_window_prefill(
+    default_vllm_config, dist_init, workspace_init, batch_spec_name: str
+):
+    """TritonMLA prefill (forward_mha) with a sliding window.
+
+    Covers both the new-token prefill path (``prefill_no_context``) and the
+    windowed chunked-context path ``_forward_prefill_swa_with_context``
+    (``prefill_with_context``). The latter requires the FlashAttn prefill
+    backend and a ``SlidingWindowMLASpec`` so the metadata builder populates
+    ``swa_groups``.
+    """
+    if AttentionBackendEnum.TRITON_MLA not in BACKENDS_TO_TEST:
+        pytest.skip("TRITON_MLA not available on this platform")
+
+    sliding_window = 32
+    with_context = batch_spec_name == "prefill_with_context"
+    if with_context:
+        # seq_len > query_len -> context present -> chunked-context SWA path.
+        batch_spec = BatchSpec(seq_lens=[96, 128], query_lens=[16, 16])
+    else:
+        # query_len == seq_len -> pure new-token prefill (no context).
+        batch_spec = BatchSpec(seq_lens=[64, 96], query_lens=[64, 96])
+
+    model = "deepseek-ai/DeepSeek-R1"
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    block_size = BACKEND_BLOCK_SIZES[AttentionBackendEnum.TRITON_MLA]
+
+    required_blocks = sum(
+        (s + block_size - 1) // block_size for s in batch_spec.seq_lens
+    )
+    num_gpu_blocks = required_blocks + 1 + 100
+
+    vllm_config = create_vllm_config(
+        model_name=model,
+        tensor_parallel_size=1,
+        max_model_len=max(batch_spec.seq_lens),
+        num_gpu_blocks=num_gpu_blocks,
+        block_size=block_size,
+    )
+
+    num_q_heads = vllm_config.model_config.get_num_attention_heads(
+        vllm_config.parallel_config
+    )
+    head_size = vllm_config.model_config.get_head_size()
+    dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
+    kv_lora_rank = 512
+    qk_rope_head_dim = 64
+    qk_nope_head_dim = 128
+    v_head_dim = 128
+    prefill_scale = (qk_nope_head_dim + qk_rope_head_dim) ** -0.5
+
+    weight_scale = kv_lora_rank**-0.5
+    W_UK = (
+        torch.randn(
+            kv_lora_rank, num_q_heads, qk_nope_head_dim, dtype=dtype, device=device
+        )
+        * weight_scale
+    )
+    W_UV = (
+        torch.randn(kv_lora_rank, num_q_heads, v_head_dim, dtype=dtype, device=device)
+        * weight_scale
+    )
+    kv_b_proj_weight = torch.cat([W_UK, W_UV], dim=-1)
+
+    all_q_vllm, all_kv_c_vllm, all_k_pe_vllm = [], [], []
+    all_sdpa_windowed, all_sdpa_full = [], []
+    kv_c_contexts, k_pe_contexts = [], []
+
+    for s_len, q_len in zip(batch_spec.seq_lens, batch_spec.query_lens):
+        context_len = s_len - q_len
+        q_c = torch.randn(
+            q_len,
+            num_q_heads,
+            qk_nope_head_dim + qk_rope_head_dim,
+            dtype=dtype,
+            device=device,
+        )
+        kv_c_full = torch.randn(s_len, kv_lora_rank, dtype=dtype, device=device)
+        k_pe_full = torch.randn(s_len, 1, qk_rope_head_dim, dtype=dtype, device=device)
+
+        q_nope, q_pe = q_c.split([qk_nope_head_dim, qk_rope_head_dim], dim=-1)
+
+        # MHA reference (matches forward_mha): decompress full latent K/V.
+        kv_nope_full = torch.einsum("sl,lnh->snh", kv_c_full, kv_b_proj_weight)
+        k_nope_full, v_full = kv_nope_full.split([qk_nope_head_dim, v_head_dim], dim=-1)
+        q_mha = torch.cat([q_nope, q_pe], dim=-1)
+        k_full = torch.cat([k_nope_full, k_pe_full.expand(-1, num_q_heads, -1)], dim=-1)
+
+        q_sdpa = q_mha.unsqueeze(0).transpose(1, 2)
+        k_sdpa = k_full.unsqueeze(0).transpose(1, 2)
+        v_sdpa = v_full.unsqueeze(0).transpose(1, 2)
+
+        windowed_mask = _windowed_causal_mask(
+            q_len, s_len, context_len, sliding_window, device
+        )
+        full_mask = torch.ones(q_len, s_len, dtype=torch.bool, device=device)
+        full_mask[:, context_len:] = torch.tril(
+            torch.ones(q_len, q_len, dtype=torch.bool, device=device)
+        )
+
+        def _sdpa(q, k, v, mask):
+            out = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, attn_mask=mask, scale=prefill_scale
+            )
+            return out.transpose(1, 2).squeeze(0).flatten(start_dim=-2)
+
+        all_sdpa_windowed.append(_sdpa(q_sdpa, k_sdpa, v_sdpa, windowed_mask))
+        all_sdpa_full.append(_sdpa(q_sdpa, k_sdpa, v_sdpa, full_mask))
+
+        all_q_vllm.append(q_c)
+        all_kv_c_vllm.append(kv_c_full[context_len:])
+        all_k_pe_vllm.append(k_pe_full[context_len:])
+        kv_c_contexts.append(kv_c_full[:context_len])
+        k_pe_contexts.append(k_pe_full[:context_len])
+
+    query_vllm = torch.cat(all_q_vllm, dim=0)
+    kv_c_vllm = torch.cat(all_kv_c_vllm, dim=0)
+    k_pe_vllm = torch.cat(all_k_pe_vllm, dim=0)
+    sdpa_windowed_ref = torch.cat(all_sdpa_windowed, dim=0)
+    sdpa_full_ref = torch.cat(all_sdpa_full, dim=0)
+
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+
+    mock_kv_b_proj = ColumnParallelLinear(
+        input_size=kv_lora_rank,
+        output_size=num_q_heads * (qk_nope_head_dim + v_head_dim),
+        bias=False,
+    ).to(device=device, dtype=dtype)
+    mock_kv_b_proj.weight = torch.nn.Parameter(
+        kv_b_proj_weight.view(
+            kv_lora_rank, num_q_heads * (qk_nope_head_dim + v_head_dim)
+        ).T,
+        requires_grad=False,
+    )
+
+    common_attn_metadata = create_common_attn_metadata(batch_spec, block_size, device)
+    required_divisor = 128 // block_size
+    current_block_num = common_attn_metadata.block_table_tensor.shape[1]
+    if current_block_num % required_divisor != 0:
+        padded = (
+            (current_block_num + required_divisor - 1) // required_divisor
+        ) * required_divisor
+        padding = torch.zeros(
+            (
+                common_attn_metadata.block_table_tensor.shape[0],
+                padded - current_block_num,
+            ),
+            dtype=torch.int32,
+            device=device,
+        )
+        common_attn_metadata.block_table_tensor = torch.cat(
+            [common_attn_metadata.block_table_tensor, padding], dim=1
+        )
+
+    kv_cache = create_and_prepopulate_kv_cache(
+        kv_c_contexts=kv_c_contexts,
+        k_pe_contexts=k_pe_contexts,
+        block_size=block_size,
+        head_size=head_size,
+        dtype=dtype,
+        device=device,
+        num_blocks=num_gpu_blocks,
+        common_attn_metadata=common_attn_metadata,
+    )
+
+    # The chunked-context SWA path reads spec.sliding_window to build swa_groups;
+    # the new-token path does not need it but a windowed spec is still valid.
+    kv_cache_spec = SlidingWindowMLASpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=head_size,
+        dtype=vllm_config.model_config.dtype,
+        sliding_window=sliding_window,
+        cache_dtype_str="auto",
+    )
+
+    backend_output = run_attention_backend(
+        AttentionBackendEnum.TRITON_MLA,
+        kv_cache_spec,
+        ["placeholder"],
+        vllm_config,
+        device,
+        common_attn_metadata,
+        query_vllm,
+        kv_c_vllm,
+        k_pe_vllm,
+        kv_cache,
+        kv_lora_rank,
+        qk_nope_head_dim,
+        qk_rope_head_dim,
+        v_head_dim,
+        mock_kv_b_proj,
+        q_scale=1.0,
+        k_scale=1.0,
+        sliding_window=sliding_window,
+        prefill_backend=MLAPrefillBackendEnum.FLASH_ATTN,
+    )
+
+    assert torch.isfinite(backend_output).all(), "TRITON_MLA produced non-finite values"
+    assert not torch.allclose(sdpa_windowed_ref, sdpa_full_ref), (
+        "Windowed and full references are identical — test not exercising the window"
+    )
+    assert torch.allclose(backend_output, sdpa_windowed_ref, rtol=1e-2, atol=5e-1), (
+        f"TRITON_MLA prefill differs from windowed SDPA. "
+        f"Max diff: {torch.max(torch.abs(backend_output - sdpa_windowed_ref)):.6f}"
+    )
+    assert not torch.allclose(backend_output, sdpa_full_ref, atol=1e-2), (
+        "TRITON_MLA prefill matches full-attention SDPA — sliding window not applied"
+    )
+
+
+@pytest.mark.parametrize("sliding_window", [None, 128])
+def test_mla_get_kv_cache_spec_sliding_window(default_vllm_config, sliding_window):
+    """MLAAttention.get_kv_cache_spec returns a SlidingWindowMLASpec when a
+    per-layer sliding window is set, and a plain MLAAttentionSpec otherwise."""
+    if AttentionBackendEnum.TRITON_MLA not in BACKENDS_TO_TEST:
+        pytest.skip("TRITON_MLA not available on this platform")
+
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.v1.attention.backends.mla.triton_mla import TritonMLABackend
+
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    kv_lora_rank = 512
+    qk_rope_head_dim = 64
+    qk_nope_head_dim = 128
+    v_head_dim = 128
+    num_heads = 16
+    dtype = _convert_dtype_to_torch(default_vllm_config.model_config.dtype)
+
+    kv_b_proj = ColumnParallelLinear(
+        input_size=kv_lora_rank,
+        output_size=num_heads * (qk_nope_head_dim + v_head_dim),
+        bias=False,
+    ).to(device=device, dtype=dtype)
+
+    with set_current_vllm_config(default_vllm_config):
+        layer = MLAAttention(
+            num_heads=num_heads,
+            scale=(qk_nope_head_dim + qk_rope_head_dim) ** -0.5,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            q_lora_rank=None,
+            kv_lora_rank=kv_lora_rank,
+            kv_b_proj=kv_b_proj,
+            cache_config=default_vllm_config.cache_config,
+            attn_backend=TritonMLABackend,
+            per_layer_sliding_window=sliding_window,
+        )
+        spec = layer.get_kv_cache_spec(default_vllm_config)
+
+    if sliding_window is None:
+        assert type(spec) is MLAAttentionSpec
+    else:
+        assert isinstance(spec, SlidingWindowMLASpec)
+        assert spec.sliding_window == sliding_window

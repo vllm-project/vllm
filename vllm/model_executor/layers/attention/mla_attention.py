@@ -191,7 +191,7 @@ import functools
 from abc import abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import ClassVar, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar, cast
 
 import torch
 import torch.nn as nn
@@ -278,13 +278,20 @@ from vllm.v1.attention.ops.common import cp_lse_ag_out_ar, cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.ops.triton_merge_attn_states import mask_empty_context
+from vllm.v1.attention.ops.triton_swa_scatter_combined import swa_scatter_combined
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheSpec,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
     get_kv_quant_mode,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.attention.backends.mla.prefill.flash_attn import (
+        FlashAttnPrefillBackend,
+    )
 
 logger = init_logger(__name__)
 
@@ -375,6 +382,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         use_sparse: bool = False,
         indexer: object | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
+        per_layer_sliding_window: int | None = None,
         **extra_impl_args,
     ):
         super().__init__()
@@ -414,6 +422,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 prefix,
                 kv_cache_dtype,
             )
+        self.sliding_window: int | None
+        if per_layer_sliding_window is not None:
+            self.sliding_window = per_layer_sliding_window
+        elif cache_config is not None:
+            self.sliding_window = cache_config.sliding_window
+        else:
+            self.sliding_window = None
 
         dtype = torch.get_default_dtype()
         if attn_backend is not None:
@@ -430,6 +445,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 use_mla=True,
                 use_sparse=use_sparse,
                 num_heads=self.num_heads,
+                has_sliding_window=self.sliding_window is not None,
             )
 
         normalized_kv_cache_dtype = _canonicalize_sparse_mla_kv_cache_dtype(
@@ -487,7 +503,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             scale=self.scale,
             num_kv_heads=1,
             alibi_slopes=None,
-            sliding_window=None,
+            sliding_window=self.sliding_window,
             kv_cache_dtype=self.kv_cache_dtype,
             logits_soft_cap=None,
             attn_type=AttentionType.DECODER,
@@ -1114,6 +1130,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, vllm_config.model_config
         )
+        # Per-layer sliding-window MLA layers need a sliding-window cache spec so
+        # the metadata builder populates `swa_groups` (the windowed-context
+        # gather tables) consumed by `_forward_prefill_swa_with_context`.
+        # Full-attention MLA layers use the standard spec.
+        sliding_window = getattr(self.impl, "sliding_window_size", 0) or 0
+        if sliding_window > 0:
+            return SlidingWindowMLASpec(
+                block_size=vllm_config.cache_config.block_size,
+                num_kv_heads=1,
+                head_size=self.head_size,
+                dtype=kv_cache_dtype,
+                sliding_window=sliding_window,
+                cache_dtype_str=vllm_config.cache_config.cache_dtype,
+            )
         return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
@@ -1369,6 +1399,156 @@ class MLACommonBackend(AttentionBackend):
 
 
 @dataclass
+class SWAContextGroup:
+    """Index tables for one sliding-window attention (SWA) prefill group.
+
+    A group is a contiguous span of sequences whose windowed context fits
+    the chunked-prefill workspace. The tensors below map the gathered
+    windowed context and the new query tokens into a single combined
+    latent sequence `[context | new_tokens]` per sequence.
+
+    Attributes:
+        total_windowed_tokens: Total windowed context tokens in the group.
+        total_combined: `total_windowed_tokens` plus the new query tokens.
+        max_combined_len: Longest combined (context + query) sequence length.
+        windowed_starts: Per-sequence start offset of the visible window in
+            the KV cache (block-aligned).
+        cu_ctx: Cumulative windowed-context lengths (varlen prefix sum).
+        combined_cu: Cumulative combined lengths, used as `cu_seqlens_k`.
+        token_to_seq: Sequence index for each gathered context token.
+        ctx_dst: Destination rows for context tokens in the combined buffer.
+        new_dst: Destination rows for new query tokens in the combined buffer.
+        query_start_loc: Cumulative query lengths, used as `cu_seqlens_q`.
+        seq_start: First sequence index of the group (into the prefill batch).
+        seq_end: One past the last sequence index of the group.
+        q_start: First query-token index of the group.
+        q_end: One past the last query-token index of the group.
+    """
+
+    total_windowed_tokens: int
+    total_combined: int
+    max_combined_len: int
+    windowed_starts: torch.Tensor
+    cu_ctx: torch.Tensor
+    combined_cu: torch.Tensor
+    token_to_seq: torch.Tensor
+    ctx_dst: torch.Tensor
+    new_dst: torch.Tensor
+    query_start_loc: torch.Tensor
+    seq_start: int
+    seq_end: int
+    q_start: int
+    q_end: int
+
+
+def _cumulative_lengths(lens: torch.Tensor) -> torch.Tensor:
+    """Varlen-style prefix sum: `[0, lens[0], lens[0]+lens[1], ...]`."""
+    cu = torch.zeros(lens.shape[0] + 1, dtype=lens.dtype)
+    cu[1:] = torch.cumsum(lens, dim=0)
+    return cu
+
+
+def _build_swa_group(
+    context_lens_cpu: torch.Tensor,
+    query_start_loc_cpu: torch.Tensor,
+    num_new_tokens: int,
+    block_size: int,
+    sliding_window_size: int,
+    device: torch.device,
+    seq_start: int,
+    seq_end: int,
+    q_start: int,
+    q_end: int,
+) -> SWAContextGroup:
+    """Compute the index tables for a single SWA group."""
+    num_seqs = context_lens_cpu.shape[0]
+    query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+
+    visible_ctx = context_lens_cpu.clamp(max=sliding_window_size)
+    windowed_starts = (context_lens_cpu - visible_ctx) // block_size * block_size
+    windowed_lens = context_lens_cpu - windowed_starts
+    combined_lens = windowed_lens + query_lens
+
+    total_windowed_tokens = int(windowed_lens.sum())
+    total_combined = total_windowed_tokens + num_new_tokens
+    max_combined_len = int(combined_lens.max())
+
+    cu_ctx = _cumulative_lengths(windowed_lens)
+    combined_cu = _cumulative_lengths(combined_lens)
+
+    token_to_seq = torch.repeat_interleave(
+        torch.arange(num_seqs, dtype=torch.int32),
+        windowed_lens,
+        output_size=total_windowed_tokens,
+    )
+
+    ctx_offset_per_seq = combined_cu[:-1] - cu_ctx[:-1]
+    ctx_dst = torch.arange(total_windowed_tokens) + torch.repeat_interleave(
+        ctx_offset_per_seq, windowed_lens, output_size=total_windowed_tokens
+    )
+
+    new_offset_per_seq = combined_cu[:-1] + windowed_lens - query_start_loc_cpu[:-1]
+    new_dst = torch.arange(num_new_tokens) + torch.repeat_interleave(
+        new_offset_per_seq, query_lens, output_size=num_new_tokens
+    )
+
+    return SWAContextGroup(
+        total_windowed_tokens=total_windowed_tokens,
+        total_combined=total_combined,
+        max_combined_len=max_combined_len,
+        windowed_starts=windowed_starts.to(device),
+        cu_ctx=cu_ctx.to(device),
+        combined_cu=combined_cu.to(device),
+        token_to_seq=token_to_seq.to(device),
+        ctx_dst=ctx_dst.to(device),
+        new_dst=new_dst.to(device),
+        query_start_loc=query_start_loc_cpu.to(device),
+        seq_start=seq_start,
+        seq_end=seq_end,
+        q_start=q_start,
+        q_end=q_end,
+    )
+
+
+def build_swa_groups(
+    context_lens_cpu: torch.Tensor,
+    query_start_loc_cpu: torch.Tensor,
+    block_size: int,
+    sliding_window_size: int,
+    workspace_size: int,
+    device: torch.device,
+) -> list[SWAContextGroup]:
+    """Split prefill sequences into SWA groups that fit the workspace."""
+    num_seqs = context_lens_cpu.shape[0]
+    max_windowed_per_seq = sliding_window_size + block_size - 1
+    max_seqs_per_group = max(1, workspace_size // max_windowed_per_seq)
+
+    groups: list[SWAContextGroup] = []
+    for g_start in range(0, num_seqs, max_seqs_per_group):
+        g_end = min(g_start + max_seqs_per_group, num_seqs)
+        q_start = int(query_start_loc_cpu[g_start])
+        q_end = int(query_start_loc_cpu[g_end])
+        group_qsl = (
+            query_start_loc_cpu[g_start : g_end + 1] - query_start_loc_cpu[g_start]
+        )
+        groups.append(
+            _build_swa_group(
+                context_lens_cpu=context_lens_cpu[g_start:g_end],
+                query_start_loc_cpu=group_qsl,
+                num_new_tokens=q_end - q_start,
+                block_size=block_size,
+                sliding_window_size=sliding_window_size,
+                device=device,
+                seq_start=g_start,
+                seq_end=g_end,
+                q_start=q_start,
+                q_end=q_end,
+            )
+        )
+    return groups
+
+
+@dataclass
 class MLACommonPrefillMetadata:
     """Prefill Specific Metadata"""
 
@@ -1402,6 +1582,7 @@ class MLACommonPrefillMetadata:
     q_data_type: torch.dtype | None = None
     output_dtype: torch.dtype | None = None
     prefill_backend: MLAPrefillBackend | None = None
+    swa_groups: list[SWAContextGroup] | None = None
 
 
 @dataclass
@@ -1992,6 +2173,18 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 dcp_virtual_block_size=self.dcp_virtual_block_size,
             )
 
+            swa_window_size = getattr(self.kv_cache_spec, "sliding_window", 0) or 0
+            swa_groups: list[SWAContextGroup] | None = None
+            if chunked_context_metadata is not None and swa_window_size:
+                swa_groups = build_swa_groups(
+                    context_lens_cpu=context_lens_cpu,
+                    query_start_loc_cpu=prefill_query_start_loc_cpu,
+                    block_size=self.kv_cache_spec.block_size,
+                    sliding_window_size=swa_window_size,
+                    workspace_size=self.chunked_prefill_workspace_size,
+                    device=device,
+                )
+
             prefill_metadata = MLACommonPrefillMetadata(
                 block_table=block_table_tensor[reqs_start:, ...],
                 query_start_loc=prefill_query_start_loc,
@@ -2000,6 +2193,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 output_dtype=self.model_config.dtype,
                 q_data_type=self.q_data_type,
                 prefill_backend=self._prefill_backend,
+                swa_groups=swa_groups,
             )
 
             self._prefill_backend.prepare_metadata(prefill_metadata)
@@ -2157,6 +2351,13 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj
+        self.has_rope = qk_rope_head_dim > 0
+
+        # Sliding window is a dense-impl feature; the base defaults to full
+        # attention so shared prefill helpers are valid for sparse impls too.
+        # Dense MLACommonImpl overrides these from its `sliding_window` arg.
+        self.sliding_window: tuple[int, int] | None = None
+        self.sliding_window_size = 0
 
     def _concat_k_nope_k_pe(
         self, k_nope: torch.Tensor, k_pe: torch.Tensor
@@ -2188,6 +2389,146 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             k[..., : k_nope.shape[-1]] = k_nope
             k[..., k_nope.shape[-1] :] = k_pe
         return k
+
+    def _extract_k_pe(self, workspace: torch.Tensor, toks: int) -> torch.Tensor:
+        """Extract `k_pe` from the KV cache workspace.
+
+        Returns an empty tensor for NoPE layers.
+        """
+        if self.has_rope:
+            return workspace[
+                :toks,
+                self.kv_lora_rank : self.kv_lora_rank + self.qk_rope_head_dim,
+            ].unsqueeze(1)
+        return workspace[:toks, :0].unsqueeze(1)
+
+    def _forward_prefill_swa_with_context(
+        self,
+        q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: "MLACommonMetadata",
+        k_scale: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """For SWA layers with context: gather only the last
+        `sliding_window_size` tokens of context per sequence, build a combined
+        latent sequence `[context | new_tokens]`, decompress once, and run a
+        single causal+windowed flash attention.
+
+        Sequences are split into groups that fit the workspace.
+        """
+        from vllm.v1.attention.backends.mla.prefill.flash_attn import (
+            FlashAttnPrefillBackend,
+        )
+
+        assert attn_metadata.prefill is not None
+        prefill = attn_metadata.prefill
+        assert prefill.chunked_context is not None
+        assert prefill.swa_groups is not None
+        assert isinstance(prefill.prefill_backend, FlashAttnPrefillBackend), (
+            "SWA MLA prefill requires the FlashAttn prefill backend"
+        )
+        prefill_backend = prefill.prefill_backend
+        workspace = prefill.chunked_context.workspace
+
+        for swa_group in prefill.swa_groups:
+            self._forward_swa_group(
+                q=q[swa_group.q_start : swa_group.q_end],
+                kv_c_normed=kv_c_normed[swa_group.q_start : swa_group.q_end],
+                k_pe=k_pe[swa_group.q_start : swa_group.q_end],
+                kv_c_and_k_pe_cache=kv_c_and_k_pe_cache,
+                k_scale=k_scale,
+                output=output[swa_group.q_start : swa_group.q_end],
+                workspace=workspace,
+                swa_group=swa_group,
+                block_table=prefill.block_table[
+                    swa_group.seq_start : swa_group.seq_end
+                ],
+                max_query_len=prefill.max_query_len,
+                prefill_backend=prefill_backend,
+            )
+
+    def _forward_swa_group(
+        self,
+        q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        k_scale: torch.Tensor,
+        output: torch.Tensor,
+        workspace: torch.Tensor,
+        swa_group: SWAContextGroup,
+        block_table: torch.Tensor,
+        max_query_len: int,
+        prefill_backend: "FlashAttnPrefillBackend",
+    ) -> None:
+        """Gather windowed context, build the combined latent sequence, and
+        run one causal+windowed flash attention for a single SWA group."""
+        ops.gather_and_maybe_dequant_cache(
+            src_cache=kv_c_and_k_pe_cache,
+            dst=workspace,
+            block_table=block_table,
+            cu_seq_lens=swa_group.cu_ctx,
+            token_to_seq=swa_group.token_to_seq,
+            num_tokens=swa_group.total_windowed_tokens,
+            kv_cache_dtype=self.kv_cache_dtype,
+            scale=k_scale,
+            seq_starts=swa_group.windowed_starts,
+        )
+
+        ctx_k_pe = self._extract_k_pe(workspace, swa_group.total_windowed_tokens)
+
+        combined_kv_c = torch.empty(
+            swa_group.total_combined,
+            self.kv_lora_rank,
+            device=q.device,
+            dtype=workspace.dtype,
+        )
+        combined_k_pe = torch.empty(
+            swa_group.total_combined,
+            *ctx_k_pe.shape[1:],
+            device=q.device,
+            dtype=workspace.dtype,
+        )
+        swa_scatter_combined(
+            workspace=workspace,
+            kv_c_normed=kv_c_normed,
+            k_pe=k_pe,
+            ctx_dst=swa_group.ctx_dst,
+            new_dst=swa_group.new_dst,
+            combined_kv_c=combined_kv_c,
+            combined_k_pe=combined_k_pe,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+        )
+
+        kv_nope = self.kv_b_proj(combined_kv_c)[0].view(
+            -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
+        )
+        combined_k_nope, combined_v = kv_nope.split(
+            [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+        )
+        combined_k = self._concat_k_nope_k_pe(combined_k_nope, combined_k_pe)
+
+        # Intentional cross-class call: SWA prefill is FlashAttn-only (asserted
+        # above), and the windowed flash-attn entry point lives on the backend.
+        attn_out = prefill_backend._flash_attn_varlen_diff_headdims(
+            q=q,
+            k=combined_k,
+            v=combined_v,
+            cu_seqlens_q=swa_group.query_start_loc,
+            cu_seqlens_k=swa_group.combined_cu,
+            max_seqlen_q=max_query_len,
+            max_seqlen_k=swa_group.max_combined_len,
+            softmax_scale=self.scale,
+            causal=True,
+            window_size=(self.sliding_window_size - 1, 0),
+        )
+
+        assert isinstance(attn_out, torch.Tensor)
+        output.copy_(attn_out.view(-1, self.num_heads * self.v_head_dim))
 
     def _compute_prefill_context(
         self,
@@ -2496,6 +2837,19 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             "Fused FP8 output is only wired for the non-chunked-context path"
         )
 
+        if self.sliding_window_size > 0 and has_context:
+            assert not use_fp8_prefill, "fp8+swa not supported"
+            self._forward_prefill_swa_with_context(
+                q,
+                kv_c_normed,
+                k_pe,
+                kv_c_and_k_pe_cache,
+                attn_metadata,
+                k_scale,
+                output,
+            )
+            return
+
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
         )
@@ -2517,6 +2871,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 else None
             ),
             output_scale=output_scale,
+            window_size=self.sliding_window,
         )
 
         if has_context:
@@ -2611,6 +2966,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             v_head_dim,
             kv_b_proj,
         )
+        if sliding_window is not None:
+            self.sliding_window = (sliding_window - 1, 0)
+        self.sliding_window_size = sliding_window or 0
         self.q_lora_rank = q_lora_rank
         self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads

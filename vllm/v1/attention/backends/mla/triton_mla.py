@@ -117,6 +117,10 @@ class TritonMLABackend(MLACommonBackend):
         return "TRITON_MLA"
 
     @classmethod
+    def supports_sliding_window(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_batch_invariance(cls) -> bool:
         return True
 
@@ -165,12 +169,14 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             **mla_args,
         )
 
-        unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
+        unsupported_features = [alibi_slopes, logits_soft_cap]
         if any(unsupported_features):
             raise NotImplementedError(
                 "TritonMLAImpl does not support one of the following: "
-                "alibi_slopes, sliding_window, logits_soft_cap"
+                "alibi_slopes, logits_soft_cap"
             )
+
+        # self.sliding_window_size is set by MLACommonImpl.__init__.
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
@@ -281,6 +287,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             k_scale=layer._k_scale,
             v_scale=layer._k_scale,
             is_mla=True,
+            sliding_window=self.sliding_window_size,
         )
 
         return o, lse

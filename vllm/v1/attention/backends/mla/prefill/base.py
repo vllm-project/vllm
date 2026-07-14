@@ -158,7 +158,22 @@ class MLAPrefillBackend(ABC):
         return_softmax_lse: bool,
         out: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
+        window_size: tuple[int, int] | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Run attention over the fresh prompt tokens (no prior context).
+
+        Args:
+            q: Query tensor.
+            k: Key tensor.
+            v: Value tensor.
+            return_softmax_lse: Whether to also return the log-sum-exp.
+            window_size: Optional flash-attn `(left, right)` sliding window.
+                `None` means full causal attention. Sliding-window layers
+                pass `(sliding_window - 1, 0)`.
+
+        Returns:
+            The attention output, optionally with the log-sum-exp.
+        """
         raise NotImplementedError
 
     @abstractmethod

@@ -430,7 +430,11 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         return_softmax_lse: bool,
         out: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
+        window_size: tuple[int, int] | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        extra_kwargs: dict[str, tuple[int, int]] = {}
+        if window_size is not None:
+            extra_kwargs["window_size"] = window_size
         return self._flash_attn_varlen_diff_headdims(
             q=q,
             k=k,
@@ -444,6 +448,7 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             return_softmax_lse=return_softmax_lse,
             out=out,
             output_scale=output_scale,
+            **extra_kwargs,
         )
 
     def run_prefill_context_chunk(
