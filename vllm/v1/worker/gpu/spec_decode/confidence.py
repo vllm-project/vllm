@@ -153,6 +153,15 @@ def compute_prefix_survival(
     return np.cumprod(probs, axis=1)
 
 
+def assign_draft_token_budget(survival: np.ndarray, num_admitted: int) -> np.ndarray:
+    """Assign a fixed global token budget using current prefix scores."""
+    num_reqs, num_steps = survival.shape
+    admitted = np.argsort(-survival.reshape(-1), kind="stable")[:num_admitted]
+    capacities = np.zeros(num_reqs, dtype=np.int32)
+    np.add.at(capacities, admitted // num_steps, 1)
+    return capacities
+
+
 THETA_MARGIN = 1.05
 
 
@@ -177,12 +186,11 @@ def allocate_draft_token_capacity(
     total = num_reqs * num_steps
     max_admissions = min(int(total * budget_frac) + 1, total)
     num_candidates = min(int((scores > 0.0).sum()), max_admissions)
-    capacities = np.zeros(num_reqs, dtype=np.int32)
     if num_candidates == 0:
-        return capacities
+        return np.zeros(num_reqs, dtype=np.int32)
 
     if sps_row is None:
-        admitted = order[:num_candidates]
+        num_admitted = num_candidates
     else:
         tau = num_reqs + np.cumsum(scores[:num_candidates])
         theta = tau * sps_row[num_reqs + 1 : num_reqs + num_candidates + 1]
@@ -194,12 +202,11 @@ def allocate_draft_token_capacity(
         if theta[best] < THETA_MARGIN * theta[num_candidates - 1]:
             best = num_candidates - 1
         elif num_reqs * sps_row[num_reqs] >= theta[best]:
-            return capacities
-        admitted = order[: best + 1]
+            return np.zeros(num_reqs, dtype=np.int32)
+        num_admitted = best + 1
 
-    # Survival is non-increasing along each row, so admission in sorted order
-    # always admits prefixes; per-request capacity is the admitted count.
-    np.add.at(capacities, admitted // num_steps, 1)
+    capacities = np.zeros(num_reqs, dtype=np.int32)
+    np.add.at(capacities, order[:num_admitted] // num_steps, 1)
     return capacities
 
 
@@ -215,40 +222,17 @@ def build_sps_table(
     return np.broadcast_to(row, (max_num_reqs + 1, row.size)).copy()
 
 
-def build_additive_sps_table(
-    step_time_grid: dict[int, list[tuple[int, float]]],
+def build_sps_table_from_costs(
+    draft_curve: list[tuple[int, float]],
+    verify_curve: list[tuple[int, float]],
     max_num_reqs: int,
     max_batch_tokens: int,
-) -> tuple[np.ndarray, list[tuple[int, float]], list[tuple[int, float]], float]:
-    """Fit ``step_ms(R, B) = request_ms(R) + verify_ms(B)``."""
-    measured_reqs = sorted(step_time_grid)
-    request_ms: list[float] = []
-    verify_by_tokens: dict[int, float] = {}
-    residuals = []
-    for num_reqs in measured_reqs:
-        curve = sorted(step_time_grid[num_reqs])
-        offsets = [
-            step_ms - verify_by_tokens[num_tokens]
-            for num_tokens, step_ms in curve
-            if num_tokens in verify_by_tokens
-        ]
-        if request_ms and not offsets:
-            raise ValueError("SPS profiling rows do not share verification sizes")
-        request_cost = 0.0 if not request_ms else float(np.median(offsets))
-        request_cost = max(request_ms[-1] if request_ms else 0.0, request_cost)
-        request_ms.append(request_cost)
-        for num_tokens, step_ms in curve:
-            verify_by_tokens.setdefault(num_tokens, max(step_ms - request_cost, 1e-6))
-            residuals.append(request_cost + verify_by_tokens[num_tokens] - step_ms)
+) -> np.ndarray:
+    """Build SPS from directly measured draft and verifier costs."""
 
-    measured_tokens = sorted(verify_by_tokens)
-    verify_ms = np.array(
-        [verify_by_tokens[num_tokens] for num_tokens in measured_tokens]
-    )
-    request_ms_np = np.array(request_ms)
-    rmse_ms = float(np.sqrt(np.mean(np.square(residuals))))
-
-    def interpolate(values: np.ndarray, xs: list[int], ys: np.ndarray) -> np.ndarray:
+    def interpolate(values: np.ndarray, curve: list[tuple[int, float]]) -> np.ndarray:
+        xs = np.array([x for x, _ in curve], dtype=np.float64)
+        ys = np.array([y for _, y in curve], dtype=np.float64)
         result = np.interp(values, xs, ys)
         if len(xs) > 1:
             after = values > xs[-1]
@@ -258,12 +242,9 @@ def build_additive_sps_table(
 
     all_reqs = np.arange(max_num_reqs + 1)
     all_tokens = np.arange(max_batch_tokens + 1)
-    request_table = np.maximum(interpolate(all_reqs, measured_reqs, request_ms_np), 0.0)
-    verify_table = np.maximum(interpolate(all_tokens, measured_tokens, verify_ms), 1e-6)
-    sps_table = 1000.0 / (request_table[:, None] + verify_table[None, :])
-    request_curve = list(zip(measured_reqs, request_ms))
-    verify_curve = list(zip(measured_tokens, verify_ms.tolist()))
-    return sps_table, request_curve, verify_curve, rmse_ms
+    draft_table = np.maximum(interpolate(all_reqs, draft_curve), 0.0)
+    verify_table = np.maximum(interpolate(all_tokens, verify_curve), 1e-6)
+    return 1000.0 / (draft_table[:, None] + verify_table[None, :])
 
 
 class ConfidenceManager:
@@ -312,29 +293,62 @@ class ConfidenceManager:
         self._confidence_logits_np = self._confidence_logits_cpu.numpy()
         self._num_sampled_np = self._num_sampled_cpu.numpy()
         self._num_verified_np = np.empty(shape, dtype=np.int64)
+        self._current_capacity_cpu = torch.empty(
+            shape, dtype=torch.int32, pin_memory=True
+        )
+        self._current_capacity_np = self._current_capacity_cpu.numpy()
+        self._current_capacity = torch.empty(
+            req_states.max_num_reqs, dtype=torch.int32, device=device
+        )
+        num_candidates = req_states.max_num_reqs * self.num_speculative_steps
+        self._survival = torch.empty(
+            (req_states.max_num_reqs, self.num_speculative_steps),
+            dtype=torch.float32,
+            device=device,
+        )
+        self._sorted_survival = torch.empty(
+            num_candidates, dtype=torch.float32, device=device
+        )
+        self._sorted_indices = torch.empty(
+            num_candidates, dtype=torch.int64, device=device
+        )
+        self._capacity_ones = torch.ones(
+            num_candidates, dtype=torch.int32, device=device
+        )
+        self._temperatures_cpu = torch.ones(
+            self.num_speculative_steps, dtype=torch.float32, pin_memory=True
+        )
+        self._temperatures_np = self._temperatures_cpu.numpy()
+        self._temperatures = torch.ones(
+            self.num_speculative_steps, dtype=torch.float32, device=device
+        )
         self._req_ids: list[list[str]] = [[], []]
         self._num_bonus = [0, 0]
         self._copy_events = [torch.cuda.Event(blocking=True) for _ in range(2)]
         self._staged_idx: int | None = None
+        self._capacity_idx: int | None = None
         self._last_idx: int | None = None
         self._next_idx = 0
+        self._draft_token_budget: int | None = None
         self.forced_capacity: int | None = None
 
     def add_request(self, req_idx: int) -> None:
         self.draft_token_capacity_np[req_idx] = self.num_speculative_steps
 
     def set_sps_profile(
-        self, step_time_grid: dict[int, list[tuple[int, float]]]
-    ) -> tuple[list[tuple[int, float]], list[tuple[int, float]], float]:
+        self,
+        draft_curve: list[tuple[int, float]],
+        verify_curve: list[tuple[int, float]],
+    ) -> None:
         max_batch_tokens = self.req_states.max_num_reqs * (
             1 + self.num_speculative_steps
         )
-        self.sps_table_np, request_curve, verify_curve, rmse_ms = (
-            build_additive_sps_table(
-                step_time_grid, self.req_states.max_num_reqs, max_batch_tokens
-            )
+        self.sps_table_np = build_sps_table_from_costs(
+            draft_curve,
+            verify_curve,
+            self.req_states.max_num_reqs,
+            max_batch_tokens,
         )
-        return request_curve, verify_curve, rmse_ms
 
     def profile_sps_curve(
         self,
@@ -349,7 +363,7 @@ class ConfidenceManager:
         warmup_iters: int = 3,
         timed_chunks: int = 5,
     ) -> None:
-        """Profile additive request-sized and verification step costs."""
+        """Profile draft-by-request and verifier-by-token step costs."""
         import time
 
         from vllm import SamplingParams
@@ -369,7 +383,7 @@ class ConfidenceManager:
         if count == max_reqs:
             req_counts.append(max_reqs)
         draft_counts = sorted(
-            {0, min(1, num_spec_steps), min(3, num_spec_steps), num_spec_steps}
+            {0, num_spec_steps // 3, (2 * num_spec_steps) // 3, num_spec_steps}
         )
         if model_runner.sampler is not None:
             params = SamplingParams()
@@ -381,9 +395,13 @@ class ConfidenceManager:
                 )
             model_runner.sampler.apply_staged_writes()
 
-        def time_steps(step: Callable[[], None]) -> float:
+        def time_steps(
+            step: Callable[[], None], after_warmup: Callable[[], None] | None = None
+        ) -> float:
             for _ in range(warmup_iters):
                 step()
+            if after_warmup is not None:
+                after_warmup()
             chunk_ms = []
             for _ in range(timed_chunks):
                 torch.accelerator.synchronize()
@@ -418,42 +436,112 @@ class ConfidenceManager:
 
             return step
 
+        speculator = model_runner.speculator
+        assert speculator is not None
+        original_propose = speculator.propose
+        proposal_events: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
+
+        def skip_propose(input_batch: Any, *args: Any, **kwargs: Any) -> torch.Tensor:
+            return speculator.draft_tokens[: input_batch.num_reqs]
+
+        def time_propose(*args: Any, **kwargs: Any) -> torch.Tensor:
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            result = original_propose(*args, **kwargs)
+            end.record()
+            proposal_events.append((start, end))
+            return result
+
         try:
-            step_ms = []
+            observations = []
+            verify_ms = []
+            draft_ms = []
+            total_ms = []
             for num_reqs in req_counts:
                 step = make_step(num_reqs)
                 for capacity in draft_counts:
                     self.forced_capacity = capacity
-                    step_ms.append(time_steps(step))
+                    num_tokens = num_reqs * (1 + capacity)
+                    observations.append((num_reqs, num_tokens))
+
+                    speculator.propose = skip_propose  # type: ignore[method-assign]
+                    verify_ms.append(time_steps(step))
+
+                    speculator.propose = time_propose  # type: ignore[method-assign]
+                    total_ms.append(time_steps(step, proposal_events.clear))
+                    draft_ms.append(
+                        float(
+                            np.median(
+                                [
+                                    start.elapsed_time(end)
+                                    for start, end in proposal_events
+                                ]
+                            )
+                        )
+                    )
         finally:
+            speculator.propose = original_propose  # type: ignore[method-assign]
             self.forced_capacity = None
 
-        timings = torch.tensor(step_ms, dtype=torch.float64, device=self.device)
+        timings = torch.tensor(
+            verify_ms + draft_ms + total_ms,
+            dtype=torch.float64,
+            device=self.device,
+        )
         tp_group = get_tp_group()
         if tp_group.world_size > 1:
             tp_group.broadcast(timings, src=0)
-        step_ms = timings.cpu().tolist()
+        timings_np = timings.cpu().numpy()
+        num_observations = len(observations)
+        verify_ms = timings_np[:num_observations]
+        draft_ms = timings_np[num_observations : 2 * num_observations]
+        total_ms = timings_np[2 * num_observations :]
 
-        ms_iter = iter(step_ms)
-        step_time_grid = {
-            num_reqs: [
-                (num_reqs * (1 + capacity), next(ms_iter)) for capacity in draft_counts
+        def collapse_samples(
+            xs: list[int], ys: np.ndarray
+        ) -> tuple[list[tuple[int, float]], float]:
+            grouped: dict[int, list[float]] = {}
+            for x, y in zip(xs, ys):
+                grouped.setdefault(x, []).append(float(y))
+            curve = [
+                (x, float(np.median(samples))) for x, samples in sorted(grouped.items())
             ]
-            for num_reqs in req_counts
-        }
-        request_curve, verify_curve, rmse_ms = self.set_sps_profile(step_time_grid)
+            costs = dict(curve)
+            residuals = [
+                sample - costs[x]
+                for x, samples in grouped.items()
+                for sample in samples
+            ]
+            return curve, float(np.sqrt(np.mean(np.square(residuals))))
+
+        reqs, tokens = map(list, zip(*observations))
+        draft_curve, draft_rmse_ms = collapse_samples(reqs, draft_ms)
+        verify_curve, verify_rmse_ms = collapse_samples(tokens, verify_ms)
+        self.set_sps_profile(draft_curve, verify_curve)
+        assert self.sps_table_np is not None
+        residuals = [
+            total - 1000.0 / self.sps_table_np[num_reqs, num_tokens]
+            for (num_reqs, num_tokens), total in zip(observations, total_ms)
+        ]
+        rmse_ms = float(np.sqrt(np.mean(np.square(residuals))))
         if self.online_sts is not None:
             self.online_sts.reset()
         logger.info(
-            "DSpark auto-profiled request-sized cost (requests -> ms): %s",
-            [(r, round(ms, 3)) for r, ms in request_curve],
+            "DSpark auto-profiled draft cost (requests -> ms): %s",
+            [(r, round(ms, 3)) for r, ms in draft_curve],
         )
         logger.info(
-            "DSpark auto-profiled verification cost (tokens -> ms): %s",
+            "DSpark auto-profiled verifier + sampler cost (tokens -> ms): %s",
             [(b, round(ms, 3)) for b, ms in verify_curve],
         )
         logger.info(
-            "DSpark additive SPS fit RMSE: %.3f ms",
+            "DSpark component collapse RMSE (draft / verifier): %.3f / %.3f ms",
+            draft_rmse_ms,
+            verify_rmse_ms,
+        )
+        logger.info(
+            "DSpark direct-component SPS residual RMSE: %.3f ms",
             rmse_ms,
         )
 
@@ -469,6 +557,7 @@ class ConfidenceManager:
         num_verified_np = (np.diff(input_batch.cu_num_logits_np) - num_bonus).astype(
             np.int64
         )
+        self._apply_staged_capacities()
         if self._staged_idx is not None:
             self._update_staged_confidences(self._staged_idx)
 
@@ -477,6 +566,7 @@ class ConfidenceManager:
         self._num_verified_np[idx, :num_reqs] = num_verified_np
         self._req_ids[idx] = list(input_batch.req_ids)
         self._num_bonus[idx] = num_bonus
+        self._rank_current_confidences(confidence_logits, num_reqs)
         current_stream = torch.cuda.current_stream(self.device)
         self.copy_stream.wait_stream(current_stream)
         with stream(self.copy_stream, current_stream):
@@ -486,9 +576,76 @@ class ConfidenceManager:
             self._num_sampled_cpu[idx, :num_reqs].copy_(
                 num_sampled[:num_reqs], non_blocking=True
             )
+            self._current_capacity_cpu[idx, :num_reqs].copy_(
+                self._current_capacity[:num_reqs], non_blocking=True
+            )
             num_sampled.record_stream(self.copy_stream)
             self._copy_events[idx].record()
         self._staged_idx = idx
+        self._capacity_idx = idx
+
+    def _rank_current_confidences(
+        self, confidence_logits: torch.Tensor, num_reqs: int
+    ) -> None:
+        temperatures: np.ndarray | float = 1.0
+        if self.online_sts is not None:
+            temperatures = self.online_sts.temperatures
+        self._temperatures_np[:] = temperatures
+        self._temperatures.copy_(self._temperatures_cpu, non_blocking=True)
+
+        survival = self._survival[:num_reqs]
+        torch.div(confidence_logits[:num_reqs], self._temperatures, out=survival)
+        torch.sigmoid(survival, out=survival)
+        torch.cumprod(survival, dim=1, out=survival)
+
+        total = num_reqs * self.num_speculative_steps
+        torch.sort(
+            survival.flatten(),
+            descending=True,
+            stable=True,
+            out=(
+                self._sorted_survival[:total],
+                self._sorted_indices[:total],
+            ),
+        )
+        if self.forced_capacity is not None:
+            self._current_capacity[:num_reqs].fill_(self.forced_capacity)
+            return
+        budget = total
+        if self._draft_token_budget is not None:
+            budget = min(self._draft_token_budget, total)
+        self._current_capacity[:num_reqs].zero_()
+        if budget > 0:
+            torch.div(
+                self._sorted_indices[:budget],
+                self.num_speculative_steps,
+                rounding_mode="floor",
+                out=self._sorted_indices[:budget],
+            )
+            self._current_capacity[:num_reqs].scatter_add_(
+                0,
+                self._sorted_indices[:budget],
+                self._capacity_ones[:budget],
+            )
+
+    def _apply_staged_capacities(self) -> None:
+        """Expose current GPU assignment to next-step host batch construction."""
+        idx = self._capacity_idx
+        if idx is None:
+            return
+        with gpu_sync_allowed():
+            self._copy_events[idx].synchronize()
+        req_ids = self._req_ids[idx]
+        slots = np.fromiter(
+            (self.req_states.req_id_to_index.get(req_id, -1) for req_id in req_ids),
+            dtype=np.int64,
+            count=len(req_ids),
+        )
+        live = slots >= 0
+        self.draft_token_capacity_np[slots[live]] = self._current_capacity_np[
+            idx, : len(req_ids)
+        ][live]
+        self._capacity_idx = None
 
     def wait_for_staged_copy(self) -> None:
         """Protect the persistent confidence buffer before its next replay."""
@@ -506,10 +663,7 @@ class ConfidenceManager:
         raise NotImplementedError
 
     def _update_staged_confidences(self, idx: int) -> None:
-        """Consume one staged slot and update request capacities."""
-        with gpu_sync_allowed():
-            self._copy_events[idx].synchronize()
-
+        """Consume a stale confidence snapshot and update the token budget."""
         req_ids = self._req_ids[idx]
         num_reqs = len(req_ids)
         confidence_logits_np = self._confidence_logits_np[idx, :num_reqs]
@@ -549,14 +703,7 @@ class ConfidenceManager:
         )
         if self.forced_capacity is not None:
             np.minimum(capacities, self.forced_capacity, out=capacities)
-
-        req_id_to_index = self.req_states.req_id_to_index
-        slots = np.array(
-            [req_id_to_index.get(req_id, -1) for req_id in req_ids],
-            dtype=np.int64,
-        )
-        live = slots >= 0
-        self.draft_token_capacity_np[slots[live]] = capacities[live]
+        self._draft_token_budget = int(capacities.sum())
 
     def warmup(self, input_buffers: "InputBuffers") -> None:
         pass
@@ -575,6 +722,7 @@ class ConfidenceManager:
         input_batch: "InputBatch",
         draft_tokens: dict[str, list[int]],
     ) -> np.ndarray:
+        self._apply_staged_capacities()
         assert input_batch.num_draft_tokens_per_req is not None
         valid = input_batch.num_draft_tokens_per_req
         if input_batch.has_structured_output_reqs:
@@ -633,6 +781,7 @@ class VarlenConfidenceManager(ConfidenceManager):
         draft_tokens: dict[str, list[int]],
         has_structured_output_requests: bool = False,
     ) -> int:
+        self._apply_staged_capacities()
         num_reqs = len(num_tokens_per_req)
         req_ids = sorted(
             num_tokens_per_req,

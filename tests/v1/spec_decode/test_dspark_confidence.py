@@ -27,7 +27,8 @@ from vllm.v1.worker.gpu.spec_decode.confidence import (  # noqa: E402
     MaskedConfidenceManager,
     VarlenConfidenceManager,
     allocate_draft_token_capacity,
-    build_additive_sps_table,
+    assign_draft_token_budget,
+    build_sps_table_from_costs,
     compute_prefix_survival,
     make_confidence_manager,
 )
@@ -168,34 +169,24 @@ def test_allocate_capacity_sps_curve_argmax():
     assert capacities.tolist() == [2, 0]
 
 
-def test_additive_sps_table_separates_request_and_verification_costs():
-    request_counts = (1, 2, 4, 8)
-    batch_multipliers = (1, 2, 4, 8)
-    request_ms = {1: 0.0, 2: 0.4, 4: 0.9, 8: 1.8}
-    verify_ms = {
-        num_tokens: 2.0 + 0.25 * np.log2(num_tokens)
-        for num_tokens in (1, 2, 4, 8, 16, 32, 64)
-    }
-    step_time_grid = {
-        num_reqs: [
-            (
-                num_reqs * multiplier,
-                request_ms[num_reqs] + verify_ms[num_reqs * multiplier],
-            )
-            for multiplier in batch_multipliers
-        ]
-        for num_reqs in request_counts
-    }
+def test_assign_draft_token_budget_uses_current_scores():
+    current_survival = np.array([[0.9, 0.8, 0.7], [0.95, 0.4, 0.3]])
 
-    table, request_curve, verify_curve, rmse_ms = build_additive_sps_table(
-        step_time_grid, max_num_reqs=8, max_batch_tokens=64
+    capacities = assign_draft_token_budget(current_survival, num_admitted=3)
+
+    assert capacities.tolist() == [2, 1]
+
+
+def test_sps_table_combines_direct_draft_and_verification_costs():
+    draft_curve = [(1, 0.2), (4, 0.8), (8, 1.6)]
+    verify_curve = [(1, 2.0), (8, 3.0), (64, 5.0)]
+
+    table = build_sps_table_from_costs(
+        draft_curve, verify_curve, max_num_reqs=8, max_batch_tokens=64
     )
 
-    assert dict(request_curve) == pytest.approx(request_ms)
-    assert dict(verify_curve) == pytest.approx(verify_ms)
-    assert rmse_ms == pytest.approx(0.0, abs=1e-12)
-    assert 1000.0 / table[1, 8] == pytest.approx(verify_ms[8])
-    assert 1000.0 / table[8, 8] == pytest.approx(request_ms[8] + verify_ms[8])
+    assert 1000.0 / table[1, 8] == pytest.approx(3.2)
+    assert 1000.0 / table[8, 8] == pytest.approx(4.6)
 
 
 def test_allocate_capacity_temperature_desaturates_zeros():
@@ -257,10 +248,8 @@ def test_online_sts_fits_order_preserving_temperatures():
     assert np.array_equal(sts.temperatures, np.ones(3))
 
 
-def test_capacity_manager_fixed_offset_staging():
-    """Capacities applied at dispatch come from the confidence copy staged
-    one step earlier (fixed offset): the newest copy is never consumed, and
-    outcomes ride along to update the online calibration."""
+def test_capacity_manager_uses_stale_budget_with_current_assignment():
+    """The prior host snapshot sets the budget; current GPU scores assign it."""
     device = torch.device("cuda")
     req_states = RequestState(
         max_num_reqs=4,
@@ -305,27 +294,32 @@ def test_capacity_manager_fixed_offset_staging():
     confident = torch.tensor(
         [[8.0, 8.0, -800.0], [8.0, 8.0, 8.0]], dtype=torch.float32, device=device
     )
-    uniform = torch.full((2, 3), 8.0, dtype=torch.float32, device=device)
+    current = torch.tensor(
+        [[20.0, 20.0, 20.0], [8.0, 8.0, 8.0]],
+        dtype=torch.float32,
+        device=device,
+    )
 
     stage(confident)
-    handler.trim_batch(input_batch, {})
+    handler._apply_staged_capacities()
     # Only one copy staged: defaults (full k) must remain untouched.
     assert handler.draft_token_capacity_np.tolist() == [3, 3, 3, 3]
 
-    stage(uniform)
-    handler.trim_batch(input_batch, {})
-    # Staging the second copy consumes the FIRST one, not the newest.
+    stage(current)
+    handler._apply_staged_capacities()
+    # The first snapshot chooses four admissions, while stable current-score
+    # ordering assigns three to req0 and one to req1.
     caps = handler.draft_token_capacity_np
-    assert caps[2] == 2 and caps[0] == 2  # 4 admissions split 2/2
+    assert caps[2] == 3 and caps[0] == 1
     # Batch trimming does not advance the staging pipeline.
-    handler.trim_batch(input_batch, {})
+    handler._apply_staged_capacities()
     assert handler.draft_token_capacity_np.tolist() == caps.tolist()
 
     # Finished requests are skipped when scattering capacities.
     del req_states.req_id_to_index["req0"]
     handler.draft_token_capacity_np.fill(3)
-    stage(uniform)
-    handler.trim_batch(input_batch, {})
+    stage(current)
+    handler._apply_staged_capacities()
     assert handler.draft_token_capacity_np[0] != 3  # req1 updated
     assert handler.draft_token_capacity_np[2] == 3  # req0 untouched
 
