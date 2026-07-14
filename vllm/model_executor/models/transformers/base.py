@@ -530,6 +530,23 @@ class Base(
         num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
         logits_soft_cap = getattr(text_config, "attn_logit_softcapping", None)
 
+        # For MLA models (e.g., DeepSeek, GLM) using the transformers backend,
+        # the generic Attention layer receives the full Q/K/V from the model code
+        # which handles MLA decompression internally. The default head_size from
+        # get_head_size() returns the MLA latent size (kv_lora_rank + qk_rope_head_dim),
+        # which is incorrect for the transformers backend. Use the actual query/key/value
+        # head dimensions from the config instead.
+        head_size_v = None
+        if self.model_config.is_deepseek_mla and self.model_config.using_transformers_backend():
+            qk_nope_head_dim = getattr(text_config, "qk_nope_head_dim", 0)
+            qk_rope_head_dim = getattr(text_config, "qk_rope_head_dim", 0)
+            if qk_nope_head_dim and qk_rope_head_dim:
+                head_size = qk_nope_head_dim + qk_rope_head_dim
+                # The model code decompresses MLA K/V into full heads,
+                # so head_size_v = v_head_dim and num_kv_heads = num_kv_heads / TP
+                v_head_dim = getattr(text_config, "v_head_dim", head_size)
+                head_size_v = v_head_dim
+
         # In encoder models, the attention layers will have `is_causal=False`
         is_encoder = lambda module: not getattr(module, "is_causal", True)
         has_encoder = lambda model: any(is_encoder(m) for m in model.modules())
@@ -564,6 +581,7 @@ class Base(
             attention_instances[i] = attn_cls(
                 num_heads=num_heads,
                 head_size=head_size,
+                head_size_v=head_size_v,
                 # NOTE: We use Llama scale as default, if it's set by
                 # Transformers, it's updated in vllm_attention_forward
                 scale=head_size**-0.5,
