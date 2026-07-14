@@ -153,6 +153,27 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         )
 
 
+def _pad_to_alignment(
+    x: torch.Tensor, dim: int, alignment: int, value: float = 0.0
+) -> torch.Tensor:
+    """Pad tensor ``x`` along ``dim`` to the next multiple of ``alignment``."""
+    remainder = x.shape[dim] % alignment
+    if remainder == 0:
+        return x
+    pad_size = alignment - remainder
+    pad_spec = [0] * (2 * x.dim())
+    pad_spec[-(2 * dim + 1)] = pad_size
+    return torch.nn.functional.pad(x, pad_spec, value=value)
+
+
+def padded_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+    if loaded_weight.shape != param.shape:
+        slices = tuple(slice(0, s) for s in loaded_weight.shape)
+        param.data[slices].copy_(loaded_weight)
+    else:
+        param.data.copy_(loaded_weight.view(param.shape))
+
+
 class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def __init__(
         self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
@@ -179,28 +200,6 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             return kFp8StaticTensorSym
         return None
 
-    @staticmethod
-    def _pad_to_alignment(
-        x: torch.Tensor, dim: int, alignment: int, value: float = 0.0
-    ) -> torch.Tensor:
-        """Pad tensor ``x`` along ``dim`` to the next multiple of
-        ``alignment``."""
-        remainder = x.shape[dim] % alignment
-        if remainder == 0:
-            return x
-        pad_size = alignment - remainder
-        pad_spec = [0] * (2 * x.dim())
-        pad_spec[-(2 * dim + 1)] = pad_size
-        return torch.nn.functional.pad(x, pad_spec, value=value)
-
-    @staticmethod
-    def padded_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
-        if loaded_weight.shape != param.shape:
-            slices = tuple(slice(0, s) for s in loaded_weight.shape)
-            param.data[slices].copy_(loaded_weight)
-        else:
-            param.data.copy_(loaded_weight.view(param.shape))
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight_name, weight_scale_name, _, _ = self.layer_param_names
         weight = getattr(layer, weight_name)
@@ -222,21 +221,21 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         set_weight_attrs(
             getattr(layer, weight_name),
             {
-                "weight_loader": self.padded_weight_loader,
+                "weight_loader": padded_weight_loader,
             },
         )
 
         weight_scale = getattr(layer, weight_scale_name, None)
         if weight_scale is not None and pad_n > 0 and weight_scale.numel() > 1:
             flat_scale = weight_scale.reshape(-1)
-            padded_scale = self._pad_to_alignment(
+            padded_scale = _pad_to_alignment(
                 flat_scale, dim=0, alignment=16, value=1.0
             ).view(-1, *weight_scale.shape[1:])
             replace_parameter(layer, weight_scale_name, padded_scale.data)
             set_weight_attrs(
                 getattr(layer, weight_name),
                 {
-                    "weight_loader": self.padded_weight_loader,
+                    "weight_loader": padded_weight_loader,
                 },
             )
 
@@ -258,9 +257,9 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         pad_n = padded_n - output_size
 
         if pad_k > 0:
-            A = self._pad_to_alignment(A, dim=1, alignment=16)
+            A = _pad_to_alignment(A, dim=1, alignment=16)
         if pad_n > 0 and bias is not None:
-            bias = self._pad_to_alignment(bias, dim=0, alignment=16)
+            bias = _pad_to_alignment(bias, dim=0, alignment=16)
 
         output = ops.cutlass_scaled_mm(
             A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
@@ -309,6 +308,33 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             )
         return True, None
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+        # The SM12x blockwise kernels reject shapes whose N is not a multiple
+        # of the 128x128 scale block, e.g. the N=576 kv_a_proj_with_mqa in
+        # DeepSeek models (https://github.com/vllm-project/vllm/issues/47990).
+        # Zero-pad N up to the block size: the padded rows fall in the last,
+        # already present, scale block and only produce zero output columns,
+        # which apply_block_scaled_mm slices away.
+        if not current_platform.is_device_capability_family(120):
+            return
+        params = self._get_layer_params(layer)
+        padded_weight = _pad_to_alignment(params.weight, dim=0, alignment=128)
+        if padded_weight is params.weight:
+            return
+        weight_scale = (
+            params.weight_scale
+            if params.weight_scale_inv is None
+            else params.weight_scale_inv
+        )
+        assert weight_scale is not None
+        assert weight_scale.shape[0] * 128 == padded_weight.shape[0]
+        replace_parameter(layer, params.WEIGHT, padded_weight.data)
+        set_weight_attrs(
+            getattr(layer, params.WEIGHT),
+            {"weight_loader": padded_weight_loader},
+        )
+
     def apply_block_scaled_mm(
         self,
         A: torch.Tensor,
@@ -317,13 +343,17 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         Bs: torch.Tensor,
     ) -> torch.Tensor:
         out_dtype = self.config.out_dtype
-        return ops.cutlass_scaled_mm(
+        output = ops.cutlass_scaled_mm(
             A,
             B.T,
             out_dtype=out_dtype,
             scale_a=As,
             scale_b=Bs.T,
         )
+        out_features = self.config.weight_shape[0]
+        if output.shape[-1] != out_features:
+            output = output[..., :out_features].contiguous()
+        return output
 
 
 def cutlass_scaled_mm(
@@ -334,10 +364,18 @@ def cutlass_scaled_mm(
     block_size: list[int],
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
-    return ops.cutlass_scaled_mm(
+    out_features = B.shape[0]
+    if current_platform.is_device_capability_family(120):
+        # Per-call padding is acceptable here: this wrapper is a test/utility
+        # surface; the layer path pads once in process_weights_after_loading.
+        B = _pad_to_alignment(B, dim=0, alignment=128)
+    output = ops.cutlass_scaled_mm(
         A,
         B.T,
         out_dtype=output_dtype,
         scale_a=As,
         scale_b=Bs.T,
     )
+    if output.shape[-1] != out_features:
+        output = output[..., :out_features].contiguous()
+    return output
