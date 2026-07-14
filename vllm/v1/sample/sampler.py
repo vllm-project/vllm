@@ -5,6 +5,7 @@
 import torch
 import torch.nn as nn
 
+from vllm import envs
 from vllm.config.model import LogprobsMode
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
@@ -402,6 +403,15 @@ class Sampler(nn.Module):
 
         # Apply logits processors which can impact greedy sampling.
         for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
+            if envs.NOVITA_ENABLE_KIMI_VALIDATIONS and predict_bonus_token:
+                apply_to_spec_decode_bonus = getattr(
+                    processor, "apply_to_spec_decode_bonus", None
+                )
+                if callable(apply_to_spec_decode_bonus):
+                    logits = apply_to_spec_decode_bonus(
+                        logits, sampling_metadata.spec_token_ids
+                    )
+                    continue
             logits = processor.apply(logits)
 
         # Apply penalties (e.g., freq_penalties).

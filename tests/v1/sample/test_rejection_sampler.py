@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
@@ -8,8 +9,18 @@ import torch
 import torch.nn.functional as F
 
 from tests.v1.sample.utils import create_allowed_token_ids
+from vllm import envs
 from vllm.platforms import current_platform
-from vllm.v1.sample.logits_processor import LogitsProcessors
+from vllm.v1.sample.logits_processor import (
+    STR_SPEC_DEC_REJECTS_LOGITSPROCS,
+    LogitsProcessors,
+    build_logitsprocs,
+)
+from vllm.v1.sample.logits_processor.builtin import (
+    KimiReasoningLogitsProcessor,
+    MinPLogitsProcessor,
+    MinTokensLogitsProcessor,
+)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (
     PLACEHOLDER_TOKEN_ID,
@@ -82,6 +93,7 @@ def create_sampling_metadata(
     repetition_penalties: list[float] | None = None,
     bad_words_token_ids: dict[int, list[list[int]]] | None = None,
     allowed_token_ids_mask: torch.Tensor | None = None,
+    logitsprocs: LogitsProcessors | None = None,
 ) -> SamplingMetadata:
     """Create a v1 sampling metadata object with all_greedy set
     to the given value. Either all greedy or all random sampling
@@ -125,7 +137,7 @@ def create_sampling_metadata(
         spec_token_ids=[] if spec_token_ids is None else spec_token_ids,
         allowed_token_ids_mask=allowed_token_ids_mask,
         bad_words_token_ids={} if bad_words_token_ids is None else bad_words_token_ids,
-        logitsprocs=LogitsProcessors(),
+        logitsprocs=logitsprocs if logitsprocs is not None else LogitsProcessors(),
     )
 
 
@@ -1183,3 +1195,250 @@ def test_placeholder_draft_token_rejected_random(rejection_sampler):
     assert sampled[0, 1].item() == vocab_size - 1
     recovered = sampled[0, 2].item()
     assert 0 <= recovered < vocab_size
+
+
+def _spec_decode_config() -> SimpleNamespace:
+    return SimpleNamespace(
+        speculative_config=object(),
+        structured_outputs_config=None,
+    )
+
+
+@pytest.mark.skipif(
+    current_platform.is_tpu(),
+    reason="vLLM V1 on TPU does not support custom logits processors",
+)
+def test_spec_decode_accepts_and_deduplicates_kimi_reasoning_logits_processor(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", True, raising=False)
+    fqcn = "vllm.v1.sample.logits_processor.builtin:KimiReasoningLogitsProcessor"
+    logitsprocs = build_logitsprocs(
+        vllm_config=_spec_decode_config(),
+        device=torch.device("cpu"),
+        is_pin_memory=False,
+        is_pooling_model=False,
+        custom_logitsprocs=[fqcn, fqcn],
+    )
+
+    assert (
+        sum(
+            isinstance(processor, KimiReasoningLogitsProcessor)
+            for processor in logitsprocs.all
+        )
+        == 1
+    )
+    assert (
+        sum(
+            isinstance(processor, MinTokensLogitsProcessor)
+            for processor in logitsprocs.all
+        )
+        == 1
+    )
+
+
+@pytest.mark.skipif(
+    current_platform.is_tpu(),
+    reason="vLLM V1 on TPU does not support custom logits processors",
+)
+def test_spec_decode_still_rejects_unsupported_logits_processor(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", True, raising=False)
+    with pytest.raises(ValueError) as exc_info:
+        build_logitsprocs(
+            vllm_config=_spec_decode_config(),
+            device=torch.device("cpu"),
+            is_pin_memory=False,
+            is_pooling_model=False,
+            custom_logitsprocs=[MinPLogitsProcessor],
+        )
+    assert "Rejected: MinPLogitsProcessor" in str(exc_info.value)
+
+
+def test_spec_decode_keeps_upstream_custom_processor_rejection_without_validations(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", False, raising=False)
+
+    with pytest.raises(ValueError, match=f"^{STR_SPEC_DEC_REJECTS_LOGITSPROCS}$"):
+        build_logitsprocs(
+            vllm_config=_spec_decode_config(),
+            device=torch.device("cpu"),
+            is_pin_memory=False,
+            is_pooling_model=False,
+            custom_logitsprocs=[KimiReasoningLogitsProcessor],
+        )
+
+
+def test_kimi_reasoning_logits_processor_applies_to_speculative_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    rejection_sampler,
+):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", True, raising=False)
+    spec_tokens = [[1, 2, 3], [1, 2, 3], [1, 2, 3]]
+    output_tokens = [[1, 2, 3, 4], [1, 2, 3, 4], [1, 2, 3, 4]]
+    logits = create_logits_tensor(output_tokens, token_idx_to_override=15)
+
+    processor = KimiReasoningLogitsProcessor.__new__(KimiReasoningLogitsProcessor)
+    processor.device = torch.device(DEVICE_TYPE)
+    processor.pin_memory = False
+    processor.req_states = {
+        0: ([], True, 0),
+        1: ([], False, 0),
+        2: ([], True, 0),
+    }
+    processor.has_reasoning = True
+    processor.think_start_token_id = 8
+    processor.reasoning_end_token_ids = {9}
+    processor.banned_token_ids_tensor = torch.tensor(
+        [2], device=DEVICE_TYPE, dtype=torch.int64
+    )
+    processor.neg_inf_tensor = torch.tensor(
+        -float("inf"), device=DEVICE_TYPE, dtype=torch.float32
+    )
+
+    metadata = create_sampling_metadata(
+        all_greedy=True,
+        output_token_ids=[[2], [3], [4]],
+        spec_token_ids=spec_tokens,
+        logitsprocs=LogitsProcessors([processor]),
+    )
+    bonus_token_tensor = torch.tensor(
+        [output[-1] for output in output_tokens], device=logits.device
+    )
+    spec_decode_metadata = create_spec_decode_metadata(spec_tokens, logits)
+    mock_sampler_output(rejection_sampler, bonus_token_tensor)
+
+    output = rejection_sampler(
+        spec_decode_metadata,
+        draft_probs=None,
+        logits=logits,
+        sampling_metadata=metadata,
+    )
+
+    expected = torch.tensor(
+        [[1, 15, -1, -1], [1, 2, 3, 4], [1, 15, -1, -1]],
+        dtype=torch.int,
+        device=logits.device,
+    )
+    assert torch.equal(output.sampled_token_ids, expected)
+
+
+def test_kimi_reasoning_logits_processor_transitions_within_speculative_rows():
+    processor = KimiReasoningLogitsProcessor.__new__(KimiReasoningLogitsProcessor)
+    processor.device = torch.device(DEVICE_TYPE)
+    processor.pin_memory = False
+    processor.req_states = {0: ([], True, 0)}
+    processor.has_reasoning = True
+    processor.think_start_token_id = 8
+    processor.reasoning_end_token_ids = {7}
+    processor.banned_token_ids_tensor = torch.tensor(
+        [2], device=DEVICE_TYPE, dtype=torch.int64
+    )
+    processor.neg_inf_tensor = torch.tensor(
+        -float("inf"), device=DEVICE_TYPE, dtype=torch.float32
+    )
+
+    logits = torch.zeros((3, 10), device=DEVICE_TYPE)
+    processor.apply_with_spec_decode(logits, [3], [[1, 7, 1]])
+
+    assert torch.isneginf(logits[0, 2])
+    assert torch.isneginf(logits[1, 2])
+    assert not torch.isneginf(logits[2, 2])
+    assert processor.req_states[0][1] is True
+
+
+def test_kimi_reasoning_logits_processor_transitions_for_speculative_bonus_rows(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", True, raising=False)
+    processor = KimiReasoningLogitsProcessor.__new__(KimiReasoningLogitsProcessor)
+    processor.device = torch.device(DEVICE_TYPE)
+    processor.pin_memory = False
+    processor.req_states = {
+        0: ([], True, 0),
+        1: ([], False, 0),
+    }
+    processor.has_reasoning = True
+    processor.think_start_token_id = 8
+    processor.reasoning_end_token_ids = {7}
+    processor.banned_token_ids_tensor = torch.tensor(
+        [2], device=DEVICE_TYPE, dtype=torch.int64
+    )
+    processor.neg_inf_tensor = torch.tensor(
+        -float("inf"), device=DEVICE_TYPE, dtype=torch.float32
+    )
+    metadata = create_sampling_metadata(
+        all_greedy=True,
+        output_token_ids=[[], []],
+        spec_token_ids=[[1, 7, 1], [1, 8, 1]],
+        logitsprocs=LogitsProcessors([processor]),
+    )
+
+    logits = Sampler().apply_logits_processors(
+        torch.zeros((2, 10), device=DEVICE_TYPE),
+        metadata,
+        predict_bonus_token=True,
+    )
+
+    assert not torch.isneginf(logits[0, 2])
+    assert torch.isneginf(logits[1, 2])
+    assert processor.req_states[0][1] is True
+    assert processor.req_states[1][1] is False
+
+
+def test_kimi_reasoning_logits_processor_reads_kimi_engine_token_ids(monkeypatch):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", True, raising=False)
+    vocab = {
+        "<think>": 1,
+        "</think>": 2,
+        "<|tool_calls_section_begin|>": 3,
+        "<|tool_calls_section_end|>": 4,
+        "<|tool_call_begin|>": 5,
+        "<|tool_call_argument_begin|>": 6,
+        "<|tool_call_end|>": 7,
+    }
+    tokenizer = SimpleNamespace(
+        get_vocab=lambda: vocab,
+        all_special_tokens=list(vocab),
+        all_special_ids=list(vocab.values()),
+        added_tokens_encoder=vocab,
+    )
+    monkeypatch.setattr(
+        "vllm.tokenizers.cached_tokenizer_from_config",
+        lambda **_: tokenizer,
+    )
+    vllm_config = SimpleNamespace(
+        structured_outputs_config=SimpleNamespace(reasoning_parser="kimi_k2"),
+        model_config=SimpleNamespace(skip_tokenizer_init=False),
+    )
+
+    processor = KimiReasoningLogitsProcessor(
+        vllm_config,
+        device=torch.device(DEVICE_TYPE),
+        is_pin_memory=False,
+    )
+
+    assert processor.think_start_token_id == 1
+    assert processor.reasoning_end_token_ids == {2, 3}
+    assert set(processor.banned_special_token_ids) == {1, 4, 5, 6, 7}
+
+
+def test_kimi_reasoning_logits_processor_is_disabled_without_validations(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", False, raising=False)
+    processor = KimiReasoningLogitsProcessor(
+        _spec_decode_config(),
+        device=torch.device(DEVICE_TYPE),
+        is_pin_memory=False,
+    )
+
+    logits = torch.zeros((1, 8), device=DEVICE_TYPE)
+    result = processor.apply(logits)
+
+    assert processor.think_start_token_id is None
+    assert processor.reasoning_end_token_ids == set()
+    assert processor.banned_special_token_ids == []
+    assert torch.equal(result, logits)

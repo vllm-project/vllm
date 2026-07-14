@@ -10,11 +10,13 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor as RequestLogitsProcessor
 from vllm.sampling_params import SamplingParams
 from vllm.utils.torch_utils import guard_cuda_initialization
 from vllm.v1.sample.logits_processor.builtin import (
+    KimiReasoningLogitsProcessor,
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
     MinTokensLogitsProcessor,
@@ -50,6 +52,13 @@ BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
     MinTokensLogitsProcessor,
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
+]
+
+# Only processors with an explicit speculative-draft implementation belong
+# here. Other custom processors keep the target branch's rejection behavior.
+KIMI_SPEC_DECODE_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
+    MinTokensLogitsProcessor,
+    KimiReasoningLogitsProcessor,
 ]
 
 
@@ -199,13 +208,48 @@ def build_logitsprocs(
 
     # Check if speculative decoding is enabled.
     if vllm_config.speculative_config:
+        spec_decode_custom_classes: list[type[LogitsProcessor]] = []
         if custom_logitsprocs:
-            raise ValueError(STR_SPEC_DEC_REJECTS_LOGITSPROCS)
+            if not envs.NOVITA_ENABLE_KIMI_VALIDATIONS:
+                raise ValueError(STR_SPEC_DEC_REJECTS_LOGITSPROCS)
+
+            from vllm.platforms import current_platform
+
+            if current_platform.is_tpu():
+                logger.warning(
+                    "Ignoring custom logits processors under speculative "
+                    "decoding because TPU does not support them."
+                )
+            else:
+                spec_decode_custom_classes = _load_logitsprocs_by_fqcns(
+                    custom_logitsprocs
+                )
+                unsupported = [
+                    processor
+                    for processor in spec_decode_custom_classes
+                    if processor not in KIMI_SPEC_DECODE_LOGITS_PROCESSORS
+                ]
+                if unsupported:
+                    rejected = ", ".join(cls.__name__ for cls in unsupported)
+                    supported = ", ".join(
+                        cls.__name__ for cls in KIMI_SPEC_DECODE_LOGITS_PROCESSORS
+                    )
+                    raise ValueError(
+                        "One or more custom logits processor(s) are not supported "
+                        "under speculative decoding. "
+                        f"Rejected: {rejected}. "
+                        f"Supported under spec decode: {supported}."
+                    )
         logger.warning(
             "min_p and logit_bias parameters won't work with speculative decoding."
         )
+
+        processor_classes = dict.fromkeys(
+            [MinTokensLogitsProcessor, *spec_decode_custom_classes]
+        )
         return LogitsProcessors(
-            [MinTokensLogitsProcessor(vllm_config, device, is_pin_memory)]
+            processor(vllm_config, device, is_pin_memory)
+            for processor in processor_classes
         )
 
     custom_logitsprocs_classes = _load_custom_logitsprocs(custom_logitsprocs)
@@ -346,6 +390,7 @@ __all__ = [
     "LogitBiasLogitsProcessor",
     "MinPLogitsProcessor",
     "MinTokensLogitsProcessor",
+    "KimiReasoningLogitsProcessor",
     "BatchUpdate",
     "BatchUpdateBuilder",
     "MoveDirectionality",

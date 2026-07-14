@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplerOutput
@@ -333,7 +334,18 @@ class RejectionSampler(nn.Module):
             )
 
         for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
-            if isinstance(processor, MinTokensLogitsProcessor):
+            if envs.NOVITA_ENABLE_KIMI_VALIDATIONS:
+                apply_with_spec_decode = getattr(
+                    processor, "apply_with_spec_decode", None
+                )
+                if not callable(apply_with_spec_decode):
+                    continue
+                logits = apply_with_spec_decode(
+                    logits,
+                    metadata.num_draft_tokens,
+                    sampling_metadata.spec_token_ids,
+                )
+            elif isinstance(processor, MinTokensLogitsProcessor):
                 logits = processor.apply_with_spec_decode(
                     logits, metadata.num_draft_tokens
                 )
