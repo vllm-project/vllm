@@ -37,7 +37,12 @@ class ThinkingBudgetState:
             if reasoning_config is None
             else reasoning_config.reasoning_end_token_ids or []
         )
-        self.enabled = bool(start_ids and end_ids)
+        natural_end_ids = (
+            []
+            if reasoning_config is None
+            else reasoning_config.natural_reasoning_end_token_ids or []
+        )
+        self.enabled = bool(start_ids and end_ids and natural_end_ids)
         if not self.enabled:
             return
 
@@ -61,6 +66,9 @@ class ThinkingBudgetState:
 
         self.reasoning_start_token_ids = torch.tensor(
             start_ids, dtype=torch.int32, device=self.device
+        )
+        self.natural_reasoning_end_token_ids = torch.tensor(
+            natural_end_ids, dtype=torch.int32, device=self.device
         )
         self.reasoning_end_token_ids = torch.tensor(
             end_ids, dtype=torch.int32, device=self.device
@@ -114,6 +122,7 @@ class ThinkingBudgetState:
             self.cached_last_end,
             self.cached_scan_pos,
             self.reasoning_start_token_ids,
+            self.natural_reasoning_end_token_ids,
             self.reasoning_end_token_ids,
         )
 
@@ -148,9 +157,9 @@ def _update_committed_marker_cache_kernel(
     cached_last_end_ptr,
     cached_scan_pos_ptr,
     reasoning_start_token_ids_ptr,
-    reasoning_end_token_ids_ptr,
+    natural_reasoning_end_token_ids_ptr,
     START_LEN: tl.constexpr,
-    END_LEN: tl.constexpr,
+    NATURAL_END_LEN: tl.constexpr,
     MAX_LEN: tl.constexpr,
 ):
     req_state_idx = tl.load(req_ids_ptr + tl.program_id(0))
@@ -184,10 +193,10 @@ def _update_committed_marker_cache_kernel(
                     start_match = start_match & (actual == expected)
 
             end_match = False
-            if i + END_LEN <= total_len:
+            if i + NATURAL_END_LEN <= total_len:
                 end_match = True
-                for j in tl.static_range(0, END_LEN):
-                    expected = tl.load(reasoning_end_token_ids_ptr + j)
+                for j in tl.static_range(0, NATURAL_END_LEN):
+                    expected = tl.load(natural_reasoning_end_token_ids_ptr + j)
                     actual = tl.load(
                         all_token_ids_ptr + req_state_idx * all_token_ids_stride + i + j
                     )
@@ -212,10 +221,10 @@ def _update_committed_marker_cache_kernel(
                 if start_match:
                     last_start = i
 
-            if i + END_LEN <= total_len:
+            if i + NATURAL_END_LEN <= total_len:
                 end_match = True
-                for j in tl.static_range(0, END_LEN):
-                    expected = tl.load(reasoning_end_token_ids_ptr + j)
+                for j in tl.static_range(0, NATURAL_END_LEN):
+                    expected = tl.load(natural_reasoning_end_token_ids_ptr + j)
                     actual = tl.load(
                         all_token_ids_ptr + req_state_idx * all_token_ids_stride + i + j
                     )
@@ -246,8 +255,10 @@ def _thinking_budget_kernel(
     cached_last_start_ptr,
     cached_last_end_ptr,
     reasoning_start_token_ids_ptr,
+    natural_reasoning_end_token_ids_ptr,
     reasoning_end_token_ids_ptr,
     START_LEN: tl.constexpr,
+    NATURAL_END_LEN: tl.constexpr,
     END_LEN: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
@@ -285,13 +296,13 @@ def _thinking_budget_kernel(
         if start_match:
             last_start = i
 
-    end_lo = total_len - END_LEN + 1
+    end_lo = total_len - NATURAL_END_LEN + 1
     if end_lo < 0:
         end_lo = 0
-    for i in tl.range(end_lo, effective_len - END_LEN + 1):
+    for i in tl.range(end_lo, effective_len - NATURAL_END_LEN + 1):
         end_match = True
-        for j in tl.static_range(0, END_LEN):
-            expected = tl.load(reasoning_end_token_ids_ptr + j)
+        for j in tl.static_range(0, NATURAL_END_LEN):
+            expected = tl.load(natural_reasoning_end_token_ids_ptr + j)
             actual = _load_effective_token(
                 all_token_ids_ptr,
                 all_token_ids_stride,
@@ -358,10 +369,12 @@ def apply_thinking_budget(
     cached_last_end: torch.Tensor,
     cached_scan_pos: torch.Tensor,
     reasoning_start_token_ids: torch.Tensor,
+    natural_reasoning_end_token_ids: torch.Tensor,
     reasoning_end_token_ids: torch.Tensor,
 ) -> None:
     num_tokens = logits.shape[0]
     start_len = reasoning_start_token_ids.shape[0]
+    natural_end_len = natural_reasoning_end_token_ids.shape[0]
     end_len = reasoning_end_token_ids.shape[0]
 
     _update_committed_marker_cache_kernel[(req_ids.shape[0],)](
@@ -374,10 +387,10 @@ def apply_thinking_budget(
         cached_last_end,
         cached_scan_pos,
         reasoning_start_token_ids,
-        reasoning_end_token_ids,
+        natural_reasoning_end_token_ids,
         START_LEN=start_len,
-        END_LEN=end_len,
-        MAX_LEN=max(start_len, end_len),
+        NATURAL_END_LEN=natural_end_len,
+        MAX_LEN=max(start_len, natural_end_len),
     )
 
     _thinking_budget_kernel[(num_tokens,)](
@@ -394,7 +407,9 @@ def apply_thinking_budget(
         cached_last_start,
         cached_last_end,
         reasoning_start_token_ids,
+        natural_reasoning_end_token_ids,
         reasoning_end_token_ids,
         START_LEN=start_len,
+        NATURAL_END_LEN=natural_end_len,
         END_LEN=end_len,
     )

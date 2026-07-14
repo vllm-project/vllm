@@ -26,11 +26,19 @@ VOCAB_SIZE = 128
 class MockReasoningConfig:
     reasoning_start_token_ids = [START]
     reasoning_end_token_ids = [END]
+    natural_reasoning_end_token_ids = [END]
 
 
 class MockMultiTokenEndReasoningConfig:
     reasoning_start_token_ids = [START]
     reasoning_end_token_ids = [END_A, END_B]
+    natural_reasoning_end_token_ids = [END_A, END_B]
+
+
+class MockDistinctEndReasoningConfig:
+    reasoning_start_token_ids = [START]
+    reasoning_end_token_ids = [END_A, END_B]
+    natural_reasoning_end_token_ids = [END]
 
 
 def _make_req_states(tokens: list[int], prompt_len: int = 1) -> RequestState:
@@ -130,6 +138,39 @@ def test_v2_thinking_budget_continues_multi_token_end_marker():
 
     assert out[0, END_A] == pytest.approx(1.0e9)
     assert out[1, END_B] == pytest.approx(1.0e9)
+
+
+def test_v2_thinking_budget_uses_distinct_forced_end_marker():
+    req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockDistinctEndReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+
+    logits = torch.zeros((2, VOCAB_SIZE), device=DEVICE)
+    out = _apply(
+        state,
+        logits,
+        input_ids=[12, END_A],
+        local_pos=[0, 1],
+    )
+
+    assert out[0, END_A] == pytest.approx(1.0e9)
+    assert out[1, END_B] == pytest.approx(1.0e9)
+
+
+def test_v2_thinking_budget_stops_after_natural_end_marker():
+    req_states = _make_req_states(
+        [1, START, 10, END, 20, 21, 22],
+        prompt_len=1,
+    )
+    state = ThinkingBudgetState(req_states, MockDistinctEndReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[22], local_pos=[0])
+
+    assert torch.all(out == 0)
 
 
 def test_v2_thinking_budget_ignores_plain_request():
