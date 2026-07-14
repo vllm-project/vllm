@@ -3,10 +3,9 @@
 
 from functools import cache
 import importlib.util
-import os
-import tempfile
 import warnings
-from pathlib import Path
+
+from packaging import version
 
 import vllm.envs as envs
 
@@ -15,7 +14,17 @@ _MODELSCOPE_FALLBACK_WARNED = False
 
 @cache
 def modelscope_is_available() -> bool:
-    return importlib.util.find_spec("modelscope") is not None
+    if importlib.util.find_spec("modelscope") is None:
+        return False
+
+    try:
+        import modelscope
+    except ImportError:
+        return False
+
+    return version.parse(getattr(modelscope, "__version__", "0")) > version.parse(
+        "1.18.0"
+    )
 
 
 def should_use_modelscope() -> bool:
@@ -23,22 +32,8 @@ def should_use_modelscope() -> bool:
 
 
 def configure_modelscope_runtime() -> None:
-    proxy_hosts = "modelscope.cn,.modelscope.cn,www.modelscope.cn"
-    for key in ("NO_PROXY", "no_proxy"):
-        current = os.environ.get(key)
-        if not current:
-            os.environ[key] = proxy_hosts
-            continue
-        if proxy_hosts in current:
-            continue
-        os.environ[key] = f"{current},{proxy_hosts}"
-
-    cache_root = Path(tempfile.gettempdir()) / "modelscope"
-    os.environ.setdefault("MODELSCOPE_CACHE", str(cache_root))
-    os.environ.setdefault(
-        "MODELSCOPE_CREDENTIALS_PATH",
-        str(cache_root / "credentials"),
-    )
+    # Keep ModelScope runtime configuration opt-in at the call site.
+    return None
 
 
 def warn_modelscope_fallback(context: str) -> None:
@@ -49,7 +44,7 @@ def warn_modelscope_fallback(context: str) -> None:
         and not _MODELSCOPE_FALLBACK_WARNED
     ):
         warnings.warn(
-            f"{context}: VLLM_USE_MODELSCOPE=True but modelscope is not "
-            "installed; falling back to Hugging Face Hub."
+            f"{context}: VLLM_USE_MODELSCOPE=True but modelscope is unavailable "
+            "or unsupported; falling back to Hugging Face Hub."
         )
         _MODELSCOPE_FALLBACK_WARNED = True
