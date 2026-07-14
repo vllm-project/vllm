@@ -24,6 +24,7 @@ from vllm.v1.sample.logits_processor import (
     MoveDirectionality,
 )
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.ops.penalties import PenaltiesState
 from vllm.v1.sample.thinking_budget_state import (
     maybe_create_thinking_budget_state_holder,
 )
@@ -102,6 +103,7 @@ class InputBatch:
         max_num_blocks_per_req: list[int],
         logitsprocs: LogitsProcessors | None = None,
         logitsprocs_need_output_token_ids: bool = False,
+        enable_penalties: bool = True,
         num_spec_tokens: int = 0,
         is_pooling_model: bool = False,
         cp_kv_cache_interleave_size: int = 1,
@@ -125,6 +127,10 @@ class InputBatch:
 
         self._req_ids: list[str | None] = []
         self.req_id_to_index: dict[str, int] = {}
+
+        self.penalties_state = PenaltiesState(
+            max_num_reqs, vocab_size, device, enabled=enable_penalties
+        )
 
         # TODO(woosuk): This buffer could be too large if max_model_len is big.
         # Find a way to reduce the CPU memory usage.
@@ -409,6 +415,9 @@ class InputBatch:
             )
             if sampling_params.repetition_penalty != 1.0:
                 self.repetition_penalties_reqs.add(req_id)
+            self.penalties_state.add_request(
+                req_index, sampling_params, *self._penalty_token_history(req_index)
+            )
 
             # NOTE(woosuk): self.generators should not include the requests that
             # do not have their own generator.
@@ -510,6 +519,25 @@ class InputBatch:
         self.is_token_ids[req_index, start_index:end_token_index] = True
         cur_spec_token_ids.extend(spec_token_ids)
 
+    def _penalty_token_history(self, req_index: int) -> tuple[np.ndarray, int]:
+        """The request's committed token history and prompt length, as the
+        penalty statistics should see them."""
+        num_prompt_tokens = int(self.num_prompt_tokens[req_index])
+        end_idx = int(self.num_tokens_no_spec[req_index])
+        if not self.is_token_ids[req_index, :num_prompt_tokens].all():
+            # Prompt embeddings: (part of) the prompt region of
+            # token_ids_cpu is uninitialized, so no prompt bitmap can be
+            # built from it.
+            return self.token_ids_cpu[req_index, num_prompt_tokens:end_idx], 0
+        return self.token_ids_cpu[req_index, :end_idx], num_prompt_tokens
+
+    def rebuild_penalties_row(self, req_index: int) -> None:
+        """Rebuild the row's penalty statistics after its committed output
+        history was rewound (KV-load-failure recovery)."""
+        self.penalties_state.rebuild_row(
+            req_index, *self._penalty_token_history(req_index)
+        )
+
     def remove_request(self, req_id: str) -> int | None:
         """This method must always be followed by a call to condense().
 
@@ -552,6 +580,7 @@ class InputBatch:
         self.frequency_penalties_reqs.discard(req_id)
         self.presence_penalties_reqs.discard(req_id)
         self.repetition_penalties_reqs.discard(req_id)
+        self.penalties_state.remove_row(req_index)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.logprob_token_ids.pop(req_id, None)
@@ -661,6 +690,7 @@ class InputBatch:
             self.repetition_penalties_cpu[i2],
             self.repetition_penalties_cpu[i1],
         )
+        self.penalties_state.swap_rows(i1, i2)
         self.num_accepted_tokens_cpu[i1], self.num_accepted_tokens_cpu[i2] = (
             self.num_accepted_tokens_cpu[i2],
             self.num_accepted_tokens_cpu[i1],
@@ -786,6 +816,7 @@ class InputBatch:
             self.repetition_penalties_cpu[empty_index] = self.repetition_penalties_cpu[
                 last_req_index
             ]
+            self.penalties_state.move_row(last_req_index, empty_index)
             self.num_accepted_tokens_cpu[empty_index] = self.num_accepted_tokens_cpu[
                 last_req_index
             ]
@@ -844,6 +875,7 @@ class InputBatch:
         if not self.no_top_k:
             copy_slice(self.top_k_cpu_tensor, self.top_k, num_reqs)
 
+        penalty_slot_mapping = None
         if not self.no_penalties:
             # Since syncing these tensors is expensive only copy them
             # if necessary i.e. if there are requests which require
@@ -859,10 +891,10 @@ class InputBatch:
                 self.repetition_penalties,
                 num_reqs,
             )
+            penalty_slot_mapping = self.penalties_state.make_slot_mapping(num_reqs)
 
-        needs_prompt_token_ids = (
-            not self.no_penalties
-            or self.logits_processing_needs_token_ids[:num_reqs].any()
+        needs_prompt_token_ids = bool(
+            self.logits_processing_needs_token_ids[:num_reqs].any()
         )
         # The prompt tokens are used only for applying penalties or
         # step pooling during the sampling/pooling process.
@@ -884,8 +916,7 @@ class InputBatch:
             holder is not None and holder.has_tracked_requests()
         )
         needs_output_token_ids = (
-            not self.no_penalties
-            or bool(self.bad_words_token_ids)
+            bool(self.bad_words_token_ids)
             or self.logitsprocs_need_output_token_ids
             or thinking_budget_tracks_reqs
         )
@@ -930,6 +961,8 @@ class InputBatch:
             output_token_ids=output_token_ids,
             spec_token_ids=self.spec_token_ids,
             no_penalties=self.no_penalties,
+            penalties_state=None if self.no_penalties else self.penalties_state,
+            penalty_slot_mapping=penalty_slot_mapping,
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,
             logitsprocs=self.logitsprocs,

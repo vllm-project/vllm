@@ -3,14 +3,17 @@
 from typing import Any
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
 
 from tests.v1.sample.utils import create_allowed_token_ids
 from vllm.platforms import current_platform
+from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.ops.penalties import PenaltiesState
 from vllm.v1.sample.rejection_sampler import (
     PLACEHOLDER_TOKEN_ID,
     RejectionSampler,
@@ -82,6 +85,7 @@ def create_sampling_metadata(
     repetition_penalties: list[float] | None = None,
     bad_words_token_ids: dict[int, list[list[int]]] | None = None,
     allowed_token_ids_mask: torch.Tensor | None = None,
+    vocab_size: int = 100,
 ) -> SamplingMetadata:
     """Create a v1 sampling metadata object with all_greedy set
     to the given value. Either all greedy or all random sampling
@@ -93,11 +97,29 @@ def create_sampling_metadata(
     else:
         assert temperature is not None
 
+    penalties_state = None
+    penalty_slot_mapping = None
     if any([frequency_penalties, presence_penalties, repetition_penalties]):
         no_penalties = False
 
         assert output_token_ids
         assert len(output_token_ids) > 0
+        assert prompt_token_ids is not None
+
+        num_reqs = len(output_token_ids)
+        penalties_state = PenaltiesState(
+            num_reqs, vocab_size, torch.device(DEVICE_TYPE)
+        )
+        for i in range(num_reqs):
+            params = SamplingParams(
+                frequency_penalty=frequency_penalties[i],
+                presence_penalty=presence_penalties[i],
+                repetition_penalty=repetition_penalties[i],
+            )
+            prompt = prompt_token_ids[i].cpu().numpy()
+            tokens = np.concatenate([prompt, output_token_ids[i]])
+            penalties_state.add_request(i, params, tokens, len(prompt))
+        penalty_slot_mapping = penalties_state.make_slot_mapping(num_reqs)
 
         frequency_penalties = torch.tensor(frequency_penalties, device=DEVICE_TYPE)
         presence_penalties = torch.tensor(presence_penalties, device=DEVICE_TYPE)
@@ -123,6 +145,8 @@ def create_sampling_metadata(
         repetition_penalties=repetition_penalties,
         output_token_ids=[] if output_token_ids is None else output_token_ids,
         spec_token_ids=[] if spec_token_ids is None else spec_token_ids,
+        penalties_state=penalties_state,
+        penalty_slot_mapping=penalty_slot_mapping,
         allowed_token_ids_mask=allowed_token_ids_mask,
         bad_words_token_ids={} if bad_words_token_ids is None else bad_words_token_ids,
         logitsprocs=LogitsProcessors(),
