@@ -670,8 +670,7 @@ class JinaRankingTokenEmbedIOProcessor(
     def get_request_factory_offline(
         self, ctx: OfflineInputsScoringContext | OfflineInputsContext
     ) -> tuple[RequestFactory, int]:
-        assert "prompts" in ctx
-        ctx = cast(OfflineInputsContext, ctx)
+        assert isinstance(ctx, OfflineInputsContext)
         if not isinstance(ctx.prompts, Sequence) or len(ctx.prompts) < 2:
             raise ValueError("The JinaForRanking model requires at least 2 inputs.")
 

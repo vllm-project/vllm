@@ -227,8 +227,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
     def get_request_factory_offline(
         self, ctx: OfflineInputsScoringContext | OfflineInputsContext
     ) -> tuple[RequestFactory, int]:
-        assert "scoring_data" in ctx
-        ctx = cast(OfflineInputsScoringContext, ctx)
+        assert isinstance(ctx, OfflineInputsScoringContext)
 
         max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
             pooling_params=ctx.pooling_params
@@ -476,8 +475,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
     def get_request_factory_offline(
         self, ctx: OfflineInputsScoringContext | OfflineInputsContext
     ) -> tuple[RequestFactory, int]:
-        assert "scoring_data" in ctx
-        ctx = cast(OfflineInputsScoringContext, ctx)
+        assert isinstance(ctx, OfflineInputsScoringContext)
 
         data_1 = ctx.scoring_data.data_1
         data_2 = ctx.scoring_data.data_2
@@ -840,8 +838,7 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
     def get_request_factory_offline(
         self, ctx: OfflineInputsScoringContext | OfflineInputsContext
     ) -> tuple[RequestFactory, int]:
-        assert "scoring_data" in ctx
-        ctx = cast(OfflineInputsScoringContext, ctx)
+        assert isinstance(ctx, OfflineInputsScoringContext)
 
         scoring_data = ctx.scoring_data
         prompt_extras = ctx.pooling_params.extra_kwargs

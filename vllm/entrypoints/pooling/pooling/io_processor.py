@@ -114,8 +114,7 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
     def get_request_factory_offline(
         self, ctx: OfflineInputsScoringContext | OfflineInputsContext
     ) -> tuple[RequestFactory, int]:
-        assert "prompts" in ctx
-        ctx = cast(OfflineInputsContext, ctx)
+        assert isinstance(ctx, OfflineInputsContext)
         assert isinstance(ctx.prompts, dict) and "data" in ctx.prompts
 
         # Validate the request data is valid for the loaded plugin

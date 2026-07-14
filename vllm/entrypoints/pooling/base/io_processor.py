@@ -111,8 +111,7 @@ class PoolingIOProcessor:
     def get_request_factory_offline(
         self, ctx: OfflineInputsScoringContext | OfflineInputsContext
     ) -> tuple[RequestFactory, int]:
-        assert "prompts" in ctx
-        ctx = cast(OfflineInputsContext, ctx)
+        assert isinstance(ctx, OfflineInputsContext)
 
         prompts_seq = prompt_to_seq(ctx.prompts)
         num_requests = len(prompts_seq)
