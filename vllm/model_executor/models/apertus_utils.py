@@ -12,8 +12,11 @@ import torch
 from PIL import Image
 
 from vllm.logger import init_logger
-from vllm.model_executor.models.apertus_emu35 import build_vision_tokenizer
-from vllm.model_executor.models.apertus_wavetokenizer import build_audio_tokenizer
+from vllm.model_executor.models.apertus_emu35 import IBQ, build_vision_tokenizer
+from vllm.model_executor.models.apertus_wavetokenizer import (
+    WavTokenizer40,
+    build_audio_tokenizer,
+)
 from vllm.multimodal.media import MediaWithBytes
 from vllm.tokenizers import TokenizerLike
 
@@ -21,7 +24,7 @@ logger = init_logger(__name__)
 
 
 class ApertusImageTokenizer:
-    _vision_tokenizer_cache: dict[tuple[str, str, torch.dtype], Any] = {}
+    _vision_tokenizer_cache: dict[tuple[str, str, torch.dtype], IBQ] = {}
 
     def __init__(self, vision_config: dict[str, Any] | None = None) -> None:
         self.vision_config = vision_config or {}
@@ -119,7 +122,7 @@ class ApertusImageTokenizer:
         device: str,
         dtype: torch.dtype,
         vision_config: dict[str, Any],
-    ) -> Any:
+    ) -> IBQ:
         path = Path(model_path).expanduser()
         assert path.exists() and path.is_dir(), (
             f"Model directory {model_path} does not exist or is not a directory."
@@ -181,7 +184,7 @@ class ApertusImageTokenizer:
 
 
 class ApertusAudioTokenizer:
-    _audio_tokenizer_cache: dict[tuple[str, str, bool], Any] = {}
+    _audio_tokenizer_cache: dict[tuple[str, str, bool], WavTokenizer40] = {}
 
     def __init__(self, audio_config: dict[str, Any] | None = None) -> None:
         self.audio_config = audio_config or {}
@@ -299,7 +302,7 @@ class ApertusAudioTokenizer:
         model_path: str,
         device: str,
         audio_config: dict[str, Any],
-    ) -> Any:
+    ) -> WavTokenizer40:
         path = Path(model_path).expanduser()
         assert path.exists() and path.is_dir(), (
             f"Model directory {model_path} does not exist or is not a directory."

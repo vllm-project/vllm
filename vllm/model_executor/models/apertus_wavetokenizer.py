@@ -834,7 +834,7 @@ def build_audio_tokenizer(
         model_path: str,
         device: str = "cuda:0",
         audio_config: dict | None = None,
-        ) -> nn.Module:
+        ) -> WavTokenizer40:
     if type != "wavtokenizer":
         raise NotImplementedError(f"Unsupported audio tokenizer type: {type}")
 

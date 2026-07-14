@@ -479,7 +479,7 @@ def build_vision_tokenizer(
     model_path: str,
     device: str = "cuda:0",
     vision_config: dict | None = None,
-) -> nn.Module:
+) -> IBQ:
     if type != "ibq":
         raise NotImplementedError(f"Unsupported vision tokenizer type: {type}")
 
