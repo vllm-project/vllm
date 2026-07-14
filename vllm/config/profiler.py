@@ -2,14 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import Field, model_validator
 from typing_extensions import Self
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config
 from vllm.logger import init_logger
-from vllm.utils.hashing import safe_hash
 
 logger = init_logger(__name__)
 
@@ -104,23 +103,9 @@ class ProfilerConfig:
     Defaults to 0 (no wait period).
     """
 
-    def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
-        """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+    def compile_factors(self) -> CompileFactors:
+        # Profiling setup does not affect the computation graph, so hash neutral.
+        return {}
 
     @model_validator(mode="after")
     def _validate_profiler_config(self) -> Self:

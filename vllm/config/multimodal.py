@@ -8,8 +8,7 @@ from typing import Any, Literal, TypeAlias, TypedDict, final
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
-from vllm.config.utils import config
-from vllm.utils.hashing import safe_hash
+from vllm.config.utils import CompileFactors, config, normalize_value
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
@@ -294,7 +293,7 @@ class MultiModalConfig:
                 )
         return self
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -314,8 +313,8 @@ class MultiModalConfig:
             self.mm_encoder_attn_dtype,
             self.mm_encoder_fp8_scale_path,
         ]
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        normalized = normalize_value(factors)
+        return {"factors": normalized} if normalized else {}
 
     def get_limit_per_prompt(self, modality: str) -> int:
         """
