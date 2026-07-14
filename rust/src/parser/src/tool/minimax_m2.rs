@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use winnow::ascii::{multispace0 as ws0, multispace1 as ws1};
 use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
 use winnow::prelude::*;
@@ -593,6 +596,7 @@ mod tests {
         let mut parser = MinimaxM2ToolParser::new(&test_tools());
         let error = parser.parse_chunk("<minimax:tool_call><bad></minimax:tool_call>").unwrap_err();
 
-        expect!["tool parser parsing failed: "].assert_eq(&error.to_report_string());
+        expect![[r#"tool parser parsing failed: near "<bad></minimax:tool_call>": "#]]
+            .assert_eq(&error.to_report_string());
     }
 }
