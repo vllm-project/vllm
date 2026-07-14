@@ -39,6 +39,16 @@ request. You may also choose a specific backend, along with
 some options. A full set of options is available in the `vllm serve --help`
 text.
 
+!!! note
+    The `outlines` backend uses an in-memory cache by default. The optional
+    on-disk outlines cache is enabled only when `VLLM_V1_USE_OUTLINES_CACHE=1`
+    and requires optional `diskcache` through the `outlines-cache` extra, for
+    example
+    `uv pip install 'vllm[outlines-cache]'` or
+    `uv pip install -e '.[outlines-cache]'` when installing from source.
+    Enable this disk cache only when `OUTLINES_CACHE_DIR` or the default cache
+    directory is writable only by trusted users.
+
 Now let's see an example for each of the cases, starting with the `choice`, as it's the easiest one:
 
 ??? code
