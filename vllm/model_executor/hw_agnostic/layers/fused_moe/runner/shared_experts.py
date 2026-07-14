@@ -13,9 +13,6 @@ from vllm.utils.torch_utils import (
     aux_stream,
     current_stream,
 )
-from vllm.v1.worker.ubatching import (
-    dbo_current_ubatch_id,
-)
 
 logger = init_logger(__name__)
 
@@ -38,15 +35,10 @@ class SharedExperts(torch.nn.Module):
         self,
         layer: torch.nn.Module,
         moe_config: FusedMoEConfig,
-        enable_dbo: bool,
     ):
         super().__init__()
 
-        # SharedExperts can be called from an MK's finalize method, so we
-        # index outputs by the current DBO ubatch id. With DBO disabled,
-        # the index is always 0 and the second slot is ignored.
-        self.enable_dbo = enable_dbo
-        self._output: list[torch.Tensor | None] = [None, None]
+        self._output: torch.Tensor | None = None
         self._layer = layer
         self._moe_config = moe_config
 
@@ -107,14 +99,10 @@ class SharedExperts(torch.nn.Module):
         return output
 
     @property
-    def _output_idx(self) -> int:
-        return dbo_current_ubatch_id() if self.enable_dbo else 0
-
-    @property
     def output(self) -> torch.Tensor:
-        assert self._output[self._output_idx] is not None
-        output = self._output[self._output_idx]
-        self._output[self._output_idx] = None
+        assert self._output is not None
+        output = self._output
+        self._output = None
         return output
 
     def forward(
@@ -127,13 +115,11 @@ class SharedExperts(torch.nn.Module):
         if order != experts_order:
             return None
 
-        assert self._output[self._output_idx] is None
+        assert self._output is None
 
         if order == SharedExpertsOrder.MULTI_STREAM_OVERLAPPED:
-            self._output[self._output_idx] = self._run_in_aux_stream(
-                shared_experts_input
-            )
+            self._output = self._run_in_aux_stream(shared_experts_input)
         else:
-            self._output[self._output_idx] = self._layer(shared_experts_input)
+            self._output = self._layer(shared_experts_input)
 
-        assert self._output[self._output_idx] is not None
+        assert self._output is not None

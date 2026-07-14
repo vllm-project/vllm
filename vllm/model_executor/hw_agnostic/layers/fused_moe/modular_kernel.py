@@ -14,7 +14,6 @@ from enum import Enum
 
 import torch
 
-from vllm.logger import init_logger
 from vllm.model_executor.hw_agnostic.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation,
@@ -23,8 +22,6 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-
-logger = init_logger(__name__)
 
 
 class FusedMoEActivationFormat(Enum):
@@ -141,13 +138,6 @@ class FusedMoEExperts(ABC):
     @property
     def g2_alphas(self) -> torch.Tensor | None:
         return self.quant_config.g2_alphas
-
-    def supports_packed_ue8m0_act_scales(self) -> bool:
-        """
-        A flag indicating whether or not this class can process packed ue8m0
-        activation scales.
-        """
-        return False
 
 
 class FusedMoEExpertsModular(FusedMoEExperts):

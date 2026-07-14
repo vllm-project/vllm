@@ -190,8 +190,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         w2: torch.Tensor,
         w13_scale: torch.Tensor,
         w2_scale: torch.Tensor,
-        w13_input_scale: torch.Tensor | None,
-        w2_input_scale: torch.Tensor | None,
     ) -> None:
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w2_weight", w2)
@@ -227,9 +225,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 w13, w13_scale, shard_size, layer.local_num_experts
             )
 
-        self._setup_kernel(
-            layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
-        )
+        self._setup_kernel(layer, w13, w2, w13_scale, w2_scale)
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         quant_config = fp8_w8a8_moe_quant_config(
@@ -382,14 +378,6 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
                 layer.w2_weight[expert, :, :]
             )
 
-        self._setup_kernel(
-            layer,
-            w13,
-            w2,
-            w13_scale,
-            w2_scale,
-            w13_input_scale=layer.w13_input_scale,
-            w2_input_scale=layer.w2_input_scale,
-        )
+        self._setup_kernel(layer, w13, w2, w13_scale, w2_scale)
 
         layer._already_called_process_weights_after_loading = True

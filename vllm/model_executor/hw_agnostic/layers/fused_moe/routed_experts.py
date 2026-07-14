@@ -146,11 +146,6 @@ class RoutedExperts(PluggableLayer):
             "global_num_experts": moe_config.num_experts,
         }
 
-        if self._needs_intermediate_size_param(self.quant_method):
-            moe_quant_params["intermediate_size_full"] = (
-                self.moe_config.intermediate_size
-            )
-
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
@@ -175,9 +170,6 @@ class RoutedExperts(PluggableLayer):
             quant_method = UnquantizedFusedMoEMethod(moe_config)
         assert isinstance(quant_method, FusedMoEMethodBase)
         return quant_method
-
-    def _needs_intermediate_size_param(self, quant_method: FusedMoEMethodBase) -> bool:
-        return False
 
     def _ensure_moe_quant_config_init(self):
         if self.quant_method.moe_quant_config is None:

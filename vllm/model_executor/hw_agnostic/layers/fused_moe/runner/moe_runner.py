@@ -19,7 +19,6 @@ from vllm.forward_context import (
     get_forward_context,
     is_forward_context_available,
 )
-from vllm.logger import init_logger
 from vllm.model_executor.hw_agnostic._custom_op_lib import vllm_hw_agnostic_lib
 from vllm.model_executor.hw_agnostic.layers.fused_moe.activation import (
     MoEActivation,
@@ -48,8 +47,6 @@ from vllm.utils.torch_utils import (
     LayerName,
     direct_register_custom_op,
 )
-
-logger = init_logger(__name__)
 
 
 def _validate_supported_settings(vllm_config) -> None:
@@ -256,7 +253,6 @@ class MoERunner(MoERunnerInterface):
         enable_dbo: bool = False,
         gate: torch.nn.Module | None = None,
         shared_experts: torch.nn.Module | None = None,
-        shared_expert_gate: torch.nn.Module | None = None,
         routed_input_transform: torch.nn.Module | None = None,
         routed_output_transform: torch.nn.Module | None = None,
         routed_scaling_factor: float = 1.0,
@@ -269,24 +265,14 @@ class MoERunner(MoERunnerInterface):
         self.routed_output_transform = routed_output_transform
         self.routed_scaling_factor = routed_scaling_factor
         self.gate = gate
-        self.shared_expert_gate = shared_expert_gate
         self.routed_experts = routed_experts
         self.enable_dbo = enable_dbo
-
-        # When both gates are present and FSE is enabled, fuse their
-        # weight matrices into [num_experts + num_shared, hidden] so one
-        # F.linear produces combined logits. The topk kernel can then
-        # apply routing softmax and shared expert activation (sigmoid)
-        # in a single launch.
-        self._fse_fuse_gate = gate is not None and shared_expert_gate is not None
-        self._combined_gate_weight: torch.Tensor | None = None
 
         self._shared_experts: SharedExperts | None = None
         if shared_experts is not None:
             self._shared_experts = SharedExperts(
                 shared_experts,
                 moe_config=moe_config,
-                enable_dbo=enable_dbo,
             )
 
         # Needed for string -> MoERunner layer lookup in custom ops.
@@ -316,20 +302,6 @@ class MoERunner(MoERunnerInterface):
         # Swaps the underlying quant method after construction (e.g. elastic
         # EP restaging); delegates to the RoutedExperts wrapper.
         self.routed_experts._replace_quant_method(quant_method)
-
-    def _maybe_fuse_gate_weights(self):
-        """Fuse router and shared expert gate weights on first call.
-
-        Cannot be done at __init__ because gate weights are loaded after
-        module construction (via weight_loader). Called once from
-        _forward_impl before the first forward pass.
-        """
-        if self._combined_gate_weight is None:
-            assert self.gate is not None and self.shared_expert_gate is not None
-            self._combined_gate_weight = torch.cat(
-                [self.gate.weight, self.shared_expert_gate.weight],
-                dim=0,
-            )
 
     @property
     def _quant_method(self) -> FusedMoEMethodBase:
@@ -394,33 +366,6 @@ class MoERunner(MoERunnerInterface):
                 shared_output *= 1.0 / self.routed_scaling_factor
         return shared_output, fused_output
 
-    @property
-    def _fused_output_is_reduced(self) -> bool:
-        # The AllGather/ReduceScatter combine leaves per-rank partials, so the
-        # fused output is never pre-reduced; the final TP/EP all-reduce is done
-        # in _maybe_reduce_final_output.
-        return False
-
-    def _maybe_reduce_shared_expert_output(
-        self,
-        shared_output: torch.Tensor | None,
-    ) -> torch.Tensor | None:
-        """All-reduce shared expert output when the combine kernel already
-        reduced fused output.
-
-        * If the combine kernel does the reduction for fused_output, reduce
-          shared_output separately. O.w, reduce fused_output+shared_output later.
-        * If we have SP (TP=N, DP=M, EP), there is a separate AG step handled
-          in the model.
-        """
-        if (
-            shared_output is not None
-            and not self.moe_config.is_sequence_parallel
-            and self._fused_output_is_reduced
-        ):
-            shared_output = tensor_model_parallel_all_reduce(shared_output)
-        return shared_output
-
     def _maybe_reduce_final_output(
         self,
         states: torch.Tensor,
@@ -428,18 +373,14 @@ class MoERunner(MoERunnerInterface):
     ) -> torch.Tensor:
         """All-reduce the combined output if needed.
 
-        This is the "late" all-reduce path. When neither fused nor shared
-        output was individually reduced, the combined sum is all-reduced
-        here. Skipped when sequence-parallel is active (SP handles its
-        own reduction) or when the early path already reduced both outputs.
+        The AllGather/ReduceScatter combine leaves per-rank partials, so the
+        fused output is never pre-reduced; this is the single all-reduce
+        point. Skipped when sequence-parallel is active (SP handles its own
+        reduction) or when running without TP/EP.
         """
-        # We don't need to reduce the final output if:
-        # - We are not running with TP or DP
-        # - The fused output was already reduced (never, on this transport).
         if (
             not self.moe_config.is_sequence_parallel
             and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
-            and not self._fused_output_is_reduced
         ):
             states = tensor_model_parallel_all_reduce(states)
 
@@ -629,25 +570,15 @@ class MoERunner(MoERunnerInterface):
             else 0,
         )
 
-        #
-        # Note: there are two all-reduce points below. They are mutually
-        # exclusive, controlled by _fused_output_is_reduced
-        #  - When True: the combine kernel already reduced fused_output,
-        #    so we reduce shared_output here to match, then skip the
-        #    all-reduce in _maybe_reduce_final_output.
-        #  - When False: neither output is reduced yet, so we combine
-        #    them first and all-reduce the sum in _maybe_reduce_final_output.
-
         # Extract outputs from result
         shared_output, fused_output = _unpack(result)
 
         if og_hidden_dim_pre_xform is not None:
             fused_output = fused_output[..., :og_hidden_dim_pre_xform]
 
-        # If combine kernel already reduced fused, reduce shared to match.
-        # See note above re: the two all-reduce points.
-        shared_output = self._maybe_reduce_shared_expert_output(shared_output)
-
+        # The AllGather/ReduceScatter combine leaves per-rank partials, so
+        # shared + fused are summed here and all-reduced together in
+        # _maybe_reduce_final_output (the single all-reduce point).
         shared_output, fused_output = self._maybe_apply_routed_scale_to_output(
             shared_output, fused_output
         )
@@ -727,11 +658,7 @@ class MoERunner(MoERunnerInterface):
         # If the Runner holds the gate, apply it after the stream sync so
         # it can run overlapped with the shared experts on the aux stream.
         if self.gate is not None:
-            if self._fse_fuse_gate:
-                self._maybe_fuse_gate_weights()
-                router_logits = F.linear(hidden_states, self._combined_gate_weight)
-            else:
-                router_logits, _ = self.gate(hidden_states)
+            router_logits, _ = self.gate(hidden_states)
 
         with self._sequence_parallel_context():
             hidden_states, router_logits = self._maybe_dispatch(

@@ -711,8 +711,6 @@ class OAITritonMxfp4Experts(mk.FusedMoEExpertsModular):
             topk_ids = remap_topk_to_local(topk_ids, expert_map)
 
         local_num_experts = w1.shape[0]
-        if global_num_experts == -1:
-            global_num_experts = local_num_experts
 
         routing_data, gather_indx, scatter_indx = make_routing_data(
             topk_ids, topk_weights, local_num_experts
@@ -734,10 +732,7 @@ class OAITritonMxfp4Experts(mk.FusedMoEExpertsModular):
 
         batch_dim = 1
         M, K = hidden_states.shape
-        E, _, N = w1.shape
-
-        if global_num_experts == -1:
-            global_num_experts = E
+        _, _, N = w1.shape
 
         intermediate_cache1 = _resize_cache(workspace2, (batch_dim, M * topk, N))
         intermediate_cache3 = _resize_cache(workspace2, (batch_dim, M * topk, K))

@@ -114,9 +114,8 @@ class TritonExperts(mk.FusedMoEExpertsModular):
             hidden_states, w1, w2, topk_ids
         )
 
-        if global_num_experts == -1:
-            global_num_experts = E
-
+        # ``global_num_experts`` is resolved to a concrete count by
+        # ``fused_moe_forward`` before ``apply`` is called, so it is always >= 0.
         config = try_get_optimal_moe_config(
             w1.size(),
             w2.size(),

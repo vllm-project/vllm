@@ -111,7 +111,6 @@ def FusedMoE(
     router_logits_dtype: torch.dtype | None = None,
     gate: torch.nn.Module | None = None,
     shared_experts: torch.nn.Module | None = None,
-    shared_expert_gate: torch.nn.Module | None = None,
     routed_input_transform: torch.nn.Module | None = None,
     routed_output_transform: torch.nn.Module | None = None,
     apply_routed_scale_to_output: bool = False,
@@ -167,7 +166,6 @@ def FusedMoE(
         router_logits_dtype: Data type for router logits buffers
         gate: Pre-configured gate module
         shared_experts: Pre-configured shared experts module
-        shared_expert_gate: Pre-configured shared expert gate module
         routed_input_transform: Input transformation module
         routed_output_transform: Output transformation module
         apply_routed_scale_to_output: Whether to apply routed_scaling_factor to
@@ -333,7 +331,6 @@ def FusedMoE(
         routed_experts=routed_experts,
         enable_dbo=vllm_config.parallel_config.enable_dbo,
         gate=gate,
-        shared_expert_gate=shared_expert_gate,
         shared_experts=shared_experts,
         routed_input_transform=routed_input_transform,
         routed_output_transform=routed_output_transform,
