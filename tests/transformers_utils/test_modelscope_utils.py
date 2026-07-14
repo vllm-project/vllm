@@ -38,3 +38,24 @@ def test_modelscope_is_available_rejects_unsupported_version(
         assert modelscope_utils.should_use_modelscope() is False
     finally:
         modelscope_utils.modelscope_is_available.cache_clear()
+
+
+def test_modelscope_is_available_rejects_broken_install(
+    monkeypatch, tmp_path: Path
+):
+    package_dir = tmp_path / "modelscope"
+    package_dir.mkdir()
+    (package_dir / "__init__.py").write_text(
+        "raise RuntimeError('broken modelscope')\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setattr("vllm.envs.VLLM_USE_MODELSCOPE", True)
+
+    modelscope_utils.modelscope_is_available.cache_clear()
+    try:
+        assert modelscope_utils.modelscope_is_available() is False
+        assert modelscope_utils.should_use_modelscope() is False
+    finally:
+        modelscope_utils.modelscope_is_available.cache_clear()

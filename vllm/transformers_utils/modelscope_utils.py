@@ -19,7 +19,7 @@ def modelscope_is_available() -> bool:
 
     try:
         import modelscope
-    except ImportError:
+    except Exception:
         return False
 
     return version.parse(getattr(modelscope, "__version__", "0")) > version.parse(
