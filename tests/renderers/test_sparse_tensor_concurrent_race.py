@@ -1,16 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Regression tests for the concurrent sparse-invariant race condition.
-
-PyTorch's ``torch.sparse.check_sparse_tensor_invariants()`` context manager
-manipulates a process-global flag.  Without serialization, concurrent callers
-can race the save/restore sequence: one context exits and restores ``False``
-while another thread is still inside its guard, bypassing the invariant check.
-
-These tests verify that ``_SPARSE_LOAD_LOCK`` prevents the race for all
-embedding-load entry points.
-"""
 
 import contextlib
 import io
