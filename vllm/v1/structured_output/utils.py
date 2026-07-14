@@ -219,14 +219,27 @@ def get_outlines_cache():
 
     cache_dir = get_outlines_cache_path()
     if envs.VLLM_V1_USE_OUTLINES_CACHE:
-        from diskcache import Cache
-
+        from diskcache import Cache, JSONDisk
+        from diskcache.core import MODE_PICKLE
+        class SafeJSONDisk(JSONDisk):
+            """JSONDisk subclass that refuses to deserialize pickle payloads.
+            Mitigates CVE-2025-69872: an attacker with cache-directory write
+            access could inject a MODE_PICKLE row into the SQLite database,
+            causing ``Disk.fetch`` to call ``pickle.load``.
+            """
+            def fetch(self, mode, filename, value, read):
+                if mode == MODE_PICKLE:
+                    raise RuntimeError(
+                        "Refusing to deserialize a pickle entry from the "
+                        "outlines cache (possible cache-poisoning attack)."
+                    )
+                return super().fetch(mode, filename, value, read)
         logger.warning(
             "Enabling outlines cache. This is an unbounded on-disk "
             "cache. It may consume a lot of disk space and should "
             "not be used with untrusted clients."
         )
-        cache = Cache(cache_dir, eviction_policy="none", cull_limit=0)
+        cache = Cache(cache_dir, eviction_policy="none", cull_limit=0, disk=SafeJSONDisk)
         outlines_version = importlib.metadata.version("outlines_core")
 
         cached_version = cache.get("__version__", None)
