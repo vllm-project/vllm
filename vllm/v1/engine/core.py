@@ -1018,6 +1018,7 @@ class EngineCoreProc(EngineCore):
         )
 
         self.engine_index = engine_index
+        self.eep_scale_up_launch = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
         self.eep_notification_addresses: EngineZmqAddresses | None = None
         self.eep_notification_socket_stack: ExitStack | None = None
         self.eep_notification_socket: zmq.Socket | None = None
@@ -2066,6 +2067,7 @@ class DPEngineCoreProc(EngineCoreProc):
                     if self.eep_scaling_state.worker_type == "removing":
                         raise SystemExit
                     if self.eep_scaling_state.worker_type == "new":
+                        self.eep_scale_up_launch = False
                         self.eep_notification_addresses = None
                         self._close_eep_notification_socket()
                     self.process_input_queue_block = True
@@ -2207,7 +2209,7 @@ class DPEngineCoreProc(EngineCoreProc):
         notification_data = (notification_type.value, dp_rank)
         effective_config = vllm_config or self.vllm_config
         if (
-            envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
+            self.eep_scale_up_launch
             and effective_config.parallel_config.data_parallel_external_lb
         ):
             from vllm.distributed.elastic_ep.external_elastic_ep import (
