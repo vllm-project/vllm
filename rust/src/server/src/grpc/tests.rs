@@ -13,6 +13,10 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use tokio_openssl::SslStream;
 use tonic::transport::{Channel, Endpoint, Server as TonicServer, Uri};
+use tonic_health::pb::HealthCheckRequest;
+use tonic_health::pb::health_check_response::ServingStatus as HealthServingStatus;
+use tonic_health::pb::health_client::HealthClient;
+use tonic_health::server::health_reporter;
 use tower::service_fn;
 use vllm_chat::{
     ChatBackend, ChatLlm, ChatRenderer, ChatRequest, ChatTextBackend, DefaultChatOutputProcessor,
@@ -31,8 +35,9 @@ use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
+use super::pb::engine_client::EngineClient;
 use super::pb::generate_client::GenerateClient;
-use super::{GenerateServer, GenerateServiceImpl, pb};
+use super::{EngineServer, EngineServiceImpl, GenerateServer, GenerateServiceImpl, pb};
 use crate::listener::{Listener, MaybeTlsListener};
 use crate::state::AppState;
 use crate::tls;
@@ -247,10 +252,16 @@ async fn grpc_test_server(
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
 ) -> (
     GenerateClient<tonic::transport::Channel>,
+    EngineClient<tonic::transport::Channel>,
+    HealthClient<tonic::transport::Channel>,
     tokio::task::JoinHandle<()>,
     MockEngineTask,
 ) {
     let (svc, engine_task) = setup_grpc_service(engine_id, output_specs).await;
+    let engine_service = EngineServer::new(EngineServiceImpl::new());
+    let (health_reporter, health_service) = health_reporter();
+    health_reporter.set_serving::<GenerateServer<GenerateServiceImpl>>().await;
+    health_reporter.set_serving::<EngineServer<EngineServiceImpl>>().await;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
     let addr = listener.local_addr().expect("local addr");
@@ -258,17 +269,30 @@ async fn grpc_test_server(
     let server_task = tokio::spawn(async move {
         let incoming = MaybeTlsListener::plain(Listener::Tcp(listener));
         TonicServer::builder()
+            .add_service(health_service)
             .add_service(svc)
+            .add_service(engine_service)
             .serve_with_incoming(incoming)
             .await
             .expect("grpc server");
     });
 
-    let grpc_client = GenerateClient::connect(format!("http://{addr}"))
+    let channel = Endpoint::from_shared(format!("http://{addr}"))
+        .expect("grpc endpoint")
+        .connect()
         .await
-        .expect("connect grpc client");
+        .expect("connect grpc channel");
+    let grpc_client = GenerateClient::new(channel.clone());
+    let engine_client = EngineClient::new(channel.clone());
+    let health_client = HealthClient::new(channel);
 
-    (grpc_client, server_task, engine_task)
+    (
+        grpc_client,
+        engine_client,
+        health_client,
+        server_task,
+        engine_task,
+    )
 }
 
 /// Spin up a TLS gRPC server (server cert from `certs`, `cert_reqs` mTLS mode).
@@ -430,7 +454,7 @@ async fn h2_unresponsive_peer_closed_within(addr: &str, wait: Duration) -> bool 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unary_generate_returns_collected_text() {
-    let (mut client, server_task, engine_task) =
+    let (mut client, _control_client, _health_client, server_task, engine_task) =
         grpc_test_server(b"engine-grpc-unary", default_stream_output_specs()).await;
 
     let response = client
@@ -473,7 +497,7 @@ async fn unary_generate_returns_collected_text() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unary_generate_with_token_ids_prompt() {
-    let (mut client, server_task, engine_task) =
+    let (mut client, _control_client, _health_client, server_task, engine_task) =
         grpc_test_server(b"engine-grpc-token-ids", default_stream_output_specs()).await;
 
     let response = client
@@ -507,7 +531,7 @@ async fn unary_generate_with_token_ids_prompt() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unary_generate_returns_token_ids_when_requested() {
-    let (mut client, server_task, engine_task) =
+    let (mut client, _control_client, _health_client, server_task, engine_task) =
         grpc_test_server(b"engine-grpc-tok-resp", default_stream_output_specs()).await;
 
     let response = client
@@ -547,7 +571,7 @@ async fn unary_generate_returns_token_ids_when_requested() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unary_generate_missing_prompt_returns_invalid_argument() {
-    let (mut client, server_task, _engine_task) =
+    let (mut client, _control_client, _health_client, server_task, _engine_task) =
         grpc_test_server(b"engine-grpc-no-prompt", default_stream_output_specs()).await;
 
     let status = client
@@ -569,7 +593,7 @@ async fn unary_generate_missing_prompt_returns_invalid_argument() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unary_generate_min_tokens_above_max_tokens_returns_invalid_argument() {
-    let (mut client, server_task, _engine_task) =
+    let (mut client, _control_client, _health_client, server_task, _engine_task) =
         grpc_test_server(b"engine-grpc-min-above-max", default_stream_output_specs()).await;
 
     let status = client
@@ -597,7 +621,7 @@ async fn unary_generate_min_tokens_above_max_tokens_returns_invalid_argument() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn streaming_generate_yields_incremental_responses() {
-    let (mut client, server_task, engine_task) =
+    let (mut client, _control_client, _health_client, server_task, engine_task) =
         grpc_test_server(b"engine-grpc-stream", default_stream_output_specs()).await;
 
     let stream = client
@@ -661,11 +685,12 @@ async fn streaming_generate_yields_incremental_responses() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn streaming_generate_missing_prompt_returns_invalid_argument() {
-    let (mut client, server_task, _engine_task) = grpc_test_server(
-        b"engine-grpc-stream-no-prompt",
-        default_stream_output_specs(),
-    )
-    .await;
+    let (mut client, _control_client, _health_client, server_task, _engine_task) =
+        grpc_test_server(
+            b"engine-grpc-stream-no-prompt",
+            default_stream_output_specs(),
+        )
+        .await;
 
     let status = client
         .generate_stream(pb::GenerateRequest {
@@ -685,11 +710,12 @@ async fn streaming_generate_missing_prompt_returns_invalid_argument() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn streaming_generate_min_tokens_above_max_tokens_returns_invalid_argument() {
-    let (mut client, server_task, _engine_task) = grpc_test_server(
-        b"engine-grpc-stream-min-above-max",
-        default_stream_output_specs(),
-    )
-    .await;
+    let (mut client, _control_client, _health_client, server_task, _engine_task) =
+        grpc_test_server(
+            b"engine-grpc-stream-min-above-max",
+            default_stream_output_specs(),
+        )
+        .await;
 
     let status = client
         .generate_stream(pb::GenerateRequest {
@@ -716,7 +742,7 @@ async fn streaming_generate_min_tokens_above_max_tokens_returns_invalid_argument
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unary_generate_with_sampling_params() {
-    let (mut client, server_task, engine_task) =
+    let (mut client, _control_client, _health_client, server_task, engine_task) =
         grpc_test_server(b"engine-grpc-sampling", default_stream_output_specs()).await;
 
     let response = client
@@ -752,7 +778,7 @@ async fn unary_generate_with_sampling_params() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unary_generate_rejects_wrong_model() {
-    let (mut client, server_task, _engine_task) =
+    let (mut client, _control_client, _health_client, server_task, _engine_task) =
         grpc_test_server(b"engine-grpc-wrong-model", default_stream_output_specs()).await;
 
     let status = client
@@ -778,11 +804,12 @@ async fn unary_generate_rejects_wrong_model() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn streaming_generate_rejects_wrong_model() {
-    let (mut client, server_task, _engine_task) = grpc_test_server(
-        b"engine-grpc-stream-wrong-model",
-        default_stream_output_specs(),
-    )
-    .await;
+    let (mut client, _control_client, _health_client, server_task, _engine_task) =
+        grpc_test_server(
+            b"engine-grpc-stream-wrong-model",
+            default_stream_output_specs(),
+        )
+        .await;
 
     let status = client
         .generate_stream(pb::GenerateRequest {
@@ -807,7 +834,7 @@ async fn streaming_generate_rejects_wrong_model() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unary_generate_accepts_empty_model() {
-    let (mut client, server_task, engine_task) =
+    let (mut client, _control_client, _health_client, server_task, engine_task) =
         grpc_test_server(b"engine-grpc-empty-model", default_stream_output_specs()).await;
 
     // Empty `model` (proto3 default) is treated as "unset" and should be accepted.
@@ -836,7 +863,7 @@ async fn unary_generate_accepts_empty_model() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unary_generate_output_text_defaults_to_true() {
-    let (mut client, server_task, engine_task) =
+    let (mut client, _control_client, _health_client, server_task, engine_task) =
         grpc_test_server(b"engine-grpc-default-text", default_stream_output_specs()).await;
 
     // No response options at all — output_text should default to true.
@@ -1034,20 +1061,31 @@ async fn grpc_without_keepalive_keeps_unresponsive_connection_open() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn extension_methods_are_unimplemented() {
-    let (mut client, server_task, _engine_task) =
+async fn canonical_health_and_unimplemented_extensions_share_listener() {
+    let (_generate_client, mut client, mut health_client, server_task, _engine_task) =
         grpc_test_server(b"engine-grpc-stubs", default_stream_output_specs()).await;
 
+    for service in ["vllm.Generate", "vllm.Engine", ""] {
+        let health = health_client
+            .check(HealthCheckRequest {
+                service: service.to_string(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(health.status, HealthServingStatus::Serving as i32);
+    }
+
     assert_eq!(
-        client.get_engine_info(pb::GetEngineInfoRequest {}).await.unwrap_err().code(),
+        client
+            .get_deployment_info(pb::GetDeploymentInfoRequest {})
+            .await
+            .unwrap_err()
+            .code(),
         tonic::Code::Unimplemented
     );
     assert_eq!(
         client.get_model_info(pb::GetModelInfoRequest {}).await.unwrap_err().code(),
-        tonic::Code::Unimplemented
-    );
-    assert_eq!(
-        client.health(pb::HealthRequest::default()).await.unwrap_err().code(),
         tonic::Code::Unimplemented
     );
     assert_eq!(
@@ -1068,14 +1106,6 @@ async fn extension_methods_are_unimplemented() {
     );
     assert_eq!(
         client.list_loras(pb::ListLorasRequest {}).await.unwrap_err().code(),
-        tonic::Code::Unimplemented
-    );
-    assert_eq!(
-        client
-            .get_kv_connector_info(pb::GetKvConnectorInfoRequest {})
-            .await
-            .unwrap_err()
-            .code(),
         tonic::Code::Unimplemented
     );
     assert_eq!(

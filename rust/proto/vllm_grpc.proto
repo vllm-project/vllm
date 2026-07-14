@@ -9,10 +9,11 @@ service Generate {
   rpc Generate (GenerateRequest) returns (GenerateResponse) {}
   // Generates text given a prompt, streaming the outputs
   rpc GenerateStream (GenerateRequest) returns (stream GenerateResponse) {}
+}
 
-  rpc GetEngineInfo (GetEngineInfoRequest) returns (EngineInfo) {}
+service Engine {
+  rpc GetDeploymentInfo (GetDeploymentInfoRequest) returns (DeploymentInfo) {}
   rpc GetModelInfo (GetModelInfoRequest) returns (ModelInfo) {}
-  rpc Health (HealthRequest) returns (HealthResponse) {}
   rpc Abort (AbortRequest) returns (AbortResponse) {}
   rpc Drain (DrainRequest) returns (DrainResponse) {}
 
@@ -20,7 +21,6 @@ service Generate {
   rpc UnloadLora (UnloadLoraRequest) returns (UnloadLoraResponse) {}
   rpc ListLoras (ListLorasRequest) returns (ListLorasResponse) {}
 
-  rpc GetKvConnectorInfo (GetKvConnectorInfoRequest) returns (KvConnectorInfo) {}
   rpc GetKvEventSources (GetKvEventSourcesRequest) returns (GetKvEventSourcesResponse) {}
 }
 
@@ -60,8 +60,6 @@ message GenerateRequest {
   repeated MediaItem media = 13;
   // Loaded LoRA name; empty selects the base model.
   string lora_name = 14;
-  // Router-selected data-parallel rank.
-  optional uint32 data_parallel_rank = 15;
 }
 
 message RandomSampling {
@@ -240,24 +238,18 @@ message MediaItem {
 // Discovery and lifecycle
 // ======================================================================================
 
-enum EngineRole {
-  ENGINE_ROLE_UNSPECIFIED = 0;
-  ENGINE_ROLE_AGGREGATED = 1;
-  ENGINE_ROLE_PREFILL = 2;
-  ENGINE_ROLE_DECODE = 3;
-}
+message GetDeploymentInfoRequest {}
 
-message GetEngineInfoRequest {}
-
-message EngineInfo {
-  string engine_name = 1;
-  string engine_version = 2;
-  string api_version = 3;
-  EngineRole role = 4;
-  string instance_id = 5;
-  repeated string supported_models = 6;
-  ParallelismInfo parallelism = 7;
-  KvConnectorInfo kv_connector = 8;
+message DeploymentInfo {
+  string engine_version = 1;
+  string api_version = 2;
+  string instance_id = 3;
+  repeated string supported_models = 4;
+  ParallelismInfo parallelism = 5;
+  uint32 kv_block_size = 6;
+  uint64 total_kv_blocks = 7;
+  uint64 max_running_requests = 8;
+  uint64 max_batched_tokens = 9;
 }
 
 message ParallelismInfo {
@@ -266,6 +258,7 @@ message ParallelismInfo {
   uint32 data_parallel_size = 3;
   uint32 data_parallel_rank = 4;
   uint32 data_parallel_start_rank = 5;
+  uint32 decode_context_parallel_size = 6;
 }
 
 message GetModelInfoRequest {}
@@ -276,12 +269,8 @@ message ModelInfo {
   repeated string served_model_aliases = 3;
   uint32 max_context_length = 4;
   uint32 max_output_tokens = 5;
-  uint32 kv_block_size = 6;
-  uint64 total_kv_blocks = 7;
-  uint64 max_running_requests = 8;
-  uint64 max_batched_tokens = 9;
-  repeated string tokenizer_modes = 10;
-  uint32 max_loras = 11;
+  repeated string tokenizer_modes = 6;
+  uint32 max_loras = 7;
 
   bool supports_text_input = 20;
   bool supports_token_ids_input = 21;
@@ -291,48 +280,11 @@ message ModelInfo {
   string tool_call_parser = 25;
 }
 
-message HealthRequest {
-  bool include_inference_probe = 1;
-  string model = 2;
-}
-
-message HealthResponse {
-  HealthState state = 1;
-  repeated HealthCheck checks = 2;
-}
-
-enum HealthState {
-  HEALTH_STATE_UNSPECIFIED = 0;
-  HEALTH_STATE_STARTING = 1;
-  HEALTH_STATE_READY = 2;
-  HEALTH_STATE_DEGRADED = 3;
-  HEALTH_STATE_DRAINING = 4;
-  HEALTH_STATE_NOT_READY = 5;
-}
-
-message HealthCheck {
-  string name = 1;
-  HealthState state = 2;
-  string message = 3;
-}
-
 message AbortRequest {
-  string request_id = 1;
-  bool abort_all = 2;
+  repeated string request_ids = 1;
 }
 
-message AbortResponse {
-  AbortStatus status = 1;
-  string message = 2;
-}
-
-enum AbortStatus {
-  ABORT_STATUS_UNSPECIFIED = 0;
-  ABORT_STATUS_ABORTED = 1;
-  ABORT_STATUS_NOT_FOUND = 2;
-  ABORT_STATUS_ALREADY_FINISHED = 3;
-  ABORT_STATUS_UNSUPPORTED = 4;
-}
+message AbortResponse {}
 
 message DrainRequest {}
 
@@ -372,31 +324,21 @@ message ListLorasResponse { repeated LoraAdapter adapters = 1; }
 // KV discovery
 // ======================================================================================
 
-message KvEndpoint {
+message GetKvEventSourcesRequest {}
+message GetKvEventSourcesResponse { repeated KvEventSource sources = 1; }
+
+message KvEventEndpoint {
   string host = 1;
   uint32 port = 2;
   string protocol = 3;
 }
 
-message GetKvConnectorInfoRequest {}
-
-message KvConnectorInfo {
-  bool enabled = 1;
-  string transfer_backend = 2;
-  repeated KvEndpoint local_endpoints = 3;
-  repeated string supported_protocols = 4;
-  uint32 schema_version = 5;
-}
-
-message GetKvEventSourcesRequest {}
-message GetKvEventSourcesResponse { repeated KvEventSource sources = 1; }
-
 message KvEventSource {
   string transport = 1;
-  KvEndpoint endpoint_addr = 2;
+  KvEventEndpoint endpoint_addr = 2;
   string topic = 3;
   string replay_endpoint = 4;
-  uint32 data_parallel_rank = 5;
+  optional uint32 data_parallel_rank = 5;
   string encoding = 6;
   uint32 schema_version = 7;
   uint32 buffer_steps = 8;

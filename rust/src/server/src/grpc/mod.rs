@@ -21,6 +21,7 @@ pub mod pb {
     tonic::include_proto!("vllm");
 }
 
+pub use pb::engine_server::EngineServer;
 pub use pb::generate_server::GenerateServer;
 
 #[cfg(test)]
@@ -34,6 +35,16 @@ pub struct GenerateServiceImpl {
 impl GenerateServiceImpl {
     pub fn new(state: Arc<AppState>) -> Self {
         Self { state }
+    }
+}
+
+/// Unimplemented control-plane service registered on the existing gRPC listener.
+#[derive(Default)]
+pub struct EngineServiceImpl;
+
+impl EngineServiceImpl {
+    pub fn new() -> Self {
+        Self
     }
 }
 
@@ -151,12 +162,15 @@ impl pb::generate_server::Generate for GenerateServiceImpl {
         let response_stream = ReceiverStream::new(rx);
         Ok(Response::new(Box::pin(response_stream)))
     }
+}
 
-    async fn get_engine_info(
+#[tonic::async_trait]
+impl pb::engine_server::Engine for EngineServiceImpl {
+    async fn get_deployment_info(
         &self,
-        _request: Request<pb::GetEngineInfoRequest>,
-    ) -> Result<Response<pb::EngineInfo>, Status> {
-        Err(Status::unimplemented("GetEngineInfo"))
+        _request: Request<pb::GetDeploymentInfoRequest>,
+    ) -> Result<Response<pb::DeploymentInfo>, Status> {
+        Err(Status::unimplemented("GetDeploymentInfo"))
     }
 
     async fn get_model_info(
@@ -164,13 +178,6 @@ impl pb::generate_server::Generate for GenerateServiceImpl {
         _request: Request<pb::GetModelInfoRequest>,
     ) -> Result<Response<pb::ModelInfo>, Status> {
         Err(Status::unimplemented("GetModelInfo"))
-    }
-
-    async fn health(
-        &self,
-        _request: Request<pb::HealthRequest>,
-    ) -> Result<Response<pb::HealthResponse>, Status> {
-        Err(Status::unimplemented("Health"))
     }
 
     async fn abort(
@@ -206,13 +213,6 @@ impl pb::generate_server::Generate for GenerateServiceImpl {
         _request: Request<pb::ListLorasRequest>,
     ) -> Result<Response<pb::ListLorasResponse>, Status> {
         Err(Status::unimplemented("ListLoras"))
-    }
-
-    async fn get_kv_connector_info(
-        &self,
-        _request: Request<pb::GetKvConnectorInfoRequest>,
-    ) -> Result<Response<pb::KvConnectorInfo>, Status> {
-        Err(Status::unimplemented("GetKvConnectorInfo"))
     }
 
     async fn get_kv_event_sources(

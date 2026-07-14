@@ -36,6 +36,7 @@ use tokio::net::TcpListener;
 use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server as TonicServer;
+use tonic_health::server::health_reporter;
 use tower::ServiceExt as _;
 use tracing::{info, trace, warn};
 use vllm_chat::{ChatLlm, LoadModelBackendsOptions, load_model_backends};
@@ -200,12 +201,23 @@ where
             .map(tls::build_grpc_server_config)
             .transpose()
             .context("invalid gRPC TLS configuration")?;
-        let svc = grpc::GenerateServer::new(grpc::GenerateServiceImpl::new(state.clone()));
+        let (health_reporter, health_service) = health_reporter();
+        health_reporter
+            .set_serving::<grpc::GenerateServer<grpc::GenerateServiceImpl>>()
+            .await;
+        health_reporter
+            .set_serving::<grpc::EngineServer<grpc::EngineServiceImpl>>()
+            .await;
+        let generate_service =
+            grpc::GenerateServer::new(grpc::GenerateServiceImpl::new(state.clone()));
+        let engine_service = grpc::EngineServer::new(grpc::EngineServiceImpl::new());
         let svc = TonicServer::builder()
             .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
             .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
             .layer(middleware::request_runtime_layer(state.clone()))
-            .add_service(svc);
+            .add_service(health_service)
+            .add_service(generate_service)
+            .add_service(engine_service);
         info!(%addr, tls = grpc_tls.is_some(), "starting gRPC server");
         Some((grpc_listener, svc, grpc_tls))
     } else {
