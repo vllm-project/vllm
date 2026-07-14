@@ -96,8 +96,16 @@ def determine_expert_counts(
     return global_num_experts, logical_num_experts, num_fused_shared_experts
 
 
+from vllm.model_executor.layers.fused_moe.runner.moe_runner_interface import MoERunnerInterface as MoERunner
+
+
+class _FusedMoEMeta(type):
+    def __instancecheck__(self, instance):
+        return isinstance(instance, MoERunner) or super().__instancecheck__(instance)
+
+
 # TODO: rename this
-def FusedMoE(
+def _FusedMoE_factory(
     num_experts: int,  # Global number of experts
     top_k: int,
     hidden_size: int,
@@ -418,6 +426,11 @@ def FusedMoE(
     )
 
     return runner
+
+
+class FusedMoE(torch.nn.Module, metaclass=_FusedMoEMeta):
+    def __new__(cls, *args, **kwargs):
+        return _FusedMoE_factory(*args, **kwargs)
 
 
 def fused_moe_make_expert_params_mapping(
