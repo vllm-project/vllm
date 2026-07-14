@@ -29,6 +29,30 @@ logger = init_logger(__name__)
 POLL_BACKOFF_STEPS_S = (0.1, 0.2, 0.4, 0.8)
 
 
+def publish_external_eep_notification(
+    vllm_config: Any,
+    notification_type: EEPNotificationType,
+    dp_rank: int,
+) -> None:
+    """Publish a new external rank's notification to the reconfig store."""
+    from vllm.distributed.utils import get_cached_tcp_store_client
+
+    parallel_config = vllm_config.parallel_config
+    store = get_cached_tcp_store_client(
+        parallel_config.data_parallel_master_ip,
+        parallel_config._coord_store_port,
+    )
+    current_epoch_key = ExternalElasticEPScaleCoordinator.key("current_epoch")
+    epoch = store.get(current_epoch_key).decode()
+    notification_key = ExternalElasticEPScaleCoordinator.key(
+        epoch,
+        "notifications",
+        notification_type.value,
+        dp_rank,
+    )
+    store.set(notification_key, b"1")
+
+
 class ExternalElasticEPScaleUpHandshakeServer:
     """Temporary rank-0 handshake server for external EEP scale-up.
 
@@ -211,30 +235,19 @@ class ExternalElasticEPScaleCoordinator:
         return get_cached_tcp_store_client(*store_addr)
 
     def _get_existing_engine_zmq_address(self) -> EngineZmqAddresses:
-        coordinator = self.client.resources.coordinator
-        if coordinator is None:
+        coordinator_input = self.client.coordinator_input_address
+        coordinator_output = self.client.coordinator_output_address
+        if coordinator_input is None or coordinator_output is None:
             raise RuntimeError(
-                "External Elastic EP scale-up requires rank 0 to own a DP coordinator."
+                "External Elastic EP scale-up requires DP coordinator addresses."
             )
-        coordinator_input, coordinator_output = (
-            coordinator.get_engine_socket_addresses()
-        )
-        stats_publish_address = coordinator.get_stats_publish_address()
-
-        input_endpoint = self.client.input_socket.getsockopt_string(zmq.LAST_ENDPOINT)
-        output_socket = self.client.resources.output_socket
-        output_endpoint = (
-            output_socket.getsockopt_string(zmq.LAST_ENDPOINT)
-            if output_socket is not None
-            else ""
-        )
 
         return EngineZmqAddresses(
-            inputs=[input_endpoint],
-            outputs=[output_endpoint],
+            inputs=[self.client.input_address],
+            outputs=[self.client.output_address],
             coordinator_input=coordinator_input,
             coordinator_output=coordinator_output,
-            frontend_stats_publish_address=stats_publish_address,
+            frontend_stats_publish_address=self.client.stats_update_address,
         )
 
     def _setup_reconfig_bootstrap(self) -> tuple[str, int]:
@@ -263,10 +276,7 @@ class ExternalElasticEPScaleCoordinator:
         previous_epoch = self.active_epoch
         if store.check([current_epoch_key]):
             current_epoch = store.get(current_epoch_key).decode()
-            if (
-                store.check([self.key(current_epoch, "completed")])
-                or self._get_error(store, current_epoch) is not None
-            ):
+            if store.check([self.key(current_epoch, "completed")]):
                 previous_epoch = current_epoch
         backoff_step = 0
         while True:
