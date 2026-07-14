@@ -1420,3 +1420,26 @@ class TestMessagesFullConverter:
         assert len(result.content) == 1
         assert result.content[0].type == "text"
         assert result.content[0].text == ""
+
+
+# ======================================================================
+# cache_salt (vLLM extension field)
+# ======================================================================
+
+
+class TestCacheSaltField:
+    def test_cache_salt_accepted(self):
+        request = _make_request([{"role": "user", "content": "hi"}], cache_salt="org-A")
+        assert request.cache_salt == "org-A"
+
+    def test_cache_salt_defaults_to_none(self):
+        request = _make_request([{"role": "user", "content": "hi"}])
+        assert request.cache_salt is None
+
+    def test_cache_salt_empty_string_rejected(self):
+        with pytest.raises(ValueError, match="cache_salt"):
+            _make_request([{"role": "user", "content": "hi"}], cache_salt="")
+
+    def test_cache_salt_non_string_rejected(self):
+        with pytest.raises(ValueError, match="cache_salt"):
+            _make_request([{"role": "user", "content": "hi"}], cache_salt=123)

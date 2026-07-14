@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from vllm.exceptions import VLLMValidationError
+
 
 class AnthropicError(BaseModel):
     """Error structure for Anthropic API"""
@@ -143,6 +145,17 @@ class AnthropicMessagesRequest(BaseModel):
             "ECTransfer parameters used for encoder-cache disaggregated serving."
         ),
     )
+    cache_salt: str | None = Field(
+        default=None,
+        description=(
+            "If specified, the prefix cache will be salted with the provided "
+            "string to prevent an attacker to guess prompts in multi-user "
+            "environments. The salt should be random, protected from "
+            "access by 3rd parties, and long enough to be "
+            "unpredictable (e.g., 43 characters base64-encoded, corresponding "
+            "to 256 bit)."
+        ),
+    )
     chat_template_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=(
@@ -164,6 +177,18 @@ class AnthropicMessagesRequest(BaseModel):
         if v <= 0:
             raise ValueError("max_tokens must be positive")
         return v
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data):
+        if data.get("cache_salt") is not None and (
+            not isinstance(data["cache_salt"], str) or not data["cache_salt"]
+        ):
+            raise VLLMValidationError(
+                "Parameter 'cache_salt' must be a non-empty string if provided.",
+                parameter="cache_salt",
+            )
+        return data
 
 
 class AnthropicDelta(BaseModel):
