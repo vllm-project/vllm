@@ -307,6 +307,31 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 "Supports only dynamic per token group activation "
                 "quantization with group_shape=(1,128).",
             )
+
+        # The CUTLASS block-scaled FP8 GEMM (sm90/sm100/sm120) tiles the weight
+        # scale factors with a fixed (128, 128) granularity along (N, K) and
+        # provides no kernel for a partial N tile (the swap_ab dispatch only
+        # handles small/unaligned M). If N is not a multiple of the weight
+        # block size, CUTLASS' gemm_op.can_implement() rejects the problem at
+        # runtime and raises "Invalid status". Report this here so kernel
+        # selection can fall back to a kernel that supports it (e.g. Triton)
+        # instead of crashing. See e.g. Qwen3.5 GDN in_proj layers (N=16).
+        weight_group_shape = config.weight_quant_key.scale.group_shape
+        n, k = config.weight_shape
+        if weight_group_shape.row > 0 and n % weight_group_shape.row != 0:
+            return (
+                False,
+                f"CUTLASS block-scaled FP8 requires the output dim N ({n}) to "
+                f"be a multiple of the weight block size "
+                f"({weight_group_shape.row}).",
+            )
+        if weight_group_shape.col > 0 and k % weight_group_shape.col != 0:
+            return (
+                False,
+                f"CUTLASS block-scaled FP8 requires the input dim K ({k}) to "
+                f"be a multiple of the weight block size "
+                f"({weight_group_shape.col}).",
+            )
         return True, None
 
     def apply_block_scaled_mm(
