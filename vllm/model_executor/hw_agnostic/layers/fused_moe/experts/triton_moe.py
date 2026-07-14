@@ -4,7 +4,7 @@
 
 import torch
 
-import vllm.model_executor.hw_agnostic.layers.fused_moe.modular_kernel as mk
+import vllm.model_executor.hw_agnostic.layers.fused_moe.experts_base as mk
 from vllm import _custom_ops as ops
 from vllm.model_executor.hw_agnostic.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (

@@ -13,7 +13,7 @@ its routing kernels compile for non-power-of-2 top_k.
 
 import torch
 
-import vllm.model_executor.hw_agnostic.layers.fused_moe.modular_kernel as mk
+import vllm.model_executor.hw_agnostic.layers.fused_moe.experts_base as mk
 from vllm.logger import init_logger
 from vllm.model_executor.hw_agnostic.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (

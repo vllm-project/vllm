@@ -12,7 +12,7 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.hw_agnostic.layers.fused_moe.modular_kernel import (
+from vllm.model_executor.hw_agnostic.layers.fused_moe.experts_base import (
     FusedMoEExpertsModular,
 )
 from vllm.model_executor.layers.quantization.base_config import (

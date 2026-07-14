@@ -26,7 +26,7 @@ import vllm.envs as envs
 from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.hw_agnostic.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.hw_agnostic.layers.fused_moe.modular_kernel import (
+from vllm.model_executor.hw_agnostic.layers.fused_moe.experts_base import (
     FusedMoEExpertsModular,
 )
 from vllm.model_executor.hw_agnostic.layers.fused_moe.utils import (
