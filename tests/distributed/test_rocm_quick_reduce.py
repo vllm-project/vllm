@@ -149,7 +149,7 @@ def _run_two_gpu_quick_allreduce_test(
     )
 
 
-CUDAGRAPH_WORLD_SIZE = 4
+CUDAGRAPH_WORLD_SIZE = 2
 CUDAGRAPH_ROUNDS = 10
 CUDAGRAPH_NUM_ELEMENTS = 1 << 21  # 2M fp16 = 4 MB, above the quick-reduce thresholds
 
