@@ -51,7 +51,7 @@ def test_dummy_sampler_run_exercises_flashinfer(monkeypatch):
 
     seen_shapes: list[torch.Size] = []
 
-    def fake_flashinfer_sample(logits, _k, _p, generators={}):  # noqa: B006
+    def fake_flashinfer_sample(logits, _k, _p, generators=None):
         seen_shapes.append(logits.shape)
         return torch.zeros(logits.shape[0], dtype=torch.int64, device=logits.device)
 
