@@ -1678,15 +1678,9 @@ class EngineCoreProc(EngineCore):
                 else 0
             ),
             kv_events_config=self.scheduler.get_kv_event_publisher_config(),
-            weight_transfer_backend=(
-                self.vllm_config.weight_transfer_config.backend
-                if self.vllm_config.weight_transfer_config is not None
-                else None
-            ),
-            enable_sleep_mode=self.vllm_config.model_config.enable_sleep_mode,
-            supports_draft_weight_updates=(
-                self.model_executor.supports_draft_weight_updates()
-            ),
+            coord_store_port=parallel_config._coord_store_port,
+            coordinator_input_address=self.addresses.coordinator_input,
+            coordinator_output_address=self.addresses.coordinator_output,
         )
 
     def process_input_sockets(
@@ -2373,6 +2367,20 @@ class DPEngineCoreProc(EngineCoreProc):
         """
         dp_rank = self.vllm_config.parallel_config.data_parallel_rank
         notification_data = (notification_type.value, dp_rank)
+        effective_config = vllm_config or self.vllm_config
+        if (
+            envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
+            and effective_config.parallel_config.data_parallel_external_lb
+        ):
+            from vllm.distributed.elastic_ep.external_elastic_ep import (
+                publish_external_eep_notification,
+            )
+
+            publish_external_eep_notification(
+                effective_config, notification_type, dp_rank
+            )
+            return
+
         outputs = EngineCoreOutputs(
             utility_output=UtilityOutput(
                 call_id=EEP_NOTIFICATION_CALL_ID,
