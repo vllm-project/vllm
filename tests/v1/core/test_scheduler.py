@@ -4336,6 +4336,64 @@ def test_abort_request_waiting_for_remote_kvs():
     assert not scheduler.finished_recving_kv_req_ids
 
 
+def test_late_recv_notification_for_untracked_request():
+    """A finished_recving signal for a request the scheduler no longer
+    tracks (aborted and fully freed while its async transfer was in flight,
+    or a duplicated signal) must be ignored, not crash the engine."""
+    scheduler = create_scheduler(use_kv_connector=True)
+
+    request = create_requests(num_requests=1)[0]
+    scheduler.add_request(request)
+
+    # abort while waiting for remote KVs; the designed flow keeps the
+    # request tracked until the transfer notification arrives...
+    request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.finish_requests((request.request_id,), RequestStatus.FINISHED_ABORTED)
+    scheduler_output = scheduler.schedule()
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        kv_connector_output=KVConnectorOutput(finished_recving={request.request_id}),
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+    assert request.request_id not in scheduler.requests
+
+    # ...but a second (late/duplicate) notification for the now-untracked
+    # request previously hit `assert req_id in self.requests` and killed
+    # the EngineCore. It must be a no-op.
+    scheduler_output = scheduler.schedule()
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        kv_connector_output=KVConnectorOutput(finished_recving={request.request_id}),
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+    assert request.request_id not in scheduler.requests
+    assert not scheduler.finished_recving_kv_req_ids
+
+
+def test_late_send_notification_for_untracked_request():
+    """Same as above for the finished_sending path."""
+    scheduler = create_scheduler(use_kv_connector=True)
+
+    request = create_requests(num_requests=1)[0]
+    scheduler.add_request(request)
+    scheduler.schedule()
+
+    request.status = RequestStatus.FINISHED_ABORTED
+    scheduler._free_request(request)
+    assert request.request_id not in scheduler.requests
+
+    scheduler_output = scheduler.schedule()
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        kv_connector_output=KVConnectorOutput(finished_sending={request.request_id}),
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+    assert request.request_id not in scheduler.requests
+
+
 def test_abort_request_finished_recving():
     scheduler = create_scheduler(use_kv_connector=True)
 

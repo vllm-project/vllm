@@ -2553,19 +2553,53 @@ class Scheduler(SchedulerInterface):
             self.connector.update_connector_output(kv_connector_output)
 
         # KV Connector:: update recv and send status from last step.
+        # A transfer-finished notification can arrive for a request the
+        # scheduler no longer tracks: the request may have been aborted and
+        # fully freed while the async transfer was still in flight, or the
+        # signal may be a duplicate. Blocks are only ever released via
+        # _free_blocks, which also removes the request from self.requests,
+        # so an untracked req_id has nothing left to free; ignore the
+        # notification instead of crashing the engine.
         for req_id in kv_connector_output.finished_recving or ():
             logger.debug("Finished recving KV transfer for request %s", req_id)
-            assert req_id in self.requests
-            req = self.requests[req_id]
+            req = self.requests.get(req_id)
+            if req is None:
+                # Aborted and already freed; nothing left to do.
+                logger.debug(
+                    "Finished recving KV transfer for untracked request %s",
+                    req_id,
+                )
+                continue
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 self.finished_recving_kv_req_ids.add(req_id)
+            elif RequestStatus.is_finished(req.status):
+                self._free_blocks(req)
             else:
-                assert RequestStatus.is_finished(req.status)
-                self._free_blocks(self.requests[req_id])
+                logger.warning(
+                    "Finished recving KV transfer for request %s in "
+                    "unexpected status %s; ignoring.",
+                    req_id,
+                    req.status,
+                )
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            assert req_id in self.requests
-            self._free_blocks(self.requests[req_id])
+            req = self.requests.get(req_id)
+            if req is None:
+                # Aborted and already freed; nothing left to do.
+                logger.debug(
+                    "Finished sending KV transfer for untracked request %s",
+                    req_id,
+                )
+                continue
+            if not req.is_finished():
+                logger.warning(
+                    "Finished sending KV transfer for request %s still in "
+                    "status %s; ignoring.",
+                    req_id,
+                    req.status,
+                )
+                continue
+            self._free_blocks(req)
 
     def _update_requests_with_invalid_blocks(
         self,
