@@ -3,6 +3,7 @@
 
 import pytest
 
+from tests.conftest import VllmRunner
 from tests.models.registry import HF_EXAMPLE_MODELS
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
@@ -26,7 +27,7 @@ def _check_model_available(model: str) -> None:
     model_info.check_transformers_version(on_fail="skip")
 
 
-def _get_kv_cache_group_count(vllm_model) -> int | None:
+def _get_kv_cache_group_count(vllm_model: VllmRunner) -> int | None:
     engine_core_client = vllm_model.llm.llm_engine.engine_core
     engine_core = getattr(engine_core_client, "engine_core", None)
     if engine_core is None:
@@ -38,7 +39,7 @@ def _get_kv_cache_group_count(vllm_model) -> int | None:
     return len(kv_cache_config.kv_cache_groups)
 
 
-def _get_counter_value(vllm_model, metric_name: str) -> int:
+def _get_counter_value(vllm_model: VllmRunner, metric_name: str) -> int:
     vllm_model.llm.llm_engine.do_log_stats()
     value = 0
     found = False
@@ -52,7 +53,7 @@ def _get_counter_value(vllm_model, metric_name: str) -> int:
 
 @pytest.mark.parametrize(("model", "min_kv_cache_groups"), SIMULATED_FORWARD_MODELS)
 def test_simulate_forward_model_matrix(
-    vllm_runner,
+    vllm_runner: type[VllmRunner],
     model: str,
     min_kv_cache_groups: int,
 ) -> None:
@@ -61,10 +62,10 @@ def test_simulate_forward_model_matrix(
 
     _check_model_available(model)
 
+    # No max_tokens/ignore_eos: generation must emit the caller-provided
+    # tokens and then terminate via EOS instead of padding to max_model_len.
     sampling_params = SamplingParams(
         temperature=0.0,
-        max_tokens=2,
-        ignore_eos=True,
         detokenize=False,
         extra_args={"simulated_output_token_ids": [501, 502]},
     )
@@ -76,11 +77,12 @@ def test_simulate_forward_model_matrix(
         kv_cache_memory_bytes=16 * 1024**3,
         max_model_len=1024,
     ) as vllm_model:
+        eos_token_id = vllm_model.llm.get_tokenizer().eos_token_id
         outputs = vllm_model.generate(
             [[1000, 1001, 1002, 1003]],
             sampling_params=sampling_params,
         )
-        assert outputs[0][0][0][-2:] == [501, 502]
+        assert outputs[0][0][0][-3:] == [501, 502, eos_token_id]
 
         group_count = _get_kv_cache_group_count(vllm_model)
         if group_count is not None:
@@ -88,8 +90,8 @@ def test_simulate_forward_model_matrix(
 
 
 def test_simulate_forward_prefix_cache_hybrid_retention_zero(
-    monkeypatch,
-    vllm_runner,
+    monkeypatch: pytest.MonkeyPatch,
+    vllm_runner: type[VllmRunner],
 ) -> None:
     if not current_platform.is_cpu():
         pytest.skip("Simulated forward is currently supported on CPU only.")
