@@ -12,7 +12,6 @@ from vllm import _custom_ops as ops
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
-from .cpu_fallbacks import _causal_conv1d_fn_cpu, _causal_conv1d_update_cpu
 
 
 @triton.jit()
@@ -1243,10 +1242,6 @@ def _causal_conv1d_update_cuda(
 
 
 def causal_conv1d_fn(*args, **kwargs):
-    """Dispatch causal_conv1d_fn to CPU PyTorch fallback or CUDA Triton kernel."""
-    x = args[0] if args else kwargs.get("x")
-    if x is not None and x.device.type == "cpu":
-        return _causal_conv1d_fn_cpu(*args, **kwargs)
     return _causal_conv1d_fn_cuda(*args, **kwargs)
 
 
@@ -1266,47 +1261,6 @@ def causal_conv1d_update(
     validate_data=False,
 ):
     """Dispatch causal_conv1d_update to CPU C++ kernel or CUDA Triton kernel."""
-    if x.device.type == "cpu":
-        # The C++ kernel handles the standard (non-varlen, non-spec-decoding)
-        # decode path.  Fall back to PyTorch for the complex varlen /
-        # spec-decoding paths.
-        if query_start_loc is not None or num_accepted_tokens is not None:
-            return _causal_conv1d_update_cpu(
-                x,
-                conv_state,
-                weight,
-                bias=bias,
-                activation=activation,
-                conv_state_indices=conv_state_indices,
-                query_start_loc=query_start_loc,
-            )
-        # Determine activation string
-        act_str = None
-        if isinstance(activation, bool):
-            act_str = "silu" if activation else None
-        elif activation is not None:
-            act_str = activation
-
-        _conv_state_indices = conv_state_indices
-        if _conv_state_indices is not None and _conv_state_indices.dim() == 2:
-            if initial_state_idx is not None:
-                _conv_state_indices = _conv_state_indices.gather(
-                    1, initial_state_idx.unsqueeze(1)
-                ).squeeze(1)
-            else:
-                _conv_state_indices = _conv_state_indices[:, 0]
-
-        pad_slot_id = int(NULL_BLOCK_ID)
-        return ops.causal_conv1d_update_cpu_vec(
-            x,
-            conv_state,
-            weight,
-            bias,
-            act_str,
-            _conv_state_indices,
-            None,  # query_start_loc
-            pad_slot_id,
-        )
 
     return _causal_conv1d_update_cuda(
         x,
@@ -1322,4 +1276,13 @@ def causal_conv1d_update(
         block_idx_last_scheduled_token=block_idx_last_scheduled_token,
         initial_state_idx=initial_state_idx,
         validate_data=validate_data,
+    )
+
+
+from vllm.platforms import current_platform
+
+if current_platform.is_cpu():
+    from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
+        causal_conv1d_fn_cpu as causal_conv1d_fn,
+        causal_conv1d_update_cpu as causal_conv1d_update,
     )

@@ -27,9 +27,6 @@ class MambaBackendEnum(Enum, metaclass=_MambaBackendEnumMeta):
 
     TRITON = "triton"
     FLASHINFER = "flashinfer"
-    # Pure-PyTorch fallback for CPU-only platforms (PowerPC, no CUDA, etc.).
-    # Avoids Triton JIT compilation which is unstable / unsupported on those
-    # architectures.
     CPU = "cpu"
 
 
@@ -38,11 +35,7 @@ class MambaConfig:
     """Configuration for Mamba SSM backends."""
 
     backend: MambaBackendEnum = MambaBackendEnum.TRITON
-    """Mamba SSU backend to use.
-
-    On CPU-only platforms (e.g. PowerPC, x86 without CUDA) the default is
-    automatically overridden to 'cpu' by ``__post_init__``.
-    """
+    """Mamba SSU backend to use."""
 
     enable_stochastic_rounding: bool = False
     """Enable stochastic rounding when writing SSM state to fp16 cache.

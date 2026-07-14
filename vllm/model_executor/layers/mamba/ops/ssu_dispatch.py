@@ -6,8 +6,7 @@ Dispatch module for Mamba selective state update (SSU) backends.
 Provides a unified `selective_state_update` function that dispatches to
 the Triton, FlashInfer, or CPU backend based on the configured
 `MambaBackendEnum`. On CPU-only platforms (PowerPC, x86 without CUDA)
-the backend defaults to 'cpu', which uses a pure-PyTorch fallback that
-avoids Triton JIT compilation entirely.
+the backend defaults to 'cpu'.
 """
 
 from abc import ABC, abstractmethod
@@ -280,7 +279,7 @@ def initialize_mamba_ssu_backend(
     backend = mamba_config.backend
 
     # On CPU-only platforms (PowerPC, x86 without CUDA) Triton JIT is
-    # unstable or unavailable.  Silently fall back to the pure-PyTorch CPU
+    # unstable or unavailable.  Silently fall back to the CPU
     # backend unless the user explicitly chose something other than "triton".
     if backend == MambaBackendEnum.TRITON:
         from vllm.platforms import current_platform
@@ -288,7 +287,7 @@ def initialize_mamba_ssu_backend(
         if current_platform.is_cpu():
             logger.info(
                 "CPU platform detected: overriding Mamba SSU backend "
-                "from 'triton' to 'cpu' (pure-PyTorch fallback)."
+                "from 'triton' to 'cpu'."
             )
             backend = MambaBackendEnum.CPU
 

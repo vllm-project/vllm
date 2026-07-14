@@ -13,7 +13,7 @@ from packaging import version
 from vllm.model_executor.custom_op import CustomOp
 from vllm.triton_utils import HAS_TRITON, triton
 
-from .cpu_fallbacks import _mamba_chunk_scan_combined_fwd_cpu
+
 from .ssd_bmm import _bmm_chunk_fwd
 from .ssd_chunk_scan import _chunk_scan_fwd
 from .ssd_chunk_state import _chunk_cumsum_fwd, _chunk_state_fwd
@@ -166,18 +166,10 @@ class MambaChunkScanCombinedFwdOp(CustomOp):
         super(CustomOp, self).__init__()  # nn.Module.__init__ only
         from vllm.platforms import current_platform
 
-        if current_platform.is_cpu():
-            self._forward_method = self.forward_cpu
-        elif current_platform.is_rocm():
+        if current_platform.is_rocm():
             self._forward_method = self.forward_hip
         else:
             self._forward_method = self.forward_cuda
-
-    def forward_native(self, *args, **kwargs):
-        return _mamba_chunk_scan_combined_fwd_cpu(*args, **kwargs)
-
-    def forward_cpu(self, *args, **kwargs):
-        return _mamba_chunk_scan_combined_fwd_cpu(*args, **kwargs)
 
     def forward_cuda(self, *args, **kwargs):
         return _mamba_chunk_scan_combined_fwd_cuda(*args, **kwargs)
@@ -260,7 +252,15 @@ def mamba_chunk_scan_combined_varlen(
         last_chunk_indices=last_chunk_indices,
         dt_softplus=dt_softplus,
         dt_limit=dt_limit,
+        return_intermediate_states=return_intermediate_states,
         state_dtype=state_dtype,
     )
-
     return varlen_states
+
+
+from vllm.platforms import current_platform
+
+if current_platform.is_cpu():
+    from vllm.model_executor.layers.mamba.ops.cpu.mamba_ssm import (
+        _mamba_chunk_scan_combined_fwd_cpu as _mamba_chunk_scan_combined_fwd,
+    )

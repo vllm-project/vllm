@@ -3429,22 +3429,17 @@ def causal_conv1d_update_cpu(
     conv_state_indices: torch.Tensor | None,
     is_vnni: bool,
 ) -> torch.Tensor:
-    from vllm.platforms import CpuArchEnum
-
-    if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
-        return torch.ops._C.causal_conv1d_update_cpu(
-            x,
-            conv_states,
-            weight,
-            bias,
-            silu_activation,
-            None,
-            conv_state_indices,
-            -1,
-            is_vnni,
-        )
-    else:
-        raise NotImplementedError("AMX conv1d is only for x86")
+    return torch.ops._C.causal_conv1d_update_cpu(
+        x,
+        conv_states,
+        weight,
+        bias,
+        silu_activation,
+        None,
+        conv_state_indices,
+        -1,
+        is_vnni,
+    )
 
 
 class CPUDNNLGEMMHandler:
