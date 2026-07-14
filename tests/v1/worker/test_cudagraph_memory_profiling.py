@@ -585,8 +585,8 @@ def test_separate_profile_accounts_persistent_and_graph_pool(monkeypatch):
     runner._warmup_before_cudagraph_capture = lambda *args, **kwargs: (
         warmup_calls.append((args[0], kwargs))
     )
-    runner._warmup_and_capture = lambda *args, **kwargs: (
-        capture_calls.append((args[0], kwargs))
+    runner._warmup_and_capture = lambda *args, **kwargs: capture_calls.append(
+        (args[0], kwargs)
     )
 
     memory_reserved_values = iter([1_000, 1_600])
