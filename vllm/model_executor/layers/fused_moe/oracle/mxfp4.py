@@ -1182,9 +1182,8 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             )
         except ImportError as e:
             raise ImportError(
-                "TokenSpeed MXFP4 MoE requires a local/new enough "
-                "tokenspeed-kernel-amd package with "
-                "ops.moe.mxfp4_gfx950_preprocess."
+                "TokenSpeed MXFP4 MoE preprocessing requires "
+                "tokenspeed_kernel_amd.ops.moe.mxfp4_gfx950_preprocess."
             ) from e
 
         layer.w13_input_layout = "interleaved"

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-from tokenspeed_kernel_amd.ops.moe.fused_mxfp_gfx950 import gluon_mxfp_fused_moe
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -18,48 +17,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Static,
 )
 from vllm.platforms import current_platform
-
-_DTYPE_TO_CODE = {
-    torch.bfloat16: 0,
-    torch.float16: 1,
-}
-_CODE_TO_DTYPE = {code: dtype for dtype, code in _DTYPE_TO_CODE.items()}
-
-
-def _tokenspeed_mxfp4_moe(
-    hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
-    w13_weight: torch.Tensor,
-    w2_weight: torch.Tensor,
-    w13_mx_scale: torch.Tensor,
-    w2_mx_scale: torch.Tensor,
-    w13_act_scale: torch.Tensor,
-    w2_act_scale: torch.Tensor,
-    w13_bias: torch.Tensor | None,
-    w2_bias: torch.Tensor | None,
-    top_k: int,
-    out_dtype_code: int,
-    enable_warp_decode: bool,
-    swiglu_alpha: float,
-    swiglu_limit: float,
-) -> torch.Tensor:
-    return gluon_mxfp_fused_moe(
-        hidden_states,
-        router_logits,
-        w13_weight,
-        w2_weight,
-        w13_mx_scale=w13_mx_scale,
-        w2_mx_scale=w2_mx_scale,
-        w13_act_scale=w13_act_scale,
-        w2_act_scale=w2_act_scale,
-        top_k=top_k,
-        w13_bias=w13_bias,
-        w2_bias=w2_bias,
-        out_dtype=_CODE_TO_DTYPE[out_dtype_code],
-        enable_warp_decode=enable_warp_decode,
-        swiglu_alpha=swiglu_alpha,
-        swiglu_limit=swiglu_limit,
-    )
 
 
 class TokenSpeedMxfp4Experts(mk.FusedMoEExpertsMonolithic):
@@ -77,6 +34,9 @@ class TokenSpeedMxfp4Experts(mk.FusedMoEExpertsMonolithic):
         )
         self.swiglu_limit = (
             7.0 if moe_config.swiglu_limit is None else moe_config.swiglu_limit
+        )
+        self.swiglu_beta = (
+            1.0 if moe_config.swiglu_beta is None else moe_config.swiglu_beta
         )
 
     @staticmethod
@@ -96,6 +56,28 @@ class TokenSpeedMxfp4Experts(mk.FusedMoEExpertsMonolithic):
         return False
 
     @staticmethod
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        if moe_config.in_dtype not in (torch.float16, torch.bfloat16):
+            return (
+                False,
+                f"kernel does not support {moe_config.in_dtype} input/output dtype",
+            )
+
+        return mk.FusedMoEExperts.is_supported_config(
+            cls,
+            moe_config,
+            weight_key,
+            activation_key,
+            activation_format,
+        )
+
+    @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
@@ -112,6 +94,7 @@ class TokenSpeedMxfp4Experts(mk.FusedMoEExpertsMonolithic):
     ) -> bool:
         return (
             not moe_parallel_config.use_all2all_kernels
+            and not moe_parallel_config.use_ep
             and not moe_parallel_config.enable_eplb
             and moe_parallel_config.dp_size <= 1
         )
@@ -154,11 +137,6 @@ class TokenSpeedMxfp4Experts(mk.FusedMoEExpertsMonolithic):
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
     ) -> torch.Tensor:
-        if expert_map is not None:
-            raise NotImplementedError(
-                "TokenSpeed MXFP4 MoE does not support expert_map/expert "
-                "parallel routing yet."
-            )
         if apply_router_weight_on_input:
             raise NotImplementedError(
                 "TokenSpeed MXFP4 MoE does not support apply_router_weight_on_input."
@@ -170,22 +148,25 @@ class TokenSpeedMxfp4Experts(mk.FusedMoEExpertsMonolithic):
             )
 
         enable_warp_decode = True
-        out_dtype_code = _DTYPE_TO_CODE[torch.bfloat16]
+        from tokenspeed_kernel_amd.ops.moe.fused_mxfp_gfx950 import (
+            gluon_mxfp_fused_moe,
+        )
 
-        return _tokenspeed_mxfp4_moe(
+        return gluon_mxfp_fused_moe(
             hidden_states,
             router_logits,
             w1,
             w2,
-            self.quant_config._w1.scale,
-            self.quant_config._w2.scale,
-            self.a1_scale,
-            self.a2_scale,
-            self.w1_bias,
-            self.w2_bias,
-            self.topk,
-            out_dtype_code,
-            enable_warp_decode,
-            self.swiglu_alpha,
-            self.swiglu_limit,
+            w13_mx_scale=self.quant_config._w1.scale,
+            w2_mx_scale=self.quant_config._w2.scale,
+            w13_act_scale=self.a1_scale,
+            w2_act_scale=self.a2_scale,
+            top_k=self.topk,
+            w13_bias=self.w1_bias,
+            w2_bias=self.w2_bias,
+            out_dtype=hidden_states.dtype,
+            enable_warp_decode=enable_warp_decode,
+            swiglu_alpha=self.swiglu_alpha,
+            swiglu_limit=self.swiglu_limit,
+            swiglu_beta=self.swiglu_beta,
         )
