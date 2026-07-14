@@ -63,11 +63,11 @@ class HadamardTransform(torch.nn.Module):
             )
 
             data_key = self._get_data_key(scheme, weight_size)
+            # load up in model's default precision, rather than using scheme.precision
             self.weight.add_partition(
                 part_index,
                 data_key,
                 size=(weight_size, weight_size),
-                dtype=scheme.precision,
             )
 
         # validate that shared tensors and schemes are correct
@@ -79,13 +79,9 @@ class HadamardTransform(torch.nn.Module):
             self.weight.process_weights_after_loading()
 
             # Merge normalization scale directly into weight, must be done only once
-            # TODO: better way to handle this? cannot each instance of HadamardTransform
-            # has different self.weight.partitions, so updating directly does nothing
-            # and a global cache is required.
             data_ptr = partition.data.data_ptr()
             if data_ptr not in HadamardTransform.scaled_data_ptrs:
-                scale = 1 / math.sqrt(partition.data.size(0))
-                partition.data.mul_(scale)
+                partition.data.div_(math.sqrt(partition.data.size(0)))
                 HadamardTransform.scaled_data_ptrs.add(data_ptr)
 
             # FUTURE: avoid runtime transpose by processing weights
