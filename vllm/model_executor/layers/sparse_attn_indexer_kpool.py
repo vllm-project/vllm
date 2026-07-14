@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom Sparse Attention Indexer layers."""
 
+import os
+
 import torch
 
 import vllm.envs as envs
@@ -128,6 +130,41 @@ def _get_decode_tail_buffers(
         _DECODE_TAIL[key] = (tail_k, tail_score)
         return tail_k, tail_score
     return entry[0][:max_batch], entry[1][:max_batch]
+
+
+def _scatter_decode_tokens_by_request(
+    tokens: torch.Tensor,
+    decode_lens: torch.Tensor,
+    num_requests: int,
+    lmax: int,
+    pad_value,
+) -> torch.Tensor:
+    """Group ``[N, ...]`` decode tokens into a padded ``[num_requests, lmax, ...]``
+    layout: request ``r``'s tokens at row ``r`` in order; short requests padded.
+
+    ``N == decode_lens.sum()``. Unlike ``pack_seq_triton`` this is dtype-agnostic
+    (needed for the int32 slot/pos tensors) — it builds the request / intra-index
+    on device and scatters. Used only for the rare non-uniform
+    (``requires_padding``) decode batch; uniform batches use a zero-copy reshape.
+    """
+    device = tokens.device
+    dl = decode_lens.to(torch.int64)
+    req_id = torch.repeat_interleave(
+        torch.arange(num_requests, device=device, dtype=torch.int64), dl
+    )
+    starts = torch.cumsum(
+        torch.cat([torch.zeros(1, device=device, dtype=torch.int64), dl[:-1]]),
+        dim=0,
+    )
+    intra = torch.arange(tokens.shape[0], device=device, dtype=torch.int64) - starts
+    out = torch.full(
+        (num_requests, lmax, *tokens.shape[1:]),
+        pad_value,
+        dtype=tokens.dtype,
+        device=device,
+    )
+    out[req_id, intra] = tokens
+    return out
 
 
 def _gather_workspace_shapes(
@@ -445,48 +482,95 @@ def sparse_attn_indexer_kpool(
         kv_cache_raw = kv_cache  # raw [num_blocks, block_size, head_dim+4] for writes
         kv_cache = kv_cache_as_quant_view(kv_cache, head_dim, use_fp4_cache)
 
-        # kpool decode write (must precede the logits read). Append the current
-        # decode token's k/gate to a per-request tail ring; when the pool fills
-        # (pos % kpool == kpool-1) compress + write at the pool slot handed to
-        # us by compress_ratio (slot_mapping). Plain decode (next_n == 1) only;
-        # spec decode needs request-grouped tail indexing — TODO.
+        # kpool decode write (must precede the logits read). Append each decode
+        # token's k/gate to its REQUEST's tail ring; when a pool fills
+        # (pos % kpool == kpool-1) compress + write at the pool slot that
+        # compress_ratio hands us via slot_mapping.
+        #
+        # Spec verify batches next_n (>1) tokens per request. The per-request
+        # tail ring must accumulate a request's tokens IN POSITION ORDER, so we
+        # group tokens by request ([num_requests, next_n, ...]) and run the
+        # per-request kernel once per token-slot — sequential launches keep each
+        # request's tokens ordered (token t stashes before token t+1 reads it
+        # for pool completion). Mirrors sglang's _forward_cuda_target_verify
+        # (per-request kpool write plan, seqlen_per_q = write_start + k + 1).
+        # Plain decode (next_n == 1) collapses to a single launch.
+        #
+        # NOTE: positions must be TOKEN-granular (per-token position, not the
+        # pool-granular decode_metadata.seq_lens which is divided by
+        # compress_ratio). The kernel derives the pool phase and tail-ring index
+        # from pos % kpool, so a pool-granular pos misaligns every pool; a
+        # per-request pos under spec is also too short (B entries for B*next_n
+        # tokens) and reads out of bounds.
         if (
             index_kpool > 1
             and gate_score is not None
             and compress_ape is not None
+            and positions is not None
             and not skip_k_cache_insert
+            and os.environ.get("VLLM_KPOOL_SKIP_DECODE_WRITE") != "1"
         ):
-            dec_k = k[:num_decode_tokens]
-            dec_gate = gate_score[:num_decode_tokens]
-            dec_slot = slot_mapping[:num_decode_tokens]
-            # position of the new token = effective context len - 1 (plain
-            # decode). Verify the seq_lens convention on the server.
-            dec_seq = decode_metadata.seq_lens[:num_decode_tokens]
-            if dec_seq.ndim == 2:
-                dec_seq = dec_seq[:, -1]
-            dec_pos = (dec_seq - 1).to(torch.int32)
+            num_requests = attn_metadata_narrowed.num_decodes
+            decode_lens_local = decode_metadata.decode_lens
+            if decode_metadata.requires_padding:
+                # Non-uniform decode_lens (mixed plain-decode + spec-verify):
+                # scatter actual tokens into a padded [B, lmax] layout. int32
+                # tensors can't go through pack_seq_triton (float/uint8 only).
+                lmax = int(decode_lens_local.max().item())
+                dec_k = _scatter_decode_tokens_by_request(
+                    k[:num_decode_tokens], decode_lens_local, num_requests, lmax, 0
+                )
+                dec_gate = _scatter_decode_tokens_by_request(
+                    gate_score[:num_decode_tokens],
+                    decode_lens_local,
+                    num_requests,
+                    lmax,
+                    0,
+                )
+                dec_slot = _scatter_decode_tokens_by_request(
+                    slot_mapping[:num_decode_tokens],
+                    decode_lens_local,
+                    num_requests,
+                    lmax,
+                    -1,
+                )
+                dec_pos = _scatter_decode_tokens_by_request(
+                    positions[:num_decode_tokens].to(torch.int32),
+                    decode_lens_local,
+                    num_requests,
+                    lmax,
+                    -1,
+                )
+            else:
+                next_n = num_decode_tokens // num_requests
+                shape2 = (num_requests, next_n)
+                dec_k = k[:num_decode_tokens].view(*shape2, head_dim)
+                dec_gate = gate_score[:num_decode_tokens].view(*shape2, head_dim)
+                dec_slot = slot_mapping[:num_decode_tokens].view(shape2)
+                dec_pos = positions[:num_decode_tokens].to(torch.int32).view(shape2)
             tail_k, tail_score = _get_decode_tail_buffers(
                 k_cache_prefix,
                 index_kpool,
                 head_dim,
-                num_decode_tokens,
+                num_requests,
                 k.device,
             )
             # The compress kernel writes the raw fp8 cache (not the quant view);
             # pass the underlying kv_cache, not kv_cache_quant_view.
-            kpool_decode_update_and_maybe_write_cache(
-                kv_cache_raw,
-                tail_k,
-                tail_score,
-                dec_k,
-                dec_gate,
-                compress_ape,
-                dec_slot,
-                dec_pos,
-                index_kpool,
-                head_dim,
-                round_scale=(scale_fmt is not None),
-            )
+            for t in range(dec_pos.shape[1]):
+                kpool_decode_update_and_maybe_write_cache(
+                    kv_cache_raw,
+                    tail_k,
+                    tail_score,
+                    dec_k[:, t, :].contiguous(),
+                    dec_gate[:, t, :].contiguous(),
+                    compress_ape,
+                    dec_slot[:, t].contiguous(),
+                    dec_pos[:, t].contiguous(),
+                    index_kpool,
+                    head_dim,
+                    round_scale=(scale_fmt is not None),
+                )
         decode_lens = decode_metadata.decode_lens
         if decode_metadata.requires_padding:
             # pad in edge case where we have short chunked prefill length <

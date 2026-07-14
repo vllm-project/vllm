@@ -1009,11 +1009,12 @@ class SpecDecodeBaseProposer:
 
     def model_returns_tuple(self) -> bool:
         if self.method == "mtp":
-            # These models return separate hidden states for logits and for
-            # feedback into the next draft step.
-            architectures = self.draft_model_config.hf_config.architectures or []
-            return bool(
-                {"DeepSeekMTPModel", "KimiK3MTPModel"}.intersection(architectures)
+            # DeepSeek/GLM5-next-family MTP recycles the post-final-norm
+            # hidden, so its forward returns (logit_hidden, recycle_hidden).
+            # Other MTP families return a single tensor.
+            return any(
+                arch in (self.draft_model_config.hf_config.architectures or [])
+                for arch in ("DeepSeekMTPModel", "Glm5NextMTPModel")
             )
         return self.method not in ("mtp", "draft_model", "dflash")
 

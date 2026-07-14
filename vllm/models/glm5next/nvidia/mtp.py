@@ -47,9 +47,22 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
 
+        # kpool widens the topk buffer: selecting topk_tokens//kpool pools and
+        # expanding them yields topk_tokens token indices, plus an always-
+        # selected tail of up to kpool-1 incomplete-pool tokens. The sparse MLA
+        # kernel also requires the width to be a multiple of BLOCK_N=128. Match
+        # the target model's buffer sizing (model.py) so the indexer's
+        # append_tail_to_topk output fits.
+        topk_tokens = config.index_topk
+        kpool = getattr(config, "index_kpool", 1) or 1
+        buffer_width = topk_tokens + (kpool - 1 if kpool > 1 else 0)
+        sparse_topk_block_n = 128
+        buffer_width = (
+            (buffer_width + sparse_topk_block_n - 1) // sparse_topk_block_n
+        ) * sparse_topk_block_n
         topk_indices_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
-            config.index_topk,
+            buffer_width,
             dtype=torch.int32,
             device=current_platform.device_type,
         )
@@ -88,17 +101,26 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
             self.enorm.variance_epsilon,
         )
         hidden_states = self.eh_proj(eh_input)
-        hidden_states, residual = self.mtp_block(
+        # mtp_block returns (hidden_states=residual+mlp, residual=post-attn); the
+        # post-attn residual is unused here (final norm is applied below without
+        # a second residual-add).
+        hidden_states, _ = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
         # mtp_block's MoE output is left un-reduced (skip_final_all_reduce); the
         # main model fuses that all-reduce into the next norm, but here the
         # recycle hidden is consumed directly, so reduce it now.
         hidden_states = tensor_model_parallel_all_reduce(hidden_states)
-        # Return the pre-final-norm recycle hidden (re-fed as the next spec
-        # step's previous_hidden_states); shared_head norm is applied in
-        # compute_logits. Matches the V2-runner / deepseek_v4 MTP contract.
-        return residual + hidden_states
+        # mtp_block (Glm5NextDecoderLayer) already returns the post-MLP residual
+        # stream (hidden_states = residual + mlp), so apply the final RMSNorm
+        # exactly once. Passing `residual` here would call fused_add_rms_norm and
+        # double-count the post-attention residual. Return the post-norm hidden
+        # for both the draft-logits path (compute_logits applies the LM head
+        # only) and the recycled previous_hidden_states. Post-norm recycle
+        # matches deepseek_mtp.py (PR #45895); model_returns_tuple() is True for
+        # Glm5NextMTPModel so the proposer unpacks the tuple.
+        hidden_states = self.shared_head(hidden_states)
+        return hidden_states, hidden_states
 
 
 class Glm5NextMultiTokenPredictor(nn.Module):
@@ -170,9 +192,10 @@ class Glm5NextMultiTokenPredictor(nn.Module):
     ) -> torch.Tensor:
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
-        return self.logits_processor(
-            mtp_layer.shared_head.head, mtp_layer.shared_head(hidden_states)
-        )
+        # hidden_states is already post-final-norm (produced in the layer
+        # forward and recycled as-is); apply the LM head only, without a
+        # second RMSNorm.
+        return self.logits_processor(mtp_layer.shared_head.head, hidden_states)
 
 
 class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
