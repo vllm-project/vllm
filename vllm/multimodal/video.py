@@ -310,6 +310,76 @@ class OpenCVVideoBackendMixin:
         limit = next_target_map.get(oldest_failed, total_frames)
         return idx < limit
 
+    @staticmethod
+    def _stream_end_count(
+        grabbed: int, last_grab_ok: int, max_frame_idx: int
+    ) -> int | None:
+        """True stream length when grabs succeeded contiguously from frame 0 and
+        then failed through max_frame_idx — the header frame count overstated the
+        presentable frames (e.g. an mp4 edit list hides the decode lead-in of a
+        stream-copied cut, yet CAP_PROP_FRAME_COUNT still counts the hidden
+        samples). Mid-stream corruption (failures with later successes) returns
+        None, keeping the existing skip behavior."""
+        if grabbed == last_grab_ok + 1 and last_grab_ok < max_frame_idx:
+            return grabbed
+        return None
+
+    @classmethod
+    def read_frames_resampling_truncated(
+        cls,
+        data: bytes,
+        cap: "cv2.VideoCapture",
+        source: VideoSourceMetadata,
+        sample_fn,
+        *,
+        frame_recovery: bool = False,
+    ) -> tuple[npt.NDArray, list[int], list[int], VideoSourceMetadata]:
+        """Sample and read frames, resampling once if the stream ends early.
+
+        When the header frame count exceeds the true stream length (see
+        _stream_end_count), indices sampled over the header count point at
+        frames that don't exist and the video silently collapses to the few
+        real ones. On a clean early stream end, rebuild the source over the
+        true length, resample via ``sample_fn(source)``, and reread from a
+        fresh capture — one cheap extra pass over the visible frames, only
+        when triggered.
+
+        Returns (frames, valid_frame_indices, frame_indices, source), with
+        source corrected when a resample happened.
+        """
+        frame_idx = sample_fn(source)
+        frames, valid, frames_in_stream = cls.read_frames(
+            cap,
+            frame_idx,
+            total_frames_num=source.total_frames_num,
+            frame_recovery=frame_recovery,
+        )
+        if (
+            frames_in_stream is not None
+            and 0 < frames_in_stream < source.total_frames_num
+        ):
+            logger.warning(
+                "Video header claims %d frames but the stream ends after %d; "
+                "resampling over the true frame count.",
+                source.total_frames_num,
+                frames_in_stream,
+            )
+            source = VideoSourceMetadata(
+                total_frames_num=frames_in_stream,
+                original_fps=source.original_fps,
+                duration=frames_in_stream / source.original_fps
+                if source.original_fps > 0
+                else 0,
+            )
+            frame_idx = sample_fn(source)
+            frames, valid, _ = cls.read_frames(
+                cls.open_video_capture(data),
+                frame_idx,
+                total_frames_num=source.total_frames_num,
+                frame_recovery=frame_recovery,
+            )
+        return frames, valid, frame_idx, source
+
     @classmethod
     def _read_frames_with_recovery(
         cls,
@@ -422,13 +492,7 @@ class OpenCVVideoBackendMixin:
         else:
             frames = np.empty((0, height, width, 3), dtype=np.uint8)
 
-        # See _read_frames_no_recovery: clean early stream end means the
-        # header frame count overstated the presentable frames.
-        frames_in_stream = (
-            grabbed
-            if grabbed == last_grab_ok + 1 and last_grab_ok < max_frame_idx
-            else None
-        )
+        frames_in_stream = cls._stream_end_count(grabbed, last_grab_ok, max_frame_idx)
         return frames, valid_frame_indices, recovered_map, frames_in_stream
 
     @classmethod
@@ -485,18 +549,7 @@ class OpenCVVideoBackendMixin:
                 valid_num_frames,
             )
 
-        # A contiguous success prefix followed by failures through the end
-        # means the stream ran out before max_frame_idx: the header count
-        # overstated the presentable frames (e.g. an mp4 edit list hides the
-        # decode lead-in of a stream-copied cut, yet CAP_PROP_FRAME_COUNT
-        # still counts the hidden samples). Report the true stream length so
-        # the caller can resample; mid-stream corruption (failures with later
-        # successes) intentionally does not qualify.
-        frames_in_stream = (
-            grabbed
-            if grabbed == last_grab_ok + 1 and last_grab_ok < max_frame_idx
-            else None
-        )
+        frames_in_stream = cls._stream_end_count(grabbed, last_grab_ok, max_frame_idx)
         return frames[:valid_num_frames], valid_frame_indices, frames_in_stream
 
     @classmethod
@@ -1080,50 +1133,15 @@ class VideoBackend(
                 int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
             )
             source = cls._prepare_source(cls.get_video_metadata(cap))
-            frame_idx = cls.compute_frames_index_to_sample(
-                source=source, target=target, **kwargs
-            )
-            frames, valid, frames_in_stream = cls.read_frames(
+            frames, valid, frame_idx, source = cls.read_frames_resampling_truncated(
+                data,
                 cap,
-                frame_idx,
-                total_frames_num=source.total_frames_num,
+                source,
+                lambda s: cls.compute_frames_index_to_sample(
+                    source=s, target=target, **kwargs
+                ),
                 frame_recovery=frame_recovery,
             )
-            if (
-                frames_in_stream is not None
-                and 0 < frames_in_stream < source.total_frames_num
-            ):
-                # CAP_PROP_FRAME_COUNT is the container's sample count, which
-                # can exceed the presentable frames — e.g. an mp4 edit list
-                # hides the decode lead-in of a stream-copied cut, but the
-                # hidden samples still count. Indices were sampled over frames
-                # that don't exist; resample over the true stream length and
-                # reread (one cheap extra pass over the visible frames).
-                logger.warning(
-                    "Video header claims %d frames but the stream ends after "
-                    "%d; resampling over the true frame count.",
-                    source.total_frames_num,
-                    frames_in_stream,
-                )
-                source = cls._prepare_source(
-                    VideoSourceMetadata(
-                        total_frames_num=frames_in_stream,
-                        original_fps=source.original_fps,
-                        duration=frames_in_stream / source.original_fps
-                        if source.original_fps > 0
-                        else 0,
-                    )
-                )
-                frame_idx = cls.compute_frames_index_to_sample(
-                    source=source, target=target, **kwargs
-                )
-                cap = cls.open_video_capture(data)
-                frames, valid, _ = cls.read_frames(
-                    cap,
-                    frame_idx,
-                    total_frames_num=source.total_frames_num,
-                    frame_recovery=frame_recovery,
-                )
         elif backend == "pyav":
             assert not frame_recovery, (
                 "frame_recovery is only available for `opencv` backend"
@@ -1953,48 +1971,22 @@ class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
 
         source = OpenCVVideoBackendMixin.get_video_metadata(cap)
 
-        def _sample_and_read(source, cap):
+        def _frame_indices(source):
             target = VideoTargetMetadata(
                 num_frames=num_frames,
                 fps=sampling_fps,
                 max_duration=source.duration,
             )
-            frame_idx = cls.compute_frames_index_to_sample(
+            return cls.compute_frames_index_to_sample(
                 source=source,
                 target=target,
                 frame_sample_mode=frame_sample_mode,
                 max_fps=max_fps,
             )
-            return cls.read_frames(
-                cap,
-                frame_idx,
-                total_frames_num=source.total_frames_num,
-                frame_recovery=frame_recovery,
-            )
 
-        frames, valid_frame_indices, frames_in_stream = _sample_and_read(source, cap)
-        if (
-            frames_in_stream is not None
-            and 0 < frames_in_stream < source.total_frames_num
-        ):
-            # See VideoBackend.load_bytes: header sample count exceeded the
-            # presentable frames (e.g. mp4 edit list) — resample and reread.
-            logger.warning(
-                "Video header claims %d frames but the stream ends after "
-                "%d; resampling over the true frame count.",
-                source.total_frames_num,
-                frames_in_stream,
-            )
-            source = VideoSourceMetadata(
-                total_frames_num=frames_in_stream,
-                original_fps=source.original_fps,
-                duration=frames_in_stream / source.original_fps
-                if source.original_fps > 0
-                else 0,
-            )
-            frames, valid_frame_indices, _ = _sample_and_read(
-                source, cls.open_video_capture(data)
-            )
+        frames, valid_frame_indices, _, source = cls.read_frames_resampling_truncated(
+            data, cap, source, _frame_indices, frame_recovery=frame_recovery
+        )
 
         metadata = cls.create_hf_metadata(
             source=source,
@@ -2140,46 +2132,13 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
             max_duration=max_duration,
         )
 
-        frame_indices_list = cls.compute_frames_index_to_sample(
-            source=source,
-            target=target,
-        )
-
-        frames, valid_frame_indices, frames_in_stream = cls.read_frames(
+        frames, valid_frame_indices, _, source = cls.read_frames_resampling_truncated(
+            data,
             cap,
-            frame_indices_list,
-            total_frames_num=source.total_frames_num,
+            source,
+            lambda s: cls.compute_frames_index_to_sample(source=s, target=target),
             frame_recovery=frame_recovery,
         )
-        if (
-            frames_in_stream is not None
-            and 0 < frames_in_stream < source.total_frames_num
-        ):
-            # See VideoBackend.load_bytes: header sample count exceeded the
-            # presentable frames (e.g. mp4 edit list) — resample and reread.
-            logger.warning(
-                "Video header claims %d frames but the stream ends after "
-                "%d; resampling over the true frame count.",
-                source.total_frames_num,
-                frames_in_stream,
-            )
-            source = VideoSourceMetadata(
-                total_frames_num=frames_in_stream,
-                original_fps=source.original_fps,
-                duration=frames_in_stream / source.original_fps
-                if source.original_fps > 0
-                else 0,
-            )
-            frame_indices_list = cls.compute_frames_index_to_sample(
-                source=source,
-                target=target,
-            )
-            frames, valid_frame_indices, _ = cls.read_frames(
-                cls.open_video_capture(data),
-                frame_indices_list,
-                total_frames_num=source.total_frames_num,
-                frame_recovery=frame_recovery,
-            )
 
         # Use transformers.video_utils.VideoMetadata format
         metadata = cls.create_hf_metadata(
