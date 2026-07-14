@@ -110,57 +110,6 @@ from .vision import get_vit_attn_backend
 
 logger = init_logger(__name__)
 
-
-class Qwen3AudioFeatureInputs(Qwen2_5OmniAudioFeatureInputs):
-    """Audio inputs accepted by the Qwen3 runners."""
-
-    input_features: torch.Tensor | list[torch.Tensor]
-
-
-def _pack_qwen3_audio_features(
-    input_features: torch.Tensor | list[torch.Tensor],
-    audio_feature_lengths: torch.Tensor,
-) -> torch.Tensor:
-    lengths = [int(length) for length in audio_feature_lengths.tolist()]
-
-    if isinstance(input_features, torch.Tensor):
-        if input_features.ndim == 2:
-            if input_features.shape[1] != sum(lengths):
-                raise ValueError(
-                    "Packed audio feature length does not match audio_feature_lengths"
-                )
-            return input_features
-        if input_features.ndim != 3:
-            raise ValueError(
-                "Audio features must be a packed 2D tensor, a batched 3D "
-                "tensor, or a list of 2D tensors"
-            )
-        features = list(input_features.unbind())
-    else:
-        features = input_features
-
-    if len(features) != len(lengths):
-        raise ValueError(
-            "Number of audio feature items does not match audio_feature_lengths"
-        )
-
-    trimmed_features = []
-    for index, (feature, length) in enumerate(zip(features, lengths)):
-        if not isinstance(feature, torch.Tensor) or feature.ndim != 2:
-            raise ValueError(f"Audio feature item {index} must be a 2D tensor")
-        if length < 0 or length > feature.shape[1]:
-            raise ValueError(
-                f"Audio feature length {length} is invalid for item {index} "
-                f"with width {feature.shape[1]}"
-            )
-        trimmed_features.append(feature[:, :length])
-
-    if not trimmed_features:
-        raise ValueError("Audio features must contain at least one item")
-
-    return torch.cat(trimmed_features, dim=1)
-
-
 # Speech input languages supported by Qwen3-Omni
 # From: https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Instruct
 ISO639_1_SUPPORTED_LANGS = {
@@ -1629,31 +1578,12 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
 
 
 class Qwen3OmniMoeConditionalGenerationMixin(Qwen2_5OmniConditionalGenerationMixin):
-    def _parse_and_validate_audio_input(
-        self, **kwargs: object
-    ) -> Qwen3AudioFeatureInputs | None:
-        input_audio_features = kwargs.pop("input_audio_features", None)
-        audio_feature_lengths = kwargs.pop("audio_feature_lengths", None)
-        feature_attention_mask = kwargs.pop("feature_attention_mask", None)
-        if input_audio_features is None:
-            return None
-
-        return Qwen3AudioFeatureInputs(
-            type="audio_features",
-            input_features=input_audio_features,
-            audio_feature_lengths=audio_feature_lengths,
-            feature_attention_mask=feature_attention_mask,
-        )
-
     def _process_audio_input(
         self,
-        audio_input: Qwen3AudioFeatureInputs,
+        audio_input: Qwen2_5OmniAudioFeatureInputs,
     ) -> tuple[torch.Tensor, ...]:
         input_features = audio_input["input_features"]
         audio_feature_lengths = audio_input["audio_feature_lengths"]
-        input_features = _pack_qwen3_audio_features(
-            input_features, audio_feature_lengths
-        )
 
         audio_output_lengths = _get_feat_extract_output_lengths(audio_feature_lengths)
 
