@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import numpy as np
 import torch
 
 from vllm.config import SpeculativeConfig
@@ -18,6 +19,15 @@ from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
+
+# Cap on the fp32 scratch that apply_sampling_params materializes.
+# Spec decode verifies num_reqs * (num_speculative_steps + 1) logits, so chunking
+# lets us cap the peak memory usage.
+# TODO(mgoin): Chunking is a workaround. The rejection kernels already upcast
+# per vocab block on load and apply ops like temperature and gumbel, so folding
+# sampling-param application into those kernels would remove this buffer and
+# its traffic entirely.
+MAX_CHUNK_BYTES = 512 * 1024 * 1024
 
 
 @triton.jit
@@ -98,6 +108,80 @@ class RejectionSampler:
             input_batch.cu_num_logits_np.tolist() if expanded_logits else None,
         )
 
+    def _verify(
+        self,
+        logits: torch.Tensor,
+        draft_logits: torch.Tensor | None,
+        draft_sampled: torch.Tensor,
+        pos: torch.Tensor,
+        cu_num_logits: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+        expanded_idx_mapping: torch.Tensor,
+        expanded_local_pos: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        processed_logits = self.sampler.apply_sampling_params(
+            logits,
+            expanded_idx_mapping,
+            idx_mapping_np,
+            pos,
+            draft_sampled,
+            expanded_local_pos,
+        )
+        sampled, num_sampled = rejection_sample(
+            processed_logits,
+            draft_logits,
+            draft_sampled,
+            cu_num_logits,
+            pos,
+            idx_mapping,
+            expanded_idx_mapping,
+            expanded_local_pos,
+            self.sampler.sampling_states.temperature.gpu,
+            self.sampler.sampling_states.seeds.gpu,
+            self.num_speculative_steps,
+            self.synthetic_conditional_rates,
+            use_fp64=self.sampler.use_fp64_gumbel,
+            use_block_verification=self.use_block_verification,
+        )
+        return processed_logits, sampled, num_sampled
+
+    def _verify_chunked(
+        self,
+        logits: torch.Tensor,
+        input_batch: InputBatch,
+        draft_logits: torch.Tensor | None,
+        draft_sampled: torch.Tensor,
+        pos: torch.Tensor,
+        max_chunk_logits: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Requests are independent, so verify them in request-aligned chunks. Each
+        # chunk's fp32 scratch is freed before the next one is allocated, capping
+        # the peak at max_chunk_logits rows instead of the whole batch.
+        cu_num_logits_np = input_batch.cu_num_logits_np
+        reqs_per_chunk = max(1, max_chunk_logits // (self.num_speculative_steps + 1))
+
+        sampled_chunks = []
+        num_sampled_chunks = []
+        for start in range(0, input_batch.num_reqs, reqs_per_chunk):
+            end = min(start + reqs_per_chunk, input_batch.num_reqs)
+            lo = int(cu_num_logits_np[start])
+            hi = int(cu_num_logits_np[end])
+            _, sampled, num_sampled = self._verify(
+                logits[lo:hi],
+                draft_logits,
+                draft_sampled[lo:hi],
+                pos[lo:hi],
+                input_batch.cu_num_logits[start : end + 1] - lo,
+                input_batch.idx_mapping[start:end],
+                input_batch.idx_mapping_np[start:end],
+                input_batch.expanded_idx_mapping[lo:hi],
+                input_batch.expanded_local_pos[lo:hi],
+            )
+            sampled_chunks.append(sampled)
+            num_sampled_chunks.append(num_sampled)
+        return torch.cat(sampled_chunks), torch.cat(num_sampled_chunks)
+
     def __call__(
         self,
         logits: torch.Tensor,
@@ -110,30 +194,35 @@ class RejectionSampler:
 
         draft_sampled = input_batch.input_ids[input_batch.logits_indices]
         pos = input_batch.positions[input_batch.logits_indices]
-        processed_logits = self.sampler.apply_sampling_params(
-            logits,
-            input_batch.expanded_idx_mapping,
-            input_batch.idx_mapping_np,
-            pos,
-            draft_sampled,
-            input_batch.expanded_local_pos,
+
+        # Only processed_logprobs needs the processed logits for the whole batch;
+        # raw_logprobs reads the (untouched) input logits, which chunking preserves.
+        need_processed_logits = (
+            self.sampler.logprobs_mode == "processed_logprobs"
+            and self.sampler.sampling_states.max_num_logprobs(
+                input_batch.idx_mapping_np
+            )
+            != NO_LOGPROBS
         )
-        sampled, num_sampled = rejection_sample(
-            processed_logits,
-            draft_logits,
-            draft_sampled,
-            input_batch.cu_num_logits,
-            pos,
-            input_batch.idx_mapping,
-            input_batch.expanded_idx_mapping,
-            input_batch.expanded_local_pos,
-            self.sampler.sampling_states.temperature.gpu,
-            self.sampler.sampling_states.seeds.gpu,
-            self.num_speculative_steps,
-            self.synthetic_conditional_rates,
-            use_fp64=self.sampler.use_fp64_gumbel,
-            use_block_verification=self.use_block_verification,
-        )
+        max_chunk_logits = max(1, MAX_CHUNK_BYTES // (logits.shape[1] * 4))
+        if need_processed_logits or logits.shape[0] <= max_chunk_logits:
+            processed_logits, sampled, num_sampled = self._verify(
+                logits,
+                draft_logits,
+                draft_sampled,
+                pos,
+                input_batch.cu_num_logits,
+                input_batch.idx_mapping,
+                input_batch.idx_mapping_np,
+                input_batch.expanded_idx_mapping,
+                input_batch.expanded_local_pos,
+            )
+        else:
+            processed_logits = None
+            sampled, num_sampled = self._verify_chunked(
+                logits, input_batch, draft_logits, draft_sampled, pos, max_chunk_logits
+            )
+
         logprobs_tensors = self._get_logprobs_tensors(
             input_batch,
             sampled,
