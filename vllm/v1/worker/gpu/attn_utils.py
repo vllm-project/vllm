@@ -218,7 +218,7 @@ def _reshape_attention_kv_cache(
         kv_cache = (
             kv_raw_tensor.view(-1, block_stride)[:, offset : offset + page_bytes]
             .view(dtype)
-            .view(kv_cache_shape)
+            .view(permuted_kv_cache_shape)
         )
     elif kv_cache_spec.page_size_padded is not None:
         # Use a strided view to skip the padding between physical pages.
@@ -238,7 +238,7 @@ def _reshape_attention_kv_cache(
         page_stride = kv_cache_spec.page_size_bytes // dtype_size
 
         num_blocks_dim = inv_order[0]
-        strides = list(torch.empty(permuted_kv_cache_shape).stride())
+        strides = list(torch.empty(permuted_kv_cache_shape, device="meta").stride())
         strides[num_blocks_dim] = page_stride
 
         kv_cache = torch.as_strided(
