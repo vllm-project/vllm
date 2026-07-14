@@ -144,6 +144,19 @@ ARG PYTORCH_AUDIO_REPO
 ARG USE_SCCACHE
 
 RUN apt-get update && apt-get install -y pkg-config liblzma-dev
+# torch 2.12 emits float->__bf16 conversion libcalls (e.g. __truncsfbf2) that
+# jammy's gcc-11 libgcc does not provide, breaking the libtorch_hip.so link.
+# gcc-13 (GCC_13.0.0) ships the bf16 soft-float builtins. add-apt-repository is
+# unusable here (python3 is repointed to 3.12, so apt_pkg is missing), so add
+# the toolchain PPA manually with an HTTPS-fetched key.
+RUN mkdir -p /etc/apt/keyrings \
+    && curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x60C317803A41BA51845E371A1E9377A2BA9EF27F" \
+       | gpg --dearmor -o /etc/apt/keyrings/ubuntu-toolchain-r.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/ubuntu-toolchain-r.gpg] https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu jammy main" \
+       > /etc/apt/sources.list.d/ubuntu-toolchain-r.list \
+    && apt-get update && apt-get install -y gcc-13 g++-13 \
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 130 \
+                           --slave  /usr/bin/g++ g++ /usr/bin/g++-13
 RUN git clone ${PYTORCH_REPO} pytorch
 RUN cd pytorch && git checkout ${PYTORCH_BRANCH}
 RUN cd pytorch \
