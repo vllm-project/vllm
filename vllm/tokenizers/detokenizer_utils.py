@@ -95,7 +95,14 @@ def convert_ids_list_to_tokens(
 
     """
     token_str_lst = []
+    vocab_size = len(tokenizer)
     for token_id in token_ids:
+        # Out-of-range ids (e.g. uninitialized prompt-logprobs slots) make a
+        # fast tokenizer's u32 conversion raise OverflowError; guard like
+        # detokenize_incrementally does.
+        if not 0 <= token_id < vocab_size:
+            token_str_lst.append("")
+            continue
         # use default skip_special_tokens.
         token_str = tokenizer.decode([token_id])
         if token_str is None:
