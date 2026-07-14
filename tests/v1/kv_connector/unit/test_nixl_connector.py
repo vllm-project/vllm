@@ -555,7 +555,6 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                     ssm_sizes=(0, 0),
                     attn_backend_name=self.backend_name,
                     physical_blocks_per_logical_kv_block=1,
-                    num_blocks_per_region=[1],
                 ),
                 remote_tp_rank=remote_tp_rank,
                 remote_tp_size=remote_tp_size,
@@ -1005,7 +1004,6 @@ class TestNixlHandshake:
                 ssm_sizes=(0, 0),
                 attn_backend_name=worker.backend_name,
                 physical_blocks_per_logical_kv_block=1,
-                num_blocks_per_region=[1],
             )
 
             with pytest.raises(RuntimeError):
@@ -1064,7 +1062,6 @@ class TestNixlHandshake:
                 ssm_sizes=(0, 0),
                 attn_backend_name=worker.backend_name,
                 physical_blocks_per_logical_kv_block=1,
-                num_blocks_per_region=[1],
             )
 
             # We don't check layout for homogeneous TP and MLA for now, as the
@@ -1181,7 +1178,6 @@ class TestNixlHandshake:
                 ssm_sizes=(0, 0),
                 attn_backend_name=worker.backend_name,
                 physical_blocks_per_logical_kv_block=1,
-                num_blocks_per_region=[1, 1],
             )
             worker.add_remote_agent(meta, remote_tp_size=1)
             assert (
@@ -1208,7 +1204,6 @@ class TestNixlHandshake:
                 ssm_sizes=(0, 0),
                 attn_backend_name=worker2.backend_name,
                 physical_blocks_per_logical_kv_block=1,
-                num_blocks_per_region=[1, 1],
             )
             with pytest.raises(AssertionError):
                 worker2.add_remote_agent(bad_meta, remote_tp_size=1)
@@ -1268,7 +1263,6 @@ class TestNixlHandshake:
                 ssm_sizes=(0, 0),
                 attn_backend_name=worker.backend_name,
                 physical_blocks_per_logical_kv_block=1,
-                num_blocks_per_region=[1],
             )
 
             # Must validate cleanly (used to raise AssertionError).
@@ -1326,7 +1320,6 @@ class TestNixlHandshake:
                 ssm_sizes=(0, 0),
                 attn_backend_name=worker.backend_name,
                 physical_blocks_per_logical_kv_block=1,
-                num_blocks_per_region=[1],
             )
 
             with pytest.raises(AssertionError):
@@ -2877,7 +2870,6 @@ def test_compatibility_hash_validation(
         ssm_sizes=(0, 0),
         attn_backend_name=decode_worker.backend_name,
         physical_blocks_per_logical_kv_block=1,
-        num_blocks_per_region=[1],
     )
     handshake_payload = NixlHandshakePayload(
         compatibility_hash=remote_hash,
