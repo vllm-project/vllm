@@ -490,32 +490,6 @@ def flatten_bn(
     return [x_n for x_b in x for x_n in x_b]
 
 
-def flatten_bn_with_lengths(
-    x: list[torch.Tensor] | torch.Tensor,
-    lengths: list[int] | torch.Tensor,
-    *,
-    concat: bool = False,
-) -> list[torch.Tensor] | torch.Tensor:
-    """
-    Flatten the `B` and `N` dimensions of batched multimodal inputs, while also
-    slicing the inputs according to the provided lengths to revert padding.
-    """
-
-    if isinstance(x, torch.Tensor):
-        x = x.flatten(0, 1)
-
-    if isinstance(lengths, torch.Tensor):
-        lengths = lengths.tolist()
-
-    offsets = list(itertools.accumulate([0] + lengths[:-1]))
-    x_f = [x[offset : offset + length] for offset, length in zip(offsets, lengths)]
-
-    if concat:
-        return torch.cat(x_f)
-
-    return x_f
-
-
 def _flatten_embeddings(embeddings: NestedTensors) -> torch.Tensor:
     """
     Recursively flattens and concatenates NestedTensors on all but the last

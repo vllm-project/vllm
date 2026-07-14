@@ -46,9 +46,12 @@ from vllm.model_executor.models.interfaces import (
     SupportsTranscription,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.qwen2_5_omni_thinker import (
+    Qwen2_5OmniAudioFeatureInputs,
+    unpad_and_flat_audio_features,
+)
 from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 from vllm.model_executor.models.qwen3_omni_moe_thinker import (
-    Qwen2_5OmniAudioFeatureInputs,
     Qwen3OmniMoeAudioEncoder,
     Qwen3OmniMoeThinkerMultiModalProcessor,
 )
@@ -89,8 +92,6 @@ from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.transformers_utils.processors.qwen3_asr import (
     Qwen3ASRProcessor,
 )
-
-from .utils import flatten_bn_with_lengths
 
 logger = init_logger(__name__)
 _ASR_TEXT_TAG = "<asr_text>"
@@ -420,13 +421,13 @@ class Qwen3ASRForConditionalGeneration(
             return None
 
         # inputs features from rust frontend is batched and padded
-        # with shape [batch_size, n_mels, total_seq_len], different
-        # from python's shape [batch_size * n_mels, total_seq_len]
+        # with shape [batch_size, n_mels, padded_seq_len], different
+        # from python's shape [n_mels, batch_size * seq_len]
         if (
             isinstance(input_audio_features, torch.Tensor)
             and input_audio_features.dim() == 3
         ):
-            input_audio_features = flatten_bn_with_lengths(
+            input_audio_features = unpad_and_flat_audio_features(
                 input_audio_features, audio_feature_lengths
             )
 

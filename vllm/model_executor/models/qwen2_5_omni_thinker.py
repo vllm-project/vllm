@@ -101,7 +101,6 @@ from .interfaces import (
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    flatten_bn_with_lengths,
     init_vllm_registered_model,
     maybe_prefix,
     split_list_into_ranges,
@@ -113,6 +112,23 @@ except (ImportError, ModuleNotFoundError):
     flash_attn = None
 
 logger = init_logger(__name__)
+
+
+def unpad_and_flat_audio_features(
+    input_audio_features: torch.Tensor,
+    audio_feature_lengths: torch.Tensor,
+) -> torch.Tensor:
+    """Unpad and flatten batched audio features."""
+    if len(audio_feature_lengths) != input_audio_features.size(0):
+        raise ValueError(
+            "Length of audio_feature_lengths must match "
+            "the batch size of input_audio_features."
+        )
+    unpadded_features = [
+        audio_feature[..., :length]
+        for audio_feature, length in zip(input_audio_features, audio_feature_lengths)
+    ]
+    return torch.cat(unpadded_features, dim=-1)
 
 
 def check_interleaved_audio_video(
@@ -889,13 +905,13 @@ class Qwen2_5OmniConditionalGenerationMixin:
             return None
 
         # inputs features from rust frontend is batched and padded
-        # with shape [batch_size, n_mels, total_seq_len], different
-        # from python's shape [batch_size * n_mels, total_seq_len]
+        # with shape [batch_size, n_mels, padded_seq_len], different
+        # from python's shape [n_mels, batch_size * seq_len]
         if (
             isinstance(input_audio_features, torch.Tensor)
             and input_audio_features.dim() == 3
         ):
-            input_audio_features = flatten_bn_with_lengths(
+            input_audio_features = unpad_and_flat_audio_features(
                 input_audio_features, audio_feature_lengths
             )
 
