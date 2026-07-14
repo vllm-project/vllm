@@ -194,6 +194,13 @@ def load_lora_op_config(op_type: str, add_inputs: bool | None) -> dict | None:
     return config_data
 
 
+@lru_cache
+def _is_hopper() -> bool:
+    return current_platform.is_cuda() and current_platform.is_device_capability_family(
+        90
+    )
+
+
 @functools.lru_cache
 def get_lora_op_configs(
     op_type: str,
@@ -260,9 +267,18 @@ def get_lora_op_configs(
             "split_k": 1,
         }
     else:
+        if num_slices > 1:
+            block_n = 64
+        elif _is_hopper():
+            # block_n=128 triggers a NaN-producing Triton/WGMMA codegen bug
+            # for the single-slice expand kernel on Hopper (sm_90); see
+            # https://github.com/vllm-project/vllm/issues/48590
+            block_n = 32
+        else:
+            block_n = 128
         default = {
             "block_m": 64,
-            "block_n": 64 if num_slices > 1 else 128,
+            "block_n": block_n,
             "block_k": 32,
             "num_warps": 4,
             "num_ctas": 1,
