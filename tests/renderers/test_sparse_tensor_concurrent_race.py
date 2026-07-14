@@ -24,7 +24,7 @@ import torch
 from vllm.config import ModelConfig
 from vllm.multimodal.media import AudioEmbeddingMediaIO, ImageEmbeddingMediaIO
 from vllm.renderers.embed_utils import safe_load_prompt_embeds
-from vllm.utils.sparse_utils import sparse_invariants_checked
+from vllm.utils.sparse_utils import check_sparse_tensor_invariants_threadsafe
 
 
 def _encode_tensor(tensor: torch.Tensor) -> bytes:
@@ -102,7 +102,7 @@ class TestConcurrentRaceProtection:
         def thread_a_benign():
             """Enter context, signal B, load, exit."""
             try:
-                with sparse_invariants_checked():
+                with check_sparse_tensor_invariants_threadsafe():
                     barrier.wait()  # signal B that A holds the lock
                     tensor = torch.load(
                         io.BytesIO(pybase64.b64decode(valid_encoded, validate=True)),
@@ -118,7 +118,7 @@ class TestConcurrentRaceProtection:
             """Wait for A to hold the lock, then try to acquire it."""
             try:
                 barrier.wait()  # wait until A is inside the lock
-                with sparse_invariants_checked():
+                with check_sparse_tensor_invariants_threadsafe():
                     tensor = torch.load(
                         io.BytesIO(
                             pybase64.b64decode(malicious_encoded, validate=True)
@@ -266,9 +266,9 @@ class TestCrossLoaderLockSharing:
         import vllm.multimodal.media.image as image_mod
         import vllm.renderers.embed_utils as embed_mod
         from vllm.utils.sparse_utils import (
-            sparse_invariants_checked as cm_from_utils,
+            check_sparse_tensor_invariants_threadsafe as cm_from_utils,
         )
 
-        assert embed_mod.sparse_invariants_checked is cm_from_utils
-        assert image_mod.sparse_invariants_checked is cm_from_utils
-        assert audio_mod.sparse_invariants_checked is cm_from_utils
+        assert embed_mod.check_sparse_tensor_invariants_threadsafe is cm_from_utils
+        assert image_mod.check_sparse_tensor_invariants_threadsafe is cm_from_utils
+        assert audio_mod.check_sparse_tensor_invariants_threadsafe is cm_from_utils
