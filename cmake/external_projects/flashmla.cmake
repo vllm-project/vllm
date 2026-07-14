@@ -18,11 +18,8 @@ if(FLASH_MLA_SRC_DIR)
 else()
   FetchContent_Declare(
         flashmla
-        # WIP: points at the ABI-stable branch on Jane's fork for integration
-        # testing. Before merging, repoint to vllm-project/FlashMLA and pin to the
-        # merged commit (a branch ref is not reproducible).
-        GIT_REPOSITORY https://github.com/janeyx99/FlashMLA
-        GIT_TAG abi-stable-review-fixes
+        GIT_REPOSITORY https://github.com/vllm-project/FlashMLA
+        GIT_TAG a8f794d1251cbfd88a5011445dd5582289c727e4
         GIT_PROGRESS TRUE
         CONFIGURE_COMMAND ""
         BUILD_COMMAND ""

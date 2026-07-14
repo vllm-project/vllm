@@ -23,7 +23,8 @@ steps:
   - tests/kernels/test_concat_mla_q.py
   - tests/kernels/test_fused_qk_norm_rope_gate.py
   commands:
-    - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py kernels/test_fused_qk_norm_rope_gate.py
+    - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_concat_mla_q.py kernels/test_fused_qk_norm_rope_gate.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 3
 
 - label: Kernels MiniMax Reduce RMS Test (2 GPUs)
   key: kernels-minimax-reduce-rms-test-2-gpus
@@ -271,7 +272,8 @@ steps:
   - tests/kernels/helion/
   commands:
     - pip install helion==1.1.0
-    - pytest -v -s kernels/helion/
+    - pytest -v -s kernels/helion/ --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 2
 
  
 - label: Kernels FP8 MoE Test (1xH100)

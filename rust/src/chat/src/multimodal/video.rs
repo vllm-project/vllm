@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Video-modality preparation: per-clip preprocessing, config resolution,
 //! and per-item feature build.
 

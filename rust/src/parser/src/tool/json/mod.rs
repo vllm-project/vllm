@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Shared parser core for JSON tool calls wrapped by text markers.
 
 pub use granite4::Granite4ToolParser;

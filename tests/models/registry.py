@@ -576,6 +576,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
 _EMBEDDING_EXAMPLE_MODELS = {
     # [Text-only]
     "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5"),
+    "BertForMaskedLM": _HfExamplesInfo("google-bert/bert-base-uncased"),
     "BertSpladeSparseEmbeddingModel": _HfExamplesInfo(
         "naver/splade-v3",
         hf_overrides={"architectures": ["BertSpladeSparseEmbeddingModel"]},
@@ -1308,6 +1309,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Qwen3_5ForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3.5-0.8B",
+        extras={"4b": "Qwen/Qwen3.5-4B"},
         max_model_len=4096,
     ),
     "Qwen3_5MoeForConditionalGeneration": _HfExamplesInfo(
@@ -1512,7 +1514,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         tokenizer="meta-llama/Llama-4-Scout-17B-16E-Instruct",
     ),
     "EagleMiniCPMForCausalLM": _HfExamplesInfo(
-        "openbmb/MiniCPM-1B-sft-bf16",
+        "openbmb/MiniCPM-2B-sft-bf16",
         trust_remote_code=True,
         speculative_model="openbmb/MiniCPM-2B-sft-bf16",
         speculative_method="eagle",
