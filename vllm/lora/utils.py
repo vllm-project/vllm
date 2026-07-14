@@ -9,10 +9,12 @@ from huggingface_hub.utils import HfHubHTTPError, HFValidationError
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm import envs
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
-from vllm.transformers_utils.modelscope_utils import configure_modelscope_runtime
+from vllm.transformers_utils.modelscope_utils import (
+    configure_modelscope_runtime,
+    should_use_modelscope,
+)
 
 # being imported for _all_lora_classes below
 from vllm.lora.layers import (
@@ -342,7 +344,7 @@ def get_adapter_absolute_path(lora_path: str) -> str:
         return os.path.abspath(lora_path)
 
     # If the path does not exist locally.
-    if envs.VLLM_USE_MODELSCOPE:
+    if should_use_modelscope():
         configure_modelscope_runtime()
         # If using ModelScope, we assume the path is a ModelScope repo.
         from modelscope.hub.snapshot_download import InvalidParameter, snapshot_download
