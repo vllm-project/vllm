@@ -360,7 +360,7 @@ export HF_TOKEN ZE_AFFINITY_MASK
     --ipc=host \
     --privileged \
     -v /dev/dri/by-path:/dev/dri/by-path \
-    -v "${HOME}/.cache/huggingface:/root/.cache/huggingface" \
+    -v "/data/huggingface:/root/.cache/huggingface" \
     --entrypoint='' \
     -e HF_TOKEN \
     -e ZE_AFFINITY_MASK \
