@@ -456,7 +456,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
             # repeat the qzeros/scales to fit new group size
             if (
                 layer.group_size_div_factor > 1
-                and ("qzeros" in weight_name or "scales" in weight_name)
+                and "qzeros" in weight_name
+                or "scales" in weight_name
             ):
                 loaded_weight = loaded_weight.repeat_interleave(
                     layer.group_size_div_factor, 1
