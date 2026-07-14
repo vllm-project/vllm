@@ -364,6 +364,11 @@ class Qwen3ASRForConditionalGeneration(
             "thinker.lm_head.": "language_model.lm_head.",
             "thinker.model.": "language_model.model.",
             "thinker.": "",
+            # HF format mapper
+            "model.audio_tower.": "audio_tower.",
+            "model.language_model.": "language_model.model.",
+            "model.multi_modal_projector.linear_1.": "audio_tower.proj1.",
+            "model.multi_modal_projector.linear_2.": "audio_tower.proj2.",
         }
     )
 
