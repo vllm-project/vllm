@@ -420,8 +420,8 @@ def test_fmha_sm100_indexer_matches_reference(q_lens, prefix_lens, index_dtype):
     _assert_topk_indices_equal_unordered(actual, expected)
 
 
-# Full impl-level parity: drive both MiniMaxM3IndexerMSAImpl (fmha_sm100 score +
-# Triton top-k) and MiniMaxM3IndexerTritonImpl through their real metadata
+# Full impl-level parity: drive both MiniMaxM3IndexerMSAImpl (fmha/CuteDSL score
+# + unified top-k) and MiniMaxM3IndexerTritonImpl through their real metadata
 # builders on the SAME CommonAttentionMetadata + index cache, and assert the
 # selected blocks agree. This exercises all the metadata the impl/kernels consume
 # (decode/prefill split, cu_seqlens_q rebasing, prefix_lens, kv_indices gather,
@@ -432,7 +432,8 @@ def test_fmha_sm100_indexer_matches_reference(q_lens, prefix_lens, index_dtype):
     reason="fmha_sm100 indexer requires SM100 (Blackwell).",
 )
 @pytest.mark.parametrize("topk", [8, 16])
-def test_msa_indexer_impl_matches_triton(topk, monkeypatch):
+@pytest.mark.parametrize("index_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_msa_indexer_impl_matches_triton(topk, index_dtype, monkeypatch):
     import vllm.models.minimax_m3.common.indexer as indexer_mod
     from tests.v1.attention.utils import (
         BatchSpec,
@@ -476,13 +477,13 @@ def test_msa_indexer_impl_matches_triton(topk, monkeypatch):
     block_table = common.block_table_tensor
     num_pages = int(block_table.max().item()) + 1
     index_cache = torch.zeros(
-        num_pages, BLOCK_SIZE, head_dim, device=device, dtype=DTYPE
+        num_pages, BLOCK_SIZE, head_dim, device=device, dtype=index_dtype
     )
     for r, seq_len in enumerate(batch.seq_lens):
         for b in range((seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE):
             index_cache[block_table[r, b]] = float(b + 1)
     index_q = torch.ones(
-        num_tokens, num_idx_heads * head_dim, device=device, dtype=DTYPE
+        num_tokens, num_idx_heads * head_dim, device=device, dtype=index_dtype
     )
 
     spec = MLAAttentionSpec(
@@ -625,9 +626,8 @@ def test_decode_index_topk_correctness(
 )
 @pytest.mark.parametrize("num_idx_heads", [1, 4])
 def test_decode_index_topk_fp8(num_idx_heads: int):
-    """The fp8 (e4m3) indexer cache feeds the Triton decode kernel on the MSA
-    path. The kernel must score in fp32 (no scaling) so its top-k matches a
-    reference computed from the dequantized fp8 values."""
+    """The standalone Triton path must score FP8 inputs in FP32 so its top-k
+    matches a reference computed from the dequantized FP8 values."""
     torch.manual_seed(0)
     topk, init_blocks, local_blocks, head_dim = 8, 0, 1, 128
     decode_query_len = 1
@@ -712,7 +712,6 @@ def test_decode_index_score_cutedsl_correctness(
     max_blocks = (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
     score_block_stride = ((max_blocks + 15) // 16) * 16
     num_pages = batch * max_blocks
-
     block_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32).reshape(
         batch, max_blocks
     )

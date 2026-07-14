@@ -452,13 +452,12 @@ def minimax_m3_index_decode_score_cutedsl(
     num_kv_heads: int,
     decode_query_len: int,
     max_decode_query_len: int,
-    score_out: torch.Tensor | None = None,
+    score_out: torch.Tensor,
 ) -> torch.Tensor:
     if idx_q.dtype not in (torch.bfloat16, torch.float8_e4m3fn):
         raise TypeError("CuteDSL index decode score supports BF16 and FP8 E4M3 only")
     total_tokens, num_heads, head_dim = idx_q.shape
     batch = block_table.shape[0]
-    assert score_out is not None
     assert index_kv_cache.shape[1] == IndexDecodeScoreKernel.BLOCK_K
     assert total_tokens == batch * decode_query_len
     assert 1 <= decode_query_len <= max_decode_query_len
