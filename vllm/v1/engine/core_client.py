@@ -602,6 +602,8 @@ class MPClient(EngineCoreClient):
             enable_input_socket_handover = parallel_config.enable_elastic_ep
 
             self.stats_update_address: str | None = None
+            self.coordinator_input_address: str | None = None
+            self.coordinator_output_address: str | None = None
             tensor_queue: Queue | None = None
             if client_addresses:
                 # Engines are managed externally to this client.
@@ -690,6 +692,11 @@ class MPClient(EngineCoreClient):
                     assert self.stats_update_address == (
                         coordinator.get_stats_publish_address()
                     )
+
+            self.input_address = self.input_socket.getsockopt_string(zmq.LAST_ENDPOINT)
+            output_socket = self.resources.output_socket
+            assert output_socket is not None
+            self.output_address = output_socket.getsockopt_string(zmq.LAST_ENDPOINT)
 
             # Serialization setup with tensor queues for multimodal tensor IPC.
             tensor_ipc_sender: TensorIpcSender | None = None
@@ -873,6 +880,25 @@ class MPClient(EngineCoreClient):
             self._kv_event_sources[response.data_parallel_rank] = (
                 response.kv_events_config
             )
+
+        parallel_config = vllm_config.parallel_config
+        if response.coord_store_port:
+            if parallel_config._coord_store_port:
+                assert response.coord_store_port == parallel_config._coord_store_port
+            else:
+                parallel_config._coord_store_port = response.coord_store_port
+
+        for attribute in (
+            "coordinator_input_address",
+            "coordinator_output_address",
+        ):
+            address = getattr(response, attribute)
+            if address is not None:
+                existing_address = getattr(self, attribute)
+                if existing_address is None:
+                    setattr(self, attribute, address)
+                else:
+                    assert address == existing_address
 
     def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
         return dict(self._kv_event_sources)
