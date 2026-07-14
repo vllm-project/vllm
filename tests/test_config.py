@@ -362,6 +362,31 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
     assert cfg.scheduler_config.async_scheduling is True
 
 
+def test_rescope_for_independent_dp_on_multinode_dense_model():
+    parallel_config = ParallelConfig(
+        tensor_parallel_size=8,
+        data_parallel_size=2,
+        data_parallel_size_local=1,
+        data_parallel_rank=1,
+        distributed_executor_backend="mp",
+        nnodes=2,
+        node_rank=1,
+    )
+
+    assert parallel_config.nnodes_within_dp == 1
+    assert parallel_config.node_rank_within_dp == 0
+
+    parallel_config.rescope_for_independent_dp()
+
+    assert parallel_config.data_parallel_size == 1
+    assert parallel_config.data_parallel_size_local == 1
+    assert parallel_config.data_parallel_rank == 0
+    assert parallel_config.data_parallel_index == 1
+    assert parallel_config.nnodes == 1
+    assert parallel_config.node_rank == 0
+    assert parallel_config.world_size == 8
+
+
 @dataclass
 class _TestConfigFields:
     a: int

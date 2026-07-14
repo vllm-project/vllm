@@ -999,14 +999,9 @@ class ParallelConfig:
 
         return self
 
-    def rescope_for_independent_dp(self):
-        """
-        For non-MoE models with data parallelism, each DP rank is
-        independent. This method re-scopes the parallel config to
-        reflect the world of a single DP rank.
-        """
-        # The order of operations is important here to correctly capture
-        # the values before they are affected by other config changes.
+    def rescope_for_independent_dp(self) -> None:
+        """Rescope config for an independent non-MoE DP rank."""
+        # Capture these before changing DP fields.
         nnodes = self.nnodes_within_dp
         node_rank = self.node_rank_within_dp
         self.data_parallel_size = 1
