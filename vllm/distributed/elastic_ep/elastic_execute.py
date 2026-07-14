@@ -180,8 +180,8 @@ class ElasticEPScalingExecutor:
         from vllm.platforms import current_platform
 
         self.worker.vllm_config.enable_trace_function_call_for_thread()
-        if hasattr(self.worker, "device"):
-            current_platform.set_device(self.worker.device)
+        assert hasattr(self.worker, "device")
+        current_platform.set_device(self.worker.device)
         with set_current_vllm_config(self.worker.vllm_config):
             self.execute(execute_method, *args, **kwargs)
 
