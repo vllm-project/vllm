@@ -3,13 +3,13 @@
 """
 Thread-safe wrapper for sparse tensor invariant validation.
 
-PyTorch's ``torch.sparse.check_sparse_tensor_invariants()`` context manager
+PyTorch's `torch.sparse.check_sparse_tensor_invariants()` context manager
 manipulates a **process-global** flag (save/enable/restore). When multiple
 embedding-load operations run concurrently on a thread-pool executor, one
-context can restore the flag to ``False`` while another thread is still inside
+context can restore the flag to `False` while another thread is still inside
 its guard, bypassing the invariant check.
 
-All call sites MUST use ``check_sparse_tensor_invariants_threadsafe()``
+All call sites MUST use `check_sparse_tensor_invariants_threadsafe()`
 which serializes access behind a lock.
 """
 
