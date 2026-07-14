@@ -36,6 +36,10 @@ from vllm.v1.kv_cache_interface import (
 )
 
 
+def _prefer_two_stage_compressor() -> bool:
+    return current_platform.is_rocm()
+
+
 class CompressorBackend(AttentionBackend):
     def __init__(self):
         super().__init__()
@@ -83,7 +87,7 @@ class CompressorMetadata:
     block_size: int
 
     token_to_req_indices: torch.Tensor | None = None  # [num_tokens]
-    num_decode_tokens: int = 0
+    num_decode_tokens: int | None = None
 
 
 class CompressorMetadataBuilder(AttentionMetadataBuilder):
@@ -110,9 +114,11 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
         token_to_req_indices = common_attn_metadata.token_to_req_indices(
             self.token_to_req_indices
         )
-        _, _, num_decode_tokens, _ = split_decodes_and_prefills(
-            common_attn_metadata, decode_threshold=1
-        )
+        num_decode_tokens = None
+        if _prefer_two_stage_compressor():
+            _, _, num_decode_tokens, _ = split_decodes_and_prefills(
+                common_attn_metadata, decode_threshold=1
+            )
         return CompressorMetadata(
             block_table=common_attn_metadata.block_table_tensor.clamp_(min=0),
             slot_mapping=common_attn_metadata.slot_mapping,
@@ -225,7 +231,7 @@ class DeepseekCompressor(nn.Module):
         # the intermediate compressed_kv.
         # Currently only tested on ROCm
         self._use_two_stage_fused_compressor = (
-            current_platform.is_rocm() and head_dim == 512 and not self.overlap
+            _prefer_two_stage_compressor() and head_dim == 512 and not self.overlap
         )
         self.max_num_batched_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens
@@ -393,6 +399,7 @@ class DeepseekCompressor(nn.Module):
         elif self._use_two_stage_fused_compressor:
             # head=512 cr>=128 (no overlap): two-pass split compressor on the
             # prefill suffix, single-pass on the decode prefix.
+            assert state_metadata.num_decode_tokens is not None
             compress_norm_rope_store_fn = compress_norm_rope_store_two_stage_triton
             extra_kwargs = {
                 "num_decode_tokens": state_metadata.num_decode_tokens,
