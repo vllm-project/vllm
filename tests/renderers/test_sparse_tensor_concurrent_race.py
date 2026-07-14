@@ -24,7 +24,7 @@ import torch
 from vllm.config import ModelConfig
 from vllm.multimodal.media import AudioEmbeddingMediaIO, ImageEmbeddingMediaIO
 from vllm.renderers.embed_utils import safe_load_prompt_embeds
-from vllm.utils.sparse_utils import _SPARSE_LOAD_LOCK
+from vllm.utils.sparse_utils import sparse_invariants_checked
 
 
 def _encode_tensor(tensor: torch.Tensor) -> bytes:
@@ -102,7 +102,7 @@ class TestConcurrentRaceProtection:
         def thread_a_benign():
             """Enter context, signal B, load, exit."""
             try:
-                with _SPARSE_LOAD_LOCK, torch.sparse.check_sparse_tensor_invariants():
+                with sparse_invariants_checked():
                     barrier.wait()  # signal B that A holds the lock
                     tensor = torch.load(
                         io.BytesIO(pybase64.b64decode(valid_encoded, validate=True)),
@@ -118,7 +118,7 @@ class TestConcurrentRaceProtection:
             """Wait for A to hold the lock, then try to acquire it."""
             try:
                 barrier.wait()  # wait until A is inside the lock
-                with _SPARSE_LOAD_LOCK, torch.sparse.check_sparse_tensor_invariants():
+                with sparse_invariants_checked():
                     tensor = torch.load(
                         io.BytesIO(
                             pybase64.b64decode(malicious_encoded, validate=True)
@@ -260,16 +260,15 @@ class TestCrossLoaderLockSharing:
         with pytest.raises((RuntimeError, ValueError)):
             io_handler.load_base64("", malicious.decode("utf-8"))
 
-    def test_all_loaders_use_same_lock_instance(self):
-        """Verify at import time that all modules reference the same lock."""
-        # Re-import from each consumer module's namespace
+    def test_all_loaders_use_same_context_manager(self):
+        """Verify all modules reference the same context manager function."""
         import vllm.multimodal.media.audio as audio_mod
         import vllm.multimodal.media.image as image_mod
         import vllm.renderers.embed_utils as embed_mod
         from vllm.utils.sparse_utils import (
-            _SPARSE_LOAD_LOCK as lock_from_utils,
+            sparse_invariants_checked as cm_from_utils,
         )
 
-        assert embed_mod._SPARSE_LOAD_LOCK is lock_from_utils
-        assert image_mod._SPARSE_LOAD_LOCK is lock_from_utils
-        assert audio_mod._SPARSE_LOAD_LOCK is lock_from_utils
+        assert embed_mod.sparse_invariants_checked is cm_from_utils
+        assert image_mod.sparse_invariants_checked is cm_from_utils
+        assert audio_mod.sparse_invariants_checked is cm_from_utils
