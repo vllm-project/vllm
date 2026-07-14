@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
-use hf_hub::api::tokio::ApiBuilder;
+use hf_hub::{HFClient, split_id};
 use tokio::runtime::Runtime;
 use vllm_tokenizer::{TiktokenTokenizer, Tokenizer};
 
@@ -57,16 +57,23 @@ impl BenchFixture {
 
 fn tiktoken_model() -> std::path::PathBuf {
     Runtime::new().expect("build tokio runtime").block_on(async {
-        let repo = ApiBuilder::from_env()
-            .with_progress(false)
-            .build()
-            .expect("build hf-hub api")
-            .model(MODEL_ID.to_string());
-        repo.get("config.json").await.expect("fetch config.json from hf-hub");
-        repo.get("tokenizer_config.json")
+        let (owner, name) = split_id(MODEL_ID);
+        let repo = HFClient::new().expect("build hf-hub api").model(owner, name);
+        repo.download_file()
+            .filename("config.json")
+            .send()
+            .await
+            .expect("fetch config.json from hf-hub");
+        repo.download_file()
+            .filename("tokenizer_config.json")
+            .send()
             .await
             .expect("fetch tokenizer_config.json from hf-hub");
-        repo.get("tiktoken.model").await.expect("fetch tiktoken.model from hf-hub")
+        repo.download_file()
+            .filename("tiktoken.model")
+            .send()
+            .await
+            .expect("fetch tiktoken.model from hf-hub")
     })
 }
 

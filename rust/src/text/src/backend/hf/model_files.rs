@@ -3,14 +3,10 @@
 
 use std::path::{Path, PathBuf};
 
-use hf_hub::Cache;
-use hf_hub::api::tokio::{Api, ApiBuilder, ApiRepo};
-use thiserror_ext::AsReport as _;
+use hf_hub::{HFClient, HFError, HFRepository, RepoTypeModel, split_id};
 
 use super::config::{HfTokenizerConfig, load_tokenizer_config};
 use crate::error::{Error, Result};
-
-const HF_TOKEN_ENV: &str = "HF_TOKEN";
 
 /// The tokenizer source selected for a model.
 #[derive(Debug, Clone)]
@@ -33,6 +29,55 @@ impl TokenizerSource {
         match self {
             Self::HuggingFace(path) | Self::Tiktoken(path) | Self::Tekken(path) => path,
         }
+    }
+}
+
+/// A typed Hugging Face model repository with shared client configuration.
+struct HubModel<'a> {
+    model_id: &'a str,
+    repo: HFRepository<RepoTypeModel>,
+}
+
+impl<'a> HubModel<'a> {
+    fn from_env(model_id: &'a str) -> Result<Self> {
+        let client = HFClient::new().map_err(|source| Error::HuggingFaceHubClient {
+            source: Box::new(source),
+        })?;
+        Ok(Self::new(model_id, client))
+    }
+
+    fn new(model_id: &'a str, client: HFClient) -> Self {
+        let (owner, name) = split_id(model_id);
+        Self {
+            model_id,
+            repo: client.model(owner, name),
+        }
+    }
+
+    async fn cached_file(&self, filename: &str) -> Result<Option<PathBuf>> {
+        let result =
+            self.repo.download_file().filename(filename).local_files_only(true).send().await;
+        match result {
+            Ok(path) => Ok(Some(path)),
+            Err(HFError::LocalEntryNotFound { .. } | HFError::EntryNotFound { .. }) => Ok(None),
+            Err(source) => Err(Error::HuggingFaceHubFile {
+                operation: "resolve cached",
+                filename: filename.to_owned(),
+                model_id: self.model_id.to_owned(),
+                source: Box::new(source),
+            }),
+        }
+    }
+
+    async fn download_file(&self, filename: &str) -> Result<PathBuf> {
+        self.repo.download_file().filename(filename).send().await.map_err(|source| {
+            Error::HuggingFaceHubFile {
+                operation: "download",
+                filename: filename.to_owned(),
+                model_id: self.model_id.to_owned(),
+                source: Box::new(source),
+            }
+        })
     }
 }
 
@@ -60,10 +105,11 @@ impl ResolvedModelFiles {
         if Path::new(model_id).is_dir() {
             return resolve_local_model_files(Path::new(model_id));
         }
-        if let Some(files) = resolve_cached_model_files(model_id)? {
+        let model = HubModel::from_env(model_id)?;
+        if let Some(files) = resolve_cached_model_files(&model).await? {
             return Ok(files);
         }
-        resolve_remote_model_files(model_id).await
+        resolve_remote_model_files(&model).await
     }
 }
 
@@ -87,52 +133,48 @@ fn resolve_local_model_files(model_dir: &Path) -> Result<ResolvedModelFiles> {
     })
 }
 
-async fn resolve_remote_model_files(model_id: &str) -> Result<ResolvedModelFiles> {
-    let api = build_api().map_err(|error| Error::Tokenizer(error.to_report_string()))?;
-    let repo = api.model(model_id.to_string());
-    let info = repo.info().await.map_err(|error| {
-        Error::Tokenizer(format!(
-            "failed to fetch model '{model_id}': {}",
-            error.as_report()
-        ))
+async fn resolve_remote_model_files(model: &HubModel<'_>) -> Result<ResolvedModelFiles> {
+    let info = model.repo.info().send().await.map_err(|source| Error::HuggingFaceHubModel {
+        model_id: model.model_id.to_owned(),
+        source: Box::new(source),
     })?;
 
     let siblings = info
         .siblings
         .iter()
+        .flatten()
         .map(|sibling| sibling.rfilename.as_str())
         .collect::<std::collections::BTreeSet<_>>();
 
     let tokenizer_config_path =
-        download_if_present(&repo, model_id, &siblings, "tokenizer_config.json").await?;
+        download_if_present(model, &siblings, "tokenizer_config.json").await?;
     let tokenizer_config = load_tokenizer_config(tokenizer_config_path.as_deref())?;
 
     let tokenizer = resolve_remote_tokenizer_source(
-        &repo,
-        model_id,
+        model,
         &siblings,
         tokenizer_config.tokenizer_class.as_deref(),
     )
     .await?;
 
     let generation_config_path =
-        download_if_present(&repo, model_id, &siblings, "generation_config.json").await?;
+        download_if_present(model, &siblings, "generation_config.json").await?;
     let preprocessor_config_path =
-        download_if_present(&repo, model_id, &siblings, "preprocessor_config.json").await?;
+        download_if_present(model, &siblings, "preprocessor_config.json").await?;
     let video_preprocessor_config_path =
-        download_if_present(&repo, model_id, &siblings, "video_preprocessor_config.json").await?;
+        download_if_present(model, &siblings, "video_preprocessor_config.json").await?;
     let processor_config_path =
-        download_if_present(&repo, model_id, &siblings, "processor_config.json").await?;
+        download_if_present(model, &siblings, "processor_config.json").await?;
     let chat_template_name = siblings
         .contains("chat_template.json")
         .then_some("chat_template.json")
         .or_else(|| siblings.contains("chat_template.jinja").then_some("chat_template.jinja"))
         .or_else(|| siblings.iter().copied().find(|name| name.ends_with(".jinja")));
     let chat_template_path = match chat_template_name {
-        Some(name) => Some(download_known_file(&repo, model_id, name).await?),
+        Some(name) => Some(model.download_file(name).await?),
         None => None,
     };
-    let config_path = download_if_present(&repo, model_id, &siblings, "config.json").await?;
+    let config_path = download_if_present(model, &siblings, "config.json").await?;
 
     Ok(ResolvedModelFiles {
         tokenizer,
@@ -146,25 +188,27 @@ async fn resolve_remote_model_files(model_id: &str) -> Result<ResolvedModelFiles
     })
 }
 
-fn resolve_cached_model_files(model_id: &str) -> Result<Option<ResolvedModelFiles>> {
-    let cache_repo = Cache::from_env().model(model_id.to_string());
-
-    let tokenizer_config_path = cache_repo.get("tokenizer_config.json");
+async fn resolve_cached_model_files(model: &HubModel<'_>) -> Result<Option<ResolvedModelFiles>> {
+    let tokenizer_config_path = model.cached_file("tokenizer_config.json").await?;
     let tokenizer_config = load_tokenizer_config(tokenizer_config_path.as_deref())?;
-    let tokenizer = match resolve_cached_tokenizer_source(&cache_repo, &tokenizer_config)? {
-        Some(tokenizer) => tokenizer,
-        None => return Ok(None),
-    };
+    let config_path = model.cached_file("config.json").await?;
+    let tokenizer =
+        match resolve_cached_tokenizer_source(model, &tokenizer_config, config_path.as_deref())
+            .await?
+        {
+            Some(tokenizer) => tokenizer,
+            None => return Ok(None),
+        };
 
     let model_dir = tokenizer.path().parent().ok_or_else(|| {
         Error::Tokenizer("resolved tokenizer file has no parent directory".to_string())
     })?;
-    let generation_config_path = cache_repo.get("generation_config.json");
-    let preprocessor_config_path = cache_repo.get("preprocessor_config.json");
-    let video_preprocessor_config_path = cache_repo.get("video_preprocessor_config.json");
-    let processor_config_path = cache_repo.get("processor_config.json");
+    let generation_config_path = model.cached_file("generation_config.json").await?;
+    let preprocessor_config_path = model.cached_file("preprocessor_config.json").await?;
+    let video_preprocessor_config_path =
+        model.cached_file("video_preprocessor_config.json").await?;
+    let processor_config_path = model.cached_file("processor_config.json").await?;
     let chat_template_path = discover_chat_template_in_dir(model_dir);
-    let config_path = cache_repo.get("config.json");
 
     Ok(Some(ResolvedModelFiles {
         tokenizer,
@@ -179,23 +223,23 @@ fn resolve_cached_model_files(model_id: &str) -> Result<Option<ResolvedModelFile
 }
 
 async fn resolve_remote_tokenizer_source(
-    repo: &ApiRepo,
-    model_id: &str,
+    model: &HubModel<'_>,
     siblings: &std::collections::BTreeSet<&str>,
     tokenizer_class: Option<&str>,
 ) -> Result<TokenizerSource> {
-    if let Some(tekken_path) = download_if_present(repo, model_id, siblings, "tekken.json").await? {
+    if let Some(tekken_path) = download_if_present(model, siblings, "tekken.json").await? {
         return Ok(TokenizerSource::Tekken(tekken_path));
     }
 
     let tokenizer_path = if siblings.contains("tokenizer.json") {
-        download_known_file(repo, model_id, "tokenizer.json").await?
+        model.download_file("tokenizer.json").await?
     } else if let Some(tiktoken_name) = find_tiktoken_sibling(siblings) {
-        download_known_file(repo, model_id, tiktoken_name).await?
+        model.download_file(tiktoken_name).await?
     } else {
         return Err(Error::Tokenizer(format!(
-            "model '{model_id}' does not expose a supported tokenizer file \
-             (tokenizer.json, tiktoken.model, or *.tiktoken) on Hugging Face"
+            "model '{}' does not expose a supported tokenizer file \
+             (tokenizer.json, tiktoken.model, or *.tiktoken) on Hugging Face",
+            model.model_id
         )));
     };
 
@@ -206,24 +250,23 @@ async fn resolve_remote_tokenizer_source(
     ))
 }
 
-fn resolve_cached_tokenizer_source(
-    cache_repo: &hf_hub::CacheRepo,
+async fn resolve_cached_tokenizer_source(
+    model: &HubModel<'_>,
     tokenizer_config: &HfTokenizerConfig,
+    config_path: Option<&Path>,
 ) -> Result<Option<TokenizerSource>> {
-    let tekken_path = cache_repo.get("tekken.json");
-
-    if let Some(tekken_path) = tekken_path {
+    if let Some(tekken_path) = model.cached_file("tekken.json").await? {
         return Ok(Some(TokenizerSource::Tekken(tekken_path)));
     }
 
-    let Some(tokenizer_path) = cache_repo.get("tokenizer.json").or_else(|| {
-        // tiktoken.model is the most common name, try it first.
-        cache_repo.get("tiktoken.model").or_else(|| {
-            // Scan for any *.tiktoken file in the cache snapshot directory.
-            let snapshot_dir = cache_repo.get("config.json")?.parent()?.to_path_buf();
-            discover_tiktoken_in_dir(&snapshot_dir)
-        })
-    }) else {
+    let tokenizer_path = match model.cached_file("tokenizer.json").await? {
+        Some(path) => Some(path),
+        None => match model.cached_file("tiktoken.model").await? {
+            Some(path) => Some(path),
+            None => config_path.and_then(Path::parent).and_then(discover_tiktoken_in_dir),
+        },
+    };
+    let Some(tokenizer_path) = tokenizer_path else {
         return Ok(None);
     };
 
@@ -295,34 +338,14 @@ fn resolve_tokenizer_source(
 
 /// Download `filename` only if it exists in `siblings`.
 async fn download_if_present(
-    repo: &ApiRepo,
-    model_id: &str,
+    model: &HubModel<'_>,
     siblings: &std::collections::BTreeSet<&str>,
     filename: &str,
 ) -> Result<Option<PathBuf>> {
     match siblings.contains(filename) {
-        true => download_known_file(repo, model_id, filename).await.map(Some),
+        true => model.download_file(filename).await.map(Some),
         false => Ok(None),
     }
-}
-
-async fn download_known_file(repo: &ApiRepo, model_id: &str, filename: &str) -> Result<PathBuf> {
-    repo.get(filename).await.map_err(|error| {
-        Error::Tokenizer(format!(
-            "failed to download '{filename}' for model '{model_id}': {}",
-            error.as_report()
-        ))
-    })
-}
-
-fn build_api() -> anyhow::Result<Api> {
-    let mut builder = ApiBuilder::from_env().with_progress(true);
-    if let Ok(token) = std::env::var(HF_TOKEN_ENV)
-        && !token.is_empty()
-    {
-        builder = builder.with_token(Some(token));
-    }
-    Ok(builder.build()?)
 }
 
 fn local_file_if_exists(dir: &Path, filename: &str) -> Option<PathBuf> {
@@ -389,10 +412,11 @@ fn discover_chat_template_in_dir(dir: &std::path::Path) -> Option<PathBuf> {
 mod tests {
     use std::fs;
 
+    use hf_hub::HFClient;
     use tempfile::tempdir;
     use vllm_tokenizer::{TiktokenTokenizer, Tokenizer};
 
-    use super::{ResolvedModelFiles, TokenizerSource};
+    use super::{HubModel, ResolvedModelFiles, TokenizerSource, resolve_cached_model_files};
 
     #[tokio::test]
     async fn resolved_model_files_prefers_absolute_local_model_dir() {
@@ -419,6 +443,55 @@ mod tests {
         assert_eq!(
             files.tokenizer_config_path,
             Some(dir.path().join("tokenizer_config.json"))
+        );
+    }
+
+    #[tokio::test]
+    async fn resolved_model_files_uses_hf_cache_without_network() {
+        let cache = tempdir().expect("create cache dir");
+        let repo_dir = cache.path().join("models--test--cached");
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let snapshot_dir = repo_dir.join("snapshots").join(commit);
+        fs::create_dir_all(&snapshot_dir).expect("create snapshot dir");
+        fs::create_dir_all(repo_dir.join("refs")).expect("create refs dir");
+        fs::write(repo_dir.join("refs/main"), commit).expect("write main ref");
+        fs::write(
+            snapshot_dir.join("tokenizer_config.json"),
+            r#"{"tokenizer_class":"TiktokenTokenizer"}"#,
+        )
+        .expect("write tokenizer config");
+        fs::write(snapshot_dir.join("tiktoken.model"), "fixture").expect("write tokenizer");
+        fs::write(snapshot_dir.join("config.json"), "{}").expect("write config");
+        fs::write(snapshot_dir.join("generation_config.json"), "{}")
+            .expect("write generation config");
+        fs::write(snapshot_dir.join("chat_template.jinja"), "{{ messages }}")
+            .expect("write chat template");
+
+        let client = HFClient::builder()
+            .endpoint("http://127.0.0.1:1")
+            .cache_dir(cache.path())
+            .build()
+            .expect("build hf-hub client");
+        let model = HubModel::new("test/cached", client);
+        let files = resolve_cached_model_files(&model)
+            .await
+            .expect("resolve cached model files")
+            .expect("cached tokenizer is complete");
+
+        match files.tokenizer {
+            TokenizerSource::Tiktoken(path) => {
+                assert_eq!(path, snapshot_dir.join("tiktoken.model"));
+            }
+            other => panic!("expected tiktoken tokenizer, got {other:?}"),
+        }
+        assert_eq!(files.config_path, Some(snapshot_dir.join("config.json")));
+        assert_eq!(
+            files.generation_config_path,
+            Some(snapshot_dir.join("generation_config.json"))
+        );
+        assert_eq!(
+            files.chat_template_path,
+            Some(snapshot_dir.join("chat_template.jinja"))
         );
     }
 
