@@ -18,11 +18,11 @@ use std::sync::{Arc, LazyLock};
 
 use itertools::izip;
 use llm_multimodal::{
-    AsyncMultiModalTracker, AudioClip, AudioPreProcessor, AudioProcessorRegistry,
-    EncoderFieldLayouts, FieldLayout, ImageFrame, MediaConnector, MediaConnectorConfig,
-    MediaContentPart, Modality, ModelMetadata, ModelProcessorSpec, ModelRegistry,
-    PreProcessorConfig, PreprocessedEncoderInputs, PromptReplacement, Tokenizer as TokenResolver,
-    TrackedMedia, VideoClip, VisionPreProcessor, VisionProcessorRegistry,
+    AsyncMultiModalTracker, AudioClip, AudioPreProcessor, EncoderFieldLayouts, FieldLayout,
+    ImageFrame, MediaConnector, MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata,
+    ModelProcessorSpec, ModelRegistry, PreProcessorConfig, PreprocessedEncoderInputs,
+    PromptReplacement, Tokenizer as TokenResolver, TrackedMedia, VideoClip, VisionPreProcessor,
+    VisionProcessorRegistry,
 };
 use thiserror_ext::AsReport as _;
 use tracing::warn;
@@ -97,12 +97,7 @@ impl MultimodalModelContext {
         model_spec: &'static dyn ModelProcessorSpec,
         preprocessor_config: &PreProcessorConfig,
     ) -> Option<Arc<dyn AudioPreProcessor>> {
-        static REGISTRY: LazyLock<AudioProcessorRegistry> =
-            LazyLock::new(AudioProcessorRegistry::with_defaults);
-
-        REGISTRY
-            .create(model_spec.name(), &self.config, preprocessor_config)
-            .map(Arc::from)
+        model_spec.audio_processor(&self.config, preprocessor_config).map(Arc::from)
     }
 }
 
@@ -453,7 +448,7 @@ impl MultimodalModelInfo {
             warn!(
                 model_id = context.model_id,
                 model_spec = raw_spec.name(),
-                "audio processor is not registered; disabling audio support for this model"
+                "model spec does not provide an audio processor; disabling audio support for this model"
             );
             return Ok(None);
         };

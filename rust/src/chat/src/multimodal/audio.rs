@@ -121,7 +121,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_qwen_audio_from_standalone_registries() {
+    fn resolves_qwen_audio_from_model_spec() {
         let info = qwen3_asr_info();
         let support = info.audio.as_ref().expect("audio support");
 
