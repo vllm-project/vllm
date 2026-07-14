@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::HashMap;
 use std::slice;
 
@@ -91,7 +94,11 @@ pub enum ContentPart {
         uuid: Option<String>,
     },
     #[serde(rename = "video_url")]
-    VideoUrl { video_url: VideoUrl },
+    VideoUrl {
+        video_url: VideoUrl,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uuid: Option<String>,
+    },
 }
 
 #[serde_with::skip_serializing_none]
