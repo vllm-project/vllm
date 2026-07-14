@@ -266,6 +266,12 @@ class NixlBaseConnectorWorker:
         # NOTE (NickLucche): For now we use a hardcoded value for a simpler interface.
         self._lease_extension = kv_lease_duration * 2 // 3
 
+        self._bidirectional_kv_xfer_enabled: bool = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "bidirectional_kv_xfer", False
+            )
+        )
+
         self._is_hma_required = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             and any(
@@ -340,6 +346,8 @@ class NixlBaseConnectorWorker:
         self._remote_agents: dict[EngineId, dict[tuple[int, int], str]] = defaultdict(
             dict
         )
+        # Map of engine_id -> clock offset.
+        self._engine_clock_offset: dict[EngineId, float] = {}
 
         # Metadata.
         self.engine_id: EngineId = engine_id
@@ -470,7 +478,9 @@ class NixlBaseConnectorWorker:
             thread_name_prefix="vllm-nixl-handshake-initiator",
         )
         self._ready_requests = queue.Queue[tuple[ReqId, ReqMeta]]()
-        self._handshake_futures: dict[EngineId, Future[dict[tuple[int, int], str]]] = {}
+        self._handshake_futures: dict[
+            EngineId, Future[tuple[dict[tuple[int, int], str], float]]
+        ] = {}
         # Protects _handshake_futures and _remote_agents.
         self._handshake_lock = threading.RLock()
 
@@ -559,7 +569,7 @@ class NixlBaseConnectorWorker:
         expected_engine_id: str,
         remote_pp_size: int = 1,
         notif_agents_only: bool = False,
-    ) -> dict[tuple[int, int], str]:
+    ) -> tuple[dict[tuple[int, int], str], float]:
         """Do a NIXL handshake with a remote instance."""
 
         # the first time we connect to a remote agent.
@@ -583,6 +593,11 @@ class NixlBaseConnectorWorker:
         p_remote_ranks = self.transfer_topo.handshake_target_ranks(remote_tp_size)
         remote_rank_to_agent_name: dict[tuple[int, int], str] = {}
         path = make_zmq_path("tcp", host, port)
+        # Clock offset to the peer, estimated from the handshake round-trip.
+        # Keep the lowest-RTT sample: hop cost is ~uniform across ranks, so a
+        # higher RTT is just noise that skews the midpoint estimate.
+        best_rtt = float("inf")
+        best_offset: float | None = None
 
         with zmq_ctx(zmq.REQ, path) as sock:
             for remote_pp_rank, remote_rank in itertools.product(
@@ -595,15 +610,24 @@ class NixlBaseConnectorWorker:
                     remote_rank,
                 )
 
-                start_time = time.perf_counter()
                 # Send query for the request.
                 msg = msgspec.msgpack.encode(
                     (GET_META_MSG, remote_pp_rank, remote_rank)
                 )
                 # Set receive timeout to 5 seconds to avoid hanging on dead server
                 sock.setsockopt(zmq.RCVTIMEO, 5000)  # milliseconds
+                start_time = time.perf_counter()
                 sock.send(msg)
-                handshake_bytes = sock.recv()
+                reply_parts = sock.recv_multipart()
+                recv_time = time.perf_counter()
+                assert len(reply_parts) == 2
+                handshake_bytes = reply_parts[0]
+
+                remote_perf = msgspec.msgpack.decode(reply_parts[1])
+                rtt = recv_time - start_time
+                if rtt < best_rtt:
+                    best_rtt = rtt
+                    best_offset = remote_perf - (start_time + recv_time) / 2
 
                 # Decode handshake payload to get compatibility hash
                 handshake_decoder = msgspec.msgpack.Decoder(NixlHandshakePayload)
@@ -681,7 +705,9 @@ class NixlBaseConnectorWorker:
                 )
                 remote_ranks = (remote_pp_rank, remote_rank)
                 remote_rank_to_agent_name[remote_ranks] = remote_agent_name
-        return remote_rank_to_agent_name
+
+        assert best_offset is not None
+        return remote_rank_to_agent_name, best_offset
 
     def _add_notif_only_remote_agent(
         self, metadata: NixlAgentMetadata, remote_tp_size: int
@@ -818,7 +844,7 @@ class NixlBaseConnectorWorker:
         tp_size: int,
         pp_size: int = 1,
         notif_agents_only: bool = False,
-    ) -> Future[dict[tuple[int, int], str]] | None:
+    ) -> Future[tuple[dict[tuple[int, int], str], float]] | None:
         """
         Ensure a handshake is in-flight (or already done) for *engine_id*.
 
@@ -846,11 +872,16 @@ class NixlBaseConnectorWorker:
             )
             self._handshake_futures[engine_id] = fut
 
-            def done_callback(f: Future[dict[tuple[int, int], str]], eid=engine_id):
+            def done_callback(
+                f: Future[tuple[dict[tuple[int, int], str], float]],
+                eid=engine_id,
+            ):
                 with self._handshake_lock:
                     del self._handshake_futures[eid]
                     try:
-                        self._remote_agents[eid] = f.result()
+                        remote_agents, clock_offset = f.result()
+                        self._remote_agents[eid] = remote_agents
+                        self._engine_clock_offset[eid] = clock_offset
                         self._engine_last_active[eid] = time.perf_counter()
                     except Exception as e:
                         self._log_failure(
@@ -2421,6 +2452,8 @@ class NixlBaseConnectorWorker:
         if self.transfer_topo is not None:
             self.transfer_topo.unregister_remote_engine(engine_id)
 
+        # Drop the cached clock offset; it is re-measured on the next handshake.
+        self._engine_clock_offset.pop(engine_id, None)
         # Push P-side engines are tracked in _remote_agents but not in
         # _engine_last_active (they don't participate in stale eviction), so
         # tolerate a missing entry.
