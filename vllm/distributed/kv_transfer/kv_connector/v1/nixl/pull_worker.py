@@ -1,7 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Pull-specific (READ) worker-side logic for the NIXL connector."""
+"""Pull-specific (READ) worker-side logic for the NIXL connector.
 
+A dedicated ``nixl-pull-reader`` thread owns the READ submission path
+(``make_prepped_xfer`` / ``transfer``), which used to run on the engine
+forward thread. The forward thread now only pre-processes scheduler
+metadata and hands work to the reader through two channels:
+``_read_inbox`` (requests whose handshake was already done) and
+``_ready_requests`` (requests whose background handshake just finished,
+populated by the base worker's handshake callback).
+
+Completion polling stays on the forward thread: ``get_finished`` keeps
+calling ``_get_new_notifs`` (P-side consumer-read counting + heartbeats)
+and ``_pop_done_transfers``. Only the ``_recving_transfers`` dict is now
+shared (reader appends, forward thread pops), so it is guarded by
+``_recving_transfers_lock``.
+
+Wake model: the reader blocks on ``_reader_wake`` when both channels are
+drained. The forward thread sets it from ``start_load_kv`` after
+enqueuing work; the handshake-completion callback sets it once a request
+lands on ``_ready_requests``.
+"""
+
+import queue
+import threading
 import time
 from typing import TYPE_CHECKING
 
@@ -37,11 +59,54 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
 
+        # Forward thread → reader thread: requests whose handshake was
+        # already done when scheduled, awaiting READ submission.
+        self._read_inbox: queue.Queue[tuple[str, ReqMeta]] = queue.Queue()
+        # ``_recving_transfers`` is now shared: the reader appends handles in
+        # ``_read_blocks`` while the forward thread pops completed ones in
+        # ``get_finished`` -> ``_pop_done_transfers``.
+        self._recving_transfers_lock = threading.Lock()
+        # Wake signal for the reader (forward thread / handshake callback).
+        self._reader_wake = threading.Event()
+        self._reader_stop = threading.Event()
+        self._pull_reader_thread: threading.Thread | None = None
+
+    # --- Lifecycle ----------------------------------------------------- #
+
+    def register_kv_caches(self, kv_caches):
+        super().register_kv_caches(kv_caches)
+        if self._pull_reader_thread is None:
+            self._pull_reader_thread = threading.Thread(
+                target=self._pull_reader_loop,
+                daemon=True,
+                name="nixl-pull-reader",
+            )
+            self._pull_reader_thread.start()
+            logger.info("nixl-pull-reader thread started (rank=%d)", self.tp_rank)
+
+    def shutdown(self):
+        # May be invoked via ``__del__`` on a partially constructed worker
+        # (e.g. built with ``object.__new__`` in tests, or if ``__init__``
+        # raised), so guard the reader-thread teardown. The base shutdown has
+        # its own partial-construction guard.
+        if hasattr(self, "_reader_stop"):
+            self._reader_stop.set()
+            # Unblock the reader if it is parked on the wake event.
+            self._reader_wake.set()
+            if self._pull_reader_thread is not None:
+                self._pull_reader_thread.join(timeout=2)
+                self._pull_reader_thread = None
+        # ``_recving_transfers`` handles are released by the base shutdown.
+        super().shutdown()
+
+    # --- Engine-main-thread entry point -------------------------------- #
+
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """
-        Start loading by triggering non-blocking nixl_xfer.
-        We check for these trnxs to complete in each step().
+        Pre-process metadata and hand READ submission to the reader thread.
+        Completion is checked on the forward thread in each step().
         """
+        enqueued = False
         for req_id, meta in metadata.reqs_to_recv.items():
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
                 meta.local_block_ids
@@ -62,17 +127,21 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             self._recving_metadata[req_id] = meta
             if remote_engine_id not in self._remote_agents:
                 # Initiate handshake with remote engine to exchange metadata.
+                # The reader is woken when it completes (the request lands on
+                # ``_ready_requests``; see the ``_background_nixl_handshake``
+                # override below).
                 with self._handshake_lock:
                     if remote_engine_id not in self._remote_agents:
                         self._background_nixl_handshake(req_id, remote_engine_id, meta)
                         continue
 
-            # Handshake already completed, start async read xfer.
-            self._read_blocks_for_req(req_id, meta)
+            # Handshake already completed: defer the READ submission to the
+            # reader thread instead of issuing it on the forward thread.
+            self._read_inbox.put((req_id, meta))
+            enqueued = True
 
-        # Start transfers for requests whose handshakes have now finished.
-        while not self._ready_requests.empty():
-            self._read_blocks_for_req(*self._ready_requests.get_nowait())
+        if enqueued:
+            self._reader_wake.set()
 
         # Keep around the requests that have been part of a batch. This is
         # needed because async scheduling pushes the misalignment between the
@@ -97,6 +166,53 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # Send heartbeats to P-side engines to keep KV blocks alive while
         # requests sit in the D scheduler WAITING queue.
         self._send_heartbeats(metadata)
+
+    # --- Reader thread ------------------------------------------------- #
+
+    def _background_nixl_handshake(self, req_id, remote_engine_id, meta):
+        """Same as the base implementation, but also wakes the reader once
+        the handshake resolves so it can drain ``_ready_requests`` without
+        waiting for the next forward step."""
+        super()._background_nixl_handshake(req_id, remote_engine_id, meta)
+        with self._handshake_lock:
+            fut = self._handshake_futures.get(remote_engine_id)
+        if fut is not None:
+            fut.add_done_callback(lambda _f: self._reader_wake.set())
+        else:
+            # Handshake already resolved: base put the request straight onto
+            # ``_ready_requests``, so wake the reader now.
+            self._reader_wake.set()
+
+    def _pull_reader_loop(self) -> None:
+        while not self._reader_stop.is_set():
+            try:
+                # 1. Requests whose handshake was already done when scheduled.
+                while True:
+                    try:
+                        req_id, meta = self._read_inbox.get_nowait()
+                    except queue.Empty:
+                        break
+                    self._read_blocks_for_req(req_id, meta)
+
+                # 2. Requests whose background handshake has now finished.
+                while not self._ready_requests.empty():
+                    self._read_blocks_for_req(*self._ready_requests.get_nowait())
+            except Exception:
+                logger.exception("nixl-pull-reader error; continuing")
+
+            # Block until the forward thread or a completed handshake signals
+            # new work.
+            self._reader_wake.wait()
+            self._reader_wake.clear()
+
+    def get_finished(self) -> tuple[set[str], set[str]]:
+        # The reader thread appends to ``_recving_transfers`` while this
+        # (forward) thread pops completed handles via ``_pop_done_transfers``.
+        # Hold the lock across the whole base call: coarse but correct, since
+        # the reader only holds it for the brief append in ``_read_blocks`` so
+        # contention is negligible.
+        with self._recving_transfers_lock:
+            return super().get_finished()
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.transfer_topo is not None
@@ -312,8 +428,11 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # Begin async xfer.
             self.nixl_wrapper.transfer(handle)
 
-            # Use handle to check completion in future step().
-            self._recving_transfers[request_id].append(handle)
+            # Use handle to check completion in future step(). The reader
+            # thread appends here; the forward thread pops in
+            # ``_pop_done_transfers`` -> guard the shared dict.
+            with self._recving_transfers_lock:
+                self._recving_transfers[request_id].append(handle)
         except Exception as e:
             # mark all (logical) blocks for this request as invalid
             self._log_failure(
