@@ -62,8 +62,8 @@ def _tokenspeed_mxfp4_moe(
     )
 
 
-class TokenSpeedMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
-    """Monolithic TokenSpeed GFX950 MXFP4 MoE backend."""
+class TokenSpeedMxfp4Experts(mk.FusedMoEExpertsMonolithic):
+    """TokenSpeed GFX950 MXFP4 MoE backend."""
 
     def __init__(
         self,

@@ -208,10 +208,10 @@ def backend_to_kernel_cls(
 
     elif backend == Mxfp4MoeBackend.TOKENSPEED:
         from vllm.model_executor.layers.fused_moe.experts.tokenspeed_mxfp4_moe import (
-            TokenSpeedMxfp4ExpertsMonolithic,
+            TokenSpeedMxfp4Experts,
         )
 
-        return [TokenSpeedMxfp4ExpertsMonolithic]
+        return [TokenSpeedMxfp4Experts]
 
     elif backend == Mxfp4MoeBackend.MARLIN:
         from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
