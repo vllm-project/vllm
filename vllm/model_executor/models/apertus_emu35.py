@@ -470,7 +470,7 @@ def build_vision_tokenizer(
         ckpt = load_file(safetensors_path, device="cpu")
         tokenizer.load_state_dict(ckpt)
     elif osp.exists(ckpt_path):
-        ckpt = torch.load(ckpt_path, map_location="cpu")
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         if isinstance(ckpt, dict) and "state_dict" in ckpt:
             ckpt = ckpt["state_dict"]
         tokenizer.load_state_dict(ckpt)
