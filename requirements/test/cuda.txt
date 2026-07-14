@@ -811,7 +811,7 @@ propcache==0.2.0
     #   yarl
 proto-plus==1.26.1
     # via google-api-core
-protobuf==6.33.6
+protobuf==7.35.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
