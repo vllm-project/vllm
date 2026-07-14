@@ -13,11 +13,22 @@ if not current_platform.has_device_capability(100):
         reason="Nvfp4 Requires compute capability of 10 or above.",
         allow_module_level=True,
     )
-import sys
 
-DTYPES = [ torch.bfloat16]
+DTYPES = [torch.bfloat16]
 # m, n, k
-SHAPES = [(128, 64),(256, 128), (128, 4096),(4096, 4096), (2048, 7168)]
+SHAPES = [
+    (1, 128, 64),
+    (1, 256, 128),
+    (1, 128, 4096),
+    (1, 4096, 4096),
+    (1, 2048, 7168),
+    (64, 128, 64),
+    (64, 256, 128),
+    (128, 128, 64),
+    (128, 128, 128),
+    (256, 128, 64),
+    (128, 256, 128),
+]
 
 
 SEEDS = [42]
@@ -61,9 +72,8 @@ def test_nvfp4_gemm(
     device: str,
 ) -> None:
     set_random_seed(seed)
-    m = 1 # batch_size=1
-    n, packed_k = shape
-    
+    m, n, packed_k = shape
+
     k = packed_k * 2
     block_size = 16
     a_dtype = torch.randn((m, k), dtype=dtype, device=device)
@@ -97,24 +107,24 @@ def test_nvfp4_gemm(
     out = ops.cutlass_scaled_fp4_mm(
         a_fp4, b_fp4, a_scale_interleaved, b_scale_interleaved, alpha, dtype
     )
-    
+    print(f"Cutlass FP4×FP4 GEMM out{out.shape} expected_out{expected_out.shape}")
     torch.testing.assert_close(out, expected_out.to(dtype=dtype), atol=1e-1, rtol=1e-1)
-    from vllm.kernels.helion.ops.nvfp4_gemv import (
-        nvfp4_gemv_fp4in,
-    )
 
-    # Helion FP4×FP4 GEMV
-    k_bytes = b_fp4.shape[1]
+    # Helion FP4×FP4 GEMV otherwise use Cutlass
+    helion_out = torch.empty(
+        (a_fp4.shape[0], b_fp4.shape[0]), dtype=dtype, device=device
+    )
     alpha_helion = float(1.0 / (a_global_scale * b_global_scale))
-    helion_out = nvfp4_gemv_fp4in(
+    torch.ops.vllm.nvfp4_gemv_fp4in(
+        helion_out,
         b_fp4,
         a_fp4,
         b_scale_interleaved,
         a_scale_interleaved,
-        alpha=alpha_helion,
-    ).unsqueeze(0)
+        alpha=alpha,
+        alpha_scalar=alpha_helion,
+    )
 
-    # Compare to CUTLASS 
+    # Compare to CUTLASS
     torch.testing.assert_close(helion_out, out, atol=1e-1, rtol=1e-1)
     print(f"Helion FP4×FP4 GEMV M={m}, N={n}, K={k}")
-
