@@ -204,6 +204,8 @@ class RejectionSampler:
             )
             != NO_LOGPROBS
         )
+        # apply_sampling_params clones logits into a new fp32 tensor; the copy is
+        # what memory we are capping here.
         max_chunk_logits = max(1, MAX_CHUNK_BYTES // (logits.shape[1] * 4))
         if need_processed_logits or logits.shape[0] <= max_chunk_logits:
             processed_logits, sampled, num_sampled = self._verify(
