@@ -161,6 +161,13 @@ class ParallelConfig:
     """Whether the deployed model is MoE (if known)."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
+    sequence_parallel_moe: bool | None = None
+    """Whether to make the input to the experts sequence parallel. `None`
+    selects it automatically from the all2all backend and the parallel sizes;
+    set it explicitly to override that heuristic. Sequence-parallel MoE avoids
+    duplicate expert work across the tensor-parallel group, but it adds an
+    all-gather/reduce-scatter per MoE layer and extra activation memory, which
+    can cost more than it saves on some deployments."""
     enable_ep_weight_filter: bool = False
     """Skip non-local expert weights during model loading when expert
     parallelism is active.  Each rank only reads its own expert shard from
@@ -640,6 +647,8 @@ class ParallelConfig:
     #
     @property
     def use_sequence_parallel_moe(self) -> bool:
+        if self.sequence_parallel_moe is not None:
+            return self.sequence_parallel_moe
         return (
             self.all2all_backend
             in (

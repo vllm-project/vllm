@@ -1647,3 +1647,29 @@ def test_load_config_rejects_invalid_safetensors_load_strategy():
 def test_load_config_rejects_non_string_load_format(bad_load_format):
     with pytest.raises(pydantic.ValidationError):
         LoadConfig(load_format=bad_load_format)
+
+
+def test_sequence_parallel_moe_override():
+    """`sequence_parallel_moe` overrides the auto heuristic in both directions.
+
+    The heuristic enables sequence-parallel MoE for any EP + TP deployment, but
+    it costs an all-gather/reduce-scatter per MoE layer plus activation memory,
+    which does not pay off everywhere. Deployments need a way to opt out (and in)
+    without changing `all2all_backend`.
+    """
+    from vllm.config import ParallelConfig
+
+    ep_tp = dict(tensor_parallel_size=4, enable_expert_parallel=True)
+
+    # Default: heuristic decides (EP + TP > 1 with the default all2all backend).
+    assert ParallelConfig(**ep_tp).use_sequence_parallel_moe
+
+    # Explicit values win over the heuristic.
+    assert not ParallelConfig(
+        **ep_tp, sequence_parallel_moe=False
+    ).use_sequence_parallel_moe
+    assert ParallelConfig(
+        tensor_parallel_size=4,
+        enable_expert_parallel=False,
+        sequence_parallel_moe=True,
+    ).use_sequence_parallel_moe
