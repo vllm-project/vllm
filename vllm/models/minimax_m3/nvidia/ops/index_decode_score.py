@@ -20,7 +20,13 @@ from cutlass import Float8E4M3FN, Float16, Float32, Int32, Int64, Uint32, cute
 from cutlass.cute.nvgpu import cpasync, warp
 from quack.compile_utils import make_fake_tensor
 
-from vllm.cute_utils import _TORCH_TO_CUTE_DTYPE, cvt, mma_sync, simple_tma_copy
+from vllm.cute_utils import (
+    _TORCH_TO_CUTE_DTYPE,
+    EVICT_FIRST,
+    cvt,
+    mma_sync,
+    simple_tma_copy,
+)
 
 
 @cute.jit
@@ -234,7 +240,7 @@ class IndexDecodeScoreKernel:
                         gK_tile,
                         sK[None, None, tma_stage],
                         k_mbar,
-                        cache_policy=Int64(Int64(0x12F0000000000000).ir_value()),
+                        cache_policy=EVICT_FIRST,
                     )
 
                     tma_stage = (tma_stage + 1) % num_stages
