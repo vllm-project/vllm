@@ -42,6 +42,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingSpec,
     OffloadKey,
     OffloadPolicy,
+    PromptCacheRetentionPolicy,
     ReqContext,
     RequestOffloadingContext,
     ScheduleEndContext,
@@ -342,9 +343,22 @@ class RequestOffloadState:
 
 
 def _create_req_context(req: Request) -> ReqContext:
+    extra_args = req.sampling_params.extra_args if req.sampling_params else None
+    retention_value = extra_args.get("prompt_cache_retention") if extra_args else None
+    try:
+        retention = PromptCacheRetentionPolicy.from_request_value(retention_value)
+    except ValueError:
+        logger.warning(
+            "Request %s has invalid prompt_cache_retention %r; using the "
+            "server default",
+            req.request_id,
+            retention_value,
+        )
+        retention = PromptCacheRetentionPolicy.DEFAULT
     return ReqContext(
         req_id=req.request_id,
         kv_transfer_params=req.kv_transfer_params,
+        prompt_cache_retention=retention,
     )
 
 

@@ -46,12 +46,6 @@ def get_offload_group_idx(key: OffloadKey) -> int:
     return int.from_bytes(key[-4:], "big", signed=False)
 
 
-@dataclass
-class ReqContext:
-    req_id: str
-    kv_transfer_params: dict[str, Any] | None = None
-
-
 class LookupResult(Enum):
     """Result of OffloadingManager.lookup()."""
 
@@ -68,6 +62,33 @@ class OffloadPolicy(Enum):
     # Offload all blocks for the request, including prefix hits.
     # Used by tiers that need the complete KV context for a request.
     REQUEST_LEVEL = "request_level"
+
+
+class PromptCacheRetentionPolicy(Enum):
+    """Internal prompt-cache residency policy for a request."""
+
+    DEFAULT = "default"
+    IN_MEMORY = "in_memory"
+    EXTENDED = "24h"
+
+    @classmethod
+    def from_request_value(cls, value: str | None) -> "PromptCacheRetentionPolicy":
+        if value is None:
+            return cls.DEFAULT
+        if value == "in_memory":
+            return cls.IN_MEMORY
+        if value == "24h":
+            return cls.EXTENDED
+        raise ValueError(f"Unknown prompt cache retention policy: {value!r}")
+
+
+@dataclass
+class ReqContext:
+    req_id: str
+    kv_transfer_params: dict[str, Any] | None = None
+    prompt_cache_retention: PromptCacheRetentionPolicy = (
+        PromptCacheRetentionPolicy.DEFAULT
+    )
 
 
 @dataclass

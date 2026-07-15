@@ -73,6 +73,7 @@ vllm serve <model> \
 | `store_threshold` | no | `0` | single-tier | Min lookups before a block is offloaded. Values ≥ 2 are rejected by `TieringOffloadingSpec`. |
 | `max_tracker_size` | no | `64000` | single-tier | Max entries in the lookup tracker. |
 | `secondary_tiers` | no | `[]` | multi-tier | List of secondary tier configs (see below). |
+| `default_prompt_cache_retention` | no | legacy behavior | multi-tier | Policy for requests that omit `prompt_cache_retention`. `in_memory` disables secondary-tier writes; `24h` enables them and copies the complete reusable prefix. When omitted, existing block-level cascading behavior is preserved. |
 | `offload_prompt_only` | no | `true` | both | If `true`, only prompt (prefill) blocks are offloaded; decode blocks are skipped. |
 | `self_describing_kv_events` | no | `false` | single-tier | Opt-in. When `true` *and* KV cache events are enabled (`--kv-events-config` with `enable_kv_cache_events`), the connector emits self-describing block-granular `BlockStored`/`BlockRemoved` payloads (constituent block hashes, whole-chunk `token_ids`, per-block `block_size`, parent hash, LoRA + group/cache-spec metadata) instead of the placeholder fallback, so external KV-event consumers can index offloaded blocks. Inert unless events are enabled. Currently rejected by `TieringOffloadingSpec`. Full-attention groups only; sliding-window/SSM groups keep the placeholder fallback. In chunk mode (`block_size` > GPU block size), overlapping chunks re-announce shared per-block hashes, so consumers must reference-count (deduplicate) repeated store/remove announcements. |
 | `spec_module_path` | no | — | both | Python import path for a custom `OffloadingSpec` not in the built-in registry. Required only when `spec_name` is not built-in (advanced). |
@@ -171,6 +172,36 @@ The `backends` and `num_threads` options mirror the conditional logic used by [`
 - Sharing `root_dir` across runs: runs with the same model, `block_size`, parallelism layout, and dtype share files under the same `<digest>` subdirectory. Changing any of these produces a new subdirectory; old ones are orphaned but harmless. Delete them to reclaim disk.
 
 ## Per-Request Selective Offload
+
+### Responses prompt-cache retention
+
+The Responses API accepts `prompt_cache_retention` as a per-request residency
+policy:
+
+- `in_memory` allows GPU prefix caching and CPU-primary offload, but prevents
+  new writes to filesystem, object-store, and other secondary tiers.
+- `24h` allows configured secondary-tier writes. It uses request-level offload
+  so reusable prefix blocks already present in the CPU primary tier are also
+  copied to secondary tiers.
+- When omitted, `default_prompt_cache_retention` applies. If the server default
+  is also omitted, the connector preserves its existing behavior.
+
+The value controls which tiers may receive a block; it does not reserve
+capacity or guarantee 24-hour residency. Eviction remains governed by the
+configured tier capacities and policies.
+
+```json
+{
+  "model": "<model>",
+  "input": "...",
+  "prompt_cache_retention": "in_memory"
+}
+```
+
+`prompt_cache_options` and explicit prompt-cache breakpoints are not supported
+by this mapping.
+
+### Token limit
 
 Individual requests can cap how many of their tokens are eligible for offload by setting `max_offload_tokens` in the request's `kv_transfer_params`. Only the first `max_offload_tokens` tokens of the request are offloaded; blocks beyond that point are skipped on the store path. This is useful when a known prefix (e.g., a system prompt or shared context) is worth caching but later request-specific tokens are not.
 

@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
+    _create_req_context,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -28,12 +29,36 @@ from vllm.v1.kv_offload.base import (
     LookupResult,
     OffloadingManager,
     OffloadPolicy,
+    PromptCacheRetentionPolicy,
     ReqContext,
     RequestOffloadingContext,
     get_offload_block_hash,
     make_offload_key,
 )
 from vllm.v1.request import RequestStatus
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, PromptCacheRetentionPolicy.DEFAULT),
+        ("in_memory", PromptCacheRetentionPolicy.IN_MEMORY),
+        ("24h", PromptCacheRetentionPolicy.EXTENDED),
+    ],
+)
+def test_create_req_context_maps_prompt_cache_retention(value, expected):
+    extra_args = {} if value is None else {"prompt_cache_retention": value}
+    request = SimpleNamespace(
+        request_id="test-request",
+        kv_transfer_params={"connector": "value"},
+        sampling_params=SimpleNamespace(extra_args=extra_args),
+    )
+
+    context = _create_req_context(request)
+
+    assert context.req_id == request.request_id
+    assert context.kv_transfer_params == request.kv_transfer_params
+    assert context.prompt_cache_retention is expected
 
 
 def _reduce_kv_connector_stats(runner):

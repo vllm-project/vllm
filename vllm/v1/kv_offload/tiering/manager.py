@@ -38,6 +38,7 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     OffloadPolicy,
     PrepareStoreOutput,
+    PromptCacheRetentionPolicy,
     ReqContext,
     RequestOffloadingContext,
     ScheduleEndContext,
@@ -67,6 +68,7 @@ class PendingPromotion:
 @dataclass(slots=True)
 class RequestState:
     req_context: ReqContext
+    secondary_store_tiers: tuple[SecondaryTierManager, ...] = ()
     pending_primary_stores: int = 0
     is_finished: bool = False
     request_level_tiers: set[SecondaryTierManager] | None = None
@@ -170,6 +172,9 @@ class TieringOffloadingManager(OffloadingManager):
         self,
         primary_tier: CPUPrimaryTierOffloadingManager,
         secondary_tiers: list[SecondaryTierManager] | None = None,
+        default_prompt_cache_retention: PromptCacheRetentionPolicy = (
+            PromptCacheRetentionPolicy.DEFAULT
+        ),
     ):
         """
         Initialize the TieringOffloadingManager.
@@ -178,9 +183,12 @@ class TieringOffloadingManager(OffloadingManager):
             primary_tier: The primary tier manager (CPU-based).
             secondary_tiers: List of secondary tier managers (e.g., Storage,
                             Network). Can be None or empty list.
+            default_prompt_cache_retention: Policy used when a request does not
+                specify prompt_cache_retention. DEFAULT preserves legacy behavior.
         """
         self.primary_tier: CPUPrimaryTierOffloadingManager = primary_tier
         self.secondary_tiers = secondary_tiers or []
+        self.default_prompt_cache_retention = default_prompt_cache_retention
 
         self._job_id_counter: int = 0
         # Job tracking: maps job_id to metadata for all in-flight transfers.
@@ -539,9 +547,9 @@ class TieringOffloadingManager(OffloadingManager):
         """
         Mark blocks as done storing from GPU to primary tier.
 
-        This is where secondary tier cascading happens — after blocks are
-        confirmed to be in the primary tier, they are cascaded to ALL
-        secondary tiers.
+        This is where secondary tier cascading happens. After blocks are
+        confirmed in the primary tier, they are cascaded to the tiers selected
+        by the request's retention policy.
 
         For each secondary tier:
         1. Call primary.prepare_read() to get LoadStoreSpec AND increment
@@ -558,12 +566,13 @@ class TieringOffloadingManager(OffloadingManager):
         self.primary_tier.complete_store(keys, req_context, success)
 
         if success:
-            # Step 2: Cascade to ALL secondary tiers
-            # For each secondary tier, call primary.prepare_read() to get the
+            # Step 2: Cascade to the selected secondary tiers.
+            # For each selected tier, call primary.prepare_read() to get the
             # LoadStoreSpec AND to increment ref_cnt (protecting blocks from
             # eviction during the async transfer). One prepare_read() call per
             # secondary tier.
-            for tier in self.secondary_tiers:
+            state = self._req_state[req_context.req_id]
+            for tier in state.secondary_store_tiers:
                 job_metadata = self.create_store_job(keys, req_context)
                 tier.submit_store(job_metadata)
 
@@ -610,17 +619,33 @@ class TieringOffloadingManager(OffloadingManager):
         exclude_tier: SecondaryTierManager | None = None,
     ) -> RequestOffloadingContext:
         """
-        Query each secondary tier for its offload policy preference.
+        Resolve the request's retention policy and query secondary tiers for
+        their offload policy preference.
 
-        Returns REQUEST_LEVEL if ANY secondary tier wants request-level.
-        Only stores REQUEST_LEVEL tier decisions for use in prepare_store.
+        Explicit extended retention uses request-level offloading so an
+        already-cached prefix can be copied to secondary tiers. In-memory
+        retention prevents all secondary-tier writes.
         """
-        state = RequestState(req_context=req_context)
+        retention = req_context.prompt_cache_retention
+        if retention is PromptCacheRetentionPolicy.DEFAULT:
+            retention = self.default_prompt_cache_retention
+
+        stores_to_secondary = retention is not PromptCacheRetentionPolicy.IN_MEMORY
+        secondary_store_tiers = (
+            tuple(self.secondary_tiers) if stores_to_secondary else ()
+        )
+        state = RequestState(
+            req_context=req_context,
+            secondary_store_tiers=secondary_store_tiers,
+        )
+        force_request_level = retention is PromptCacheRetentionPolicy.EXTENDED
         for tier in self.secondary_tiers:
             if tier is exclude_tier:
                 continue
             tier_ctx = tier.on_new_request(req_context)
-            if tier_ctx.policy == OffloadPolicy.REQUEST_LEVEL:
+            if tier in secondary_store_tiers and (
+                force_request_level or tier_ctx.policy == OffloadPolicy.REQUEST_LEVEL
+            ):
                 if state.request_level_tiers is None:
                     state.request_level_tiers = set()
                 state.request_level_tiers.add(tier)

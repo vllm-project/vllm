@@ -26,6 +26,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadKey,
     OffloadPolicy,
+    PromptCacheRetentionPolicy,
     ReqContext,
     RequestOffloadingContext,
     ScheduleEndContext,
@@ -311,6 +312,75 @@ class TestTieringOffloadingManager:
         assert all(
             self.secondary_tier2.lookup(b, _CTX) is LookupResult.HIT for b in blocks
         )
+
+    def test_in_memory_retention_skips_secondary_tiers(self, manager_setup):
+        """in_memory stores in CPU primary without persistent-tier writes."""
+        blocks = to_keys(range(3))
+        ctx = ReqContext(
+            req_id="in-memory",
+            prompt_cache_retention=PromptCacheRetentionPolicy.IN_MEMORY,
+        )
+        self.secondary_tier1.submit_store = MagicMock(
+            wraps=self.secondary_tier1.submit_store
+        )
+        self.secondary_tier2.submit_store = MagicMock(
+            wraps=self.secondary_tier2.submit_store
+        )
+
+        offloading_context = self.manager.on_new_request(ctx)
+        result = self.manager.prepare_store(blocks, ctx)
+        assert result is not None
+        self.manager.complete_store(blocks, ctx, success=True)
+
+        assert offloading_context.policy is OffloadPolicy.BLOCK_LEVEL
+        assert count_hits(self.primary_tier, blocks) == len(blocks)
+        self.secondary_tier1.submit_store.assert_not_called()
+        self.secondary_tier2.submit_store.assert_not_called()
+
+    def test_extended_retention_cascades_existing_prefix(self, manager_setup):
+        """Explicit extended retention upgrades an existing CPU prefix."""
+        blocks = to_keys(range(3))
+        primary_result = self.primary_tier.prepare_store(blocks, _CTX)
+        assert primary_result is not None
+        self.primary_tier.complete_store(blocks, _CTX, success=True)
+
+        self.secondary_tier1.submit_store = MagicMock(
+            wraps=self.secondary_tier1.submit_store
+        )
+        self.secondary_tier2.submit_store = MagicMock(
+            wraps=self.secondary_tier2.submit_store
+        )
+        ctx = ReqContext(
+            req_id="extended",
+            prompt_cache_retention=PromptCacheRetentionPolicy.EXTENDED,
+        )
+
+        offloading_context = self.manager.on_new_request(ctx)
+        result = self.manager.prepare_store(blocks, ctx)
+
+        assert result is not None
+        assert result.keys_to_store == []
+        assert offloading_context.policy is OffloadPolicy.REQUEST_LEVEL
+        self.secondary_tier1.submit_store.assert_called_once()
+        self.secondary_tier2.submit_store.assert_called_once()
+
+    def test_server_default_can_disable_secondary_writes(self, manager_setup):
+        """Unspecified retention follows the configured server default."""
+        self.manager.default_prompt_cache_retention = (
+            PromptCacheRetentionPolicy.IN_MEMORY
+        )
+        blocks = to_keys(range(2))
+        ctx = ReqContext(req_id="server-default")
+        self.secondary_tier1.submit_store = MagicMock(
+            wraps=self.secondary_tier1.submit_store
+        )
+
+        self.manager.on_new_request(ctx)
+        result = self.manager.prepare_store(blocks, ctx)
+        assert result is not None
+        self.manager.complete_store(blocks, ctx, success=True)
+
+        self.secondary_tier1.submit_store.assert_not_called()
 
     def test_ref_cnt_protection_during_cascade(self, manager_setup):
         """Test that ref_cnt protects blocks during cascade."""

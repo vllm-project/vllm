@@ -210,6 +210,14 @@ class ResponsesRequest(OpenAIBaseModel):
             "and vLLM will ignore it."
         ),
     )
+    prompt_cache_retention: Literal["in_memory", "24h"] | None = Field(
+        default=None,
+        description=(
+            "The prompt-cache retention policy. 'in_memory' restricts new KV "
+            "writes to volatile tiers, while '24h' allows configured secondary "
+            "tiers. Actual residency remains subject to server capacity."
+        ),
+    )
 
     # --8<-- [start:responses-extra-params]
     request_id: str = Field(
@@ -412,11 +420,13 @@ class ResponsesRequest(OpenAIBaseModel):
         if isinstance(stop, str):
             stop = [stop]
 
-        extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
+        extra_args: dict[str, Any] = dict(self.vllm_xargs or {})
         if self.kv_transfer_params:
             extra_args["kv_transfer_params"] = self.kv_transfer_params
         if self.ec_transfer_params:
             extra_args["ec_transfer_params"] = self.ec_transfer_params
+        if self.prompt_cache_retention is not None:
+            extra_args["prompt_cache_retention"] = self.prompt_cache_retention
 
         return SamplingParams.from_optional(
             temperature=temperature,
@@ -651,6 +661,7 @@ class ResponsesResponse(OpenAIBaseModel):
     max_tool_calls: int | None = None
     previous_response_id: str | None = None
     prompt: ResponsePrompt | None = None
+    prompt_cache_retention: Literal["in_memory", "24h"] | None = None
     reasoning: Reasoning | None = None
     service_tier: Literal["auto", "default", "flex", "scale", "priority"]
     status: ResponseStatus
@@ -759,6 +770,7 @@ class ResponsesResponse(OpenAIBaseModel):
             max_tool_calls=request.max_tool_calls,
             previous_response_id=request.previous_response_id,
             prompt=request.prompt,
+            prompt_cache_retention=request.prompt_cache_retention,
             reasoning=request.reasoning,
             service_tier=request.service_tier,
             presence_penalty=sampling_params.presence_penalty,

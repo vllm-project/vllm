@@ -4,7 +4,10 @@
 import pytest
 from pydantic import ValidationError
 
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.openai.responses.protocol import (
+    ResponsesRequest,
+    ResponsesResponse,
+)
 
 SAMPLE_TOOL = {
     "type": "function",
@@ -21,6 +24,42 @@ NAMED_TOOL_CHOICE = {
     "type": "function",
     "name": "get_weather",
 }
+
+
+@pytest.mark.parametrize("retention", ["in_memory", "24h"])
+def test_prompt_cache_retention_reaches_engine_and_response(retention):
+    """Retention is validated, forwarded to the engine, and echoed."""
+    request = ResponsesRequest.model_validate(
+        {
+            "input": "Hello",
+            "model": "test-model",
+            "prompt_cache_retention": retention,
+        }
+    )
+
+    sampling_params = request.to_sampling_params(default_max_tokens=16)
+    assert sampling_params.extra_args == {"prompt_cache_retention": retention}
+
+    response = ResponsesResponse.from_request(
+        request=request,
+        sampling_params=sampling_params,
+        model_name="test-model",
+        created_time=0,
+        output=[],
+        status="completed",
+    )
+    assert response.prompt_cache_retention == retention
+
+
+def test_prompt_cache_retention_rejects_unknown_policy():
+    with pytest.raises(ValidationError, match="prompt_cache_retention"):
+        ResponsesRequest.model_validate(
+            {
+                "input": "Hello",
+                "model": "test-model",
+                "prompt_cache_retention": "forever",
+            }
+        )
 
 
 def test_responses_request_with_no_tools():
