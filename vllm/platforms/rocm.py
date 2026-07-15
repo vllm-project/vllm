@@ -753,6 +753,7 @@ class RocmPlatform(Platform):
             device_uuid = amdsmi_get_gpu_device_uuid(device)
         except AmdSmiException as error:
             logger.error("amdsmi device uuid query failed ", exc_info=error)
+            return ""
         return device_uuid
 
     @classmethod
