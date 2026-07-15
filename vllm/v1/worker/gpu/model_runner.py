@@ -892,10 +892,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         scheduler_output: SchedulerOutput,
         batch_desc: BatchExecutionDescriptor,
+        num_tokens: int,
     ) -> InputBatch:
-        num_tokens = min(
-            scheduler_output.total_num_scheduled_tokens, batch_desc.num_tokens
-        )
         num_tokens_after_padding = batch_desc.num_tokens
         assert num_tokens > 0
         uses_padding_mask = envs.VLLM_MOE_SKIP_PADDING or (
@@ -1268,7 +1266,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not dummy_run:
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
-            input_batch = self.prepare_inputs(scheduler_output, batch_desc)
+            num_toks = min(
+                scheduler_output.total_num_scheduled_tokens, batch_desc.num_tokens
+            )
+            input_batch = self.prepare_inputs(scheduler_output, batch_desc, num_toks)
             block_tables, slot_mappings = self.prepare_attn(input_batch)
             # Mamba "align" pre-copy: migrate recurrent state across block
             # boundaries before the forward. Runs only on real batches, and
