@@ -878,6 +878,7 @@ class TestPushPipelineParallel:
         w.pp_size = 2
         w._remote_region_offset = 2  # this worker owns layers [2, 4)
         w.block_len_per_layer = [block_len, block_len]  # 2 local layers
+        w._region_is_mla = [False, False]
         w.nixl_wrapper = MagicMock()
 
         class _StopAfterSlice(RuntimeError):
