@@ -199,15 +199,19 @@ class ClientRole:
         Idempotent across scheduler steps:
         - First call: creates a pending entry, returns None.
         - Subsequent calls while in-flight: returns None.
-        - Once a LookupRespMsg has resolved the entry: pops and
-          returns the bool result.
+        - Once a LookupRespMsg has resolved the entry: returns the cached
+          bool result on every call without popping it.
+
+        Resolved entries are retained until ``cancel_lookups`` (via
+        finish_request) clears all entries for the id. A request's block
+        set can be re-probed across steps, so popping on read would make
+        a repeat probe of an already-resolved hash look brand-new and
+        re-queue it, emitting a redundant LookupMsg for an answer we
+        already hold. Keeping the entry makes repeat probes free.
         """
         key = (kv_request_id, block_hash)
         if key in self._lookups:
-            result = self._lookups[key]
-            if result is not None:
-                del self._lookups[key]
-            return result
+            return self._lookups[key]
         self._lookups[key] = None
         self._unsent_lookups_by_req.setdefault(kv_request_id, []).append(block_hash)
         logger.debug(

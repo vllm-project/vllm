@@ -523,7 +523,8 @@ class TestLookupFlow:
 
     def test_aggregate_flush_resolve_round_trip(self):
         """register_lookup → flush sends one LookupMsg → response
-        resolves entries → register_lookup pops and returns the bool."""
+        resolves entries → register_lookup returns the cached bool on
+        every call, and repeat probes never re-issue a LookupMsg."""
         session, conn, _ = _make_session()
         _activate(session, conn)
 
@@ -560,11 +561,18 @@ class TestLookupFlow:
         )
         session.poll()
 
-        # Next register_lookup pops and returns the bool.
+        # register_lookup returns the resolved bool.
         assert session.register_lookup("req-1", b"hA") is True
         assert session.register_lookup("req-1", b"hB") is False
-        # Entries are gone — a fresh register starts a new pending entry.
-        assert session.register_lookup("req-1", b"hA") is None
+        # The entry is cached, not popped: repeat probes keep returning the
+        # same result and never re-queue the hash, so a flush sends nothing.
+        assert session.register_lookup("req-1", b"hA") is True
+        assert session.register_lookup("req-1", b"hB") is False
+        sent_before = len(conn._sent)
+        session.flush_pending_lookups()
+        assert [
+            m for m in conn._sent[sent_before:] if m[TYPE_KEY] == LookupMsg.TYPE
+        ] == []
 
     def test_separate_lookup_msg_per_kv_request_id(self):
         """Hashes for different kv_request_ids flush as separate LookupMsgs."""
