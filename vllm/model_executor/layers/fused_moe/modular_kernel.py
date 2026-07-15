@@ -889,9 +889,18 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         clamp_limit: float | None = None,
         alpha: float = 1.0,
         beta: float = 0.0,
+        topk_ids: torch.Tensor | None = None,
+        expert_map: torch.Tensor | None = None,
     ) -> None:
         apply_moe_activation(
-            activation, output, input, clamp_limit=clamp_limit, alpha=alpha, beta=beta
+            activation,
+            output,
+            input,
+            clamp_limit=clamp_limit,
+            alpha=alpha,
+            beta=beta,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
         )
 
     @abstractmethod
