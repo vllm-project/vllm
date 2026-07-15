@@ -179,21 +179,12 @@ class HookManager:
         return steps_manifest
 
 
-def get_model_from_engine(llm) -> torch.nn.Module:
-    """Extract the nn.Module from the vLLM LLM engine internals."""
-    engine = llm.llm_engine
-    executor = engine.model_executor
-    if hasattr(executor, "driver_worker"):
-        worker = executor.driver_worker
-    else:
-        worker = executor.workers[0] if hasattr(executor, "workers") else None
+def register_hooks_on_model(llm, hook_manager: "HookManager"):
+    """Register hooks via LLM.apply_model() — works for all executor types."""
+    def _register(model: torch.nn.Module):
+        hook_manager.register_hooks(model)
 
-    if worker is None:
-        raise RuntimeError("Cannot locate worker from model_executor")
-
-    runner = worker.model_runner
-    model = runner.model
-    return model
+    llm.apply_model(_register)
 
 
 def main():
@@ -255,13 +246,9 @@ def main():
 
     llm = LLM(**llm_kwargs)
 
-    # Get internal model
-    model = get_model_from_engine(llm)
-    print(f"Model type: {type(model).__name__}")
-
-    # Register hooks
+    # Register hooks via public apply_model API
     hook_manager = HookManager(dump_mode=args.dump_mode, layers=target_layers)
-    hook_manager.register_hooks(model)
+    register_hooks_on_model(llm, hook_manager)
 
     # Run inference
     sampling_params = SamplingParams(
