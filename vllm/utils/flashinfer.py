@@ -287,6 +287,8 @@ def has_flashinfer_cutlass_fused_moe_fp4() -> bool:
     """Return whether the FlashInfer CUTLASS build contains FP4 kernels."""
     if not has_flashinfer_cutlass_fused_moe():
         return False
+    if has_flashinfer_cubin():
+        return True
     if importlib.util.find_spec("flashinfer_jit_cache") is not None:
         return True
 
