@@ -374,19 +374,18 @@ class CudaGraphManager:
                         compilation_counter.num_cudagraph_captured += 1
         # Collective graph addresses are registered when graph_capture exits.
         if self.time_graphs:
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
+            start = torch.Event(enable_timing=True)
+            end = torch.Event(enable_timing=True)
             for desc, graph in self.graphs.items():
                 create_forward_fn(desc, warmup=False)
                 if prepare_timing is not None:
                     prepare_timing(desc)
                 start.record()
-                for _ in range(3):
-                    graph.replay()
+                graph.replay()
                 end.record()
                 with gpu_sync_allowed():
                     end.synchronize()
-                self.graph_timings[desc] = start.elapsed_time(end) / 3
+                self.graph_timings[desc] = start.elapsed_time(end)
         self._graphs_captured = True
 
     def dispatch(

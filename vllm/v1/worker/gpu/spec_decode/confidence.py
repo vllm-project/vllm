@@ -14,7 +14,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.worker.gpu.async_utils import stream
-from vllm.v1.worker.gpu.buffer_utils import UvaBufferPool
+from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 
 logger = init_logger(__name__)
 
@@ -36,7 +36,6 @@ def _assign_draft_token_budget_kernel(
     confidence_logits_ptr,
     confidence_logits_stride,
     idx_mapping_ptr,
-    valid_draft_tokens_ptr,
     capacities_ptr,
     num_reqs,
     draft_token_budget,
@@ -60,7 +59,7 @@ def _assign_draft_token_budget_kernel(
         combine_fn=_keyed_product,
     )
     num_valid = tl.load(
-        valid_draft_tokens_ptr + req_idx,
+        capacities_ptr + req_idx,
         mask=valid_candidate,
         other=0,
     )
@@ -124,8 +123,7 @@ class ConfidenceManager:
         self,
         req_states: "RequestState",
         speculative_config: "SpeculativeConfig",
-        query_start_loc: torch.Tensor | None = None,
-        num_bonus_tokens: int = 1,
+        num_bonus_tokens: int,
     ):
         self.req_states = req_states
         self.num_speculative_steps = req_states.num_speculative_steps
@@ -136,7 +134,6 @@ class ConfidenceManager:
         self.time_graphs = (
             self.varlen_spec_decode and speculative_config.dspark_sps_curve == "auto"
         )
-        self.query_start_loc = query_start_loc
         self.num_bonus_tokens = num_bonus_tokens
         self.cost_tables: tuple[np.ndarray, np.ndarray] | None = None
         max_num_reqs = req_states.max_num_reqs
@@ -146,10 +143,6 @@ class ConfidenceManager:
             device=device,
         )
         self._batch_draft_capacity = torch.empty(
-            max_num_reqs, dtype=torch.int32, device=device
-        )
-        self._valid_draft_tokens_pool = UvaBufferPool(max_num_reqs, torch.int32)
-        self._valid_draft_tokens = torch.empty(
             max_num_reqs, dtype=torch.int32, device=device
         )
         self._draft_steps = torch.arange(
@@ -204,14 +197,7 @@ class ConfidenceManager:
             self.req_states.max_num_reqs,
             self.req_states.max_num_batched_tokens,
         )
-        logger.info_once(
-            "DSpark timed draft CUDA graphs (requests -> ms): %s",
-            tuple((r, round(ms, 3)) for r, ms in draft_curve),
-        )
-        logger.info_once(
-            "DSpark timed verifier CUDA graphs (tokens -> ms): %s",
-            tuple((b, round(ms, 3)) for b, ms in verify_curve),
-        )
+        logger.debug("DSpark cost tables: %s", self.cost_tables)
 
     def stage_confidences(
         self,
@@ -333,7 +319,6 @@ class ConfidenceManager:
             self._confidence_logits,
             self._confidence_logits.stride(0),
             idx_mapping,
-            self._valid_draft_tokens,
             capacities,
             num_reqs,
             draft_token_budget,
@@ -353,15 +338,9 @@ class ConfidenceManager:
         if draft_token_budget == 0:
             return capacities.zero_()
 
+        async_copy_to_gpu(valid_draft_tokens_per_req, out=capacities)
         if draft_token_budget == int(valid_draft_tokens_per_req.sum()):
-            self._valid_draft_tokens_pool.copy_to_gpu(
-                valid_draft_tokens_per_req, out=capacities
-            )
             return capacities
-        self._valid_draft_tokens_pool.copy_to_gpu(
-            valid_draft_tokens_per_req,
-            out=self._valid_draft_tokens[:num_reqs],
-        )
 
         self._assign_draft_token_budget_gpu(
             idx_mapping,
@@ -374,7 +353,6 @@ class ConfidenceManager:
     def warmup(self) -> None:
         max_num_reqs = self.req_states.max_num_reqs
         self._confidence_logits.zero_()
-        self._valid_draft_tokens.fill_(self.num_speculative_steps)
         idx_mapping = torch.arange(
             max_num_reqs, dtype=torch.int32, device=self.req_states.device
         )
@@ -385,6 +363,7 @@ class ConfidenceManager:
         while block_size <= max_block_size:
             num_reqs = min(max_num_reqs, block_size // self.num_speculative_steps)
             draft_token_budget = max(1, num_reqs * self.num_speculative_steps // 2)
+            self._batch_draft_capacity.fill_(self.num_speculative_steps)
             self._assign_draft_token_budget_gpu(
                 idx_mapping,
                 self._batch_draft_capacity,
@@ -396,21 +375,6 @@ class ConfidenceManager:
         self._staged_req_ids = [[], []]
         self._next_idx = 0
         self._stale_confidences = None
-
-    @staticmethod
-    def _get_num_bonus_tokens(input_batch: "InputBatch") -> int:
-        num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
-        num_draft_tokens = (
-            0
-            if num_draft_tokens_per_req is None
-            else int(num_draft_tokens_per_req.sum())
-        )
-        num_bonus_tokens, remainder = divmod(
-            int(input_batch.cu_num_logits_np[-1]) - num_draft_tokens,
-            input_batch.num_reqs,
-        )
-        assert remainder == 0
-        return num_bonus_tokens
 
     def _plan_batch(
         self,
@@ -457,15 +421,15 @@ class VarlenConfidenceManager(ConfidenceManager):
         self,
         req_states: "RequestState",
         speculative_config: "SpeculativeConfig",
-        query_start_loc: torch.Tensor | None = None,
-        num_bonus_tokens: int = 1,
+        query_start_loc: torch.Tensor,
+        num_bonus_tokens: int,
     ):
         super().__init__(
             req_states,
             speculative_config,
-            query_start_loc,
             num_bonus_tokens,
         )
+        self.query_start_loc = query_start_loc
         self._planned_batch: tuple[np.ndarray, np.ndarray, int] | None = None
         self.compact_batch = False
 
@@ -518,7 +482,6 @@ class VarlenConfidenceManager(ConfidenceManager):
         assert planned_batch is not None
         required_targets, valid_drafts, budget = planned_batch
         assert self.compact_batch
-        assert self.query_start_loc is not None
         capacities = self._assign_draft_token_budget(idx_mapping, valid_drafts, budget)
         num_reqs = idx_mapping.shape[0]
         num_tokens = int(required_targets.sum()) + budget
@@ -559,7 +522,7 @@ class MaskedConfidenceManager(ConfidenceManager):
         prune_starts = (
             query_ends
             - num_logits
-            + self._get_num_bonus_tokens(input_batch)
+            + self.num_bonus_tokens
             + self._batch_draft_capacity[: input_batch.num_reqs]
         )
         token_indices = prune_starts[:, None] + self._draft_steps
@@ -576,8 +539,8 @@ def make_confidence_manager(
     attn_cg_support: "AttentionCGSupportInfo",
     req_states: "RequestState",
     speculative_config: "SpeculativeConfig",
-    query_start_loc: torch.Tensor | None = None,
-    num_bonus_tokens: int = 1,
+    query_start_loc: torch.Tensor,
+    num_bonus_tokens: int,
 ) -> ConfidenceManager:
     if mode == "auto":
         if attn_cg_support.min_cg_support == AttentionCGSupport.ALWAYS:
@@ -598,5 +561,9 @@ def make_confidence_manager(
             num_bonus_tokens,
         )
     if mode == "mask":
-        return MaskedConfidenceManager(req_states, speculative_config)
+        return MaskedConfidenceManager(
+            req_states,
+            speculative_config,
+            num_bonus_tokens,
+        )
     raise ValueError(f"Unknown confidence-based verification mode: {mode}")
