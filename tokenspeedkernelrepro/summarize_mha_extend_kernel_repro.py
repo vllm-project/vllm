@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Summarize the isolated MHA extend kernel-author repro logs."""
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Summarize TokenSpeed native-extend vs AITER repro logs."""
 
 from __future__ import annotations
 
@@ -10,28 +12,22 @@ from pathlib import Path
 
 
 @dataclass(frozen=True)
-class ExtendRow:
-    workload: str
-    case: str
-    ms: float
-    rows_per_s: float
-    relative_to_native: float
-
-
-@dataclass(frozen=True)
-class MixedRow:
+class BenchRow:
     workload: str
     backend: str
     ms: float
-    tokens_per_s: float
+    throughput: float
     relative_to_aiter: float
+    throughput_name: str
 
 
 @dataclass(frozen=True)
-class AccuracyRow:
+class CompareRow:
     workload: str
-    max_abs: float
-    mean_abs: float
+    name: str
+    allclose: str
+    max_abs: str
+    mean_abs: str
 
 
 def _csv_rows_after(lines: list[str], start_idx: int) -> list[list[str]]:
@@ -46,52 +42,60 @@ def _csv_rows_after(lines: list[str], start_idx: int) -> list[list[str]]:
     return rows
 
 
-def parse_log(path: Path) -> tuple[list[ExtendRow], list[MixedRow], list[AccuracyRow]]:
+def _parse_compare_line(workload: str, line: str) -> CompareRow | None:
+    if " allclose=" not in line:
+        return None
+    name, rest = line.split(" ", 1)
+    fields = dict(item.split("=", 1) for item in rest.split() if "=" in item)
+    if not {"allclose", "max_abs", "mean_abs"} <= fields.keys():
+        return None
+    return CompareRow(
+        workload=workload,
+        name=name,
+        allclose=fields["allclose"],
+        max_abs=fields["max_abs"],
+        mean_abs=fields["mean_abs"],
+    )
+
+
+def parse_log(path: Path) -> tuple[list[BenchRow], list[CompareRow]]:
     lines = path.read_text().splitlines()
-    extend_rows: list[ExtendRow] = []
-    mixed_rows: list[MixedRow] = []
-    accuracy_rows: list[AccuracyRow] = []
     workload = path.stem
+    bench_rows: list[BenchRow] = []
+    compare_rows: list[CompareRow] = []
 
     for idx, line in enumerate(lines):
         stripped = line.strip()
-        if stripped == "case,ms,rows_per_s,relative_to_native":
+        if stripped == "backend,ms,rows_per_s,relative_to_aiter":
             for fields in _csv_rows_after(lines, idx):
-                extend_rows.append(
-                    ExtendRow(
+                bench_rows.append(
+                    BenchRow(
                         workload=workload,
-                        case=fields[0],
+                        backend=fields[0],
                         ms=float(fields[1]),
-                        rows_per_s=float(fields[2]),
-                        relative_to_native=float(fields[3]),
+                        throughput=float(fields[2]),
+                        relative_to_aiter=float(fields[3]),
+                        throughput_name="rows/s",
                     )
                 )
         elif stripped == "backend,ms,tokens_per_s,relative_to_aiter":
             for fields in _csv_rows_after(lines, idx):
-                mixed_rows.append(
-                    MixedRow(
+                bench_rows.append(
+                    BenchRow(
                         workload=workload,
                         backend=fields[0],
                         ms=float(fields[1]),
-                        tokens_per_s=float(fields[2]),
+                        throughput=float(fields[2]),
                         relative_to_aiter=float(fields[3]),
+                        throughput_name="tokens/s",
                     )
                 )
-        elif stripped.startswith("native_vs_decomposed_last_run "):
-            parts = dict(
-                item.split("=", 1)
-                for item in stripped.split()[1:]
-                if "=" in item
-            )
-            accuracy_rows.append(
-                AccuracyRow(
-                    workload=workload,
-                    max_abs=float(parts["max_abs_diff"]),
-                    mean_abs=float(parts["mean_abs_diff"]),
-                )
-            )
+        else:
+            parsed = _parse_compare_line(workload, stripped)
+            if parsed is not None:
+                compare_rows.append(parsed)
 
-    return extend_rows, mixed_rows, accuracy_rows
+    return bench_rows, compare_rows
 
 
 def parse_args() -> argparse.Namespace:
@@ -101,120 +105,59 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def write_summary(
-    extend_rows: list[ExtendRow],
-    mixed_rows: list[MixedRow],
-    accuracy_rows: list[AccuracyRow],
-) -> str:
+def write_summary(bench_rows: list[BenchRow], compare_rows: list[CompareRow]) -> str:
     lines: list[str] = []
-    lines.append("# MHA Extend Kernel Repro Summary")
+    lines.append("# TokenSpeed Native Extend vs AITER Summary")
     lines.append("")
     lines.append(
-        "This repro isolates TokenSpeed MHA native extend behavior without "
-        "modifying `tokenspeed_kernel_amd`."
+        "This report compares TokenSpeed native extend paths against "
+        "`ROCM_AITER_UNIFIED_ATTN`/AITER unified attention only."
+    )
+    lines.append(
+        "Sliding-window workloads use the corrected convention: workload names "
+        "report the vLLM semantic window, TokenSpeed receives `sliding_window - 1`, "
+        "and AITER receives `window_size=(sliding_window - 1, 0)`."
     )
     lines.append("")
 
-    if extend_rows:
-        lines.append("## Native Extend vs Decode-Decomposed Extend")
+    if bench_rows:
+        lines.append("## Benchmarks")
         lines.append("")
         lines.append(
-            "| Workload | Case | ms | rows/s | Relative to native extend |"
+            "| Workload | Backend/path | ms | Throughput | Relative to AITER |"
         )
         lines.append("|---|---|---:|---:|---:|")
-        for row in extend_rows:
-            lines.append(
-                f"| `{row.workload}` | `{row.case}` | `{row.ms:.4f}` | "
-                f"`{row.rows_per_s:.1f}` | `{row.relative_to_native:.3f}` |"
-            )
-        lines.append("")
-        lines.append(
-            "For this table, `relative_to_native < 1.000` means the "
-            "decode-decomposed alternative is faster than native extend."
-        )
-        lines.append("")
-
-        lines.append("## Native Extend Slowdown Highlights")
-        lines.append("")
-        lines.append(
-            "| Workload | Native extend ms | Best equivalent alternative | "
-            "Alternative ms | Native / alternative |"
-        )
-        lines.append("|---|---:|---|---:|---:|")
-        by_workload: dict[str, list[ExtendRow]] = {}
-        for row in extend_rows:
-            by_workload.setdefault(row.workload, []).append(row)
-        for workload, rows in sorted(by_workload.items()):
-            native = next((row for row in rows if row.case == "native_extend"), None)
-            alternatives = [
-                row
-                for row in rows
-                if row.case.startswith("decode_decomposed_")
-            ]
-            if native is None or not alternatives:
-                continue
-            best = min(alternatives, key=lambda row: row.ms)
-            lines.append(
-                f"| `{workload}` | `{native.ms:.4f}` | `{best.case}` | "
-                f"`{best.ms:.4f}` | `{native.ms / best.ms:.3f}` |"
-            )
-        lines.append("")
-
-    if accuracy_rows:
-        lines.append("## Extend Equivalence Checks")
-        lines.append("")
-        lines.append("| Workload | max abs diff | mean abs diff |")
-        lines.append("|---|---:|---:|")
-        for row in accuracy_rows:
-            lines.append(
-                f"| `{row.workload}` | `{row.max_abs:.8g}` | "
-                f"`{row.mean_abs:.8g}` |"
-            )
-        lines.append("")
-
-    if mixed_rows:
-        lines.append("## Mixed Batch vs ROCM_AITER_UNIFIED_ATTN")
-        lines.append("")
-        lines.append(
-            "| Workload | Backend/path | ms | tokens/s | Relative to AITER |"
-        )
-        lines.append("|---|---|---:|---:|---:|")
-        interesting = {
-            "aiter_unified",
-            "tokenspeed_safe",
-            "tokenspeed_native_extend",
-            "tokenspeed_native_extend_prefill_kernel",
-            "tokenspeed_native_extend_all",
-        }
-        for row in mixed_rows:
-            if row.backend not in interesting:
-                continue
+        for row in bench_rows:
             lines.append(
                 f"| `{row.workload}` | `{row.backend}` | `{row.ms:.4f}` | "
-                f"`{row.tokens_per_s:.1f}` | `{row.relative_to_aiter:.3f}` |"
+                f"`{row.throughput:.1f} {row.throughput_name}` | "
+                f"`{row.relative_to_aiter:.3f}` |"
             )
         lines.append("")
         lines.append(
-            "For this table, `relative_to_aiter > 1.000` means slower than "
-            "`ROCM_AITER_UNIFIED_ATTN` for the same synthetic request mix."
+            "`relative_to_aiter > 1.000` means slower than AITER for the same "
+            "synthetic request shape."
         )
         lines.append("")
 
-    lines.append("## Interpretation")
+    if compare_rows:
+        lines.append("## Output Checks")
+        lines.append("")
+        lines.append("| Workload | Comparison | allclose | max abs | mean abs |")
+        lines.append("|---|---|---:|---:|---:|")
+        for row in compare_rows:
+            lines.append(
+                f"| `{row.workload}` | `{row.name}` | `{row.allclose}` | "
+                f"`{row.max_abs}` | `{row.mean_abs}` |"
+            )
+        lines.append("")
+
+    lines.append("## Kernel-Author Target")
     lines.append("")
     lines.append(
-        "- The `extend_full_q1` workload is the direct kernel-level case to "
-        "send upstream when native MHA extend is slower than equivalent "
-        "decode-decomposed extend work."
-    )
-    lines.append(
-        "- Multi-token extend rows are included because native extend is not "
-        "universally slower in isolation; the important gap is the mixed serving "
-        "shape against `ROCM_AITER_UNIFIED_ATTN`."
-    )
-    lines.append(
-        "- The current safe integration keeps native extend disabled by default "
-        "because native-extend full-model runs previously regressed GSM8K."
+        "Optimize TokenSpeed native extend so the TokenSpeed rows approach or beat "
+        "`aiter_unified` for the same full-attention and corrected sliding-window "
+        "request shapes."
     )
     lines.append("")
     return "\n".join(lines)
@@ -222,19 +165,17 @@ def write_summary(
 
 def main() -> int:
     args = parse_args()
-    extend_rows: list[ExtendRow] = []
-    mixed_rows: list[MixedRow] = []
-    accuracy_rows: list[AccuracyRow] = []
+    bench_rows: list[BenchRow] = []
+    compare_rows: list[CompareRow] = []
     for path in args.logs:
-        parsed_extend, parsed_mixed, parsed_accuracy = parse_log(path)
-        extend_rows.extend(parsed_extend)
-        mixed_rows.extend(parsed_mixed)
-        accuracy_rows.extend(parsed_accuracy)
+        parsed_bench, parsed_compare = parse_log(path)
+        bench_rows.extend(parsed_bench)
+        compare_rows.extend(parsed_compare)
 
-    if not extend_rows and not mixed_rows:
+    if not bench_rows:
         raise SystemExit("No benchmark CSV sections found in logs.")
 
-    summary = write_summary(extend_rows, mixed_rows, accuracy_rows)
+    summary = write_summary(bench_rows, compare_rows)
     if args.out is not None:
         args.out.write_text(summary + "\n")
     else:

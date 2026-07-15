@@ -35,27 +35,27 @@ run_logged() {
   echo
 }
 
-# Native extend corner case: a one-token extend should behave like decode, but
-# this exposes whether the extend kernel has a high fixed per-request cost.
+# Native extend corner case: one-token request-level extend against AITER.
 run_logged extend_full_q1 \
-  python "${BENCH_DIR}/bench_extend_decomposition_perf.py" \
+  python "${BENCH_DIR}/bench_native_extend_vs_aiter.py" \
     "${COMMON_ARGS[@]}" \
     --requests 128 \
     --query-len 1 \
     --seq-len 1024
 
-# Multi-token full-attention extend. Keep this in the repro because native
-# extend is not universally slower; this row prevents over-attributing the gap.
+# Multi-token full-attention native extend against AITER.
 run_logged extend_full_q8 \
-  python "${BENCH_DIR}/bench_extend_decomposition_perf.py" \
+  python "${BENCH_DIR}/bench_native_extend_vs_aiter.py" \
     "${COMMON_ARGS[@]}" \
     --requests 128 \
     --query-len 8 \
     --seq-len 1024
 
 # Sliding-window extend is common for the model path we were evaluating.
+# The script treats --sliding-window as the vLLM semantic window and passes
+# sliding_window - 1 to TokenSpeed kernels internally.
 run_logged extend_sliding128_q8 \
-  python "${BENCH_DIR}/bench_extend_decomposition_perf.py" \
+  python "${BENCH_DIR}/bench_native_extend_vs_aiter.py" \
     "${COMMON_ARGS[@]}" \
     --requests 128 \
     --query-len 8 \
@@ -75,6 +75,20 @@ run_logged mixed_balanced_native_extend \
     --extend-seq-len 1024 \
     --num-prefills 8 \
     --prefill-query-len 64
+
+# Same mixed shape with a vLLM semantic sliding window of 128. Internally the
+# TokenSpeed decode/extend calls receive 127 and AITER receives (127, 0).
+run_logged mixed_balanced_sliding128_native_extend \
+  python "${BENCH_DIR}/bench_mixed_vs_aiter_unified.py" \
+    "${COMMON_ARGS[@]}" \
+    --num-decodes 128 \
+    --decode-seq-len 1024 \
+    --num-extends 16 \
+    --extend-query-len 16 \
+    --extend-seq-len 1024 \
+    --num-prefills 8 \
+    --prefill-query-len 64 \
+    --sliding-window 128
 
 # Larger near-chunk-limit mixed batch. This is closer to the serving path where
 # max-num-batched-tokens constrains how much prefill/extend work enters a step.
