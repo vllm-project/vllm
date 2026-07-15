@@ -138,69 +138,30 @@ def _rewrite_compact_batch_kernel(
 
 
 @triton.jit
-def _keyed_product(left_value, left_key, right_value, right_key):
-    value = tl.where(left_key == right_key, left_value * right_value, right_value)
-    return value, right_key
-
-
-@triton.jit
-def _assign_draft_token_budget_kernel(
+def _compute_prefix_survival_kernel(
     confidence_logits_ptr,
     confidence_logits_stride,
     idx_mapping_ptr,
     valid_draft_tokens_ptr,
     temperatures_ptr,
-    capacities_ptr,
-    num_reqs,
-    draft_token_budget,
+    survival_ptr,
     NUM_STEPS: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
 ):
-    candidate_idx = tl.arange(0, BLOCK_SIZE)
-    req_idx = candidate_idx // NUM_STEPS
-    step = candidate_idx % NUM_STEPS
-    valid_candidate = req_idx < num_reqs
-    req_state_idx = tl.load(idx_mapping_ptr + req_idx, mask=valid_candidate, other=0)
-    logit = tl.load(
-        confidence_logits_ptr + req_state_idx * confidence_logits_stride + step,
-        mask=valid_candidate,
-        other=-float("inf"),
-    )
-    if temperatures_ptr is not None:
-        logit /= tl.load(temperatures_ptr + step)
-    probability = tl.sigmoid(logit)
-    survival, _ = tl.associative_scan(
-        (probability, req_idx),
-        axis=0,
-        combine_fn=_keyed_product,
-    )
-    num_valid = tl.load(
-        valid_draft_tokens_ptr + req_idx,
-        mask=valid_candidate,
-        other=0,
-    )
-    survival = tl.where(valid_candidate & (step < num_valid), survival, -float("inf"))
-
-    # Pack descending float order and the original index into one ascending
-    # int64 key. The index preserves torch.sort(stable=True) tie ordering.
-    min_int32: tl.constexpr = -2147483648
-    score_bits = survival.to(tl.int32, bitcast=True)
-    sort_key = tl.where(
-        score_bits >> 31 == 0,
-        score_bits ^ -1,
-        score_bits ^ min_int32,
-    )
-    packed = ((sort_key.to(tl.int64) & 0xFFFFFFFF) << 32) | candidate_idx.to(tl.int64)
-    sorted_packed = tl.sort(packed, descending=False)
-    admitted_idx = (sorted_packed & 0xFFFFFFFF).to(tl.int32)
-
-    tl.store(capacities_ptr + candidate_idx, 0, mask=candidate_idx < num_reqs)
-    tl.debug_barrier()
-    tl.atomic_add(
-        capacities_ptr + admitted_idx // NUM_STEPS,
-        1,
-        mask=candidate_idx < draft_token_budget,
-    )
+    req_idx = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + req_idx)
+    num_valid = tl.load(valid_draft_tokens_ptr + req_idx)
+    survival = 1.0
+    for step in tl.static_range(NUM_STEPS):
+        logit = tl.load(
+            confidence_logits_ptr + req_state_idx * confidence_logits_stride + step
+        )
+        if temperatures_ptr is not None:
+            logit /= tl.load(temperatures_ptr + step)
+        survival *= tl.sigmoid(logit)
+        tl.store(
+            survival_ptr + req_idx * NUM_STEPS + step,
+            tl.where(step < num_valid, survival, -float("inf")),
+        )
 
 
 @triton.jit
@@ -308,10 +269,23 @@ class ConfidenceManager:
         )
 
         max_num_reqs = req_states.max_num_reqs
+        num_candidates = max_num_reqs * self.num_speculative_steps
         self._confidence_logits = torch.empty(
             (max_num_reqs, self.num_speculative_steps),
             dtype=torch.float32,
             device=device,
+        )
+        self._survival = torch.empty(
+            (max_num_reqs, self.num_speculative_steps),
+            dtype=torch.float32,
+            device=device,
+        )
+        self._sort_buffers = (
+            torch.empty(num_candidates, dtype=torch.float32, device=device),
+            torch.empty(num_candidates, dtype=torch.int64, device=device),
+        )
+        self._capacity_ones = torch.ones(
+            num_candidates, dtype=torch.int32, device=device
         )
         self._batch_draft_capacity = torch.empty(
             max_num_reqs, dtype=torch.int32, device=device
@@ -534,31 +508,6 @@ class ConfidenceManager:
         )
         return 0 if baseline >= throughput[best] else best + 1
 
-    def _assign_draft_token_budget_gpu(
-        self,
-        idx_mapping: torch.Tensor,
-        capacities: torch.Tensor,
-        temperatures: torch.Tensor | None,
-        num_reqs: int,
-        draft_token_budget: int,
-    ) -> None:
-        num_candidates = num_reqs * self.num_speculative_steps
-        block_size = triton.next_power_of_2(num_candidates)
-        num_warps = 4 if block_size <= 256 else 8
-        _assign_draft_token_budget_kernel[(1,)](
-            self._confidence_logits,
-            self._confidence_logits.stride(0),
-            idx_mapping,
-            self._valid_draft_tokens,
-            temperatures,
-            capacities,
-            num_reqs,
-            draft_token_budget,
-            NUM_STEPS=self.num_speculative_steps,
-            BLOCK_SIZE=block_size,
-            num_warps=num_warps,
-        )
-
     def _assign_draft_token_budget(
         self,
         input_batch: "InputBatch",
@@ -582,42 +531,59 @@ class ConfidenceManager:
             if self.online_sts is not None
             else None
         )
-        self._assign_draft_token_budget_gpu(
+        _compute_prefix_survival_kernel[(num_reqs,)](
+            self._confidence_logits,
+            self._confidence_logits.stride(0),
             input_batch.idx_mapping,
-            capacities,
+            self._valid_draft_tokens,
             temperatures,
-            num_reqs,
-            draft_token_budget,
+            self._survival,
+            NUM_STEPS=self.num_speculative_steps,
+        )
+        num_candidates = num_reqs * self.num_speculative_steps
+        sorted_survival, sorted_indices = self._sort_buffers
+        torch.sort(
+            self._survival[:num_reqs].flatten(),
+            descending=True,
+            stable=True,
+            out=(
+                sorted_survival[:num_candidates],
+                sorted_indices[:num_candidates],
+            ),
+        )
+        capacities.zero_()
+        admitted = sorted_indices[:draft_token_budget]
+        torch.div(
+            admitted,
+            self.num_speculative_steps,
+            rounding_mode="floor",
+            out=admitted,
+        )
+        capacities.scatter_add_(
+            0,
+            admitted,
+            self._capacity_ones[:draft_token_budget],
         )
         return capacities
 
     def warmup(self) -> None:
-        max_num_reqs = self.req_states.max_num_reqs
-        self._confidence_logits.zero_()
-        self._valid_draft_tokens.fill_(self.num_speculative_steps)
+        self._confidence_logits[:1].zero_()
+        self._valid_draft_tokens[:1].fill_(self.num_speculative_steps)
         temperatures = (
             self.online_sts.copy_temperatures_to_gpu()
             if self.online_sts is not None
             else None
         )
-        idx_mapping = torch.arange(
-            max_num_reqs, dtype=torch.int32, device=self.req_states.device
+        idx_mapping = torch.zeros(1, dtype=torch.int32, device=self.req_states.device)
+        _compute_prefix_survival_kernel[(1,)](
+            self._confidence_logits,
+            self._confidence_logits.stride(0),
+            idx_mapping,
+            self._valid_draft_tokens,
+            temperatures,
+            self._survival,
+            NUM_STEPS=self.num_speculative_steps,
         )
-        block_size = triton.next_power_of_2(self.num_speculative_steps)
-        max_block_size = triton.next_power_of_2(
-            max_num_reqs * self.num_speculative_steps
-        )
-        while block_size <= max_block_size:
-            num_reqs = min(max_num_reqs, block_size // self.num_speculative_steps)
-            draft_token_budget = max(1, num_reqs * self.num_speculative_steps // 2)
-            self._assign_draft_token_budget_gpu(
-                idx_mapping,
-                self._batch_draft_capacity,
-                temperatures,
-                num_reqs,
-                draft_token_budget,
-            )
-            block_size *= 2
 
         self._staged_req_ids = [[], []]
         self._next_idx = 0
