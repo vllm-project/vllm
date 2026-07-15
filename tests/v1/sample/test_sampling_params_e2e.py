@@ -31,6 +31,7 @@ def test_penalties(llm):
         frequency_penalty=1.2,
         repetition_penalty=1.2,
         min_p=0.5,
+        p_less=True,
         top_p=0.5,
         top_k=3,
     )
