@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     VLLM_API_KEY: str | None = None
     VLLM_DEBUG_LOG_API_SERVER_RESPONSE: bool = False
     VLLM_KEEP_HISTORY_REASONING: bool = True
+    VLLM_IQUEST_MULTILAYER_MTP: bool = False
     VLLM_REQUEST_LOG_PATH: str | None = None
     VLLM_REQUEST_LOG_MAX_BYTES: int = 0
     VLLM_REQUEST_LOG_ROTATE_INTERVAL: str | None = None
@@ -652,6 +653,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_KEEP_HISTORY_REASONING", "True"
     ).lower()
     == "true",
+    # Prototype toggle for TRUE multi-layer MTP speculative decoding with the
+    # iquest_mtp draft head. When enabled (and the draft is iquest_mtp with
+    # num_mtp_layers>1 and num_speculative_tokens==num_mtp_layers), draft token
+    # +k is produced by the trained MTP layer k in a chained pass, instead of
+    # reusing layer 0 autoregressively. Off by default.
+    "VLLM_IQUEST_MULTILAYER_MTP": lambda: bool(
+        int(os.getenv("VLLM_IQUEST_MULTILAYER_MTP", "0"))
+    ),
     # If set, the OpenAI-compatible API server will log every HTTP
     # request/response pair as a single line of JSON to this file. Writes
     # are performed by a separate subprocess that talks to the API server

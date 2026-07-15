@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal, get_args
 from pydantic import Field, SkipValidation, model_validator
 from typing_extensions import Self
 
+import vllm.envs as envs
 from vllm.config import LoadConfig
 from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
@@ -208,14 +209,9 @@ class SpeculativeConfig:
 
         if hf_config.architectures[0] == "IquestMoeV13ForCausalLM":
             hf_config.model_type = "iquest_mtp"
-            # Low-cost v1: materialize only mtp_layers.0. n_predict=1 makes K=1
-            # the default; explicit num_speculative_tokens > 1 is still allowed
-            # (K % n_predict == 0) and reuses this single MTP layer
-            # autoregressively, with lower expected acceptance for later draft
-            # tokens. num_hidden_layers is left unchanged so the draft's MTP
-            # layer registers a KV-cache name distinct from the target's layers.
+            n_predict = getattr(hf_config, "num_mtp_layers", 1) or 1
             hf_config.update(
-                {"n_predict": 1, "architectures": ["IquestMoeV13MTPModel"]}
+                {"n_predict": n_predict, "architectures": ["IquestMoeV13MTPModel"]}
             )
 
         if hf_config.architectures[0] == "MiMoForCausalLM":
@@ -452,11 +448,19 @@ class SpeculativeConfig:
                     MTPModelTypes
                 ):
                     self.method = "mtp"
-                    if self.num_speculative_tokens > 1:
+                    hf_config = self.draft_model_config.hf_config
+                    use_iquest_multilayer = (
+                        hf_config.model_type == "iquest_mtp"
+                        and envs.VLLM_IQUEST_MULTILAYER_MTP
+                        and self.num_speculative_tokens is not None
+                        and self.num_speculative_tokens
+                        == getattr(hf_config, "num_mtp_layers", 1)
+                    )
+                    if self.num_speculative_tokens > 1 and not use_iquest_multilayer:
                         logger.warning(
                             "Enabling num_speculative_tokens > 1 will run "
-                            "multiple times of forward on same MTP layer"
-                            ",which may result in lower acceptance rate"
+                            "multiple forwards on the same MTP layer, which may "
+                            "result in a lower acceptance rate."
                         )
                 elif self.draft_model_config.hf_config.model_type in (
                     "longcat_flash_mtp"

@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.config import (
     CUDAGraphMode,
     VllmConfig,
@@ -506,6 +507,23 @@ class SpecDecodeBaseProposer:
             draft_token_ids = self._greedy_sample(sample_hidden_states)
             return draft_token_ids.view(-1, self.num_speculative_tokens)
 
+        # Prototype: TRUE multi-layer MTP for iquest_mtp. Draft token +k is
+        # produced by the trained MTP layer k in a chained pass, instead of
+        # reusing layer 0 autoregressively. `hidden_states` here is still the
+        # full first-pass (layer 0) output over every query token.
+        if self._use_iquest_multilayer():
+            return self._propose_mtp_chained(
+                first_pass_hidden_states=hidden_states,
+                sample_hidden_states=sample_hidden_states,
+                token_indices_to_sample=token_indices_to_sample,
+                per_layer_attn_metadata=per_layer_attn_metadata,
+                common_attn_metadata=common_attn_metadata,
+                num_tokens=num_tokens,
+                num_input_tokens=num_input_tokens,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                num_tokens_across_dp=num_tokens_across_dp,
+            )
+
         if self.uses_mrope:
             positions = self.mrope_positions[:, token_indices_to_sample]
         else:
@@ -705,6 +723,152 @@ class SpecDecodeBaseProposer:
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         return draft_token_ids
+
+    def _use_iquest_multilayer(self) -> bool:
+        """Gate for the prototype chained multi-layer MTP path.
+
+        Only enabled when:
+          * VLLM_IQUEST_MULTILAYER_MTP=1,
+          * the draft is the iquest_mtp head with num_mtp_layers > 1,
+          * num_speculative_tokens == num_mtp_layers (each layer used once).
+        Otherwise we fall back to the default layer-0-reuse path.
+        """
+        cached = getattr(self, "_iquest_multilayer_enabled", None)
+        if cached is not None:
+            return cached
+
+        enabled = False
+        num_mtp_layers = 1
+        if envs.VLLM_IQUEST_MULTILAYER_MTP and self.method == "mtp":
+            hf_config = self.draft_model_config.hf_config
+            num_mtp_layers = getattr(hf_config, "num_mtp_layers", 1) or 1
+            if (
+                getattr(hf_config, "model_type", None) == "iquest_mtp"
+                and num_mtp_layers > 1
+            ):
+                if self.num_speculative_tokens == num_mtp_layers:
+                    enabled = True
+                else:
+                    logger.warning_once(
+                        "VLLM_IQUEST_MULTILAYER_MTP is set but "
+                        "num_speculative_tokens=%d != num_mtp_layers=%d; "
+                        "falling back to layer-0-reuse drafting.",
+                        self.num_speculative_tokens,
+                        num_mtp_layers,
+                    )
+        self._num_mtp_layers = num_mtp_layers if enabled else 1
+        self._iquest_multilayer_enabled = enabled
+        return enabled
+
+    def _propose_mtp_chained(
+        self,
+        first_pass_hidden_states: torch.Tensor,
+        sample_hidden_states: torch.Tensor,
+        token_indices_to_sample: torch.Tensor,
+        per_layer_attn_metadata: dict,
+        common_attn_metadata: CommonAttentionMetadata,
+        num_tokens: int,
+        num_input_tokens: int,
+        cudagraph_runtime_mode: CUDAGraphMode,
+        num_tokens_across_dp: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Draft one token with each trained MTP layer.
+
+        Every trained MTP layer runs once over the same query span so that each
+        physical layer maintains its own prefix KV cache. A two-layer model
+        therefore drafts exactly two tokens in one chained pass.
+
+        Wiring per layer k (>=1), for query token at buffer index i:
+          * positions:      unchanged (all layers attend at the same absolute
+                            positions).
+          * input token:    the (k+1)-ahead ground-truth token, obtained by
+                            left-shifting layer (k-1)'s input by one within
+                            each request; at each request's sample (last)
+                            position the ground truth is unknown, so we splice
+                            in the draft token just sampled from layer (k-1).
+          * previous_hidden: layer (k-1)'s full-length output hidden states.
+        """
+        if self.supports_mm_inputs:
+            raise NotImplementedError(
+                "iquest multilayer MTP prototype does not support multimodal inputs."
+            )
+
+        # d_1 from layer 0 (already run in the first pass).
+        draft_token_ids_list = [self._greedy_sample(sample_hidden_states)]
+
+        # Running hidden states threaded across layers (h_0 -> h_1 -> ...).
+        prev_hidden_states = first_pass_hidden_states
+
+        for step_idx in range(1, self._num_mtp_layers):
+            prev_draft = draft_token_ids_list[-1].int()
+
+            # Build layer-k input ids: left-shift the current buffer within
+            # each request, then overwrite the per-request sample positions
+            # with the previous layer's draft token.
+            #
+            # NOTE: clone (not torch.empty_like) is essential. The left-shift
+            # fills slots [0, num_tokens-2] and the scatter fills the sample
+            # positions; the tail slot (num_tokens-1) is otherwise left
+            # UNINITIALIZED. With torch.empty_like it holds garbage ints, and
+            # once real spec-decode rejections move the sample positions off
+            # the buffer tail, that garbage id (>= vocab_size) is fed to the
+            # embedding gather -> device-side assert. Cloning the current
+            # buffer keeps a valid in-range token id in any slot we don't
+            # explicitly overwrite.
+            layer_input_ids = self.input_ids[:num_tokens].clone()
+            layer_input_ids[:-1] = self.input_ids[1:num_tokens]
+            layer_input_ids[token_indices_to_sample] = prev_draft
+            self.input_ids[:num_tokens] = layer_input_ids
+
+            # Thread the previous layer's hidden states into the buffer.
+            self.hidden_states[:num_tokens] = prev_hidden_states[:num_tokens]
+
+            # The fixed per-layer compiled entry point receives embeddings rather
+            # than input ids. Keep them in a persistent proposer buffer because
+            # CUDA graph replay requires every tensor input to retain the same
+            # address used during capture.
+            self.inputs_embeds[:num_input_tokens] = self.model.embed_input_ids(
+                self.input_ids[:num_input_tokens]
+            )
+
+            model_kwargs = {
+                "input_ids": None,
+                "positions": self._get_positions(num_input_tokens),
+                "inputs_embeds": self.inputs_embeds[:num_input_tokens],
+                "hidden_states": self.hidden_states[:num_input_tokens],
+                "spec_step_idx": step_idx,
+            }
+
+            logger.debug(
+                "iquest multilayer MTP: running spec_step_idx=%d "
+                "(mtp layer %d) over %d query tokens",
+                step_idx,
+                step_idx % self._num_mtp_layers,
+                num_tokens,
+            )
+
+            with set_forward_context(
+                per_layer_attn_metadata,
+                self.vllm_config,
+                num_tokens=num_input_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
+                # Each trained MTP layer has its own fixed compiled entry point
+                # and therefore its own CUDAGraphWrapper/cache.
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                slot_mapping=self._get_slot_mapping(
+                    num_input_tokens, common_attn_metadata.slot_mapping
+                ),
+            ):
+                ret_hidden_states = self.model.forward_mtp_layer(**model_kwargs)
+                # method == "mtp" => model returns a single hidden tensor.
+                last_hidden_states = ret_hidden_states
+
+            prev_hidden_states = last_hidden_states[:num_tokens]
+            sample_hidden_states = last_hidden_states[token_indices_to_sample]
+            draft_token_ids_list.append(self._greedy_sample(sample_hidden_states))
+
+        # [batch_size, num_speculative_tokens]
+        return torch.stack(draft_token_ids_list, dim=1)
 
     def set_inputs_first_pass(
         self,
@@ -1584,9 +1748,15 @@ class SpecDecodeBaseProposer:
     ) -> None:
         # FIXME: when using tree-based specdec, adjust number of forward-passes
         # according to the depth of the tree.
-        for fwd_idx in range(
-            self.num_speculative_tokens if not is_graph_capturing else 1
-        ):
+        use_iquest_multilayer = self._use_iquest_multilayer()
+        if not is_graph_capturing:
+            num_forwards = self.num_speculative_tokens
+        elif use_iquest_multilayer:
+            # Capture the outer layer-0 graph and each remaining physical layer.
+            num_forwards = self._num_mtp_layers
+        else:
+            num_forwards = 1
+        for fwd_idx in range(num_forwards):
             if fwd_idx <= 1:
                 num_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
                     num_tokens_unpadded=num_tokens, num_tokens_padded=num_tokens
@@ -1612,6 +1782,7 @@ class SpecDecodeBaseProposer:
             else:
                 slot_mapping_dict = slot_mappings or {}
 
+            use_fixed_iquest_layer = use_iquest_multilayer and fwd_idx > 0
             with set_forward_context(
                 None,
                 self.vllm_config,
@@ -1621,6 +1792,12 @@ class SpecDecodeBaseProposer:
                 slot_mapping=slot_mapping_dict,
             ):
                 if self.supports_mm_inputs:
+                    input_ids = None
+                    inputs_embeds = self.inputs_embeds[:num_input_tokens]
+                elif use_fixed_iquest_layer:
+                    self.inputs_embeds[:num_input_tokens] = self.model.embed_input_ids(
+                        self.input_ids[:num_input_tokens]
+                    )
                     input_ids = None
                     inputs_embeds = self.inputs_embeds[:num_input_tokens]
                 else:
@@ -1634,7 +1811,11 @@ class SpecDecodeBaseProposer:
                 )
                 if self.pass_hidden_states_to_model:
                     kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
-                self.model(**kwargs)
+                if use_fixed_iquest_layer:
+                    kwargs["spec_step_idx"] = fwd_idx
+                    self.model.forward_mtp_layer(**kwargs)
+                else:
+                    self.model(**kwargs)
 
     def _get_attention_metadata_builder(self) -> AttentionMetadataBuilder:
         """Find and return the attention metadata builders for EAGLE layers.
