@@ -2137,6 +2137,9 @@ class DPEngineCoreProc(EngineCoreProc):
             == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
         )
 
+        if self.eep_scaling_state is not None:
+            raise RuntimeError("Elastic EP reconfiguration is already active")
+
         state = ElasticEPScalingState(
             model_executor=self.model_executor,
             engine_core=self,
@@ -2146,10 +2149,6 @@ class DPEngineCoreProc(EngineCoreProc):
             scale_type="scale_down" if is_scale_down else "scale_up",
             reconfig_request=reconfig_request,
         )
-
-        if self.eep_scaling_state is not None:
-            raise RuntimeError("Elastic EP reconfiguration is already active")
-
         self.eep_scaling_state = state
 
         self.process_input_queue_block = False
