@@ -72,14 +72,26 @@ def test_non_fp32_head_dtype_uses_cast_path(default_vllm_config):
 
 
 def test_head_dtype_equal_to_model_dtype_uses_quant_method(default_vllm_config):
+    from unittest import mock
+
     vocab_size, hidden_size = 64, 16
     lp = _build_processor(vocab_size)
     lp.head_dtype = torch.bfloat16
 
     hidden_states = torch.randn(4, hidden_size, dtype=torch.bfloat16)
     weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16)
+    lm_head = _FakeLmHead(weight)
 
-    logits = lp._get_logits(hidden_states, _FakeLmHead(weight), None)
+    with mock.patch.object(
+        lm_head.quant_method,
+        "apply",
+        side_effect=lambda layer, x, bias=None: torch.nn.functional.linear(
+            x, layer.weight, bias
+        ),
+    ) as apply_mock:
+        logits = lp._get_logits(hidden_states, lm_head, None)
+
+    apply_mock.assert_called_once()
     assert logits.dtype == torch.bfloat16
 
 

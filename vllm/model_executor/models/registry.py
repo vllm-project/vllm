@@ -210,6 +210,7 @@ _TEXT_GENERATION_MODELS = {
 _EMBEDDING_MODELS = {
     # [Text-only]
     "BertModel": ("bert", "BertEmbeddingModel"),
+    "BertForMaskedLM": ("bert", "BertForMaskedLM"),
     "BertSpladeSparseEmbeddingModel": ("bert", "BertSpladeSparseEmbeddingModel"),
     "BgeM3EmbeddingModel": ("roberta", "BgeM3EmbeddingModel"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
@@ -348,6 +349,10 @@ _MULTIMODAL_MODELS = {
         "Cohere2VisionForConditionalGeneration",
     ),
     "Cosmos3ForConditionalGeneration": ("cosmos3", "Cosmos3ForConditionalGeneration"),
+    "Cosmos3EdgeForConditionalGeneration": (
+        "cosmos3_edge",
+        "Cosmos3EdgeForConditionalGeneration",
+    ),
     "DeepseekVLV2ForCausalLM": ("deepseek_vl2", "DeepseekVLV2ForCausalLM"),
     "DeepseekOCRForCausalLM": ("deepseek_ocr", "DeepseekOCRForCausalLM"),
     "DeepseekOCR2ForCausalLM": ("deepseek_ocr2", "DeepseekOCR2ForCausalLM"),
