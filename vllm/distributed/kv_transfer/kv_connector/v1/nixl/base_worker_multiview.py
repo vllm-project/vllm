@@ -11,7 +11,6 @@ Wire-in: change the import in pull_worker.py / push_worker.py to use
 NixlBaseConnectorWorkerMultiview as the base class.
 """
 
-import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
 from math import prod
@@ -40,8 +39,6 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
-
-logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -300,30 +297,6 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
     def _on_kv_caches_registered(self) -> None:
         """Build DescriptorViews after NIXL memory regions are registered."""
         self._views, self._group_to_view_idx = self._build_descriptor_views()
-        spec_names = [type(s).__name__ for s in self.spec_per_region]
-        logger.warning(
-            "[DEBUG VIEWS] spec_per_region=%s block_lens=%s "
-            "block_strides=%s views=%d group_to_view=%s",
-            spec_names,
-            self.block_len_per_layer,
-            self.block_stride_per_layer,
-            len(self._views),
-            self._group_to_view_idx,
-        )
-        for vi, v in enumerate(self._views):
-            logger.warning(
-                "[DEBUG VIEW %d] spec=%s regions=%s strides=%s "
-                "contents=%s num_blocks=%d descs_per_region=%d "
-                "total_descs=%d",
-                vi,
-                type(v.spec).__name__,
-                v.region_indices,
-                v.strides,
-                v.contents,
-                v.num_blocks,
-                v.descs_per_region,
-                v.num_descs(),
-            )
 
     # ------------------------------------------------------------------
     # View-based local descriptor building
@@ -397,18 +370,9 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
         local_base_addresses = self.kv_caches_base_addr[self.engine_id][self.tp_rank]
 
         blocks_data: list[tuple[int, int, int]] = []
-        for vi, view in enumerate(self._views):
+        for view in self._views:
             view_descs = self._build_view_local(
                 view, local_base_addresses, block_size_ratio
-            )
-            unique_sizes = sorted(set(d[1] for d in view_descs))
-            logger.warning(
-                "[DEBUG LOCAL] view=%d spec=%s regions=%s num_descs=%d unique_sizes=%s",
-                vi,
-                type(view.spec).__name__,
-                view.region_indices,
-                len(view_descs),
-                unique_sizes,
             )
             blocks_data.extend(view_descs)
 
