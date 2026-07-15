@@ -156,6 +156,7 @@ class BailingMoeV25MultiTokenPredictor(nn.Module):
                 config.hidden_size,
                 org_num_embeddings=config.vocab_size,
                 prefix=maybe_prefix(prefix, "embed_tokens"),
+                quant_config=vllm_config.quant_config,
             )
         else:
             self.embed_tokens = PPMissingLayer()

@@ -23,6 +23,7 @@ from vllm.model_executor.layers.pooler.tokwise import (
     pooler_for_token_classify,
     pooler_for_token_embed,
 )
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -46,11 +47,19 @@ from .interfaces_base import attn_type, default_pooling_type
 
 
 class RobertaEmbedding(nn.Module):
-    def __init__(self, config: RobertaConfig):
+    def __init__(
+        self,
+        config: RobertaConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
         super().__init__()
         self.size = config.hidden_size
         self.word_embeddings = VocabParallelEmbedding(
-            config.vocab_size, config.hidden_size
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.word_embeddings",
         )
         self.padding_idx = config.pad_token_id
         self.position_embeddings = VocabParallelEmbedding(

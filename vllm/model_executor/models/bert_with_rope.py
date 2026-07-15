@@ -46,7 +46,12 @@ from .interfaces_base import default_pooling_type
 
 
 class BertWithRopeEmbedding(nn.Module):
-    def __init__(self, config: PretrainedConfig):
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
         super().__init__()
         if config.position_embedding_type not in ["rope", "rotary"]:
             raise ValueError(
@@ -54,7 +59,10 @@ class BertWithRopeEmbedding(nn.Module):
             )
 
         self.word_embeddings = VocabParallelEmbedding(
-            config.vocab_size, config.hidden_size
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.word_embeddings",
         )
         if config.type_vocab_size > 0:
             self.token_type_embeddings = VocabParallelEmbedding(
@@ -457,7 +465,11 @@ class BertWithRope(nn.Module, SupportsQuant):
         self.vllm_config = vllm_config
         self.add_pooling_layer = add_pooling_layer
         self.config = vllm_config.model_config.hf_config
-        self.embeddings = BertWithRopeEmbedding(self.config)
+        self.embeddings = BertWithRopeEmbedding(
+            self.config,
+            quant_config=vllm_config.quant_config,
+            prefix=f"{prefix}.embeddings",
+        )
         self.encoder = BertWithRopeEncoder(
             vllm_config=vllm_config,
             bias=getattr(self.config, "bias", True),

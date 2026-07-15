@@ -309,6 +309,8 @@ class NemotronModel(nn.Module):
             self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
                 config.hidden_size,
+                quant_config=quant_config,
+                prefix=f"{prefix}.embed_tokens",
             )
         else:
             self.embed_tokens = PPMissingLayer()

@@ -47,11 +47,19 @@ from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
 class BertEmbedding(nn.Module):
-    def __init__(self, config: BertConfig):
+    def __init__(
+        self,
+        config: BertConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
         super().__init__()
         self.size = config.hidden_size
         self.word_embeddings = VocabParallelEmbedding(
-            config.vocab_size, config.hidden_size
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.word_embeddings",
         )
         self.position_embeddings = VocabParallelEmbedding(
             config.max_position_embeddings, config.hidden_size
@@ -393,7 +401,11 @@ class BertModel(nn.Module, SupportsQuant):
         super().__init__()
 
         self.config = vllm_config.model_config.hf_config
-        self.embeddings = embedding_class(self.config)
+        self.embeddings = embedding_class(
+            self.config,
+            quant_config=vllm_config.quant_config,
+            prefix=f"{prefix}.embeddings",
+        )
         self.encoder = BertEncoder(vllm_config=vllm_config, prefix=f"{prefix}.encoder")
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:

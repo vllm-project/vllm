@@ -22,6 +22,7 @@ from vllm.model_executor.layers.pooler.seqwise import (
     get_seq_pooling_method,
 )
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_classify
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -33,11 +34,19 @@ from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
 class ModernBertEmbeddings(nn.Module):
-    def __init__(self, config: ModernBertConfig):
+    def __init__(
+        self,
+        config: ModernBertConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
         super().__init__()
         self.config = config
         self.tok_embeddings = VocabParallelEmbedding(
-            config.vocab_size, config.hidden_size
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.tok_embeddings",
         )
         eps = (
             getattr(config, "norm_eps", None)
@@ -252,7 +261,11 @@ class ModernBertModel(nn.Module):
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.config = config
-        self.embeddings = ModernBertEmbeddings(config)
+        self.embeddings = ModernBertEmbeddings(
+            config,
+            quant_config=vllm_config.quant_config,
+            prefix=f"{prefix}.embeddings",
+        )
         self.encoder_layer = ModernBertEncoderLayer(
             vllm_config, prefix=f"{prefix}.encoder_layer"
         )
