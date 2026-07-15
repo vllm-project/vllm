@@ -1124,8 +1124,8 @@ class TestNixlHandshake:
             == worker._mamba_ssm_size[1]
         )
 
-        assert worker._build_fa_remote(plan, meta, block_size_ratio=1) == [
-            (0x1000 + local_block_len, local_block_len, 0)
+        assert worker._build_fa_remote(plan, meta, block_size_ratio=1).tolist() == [
+            [0x1000 + local_block_len, local_block_len, 0]
         ]
 
     @patch(

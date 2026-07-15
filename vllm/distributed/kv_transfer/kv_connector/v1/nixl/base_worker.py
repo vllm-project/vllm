@@ -188,12 +188,13 @@ class NixlBaseConnectorWorker:
 
         # Per-FA-descriptor replicate flag, in _build_fa_local emission order.
         fa_desc_replicated = self._fa_desc_replicated(num_fa_descs)
+        src_blocks_list = src_blocks_data.tolist()
 
         for p_idx, p_rank in enumerate(plan.all_source_ranks):
             fa_slot = plan.rank_to_attention_slot.get(p_rank, 0)
 
             handle: list[tuple[int, int, int]] = []
-            for j, (addr, local_len, dev) in enumerate(src_blocks_data.tolist()):
+            for j, (addr, local_len, dev) in enumerate(src_blocks_list):
                 if j < num_fa_descs:
                     if fa_desc_replicated[j]:
                         # REPLICATE (MLA): whole block written on every rank.
@@ -1284,6 +1285,7 @@ class NixlBaseConnectorWorker:
             "Mamba 3-read transfer with block_size_ratio != 1 is not tested. "
             f"Got block_size_ratio={block_size_ratio}."
         )
+        assert base_addresses, "Local KV cache base addresses must not be empty."
         assert self._conv_decomp is not None
         conv_offsets = self._conv_decomp.local_conv_offsets
         conv_size, ssm_size = self._mamba_ssm_size
@@ -1304,7 +1306,7 @@ class NixlBaseConnectorWorker:
                 parts.append(self._stack_descs(blk_addrs + off, sz, device_id))
             # SSM temporal state follows the conv state.
             parts.append(self._stack_descs(blk_addrs + conv_size, ssm_size, device_id))
-        return np.concatenate(parts) if parts else np.empty((0, 3), dtype=np.uint64)
+        return np.concatenate(parts)
 
     def _build_mamba_remote(
         self,
@@ -1315,6 +1317,9 @@ class NixlBaseConnectorWorker:
         """Build remote desc regions (conv sub-projections + ssm) per layer.
         For hetero-TP, each D rank reads only its sub-projection slice from
         the P rank. Returns an Nx3 uint64 array."""
+        assert nixl_agent_meta.kv_caches_base_addr, (
+            "Remote KV cache base addresses must not be empty."
+        )
         assert self._conv_decomp is not None
         effective_ratio = max(tp_ratio, 1)
         # Mamba conv state is always TP-sharded, even when attention KV
@@ -1344,7 +1349,7 @@ class NixlBaseConnectorWorker:
             # SSM temporal state is also TP-sharded on the heads dimension.
             ssm_addrs = blk_addrs + conv_size_remote + local_offset * ssm_read_size
             parts.append(self._stack_descs(ssm_addrs, ssm_read_size, device_id))
-        return np.concatenate(parts) if parts else np.empty((0, 3), dtype=np.uint64)
+        return np.concatenate(parts)
 
     @staticmethod
     def _stack_descs(addrs: np.ndarray, length: int, device_id: int) -> np.ndarray:
@@ -1361,6 +1366,7 @@ class NixlBaseConnectorWorker:
     ) -> np.ndarray:
         """Build local FA descriptors for all layers as an Nx3 uint64 array."""
         assert self.transfer_topo is not None
+        assert base_addresses, "Local KV cache base addresses must not be empty."
         num_blocks = self.num_blocks * block_size_ratio
         device_id = self.device_id
         block_arange = np.arange(num_blocks, dtype=np.uint64)
@@ -1375,7 +1381,7 @@ class NixlBaseConnectorWorker:
             page_stride = self.block_len_per_layer[i] // block_size_ratio
             addrs = base_addr + block_arange * page_stride
             parts.append(self._stack_descs(addrs, kv_block_len, device_id))
-        return np.concatenate(parts) if parts else np.empty((0, 3), dtype=np.uint64)
+        return np.concatenate(parts)
 
     def _build_fa_remote(
         self,
@@ -1385,6 +1391,9 @@ class NixlBaseConnectorWorker:
     ) -> np.ndarray:
         """Build remote FA descriptors for all layers as an Nx3 uint64 array."""
         assert self.transfer_topo is not None
+        assert nixl_agent_meta.kv_caches_base_addr, (
+            "Remote KV cache base addresses must not be empty."
+        )
         fa_group_idx = next(
             i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
         )
@@ -1417,7 +1426,7 @@ class NixlBaseConnectorWorker:
             page_size = nixl_agent_meta.block_lens[i]
             addrs = base_addr + rank_offset + block_arange * page_size
             parts.append(self._stack_descs(addrs, local_block_len, device_id))
-        return np.concatenate(parts) if parts else np.empty((0, 3), dtype=np.uint64)
+        return np.concatenate(parts)
 
     def register_local_xfer_handler(
         self,
