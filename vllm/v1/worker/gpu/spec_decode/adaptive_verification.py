@@ -306,7 +306,9 @@ class AdaptiveVerificationManager:
         draft_budget = int(np.argmax(num_tokens_to_estimated_accepted_tokens / costs))
         return valid_drafts_per_req, num_non_draft_tokens_per_req, draft_budget
 
-    def _consume_budget(self, req_ids: list[str]) -> tuple[np.ndarray, np.ndarray, int]:
+    def allocate_draft_token_budget(
+        self, req_ids: list[str], idx_mapping: torch.Tensor
+    ) -> tuple[torch.Tensor, np.ndarray, int]:
         batch_budget = self._batch_budget
         self._batch_budget = None
         assert batch_budget is not None
@@ -321,9 +323,30 @@ class AdaptiveVerificationManager:
             dtype=np.int32,
             count=len(req_ids),
         )
-        return valid_drafts, num_non_draft_tokens, draft_budget
+        num_reqs = idx_mapping.shape[0]
+        capacities = self._batch_draft_capacity[:num_reqs]
+        if draft_budget == 0:
+            capacities.zero_()
+        else:
+            async_copy_to_gpu(valid_drafts, out=capacities)
+            if draft_budget != int(valid_drafts.sum()):
+                block_size = triton.next_power_of_2(
+                    num_reqs * self.num_speculative_steps
+                )
+                _assign_draft_token_budget_kernel[(1,)](
+                    self._confidence_probs,
+                    self._confidence_probs.stride(0),
+                    idx_mapping,
+                    capacities,
+                    num_reqs,
+                    draft_budget,
+                    NUM_STEPS=self.num_speculative_steps,
+                    BLOCK_SIZE=block_size,
+                    num_warps=4 if block_size <= 256 else 8,
+                )
+        return capacities, num_non_draft_tokens, draft_budget
 
-    def allocate_draft_token_budget(
+    def compact_batch(
         self, req_ids: list[str], idx_mapping: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
         raise NotImplementedError
@@ -349,31 +372,13 @@ class VarlenAdaptiveVerificationManager(AdaptiveVerificationManager):
         self._num_non_draft_tokens = torch.empty_like(query_start_loc[:-1])
         self._cu_num_logits = torch.empty_like(query_start_loc)
 
-    def allocate_draft_token_budget(
+    def compact_batch(
         self, req_ids: list[str], idx_mapping: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
-        valid_drafts, num_non_draft_tokens, draft_budget = self._consume_budget(req_ids)
+        capacities, num_non_draft_tokens, draft_budget = (
+            self.allocate_draft_token_budget(req_ids, idx_mapping)
+        )
         num_reqs = idx_mapping.shape[0]
-        capacities = self._batch_draft_capacity[:num_reqs]
-        if draft_budget == 0:
-            capacities.zero_()
-        else:
-            async_copy_to_gpu(valid_drafts, out=capacities)
-            if draft_budget != int(valid_drafts.sum()):
-                block_size = triton.next_power_of_2(
-                    num_reqs * self.num_speculative_steps
-                )
-                _assign_draft_token_budget_kernel[(1,)](
-                    self._confidence_probs,
-                    self._confidence_probs.stride(0),
-                    idx_mapping,
-                    capacities,
-                    num_reqs,
-                    draft_budget,
-                    NUM_STEPS=self.num_speculative_steps,
-                    BLOCK_SIZE=block_size,
-                    num_warps=4 if block_size <= 256 else 8,
-                )
         num_tokens = int(num_non_draft_tokens.sum()) + draft_budget
         num_non_draft_tokens_gpu = self._num_non_draft_tokens[:num_reqs]
         async_copy_to_gpu(
@@ -406,28 +411,9 @@ class MaskedAdaptiveVerificationManager(AdaptiveVerificationManager):
         if scheduled_drafts is None:
             self._batch_draft_capacity[: input_batch.num_reqs].zero_()
             return
-        valid_drafts, _, draft_budget = self._consume_budget(input_batch.req_ids)
-        num_reqs = input_batch.num_reqs
-        capacities = self._batch_draft_capacity[:num_reqs]
-        if draft_budget == 0:
-            capacities.zero_()
-        else:
-            async_copy_to_gpu(valid_drafts, out=capacities)
-            if draft_budget != int(valid_drafts.sum()):
-                block_size = triton.next_power_of_2(
-                    num_reqs * self.num_speculative_steps
-                )
-                _assign_draft_token_budget_kernel[(1,)](
-                    self._confidence_probs,
-                    self._confidence_probs.stride(0),
-                    input_batch.idx_mapping,
-                    capacities,
-                    num_reqs,
-                    draft_budget,
-                    NUM_STEPS=self.num_speculative_steps,
-                    BLOCK_SIZE=block_size,
-                    num_warps=4 if block_size <= 256 else 8,
-                )
+        capacities, _, _ = self.allocate_draft_token_budget(
+            input_batch.req_ids, input_batch.idx_mapping
+        )
         query_ends = input_batch.query_start_loc[1 : input_batch.num_reqs + 1]
         num_logits = input_batch.cu_num_logits[1:] - input_batch.cu_num_logits[:-1]
         prune_starts = query_ends - num_logits + self.num_bonus_tokens + capacities

@@ -965,9 +965,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             and num_draft_tokens_per_req is not None
         ):
             cu_num_logits, query_start_loc, total_num_draft_tokens = (
-                self.adaptive_verification.allocate_draft_token_budget(
-                    req_ids, idx_mapping
-                )
+                self.adaptive_verification.compact_batch(req_ids, idx_mapping)
             )
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
         if draft_tokens:
