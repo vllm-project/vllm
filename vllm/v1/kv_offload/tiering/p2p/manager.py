@@ -9,12 +9,14 @@ Owns transports and a single bidirectional P2PSession per remote peer.
 from __future__ import annotations
 
 import time
+import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from typing_extensions import override
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     LookupResult,
@@ -111,8 +113,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         offloading_spec: OffloadingSpec,
         primary_kv_view: memoryview,
         tier_type: str = "p2p",
-        host: str = "0.0.0.0",
-        port: int = 7777,
+        host: str | None = None,
+        port: int | None = None,
         backends: list[str] | None = None,
         num_threads: int = 4,
         **kwargs: Any,
@@ -130,9 +132,19 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             primary_kv_view: Memoryview over the CPU primary tier; the
                 NIXL agent registers this region for RDMA transfers.
             tier_type: Tier identifier (defaults to ``"p2p"``).
-            host: Address the ZMQ control socket binds to.
-            port: Port for the ZMQ control socket. Must be reachable
-                from peers.
+            host: Address the ZMQ control socket binds to, used verbatim
+                as both the bind address and the identity peers dial back
+                (mirrors the NIXL connector's ``VLLM_NIXL_SIDE_CHANNEL_HOST``;
+                no auto-detection). Defaults to
+                ``VLLM_P2P_SIDE_CHANNEL_HOST`` (``localhost``) when not set;
+                must be set to the node's routable IP for cross-host P2P so
+                remote peers can reach the socket.
+            port: Base port for the ZMQ control socket. Must be
+                reachable from peers. Defaults to
+                ``VLLM_P2P_SIDE_CHANNEL_PORT`` (``5710``) when not set.
+                The bound port is ``base + data_parallel_index`` so each
+                DP replica gets a distinct port (one socket per replica,
+                like NIXL); for DP=1 the offset is 0.
             backends: NIXL transport backends (e.g. ``["UCX"]``,
                 ``["MOONCAKE"]``, ``["LIBFABRIC"]``). Defaults to
                 ``["UCX"]``. When any non-UCX backend is requested, the
@@ -145,8 +157,26 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             **kwargs: Reserved for future tier-specific options.
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
-        port = int(port)
+        if host is None:
+            host = envs.VLLM_P2P_SIDE_CHANNEL_HOST
+        if port is None:
+            port = envs.VLLM_P2P_SIDE_CHANNEL_PORT
+        # One control socket per DP replica: offset the base by the global
+        # data-parallel index so replicas on a host don't collide (mirrors
+        # NIXL). For DP=1 the index is 0, leaving the base port unchanged.
+        dp_index = offloading_spec.vllm_config.parallel_config.data_parallel_index
+        port = int(port) + dp_index
+        # Two decoupled identities:
+        #   _local_id (``host:port``): the ZMQ control identity that peers
+        #     dial back, used verbatim (the socket binds this host/port and
+        #     the address is parsed back into host:port by the remote).
+        #   _nixl_agent_name (uuid4): the NIXL agent name. It is never dialed
+        #     — it travels opaquely inside the agent metadata blob — so it
+        #     only needs to be globally unique. A per-process uuid guarantees
+        #     that even for peers sharing a host:port (mirrors the NIXL
+        #     connector; avoids the "remote agent name equals local" reject).
         self._local_id = f"{host}:{port}"
+        self._nixl_agent_name = str(uuid.uuid4())
 
         config_fields = FileMapper.from_offloading_spec(
             root_dir="",
@@ -155,7 +185,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             parallel_agnostic=True,
         ).get_run_config()
         self._data: DataTransport = NixlTransport(
-            self._local_id,
+            self._nixl_agent_name,
             primary_kv_view,
             config_fields=config_fields,
             backends=backends,
