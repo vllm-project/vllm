@@ -120,6 +120,13 @@ class WorkspaceSizes(NamedTuple):
         return self.float_bytes + self.int_bytes
 
 
+class FlashInferWorkspaceRoutes(NamedTuple):
+    native_prefill: bool
+    trtllm_prefill: bool
+    native_decode: bool
+    trtllm_decode: bool
+
+
 def _int_workspace_allocation_bytes(
     required_bytes: int, *, round_up: bool = True
 ) -> int:
@@ -749,6 +756,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._workspace_buffer = None
         self._workspace_state = _FlashInferWorkspaceState()
         self._last_reserved_workspace_sizes = WorkspaceSizes(0, 0)
+        self._last_reserved_trtllm_workspace_bytes = 0
         self._prefill_wrapper: (
             BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
         ) = None  # Wrapper for prefill/append
@@ -930,6 +938,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 "sinks, please use trtllm on blackwell or flash attention on "
                 "earlier GPUs."
             )
+        self.use_trtllm_prefill_attention = self._resolve_trtllm_prefill_attention()
         capability = current_platform.get_device_capability()
         arch = f"sm{capability.major}{capability.minor}" if capability else "unknown"
         decode_backend = (
@@ -1069,6 +1078,27 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 return True
         return False
 
+    @classmethod
+    def requires_persistent_workspace_memory_profiling(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> bool:
+        if vllm_config.parallel_config.decode_context_parallel_size > 1:
+            return False
+        # MM-prefix execution owns a lazily-created custom-mask prefill
+        # wrapper that is not covered by the causal reservation contract.
+        if vllm_config.model_config.is_mm_prefix_lm:
+            return False
+        kv_specs = (
+            kv_cache_spec.kv_cache_specs.values()
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs)
+            else [kv_cache_spec]
+        )
+        # Non-causal execution owns a separate prefill wrapper that is not
+        # covered by the causal reservation contract below.
+        return not any(getattr(spec, "non_causal", False) for spec in kv_specs)
+
     def _default_workspace_buffer_size(self) -> int:
         if envs.VLLM_BATCH_INVARIANT:
             return FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
@@ -1083,6 +1113,43 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         return max(
             envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,
             estimated_prefill_size,
+        )
+
+    def _resolve_trtllm_prefill_attention(self) -> bool:
+        """Resolve the shape-invariant prefill backend once per builder."""
+        # Page sizes >= 128 must use trtllm-gen; force it for prefill too.
+        force_use_trtllm = (
+            True
+            if self.page_size >= 128
+            else self.attention_config.use_trtllm_attention
+        )
+        return use_trtllm_attention(
+            self.num_qo_heads,
+            self.num_kv_heads,
+            self.max_num_batched_tokens,
+            self.model_config.max_model_len,
+            self.dcp_world_size,
+            self.cache_dtype,
+            self.q_data_type_prefill,
+            is_prefill=True,
+            force_use_trtllm=force_use_trtllm,
+            has_sinks=self.has_sinks,
+            has_spec=self.reorder_batch_threshold > 1,
+        )
+
+    def _get_workspace_routes(self) -> FlashInferWorkspaceRoutes:
+        non_causal = getattr(self.kv_cache_spec, "non_causal", False)
+        trtllm_prefill = self.use_trtllm_prefill_attention and not non_causal
+        native_prefill = (
+            non_causal or self.model_config.is_mm_prefix_lm or not trtllm_prefill
+        )
+        trtllm_decode = self.use_trtllm_decode_attention and not non_causal
+        native_decode = not self.use_trtllm_decode_attention and not non_causal
+        return FlashInferWorkspaceRoutes(
+            native_prefill=native_prefill,
+            trtllm_prefill=trtllm_prefill,
+            native_decode=native_decode,
+            trtllm_decode=trtllm_decode,
         )
 
     def _native_initial_workspace_buffer_size(self) -> int:
@@ -1123,6 +1190,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._workspace_buffer = workspace_state.buffer
 
     def set_workspace_buffer(self, workspace_buffer: torch.Tensor):
+        self._workspace_state.set_buffer(workspace_buffer)
+        self._workspace_buffer = workspace_buffer
+
+    def rebind_workspace_after_reservation(self) -> None:
+        if not self.use_vllm_workspace_manager_for_workspace_buffer():
+            return
+        workspace_buffer = current_workspace_manager().get_workspace()
+        if workspace_buffer is None:
+            return
         self._workspace_state.set_buffer(workspace_buffer)
         self._workspace_buffer = workspace_buffer
 
@@ -1653,6 +1729,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def reserve_workspace_for_cudagraph_capture(self) -> int:
         self._last_reserved_workspace_sizes = WorkspaceSizes(0, 0)
+        self._last_reserved_trtllm_workspace_bytes = 0
         if self.use_dcp or not self.use_vllm_workspace_manager_for_workspace_buffer():
             return 0
 
@@ -1666,99 +1743,88 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if max_num_batched_tokens <= 0 or max_num_seqs <= 0:
             return 0
 
-        helper = self._get_prefill_workspace_size_func(
-            q_data_type=self.q_data_type_prefill,
-            kv_data_type=self.kv_cache_dtype,
-            paged_kv_indptr_dtype=torch.int32,
-            use_custom_mask=False,
-            window_left=self.window_left,
-        )
-        if helper is None:
-            return 0
-
-        backend, workspace_size = helper
         num_pages = cdiv(max_model_len, self.page_size)
         last_page_len = max_model_len % self.page_size or self.page_size
-        max_prefill_workspace_size = WorkspaceSizes(0, 0)
+        reserved_sizes = WorkspaceSizes(0, 0)
 
-        for batch_size in range(1, max_num_seqs + 1):
-            max_query_len = max_num_batched_tokens // batch_size
-            if max_query_len <= 0:
-                break
-            batch_arange = torch.arange(batch_size + 1, dtype=torch.int32, device="cpu")
-            paged_kv_indptr_cpu = batch_arange * num_pages
-            paged_kv_last_page_len_cpu = torch.full(
-                (batch_size,),
-                last_page_len,
-                dtype=torch.int32,
-                device="cpu",
+        workspace_routes = self._get_workspace_routes()
+        if workspace_routes.native_prefill:
+            helper = self._get_prefill_workspace_size_func(
+                q_data_type=self.q_data_type_prefill,
+                kv_data_type=self.kv_cache_dtype,
+                paged_kv_indptr_dtype=torch.int32,
+                use_custom_mask=False,
+                window_left=self.window_left,
             )
-            query_lens = self._get_workspace_query_len_candidates(max_query_len)
-            for query_len in query_lens:
-                qo_indptr_cpu = batch_arange * query_len
-                workspace_sizes = self._call_prefill_workspace_size(
-                    backend=backend,
-                    workspace_size=workspace_size,
-                    qo_indptr_cpu=qo_indptr_cpu,
-                    paged_kv_indptr_cpu=paged_kv_indptr_cpu,
-                    paged_kv_last_page_len_cpu=paged_kv_last_page_len_cpu,
-                    causal=True,
-                    window_left=self.window_left,
-                    fixed_split_size=self.prefill_fixed_split_size,
-                    disable_split_kv=self.disable_split_kv,
-                )
-                if workspace_sizes is None:
-                    continue
-                max_prefill_workspace_size = WorkspaceSizes(
-                    max(
-                        max_prefill_workspace_size.float_bytes,
-                        workspace_sizes.float_bytes,
-                    ),
-                    max(
-                        max_prefill_workspace_size.int_bytes,
-                        workspace_sizes.int_bytes,
-                    ),
-                    (
-                        max_prefill_workspace_size.has_int_bytes
-                        or workspace_sizes.has_int_bytes
-                    ),
-                )
+            if helper is not None:
+                backend, workspace_size = helper
+                max_prefill_workspace_size = WorkspaceSizes(0, 0)
 
-        reserved_sizes = max_prefill_workspace_size
-        if max_prefill_workspace_size.total_bytes > 0:
-            prefill_wrapper = self._get_prefill_wrapper(causal=True)
-            self._ensure_flashinfer_wrapper_workspace(
-                prefill_wrapper, max_prefill_workspace_size
-            )
+                for batch_size in range(1, max_num_seqs + 1):
+                    max_query_len = max_num_batched_tokens // batch_size
+                    if max_query_len <= 0:
+                        break
+                    batch_arange = torch.arange(
+                        batch_size + 1, dtype=torch.int32, device="cpu"
+                    )
+                    paged_kv_indptr_cpu = batch_arange * num_pages
+                    paged_kv_last_page_len_cpu = torch.full(
+                        (batch_size,),
+                        last_page_len,
+                        dtype=torch.int32,
+                        device="cpu",
+                    )
+                    query_lens = self._get_workspace_query_len_candidates(max_query_len)
+                    for query_len in query_lens:
+                        qo_indptr_cpu = batch_arange * query_len
+                        workspace_sizes = self._call_prefill_workspace_size(
+                            backend=backend,
+                            workspace_size=workspace_size,
+                            qo_indptr_cpu=qo_indptr_cpu,
+                            paged_kv_indptr_cpu=paged_kv_indptr_cpu,
+                            paged_kv_last_page_len_cpu=paged_kv_last_page_len_cpu,
+                            causal=True,
+                            window_left=self.window_left,
+                            fixed_split_size=self.prefill_fixed_split_size,
+                            disable_split_kv=self.disable_split_kv,
+                        )
+                        if workspace_sizes is None:
+                            continue
+                        max_prefill_workspace_size = WorkspaceSizes(
+                            max(
+                                max_prefill_workspace_size.float_bytes,
+                                workspace_sizes.float_bytes,
+                            ),
+                            max(
+                                max_prefill_workspace_size.int_bytes,
+                                workspace_sizes.int_bytes,
+                            ),
+                            (
+                                max_prefill_workspace_size.has_int_bytes
+                                or workspace_sizes.has_int_bytes
+                            ),
+                        )
 
-        max_decode_tokens = max_num_seqs
-        speculative_config = self.vllm_config.speculative_config
-        if speculative_config is not None:
-            max_decode_tokens *= 1 + speculative_config.num_speculative_tokens
-        max_decode_tokens = min(max_decode_tokens, max_num_batched_tokens)
+                reserved_sizes = max_prefill_workspace_size
+                if max_prefill_workspace_size.total_bytes > 0:
+                    prefill_wrapper = self._get_prefill_wrapper(causal=True)
+                    self._ensure_flashinfer_wrapper_workspace(
+                        prefill_wrapper, max_prefill_workspace_size
+                    )
 
-        if max_decode_tokens > 0:
-            decode_sizes = self._reserve_decode_wrapper_workspace(
-                batch_size=max_decode_tokens,
-                num_pages=num_pages,
-                last_page_len=last_page_len,
-                use_cudagraph=False,
-            )
-            reserved_sizes = WorkspaceSizes(
-                max(reserved_sizes.float_bytes, decode_sizes.float_bytes),
-                reserved_sizes.int_bytes + decode_sizes.int_bytes,
-                reserved_sizes.has_int_bytes or decode_sizes.has_int_bytes,
-            )
+        if workspace_routes.native_decode:
+            max_decode_tokens = max_num_seqs
+            speculative_config = self.vllm_config.speculative_config
+            if speculative_config is not None:
+                max_decode_tokens *= 1 + speculative_config.num_speculative_tokens
+            max_decode_tokens = min(max_decode_tokens, max_num_batched_tokens)
 
-        if self.enable_cuda_graph:
-            for batch_size in self.compilation_config.cudagraph_capture_sizes or []:
-                if batch_size <= 0 or batch_size > self._decode_cudagraph_max_bs:
-                    continue
+            if max_decode_tokens > 0:
                 decode_sizes = self._reserve_decode_wrapper_workspace(
-                    batch_size=batch_size,
+                    batch_size=max_decode_tokens,
                     num_pages=num_pages,
                     last_page_len=last_page_len,
-                    use_cudagraph=True,
+                    use_cudagraph=False,
                 )
                 reserved_sizes = WorkspaceSizes(
                     max(reserved_sizes.float_bytes, decode_sizes.float_bytes),
@@ -1766,17 +1832,82 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     reserved_sizes.has_int_bytes or decode_sizes.has_int_bytes,
                 )
 
-        if reserved_sizes.total_bytes <= 0:
+            if self.enable_cuda_graph:
+                for batch_size in self.compilation_config.cudagraph_capture_sizes or []:
+                    if batch_size <= 0 or batch_size > self._decode_cudagraph_max_bs:
+                        continue
+                    decode_sizes = self._reserve_decode_wrapper_workspace(
+                        batch_size=batch_size,
+                        num_pages=num_pages,
+                        last_page_len=last_page_len,
+                        use_cudagraph=True,
+                    )
+                    reserved_sizes = WorkspaceSizes(
+                        max(reserved_sizes.float_bytes, decode_sizes.float_bytes),
+                        reserved_sizes.int_bytes + decode_sizes.int_bytes,
+                        reserved_sizes.has_int_bytes or decode_sizes.has_int_bytes,
+                    )
+
+        trtllm_workspace_bytes = 0
+        if workspace_routes.trtllm_prefill or workspace_routes.trtllm_decode:
+            trtllm_workspace_bytes = _buffer_nbytes(_get_trtllm_workspace_buffer())
+        self._last_reserved_trtllm_workspace_bytes = trtllm_workspace_bytes
+
+        if reserved_sizes.total_bytes + trtllm_workspace_bytes <= 0:
             return 0
 
         self._last_reserved_workspace_sizes = reserved_sizes
         logger.debug(
             "Reserved FlashInfer workspace before CUDA graph lock: "
-            "%.2f MiB float workspace, %.2f MiB dedicated int workspace",
+            "%.2f MiB float workspace, %.2f MiB dedicated int workspace, "
+            "%.2f MiB direct TRTLLM workspace",
             reserved_sizes.float_bytes / (1 << 20),
             reserved_sizes.int_bytes / (1 << 20),
+            trtllm_workspace_bytes / (1 << 20),
         )
-        return reserved_sizes.total_bytes
+        return reserved_sizes.total_bytes + trtllm_workspace_bytes
+
+    def reserve_workspace_for_memory_profiling(self) -> int:
+        """Materialize both runtime and CUDA graph persistent workspace."""
+        if self.use_dcp:
+            return self.reserve_workspace_for_cudagraph_capture()
+
+        self.reserve_workspace_for_cudagraph_capture()
+
+        # Sizing helpers can be unavailable or return no usable size for a
+        # supported runtime shape. Materialize every persistent runtime wrapper
+        # so its default dedicated int buffer is retained by the profiling
+        # lease; existing wrappers are reused when exact sizing succeeded.
+        workspace_routes = self._get_workspace_routes()
+        # The CUDA graph reservation above also materializes direct TRTLLM's
+        # module-global workspace. Reuse the measured size instead of touching
+        # the global allocator twice during one profiling reservation.
+        trtllm_workspace_bytes = self._last_reserved_trtllm_workspace_bytes
+        if workspace_routes.native_prefill:
+            self._get_prefill_wrapper(causal=True)
+
+        if workspace_routes.native_decode:
+            max_decode_tokens = min(
+                self.vllm_config.scheduler_config.max_num_seqs,
+                self.vllm_config.scheduler_config.max_num_batched_tokens,
+                self.model_config.max_model_len,
+            )
+            if max_decode_tokens > 0:
+                self._get_decode_wrapper(max_decode_tokens, use_cudagraph=False)
+            if self.enable_cuda_graph:
+                for batch_size in self.compilation_config.cudagraph_capture_sizes or []:
+                    if 0 < batch_size <= self._decode_cudagraph_max_bs:
+                        self._get_decode_wrapper(batch_size, use_cudagraph=True)
+
+        if workspace_routes.native_prefill or workspace_routes.native_decode:
+            default_float_bytes = self._default_workspace_buffer_size()
+            self._get_workspace_buffer(default_float_bytes)
+        debug_info = self.get_workspace_reserve_debug_info()
+        return (
+            _buffer_nbytes(self._workspace_state.buffer)
+            + int(debug_info["actual_int_workspace_bytes"])
+            + trtllm_workspace_bytes
+        )
 
     def _get_decode_workspace_size(
         self,
@@ -1945,24 +2076,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # - Prefill (FI native or TRTLLM)
         # - Decode (FI native, XQA, or trtllm-gen)
         use_cascade = common_prefix_len > 0
-        uses_spec_reorder = self.reorder_batch_threshold > 1
-        # Page sizes >= 128 must use trtllm-gen; force it for prefill too.
-        prefill_force_trtllm = (
-            True if page_size >= 128 else self.attention_config.use_trtllm_attention
-        )
-        prefill_use_trtllm = causal and use_trtllm_attention(
-            self.num_qo_heads,
-            self.num_kv_heads,
-            num_prefill_tokens,
-            max_seq_len,
-            self.dcp_world_size,
-            self.cache_dtype,
-            self.q_data_type_prefill,
-            is_prefill=True,
-            force_use_trtllm=prefill_force_trtllm,
-            has_sinks=self.has_sinks,
-            has_spec=uses_spec_reorder,
-        )
+        prefill_use_trtllm = causal and self.use_trtllm_prefill_attention
         decode_with_flashinfer_trtllm_api = causal and self.use_trtllm_decode_attention
 
         if not causal and self.use_dcp:

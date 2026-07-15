@@ -79,15 +79,22 @@ from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
-from vllm.v1.worker.utils import is_residual_scattered_for_sp
+from vllm.v1.worker.utils import (
+    is_residual_scattered_for_sp,
+    requires_persistent_attention_workspace_profiling,
+)
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
-from vllm.v1.worker.workspace import init_workspace_manager
+from vllm.v1.worker.workspace import (
+    get_num_workspace_ubatches,
+    init_workspace_manager,
+)
 
 from ...model_executor.model_loader import TensorizerLoader
 from .gpu.warmup import warmup_kernels
 from .utils import request_memory
 
 logger = init_logger(__name__)
+
 
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
@@ -395,7 +402,7 @@ class Worker(WorkerBase):
             raise RuntimeError(f"Unsupported device type: {self.device_config.device}")
 
         # Initialize workspace manager
-        num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
+        num_ubatches = get_num_workspace_ubatches(self.vllm_config.parallel_config)
         init_workspace_manager(self.device, num_ubatches)
 
         # Construct the model runner
@@ -481,26 +488,51 @@ class Worker(WorkerBase):
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        with memory_profiling(
-            self.init_snapshot,
-            weights_memory=int(self.model_runner.model_memory_usage),
-        ) as profile_result:
-            self.model_runner.profile_run()
+        workspace_lease = None
+        profile_persistent_workspace = (
+            requires_persistent_attention_workspace_profiling(self.vllm_config)
+        )
+        try:
+            with memory_profiling(
+                self.init_snapshot,
+                weights_memory=int(self.model_runner.model_memory_usage),
+            ) as profile_result:
+                if profile_persistent_workspace:
+                    workspace_lease = self.model_runner.prepare_profiling_workspace()
+                self.model_runner.profile_run()
 
-            profile_torch_peak = torch.accelerator.memory_stats(self.device).get(
-                "allocated_bytes.all.peak", 0
-            )
+                profile_torch_peak = torch.accelerator.memory_stats(self.device).get(
+                    "allocated_bytes.all.peak", 0
+                )
 
-            # Profile CUDA graph memory if graphs will be captured.
-            # Skip on ROCm/HIP/XPU as graph pool handles and get_memory_info
-            # behave differently and can produce incorrect/negative estimates.
-            cudagraph_memory_estimate = 0
-            if (
-                current_platform.is_cuda()
-                and self.vllm_config.compilation_config.cudagraph_mode
-                != CUDAGraphMode.NONE
-            ):
-                cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
+                # Persistent workspace is now part of profile_torch_peak. Release
+                # profiling-only owners before rebuilding the minimal KV state for
+                # CUDA graph-pool measurement; the global shared arenas stay live.
+                if workspace_lease is not None:
+                    workspace_lease.release()
+                    workspace_lease = None
+                    gc.collect()
+                    torch.accelerator.empty_cache()
+
+                # Profile CUDA graph memory if graphs will be captured.
+                # Skip on ROCm/HIP/XPU as graph pool handles and get_memory_info
+                # behave differently and can produce incorrect/negative estimates.
+                cudagraph_memory_estimate = 0
+                if (
+                    current_platform.is_cuda()
+                    and self.vllm_config.compilation_config.cudagraph_mode
+                    != CUDAGraphMode.NONE
+                ):
+                    cudagraph_memory_estimate = (
+                        self.model_runner.profile_cudagraph_memory(
+                            persistent_workspace_profiled=(profile_persistent_workspace)
+                        )
+                    )
+                if profile_persistent_workspace:
+                    self.model_runner.record_persistent_attention_workspace_profile()
+        finally:
+            if workspace_lease is not None:
+                workspace_lease.release()
 
         # Use the pre-cudagraph torch peak to avoid double-counting.
         profile_result.torch_peak_increase = (
@@ -734,6 +766,8 @@ class Worker(WorkerBase):
 
         with self._maybe_get_memory_pool_context(tag="kv_cache"):
             self.model_runner.initialize_kv_cache(kv_cache_config)
+        if requires_persistent_attention_workspace_profiling(self.vllm_config):
+            self.model_runner.reserve_persistent_attention_workspace()
 
         if self.model_config.enable_return_routed_experts:
             self.model_runner.init_routed_experts_capturer()
@@ -782,6 +816,12 @@ class Worker(WorkerBase):
         # Warmup and tune the kernels used during model execution before
         # cuda graph capture.
         kernel_warmup(self)
+
+        profile_persistent_workspace = (
+            requires_persistent_attention_workspace_profiling(self.vllm_config)
+        )
+        if profile_persistent_workspace:
+            self.model_runner.reserve_persistent_attention_workspace()
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:

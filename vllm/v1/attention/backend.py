@@ -660,6 +660,26 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         """
         return 0
 
+    @classmethod
+    def requires_persistent_workspace_memory_profiling(
+        cls,
+        vllm_config: "VllmConfig",
+        kv_cache_spec: Any,
+    ) -> bool:
+        """Return whether builder-time persistent workspace must be profiled."""
+        return False
+
+    def reserve_workspace_for_memory_profiling(self) -> int:
+        """Materialize persistent workspace before activation profiling.
+
+        The default reuses the CUDA graph reservation contract. Backends with
+        additional eager-only persistent workspace can extend this method.
+        """
+        return self.reserve_workspace_for_cudagraph_capture()
+
+    def rebind_workspace_after_reservation(self) -> None:
+        """Rebind consumers after all shared workspace arenas are finalized."""
+
     def _init_reorder_batch_threshold(
         self,
         reorder_batch_threshold: int | None = 1,

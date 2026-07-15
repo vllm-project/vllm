@@ -223,7 +223,12 @@ from vllm.v1.worker.ubatch_utils import (
     split_attn_metadata,
 )
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
-from vllm.v1.worker.workspace import lock_workspace
+from vllm.v1.worker.workspace import (
+    PersistentWorkspaceLease,
+    current_workspace_manager,
+    lock_workspace,
+    use_workspace_ubatch_id,
+)
 
 from .utils import (
     AttentionGroup,
@@ -6572,18 +6577,144 @@ class GPUModelRunner(
                 return True
         return False
 
-    def _reserve_attention_workspace_for_cudagraph_capture(self) -> int:
+    def _reserve_attention_workspace(self, *, memory_profiling: bool) -> int:
         if not getattr(self, "attn_groups", None):
             return 0
 
         reserved_before = torch.accelerator.memory_reserved(self.device)
+        builders: list[tuple[int, Any]] = []
         for attn_group in self._attn_group_iterator():
-            for builder in attn_group.metadata_builders:
-                builder.reserve_workspace_for_cudagraph_capture()
+            for ubatch_id, builder in enumerate(attn_group.metadata_builders):
+                with use_workspace_ubatch_id(ubatch_id):
+                    if memory_profiling:
+                        builder.reserve_workspace_for_memory_profiling()
+                    else:
+                        builder.reserve_workspace_for_cudagraph_capture()
+                builders.append((ubatch_id, builder))
+        for ubatch_id, builder in builders:
+            with use_workspace_ubatch_id(ubatch_id):
+                builder.rebind_workspace_after_reservation()
         torch.accelerator.synchronize()
         torch.accelerator.empty_cache()
         reserved_after = torch.accelerator.memory_reserved(self.device)
         return max(reserved_after - reserved_before, 0)
+
+    def _reserve_attention_workspace_for_cudagraph_capture(self) -> int:
+        return self._reserve_attention_workspace(memory_profiling=False)
+
+    @staticmethod
+    def _workspace_sizes_exceed(
+        limits: tuple[int, ...], current: tuple[int, ...]
+    ) -> bool:
+        return len(current) != len(limits) or any(
+            current_size > limit for current_size, limit in zip(current, limits)
+        )
+
+    def record_persistent_attention_workspace_profile(self) -> None:
+        self._profiled_persistent_workspace_sizes = (
+            current_workspace_manager().workspace_sizes_bytes()
+        )
+
+    def reserve_persistent_attention_workspace(self) -> int:
+        manager = current_workspace_manager()
+        arena_before = manager.workspace_sizes_bytes()
+        profiled_sizes = getattr(self, "_profiled_persistent_workspace_sizes", None)
+        if profiled_sizes is not None and self._workspace_sizes_exceed(
+            profiled_sizes, arena_before
+        ):
+            raise AssertionError(
+                "Attention workspace arena exceeded its profiled size before "
+                "persistent workspace finalization: "
+                f"profiled={profiled_sizes}, current={arena_before}."
+            )
+        reserved_bytes = self._reserve_attention_workspace(memory_profiling=True)
+        arena_after = manager.workspace_sizes_bytes()
+        if profiled_sizes is not None and self._workspace_sizes_exceed(
+            profiled_sizes, arena_after
+        ):
+            raise AssertionError(
+                "Attention workspace arena exceeded its profiled size during "
+                "persistent workspace finalization: "
+                f"profiled={profiled_sizes}, current={arena_after}."
+            )
+        if profiled_sizes is None:
+            self._profiled_persistent_workspace_sizes = arena_after
+        return reserved_bytes
+
+    def prepare_profiling_workspace(
+        self,
+    ) -> PersistentWorkspaceLease:
+        manager = current_workspace_manager()
+        arena_before = manager.workspace_sizes_bytes()
+        allocated_before = torch.accelerator.memory_allocated(self.device)
+        reserved_before = torch.accelerator.memory_reserved(self.device)
+
+        lease: PersistentWorkspaceLease | None = None
+        try:
+            with set_current_vllm_config(self.vllm_config):
+                self._init_minimal_kv_cache_for_profiling()
+
+            arena_after_init = manager.workspace_sizes_bytes()
+            allocated_after_init = torch.accelerator.memory_allocated(self.device)
+            reserved_after_init = torch.accelerator.memory_reserved(self.device)
+            self._reserve_attention_workspace(memory_profiling=True)
+            arena_after_reserve = manager.workspace_sizes_bytes()
+            allocated_after_reserve = torch.accelerator.memory_allocated(self.device)
+            reserved_after_reserve = torch.accelerator.memory_reserved(self.device)
+
+            owners = [
+                builder
+                for attn_group in self._attn_group_iterator()
+                for builder in attn_group.metadata_builders
+            ]
+            lease = PersistentWorkspaceLease(owners)
+            self._cleanup_profiling_kv_cache()
+        except Exception:
+            if lease is not None:
+                lease.release()
+            try:
+                self._cleanup_profiling_kv_cache()
+            except Exception:
+                logger.exception(
+                    "Failed to clean up profiling KV cache after persistent "
+                    "workspace preparation failed"
+                )
+            raise
+
+        torch.accelerator.reset_peak_memory_stats(self.device)
+
+        scratch_bytes = sum(
+            max(after - before, 0)
+            for before, after in zip(arena_before, arena_after_init)
+        )
+        arena_growth_bytes = sum(
+            max(after - before, 0)
+            for before, after in zip(arena_after_init, arena_after_reserve)
+        )
+        logger.info(
+            "Persistent attention workspace profiling: arenas before=%s, "
+            "after init=%s, after reserve=%s; scratch/init growth %.2f MiB, "
+            "post-init growth %.2f MiB",
+            [round(size / (1 << 20), 2) for size in arena_before],
+            [round(size / (1 << 20), 2) for size in arena_after_init],
+            [round(size / (1 << 20), 2) for size in arena_after_reserve],
+            scratch_bytes / (1 << 20),
+            arena_growth_bytes / (1 << 20),
+        )
+        logger.info(
+            "Persistent attention workspace allocation checkpoints: "
+            "before=(allocated %.2f MiB, reserved %.2f MiB), "
+            "after_init=(allocated %.2f MiB, reserved %.2f MiB), "
+            "after_reserve=(allocated %.2f MiB, reserved %.2f MiB)",
+            allocated_before / (1 << 20),
+            reserved_before / (1 << 20),
+            allocated_after_init / (1 << 20),
+            reserved_after_init / (1 << 20),
+            allocated_after_reserve / (1 << 20),
+            reserved_after_reserve / (1 << 20),
+        )
+        assert lease is not None
+        return lease
 
     def _profile_cudagraph_memory_separately(
         self,
@@ -6645,12 +6776,25 @@ class GPUModelRunner(
         return persistent_memory_estimate
 
     @torch.inference_mode()
-    def profile_cudagraph_memory(self) -> int:
+    def profile_cudagraph_memory(
+        self, *, persistent_workspace_profiled: bool = False
+    ) -> int:
         self.cudagraph_memory_persistent_estimate = 0
         self.cudagraph_memory_graph_pool_estimate = 0
 
+        arena_before_init = current_workspace_manager().workspace_sizes_bytes()
         with set_current_vllm_config(self.vllm_config):
             self._init_minimal_kv_cache_for_profiling()
+        arena_after_init = current_workspace_manager().workspace_sizes_bytes()
+        if persistent_workspace_profiled and self._workspace_sizes_exceed(
+            arena_before_init, arena_after_init
+        ):
+            self._cleanup_profiling_kv_cache()
+            raise AssertionError(
+                "Attention workspace arena grew while rebuilding CUDA graph "
+                "profiling metadata after persistent workspace profiling: "
+                f"{arena_before_init} -> {arena_after_init}."
+            )
 
         saved_num_cudagraph_captured = compilation_counter.num_cudagraph_captured
         use_separate_profiling = self._requires_separate_cudagraph_memory_profiling()
@@ -6715,9 +6859,25 @@ class GPUModelRunner(
             with self._freeze_gc(), graph_capture(device=self.device):
                 torch.accelerator.synchronize()
                 torch.accelerator.empty_cache()
-                persistent_memory_estimate += (
+                arena_before_reserve = (
+                    current_workspace_manager().workspace_sizes_bytes()
+                )
+                reserve_estimate = (
                     self._reserve_attention_workspace_for_cudagraph_capture()
                 )
+                arena_after_reserve = (
+                    current_workspace_manager().workspace_sizes_bytes()
+                )
+                if persistent_workspace_profiled and self._workspace_sizes_exceed(
+                    arena_before_init, arena_after_reserve
+                ):
+                    raise AssertionError(
+                        "Attention workspace arena grew during CUDA graph "
+                        "profiling after persistent workspace profiling: "
+                        f"{arena_before_reserve} -> {arena_after_reserve}."
+                    )
+                if not persistent_workspace_profiled:
+                    persistent_memory_estimate += reserve_estimate
 
                 if use_separate_profiling:
                     persistent_memory_estimate += (

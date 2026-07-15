@@ -5,14 +5,15 @@ from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from itertools import product as iprod
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
@@ -38,6 +39,37 @@ from vllm.v1.kv_cache_interface import (
 )
 
 logger = init_logger(__name__)
+
+
+def requires_persistent_attention_workspace_profiling(
+    vllm_config: VllmConfig,
+) -> bool:
+    """Check the all-builders opt-in without constructing builders."""
+    if vllm_config.parallel_config.enable_elastic_ep:
+        # Elastic EP intentionally unlocks and regrows the shared workspace
+        # during reconfiguration. Its rewarm lifecycle must remain on the
+        # legacy accounting path until it can establish a new profiled bound.
+        return False
+    if vllm_config.speculative_config is not None:
+        # Draft-model builders have a separate ownership lifecycle. Keep the
+        # legacy CUDA graph accounting path until that lifecycle participates
+        # in the same pre-profile reservation contract.
+        return False
+
+    layer_type = cast(type[Any], AttentionLayerBase)
+    attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
+    found_builder = False
+    for attn_module in attn_layers.values():
+        kv_cache_spec = attn_module.get_kv_cache_spec(vllm_config)
+        if kv_cache_spec is None:
+            continue
+        found_builder = True
+        builder_cls = attn_module.get_attn_backend().get_builder_cls()
+        if not builder_cls.requires_persistent_workspace_memory_profiling(
+            vllm_config, kv_cache_spec
+        ):
+            return False
+    return found_builder
 
 
 @triton.jit
@@ -264,15 +296,18 @@ class AttentionGroup:
             if kernel_block_size is not None
             else self.kv_cache_spec
         )
-        self.metadata_builders = [
-            self.backend.get_builder_cls()(
-                kv_cache_spec_builder,
-                self.layer_names,
-                vllm_config,
-                device,
-            )
-            for _ in range(num_metadata_builders)
-        ]
+        from vllm.v1.worker.workspace import use_workspace_ubatch_id
+
+        self.metadata_builders = []
+        for ubatch_id in range(num_metadata_builders):
+            with use_workspace_ubatch_id(ubatch_id):
+                builder = self.backend.get_builder_cls()(
+                    kv_cache_spec_builder,
+                    self.layer_names,
+                    vllm_config,
+                    device,
+                )
+            self.metadata_builders.append(builder)
 
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id
