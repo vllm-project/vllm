@@ -445,10 +445,12 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         from vllm.vllm_flash_attn import flash_attn_varlen_func
 
         max_seq_len = prefill_metadata.max_query_len
+        tile_m = 128 if max_seq_len <= 128 else 256
+        padded_q_len = triton.cdiv(max_seq_len, tile_m) * tile_m
         dense_mask = _build_topk_mask(
             topk_per_req,
             q_lens,
-            max_seq_len,
+            padded_q_len,
             max_seq_len,
             q.device,
         )
@@ -469,7 +471,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         }
 
         if envs.VLLM_SPARSE_MLA_USE_BLOCK_SPARSE:
-            tile_m = 128 if max_seq_len <= 128 else 256
             mask_words_per_tile = 128 // 32
             padded_mask_words = triton.cdiv(max_seq_len, 128) * mask_words_per_tile
             if dense_mask.shape[2] < padded_mask_words:
