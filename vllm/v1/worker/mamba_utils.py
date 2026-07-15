@@ -24,6 +24,69 @@ from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
 
 
 @triton.jit
+def _memcpy_u64_tiled(
+    src_addr,
+    dst_addr,
+    copy_size,
+    tile_idx,
+    COPY_BLOCK_SIZE: tl.constexpr,
+    NUM_TILES: tl.constexpr,
+):
+    """Head/body/tail memcpy with the u64 body split across ``NUM_TILES`` CTAs.
+
+    Tile 0 owns the byte head (aligning dst to 8B) and the 0-7 byte tail;
+    body tiles vectorize as u64 over the aligned interior. ``NUM_TILES=1``
+    collapses to a single-CTA memcpy. Loads pay the misaligned-sector cost
+    when ``src`` and ``dst`` don't share sub-8B alignment; stores stay
+    coalesced.
+    """
+    dst_addr_i = dst_addr.to(tl.int64)
+    head_bytes = tl.minimum(((-dst_addr_i) & 7).to(tl.int64), copy_size)
+    if tile_idx == 0:
+        head_off = tl.arange(0, 8)
+        head_mask = head_off < head_bytes
+        head_src = src_addr.to(tl.pointer_type(tl.uint8))
+        head_dst = dst_addr.to(tl.pointer_type(tl.uint8))
+        tl.store(
+            head_dst + head_off,
+            tl.load(head_src + head_off, mask=head_mask),
+            mask=head_mask,
+        )
+
+    # Body: u64 tiled. Rounding per_tile up to COPY_BLOCK_SIZE keeps every
+    # inner-loop iteration full-width vectorized; only the last non-empty
+    # tile can be masked. Late tiles fall off the end and iterate zero
+    # times.
+    body_bytes = copy_size - head_bytes
+    body_u64 = body_bytes // 8
+    per_tile_u64_raw = tl.cdiv(body_u64, NUM_TILES)
+    per_tile_u64 = tl.cdiv(per_tile_u64_raw, COPY_BLOCK_SIZE) * COPY_BLOCK_SIZE
+    tile_start = tile_idx.to(tl.int64) * per_tile_u64
+    tile_end = tl.minimum(tile_start + per_tile_u64, body_u64)
+
+    src_body_u64 = (src_addr + head_bytes).to(tl.pointer_type(tl.uint64))
+    dst_body_u64 = (dst_addr + head_bytes).to(tl.pointer_type(tl.uint64))
+    offsets = tl.arange(0, COPY_BLOCK_SIZE)
+    for i in range(tile_start, tile_end, COPY_BLOCK_SIZE):
+        mask = (i + offsets) < tile_end
+        data = tl.load(src_body_u64 + i + offsets, mask=mask)
+        tl.store(dst_body_u64 + i + offsets, data, mask=mask)
+
+    if tile_idx == 0:
+        tail_start = head_bytes + body_u64 * 8
+        tail_bytes = copy_size - tail_start
+        tail_off = tl.arange(0, 8)
+        tail_src = (src_addr + tail_start).to(tl.pointer_type(tl.uint8))
+        tail_dst = (dst_addr + tail_start).to(tl.pointer_type(tl.uint8))
+        tail_mask = tail_off < tail_bytes
+        tl.store(
+            tail_dst + tail_off,
+            tl.load(tail_src + tail_off, mask=tail_mask),
+            mask=tail_mask,
+        )
+
+
+@triton.jit
 def _copy_mamba_state_block(
     state_idx,
     bt_row_idx,
@@ -119,119 +182,41 @@ def _copy_mamba_state_block(
         # SD conv: copy
         #   state[bt[src_col], token_bias:] ->
         #   state[bt[dst_col], :conv_width - token_bias]
-        # Head/body/tail memcpy: byte head brings dst to 8B alignment, u64
-        # body runs at full vector width, byte tail sweeps the trailing
-        # 0-7 bytes. src is aligned to dst's alignment; when they differ,
-        # loads pay the misaligned-sector cost but stores stay coalesced
-        # (dst-aligned is the more valuable side on NVIDIA). Small per-block
-        # bytes (~60-80 KiB) make tiling degenerate, so conv keeps a
-        # single-CTA copy body.
+        # Small per-block bytes (~60-80 KiB) make tiling degenerate, so
+        # conv runs as a single-CTA memcpy (NUM_TILES=1).
         src_block_id = tl.load(block_table_base + src_col).to(tl.int64)
         src_offset = token_bias.to(tl.int64) * state_inner_size * state_elem_size
         src_addr = state_base_addr + src_block_id * state_block_stride + src_offset
-        num_elems_to_copy = (conv_width - token_bias).to(tl.int64) * state_inner_size
-        copy_size = num_elems_to_copy * state_elem_size
-
-        # Head: bytes to bring dst to 8B alignment, clamped by copy_size for
-        # sub-8B copies.
-        dst_addr_i = dst_addr.to(tl.int64)
-        head_bytes = tl.minimum(((-dst_addr_i) & 7).to(tl.int64), copy_size)
-        head_off = tl.arange(0, 8)
-        head_mask = head_off < head_bytes
-        head_src = src_addr.to(tl.pointer_type(tl.uint8))
-        head_dst = dst_addr.to(tl.pointer_type(tl.uint8))
-        tl.store(
-            head_dst + head_off,
-            tl.load(head_src + head_off, mask=head_mask),
-            mask=head_mask,
+        copy_size = (
+            (conv_width - token_bias).to(tl.int64) * state_inner_size * state_elem_size
         )
-
-        # Body: u64 over the aligned region after the head.
-        body_bytes = copy_size - head_bytes
-        body_u64 = body_bytes // 8
-        src_body_u64 = (src_addr + head_bytes).to(tl.pointer_type(tl.uint64))
-        dst_body_u64 = (dst_addr + head_bytes).to(tl.pointer_type(tl.uint64))
-        offsets = tl.arange(0, COPY_BLOCK_SIZE)
-        for i in range(0, body_u64, COPY_BLOCK_SIZE):
-            mask = (i + offsets) < body_u64
-            data = tl.load(src_body_u64 + i + offsets, mask=mask)
-            tl.store(dst_body_u64 + i + offsets, data, mask=mask)
-
-        # Tail: 0-7 bytes after the u64 body.
-        tail_start = head_bytes + body_u64 * 8
-        tail_bytes = copy_size - tail_start
-        tail_off = tl.arange(0, 8)
-        tail_src = (src_addr + tail_start).to(tl.pointer_type(tl.uint8))
-        tail_dst = (dst_addr + tail_start).to(tl.pointer_type(tl.uint8))
-        tail_mask = tail_off < tail_bytes
-        tl.store(
-            tail_dst + tail_off,
-            tl.load(tail_src + tail_off, mask=tail_mask),
-            mask=tail_mask,
+        _memcpy_u64_tiled(
+            src_addr,
+            dst_addr,
+            copy_size,
+            tile_idx,
+            COPY_BLOCK_SIZE=COPY_BLOCK_SIZE,
+            NUM_TILES=1,
         )
         return
 
     # Temporal state: copy state[bt[src_col + token_bias]] -> state[bt[dst_col]]
-    # Head/body/tail memcpy identical to SD conv above; the only difference
-    # is that the u64 body is partitioned across TEMPORAL_TILES CTAs to
-    # keep the SMs filled at small batch. Tile 0 owns the byte head and
-    # tail so they run exactly once regardless of tile count.
+    # Body u64 range is partitioned across TEMPORAL_TILES CTAs to keep the
+    # SMs filled at small batch.
     actual_src_block_id = tl.load(block_table_base + src_col + token_bias).to(tl.int64)
     src_addr = state_base_addr + actual_src_block_id * state_block_stride
     # Use natural block data size (inner_size * elem_size), NOT
     # state_block_stride which is the page stride and can exceed the
     # actual data when the state tensor uses as_strided page padding.
     copy_size = state_inner_size * state_elem_size
-
-    # Head: bytes to bring dst to 8B alignment, clamped by copy_size.
-    dst_addr_i = dst_addr.to(tl.int64)
-    head_bytes = tl.minimum(((-dst_addr_i) & 7).to(tl.int64), copy_size)
-    if tile_idx == 0:
-        head_off = tl.arange(0, 8)
-        head_mask = head_off < head_bytes
-        head_src = src_addr.to(tl.pointer_type(tl.uint8))
-        head_dst = dst_addr.to(tl.pointer_type(tl.uint8))
-        tl.store(
-            head_dst + head_off,
-            tl.load(head_src + head_off, mask=head_mask),
-            mask=head_mask,
-        )
-
-    # Body: u64 over the aligned region [head_bytes, head_bytes + body_u64*8).
-    # Partition the u64 body into TEMPORAL_TILES contiguous, COPY_BLOCK_SIZE-
-    # aligned slices. Rounding per_tile up to COPY_BLOCK_SIZE keeps every
-    # inner-loop iteration full-width vectorized; only the last non-empty
-    # tile can be masked. Late tiles fall off the end (body_u64 does not
-    # divide evenly by TEMPORAL_TILES) and iterate zero times.
-    body_bytes = copy_size - head_bytes
-    body_u64 = body_bytes // 8
-    per_tile_u64_raw = tl.cdiv(body_u64, TEMPORAL_TILES)
-    per_tile_u64 = tl.cdiv(per_tile_u64_raw, COPY_BLOCK_SIZE) * COPY_BLOCK_SIZE
-    tile_start = tile_idx.to(tl.int64) * per_tile_u64
-    tile_end = tl.minimum(tile_start + per_tile_u64, body_u64)
-
-    src_body_u64 = (src_addr + head_bytes).to(tl.pointer_type(tl.uint64))
-    dst_body_u64 = (dst_addr + head_bytes).to(tl.pointer_type(tl.uint64))
-    offsets = tl.arange(0, COPY_BLOCK_SIZE)
-    for i in range(tile_start, tile_end, COPY_BLOCK_SIZE):
-        mask = (i + offsets) < tile_end
-        data = tl.load(src_body_u64 + i + offsets, mask=mask)
-        tl.store(dst_body_u64 + i + offsets, data, mask=mask)
-
-    # Tail: 0-7 bytes after the u64 body. Owned by tile 0 to avoid
-    # duplicate stores when TEMPORAL_TILES > 1.
-    if tile_idx == 0:
-        tail_start = head_bytes + body_u64 * 8
-        tail_bytes = copy_size - tail_start
-        tail_off = tl.arange(0, 8)
-        tail_src = (src_addr + tail_start).to(tl.pointer_type(tl.uint8))
-        tail_dst = (dst_addr + tail_start).to(tl.pointer_type(tl.uint8))
-        tail_mask = tail_off < tail_bytes
-        tl.store(
-            tail_dst + tail_off,
-            tl.load(tail_src + tail_off, mask=tail_mask),
-            mask=tail_mask,
-        )
+    _memcpy_u64_tiled(
+        src_addr,
+        dst_addr,
+        copy_size,
+        tile_idx,
+        COPY_BLOCK_SIZE=COPY_BLOCK_SIZE,
+        NUM_TILES=TEMPORAL_TILES,
+    )
 
 
 @triton.jit
