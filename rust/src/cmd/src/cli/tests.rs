@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use expect_test::expect;
 use vllm_engine_core_client::TransportMode;
 use vllm_server::{Config, HttpListenerMode, ParserSelection, RendererSelection};
