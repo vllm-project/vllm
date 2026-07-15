@@ -43,7 +43,7 @@ class Sampler(nn.Module):
            return the greedily sampled tokens and final logprobs if requested.
         b) Apply temperature.
         c) Apply logit processors which are argmax-invariant, by default
-           the min_p processor.
+           the p_less or min_p processor.
         d) Apply top_k and/or top_p.
         e) Sample the next tokens with the probability distribution.
         f) If `all_random` or temperature >= epsilon (1e-5), return the
