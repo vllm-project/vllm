@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.v1.attention.backend import PersistentWorkspaceProfilingSupport
 from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
 from vllm.v1.worker.workspace import (
     PersistentWorkspaceLease,
@@ -350,11 +351,12 @@ def test_flashinfer_persistent_workspace_profile_gate(
         ),
     )
 
-    assert (
-        FlashInferMetadataBuilder.requires_persistent_workspace_memory_profiling(
-            config, _attention_spec(128)
-        )
-        is expected
+    assert FlashInferMetadataBuilder.get_persistent_workspace_memory_profiling_support(
+        config, _attention_spec(128)
+    ) is (
+        PersistentWorkspaceProfilingSupport.REQUIRED
+        if expected
+        else PersistentWorkspaceProfilingSupport.UNSUPPORTED
     )
 
 
@@ -385,10 +387,11 @@ def test_flashinfer_persistent_workspace_profile_rejects_non_causal(
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
     )
 
-    assert not (
-        FlashInferMetadataBuilder.requires_persistent_workspace_memory_profiling(
+    assert (
+        FlashInferMetadataBuilder.get_persistent_workspace_memory_profiling_support(
             config, kv_cache_spec
         )
+        is PersistentWorkspaceProfilingSupport.UNSUPPORTED
     )
 
 
@@ -544,6 +547,53 @@ def test_worker_persistent_workspace_gate_falls_back_for_flashinfer_dcp(
     )
 
     assert not requires_persistent_attention_workspace_profiling(config)
+
+
+def test_worker_persistent_workspace_gate_allows_flashinfer_with_gdn(
+    monkeypatch,
+):
+    pytest.importorskip("flashinfer")
+    from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
+    from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+    from vllm.v1.worker.utils import (
+        requires_persistent_attention_workspace_profiling,
+    )
+
+    class Backend:
+        def __init__(self, builder_cls):
+            self.builder_cls = builder_cls
+
+        def get_builder_cls(self):
+            return self.builder_cls
+
+    class Layer:
+        def __init__(self, builder_cls):
+            self.backend = Backend(builder_cls)
+
+        @staticmethod
+        def get_kv_cache_spec(config):
+            return _attention_spec(128)
+
+        def get_attn_backend(self):
+            return self.backend
+
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(is_mm_prefix_lm=False),
+        speculative_config=None,
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            enable_elastic_ep=False,
+        ),
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.utils.get_layers_from_vllm_config",
+        lambda config, layer_type: {
+            "full-attention": Layer(FlashInferMetadataBuilder),
+            "gdn": Layer(GDNAttentionMetadataBuilder),
+        },
+    )
+
+    assert requires_persistent_attention_workspace_profiling(config)
 
 
 def test_flashinfer_workspace_buffer_uses_workspace_manager():

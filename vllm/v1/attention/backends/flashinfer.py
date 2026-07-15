@@ -66,6 +66,7 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
     MultipleOf,
+    PersistentWorkspaceProfilingSupport,
 )
 from vllm.v1.attention.backends.utils import (
     KVCacheLayoutType,
@@ -1079,17 +1080,17 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         return False
 
     @classmethod
-    def requires_persistent_workspace_memory_profiling(
+    def get_persistent_workspace_memory_profiling_support(
         cls,
         vllm_config: VllmConfig,
         kv_cache_spec: KVCacheSpec,
-    ) -> bool:
+    ) -> PersistentWorkspaceProfilingSupport:
         if vllm_config.parallel_config.decode_context_parallel_size > 1:
-            return False
+            return PersistentWorkspaceProfilingSupport.UNSUPPORTED
         # MM-prefix execution owns a lazily-created custom-mask prefill
         # wrapper that is not covered by the causal reservation contract.
         if vllm_config.model_config.is_mm_prefix_lm:
-            return False
+            return PersistentWorkspaceProfilingSupport.UNSUPPORTED
         kv_specs = (
             kv_cache_spec.kv_cache_specs.values()
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs)
@@ -1097,7 +1098,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )
         # Non-causal execution owns a separate prefill wrapper that is not
         # covered by the causal reservation contract below.
-        return not any(getattr(spec, "non_causal", False) for spec in kv_specs)
+        if any(getattr(spec, "non_causal", False) for spec in kv_specs):
+            return PersistentWorkspaceProfilingSupport.UNSUPPORTED
+        return PersistentWorkspaceProfilingSupport.REQUIRED
 
     def _default_workspace_buffer_size(self) -> int:
         if envs.VLLM_BATCH_INVARIANT:

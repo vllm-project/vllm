@@ -604,6 +604,17 @@ class AttentionCGSupport(Enum):
     """NO cudagraph support"""
 
 
+class PersistentWorkspaceProfilingSupport(Enum):
+    """Persistent workspace profiling support for an attention builder."""
+
+    UNSUPPORTED = 0
+    """The builder cannot participate in the global profiling lifecycle."""
+    NEUTRAL = 1
+    """The builder can participate but does not require global reservation."""
+    REQUIRED = 2
+    """The builder requires and supports pre-profile workspace reservation."""
+
+
 class AttentionMetadataBuilder(ABC, Generic[M]):
     # Does this backend/builder support CUDA Graphs for attention (default: no).
     # Do not access directly. Call get_cudagraph_support() instead.
@@ -661,13 +672,19 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         return 0
 
     @classmethod
-    def requires_persistent_workspace_memory_profiling(
+    def get_persistent_workspace_memory_profiling_support(
         cls,
         vllm_config: "VllmConfig",
         kv_cache_spec: Any,
-    ) -> bool:
-        """Return whether builder-time persistent workspace must be profiled."""
-        return False
+    ) -> PersistentWorkspaceProfilingSupport:
+        """Return support for the global persistent-workspace lifecycle.
+
+        Builders must explicitly declare ``NEUTRAL`` when their constructor
+        state can be retained by the common lease without an additional
+        reserve/rebind contract. The fail-closed default prevents an unknown
+        builder from being treated as neutral in a mixed-backend model.
+        """
+        return PersistentWorkspaceProfilingSupport.UNSUPPORTED
 
     def reserve_workspace_for_memory_profiling(self) -> int:
         """Materialize persistent workspace before activation profiling.

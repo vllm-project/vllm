@@ -25,6 +25,7 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadataBuilder,
     MultipleOf,
+    PersistentWorkspaceProfilingSupport,
 )
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
@@ -44,7 +45,7 @@ logger = init_logger(__name__)
 def requires_persistent_attention_workspace_profiling(
     vllm_config: VllmConfig,
 ) -> bool:
-    """Check the all-builders opt-in without constructing builders."""
+    """Check whether every relevant builder supports the profiling lifecycle."""
     if vllm_config.parallel_config.enable_elastic_ep:
         # Elastic EP intentionally unlocks and regrows the shared workspace
         # during reconfiguration. Its rewarm lifecycle must remain on the
@@ -58,18 +59,28 @@ def requires_persistent_attention_workspace_profiling(
 
     layer_type = cast(type[Any], AttentionLayerBase)
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
-    found_builder = False
+    found_required_builder = False
     for attn_module in attn_layers.values():
         kv_cache_spec = attn_module.get_kv_cache_spec(vllm_config)
         if kv_cache_spec is None:
             continue
-        found_builder = True
         builder_cls = attn_module.get_attn_backend().get_builder_cls()
-        if not builder_cls.requires_persistent_workspace_memory_profiling(
+        support = builder_cls.get_persistent_workspace_memory_profiling_support(
             vllm_config, kv_cache_spec
-        ):
+        )
+        if support is PersistentWorkspaceProfilingSupport.UNSUPPORTED:
             return False
-    return found_builder
+        if support is PersistentWorkspaceProfilingSupport.REQUIRED:
+            found_required_builder = True
+        elif support is not PersistentWorkspaceProfilingSupport.NEUTRAL:
+            logger.warning_once(
+                "Attention metadata builder %s returned invalid persistent "
+                "workspace profiling support %r; using legacy memory accounting",
+                getattr(builder_cls, "__name__", type(builder_cls).__name__),
+                support,
+            )
+            return False
+    return found_required_builder
 
 
 @triton.jit

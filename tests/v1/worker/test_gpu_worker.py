@@ -16,6 +16,10 @@ from vllm.multimodal.video import (
     PYNVVIDEOCODEC_VIDEO_BACKEND,
 )
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.v1.attention.backend import (
+    AttentionMetadataBuilder,
+    PersistentWorkspaceProfilingSupport,
+)
 from vllm.v1.worker import startup_plan
 from vllm.v1.worker.gpu_worker import Worker
 from vllm.v1.worker.startup_plan import (
@@ -82,36 +86,90 @@ def test_initialize_kv_cache_finalizes_persistent_workspace(
 
 
 @pytest.mark.parametrize(
-    ("builder_opt_ins", "speculative", "elastic_ep", "expected"),
+    ("builder_support", "speculative", "elastic_ep", "expected"),
     [
-        pytest.param([True], False, False, True, id="single-opt-in"),
-        pytest.param([True, True], False, False, True, id="all-opt-in"),
-        pytest.param([True, False], False, False, False, id="mixed-builders"),
+        pytest.param(
+            [PersistentWorkspaceProfilingSupport.REQUIRED],
+            False,
+            False,
+            True,
+            id="single-required",
+        ),
+        pytest.param(
+            [
+                PersistentWorkspaceProfilingSupport.REQUIRED,
+                PersistentWorkspaceProfilingSupport.REQUIRED,
+            ],
+            False,
+            False,
+            True,
+            id="all-required",
+        ),
+        pytest.param(
+            [
+                PersistentWorkspaceProfilingSupport.REQUIRED,
+                PersistentWorkspaceProfilingSupport.NEUTRAL,
+            ],
+            False,
+            False,
+            True,
+            id="required-with-neutral",
+        ),
+        pytest.param(
+            [
+                PersistentWorkspaceProfilingSupport.REQUIRED,
+                PersistentWorkspaceProfilingSupport.UNSUPPORTED,
+            ],
+            False,
+            False,
+            False,
+            id="unsupported-vetoes-required",
+        ),
+        pytest.param(
+            [PersistentWorkspaceProfilingSupport.NEUTRAL],
+            False,
+            False,
+            False,
+            id="neutral-only",
+        ),
+        pytest.param([object()], False, False, False, id="unknown-fails-closed"),
         pytest.param([], False, False, False, id="no-builders"),
-        pytest.param([True], True, False, False, id="speculative-fallback"),
-        pytest.param([True], False, True, False, id="elastic-ep-fallback"),
+        pytest.param(
+            [PersistentWorkspaceProfilingSupport.REQUIRED],
+            True,
+            False,
+            False,
+            id="speculative-fallback",
+        ),
+        pytest.param(
+            [PersistentWorkspaceProfilingSupport.REQUIRED],
+            False,
+            True,
+            False,
+            id="elastic-ep-fallback",
+        ),
     ],
 )
-def test_persistent_workspace_profiling_requires_all_builders(
-    monkeypatch, builder_opt_ins, speculative, elastic_ep, expected
+def test_persistent_workspace_profiling_supports_neutral_builders(
+    monkeypatch, builder_support, speculative, elastic_ep, expected
 ):
     class Builder:
-        def __init__(self, opt_in):
-            self.opt_in = opt_in
+        def __init__(self, support):
+            self.support = support
 
-        def requires_persistent_workspace_memory_profiling(self, config, spec):
-            return self.opt_in
+        def get_persistent_workspace_memory_profiling_support(self, config, spec):
+            return self.support
 
     class Backend:
-        def __init__(self, opt_in):
-            self.builder = Builder(opt_in)
+        def __init__(self, support):
+            self.builder = Builder(support)
 
         def get_builder_cls(self):
             return self.builder
 
     class Layer:
-        def __init__(self, opt_in):
-            self.backend = Backend(opt_in)
+        def __init__(self, support):
+            self.backend = Backend(support)
 
         def get_kv_cache_spec(self, config):
             return object()
@@ -124,7 +182,8 @@ def test_persistent_workspace_profiling_requires_all_builders(
         parallel_config=SimpleNamespace(enable_elastic_ep=elastic_ep),
     )
     layers = {
-        f"layer-{index}": Layer(opt_in) for index, opt_in in enumerate(builder_opt_ins)
+        f"layer-{index}": Layer(support)
+        for index, support in enumerate(builder_support)
     }
     monkeypatch.setattr(
         "vllm.v1.worker.utils.get_layers_from_vllm_config",
@@ -132,6 +191,26 @@ def test_persistent_workspace_profiling_requires_all_builders(
     )
 
     assert requires_persistent_attention_workspace_profiling(config) is expected
+
+
+def test_gdn_builder_is_neutral_for_persistent_workspace_profiling():
+    from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+
+    assert (
+        GDNAttentionMetadataBuilder.get_persistent_workspace_memory_profiling_support(
+            SimpleNamespace(), SimpleNamespace()
+        )
+        is PersistentWorkspaceProfilingSupport.NEUTRAL
+    )
+
+
+def test_unknown_builder_fails_closed_for_persistent_workspace_profiling():
+    assert (
+        AttentionMetadataBuilder.get_persistent_workspace_memory_profiling_support(
+            SimpleNamespace(), SimpleNamespace()
+        )
+        is PersistentWorkspaceProfilingSupport.UNSUPPORTED
+    )
 
 
 def _worker_with_mm_config(
