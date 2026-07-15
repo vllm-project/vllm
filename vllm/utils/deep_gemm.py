@@ -100,6 +100,19 @@ def is_deep_gemm_supported() -> bool:
 
 
 @functools.cache
+def is_deep_gemm_paged_mqa_supported() -> bool:
+    """Return `True` if DeepGEMM paged MQA logits support this platform."""
+    return (
+        envs.VLLM_USE_DEEP_GEMM
+        and has_deep_gemm()
+        and (
+            current_platform.is_device_capability_family(90)
+            or current_platform.is_device_capability_family(100)
+        )
+    )
+
+
+@functools.cache
 def is_deep_gemm_e8m0_used() -> bool:
     """Return `True` if vLLM is configured to use DeepGEMM "
     "E8M0 scale on a Hopper or Blackwell-class GPU.
@@ -732,6 +745,7 @@ __all__ = [
     "get_paged_mqa_logits_metadata",
     "per_block_cast_to_fp8",
     "is_deep_gemm_e8m0_used",
+    "is_deep_gemm_paged_mqa_supported",
     "is_deep_gemm_supported",
     "get_num_sms",
     "set_num_sms",

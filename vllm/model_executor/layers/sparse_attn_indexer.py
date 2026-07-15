@@ -21,9 +21,10 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
     fp8_fp4_mqa_logits,
     fp8_fp4_paged_mqa_logits,
-    has_deep_gemm,
+    is_deep_gemm_paged_mqa_supported,
 )
 from vllm.utils.import_utils import has_cutedsl
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -291,6 +292,89 @@ def kv_cache_as_quant_view(
     return kv_cache.unsqueeze(-2)
 
 
+def _fp8_mqa_logits_torch(
+    q_fp8: torch.Tensor,
+    kv: tuple[torch.Tensor, torch.Tensor],
+    weights: torch.Tensor,
+    cu_seqlen_ks: torch.Tensor,
+    cu_seqlen_ke: torch.Tensor,
+) -> torch.Tensor:
+    k_fp8, k_scale = kv
+    q = q_fp8.to(torch.float32)
+    k = k_fp8.to(torch.float32) * k_scale.to(torch.float32).unsqueeze(-1)
+
+    kv_offsets = torch.arange(k.shape[0], device=q.device)
+    mask = (kv_offsets[None, :] >= cu_seqlen_ks[:, None]) & (
+        kv_offsets[None, :] < cu_seqlen_ke[:, None]
+    )
+    score = torch.einsum("mhd,nd->hmn", q, k)
+    logits = (score.relu() * weights.unsqueeze(-1).transpose(0, 1)).sum(dim=0)
+    return logits.masked_fill(~mask, float("-inf"))
+
+
+def _fp8_paged_mqa_logits_torch(
+    q_fp8: torch.Tensor,
+    kv_cache: torch.Tensor,
+    weights: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    max_model_len: int,
+) -> torch.Tensor:
+    fp8_dtype = current_platform.fp8_dtype()
+    batch_size, next_n, _, dim = q_fp8.size()
+    block_size = kv_cache.shape[1]
+
+    kv_values = kv_cache[..., :dim].contiguous().view(fp8_dtype).to(torch.float32)
+    kv_scales = kv_cache[..., dim:].contiguous().view(torch.float32)
+    kv_values = kv_values * kv_scales
+    q = q_fp8.to(torch.float32)
+
+    logits = torch.full(
+        (batch_size * next_n, max_model_len),
+        float("-inf"),
+        device=q.device,
+        dtype=torch.float32,
+    )
+    for i in range(batch_size):
+        context_len = context_lens[i]
+        if context_len.ndim == 0:
+            context_len_i = int(context_len.item())
+            context_limit = torch.full(
+                (next_n,), context_len_i, dtype=torch.int32, device=q.device
+            )
+            q_offsets = torch.arange(
+                context_len_i - next_n, context_len_i, device=q.device
+            )
+        else:
+            context_limit = context_len.to(device=q.device, dtype=torch.int32)
+            q_offsets = context_limit - 1
+
+        weight_slice = (
+            weights[i * next_n : (i + 1) * next_n].transpose(0, 1).contiguous()
+        )
+        max_context_len = int(context_limit.max().item())
+        for block_rk in range(cdiv(max_context_len, block_size)):
+            block_idx = block_tables[i][block_rk]
+            k_block = kv_values[block_idx].squeeze(-2)
+            k_offsets = torch.arange(
+                block_rk * block_size,
+                (block_rk + 1) * block_size,
+                device=q.device,
+            )
+            causal_mask = (k_offsets[None, :] < context_limit[:, None]) & (
+                k_offsets[None, :] <= q_offsets[:, None]
+            )
+            score = torch.einsum("nhd,bd->hnb", q[i], k_block)
+            score = torch.where(causal_mask[None], score, float("-inf"))
+            score = score.relu() * weight_slice[..., None]
+            start = block_rk * block_size
+            logits[
+                i * next_n : (i + 1) * next_n,
+                start : start + block_size,
+            ] = score.sum(dim=0)
+    return logits
+
+
 @eager_break_during_capture
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
@@ -462,6 +546,22 @@ def sparse_attn_indexer(
                         cu_seqlen_ks,
                         cu_seqlen_ke,
                     )
+                elif (
+                    current_platform.is_cuda()
+                    and not is_deep_gemm_paged_mqa_supported()
+                ):
+                    if q_scale_slice is not None:
+                        raise RuntimeError(
+                            "CUDA sparse attention FP4 indexer requires "
+                            "DeepGEMM paged MQA logits support."
+                        )
+                    logits = _fp8_mqa_logits_torch(
+                        q_slice_cast,
+                        (k_quant_cast, k_scale_cast),
+                        weights[chunk.token_start : chunk.token_end],
+                        cu_seqlen_ks,
+                        cu_seqlen_ke,
+                    )
                 else:
                     logits = fp8_fp4_mqa_logits(
                         (q_slice_cast, q_scale_slice),
@@ -556,6 +656,20 @@ def sparse_attn_indexer(
                 seq_lens_xpu,
                 decode_metadata.block_table,
                 decode_metadata.schedule_metadata,
+                max_model_len,
+            )
+        elif current_platform.is_cuda() and not is_deep_gemm_paged_mqa_supported():
+            if padded_q_scale is not None:
+                raise RuntimeError(
+                    "CUDA sparse attention FP4 indexer requires DeepGEMM "
+                    "paged MQA logits support."
+                )
+            logits = _fp8_paged_mqa_logits_torch(
+                padded_q_quant_cast,
+                kv_cache,
+                weights[:num_padded_tokens],
+                seq_lens,
+                decode_metadata.block_table,
                 max_model_len,
             )
         else:
@@ -725,10 +839,15 @@ class SparseAttnIndexer(CustomOp):
         self.dcp_world_size = parallel_config.decode_context_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
-        if current_platform.is_cuda() and not has_deep_gemm():
+        if (
+            current_platform.is_cuda()
+            and self.use_fp4_cache
+            and not is_deep_gemm_paged_mqa_supported()
+        ):
             raise RuntimeError(
-                "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
-                "the current vLLM environment."
+                "Sparse Attention Indexer CUDA FP4 cache path requires "
+                "DeepGEMM paged MQA logits support in the current vLLM "
+                "environment."
             )
 
     def forward_native(

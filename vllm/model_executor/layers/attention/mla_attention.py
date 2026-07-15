@@ -331,6 +331,7 @@ def _canonicalize_sparse_mla_kv_cache_dtype(
         "auto",
         "fp8",
         "fp8_e4m3",
+        "fp8_ds_mla",
     ):
         return "fp8_ds_mla"
     return kv_cache_dtype
