@@ -381,17 +381,20 @@ class CudaGraphManager:
                             get_offloader().join_after_forward()
                         self.graphs[desc] = graph
                         compilation_counter.num_cudagraph_captured += 1
-                        if self.time_graphs:
-                            if prepare_timing is not None:
-                                prepare_timing(desc)
-                            start = torch.cuda.Event(enable_timing=True)
-                            end = torch.cuda.Event(enable_timing=True)
-                            start.record()
-                            for _ in range(3):
-                                graph.replay()
-                            end.record()
-                            end.synchronize()
-                            self.graph_timings[desc] = start.elapsed_time(end) / 3
+        # Collective graph addresses are registered when graph_capture exits.
+        if self.time_graphs:
+            for desc, graph in self.graphs.items():
+                create_forward_fn(desc, warmup=False)
+                if prepare_timing is not None:
+                    prepare_timing(desc)
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+                start.record()
+                for _ in range(3):
+                    graph.replay()
+                end.record()
+                end.synchronize()
+                self.graph_timings[desc] = start.elapsed_time(end) / 3
         self._graphs_captured = True
 
     def dispatch(
