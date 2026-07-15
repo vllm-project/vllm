@@ -620,6 +620,8 @@ def prepare_moe_mxfp4_layer_for_marlin(
         w2_scale = torch.nn.functional.pad(
             w2_scale, (0, padded_n // group_size - w2_scale.shape[-1])
         )
+        if w13_bias is not None:
+            w13_bias = torch.nn.functional.pad(w13_bias, (0, 2 * (padded_n - n)))
         n = padded_n
 
     device = w13.device

@@ -153,6 +153,16 @@ def test_marlin_moe_padded_intermediate(intermediate, group_size):
         assert padded == intermediate
 
 
+@pytest.mark.parametrize("n,padded_n", [(130, 192), (200, 256)])
+def test_mxfp4_w13_bias_padding(n, padded_n):
+    bias = torch.ones(2, 2 * n)
+    padded = torch.nn.functional.pad(bias, (0, 2 * (padded_n - n)))
+
+    assert padded.shape == (2, 2 * padded_n)
+    assert torch.equal(padded[:, : 2 * n], bias)
+    assert padded[:, 2 * n :].abs().sum() == 0
+
+
 def test_marlin_moe_pad_helpers_shapes():
     from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
         _pad_rows,
