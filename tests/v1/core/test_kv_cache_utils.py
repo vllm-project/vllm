@@ -2797,7 +2797,10 @@ def test_eagle_draft_kv_cache_grouping(
     num_draft_layers, pp_size, draft_matches, expected_mode
 ):
     spec = _build_eagle_specs(
-        num_full=4, num_sw=13, num_draft_layers=num_draft_layers, draft_matches=draft_matches
+        num_full=4,
+        num_sw=13,
+        num_draft_layers=num_draft_layers,
+        draft_matches=draft_matches,
     )
     groups = kv_cache_utils._get_kv_cache_groups_uniform_page_size(
         _fake_vllm_config(pp_size), spec

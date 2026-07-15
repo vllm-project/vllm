@@ -147,8 +147,8 @@ class EagleCohereForCausalLM(CohereForCausalLM):
             vllm_config.parallel_config
         )
 
-        # Name the eagle draft model so it can be 
-        # distinguished from the target model 
+        # Name the eagle draft model so it can be
+        # distinguished from the target model
         # in the KV cache groups.
         self.model = CohereEagleModel(
             vllm_config=vllm_config,
