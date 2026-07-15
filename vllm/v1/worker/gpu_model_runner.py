@@ -7589,7 +7589,7 @@ class GPUModelRunner(
             BaseRouter,
         )
 
-        for module in self.compilation_config.static_forward_context.values():
+        for module in self.model.modules():
             if isinstance(module, MoERunner) and isinstance(module.router, BaseRouter):
                 layer_id = module.layer_id
 
