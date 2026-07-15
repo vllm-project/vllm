@@ -122,3 +122,18 @@ def _extract_step_logprobs(request_output):
 
 def is_device_capability_below_90() -> bool:
     return not current_platform.has_device_capability(90)
+
+
+def get_attention_config(backend: str) -> dict:
+    """Return attention_config dict for the given backend.
+
+    GDN_ATTN is a Mamba-specific backend that is auto-selected by model
+    architecture (Qwen3.5/Qwen3.6 GDN layers). It cannot be set via
+    attention_config["backend"] since it is not a standard AttentionBackendEnum
+    value. For GDN_ATTN, return an empty dict so the engine uses its default
+    attention backend for transformer layers while GDN layers use GDN_ATTN
+    automatically.
+    """
+    if backend == "GDN_ATTN":
+        return {}
+    return {"backend": backend}
