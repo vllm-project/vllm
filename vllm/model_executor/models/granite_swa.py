@@ -167,12 +167,6 @@ class GraniteSWAAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            max_position=max_position_embeddings,
-            rope_parameters=config.rope_parameters,
-        )
-
         # Learnable per-head attention sink, present on every layer (matches the
         # Transformers `granite_swa` implementation). It is applied by the
         # attention backend as an extra logit in the softmax denominator.
@@ -186,9 +180,22 @@ class GraniteSWAAttention(nn.Module):
         else:
             sliding_window = None
 
-        # Per-layer RoPE vs. NoPE (`config.no_rope_layers`): 1 => apply RoPE, 0 => NoPE.
-        no_rope_layers = getattr(config, "no_rope_layers", None)
-        self.use_rope = no_rope_layers is None or bool(no_rope_layers[layer_idx])
+        # Per-layer RoPE base (`config.layer_rope_theta`): this layer's theta,
+        # or 0 => NoPE. Defaults to the global rope_theta for every layer, so
+        # different layers can use different frequencies (or none).
+        layer_rope_theta = getattr(config, "layer_rope_theta", None)
+        rope_theta = (
+            layer_rope_theta[layer_idx]
+            if layer_rope_theta is not None
+            else config.rope_parameters["rope_theta"]
+        )
+        self.use_rope = rope_theta != 0
+        if self.use_rope:
+            self.rotary_emb = get_rope(
+                self.head_dim,
+                max_position=max_position_embeddings,
+                rope_parameters={**config.rope_parameters, "rope_theta": rope_theta},
+            )
 
         self.attn = Attention(
             self.num_heads,
