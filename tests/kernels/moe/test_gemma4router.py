@@ -30,10 +30,12 @@ def test_gemma4_routing_kernel_triton(
 
     tri_w, tri_ids = gemma4_fused_routing_kernel_triton(gating, topk, scales)
 
-    # Used with gamma4_routing_function_torch, it doesn't use the
-    # first return value and the second value needs to be a LongTensor.
+    # Mock topk function to be used with the torch implementation.
+    # Return the corresponding gating weights for completeness.
+    topk_gating = torch.gather(gating, 1, tri_ids)
+
     def mock_topk(x, k, dim):
-        return None, tri_ids.long()
+        return topk_gating, tri_ids.long()
 
     # The two properties needed will be checked separately, in this order:
     # 1) Check that the tri_ids do constitute a valid top-k set.
