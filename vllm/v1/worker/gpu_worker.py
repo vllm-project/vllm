@@ -124,7 +124,7 @@ class Worker(WorkerBase):
         torch.set_float32_matmul_precision(precision)
 
         # Buffers saved before sleep
-        self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+        self._sleep_saved_buffers: dict[str, dict[str, torch.Tensor]] = {}
 
         # Weight transfer engine (initialized on-demand)
         self.weight_transfer_engine = (
@@ -150,6 +150,33 @@ class Worker(WorkerBase):
         # pending non-blocking PP send work from the previous iteration
         self._pp_send_work: list[Handle] = []
 
+    def _models_with_sleep_buffers(self) -> dict[str, torch.nn.Module]:
+        models = {"target": self.model_runner.model}
+        drafter = getattr(self.model_runner, "drafter", None)
+        draft_model = getattr(drafter, "model", None)
+        if draft_model is not None:
+            models["drafter"] = draft_model
+        return models
+
+    def _save_buffers_before_sleep(self) -> None:
+        self._sleep_saved_buffers = {
+            model_name: {
+                name: buffer.cpu().clone() for name, buffer in model.named_buffers()
+            }
+            for model_name, model in self._models_with_sleep_buffers().items()
+        }
+
+    def _restore_buffers_after_sleep(self) -> None:
+        if not self._sleep_saved_buffers:
+            return
+
+        for model_name, model in self._models_with_sleep_buffers().items():
+            saved_buffers = self._sleep_saved_buffers.get(model_name, {})
+            for name, buffer in model.named_buffers():
+                if name in saved_buffers:
+                    buffer.data.copy_(saved_buffers[name].data)
+        self._sleep_saved_buffers = {}
+
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
 
@@ -157,10 +184,7 @@ class Worker(WorkerBase):
 
         # Save the buffers before level 2 sleep
         if level == 2:
-            model = self.model_runner.model
-            self._sleep_saved_buffers = {
-                name: buffer.cpu().clone() for name, buffer in model.named_buffers()
-            }
+            self._save_buffers_before_sleep()
 
         allocator = CuMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
@@ -181,12 +205,7 @@ class Worker(WorkerBase):
         allocator.wake_up(tags)
 
         # Restore the buffers after level 2 sleep
-        if len(self._sleep_saved_buffers):
-            model = self.model_runner.model
-            for name, buffer in model.named_buffers():
-                if name in self._sleep_saved_buffers:
-                    buffer.data.copy_(self._sleep_saved_buffers[name].data)
-            self._sleep_saved_buffers = {}
+        self._restore_buffers_after_sleep()
 
         # If the KV cache has just been woken up,
         # the internal state of cache_engine must be reset,
