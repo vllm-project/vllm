@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import torch
 from transformers import AutoTokenizer
@@ -27,7 +28,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     get_conv_copy_spec,
     get_temporal_copy_spec,
 )
-from vllm.model_executor.models.config import MambaModelConfig, MODELS_CONFIG_MAP
+from vllm.model_executor.models.config import MODELS_CONFIG_MAP, MambaModelConfig
 from vllm.model_executor.models.rwkv7 import (
     RWKV7Block,
     RWKV7ForCausalLM,
@@ -61,19 +62,17 @@ def _make_config() -> RWKV7Config:
 def _initialize_module_parameters(module: torch.nn.Module) -> None:
     generator = torch.Generator().manual_seed(0)
     for name, parameter in module.named_parameters():
-        if parameter.ndim == 0:
+        if parameter.ndim == 0 or name.endswith(".bias"):
             parameter.data.zero_()
-        elif name.endswith(".bias"):
-            parameter.data.zero_()
-        elif "g_norm.weight" in name:
-            parameter.data.fill_(1.0)
-        elif "k_a" in name:
+        elif "g_norm.weight" in name or "k_a" in name:
             parameter.data.fill_(1.0)
         else:
             parameter.data.normal_(mean=0.0, std=0.02, generator=generator)
 
 
-def _make_prefill_metadata(seq_len: int, *, device: torch.device) -> LinearAttentionMetadata:
+def _make_prefill_metadata(
+    seq_len: int, *, device: torch.device
+) -> LinearAttentionMetadata:
     return LinearAttentionMetadata(
         num_prefills=1,
         num_prefill_tokens=seq_len,
@@ -99,8 +98,6 @@ def _make_decode_metadata(
     )
 
 
-
-
 def _make_multi_decode_metadata(
     total_seq_lens: list[int], state_indices: list[int], *, device: torch.device
 ) -> LinearAttentionMetadata:
@@ -114,7 +111,9 @@ def _make_multi_decode_metadata(
             0, num_decodes + 1, dtype=torch.int32, device=device
         ),
         seq_lens=torch.tensor(total_seq_lens, dtype=torch.int32, device=device),
-        state_indices_tensor=torch.tensor(state_indices, dtype=torch.long, device=device),
+        state_indices_tensor=torch.tensor(
+            state_indices, dtype=torch.long, device=device
+        ),
     )
 
 
@@ -139,13 +138,13 @@ def _make_multi_prefill_metadata(
             device=device,
         ),
         seq_lens=torch.tensor(total_seq_lens, dtype=torch.int32, device=device),
-        state_indices_tensor=torch.tensor(state_indices, dtype=torch.long, device=device),
+        state_indices_tensor=torch.tensor(
+            state_indices, dtype=torch.long, device=device
+        ),
     )
 
 
-
-
-def _require_reference_checkpoint() -> tuple[Path, object]:
+def _require_reference_checkpoint() -> tuple[Path, Any]:
     """Resolve optional dependencies for RWKV7 reference parity tests only.
 
     The external top-level ``fla`` package is only needed here so parity tests
@@ -171,6 +170,8 @@ def _require_reference_checkpoint() -> tuple[Path, object]:
             "not depend on the external top-level `fla` package."
         )
 
+    assert model_path
+    assert fla_path
     model_dir = Path(model_path)
     fla_dir = Path(fla_path)
     if not model_dir.exists():
@@ -285,8 +286,7 @@ def test_rwkv7_block_registers_static_forward_context():
             prefix = "model.layers.0"
             block = RWKV7Block(config=config, layer_idx=0, prefix=prefix)
             assert (
-                vllm_config.compilation_config.static_forward_context[prefix]
-                is block
+                vllm_config.compilation_config.static_forward_context[prefix] is block
             )
             assert (
                 vllm_config.compilation_config.static_forward_context[f"{prefix}.attn"]
@@ -409,7 +409,9 @@ def test_rwkv7_block_batches_decode_tokens_without_changing_results():
                 )
 
             block_batched.kv_cache = make_cache()
-            block_ref.kv_cache = tuple(cache.clone() for cache in block_batched.kv_cache)
+            block_ref.kv_cache = tuple(
+                cache.clone() for cache in block_batched.kv_cache
+            )
 
             hidden_states = torch.randn(
                 2, config.hidden_size, generator=generator, dtype=torch.float32
@@ -426,7 +428,13 @@ def test_rwkv7_block_batches_decode_tokens_without_changing_results():
             v_first_ref = torch.empty_like(hidden_states)
             for idx, slot_id in enumerate([0, 1]):
                 states = block_ref._get_kv_state(slot_id, use_initial_state=True)
-                out, v_first_out, attn_shift, recurrent, ffn_shift = block_ref._run_sequence(
+                (
+                    out,
+                    v_first_out,
+                    attn_shift,
+                    recurrent,
+                    ffn_shift,
+                ) = block_ref._run_sequence(
                     hidden_states[idx : idx + 1],
                     None,
                     *states,
@@ -437,7 +445,9 @@ def test_rwkv7_block_batches_decode_tokens_without_changing_results():
 
             torch.testing.assert_close(output_batched, output_ref)
             torch.testing.assert_close(v_first_batched, v_first_ref)
-            for batched_state, ref_state in zip(block_batched.kv_cache, block_ref.kv_cache):
+            for batched_state, ref_state in zip(
+                block_batched.kv_cache, block_ref.kv_cache
+            ):
                 torch.testing.assert_close(batched_state, ref_state)
         finally:
             cleanup_dist_env_and_memory()
@@ -484,7 +494,9 @@ def test_rwkv7_block_batches_decode_tokens_without_changing_results_cuda():
                 )
 
             block_batched.kv_cache = make_cache()
-            block_ref.kv_cache = tuple(cache.clone() for cache in block_batched.kv_cache)
+            block_ref.kv_cache = tuple(
+                cache.clone() for cache in block_batched.kv_cache
+            )
 
             hidden_states = torch.randn(
                 2,
@@ -504,7 +516,13 @@ def test_rwkv7_block_batches_decode_tokens_without_changing_results_cuda():
             v_first_ref = torch.empty_like(hidden_states)
             for idx, slot_id in enumerate([0, 1]):
                 states = block_ref._get_kv_state(slot_id, use_initial_state=True)
-                out, v_first_out, attn_shift, recurrent, ffn_shift = block_ref._run_sequence(
+                (
+                    out,
+                    v_first_out,
+                    attn_shift,
+                    recurrent,
+                    ffn_shift,
+                ) = block_ref._run_sequence(
                     hidden_states[idx : idx + 1],
                     None,
                     *states,
@@ -517,7 +535,9 @@ def test_rwkv7_block_batches_decode_tokens_without_changing_results_cuda():
             torch.testing.assert_close(
                 v_first_batched, v_first_ref, rtol=2e-4, atol=1e-3
             )
-            for batched_state, ref_state in zip(block_batched.kv_cache, block_ref.kv_cache):
+            for batched_state, ref_state in zip(
+                block_batched.kv_cache, block_ref.kv_cache
+            ):
                 torch.testing.assert_close(
                     batched_state, ref_state, rtol=2e-4, atol=1e-3
                 )
@@ -560,7 +580,9 @@ def test_rwkv7_block_batches_prefill_tokens_without_changing_results():
                 )
 
             block_batched.kv_cache = make_cache()
-            block_ref.kv_cache = tuple(cache.clone() for cache in block_batched.kv_cache)
+            block_ref.kv_cache = tuple(
+                cache.clone() for cache in block_batched.kv_cache
+            )
 
             query_lens = [2, 3]
             total_seq_lens = [2, 5]
@@ -595,7 +617,13 @@ def test_rwkv7_block_batches_prefill_tokens_without_changing_results():
                     slot_id,
                     use_initial_state=total_seq_len > query_len,
                 )
-                out, v_first_out, attn_shift, recurrent, ffn_shift = block_ref._run_sequence(
+                (
+                    out,
+                    v_first_out,
+                    attn_shift,
+                    recurrent,
+                    ffn_shift,
+                ) = block_ref._run_sequence(
                     hidden_states[start:end],
                     None,
                     *states,
@@ -607,7 +635,9 @@ def test_rwkv7_block_batches_prefill_tokens_without_changing_results():
 
             torch.testing.assert_close(output_batched, output_ref)
             torch.testing.assert_close(v_first_batched, v_first_ref)
-            for batched_state, ref_state in zip(block_batched.kv_cache, block_ref.kv_cache):
+            for batched_state, ref_state in zip(
+                block_batched.kv_cache, block_ref.kv_cache
+            ):
                 torch.testing.assert_close(batched_state, ref_state)
         finally:
             cleanup_dist_env_and_memory()
@@ -627,9 +657,7 @@ def test_rwkv7_uses_base_mamba_model_config():
 
 
 def test_rwkv7_does_not_declare_mamba_prefix_caching_support():
-    assert (
-        getattr(RWKV7ForCausalLM, "supports_mamba_prefix_caching", False) is False
-    )
+    assert getattr(RWKV7ForCausalLM, "supports_mamba_prefix_caching", False) is False
 
 
 def test_rwkv7_prefix_caching_defaults_to_align(tmp_path: Path, monkeypatch):
@@ -661,9 +689,7 @@ def test_rwkv7_prefix_caching_defaults_to_align(tmp_path: Path, monkeypatch):
     )
 
 
-def test_rwkv7_prefix_caching_all_mode_falls_back_to_align(
-    tmp_path: Path, monkeypatch
-):
+def test_rwkv7_prefix_caching_all_mode_falls_back_to_align(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path / "vllm_cache"))
 
     model_path = _write_test_model_config(tmp_path)
@@ -757,7 +783,6 @@ def test_rwkv7_model_keeps_weights_and_pp_buffers_in_model_dtype(tmp_path: Path)
             cleanup_dist_env_and_memory()
 
 
-
 def test_rwkv7_reference_parity_full_forward():
     if pytest is None:
         raise RuntimeError("pytest is required to run RWKV7 integration tests.")
@@ -766,15 +791,15 @@ def test_rwkv7_reference_parity_full_forward():
 
     model_path, reference_cls = _require_reference_checkpoint()
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    inputs = tokenizer(
-        "Hello RWKV7, this is a parity check.", return_tensors="pt"
-    )["input_ids"].to("cuda")
+    inputs = tokenizer("Hello RWKV7, this is a parity check.", return_tensors="pt")[
+        "input_ids"
+    ].to("cuda")
     flat_input_ids = inputs[0]
     positions = torch.arange(flat_input_ids.numel(), device="cuda", dtype=torch.long)
 
-    reference_model = reference_cls.from_pretrained(
-        model_path, dtype=torch.float32
-    ).eval().to("cuda")
+    reference_model = (
+        reference_cls.from_pretrained(model_path, dtype=torch.float32).eval().to("cuda")
+    )
     vllm_config = _make_vllm_config(model_path)
 
     with set_current_vllm_config(vllm_config):
@@ -827,13 +852,13 @@ def test_rwkv7_reference_parity_prefill_decode():
 
     model_path, reference_cls = _require_reference_checkpoint()
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    prompt_ids = tokenizer(
-        "The capital of France is", return_tensors="pt"
-    )["input_ids"].to("cuda")
+    prompt_ids = tokenizer("The capital of France is", return_tensors="pt")[
+        "input_ids"
+    ].to("cuda")
 
-    reference_model = reference_cls.from_pretrained(
-        model_path, dtype=torch.float32
-    ).eval().to("cuda")
+    reference_model = (
+        reference_cls.from_pretrained(model_path, dtype=torch.float32).eval().to("cuda")
+    )
     vllm_config = _make_vllm_config(model_path)
 
     with set_current_vllm_config(vllm_config):
@@ -896,9 +921,7 @@ def test_rwkv7_reference_parity_prefill_decode():
                     [current_ids.shape[1]], device="cuda", dtype=torch.long
                 )
 
-                with torch.no_grad(), set_forward_context(
-                    decode_metadata, vllm_config
-                ):
+                with torch.no_grad(), set_forward_context(decode_metadata, vllm_config):
                     hidden_states = vllm_model(
                         input_ids=next_token,
                         positions=position,

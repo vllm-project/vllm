@@ -52,7 +52,9 @@ RWKV7_RUNTIME_DTYPE = torch.float32
 
 
 def get_tp_world_size() -> int:
-    return get_tensor_model_parallel_world_size() if model_parallel_is_initialized() else 1
+    return (
+        get_tensor_model_parallel_world_size() if model_parallel_is_initialized() else 1
+    )
 
 
 def get_tp_rank() -> int:
@@ -109,10 +111,9 @@ def token_shift_with_cache_varlen(
     if cached_state is None:
         delta[first_token_indices] = -hidden_states.index_select(0, first_token_indices)
     else:
-        delta[first_token_indices] = (
-            cached_state.to(hidden_states.dtype)
-            - hidden_states.index_select(0, first_token_indices)
-        )
+        delta[first_token_indices] = cached_state.to(
+            hidden_states.dtype
+        ) - hidden_states.index_select(0, first_token_indices)
 
     last_token_indices = (query_start_loc[1:] - 1).to(dtype=torch.long)
     final_state = hidden_states.index_select(0, last_token_indices).to(
@@ -204,9 +205,7 @@ def _rwkv7_recurrent_scan_varlen(
     for seq_idx in range(num_sequences):
         start = int(query_start_loc[seq_idx].item())
         end = int(query_start_loc[seq_idx + 1].item())
-        seq_initial_state = (
-            None if initial_state is None else initial_state[seq_idx]
-        )
+        seq_initial_state = None if initial_state is None else initial_state[seq_idx]
         seq_output, seq_final_state = _rwkv7_recurrent_scan(
             r[start:end],
             w[start:end],
@@ -222,8 +221,6 @@ def _rwkv7_recurrent_scan_varlen(
     return torch.cat(outputs, dim=0), torch.stack(final_states, dim=0)
 
 
-
-
 def rwkv7_attention(
     hidden_states: torch.Tensor,
     cached_shift_state: torch.Tensor,
@@ -237,8 +234,6 @@ def rwkv7_attention(
 ) -> None:
     forward_context = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    attn_metadata = forward_context.attn_metadata
-    block_layer_name = layer_name.removesuffix(".attn")
     out, shift_state, recurrent, first_value = self._forward(
         hidden_states,
         _custom_op_tensor_or_none(cached_shift_state),
@@ -687,7 +682,9 @@ class RWKV7Attention(nn.Module):
         recurrent_state: torch.Tensor | None,
         v_first: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        delta, final_shift_state = token_shift_with_cache(hidden_states, cached_shift_state)
+        delta, final_shift_state = token_shift_with_cache(
+            hidden_states, cached_shift_state
+        )
         r, w, k, v, kk, a, g, v_first_out = self._project_recurrent_inputs(
             hidden_states,
             delta,
@@ -839,7 +836,6 @@ class RWKV7Attention(nn.Module):
         return output, final_shift_state, final_recurrent_state, v_first_out
 
 
-
 class RWKV7Block(nn.Module, MambaBase):
     def __init__(
         self,
@@ -952,7 +948,13 @@ class RWKV7Block(nn.Module, MambaBase):
         ffn_input = self.ffn_norm(hidden_states)
         ffn_out, ffn_shift_state = self.ffn(ffn_input, ffn_shift_state)
         hidden_states = hidden_states + ffn_out
-        return hidden_states, v_first_out, attn_shift_state, recurrent_state, ffn_shift_state
+        return (
+            hidden_states,
+            v_first_out,
+            attn_shift_state,
+            recurrent_state,
+            ffn_shift_state,
+        )
 
     def _get_kv_state(
         self, slot_id: int, use_initial_state: bool
@@ -1064,7 +1066,13 @@ class RWKV7Block(nn.Module, MambaBase):
             ffn_input, ffn_shift_state
         )
         hidden_states = hidden_states + ffn_out
-        return hidden_states, v_first_out, attn_shift_state, recurrent_state, ffn_shift_state
+        return (
+            hidden_states,
+            v_first_out,
+            attn_shift_state,
+            recurrent_state,
+            ffn_shift_state,
+        )
 
     def _run_prefill_batch(
         self,
@@ -1098,8 +1106,13 @@ class RWKV7Block(nn.Module, MambaBase):
             ffn_shift_state,
         )
         hidden_states = hidden_states + ffn_out
-        return hidden_states, v_first_out, attn_shift_state, recurrent_state, ffn_shift_state
-
+        return (
+            hidden_states,
+            v_first_out,
+            attn_shift_state,
+            recurrent_state,
+            ffn_shift_state,
+        )
 
     def _forward_runtime(
         self,
@@ -1140,7 +1153,9 @@ class RWKV7Block(nn.Module, MambaBase):
         state_indices = attn_metadata.state_indices_tensor
 
         if attn_metadata.num_decode_tokens > 0:
-            decode_slot_ids = state_indices[: attn_metadata.num_decodes].to(dtype=torch.long)
+            decode_slot_ids = state_indices[: attn_metadata.num_decodes].to(
+                dtype=torch.long
+            )
             states = self._get_kv_states(decode_slot_ids)
             out, vf_out, attn_shift, recurrent, ffn_shift = self._run_decode_batch(
                 hidden_states[: attn_metadata.num_decode_tokens],
@@ -1160,13 +1175,11 @@ class RWKV7Block(nn.Module, MambaBase):
         prefill_token_offset = attn_metadata.num_decode_tokens
         if attn_metadata.num_prefills > 0:
             prefill_req_end = prefill_req_offset + attn_metadata.num_prefills
-            prefill_slot_ids = state_indices[
-                prefill_req_offset:prefill_req_end
-            ].to(dtype=torch.long)
+            prefill_slot_ids = state_indices[prefill_req_offset:prefill_req_end].to(
+                dtype=torch.long
+            )
             prefill_query_start_loc = (
-                attn_metadata.query_start_loc[
-                    prefill_req_offset : prefill_req_end + 1
-                ]
+                attn_metadata.query_start_loc[prefill_req_offset : prefill_req_end + 1]
                 - prefill_token_offset
             )
             query_lens = prefill_query_start_loc[1:] - prefill_query_start_loc[:-1]
@@ -1248,7 +1261,8 @@ class RWKV7Model(nn.Module):
 
         if config.attn is not None:
             raise NotImplementedError(
-                "Hybrid RWKV7 checkpoints with transformer attention are not supported yet."
+                "Hybrid RWKV7 checkpoints with transformer attention are "
+                "not supported yet."
             )
 
         value_dims = config.value_dim
@@ -1333,7 +1347,9 @@ class RWKV7Model(nn.Module):
 
         if get_pp_group().is_first_rank:
             hidden_states = (
-                inputs_embeds if inputs_embeds is not None else self.embed_input_ids(input_ids)
+                inputs_embeds
+                if inputs_embeds is not None
+                else self.embed_input_ids(input_ids)
             )
             v_first = None
         else:

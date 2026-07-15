@@ -71,7 +71,8 @@ class RWKV7Config(PretrainedConfig):
             for dim in value_dim:
                 if dim < hidden_size or dim % hidden_size != 0:
                     raise ValueError(
-                        "`value_dim` must be >= hidden_size and divisible by hidden_size."
+                        "`value_dim` must be >= hidden_size and divisible "
+                        "by hidden_size."
                     )
 
         self.head_dim = head_dim
