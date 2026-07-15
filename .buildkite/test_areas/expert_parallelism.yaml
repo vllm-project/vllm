@@ -3,7 +3,8 @@ depends_on:
   - image-build
 steps:
 - label: EPLB Algorithm
-  timeout_in_minutes: 15
+  key: eplb-algorithm
+  timeout_in_minutes: 20
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -13,9 +14,21 @@ steps:
   commands:
   - pytest -v -s distributed/test_eplb_algo.py
   - pytest -v -s distributed/test_eplb_utils.py
+  mirror:
+    amd:
+      dind: false
+      device: mi300_1
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/distributed/eplb
+      - tests/distributed/test_eplb_algo.py
+      - tests/distributed/test_eplb_utils.py
+      - vllm/platforms/rocm.py
 
 - label: EPLB Execution # 17min
-  timeout_in_minutes: 27
+  key: eplb-execution
+  timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
   source_file_dependencies:
@@ -26,7 +39,8 @@ steps:
   - pytest -v -s distributed/test_eplb_spec_decode.py
 
 - label: Elastic EP Scaling Test
-  timeout_in_minutes: 20
+  key: elastic-ep-scaling-test
+  timeout_in_minutes: 30
   device: h100
   working_dir: "/vllm-workspace/tests"
   num_devices: 4

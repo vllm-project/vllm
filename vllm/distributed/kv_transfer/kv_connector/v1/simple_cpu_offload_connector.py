@@ -49,7 +49,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: "KVCacheConfig | None" = None,
+        kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
@@ -96,10 +96,18 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
         if role == KVConnectorRole.SCHEDULER:
+            from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
+
+            assert kv_cache_config is not None
+            scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
+                kv_cache_config, vllm_config
+            )
             self.scheduler_manager = SimpleCPUOffloadScheduler(
                 vllm_config,
                 kv_cache_config,
                 cpu_capacity_per_rank,
+                scheduler_block_size=scheduler_block_size,
+                hash_block_size=hash_block_size,
                 lazy_offload=lazy_offload,
             )
         elif role == KVConnectorRole.WORKER:
@@ -165,7 +173,6 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
 
     # --- Scheduler-side methods ---
 
-    # NOTE: New API only for SimpleCPUOffloadConnector.
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         if self.scheduler_manager is not None:
             self.scheduler_manager.bind_gpu_block_pool(gpu_block_pool)
@@ -238,10 +245,10 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             return self.scheduler_manager.take_events()
         return []
 
+    # NOTE: Workers are not contacted. In-flight transfers drain naturally,
+    # and stale completions are ignored by the guarded
+    # SimpleCPUOffloadScheduler._process_store_event().
     def reset_cache(self) -> bool | None:
-        raise NotImplementedError(
-            "SimpleCPUOffloadConnector does not support reset_cache(). "
-            "reset_prefix_cache() requires synchronizing all pending "
-            "CPU offload transfers before clearing GPU prefix cache blocks, "
-            "which is not yet implemented."
-        )
+        if self.scheduler_manager is not None:
+            return self.scheduler_manager.reset()
+        return None

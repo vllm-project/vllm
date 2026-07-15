@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.engine.protocol import (
@@ -13,10 +14,13 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.pooling.base.serving import PoolingBaseServing
+from vllm.entrypoints.pooling.typing import PoolingServeContext
 from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,
 )
+from vllm.exceptions import VLLMNotFoundError
 from vllm.lora.request import LoRARequest
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
@@ -130,3 +134,60 @@ async def test_unload_lora_adapter_not_found():
     assert isinstance(response, ErrorResponse)
     assert response.error.type == "NotFoundError"
     assert response.error.code == HTTPStatus.NOT_FOUND
+
+
+class _ConcretePoolingServing(PoolingBaseServing):
+    """Minimal concrete subclass used only in these unit tests."""
+
+    request_id_prefix = "test"
+
+    def get_io_processor(self, request):
+        raise NotImplementedError
+
+    def _build_response(self, ctx):
+        raise NotImplementedError
+
+
+def _make_pooling_serving(lora_name: str) -> _ConcretePoolingServing:
+    lora_request = LoRARequest(
+        lora_name=lora_name, lora_int_id=1, lora_path="/path/to/lora"
+    )
+    mock_models = MagicMock()
+    mock_models.lora_requests = {lora_name: lora_request}
+    mock_models.is_base_model.side_effect = lambda name: name == MODEL_NAME
+
+    serving = object.__new__(_ConcretePoolingServing)
+    serving.models = mock_models
+    return serving
+
+
+def _make_pooling_ctx(model_name: str) -> PoolingServeContext:
+    mock_request = MagicMock()
+    mock_request.model = model_name
+    return PoolingServeContext(
+        request=mock_request,
+        model_name=MODEL_NAME,
+        request_id="test-id",
+        pooling_params=PoolingParams(),
+    )
+
+
+def test_pooling_maybe_get_adapters_lora_name_sets_lora_request():
+    """LoRA adapter name must populate ctx.lora_request without raising."""
+    lora_name = "bot-embed-lora"
+    serving = _make_pooling_serving(lora_name)
+    ctx = _make_pooling_ctx(lora_name)
+
+    ctx.lora_request = serving._maybe_get_adapters(ctx.request)
+
+    assert ctx.lora_request is not None
+    assert ctx.lora_request.lora_name == lora_name
+
+
+def test_pooling_maybe_get_adapters_unknown_model_raises():
+    """An unrecognised model name must still raise VLLMNotFoundError."""
+    serving = _make_pooling_serving("some-lora")
+    ctx = _make_pooling_ctx("unknown-model")
+
+    with pytest.raises(VLLMNotFoundError):
+        serving._maybe_get_adapters(ctx.request)

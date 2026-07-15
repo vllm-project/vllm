@@ -20,13 +20,16 @@
 #   SD_MODEL            - drafter model path
 #   MODEL_NAME          - target model (default: meta-llama/Llama-3.1-8B-Instruct)
 #   NUM_SPEC_TOKENS     - number of speculative tokens (default: 3)
-#   GPU_MEMORY_UTILIZATION - (default: 0.7)
+#   GPU_MEMORY_UTILIZATION - used when KV_CACHE_MEMORY_BYTES is unset (default: 0.7)
+#   KV_CACHE_MEMORY_BYTES - optional KV cache size per server
 #   ATTENTION_BACKEND   - attention backend to use
 #                         Default: TRITON_ATTN on ROCm, FLASH_ATTN on NVIDIA
 #                         ROCm options: TRITON_ATTN, ROCM_ATTN, ROCM_AITER_FA,
 #                                       ROCM_AITER_UNIFIED_ATTN
 #                         NVIDIA options: FLASH_ATTN, FLASHINFER
-set -x
+#   VLLM_SSM_CONV_STATE_LAYOUT - SSM conv state layout (e.g. "DS" required for Mamba models)
+#   VLLM_SERVE_EXTRA_ARGS - comma-separated extra args for vllm serve
+set -ex
 
 # ── Model & spec decode config ──────────────────────────────────────────
 
@@ -50,7 +53,16 @@ NUM_DECODE_INSTANCES=${NUM_DECODE_INSTANCES:-1}
 PREFILLER_TP_SIZE=${PREFILLER_TP_SIZE:-1}
 DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.7}
+KV_CACHE_MEMORY_BYTES=${KV_CACHE_MEMORY_BYTES:-}
 BLOCK_SIZE=${BLOCK_SIZE:-16}
+SERVER_HOST="${SERVER_HOST:-127.0.0.1}"
+NIXL_SIDE_CHANNEL_HOST="${NIXL_SIDE_CHANNEL_HOST:-$SERVER_HOST}"
+
+if [[ -n "$KV_CACHE_MEMORY_BYTES" ]]; then
+  KV_CACHE_ARGS=(--kv-cache-memory-bytes "$KV_CACHE_MEMORY_BYTES")
+else
+  KV_CACHE_ARGS=(--gpu-memory-utilization "$GPU_MEMORY_UTILIZATION")
+fi
 
 # Resolve the repository root from the script location instead of `.git`.
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -80,6 +92,14 @@ if [[ -z "${ATTENTION_BACKEND:-}" ]]; then
 fi
 echo "Using attention backend: ${ATTENTION_BACKEND}"
 
+# ── Extra serve args ─────────────────────────────────────────────────
+
+EXTRA_SERVE_ARGS=()
+if [[ -n "${VLLM_SERVE_EXTRA_ARGS:-}" ]]; then
+  IFS=',' read -r -a EXTRA_SERVE_ARGS <<< "$VLLM_SERVE_EXTRA_ARGS"
+  echo "Extra serve args: ${EXTRA_SERVE_ARGS[*]}"
+fi
+
 cleanup_instances() {
   echo ""
   echo "Cleaning up..."
@@ -96,18 +116,57 @@ trap 'echo " Interrupted."; exit 130' INT TERM
 
 wait_for_server() {
   local port=$1
-  local deadline=600
+  local server_pid=$2
+  local server_name=$3
+  local endpoint=${4:-/v1/completions}
+  local deadline=${5:-600}
   local elapsed=0
-  echo "Waiting for server on port ${port}..."
+  echo "Waiting for ${server_name} on port ${port}..."
   while [ $elapsed -lt $deadline ]; do
-    if curl -s "localhost:${port}/v1/completions" > /dev/null 2>&1; then
-      echo "Server on port ${port} ready"
+    if ! ps -p "$server_pid" > /dev/null 2>&1; then
+      local status=0
+      wait "$server_pid" || status=$?
+      echo "FAIL: ${server_name} process ${server_pid} exited with status ${status} before port ${port} became ready"
+      exit 1
+    fi
+    if curl -s "http://${SERVER_HOST}:${port}${endpoint}" > /dev/null 2>&1; then
+      echo "${server_name} on port ${port} ready"
       return 0
     fi
     sleep 2
     elapsed=$((elapsed + 2))
   done
-  echo "FAIL: Server on port ${port} did not start within ${deadline}s"
+  echo "FAIL: ${server_name} on port ${port} did not start within ${deadline}s"
+  exit 1
+}
+
+wait_for_nixl_side_channel() {
+  local host=$1
+  local port=$2
+  local server_pid=$3
+  local server_name=$4
+  local deadline=120
+  local elapsed=0
+  echo "Waiting for ${server_name} NIXL side channel on ${host}:${port}..."
+  while [ $elapsed -lt $deadline ]; do
+    if ! ps -p "$server_pid" > /dev/null 2>&1; then
+      local status=0
+      wait "$server_pid" || status=$?
+      echo "FAIL: ${server_name} server process ${server_pid} exited with status ${status} before NIXL side channel ${host}:${port} became ready"
+      exit 1
+    fi
+    if python3 "${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/nixl_side_channel_probe.py" \
+      --host "$host" \
+      --port "$port" \
+      --timeout-ms 1000 > /dev/null 2>&1
+    then
+      echo "${server_name} NIXL side channel on ${host}:${port} ready"
+      return 0
+    fi
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+  echo "FAIL: ${server_name} NIXL side channel ${host}:${port} did not start within ${deadline}s"
   exit 1
 }
 
@@ -142,9 +201,11 @@ run_test_for_device() {
   local kv_device=$1
 
   if [[ "$kv_device" == "cuda" ]]; then
-    local kv_config='{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+    local kv_config_p='{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
+    local kv_config_d='{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
   else
-    local kv_config="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"${kv_device}\"}"
+    local kv_config_p="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_producer\",\"kv_buffer_device\":\"${kv_device}\"}"
+    local kv_config_d="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_consumer\",\"kv_buffer_device\":\"${kv_device}\"}"
   fi
 
   echo ""
@@ -156,8 +217,11 @@ run_test_for_device() {
   echo "SD model:           ${SD_MODEL}"
   echo "Spec tokens:        ${NUM_SPEC_TOKENS}"
   echo "KV buffer device:   ${kv_device}"
+  echo "KV cache memory:    ${KV_CACHE_MEMORY_BYTES:-auto-sized}"
   echo "Attention backend:  ${ATTENTION_BACKEND}"
   echo "GPU platform:       ${GPU_PLATFORM}"
+  echo "Server host:        ${SERVER_HOST}"
+  echo "NIXL side channel:  ${NIXL_SIDE_CHANNEL_HOST}"
   echo "GPUs available:     ${ALL_GPUS[*]}"
   echo "================================================================"
 
@@ -167,7 +231,8 @@ run_test_for_device() {
   local DECODE_PORTS=()
   local GPU_IDX=0
 
-  # Start prefill instances
+  # Start prefill instances and wait for each one before allocating the next
+  # server. This keeps failures from leaving extra model servers spinning.
   for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     local GPU_ID="${ALL_GPUS[$GPU_IDX]}"
     GPU_IDX=$((GPU_IDX + 1))
@@ -184,23 +249,29 @@ run_test_for_device() {
     ${GPU_DEVICE_VAR}=$GPU_ID \
     VLLM_KV_CACHE_LAYOUT='HND' \
     UCX_NET_DEVICES=all \
+    ${VLLM_SSM_CONV_STATE_LAYOUT:+VLLM_SSM_CONV_STATE_LAYOUT=$VLLM_SSM_CONV_STATE_LAYOUT} \
+    VLLM_NIXL_SIDE_CHANNEL_HOST=$NIXL_SIDE_CHANNEL_HOST \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
     vllm serve $MODEL_NAME \
       --port $PORT \
       --enforce-eager \
       --max-model-len $MAX_MODEL_LEN \
       --block-size ${BLOCK_SIZE} \
-      --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
+      "${KV_CACHE_ARGS[@]}" \
       --tensor-parallel-size $PREFILLER_TP_SIZE \
-      --kv-transfer-config "$kv_config" \
+      --kv-transfer-config "$kv_config_p" \
       --speculative-config "$PREFILL_SPEC_CONFIG" \
-      --attention-backend $ATTENTION_BACKEND &
+      --attention-backend $ATTENTION_BACKEND \
+      ${EXTRA_SERVE_ARGS[@]+"${EXTRA_SERVE_ARGS[@]}"} &
+    local SERVER_PID=$!
 
-    PREFILL_HOSTS+=("localhost")
+    PREFILL_HOSTS+=("$SERVER_HOST")
     PREFILL_PORTS+=("$PORT")
+    wait_for_server "$PORT" "$SERVER_PID" "prefill"
+    wait_for_nixl_side_channel "$NIXL_SIDE_CHANNEL_HOST" "$SIDE_CHANNEL_PORT" "$SERVER_PID" "prefill"
   done
 
-  # Start decode instances
+  # Start decode instances after prefill is ready.
   for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     local GPU_ID="${ALL_GPUS[$GPU_IDX]}"
     GPU_IDX=$((GPU_IDX + 1))
@@ -217,28 +288,26 @@ run_test_for_device() {
     ${GPU_DEVICE_VAR}=$GPU_ID \
     VLLM_KV_CACHE_LAYOUT='HND' \
     UCX_NET_DEVICES=all \
+    ${VLLM_SSM_CONV_STATE_LAYOUT:+VLLM_SSM_CONV_STATE_LAYOUT=$VLLM_SSM_CONV_STATE_LAYOUT} \
+    VLLM_NIXL_SIDE_CHANNEL_HOST=$NIXL_SIDE_CHANNEL_HOST \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
     vllm serve $MODEL_NAME \
       --port $PORT \
       --enforce-eager \
       --max-model-len $MAX_MODEL_LEN \
       --block-size ${BLOCK_SIZE} \
-      --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
+      "${KV_CACHE_ARGS[@]}" \
       --tensor-parallel-size $DECODER_TP_SIZE \
-      --kv-transfer-config "$kv_config" \
+      --kv-transfer-config "$kv_config_d" \
       --speculative-config "$DECODE_SPEC_CONFIG" \
-      --attention-backend $ATTENTION_BACKEND &
+      --attention-backend $ATTENTION_BACKEND \
+      ${EXTRA_SERVE_ARGS[@]+"${EXTRA_SERVE_ARGS[@]}"} &
+    local SERVER_PID=$!
 
-    DECODE_HOSTS+=("localhost")
+    DECODE_HOSTS+=("$SERVER_HOST")
     DECODE_PORTS+=("$PORT")
-  done
-
-  # Wait for servers
-  for PORT in "${PREFILL_PORTS[@]}"; do
-    wait_for_server "$PORT"
-  done
-  for PORT in "${DECODE_PORTS[@]}"; do
-    wait_for_server "$PORT"
+    wait_for_server "$PORT" "$SERVER_PID" "decode"
+    wait_for_nixl_side_channel "$NIXL_SIDE_CHANNEL_HOST" "$SIDE_CHANNEL_PORT" "$SERVER_PID" "decode"
   done
 
   # Start proxy
@@ -250,13 +319,16 @@ run_test_for_device() {
     --prefiller-ports ${PREFILL_PORTS[*]} \
     --decoder-hosts ${DECODE_HOSTS[*]} \
     --decoder-ports ${DECODE_PORTS[*]} &
+  local PROXY_PID=$!
 
-  sleep 5
+  wait_for_server "$PROXY_PORT" "$PROXY_PID" "proxy" "/healthcheck" 60
 
   # Run test
   echo "Running spec decode acceptance test (kv_buffer_device=${kv_device}, backend=${ATTENTION_BACKEND})..."
   DECODE_PORT=${DECODE_PORTS[0]} \
+  SERVER_HOST=$SERVER_HOST \
   TEST_MODEL=$MODEL_NAME \
+  SD_METHOD=$SD_METHOD \
   python3 -m pytest -s -x "${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/test_spec_decode_acceptance.py"
 
   # Tear down before next iteration

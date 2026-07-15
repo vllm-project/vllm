@@ -4,6 +4,7 @@ import inspect
 from collections.abc import Callable
 
 import torch
+from torch.nn.parameter import UninitializedParameter
 from torch.utils._python_dispatch import TorchDispatchMode
 
 from .sanitize import restore_layer_refs, sanitize_layer_refs
@@ -55,11 +56,45 @@ def materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
     return tensor
 
 
+def _is_non_persistent_parameter_alias_buffer(
+    layer: torch.nn.Module,
+    name: str,
+    buffer: torch.Tensor,
+    parameter_storage_ptrs: set[int],
+) -> bool:
+    if name not in layer._non_persistent_buffers_set:
+        return False
+
+    buffer_storage_ptr = _tensor_storage_ptr(buffer)
+    return (
+        buffer_storage_ptr is not None and buffer_storage_ptr in parameter_storage_ptrs
+    )
+
+
+def _tensor_storage_ptr(tensor: torch.Tensor) -> int | None:
+    if isinstance(tensor, UninitializedParameter):
+        return None
+
+    try:
+        return tensor.untyped_storage().data_ptr()
+    except (RuntimeError, ValueError):
+        return None
+
+
+def _parameter_storage_ptrs(layer: torch.nn.Module) -> set[int]:
+    return {
+        storage_ptr
+        for param in layer.parameters(recurse=True)
+        if (storage_ptr := _tensor_storage_ptr(param)) is not None
+    }
+
+
 def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
     if layer.__class__.__name__ in SKIP_MODULES:
         return ({}, {})
 
     params, buffers = get_layer_params_buffers(layer)
+    parameter_storage_ptrs = _parameter_storage_ptrs(layer)
     return (
         {
             name: sanitize_layer_refs(to_meta_tensor(param), layer)
@@ -70,6 +105,9 @@ def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
             name: sanitize_layer_refs(to_meta_tensor(buffer), layer)
             for name, buffer in buffers.items()
             if name not in SKIP_TENSORS
+            and not _is_non_persistent_parameter_alias_buffer(
+                layer, name, buffer, parameter_storage_ptrs
+            )
         },
     )
 
@@ -79,6 +117,7 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
     if layer.__class__.__name__ in SKIP_MODULES:
         return
 
+    non_persistent = set(layer._non_persistent_buffers_set)
     for name in get_layer_tensors(layer):
         if name not in SKIP_TENSORS:
             delattr(layer, name)
@@ -92,7 +131,7 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
     for name, buffer in restore_buffers.items():
         if name not in SKIP_TENSORS:
             buffer = restore_layer_refs(buffer, layer)
-            layer.register_buffer(name, buffer)
+            layer.register_buffer(name, buffer, persistent=name not in non_persistent)
 
 
 def materialize_layer(layer: torch.nn.Module, info: LayerReloadingInfo):
@@ -102,7 +141,7 @@ def materialize_layer(layer: torch.nn.Module, info: LayerReloadingInfo):
 
     with info.restore_device:
         for name, tensor in get_layer_tensors(layer).items():
-            if name not in SKIP_TENSORS:
+            if name not in SKIP_TENSORS and tensor.is_meta:
                 setattr(layer, name, materialize_meta_tensor(tensor))
 
 
@@ -137,11 +176,28 @@ def get_numel_loaded(
     """
     Determine how many elements would be loaded by a weight loader call.
 
-    :param weight loader: used to load weights
-    :param args: bound arguments to weight loader
-    :return: number of elements loaded by the weight loader, the return value of the
+    Args:
+        weight_loader: used to load weights
+        args: bound arguments to weight loader
+
+    Returns:
+        number of elements loaded by the weight loader, the return value of the
         weight loader
     """
     with CopyCounter() as counter:
         return_value = weight_loader(*args.args, **args.kwargs)
-    return counter.copied_numel, return_value
+
+    # A weight loader fills a single destination parameter, so the number of
+    # loaded elements is at most that parameter's size. Some loaders copy into
+    # the parameter more than once -- e.g. ``composed_weight_loader`` runs an
+    # in-place post-load transform (``param.copy_(fn(param))``) on top of the
+    # initial copy -- which would make CopyCounter report twice the parameter
+    # size. Over-counting inflates the layer's loaded-element total and can
+    # finalize the layer before every parameter is loaded, silently dropping
+    # the trailing parameter(s) (e.g. Mamba ``mixer.D``). Cap the count at the
+    # destination size to keep the per-layer accounting correct.
+    numel = counter.copied_numel
+    param = args.arguments.get("param", None)
+    if isinstance(param, torch.Tensor):
+        numel = min(numel, param.numel())
+    return numel, return_value

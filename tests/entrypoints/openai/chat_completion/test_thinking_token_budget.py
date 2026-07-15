@@ -72,7 +72,9 @@ def server():
         "0.4",
         "--no-async-scheduling",
     ]
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    # thinking_token_budget is not yet supported by the V2 model runner.
+    env_dict = {"VLLM_USE_V2_MODEL_RUNNER": "0"}
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
         yield remote_server
 
 
@@ -88,7 +90,9 @@ def server_with_auto_reasoning_config():
         "0.4",
         "--no-async-scheduling",
     ]
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    # thinking_token_budget is not yet supported by the V2 model runner.
+    env_dict = {"VLLM_USE_V2_MODEL_RUNNER": "0"}
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
         yield remote_server
 
 
@@ -122,11 +126,12 @@ def server_qwen35_fp8_mtp_tp2():
             }
         ),
     ]
+    # thinking_token_budget is not yet supported by the V2 model runner.
+    env_dict: dict[str, str] = {"VLLM_USE_V2_MODEL_RUNNER": "0"}
     # With 4+ GPUs, run TP=2 on physical devices 2,3 so module-scoped 0.6B servers
     # on 0,1 do not exhaust memory on the same devices as this worker.
-    env_dict = None
     if current_platform.device_count() >= 4:
-        env_dict = {"CUDA_VISIBLE_DEVICES": "2,3"}
+        env_dict["CUDA_VISIBLE_DEVICES"] = "2,3"
 
     with RemoteOpenAIServer(
         QWEN35_FP8_MTP_MODEL,
@@ -178,27 +183,39 @@ async def test_thinking_token_budget_mixed_requests(client: openai.AsyncOpenAI):
 async def test_thinking_token_budget_limits_reasoning(client: openai.AsyncOpenAI):
     """Test that thinking_token_budget limits the number of reasoning tokens.
 
-    Counts non-empty streaming ``delta.reasoning`` chunks (coarse proxy; each
-    chunk may represent multiple decode tokens — see
-    ``_count_reasoning_decode_token_ids_between_markers`` and the Qwen3.5 MTP
-    test for id-based checks).
+    Counts reasoning decode tokens by id, which is robust to how tokens are
+    grouped into streamed chunks (a single chunk can carry several tokens under
+    async scheduling / stream_interval > 1). Counting chunks under-counts.
     """
 
-    reasoning_token_count = 0
+    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
+    start_ids = list(tokenizer.encode(REASONING_START_STR, add_special_tokens=False))
+    end_ids = list(tokenizer.encode(REASONING_END_STR, add_special_tokens=False))
+
+    prompt_token_ids: list[int] = []
+    decode_token_ids: list[int] = []
     stream = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,
         max_tokens=100,
         stream=True,
-        extra_body={"thinking_token_budget": THINK_BUDGET},
+        extra_body={"thinking_token_budget": THINK_BUDGET, "return_token_ids": True},
     )
     async for chunk in stream:
-        delta = chunk.choices[0].delta
-        if getattr(delta, "reasoning", None):
-            reasoning_token_count += 1
+        if not chunk.choices:
+            continue
+        if getattr(chunk, "prompt_token_ids", None):
+            prompt_token_ids = list(chunk.prompt_token_ids)
+        delta_ids = getattr(chunk.choices[0], "token_ids", None)
+        if delta_ids:
+            decode_token_ids.extend(delta_ids)
 
+    reasoning_token_count = _count_reasoning_decode_token_ids_between_markers(
+        prompt_token_ids + decode_token_ids, start_ids, end_ids
+    )
+    assert reasoning_token_count is not None, "missing reasoning start marker in ids"
     assert reasoning_token_count == THINK_BUDGET, (
-        f"reasoning tokens ({reasoning_token_count}) exceeded "
+        f"reasoning tokens ({reasoning_token_count}) != "
         f"thinking_token_budget ({THINK_BUDGET})"
     )
 
@@ -287,3 +304,47 @@ async def test_thinking_token_budget_qwen35_fp8_mtp_concurrent_mixed_budget_and_
                 f"index {i}: reasoning decode token ids ({n_reason}) != "
                 f"thinking_token_budget ({expected_budget})"
             )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client", ["default", "auto_config"], indirect=True)
+async def test_streaming_with_thinking_disabled_stays_in_content(
+    client: openai.AsyncOpenAI,
+):
+    request_kwargs = {
+        "model": MODEL_NAME,
+        "messages": [
+            {
+                "role": "user",
+                "content": "Which is larger, 4 or 12?"
+                " Output exactly one token: 4 or 12.",
+            }
+        ],
+        "max_tokens": 16,
+        "temperature": 0.0,
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+    }
+
+    response = await client.chat.completions.create(**request_kwargs)
+    message = response.choices[0].message
+    assert message.content is not None and message.content.strip() != ""
+    assert getattr(message, "reasoning", None) in (None, "")
+
+    stream = await client.chat.completions.create(
+        **request_kwargs,
+        stream=True,
+    )
+
+    content_chunks = []
+    reasoning_chunks = []
+    async for chunk in stream:
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        if getattr(delta, "content", None):
+            content_chunks.append(delta.content)
+        if getattr(delta, "reasoning", None):
+            reasoning_chunks.append(delta.reasoning)
+
+    assert "".join(content_chunks).strip() != ""
+    assert reasoning_chunks == []

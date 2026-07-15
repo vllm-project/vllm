@@ -70,7 +70,11 @@ class ActivationQuantPattern(VllmPatternReplacement):
         self.silu_and_mul_matcher = MatcherSiluAndMul()
 
     def empty_quant(self, *args: Any, **kwargs: Any) -> torch.Tensor:
-        kwargs = {"dtype": self.quant_dtype, "device": "cuda", **kwargs}
+        kwargs = {
+            "dtype": self.quant_dtype,
+            "device": current_platform.device_type,
+            **kwargs,
+        }
         return torch.empty(*args, **kwargs)
 
 
@@ -190,6 +194,7 @@ class SiluMulBlockQuantPattern(ActivationQuantPattern):
         is_scale_transposed: bool = False,
         is_e8m0: bool = False,
         is_tma_aligned: bool = False,
+        match_aiter: bool = False,
     ) -> None:
         super().__init__(quant_key)
         self.quant_matcher = MatcherQuantFP8(

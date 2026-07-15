@@ -3,10 +3,10 @@
 from abc import ABC, abstractmethod
 
 import tokenizers
+import tokenizers.decoders
 from packaging import version
 from tokenizers import Tokenizer
-from tokenizers.decoders import DecodeStream
-from transformers import PreTrainedTokenizerFast
+from transformers import TokenizersBackend
 
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
@@ -57,7 +57,7 @@ class IncrementalDetokenizer:
             # No tokenizer => skipping detokenization.
             return IncrementalDetokenizer()
 
-        if USE_FAST_DETOKENIZER and isinstance(tokenizer, PreTrainedTokenizerFast):
+        if USE_FAST_DETOKENIZER and isinstance(tokenizer, TokenizersBackend):
             # Fast tokenizer => use tokenizers library DecodeStream.
             return FastIncrementalDetokenizer(tokenizer, request)
 
@@ -165,7 +165,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
 
 class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
-    def __init__(self, tokenizer: PreTrainedTokenizerFast, request: EngineCoreRequest):
+    def __init__(self, tokenizer: TokenizersBackend, request: EngineCoreRequest):
         super().__init__(request)
 
         sampling_params = request.sampling_params
@@ -177,7 +177,10 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         self.tokenizer: Tokenizer = tokenizer._tokenizer
 
         # Use native prefill to prime the decode stream with prompt tokens.
-        self.stream = DecodeStream(
+        # Look up DecodeStream on the module so backend patches (e.g. the
+        # fastokens shim that replaces ``tokenizers.decoders.DecodeStream``)
+        # are honored regardless of import order.
+        self.stream = tokenizers.decoders.DecodeStream(
             ids=request.prompt_token_ids,
             skip_special_tokens=self.skip_special_tokens,
         )
@@ -237,7 +240,9 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
                 " for request %s, resetting decode stream.",
                 self.request_id,
             )
-            self.stream = DecodeStream(skip_special_tokens=self.skip_special_tokens)
+            self.stream = tokenizers.decoders.DecodeStream(
+                skip_special_tokens=self.skip_special_tokens
+            )
             token = self.stream.step(self.tokenizer, next_token_id)
         return token
 

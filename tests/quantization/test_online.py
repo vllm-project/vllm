@@ -40,13 +40,12 @@ from vllm.platforms import current_platform
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerBlockOnlineMoEMethod,
         ),
-        # quantization='online with linear_scheme_override and
-        # moe_scheme_override
+        # quantization='online' with per-layer-kind overrides
         (
             "online",
             {
-                "linear_scheme_override": "fp8_per_block",
-                "moe_scheme_override": "fp8_per_tensor",
+                "linear": "fp8_per_block",
+                "moe": "fp8_per_tensor",
             },
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
@@ -116,7 +115,7 @@ def test_online_quantization(
             # because of how we craft the test case inputs
             assert isinstance(o_proj.quant_method, expected_linear_cls)
             if moe is not None:
-                assert isinstance(moe.quant_method, expected_moe_cls)
+                assert isinstance(moe._quant_method, expected_moe_cls)
 
             if current_platform.is_cuda():
                 assert o_proj.weight.dtype == torch.float8_e4m3fn

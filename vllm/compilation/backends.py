@@ -50,6 +50,7 @@ from .partition_rules import (
     should_split,
 )
 from .passes.inductor_pass import InductorPass, pass_context
+from .passes.ir.inplace_functionalization import VllmIRInplaceFunctionalizationPass
 from .passes.pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
@@ -926,6 +927,24 @@ class VllmBackend:
         return standalone_compile_artifacts, sym_shape_indices_map, returns_tuple_map
 
     def configure_post_pass(self) -> None:
+        # TODO proper PassManager?
+        pre_grad_pass_key = "pre_grad_custom_pass"
+        assert self.pass_key != pre_grad_pass_key
+        assert pre_grad_pass_key not in self.inductor_config
+        self.inductor_config[pre_grad_pass_key] = VllmIRInplaceFunctionalizationPass(
+            self.vllm_config
+        )
+
+        # Make sure pre_grad_custom_pass is not pickled
+        # as part of AOTAutograd built-in cache key
+        # TODO(luka) is there a cleaner way to do this
+        import torch._inductor.config as inductor_config
+
+        ignore = inductor_config._cache_config_ignore_prefix + [pre_grad_pass_key]
+        assert "_cache_config_ignore_prefix" not in self.inductor_config
+        self.inductor_config["_cache_config_ignore_prefix"] = ignore
+
+        # Configure the (nominally post-grad) pass manager
         self.pass_manager.configure(self.vllm_config)
 
         # Post-grad custom passes are run using the post_grad_custom_post_pass
@@ -972,7 +991,7 @@ class VllmBackend:
             },
             payload_fn=lambda: json.dumps(
                 {
-                    "model": self.vllm_config.model_config.model,
+                    "model": getattr(self.vllm_config.model_config, "model", "unknown"),
                     "prefix": self.prefix,
                     "mode": str(cc.mode),
                     "backend": cc.backend,
@@ -1125,16 +1144,19 @@ class VllmBackend:
         compilation_counter.num_graphs_seen += 1
         from .monitor import torch_compile_start_time
 
-        dynamo_time = time.perf_counter() - torch_compile_start_time
+        current_perf = time.perf_counter()
+        current_epoch = time.time()
+        dynamo_time = current_perf - torch_compile_start_time
         logger.info_once(
             "Dynamo bytecode transform time: %.2f s",
             dynamo_time,
         )
 
         # Record Dynamo time in tracing if available
-        start_time = int(torch_compile_start_time * 1e9)
+        real_start_time = current_epoch - dynamo_time
+        start_time_ns = int(real_start_time * 1e9)
         attributes = {"dynamo.time_seconds": dynamo_time}
-        instrument_manual("Dynamo bytecode transform", start_time, None, attributes)
+        instrument_manual("Dynamo bytecode transform", start_time_ns, None, attributes)
 
         # we control the compilation process, each instance can only be
         # called once
@@ -1249,7 +1271,7 @@ class VllmBackend:
             original_split_gm if envs.VLLM_USE_MEGA_AOT_ARTIFACT else self.graph
         )
 
-        execution_code, submod_names = generate_execution_code(self.split_gm)
+        execution_code, submod_names, consts = generate_execution_code(self.split_gm)
         # Use getattr to get correct callables: __dict__ has PiecewiseBackend
         # instances (from PiecewiseCompileInterpreter), _modules has originals.
         # getattr checks __dict__ first, then falls back to _modules.
@@ -1258,7 +1280,7 @@ class VllmBackend:
             for name, _ in self.split_gm.named_children()
         }
         runtime_callable = compile_execution_fn(
-            execution_code, submod_callables, submod_names
+            execution_code, submod_callables, submod_names, consts
         )
 
         if (
@@ -1274,6 +1296,7 @@ class VllmBackend:
                 vllm_backend=self,
                 execution_code=execution_code,
                 submod_names=submod_names,
+                consts=consts,
             )
 
         # index of tensors that have symbolic shapes (batch size)
@@ -1307,4 +1330,5 @@ class VllmBackend:
             sym_tensor_indices=sym_tensor_indices,
             execution_code=execution_code,
             submod_names=submod_names,
+            consts=consts,
         )
