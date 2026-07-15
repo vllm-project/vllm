@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek V3.2 causal LM for ROCm.
 
-Identical to the NVIDIA backbone (nvidia/model.py) except DeepseekV32DecoderLayer
-instantiates DeepseekV32ROCMAiterMLAAttention instead of DeepseekV32Attention.
+instantiates DeepseekV32MLAAttention instead of DeepseekV32Attention.
 Weight loading, MoE routing, and pipeline-parallel logic are unchanged.
 """
 
@@ -43,10 +42,10 @@ from vllm.model_executor.models.utils import (
 from vllm.models.deepseek_v32.common.fused_ops import fused_allreduce_rms_norm
 from vllm.sequence import IntermediateTensors
 
-from .rocm import DeepseekV32ROCMAiterMLAAttention
+from .rocm import DeepseekV32MLAAttention
 
 
-class DeepseekV32ROCMAiterDecoderLayer(torch.nn.Module):
+class DeepseekV32DecoderLayer(torch.nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -67,7 +66,7 @@ class DeepseekV32ROCMAiterDecoderLayer(torch.nn.Module):
         self.layer_idx = layer_idx
         self.use_mha = False
 
-        self.self_attn = DeepseekV32ROCMAiterMLAAttention(
+        self.self_attn = DeepseekV32MLAAttention(
             vllm_config=vllm_config,
             config=config,
             prefix=f"{prefix}.self_attn",
@@ -122,7 +121,7 @@ class DeepseekV32ROCMAiterDecoderLayer(torch.nn.Module):
         return hidden_states, residual
 
 
-class DeepseekV32ROCMAiterModel(torch.nn.Module):
+class DeepseekV32Model(torch.nn.Module):
     fall_back_to_pt_during_load = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -156,7 +155,7 @@ class DeepseekV32ROCMAiterModel(torch.nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: DeepseekV32ROCMAiterDecoderLayer(
+            lambda prefix: DeepseekV32DecoderLayer(
                 vllm_config=vllm_config,
                 prefix=prefix,
                 topk_indices_buffer=topk_indices_buffer,
@@ -187,6 +186,7 @@ class DeepseekV32ROCMAiterModel(torch.nn.Module):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        #raise "In amd dsv3.2 forward."
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -235,6 +235,8 @@ class DeepseekV32ROCMAiterModel(torch.nn.Module):
             num_experts=self.config.n_routed_experts,
             num_redundant_experts=self.num_redundant_experts,
         )
+
+        #raise "In amd dsv3.2 forward."
 
         pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
@@ -315,12 +317,13 @@ class DeepseekV32ROCMAiterModel(torch.nn.Module):
         return loaded_params
 
 
-class DeepseekV32ROCMAiterForCausalLM(DeepseekV2ForCausalLM):
+class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
     """DSA causal LM for ROCm — DeepSeek V3.2 backbone with ROCm sparse MLA."""
-
-    model_cls = DeepseekV32ROCMAiterModel
+ 
+    model_cls = DeepseekV32Model
 
     def set_moe_parameters(self):
+        #print(f'*******************************************In AMD DPV3.2*******************************************')
         self.num_expert_groups = getattr(self.config, "n_group", 1)
         self.moe_layers = []
         self.moe_mlp_layers = []

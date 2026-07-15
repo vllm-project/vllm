@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Multi-Token Predictor for DeepSeek V3.2 on ROCm.
 
-Extends the NVIDIA MTP (nvidia/mtp.py) with:
   - ROCm aiter shared-expert fusion in load_weights
-  - DeepseekV32ROCMAiterDecoderLayer for the decoder block inside the MTP layer
+  - DeepseekV32DecoderLayer for the decoder block inside the MTP layer
 """
 
 import typing
@@ -43,10 +42,10 @@ from vllm.models.deepseek_v32.common.kernels import fused_eh_norm
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .model import DeepseekV32ROCMAiterDecoderLayer
+from .model import DeepseekV32DecoderLayer
 
 
-class DeepseekV32ROCMAiterMultiTokenPredictorLayer(nn.Module):
+class DeepseekV32MultiTokenPredictorLayer(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
@@ -67,7 +66,7 @@ class DeepseekV32ROCMAiterMultiTokenPredictorLayer(nn.Module):
         self.shared_head = SharedHead(
             config=config, prefix=prefix, quant_config=quant_config
         )
-        self.mtp_block = DeepseekV32ROCMAiterDecoderLayer(
+        self.mtp_block = DeepseekV32DecoderLayer(
             vllm_config,
             prefix,
             config=config,
@@ -99,7 +98,7 @@ class DeepseekV32ROCMAiterMultiTokenPredictorLayer(nn.Module):
         return residual + hidden_states
 
 
-class DeepseekV32ROCMAiterMultiTokenPredictor(nn.Module):
+class DeepseekV32MultiTokenPredictor(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -107,7 +106,7 @@ class DeepseekV32ROCMAiterMultiTokenPredictor(nn.Module):
         self.num_mtp_layers = config.num_nextn_predict_layers
         self.layers = torch.nn.ModuleDict(
             {
-                str(idx): DeepseekV32ROCMAiterMultiTokenPredictorLayer(
+                str(idx): DeepseekV32MultiTokenPredictorLayer(
                     vllm_config, f"{prefix}.layers.{idx}"
                 )
                 for idx in range(
@@ -163,12 +162,12 @@ class DeepseekV32ROCMAiterMultiTokenPredictor(nn.Module):
         )
 
 
-class DeepseekV32ROCMAiterMTP(nn.Module, DeepseekV2MixtureOfExperts):
+class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
-        self.model = DeepseekV32ROCMAiterMultiTokenPredictor(
+        self.model = DeepseekV32MultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.set_moe_parameters()
