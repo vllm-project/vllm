@@ -29,8 +29,8 @@ _REASONING_PARSERS_TO_REGISTER = {
         "DeepSeekV3ReasoningParser",
     ),
     "deepseek_v4": (
-        "deepseek_v3_reasoning_parser",
-        "DeepSeekV3ReasoningParser",
+        "deepseek_v4_engine_reasoning_parser",
+        "DeepSeekV4ParserReasoningAdapter",
     ),
     "poolside_v1": (
         "poolside_v1_reasoning_parser",
@@ -53,8 +53,12 @@ _REASONING_PARSERS_TO_REGISTER = {
         "Gemma4ParserReasoningAdapter",
     ),
     "glm45": (
-        "deepseek_v3_reasoning_parser",
-        "DeepSeekV3ReasoningWithThinkingParser",
+        "glm47_moe_reasoning_parser",
+        "Glm47MoeParserReasoningAdapter",
+    ),
+    "glm47": (
+        "glm47_moe_reasoning_parser",
+        "Glm47MoeParserReasoningAdapter",
     ),
     "openai_gptoss": (
         "gptoss_reasoning_parser",
@@ -113,8 +117,8 @@ _REASONING_PARSERS_TO_REGISTER = {
         "Qwen3ParserReasoningAdapter",
     ),
     "seed_oss": (
-        "seedoss_reasoning_parser",
-        "SeedOSSReasoningParser",
+        "seed_oss_engine_reasoning_parser",
+        "SeedOssParserReasoningAdapter",
     ),
     "step3": (
         "step3_reasoning_parser",

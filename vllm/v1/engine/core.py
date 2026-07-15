@@ -22,6 +22,7 @@ import zmq
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
+from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
     stateless_destroy_torch_distributed_process_group,
@@ -74,7 +75,7 @@ from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
     EngineZmqAddresses,
     SignalCallback,
-    get_device_indices,
+    get_physical_gpu_ids_for_local_dp_rank,
 )
 from vllm.v1.executor import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig, get_kv_cache_spec_kind
@@ -121,6 +122,7 @@ class EngineCore:
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
+        self._pooler_config_logged = False
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(executor_fail_callback)
 
@@ -348,7 +350,63 @@ class EngineCore:
         return scheduler_kv_cache_config
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        return self.model_executor.supported_tasks
+        supported_tasks = self.model_executor.supported_tasks
+        self._log_pooler_config(supported_tasks)
+        return supported_tasks
+
+    def _log_pooler_config(self, supported_tasks: tuple[SupportedTask, ...]) -> None:
+        if self._pooler_config_logged:
+            return
+
+        model_config = self.vllm_config.model_config
+        pooler_config = model_config.pooler_config
+        if (
+            self.vllm_config.parallel_config.data_parallel_rank_local
+            or model_config.runner_type != "pooling"
+            or pooler_config is None
+        ):
+            return
+
+        supported_pooling_tasks = tuple(
+            sorted(set(supported_tasks) & set(POOLING_TASKS))
+        )
+        if not supported_pooling_tasks:
+            return
+
+        self._pooler_config_logged = True
+        task_set = set(supported_pooling_tasks)
+        use_activation = pooler_config.use_activation
+        if use_activation is None:
+            use_activation = True
+        sources = getattr(model_config, "_pooler_config_sources", {})
+        pooling_type_field = (
+            "seq_pooling_type"
+            if task_set & {"embed", "classify"}
+            else "tok_pooling_type"
+        )
+
+        def log_field(name: str, field: str) -> str:
+            value = (
+                use_activation
+                if field == "use_activation"
+                else getattr(pooler_config, field)
+            )
+            source = sources.get(field, "unknown")
+            return f"{name}={value}(source={source})"
+
+        log_items = [("pooling_type", pooling_type_field)]
+        log_items.extend(
+            (field, field)
+            for field in POOLER_CONFIG_LOG_FIELDS
+            if field != pooling_type_field
+        )
+        config_fields = ", ".join(log_field(name, field) for name, field in log_items)
+
+        logger.info_once(
+            "Resolved pooling config: %s, supported_tasks=%s",
+            config_fields,
+            supported_pooling_tasks,
+        )
 
     def get_kv_cache_group_metadata(self) -> list[dict[str, int | str | None]]:
         """Return msgspec-serializable metadata for scheduler KV cache groups."""
@@ -398,6 +456,15 @@ class EngineCore:
             logger.warning(
                 "Got kv_transfer_params, but no KVConnector found. "
                 "Disabling KVTransfer for this request."
+            )
+
+        if (
+            request.ec_transfer_params is not None
+            and self.scheduler.get_ec_connector() is None
+        ):
+            logger.warning(
+                "Got ec_transfer_params, but no ECConnector found. "
+                "Disabling ECTransfer for this request."
             )
 
         self.scheduler.add_request(request)
@@ -809,8 +876,10 @@ class EngineCore:
         if tags is None or tags:
             self.model_executor.wake_up(tags)
 
-        # Resume scheduling (applies to all levels)
-        self.resume_scheduler()
+        # Partial wakes intentionally keep the remaining allocations asleep.
+        # Resume scheduling only once all executor memory is resident again.
+        if not self.model_executor.is_sleeping:
+            self.resume_scheduler()
 
     def is_sleeping(self) -> bool:
         """Check if engine is sleeping at any level."""
@@ -1173,10 +1242,10 @@ class EngineCoreProc(EngineCore):
                 numa_utils.log_current_affinity_state(process_title)
 
             if data_parallel and vllm_config.kv_transfer_config is not None:
-                # modify the engine_id and append the local_dp_rank to it to ensure
+                # modify the engine_id and append the dp_rank to it to ensure
                 # that the kv_transfer_config is unique for each DP rank.
                 vllm_config.kv_transfer_config.engine_id = (
-                    f"{vllm_config.kv_transfer_config.engine_id}_dp{local_dp_rank}"
+                    f"{vllm_config.kv_transfer_config.engine_id}_dp{dp_rank}"
                 )
                 logger.debug(
                     "Setting kv_transfer_config.engine_id to %s",
@@ -1947,10 +2016,11 @@ class DPEngineCoreProc(EngineCoreProc):
                     # All engines are idle.
                     continue
 
-                # We are in a running state and so must execute a dummy pass
-                # if the model didn't execute any ready requests.
-                with self.log_iteration_details(None):
-                    self.execute_dummy_batch()
+                # Execute a dummy pass when no ready requests ran, unless the
+                # engine is sleeping.
+                elif not self.model_executor.is_sleeping:
+                    with self.log_iteration_details(None):
+                        self.execute_dummy_batch()
 
             # 3) All-reduce operation to determine global unfinished reqs.
             self.engines_running = self._has_global_unfinished_reqs(
@@ -2175,23 +2245,30 @@ class EngineCoreActorMixin:
             pass
         else:
             device_control_env_var = current_platform.device_control_env_var
-            self._set_cuda_visible_devices(
+            self._set_assigned_physical_gpu_ids(
                 vllm_config, local_dp_rank, device_control_env_var
             )
 
-    def _set_cuda_visible_devices(
-        self, vllm_config: VllmConfig, local_dp_rank: int, device_control_env_var: str
+    def _set_assigned_physical_gpu_ids(
+        self,
+        vllm_config: VllmConfig,
+        local_dp_rank: int,
+        device_control_env_var: str,
     ):
         world_size = vllm_config.parallel_config.world_size
-        # Set CUDA_VISIBLE_DEVICES or equivalent.
         try:
-            value = get_device_indices(
-                device_control_env_var, local_dp_rank, world_size
+            physical_gpu_ids = get_physical_gpu_ids_for_local_dp_rank(
+                device_control_env_var,
+                local_dp_rank,
+                world_size,
+                user_assigned_gpu_ids=(
+                    vllm_config.parallel_config.assigned_physical_gpu_ids
+                ),
             )
-            os.environ[device_control_env_var] = value
+            vllm_config.parallel_config.assigned_physical_gpu_ids = physical_gpu_ids
         except IndexError as e:
             raise Exception(
-                f"Error setting {device_control_env_var}: "
+                f"Error computing assigned_physical_gpu_ids: "
                 f"local range: [{local_dp_rank * world_size}, "
                 f"{(local_dp_rank + 1) * world_size}) "
                 f'base value: "{os.getenv(device_control_env_var)}"'

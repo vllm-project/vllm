@@ -95,40 +95,54 @@ def mma_bf16(
     return cute.TensorSSA(vec, 4, Float32)
 
 
-@dsl_user_op
-def _bf16x2_abs(a: Uint32, *, loc=None, ip=None) -> Uint32:
+def _bf16x2_unary(asm: str, a: Uint32, *, loc=None, ip=None) -> Uint32:
     out = llvm.inline_asm(
         T.i32(),
         [a.ir_value(loc=loc, ip=ip)],
-        "abs.bf16x2 $0, $1;",
+        f"{asm}.bf16x2 $0, $1;",
         "=r,r",
         has_side_effects=False,
         is_align_stack=False,
+        loc=loc,
+        ip=ip,
     )
     return Uint32(out)
+
+
+def _bf16x2_binary(asm: str, a: Uint32, b: Uint32, *, loc=None, ip=None) -> Uint32:
+    out = llvm.inline_asm(
+        T.i32(),
+        [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
+        f"{asm}.bf16x2 $0, $1, $2;",
+        "=r,r,r",
+        has_side_effects=False,
+        is_align_stack=False,
+        loc=loc,
+        ip=ip,
+    )
+    return Uint32(out)
+
+
+@dsl_user_op
+def _bf16x2_abs(a: Uint32, *, loc=None, ip=None) -> Uint32:
+    return _bf16x2_unary("abs", a, loc=loc, ip=ip)
+
+
+@dsl_user_op
+def _bf16x2_neg(a: Uint32, *, loc=None, ip=None) -> Uint32:
+    return _bf16x2_unary("neg", a, loc=loc, ip=ip)
 
 
 @dsl_user_op
 def _bf16x2_max(a: Uint32, b: Uint32, *, loc=None, ip=None) -> Uint32:
-    out = llvm.inline_asm(
-        T.i32(),
-        [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
-        "max.bf16x2 $0, $1, $2;",
-        "=r,r,r",
-        has_side_effects=False,
-        is_align_stack=False,
-    )
-    return Uint32(out)
+    return _bf16x2_binary("max", a, b, loc=loc, ip=ip)
 
 
 @dsl_user_op
 def _bf16x2_mul(a: Uint32, b: Uint32, *, loc=None, ip=None) -> Uint32:
-    out = llvm.inline_asm(
-        T.i32(),
-        [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
-        "mul.rn.bf16x2 $0, $1, $2;",
-        "=r,r,r",
-        has_side_effects=False,
-        is_align_stack=False,
-    )
-    return Uint32(out)
+    return _bf16x2_binary("mul.rn", a, b, loc=loc, ip=ip)
+
+
+@dsl_user_op
+def _bf16x2_sub(a: Uint32, b: Uint32, *, loc=None, ip=None) -> Uint32:
+    return _bf16x2_binary("sub.rn", a, b, loc=loc, ip=ip)

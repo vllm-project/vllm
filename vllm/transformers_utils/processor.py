@@ -18,6 +18,7 @@ from transformers.audio_utils import AudioInput
 from transformers.feature_extraction_utils import FeatureExtractionMixin
 from transformers.image_processing_utils import BaseImageProcessor
 from transformers.image_utils import ImageInput
+from transformers.models.auto.video_processing_auto import VIDEO_PROCESSOR_MAPPING_NAMES
 from transformers.processing_utils import ProcessorMixin
 from transformers.video_processing_utils import BaseVideoProcessor
 from transformers.video_utils import VideoInput
@@ -80,6 +81,7 @@ _transformers_v4_compatibility_import()
 _transformers_v4_compatibility_init()
 
 _P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
+_I = TypeVar("_I", bound=BaseImageProcessor, default=BaseImageProcessor)
 _V = TypeVar("_V", bound=BaseVideoProcessor, default=BaseVideoProcessor)
 
 
@@ -169,6 +171,15 @@ def get_video_processor_cls_name_from_config(
         config = get_hf_file_to_dict(file, processor_name, revision=revision)
         if config and "video_processor_type" in config:
             return config["video_processor_type"]
+
+    # Some models ship no explicit ``video_processor_type`` in their
+    # preprocessor config. Fall back to transformers' ``model_type`` -> video
+    # processor mapping so these still resolve to their registered loader
+    # instead of the generic opencv fallback. The mapping is ``None`` for a
+    # given type when torchvision is unavailable; callers then use opencv.
+    model_config = get_hf_file_to_dict("config.json", processor_name, revision=revision)
+    if model_config and "model_type" in model_config:
+        return VIDEO_PROCESSOR_MAPPING_NAMES.get(model_config["model_type"])
     return None
 
 
@@ -430,12 +441,14 @@ def get_image_processor(
     *args: Any,
     revision: str | None = None,
     trust_remote_code: bool = False,
+    processor_cls_overrides: type[_I] | None = None,
     **kwargs: Any,
 ):
     """Load an image processor for the given model name via HuggingFace."""
     try:
         processor_name = convert_model_repo_to_path(processor_name)
-        processor = AutoImageProcessor.from_pretrained(
+        processor_cls = processor_cls_overrides or AutoImageProcessor
+        processor = processor_cls.from_pretrained(
             processor_name,
             *args,
             revision=revision,

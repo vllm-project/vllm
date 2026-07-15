@@ -2,9 +2,9 @@ group: CUDA
 depends_on: 
   - image-build
 steps:
-- label: Platform Tests (CUDA)
-  key: platform-tests-cuda
-  timeout_in_minutes: 15
+- label: Platform Tests
+  key: platform-tests
+  timeout_in_minutes: 20
   device: h200_18gb
   source_file_dependencies:
   - vllm/envs.py
@@ -19,7 +19,7 @@ steps:
 
 - label: Cudagraph
   key: cudagraph
-  timeout_in_minutes: 20
+  timeout_in_minutes: 30
   source_file_dependencies:
   - tests/v1/cudagraph
   - vllm/v1/cudagraph_dispatcher.py
