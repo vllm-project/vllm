@@ -22,6 +22,12 @@ from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
 
+# Number of CTAs the u64 temporal body is split across (grid_z of the fused
+# postprocess/precopy kernels). 8 saturates HBM on H100/GB200 across the
+# reqs=1..128 range in the microbenchmark; small-model / small-batch cases
+# benefit most, and larger batches fold gracefully to a single wave.
+_TEMPORAL_TILES = 8
+
 
 @triton.jit
 def _memcpy_u64_tiled(
@@ -852,7 +858,7 @@ class MambaSpecDecodeGPUContext:
         )
 
         total_states = self.num_layers * self.num_state_types
-        grid = (num_reqs, total_states)
+        grid = (num_reqs, total_states, _TEMPORAL_TILES)
 
         postprocess_mamba_fused_kernel[grid](
             num_accepted_tokens_gpu,
@@ -876,6 +882,7 @@ class MambaSpecDecodeGPUContext:
             block_size=self.block_size,
             COPY_BLOCK_SIZE=1024,
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
+            TEMPORAL_TILES=_TEMPORAL_TILES,
         )
 
     def run_fused_precopy(
@@ -899,7 +906,7 @@ class MambaSpecDecodeGPUContext:
         if num_reqs == 0 or not self.is_initialized:
             return
         total_states = self.num_layers * self.num_state_types
-        grid = (num_reqs, total_states)
+        grid = (num_reqs, total_states, _TEMPORAL_TILES)
         precopy_mamba_align_fused_kernel[grid](
             state_idx_gpu,
             src_col_gpu,
@@ -918,6 +925,7 @@ class MambaSpecDecodeGPUContext:
             num_reqs,
             COPY_BLOCK_SIZE=1024,
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
+            TEMPORAL_TILES=_TEMPORAL_TILES,
         )
 
     def run_fused_postprocess_align(
@@ -939,7 +947,7 @@ class MambaSpecDecodeGPUContext:
         if num_reqs == 0 or not self.is_initialized:
             return
         total_states = self.num_layers * self.num_state_types
-        grid = (num_reqs, total_states)
+        grid = (num_reqs, total_states, _TEMPORAL_TILES)
         postprocess_mamba_fused_kernel[grid](
             num_accepted_tokens_gpu,
             state_idx_gpu,
@@ -964,6 +972,7 @@ class MambaSpecDecodeGPUContext:
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
             HAS_IDX_MAPPING=True,
             PRECOMPUTED_NEW_COMPUTED=True,
+            TEMPORAL_TILES=_TEMPORAL_TILES,
         )
 
 
