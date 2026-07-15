@@ -27,7 +27,7 @@
 import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from functools import partial
+from functools import cached_property, partial
 from itertools import chain
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -556,31 +556,42 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     image_pattern = "(<image>./</image>)"
     video_pattern = "(<video>./</video>)"
 
-    def get_hf_config(self):
-        return self.ctx.get_hf_config()
-
-    def get_hf_processor(self, **kwargs: object):
-        cached = getattr(self, "_minicpmv_hf_processor", None)
-        if cached is not None:
-            return cached
-
-        # AutoProcessor only for tokenizer; its image_processor is resolved by
-        # class name and can pick the wrong checkpoint across MiniCPM-V versions.
-        hf_processor = self.ctx.get_hf_processor(**kwargs)
-
+    @cached_property
+    def _image_processor_cls(self):
         model_config = self.ctx.model_config
-        processor_cls = get_class_from_dynamic_module(
+        return get_class_from_dynamic_module(
             _MINICPMV_IMAGE_PROCESSOR_CLASS_REF,
             model_config.model,
             revision=model_config.revision,
             trust_remote_code=model_config.trust_remote_code,
         )
+
+    def get_hf_config(self):
+        return self.ctx.get_hf_config()
+
+    def get_hf_processor(self, **kwargs: object):
+        model_config = self.ctx.model_config
+        processor_cls = self._image_processor_cls
+        merged_kwargs = _merge_mm_kwargs(model_config, processor_cls, **kwargs)
+
+        cache_key = tuple(sorted(merged_kwargs.items()))
+        cached_processors = getattr(self, "_minicpmv_hf_processor_cache", None)
+        if cached_processors is None:
+            cached_processors = {}
+            self._minicpmv_hf_processor_cache = cached_processors
+        if cache_key in cached_processors:
+            return cached_processors[cache_key]
+
+        # AutoProcessor only for tokenizer; its image_processor is resolved by
+        # class name and can pick the wrong checkpoint across MiniCPM-V versions.
+        hf_processor = self.ctx.get_hf_processor(**kwargs)
+
         image_processor = cached_get_image_processor(
             model_config.model,
             revision=model_config.revision,
             trust_remote_code=model_config.trust_remote_code,
             processor_cls_overrides=processor_cls,
-            **_merge_mm_kwargs(model_config, processor_cls, **kwargs),
+            **merged_kwargs,
         )
 
         from vllm.transformers_utils.processors.minicpmv import MiniCPMVProcessor
@@ -600,7 +611,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
             if isinstance(val, np.ndarray):
                 setattr(image_processor, attr, val.tolist())
 
-        self._minicpmv_hf_processor = hf_processor
+        cached_processors[cache_key] = hf_processor
         return hf_processor
 
     def get_image_processor(self, **kwargs: object):
