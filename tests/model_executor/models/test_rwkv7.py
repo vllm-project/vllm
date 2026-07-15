@@ -381,7 +381,9 @@ def test_rwkv7_rejects_torch_compile():
         )
 
 
-def test_rwkv7_init_preserves_process_wide_torch_state(monkeypatch):
+def test_rwkv7_init_preserves_process_wide_torch_state(
+    monkeypatch, default_vllm_config
+):
     monkeypatch.setattr(rwkv7, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(rwkv7, "get_tensor_model_parallel_rank", lambda: 0)
 
