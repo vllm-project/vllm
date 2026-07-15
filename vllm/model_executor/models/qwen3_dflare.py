@@ -344,7 +344,7 @@ class DFlareQwen3Model(nn.Module):
             ]
         )
 
-        # ★ Layer-wise adaptive fusion (replaces DFlash's self.fc)
+        # Layer-wise adaptive fusion (replaces DFlash's self.fc)
         T = len(drafter_config.get("target_layer_ids", []))
         D = self.config.num_hidden_layers
         self.layer_fusion_weights = nn.Parameter(torch.zeros(D, T))
@@ -380,8 +380,11 @@ class DFlareQwen3Model(nn.Module):
         # Stack target KV projection weights: [D, out_features, in_features]
         k_target = torch.stack([a.k_proj_target.weight for a in layers_attn])
         v_target = torch.stack([a.v_proj_target.weight for a in layers_attn])
-        self._k_target = k_target  # [D, kv_size, hidden_size]
-        self._v_target = v_target  # [D, kv_size, hidden_size]
+        # self._k_target = k_target  # [D, kv_size, hidden_size]
+        # self._v_target = v_target  # [D, kv_size, hidden_size]
+
+        self._k_target = k_target.transpose(1, 2).contiguous()
+        self._v_target = v_target.transpose(1, 2).contiguous()
 
         # K-norm weights: [D, head_dim]
         self._k_norm_weights = torch.stack(
@@ -421,6 +424,10 @@ class DFlareQwen3Model(nn.Module):
             ), "All layers must have the same attn config for DFlare precomputation"
 
         self._attn_layers = [layer.self_attn.attn for layer in self.layers]
+        # Precompute layer fusion weights
+        self.layer_fusion_weights.data = F.softmax(
+            self.layer_fusion_weights.data, dim=-1
+        )
 
     def _project_context_kv(
         self,
@@ -440,12 +447,15 @@ class DFlareQwen3Model(nn.Module):
         """
         # context_states: [D, N, H]
         # self._k_target: [D, kv_size, H]  → transpose → [D, H, kv_size]
-        all_k = torch.bmm(
-            context_states, self._k_target.transpose(1, 2)
-        )  # [D, N, kv_size]
-        all_v = torch.bmm(
-            context_states, self._v_target.transpose(1, 2)
-        )  # [D, N, kv_size]
+        # all_k = torch.bmm(
+        #     context_states, self._k_target
+        # )  # [D, N, kv_size]
+        # all_v = torch.bmm(
+        #     context_states, self._v_target
+        # )  # [D, N, kv_size]
+
+        all_k = context_states @ self._k_target
+        all_v = context_states @ self._v_target
 
         all_k = all_k.view(num_layers, num_ctx, num_kv_heads, head_dim)
         all_v = all_v.view(num_layers, num_ctx, num_kv_heads, head_dim)
@@ -642,20 +652,10 @@ class DFlareQwen3ForCausalLM(DFlashQwen3ForCausalLM):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        """Per-layer adaptive fusion of target hidden states.
-
-        Args:
-            hidden_states: [N, T * H] — concatenated target hidden states
-                from ``target_layer_ids``.
-
-        Returns:
-            [N, D, H] — one fused representation per draft layer.
-        """
         T = len(self.dflare_config["target_layer_ids"])
         h = hidden_states.view(-1, T, self.config.hidden_size)  # [N, T, H]
         h_normed = self.model.hidden_norm(h)  # RMSNorm over hidden_size
-        alpha = F.softmax(self.model.layer_fusion_weights, dim=-1)  # [D, T]
-        fused = torch.einsum("dt,ntH->ndH", alpha, h_normed)  # [N, D, H]
+        fused = self.model.layer_fusion_weights @ h_normed
         return fused
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
