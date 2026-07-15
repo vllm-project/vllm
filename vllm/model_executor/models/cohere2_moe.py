@@ -398,7 +398,10 @@ class Cohere2MoeModel(nn.Module):
         self.vocab_size = config.vocab_size
         self.org_vocab_size = config.vocab_size
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size, config.hidden_size
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.embed_tokens",
         )
 
         # Decoder layers read per-layer MLP layout from config.mlp_layer_types

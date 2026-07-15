@@ -112,6 +112,8 @@ class Mamba2Model(nn.Module):
         self.embeddings = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.embeddings",
         )
 
         self.start_layer, self.end_layer, self.layers = make_layers(

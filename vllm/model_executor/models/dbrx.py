@@ -340,6 +340,8 @@ class DbrxModel(nn.Module):
         self.wte = VocabParallelEmbedding(
             config.vocab_size,
             config.d_model,
+            quant_config=quant_config,
+            prefix=f"{prefix}.wte",
         )
         self.start_layer, self.end_layer, self.blocks = make_layers(
             config.n_layers,

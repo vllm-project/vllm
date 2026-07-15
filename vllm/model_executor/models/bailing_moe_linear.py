@@ -496,6 +496,8 @@ class BailingMoeV25Model(nn.Module):
                 self.vocab_size,
                 self.embed_dim,
                 org_num_embeddings=self.vocab_size,
+                quant_config=vllm_config.quant_config,
+                prefix=f"{prefix}.word_embeddings",
             )
         else:
             from vllm.model_executor.models.utils import PPMissingLayer
