@@ -35,7 +35,6 @@ from vllm.v1.worker.gpu.spec_decode.confidence import (  # noqa: E402
     build_cost_tables_from_curves,
     compute_prefix_survival,
     make_confidence_manager,
-    select_draft_token_budget,
 )
 from vllm.v1.worker.gpu.spec_decode.dspark.online_sts import (  # noqa: E402
     DSparkOnlineSTS,
@@ -56,6 +55,36 @@ def _spec_config(**overrides: Any) -> SimpleNamespace:
 
 def _logit(probs: np.ndarray) -> np.ndarray:
     return np.log(probs / (1.0 - probs))
+
+
+def _plan_budget(
+    survival: np.ndarray,
+    num_sampling_requests: int,
+    num_required_target_tokens: int,
+    budget_frac: float = 1.0,
+    cost_tables: tuple[np.ndarray, np.ndarray] | None = None,
+) -> int:
+    num_reqs, num_steps = survival.shape
+    req_ids = [f"req{i}" for i in range(num_reqs)]
+    required = np.full(num_reqs, num_required_target_tokens // num_reqs, dtype=np.int32)
+    required[: num_required_target_tokens % num_reqs] += 1
+    prefill_lens = required.copy()
+    prefill_lens[num_sampling_requests:] += 1
+    manager = object.__new__(VarlenConfidenceManager)
+    manager.num_speculative_steps = num_steps
+    manager.req_states = SimpleNamespace(
+        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+        num_computed_tokens_np=np.zeros(num_reqs, dtype=np.int32),
+        prefill_len=SimpleNamespace(np=prefill_lens),
+    )
+    manager._stale_confidences = (req_ids, survival)
+    manager.budget_frac = budget_frac
+    manager.cost_tables = cost_tables
+    return manager._plan_draft_token_budget(
+        req_ids,
+        required,
+        np.full(num_reqs, num_steps, dtype=np.int32),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -194,13 +223,13 @@ def test_varlen_indexer_indices_use_device_lengths():
 
 def test_select_budget_applies_fraction_globally():
     survival = compute_prefix_survival(_logit(np.array([[0.90, 0.80], [0.80, 0.80]])))
-    budget = select_draft_token_budget(survival, 2, 2, 2, budget_frac=0.5)
+    budget = _plan_budget(survival, 2, 2, budget_frac=0.5)
     assert budget == 2
 
 
 def test_select_budget_is_hard_cap_under_ties():
     survival = compute_prefix_survival(_logit(np.array([[0.90, 0.80], [0.90, 0.80]])))
-    budget = select_draft_token_budget(survival, 2, 2, 2, budget_frac=0.25)
+    budget = _plan_budget(survival, 2, 2, budget_frac=0.25)
     assert budget == 1
 
 
@@ -211,7 +240,7 @@ def test_select_budget_is_hard_cap_for_saturated_scores():
     would admit all tokens; the budget must remain a hard cap on the total.
     """
     survival = compute_prefix_survival(np.full((4, 7), 40.0))
-    budget = select_draft_token_budget(survival, 4, 4, 4, budget_frac=0.5)
+    budget = _plan_budget(survival, 4, 4, budget_frac=0.5)
     assert budget == int(4 * 7 * 0.5)
 
 
@@ -223,7 +252,7 @@ def test_select_budget_never_admits_zero_survival():
     logits = np.full((2, 5), 40.0)
     logits[:, 2] = -800.0
     survival = compute_prefix_survival(logits)
-    budget = select_draft_token_budget(survival, 2, 2, 2, budget_frac=0.9)
+    budget = _plan_budget(survival, 2, 2, budget_frac=0.9)
     assert budget == 4
 
 
@@ -237,9 +266,8 @@ def test_select_budget_uses_sps_argmax():
     #   k=0: 2.00*1.00, k=1: 2.90*0.95=2.755, k=2: 3.62*0.90=3.258,
     #   k=3: 4.22*0.20=0.844, k=4: 4.52*0.10=0.452.
     rates = np.array([1.0, 1.0, 1.0, 0.95, 0.90, 0.20, 0.10])
-    budget = select_draft_token_budget(
+    budget = _plan_budget(
         survival,
-        num_batch_requests=2,
         num_sampling_requests=2,
         num_required_target_tokens=2,
         cost_tables=(np.zeros(3), 1000.0 / rates),
@@ -252,9 +280,8 @@ def test_select_budget_counts_only_requests_that_sample():
     rates = np.ones(9)
     rates[5:] = 0.1
 
-    budget = select_draft_token_budget(
+    budget = _plan_budget(
         survival,
-        num_batch_requests=2,
         num_sampling_requests=1,
         num_required_target_tokens=4,
         cost_tables=(np.zeros(3), 1000.0 / rates),
@@ -308,7 +335,7 @@ def test_profile_uses_rank_zero_cost_curves_on_every_tp_rank(monkeypatch):
         max_num_reqs=1,
         max_num_batched_tokens=2,
     )
-    manager._profile_capacity = None
+    manager.budget_frac = 1.0
     manager.online_sts = None
     speculator = SimpleNamespace(
         propose=lambda *args, **kwargs: None,
@@ -337,7 +364,7 @@ def test_profile_uses_rank_zero_cost_curves_on_every_tp_rank(monkeypatch):
     )
 
     expected = build_cost_tables_from_curves(*canonical_curves, 1, 2)
-    assert broadcasts == [(([(1, 0.0)], [(1, 1.0), (2, 1.0)]), 0)]
+    assert broadcasts == [(([(1, 0.0)], [(1, 1.5), (2, 1.5)]), 0)]
     assert manager.cost_tables is not None
     assert np.array_equal(manager.cost_tables[0], expected[0])
     assert np.array_equal(manager.cost_tables[1], expected[1])
@@ -349,11 +376,9 @@ def test_select_budget_temperature_desaturates_zeros():
     being truncated by miscalibrated zeros."""
     logits = np.full((2, 5), 40.0)
     logits[:, 2] = -800.0
-    budget_t1 = select_draft_token_budget(
-        compute_prefix_survival(logits), 2, 2, 2, budget_frac=0.9
-    )
-    budget_t80 = select_draft_token_budget(
-        compute_prefix_survival(logits, 80.0), 2, 2, 2, budget_frac=0.9
+    budget_t1 = _plan_budget(compute_prefix_survival(logits), 2, 2, budget_frac=0.9)
+    budget_t80 = _plan_budget(
+        compute_prefix_survival(logits, 80.0), 2, 2, budget_frac=0.9
     )
     # T=1: exact-zero survival past position 2 truncates both requests.
     assert budget_t1 == 4
@@ -416,7 +441,6 @@ def test_capacity_manager_plans_budget_without_tp_broadcast(monkeypatch):
         num_computed_tokens_np=np.array([0], dtype=np.int32),
         prefill_len=SimpleNamespace(np=np.array([0], dtype=np.int32)),
     )
-    manager._profile_capacity = None
     manager._stale_confidences = None
     manager.budget_frac = 0.5
     manager.cost_tables = None
@@ -528,10 +552,13 @@ def test_varlen_capacity_manager_compacts_verifier_batch():
         device=device,
     )
     is_padding = torch.zeros(10, dtype=torch.bool, device=device)
+    num_scheduled_tokens = np.array([4, 4], dtype=np.int32)
+    query_start_loc_np = np.array([0, 4, 8, 8, 8], dtype=np.int32)
+    cu_num_logits_np = np.array([0, 4, 8], dtype=np.int32)
     input_batch = InputBatch(
         req_ids=["req0", "req1"],
         num_reqs=2,
-        num_reqs_after_padding=2,
+        num_reqs_after_padding=4,
         idx_mapping=torch.tensor([0, 1], dtype=torch.int32, device=device),
         idx_mapping_np=np.array([0, 1], dtype=np.int32),
         expanded_idx_mapping=torch.tensor(
@@ -540,15 +567,15 @@ def test_varlen_capacity_manager_compacts_verifier_batch():
         expanded_local_pos=torch.tensor(
             [0, 1, 2, 3, 0, 1, 2, 3], dtype=torch.int32, device=device
         ),
-        num_scheduled_tokens=np.array([4, 4], dtype=np.int32),
+        num_scheduled_tokens=num_scheduled_tokens,
         num_tokens=8,
         num_tokens_after_padding=5,
         num_draft_tokens=6,
         num_draft_tokens_per_req=np.array([3, 3], dtype=np.int32),
-        query_start_loc=torch.tensor([0, 4, 8], dtype=torch.int32, device=device),
-        query_start_loc_np=np.array([0, 4, 8], dtype=np.int32),
-        seq_lens=torch.zeros(2, dtype=torch.int32, device=device),
-        seq_lens_cpu_upper_bound=torch.tensor([4, 4], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 4, 8, 8, 8], dtype=torch.int32, device=device),
+        query_start_loc_np=query_start_loc_np,
+        seq_lens=torch.zeros(4, dtype=torch.int32, device=device),
+        seq_lens_cpu_upper_bound=torch.tensor([4, 4, 0, 0], dtype=torch.int32),
         dcp_local_seq_lens=None,
         num_computed_tokens_np=np.array([0, 0], dtype=np.int32),
         prefill_len_np=np.array([0, 0], dtype=np.int32),
@@ -560,7 +587,7 @@ def test_varlen_capacity_manager_compacts_verifier_batch():
         is_padding=is_padding[:5],
         logits_indices=torch.arange(8, dtype=torch.int64, device=device),
         cu_num_logits=torch.tensor([0, 4, 8], dtype=torch.int32, device=device),
-        cu_num_logits_np=np.array([0, 4, 8], dtype=np.int32),
+        cu_num_logits_np=cu_num_logits_np,
         has_structured_output_reqs=False,
         prompt_lens=None,
     )
@@ -574,10 +601,13 @@ def test_varlen_capacity_manager_compacts_verifier_batch():
     assert input_batch.num_draft_tokens_per_req.tolist() == [2, 1]
     assert input_batch.num_tokens == 5
     assert input_batch.num_draft_tokens == 3
+    assert input_batch.num_scheduled_tokens is num_scheduled_tokens
+    assert input_batch.cu_num_logits_np is cu_num_logits_np
+    assert input_batch.query_start_loc_np is query_start_loc_np
     assert input_batch.cu_num_logits_np.tolist() == [0, 3, 5]
-    assert input_batch.query_start_loc_np.tolist() == [0, 3, 5]
+    assert input_batch.query_start_loc_np.tolist() == [0, 3, 5, 5, 5]
     assert input_batch.cu_num_logits.cpu().tolist() == [0, 2, 5]
-    assert input_batch.query_start_loc.cpu().tolist() == [0, 2, 5]
+    assert input_batch.query_start_loc.cpu().tolist() == [0, 2, 5, 5, 5]
     assert input_batch.input_ids.shape[0] == input_batch.num_tokens_after_padding
     assert input_batch.input_ids[: input_batch.num_tokens].cpu().tolist() == [
         101,
@@ -593,7 +623,7 @@ def test_varlen_capacity_manager_compacts_verifier_batch():
         1,
         2,
     ]
-    assert input_batch.seq_lens.cpu().tolist() == [2, 3]
+    assert input_batch.seq_lens.cpu().tolist() == [2, 3, 0, 0]
     assert input_batch.logits_indices.cpu().tolist() == [0, 1, 2, 3, 4]
     assert (
         input_batch.is_padding[: input_batch.num_tokens].cpu().tolist() == [False] * 5
