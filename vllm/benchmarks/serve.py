@@ -1736,6 +1736,14 @@ def add_cli_args(parser: FlexibleArgumentParser):
         help="Min-p sampling parameter. Only has effect on openai-compatible backends.",
     )
     sampling_group.add_argument(
+        "--p-less",
+        type=float,
+        default=None,
+        help=(
+            "p-less sampling parameter. Only has effect on openai-compatible backends."
+        ),
+    )
+    sampling_group.add_argument(
         "--temperature",
         type=float,
         default=None,
@@ -2057,6 +2065,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
                 "top_p": args.top_p,
                 "top_k": args.top_k,
                 "min_p": args.min_p,
+                "p_less": args.p_less,
                 "temperature": args.temperature,
                 "frequency_penalty": args.frequency_penalty,
                 "presence_penalty": args.presence_penalty,
