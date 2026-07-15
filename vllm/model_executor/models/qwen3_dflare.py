@@ -16,15 +16,12 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
-    RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -33,13 +30,14 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.transformers_utils.config import set_default_rope_theta
-from vllm.v1.attention.backend import AttentionType
-
-from .qwen3_dflash import (
+from vllm.model_executor.models.qwen3_dflash import (
+    DFlashQwen3Attention,
     DFlashQwen3ForCausalLM,
     _resolve_layer_attention,
 )
+from vllm.transformers_utils.config import set_default_rope_theta
+from vllm.v1.attention.backend import AttentionType
+
 from .utils import (
     AutoWeightsLoader,
     get_draft_quant_config,
@@ -50,13 +48,8 @@ from .utils import (
 logger = init_logger(__name__)
 
 
-class DFlareQwen3Attention(nn.Module):
+class DFlareQwen3Attention(DFlashQwen3Attention):
     """Attention for DFlare speculative decoding.
-
-    Compared to DFlash, DFlare has separate KV projections for context
-    (target hidden states → cache) and draft query tokens:
-
-    - ``k_proj`` / ``v_proj``: used in ``forward()`` for draft query tokens.
     - ``k_proj_target`` / ``v_proj_target``: used during
       ``precompute_and_store_context_kv`` to project per-layer fused target
       hidden states into the KV cache.
@@ -80,49 +73,23 @@ class DFlareQwen3Attention(nn.Module):
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
     ) -> None:
-        super().__init__()
-        self.layer_name = prefix
-        self.hidden_size = hidden_size
-        tp_size = get_tensor_model_parallel_world_size()
-        self.total_num_heads = num_heads
-        assert self.total_num_heads % tp_size == 0
-        self.num_heads = self.total_num_heads // tp_size
-        self.total_num_kv_heads = num_kv_heads
-        if self.total_num_kv_heads >= tp_size:
-            assert self.total_num_kv_heads % tp_size == 0
-        else:
-            assert tp_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = head_dim or hidden_size // self.total_num_heads
-        self.q_size = self.num_heads * self.head_dim
-        self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim**-0.5
-
-        # Draft query projections
-        self.q_proj = ColumnParallelLinear(
-            hidden_size,
-            self.total_num_heads * self.head_dim,
-            bias=attention_bias,
+        super().__init__(
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            rope_parameters=rope_parameters,
+            max_position=max_position,
+            head_dim=head_dim,
+            rms_norm_eps=rms_norm_eps,
+            attention_bias=attention_bias,
+            add_swa_attention_sink_bias=add_swa_attention_sink_bias,
+            sliding_window=sliding_window,
+            causal=causal,
+            cache_config=cache_config,
             quant_config=quant_config,
-            prefix=f"{prefix}.q_proj",
+            prefix=prefix,
+            attn_type=attn_type,
         )
-        self.k_proj = ColumnParallelLinear(
-            hidden_size,
-            self.total_num_kv_heads * self.head_dim,
-            bias=attention_bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.k_proj",
-        )
-        self.v_proj = ColumnParallelLinear(
-            hidden_size,
-            self.total_num_kv_heads * self.head_dim,
-            bias=attention_bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.v_proj",
-        )
-
-        # Target context projections (heterogeneous KV — used only in
-        # precompute_and_store_context_kv, not in forward())
         self.k_proj_target = ColumnParallelLinear(
             hidden_size,
             self.total_num_kv_heads * self.head_dim,
@@ -137,73 +104,6 @@ class DFlareQwen3Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.v_proj_target",
         )
-
-        self.o_proj = RowParallelLinear(
-            self.total_num_heads * self.head_dim,
-            hidden_size,
-            bias=attention_bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.o_proj",
-        )
-
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            max_position=max_position,
-            rope_parameters=rope_parameters,
-        )
-
-        self.attention_sink_bias = (
-            torch.nn.Parameter(torch.empty(self.num_heads), requires_grad=False)
-            if add_swa_attention_sink_bias
-            else None
-        )
-
-        self.sliding_window = sliding_window
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            per_layer_sliding_window=sliding_window,
-            prefix=f"{prefix}.attn",
-            attn_type=attn_type,
-            sinks=self.attention_sink_bias,
-        )
-        self.causal = causal
-        self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
-        self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
-
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        """Forward for draft query tokens only.
-
-        Context K/V are pre-inserted into the KV cache by
-        ``precompute_and_store_context_kv`` using ``k_proj_target`` /
-        ``v_proj_target``.  This method only projects draft query tokens
-        with ``q_proj`` / ``k_proj`` / ``v_proj``.
-        """
-        q, _ = self.q_proj(hidden_states)
-        k, _ = self.k_proj(hidden_states)
-        v, _ = self.v_proj(hidden_states)
-
-        q_shape, k_shape = q.shape, k.shape
-        q = self.q_norm(
-            q.view(*q_shape[:-1], q_shape[-1] // self.head_dim, self.head_dim)
-        ).view(q_shape)
-        k = self.k_norm(
-            k.view(*k_shape[:-1], k_shape[-1] // self.head_dim, self.head_dim)
-        ).view(k_shape)
-
-        q, k = self.rotary_emb(positions, q, k)
-
-        attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output)
-        return output
 
 
 class DFlareQwen3DecoderLayer(nn.Module):
@@ -445,14 +345,6 @@ class DFlareQwen3Model(nn.Module):
         Returns:
             all_k, all_v: each [D, N, nkv, hd].
         """
-        # context_states: [D, N, H]
-        # self._k_target: [D, kv_size, H]  → transpose → [D, H, kv_size]
-        # all_k = torch.bmm(
-        #     context_states, self._k_target
-        # )  # [D, N, kv_size]
-        # all_v = torch.bmm(
-        #     context_states, self._v_target
-        # )  # [D, N, kv_size]
 
         all_k = context_states @ self._k_target
         all_v = context_states @ self._v_target
@@ -562,6 +454,9 @@ class DFlareQwen3Model(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
+            (".qkv_proj", ".q_proj", "q"),
+            (".qkv_proj", ".k_proj", "k"),
+            (".qkv_proj", ".v_proj", "v"),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
         ]
@@ -589,6 +484,8 @@ class DFlareQwen3Model(nn.Module):
                 continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
+                    continue
+                if "_target" in name:
                     continue
                 name = name.replace(weight_name, param_name)
                 param = params_dict[name]
