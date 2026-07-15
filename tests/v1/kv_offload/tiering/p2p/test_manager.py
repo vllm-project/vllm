@@ -9,6 +9,7 @@ using fake transport and session objects.
 from __future__ import annotations
 
 import time
+import uuid
 from types import SimpleNamespace
 
 import numpy as np
@@ -1500,17 +1501,14 @@ class TestBindHostPortDefaults:
     """host/port fall back to VLLM_P2P_SIDE_CHANNEL_* when not in config."""
 
     @staticmethod
-    def _construct(
-        monkeypatch, dp_index=0, node_ip="203.0.113.9", **kwargs
-    ) -> P2PSecondaryTierManager:
+    def _construct(monkeypatch, dp_index=0, **kwargs) -> P2PSecondaryTierManager:
         """Build a manager with the transports/file-mapper stubbed out.
 
-        ``get_ip`` is stubbed to ``node_ip`` so wildcard/loopback bind hosts
-        resolve deterministically. The transport constructor args are
-        recorded on ``mgr._test_calls`` so tests can assert the bind host
-        stays decoupled from the advertised identity.
+        The host is used verbatim (no resolution). The transport constructor
+        args are recorded on ``mgr._test_calls`` so tests can assert the ZMQ
+        identity (``host:port``) stays decoupled from the NIXL agent name
+        (a uuid).
         """
-        monkeypatch.setattr(manager_module, "get_ip", lambda: node_ip)
         monkeypatch.setattr(
             manager_module,
             "FileMapper",
@@ -1524,7 +1522,7 @@ class TestBindHostPortDefaults:
         monkeypatch.setattr(
             manager_module,
             "NixlTransport",
-            lambda local_id, *a, **k: calls.update(nixl_name=local_id)
+            lambda agent_name, *a, **k: calls.update(nixl_name=agent_name)
             or SimpleNamespace(),
         )
         monkeypatch.setattr(
@@ -1549,9 +1547,8 @@ class TestBindHostPortDefaults:
         monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
         monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_PORT", raising=False)
         mgr = self._construct(monkeypatch)
-        # localhost default binds loopback but the identity still resolves to a
-        # routable node IP so peers can dial back and NIXL names stay unique.
-        assert mgr._local_id == "203.0.113.9:5710"
+        # localhost default is used verbatim as the dial-back identity.
+        assert mgr._local_id == "localhost:5710"
 
     def test_env_override(self, monkeypatch):
         monkeypatch.setenv("VLLM_P2P_SIDE_CHANNEL_HOST", "10.1.2.3")
@@ -1569,36 +1566,39 @@ class TestBindHostPortDefaults:
         monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
         monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_PORT", raising=False)
         mgr = self._construct(monkeypatch, dp_index=2)
-        assert mgr._local_id == "203.0.113.9:5712"
+        assert mgr._local_id == "localhost:5712"
 
     def test_dp_index_offsets_explicit_port(self, monkeypatch):
         mgr = self._construct(monkeypatch, dp_index=1, host="192.0.2.5", port=6000)
         assert mgr._local_id == "192.0.2.5:6001"
 
-    @pytest.mark.parametrize("bind_host", ["", "localhost", "127.0.0.1", "::1"])
-    def test_loopback_resolves_to_node_ip(self, monkeypatch, bind_host):
-        # None of these are usable as a peer identity, so all resolve to the
-        # routable node IP while the port is preserved.
+    @pytest.mark.parametrize(
+        "bind_host", ["localhost", "127.0.0.1", "::1", "0.0.0.0", "::", "192.0.2.5"]
+    )
+    def test_host_used_verbatim(self, monkeypatch, bind_host):
+        # The host is never rewritten — loopbacks and wildcards alike become
+        # the dial-back identity verbatim (mirrors the NIXL connector).
         mgr = self._construct(monkeypatch, host=bind_host, port=5710)
-        assert mgr._local_id == "203.0.113.9:5710"
+        assert mgr._local_id == f"{bind_host}:5710"
 
-    def test_explicit_routable_host_kept_verbatim(self, monkeypatch):
-        mgr = self._construct(monkeypatch, host="192.0.2.5", port=5710)
-        assert mgr._local_id == "192.0.2.5:5710"
-
-    @pytest.mark.parametrize("bind_host", ["0.0.0.0", "::"])
-    def test_wildcard_bind_host_rejected(self, monkeypatch, bind_host):
-        # Wildcards bind every interface but are not routable as a peer
-        # identity, so they are rejected rather than silently resolved.
-        with pytest.raises(ValueError, match="is not a supported"):
-            self._construct(monkeypatch, host=bind_host, port=5710)
-
-    def test_bind_host_decoupled_from_identity(self, monkeypatch):
-        # The loopback is what the socket actually binds to, but both the ZMQ
-        # peer identity and the NIXL agent name use the resolved routable IP.
+    def test_nixl_name_decoupled_from_identity(self, monkeypatch):
+        # The ZMQ identity is the verbatim host:port; the NIXL agent name is a
+        # uuid, distinct from the identity and never used as an address.
         mgr = self._construct(monkeypatch, host="127.0.0.1", port=5710)
         assert mgr._test_calls["zmq_host"] == "127.0.0.1"
         assert mgr._test_calls["zmq_port"] == 5710
-        assert mgr._test_calls["zmq_id"] == "203.0.113.9:5710"
-        assert mgr._test_calls["nixl_name"] == "203.0.113.9:5710"
-        assert mgr._local_id == "203.0.113.9:5710"
+        assert mgr._test_calls["zmq_id"] == "127.0.0.1:5710"
+        assert mgr._local_id == "127.0.0.1:5710"
+        # nixl_name is a valid uuid4 and not the host:port identity.
+        nixl_name = mgr._test_calls["nixl_name"]
+        assert nixl_name != mgr._local_id
+        assert uuid.UUID(nixl_name).version == 4
+
+    def test_same_host_port_gets_distinct_nixl_names(self, monkeypatch):
+        # The original collision: two peers sharing a host:port must still get
+        # distinct NIXL agent names so add_remote_agent doesn't reject a remote
+        # whose name equals the local. The per-process uuid guarantees this.
+        mgr_a = self._construct(monkeypatch, host="localhost", port=5710)
+        mgr_b = self._construct(monkeypatch, host="localhost", port=5710)
+        assert mgr_a._local_id == mgr_b._local_id == "localhost:5710"
+        assert mgr_a._nixl_agent_name != mgr_b._nixl_agent_name
