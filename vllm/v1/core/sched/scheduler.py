@@ -1087,12 +1087,12 @@ class Scheduler(SchedulerInterface):
             (new_attn_block_ids or None) if self.needs_kv_cache_zeroing else None
         )
 
-        # Dynamic speculative decoding: compute optimal K
-        num_spec_tokens_to_schedule = self.num_spec_tokens
-        if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
-            num_spec_tokens_to_schedule = self.dynamic_sd_lookup[
-                len(num_scheduled_tokens)
-            ]
+        # Dynamic speculative decoding: compute the aggregate draft-token budget.
+        num_scheduled_reqs = len(num_scheduled_tokens)
+        num_spec_tokens_per_req = self.num_spec_tokens
+        if self.dynamic_sd_lookup is not None and num_scheduled_reqs > 0:
+            num_spec_tokens_per_req = self.dynamic_sd_lookup[num_scheduled_reqs]
+        num_spec_tokens_to_schedule = num_scheduled_reqs * num_spec_tokens_per_req
 
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
@@ -1500,7 +1500,11 @@ class Scheduler(SchedulerInterface):
             structured_output_request_ids,
             scheduler_output.scheduled_spec_decode_tokens,
         )
-        return GrammarOutput(structured_output_request_ids, bitmask)
+        return GrammarOutput(
+            structured_output_request_ids,
+            bitmask,
+            self.num_spec_tokens + 1 if self.use_v2_model_runner else 1,
+        )
 
     def update_from_output(
         self,

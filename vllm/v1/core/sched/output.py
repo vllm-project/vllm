@@ -240,8 +240,9 @@ class SchedulerOutput:
     # preventing stale NaN/data from corrupting attention or SSM computation.
     new_block_ids_to_zero: list[int] | None = None
 
-    # Dynamic speculative decoding: optimal K chosen by scheduler.
-    # Number of spec tokens to schedule for the next step.
+    # Aggregate draft-token budget selected for this worker step.
+    # Adaptive verification divides budget this dynamically among the requests.
+    # Non-adaptive drafting converts it back to a uniform per-request width.
     num_spec_tokens_to_schedule: int = 0
 
     @classmethod
@@ -265,3 +266,5 @@ class GrammarOutput:
     structured_output_request_ids: list[str]
     # Bitmask ordered as structured_output_request_ids.
     grammar_bitmask: "npt.NDArray[np.int32]"
+    # Stride used to encode a request and position in the mask mapping.
+    grammar_mask_stride: int = 1

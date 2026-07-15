@@ -226,11 +226,8 @@ class CudaGraphManager:
             num_new_sampled_tokens_per_step = (
                 self.decode_query_len - self.vllm_config.num_speculative_tokens
             )
-            # Each entry is (range_start, range_end, num_speculative_tokens).
             decode_query_lens = [
-                min(x[2], self.vllm_config.num_speculative_tokens)
-                + num_new_sampled_tokens_per_step
-                for x in num_spec_per_batch_size
+                x[2] + num_new_sampled_tokens_per_step for x in num_spec_per_batch_size
             ]
         else:
             decode_query_lens = [self.decode_query_len]

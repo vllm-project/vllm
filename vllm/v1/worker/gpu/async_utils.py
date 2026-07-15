@@ -73,7 +73,17 @@ class AsyncOutput(AsyncModelRunnerOutput):
             )
 
         if self.logprobs_tensors is not None:
-            self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
+            cu_num_generated_tokens = None
+            if self.num_draft_tokens_np is not None:
+                cu_num_generated_tokens = np.concatenate(
+                    (
+                        np.zeros(1, dtype=self.num_draft_tokens_np.dtype),
+                        np.cumsum(self.num_draft_tokens_np + 1),
+                    )
+                ).tolist()
+            self.model_runner_output.logprobs = self.logprobs_tensors.tolists(
+                cu_num_generated_tokens
+            )
         self.model_runner_output.prompt_logprobs_dict = self.prompt_logprobs_dict
         return self.model_runner_output
 

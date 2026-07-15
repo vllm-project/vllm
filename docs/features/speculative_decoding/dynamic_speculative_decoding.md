@@ -11,7 +11,9 @@ SD methods need to verify K tokens for each sequence during decoding. As BS incr
 
 ## `--speculative-config` schema
 
-To use Dynamic SD, add `num_speculative_tokens_per_batch_size` to the config of an SD method which is a list of list. Here, an entry is `[start_bs, end_bs, optimal_K]` which means when the concurrency is within range `[start_bs, end_bs]` then `optimal_K` number of draft tokens are used. For e.g.,
+To use Dynamic SD, add `num_speculative_tokens_per_batch_size` to the config of an SD method which is a list of list. Here, an entry is `[start_bs, end_bs, optimal_K]` which means when the concurrency is within range `[start_bs, end_bs]` then `optimal_K` number of draft tokens are used.
+
+Every `optimal_K` must be less than or equal to `num_speculative_tokens`, which defines the maximum draft window.
 
 ```bash
 --speculative-config '{
@@ -32,7 +34,36 @@ implies that:
 * K=1 will be used when the concurrency is in range [65, 128]
 * K=0 will be used when the concurrency is in range [129, 512], i.e., no draft tokens will be produced.
 
+## Adaptive verification
+
+Adaptive verification is supported with the Model Runner V2 DSpark implementation. Enable it by setting `adaptive_verification` to `true` in the speculative config.
+
+In this mode, `num_speculative_tokens` is the maximum per-request draft length. The drafter returns `num_speculative_tokens` tokens per request, and the scheduler reserves KV-cache capacity for that full window. For `N` scheduled requests, Dynamic SD maps this through the `num_speculative_tokens_per_batch_size` table to calculate the total verification budget of `N * optimal_K`. The worker distributes that budget across the draft prefixes using the DSpark confidence head, so individual requests can verify different numbers of draft tokens while the batch total remains fixed. Only the allocated draft positions, plus one bonus position per request, run through the target model.
+
 ## Online Examples
+
+### Adaptive Dynamic SD with DSpark
+
+```bash
+vllm serve Qwen/Qwen3-4B-FP8 \
+  --trust-remote-code \
+  --max-model-len 4096 \
+  --attention-backend FLASH_ATTN \
+  --speculative-config '{
+    "method": "dspark",
+    "model": "deepseek-ai/dspark_qwen3_4b_block7",
+    "num_speculative_tokens": 11,
+    "num_speculative_tokens_per_batch_size": [
+      [1, 32, 7],
+      [33, 128, 5],
+      [129, 512, 3]
+    ],
+    "adaptive_verification": true,
+    "draft_sample_method": "probabilistic"
+  }'
+```
+
+Here the drafter produces 11 draft tokens for each request, but uses a different total verification budget depending on the batch size.
 
 ### Dynamic SD Eagle Drafter
 
@@ -57,7 +88,7 @@ VLLM_USE_V2_MODEL_RUNNER=0 vllm serve meta-llama/Llama-3.1-8B-Instruct \
   --speculative-config '{
     "method": "eagle3",
     "model": "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
-    "num_speculative_tokens": 3,
+    "num_speculative_tokens": 5,
     "num_speculative_tokens_per_batch_size": [
       [1, 16, 5],
       [17, 32, 4],

@@ -27,9 +27,7 @@ class DraftTokensHandler:
     ) -> None:
         self.req_ids = input_batch.req_ids
         self.num_draft_tokens = (
-            draft_tokens.shape[1]
-            if num_draft_tokens is None
-            else min(num_draft_tokens, draft_tokens.shape[1])
+            draft_tokens.shape[1] if num_draft_tokens is None else num_draft_tokens
         )
         if not input_batch.has_structured_output_reqs:
             # No draft token validation needs to be performed by

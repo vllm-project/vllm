@@ -89,8 +89,10 @@ class InputBatch:
 
     # [total_num_logits]
     logits_indices: torch.Tensor
-    # [num_reqs + 1]
+    # [num_reqs + 1] device-side actual cumulative logit counts.
     cu_num_logits: torch.Tensor
+    # [num_reqs + 1] host-side scheduled cumulative logit counts.
+    # This is an upper bound when adaptive verification is active.
     cu_num_logits_np: np.ndarray
 
     # Whether any requests in batch use structured output.
