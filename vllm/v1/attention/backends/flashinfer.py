@@ -82,6 +82,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.utils import CpuGpuBuffer
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
+FLASHINFER_PREFILL_WORKSPACE_BYTES_PER_ELEM = 16
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
@@ -648,6 +649,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.disable_split_kv = False
 
         self.compilation_config = vllm_config.compilation_config
+        self.max_num_batched_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens
+        )
         max_num_pages_per_req = cdiv(
             self.model_config.max_model_len, self.kv_cache_spec.block_size
         )
@@ -933,6 +937,21 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
             if envs.VLLM_BATCH_INVARIANT:
                 buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
+            else:
+                # FlashInfer prefill temp buffers (batch_prefill_tmp_v, ...)
+                # scale with the prefill chunk and query-head footprint, NOT
+                # context length. The fixed ~394 MiB default is too small for
+                # wide-head models at the default 8192-token chunk on some
+                # archs (e.g. sm_120), where FlashInfer hard-errors instead of
+                # growing. Size to the batch's head footprint; never shrink
+                # below the configured default.
+                est = (
+                    self.max_num_batched_tokens
+                    * self.num_qo_heads
+                    * self.head_dim
+                    * FLASHINFER_PREFILL_WORKSPACE_BYTES_PER_ELEM
+                )
+                buffer_size = max(buffer_size, est)
             self._workspace_buffer = torch.zeros(
                 buffer_size, dtype=torch.uint8, device=self.device
             )

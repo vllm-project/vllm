@@ -27,7 +27,9 @@ void topk_softplus_sqrt(
     const std::optional<torch::stable::Tensor>& input_ids,
     const std::optional<torch::stable::Tensor>& tid2eid);
 
-void moe_sum(torch::stable::Tensor& input, torch::stable::Tensor& output);
+void moe_sum(torch::stable::Tensor& input, torch::stable::Tensor& output,
+             std::optional<torch::stable::Tensor> topk_ids,
+             std::optional<torch::stable::Tensor> expert_map);
 
 void moe_align_block_size(
     torch::stable::Tensor topk_ids, int64_t num_experts, int64_t block_size,

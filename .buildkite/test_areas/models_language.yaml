@@ -15,6 +15,7 @@ steps:
     - pytest -v -s models/language -m 'core_model and (not slow_test)'
   mirror:
     amd:
+      dind: false
       device: mi300_1
       depends_on:
       - image-build-amd
@@ -35,6 +36,7 @@ steps:
   parallelism: 2
   mirror:
     amd:
+      dind: false
       device: mi300_1
       depends_on:
       - image-build-amd
