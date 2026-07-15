@@ -64,6 +64,9 @@ if has_humming():
         humming_dtypes.uint8: INT8_DTYPE,
         humming_dtypes.uint2: torch.uint8,
         humming_dtypes.uint3: torch.uint8,
+        humming_dtypes.uint5: torch.uint8,
+        humming_dtypes.uint6: torch.uint8,
+        humming_dtypes.uint7: torch.uint8,
     }
 
     _HUMMING_TO_SCALE_DTYPE: dict[humming_dtypes.DataType, torch.dtype] = {

@@ -37,7 +37,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_workspace_new,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
     QuantKey,
+    ScaleDesc,
     kInt4Static32GroupScale,
     kInt4StaticGroupScale,
     kInt8StaticGroupScale,
@@ -82,9 +84,16 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         elif self.num_bits == 8:
             scale = kInt8StaticGroupScale
         else:
-            raise ValueError(
-                "CompressedTensorsWNA16MarlinMoEMethod only supports int4 and int8 now."
+            scale = ScaleDesc(
+                dtype=torch.float16,
+                static=True,
+                group_shape=(
+                    GroupShape.PER_CHANNEL
+                    if self.group_size == -1
+                    else GroupShape(row=1, col=self.group_size)
+                ),
             )
+            self.quant_type = torch.uint8
 
         weight_key = QuantKey(self.quant_type, scale, symmetric=self.symmetric)
 
@@ -118,7 +127,10 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                 "num_groups_w2 must be provided for weight scales/zero_points"
             )
         w13_num_shards = 2 if self.moe.is_act_and_mul else 1
-        is_flashinfer = self.wna16_backend == WNA16MoEBackend.FLASHINFER_TRTLLM
+        uses_checkpoint_layout = self.wna16_backend in (
+            WNA16MoEBackend.FLASHINFER_TRTLLM,
+            WNA16MoEBackend.HUMMING,
+        )
         shape_map = {
             "w13_weight": {
                 "Flashinfer": (
@@ -177,7 +189,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                 ),
             },
         }
-        backend_key = "Flashinfer" if is_flashinfer else "Marlin"
+        backend_key = "Flashinfer" if uses_checkpoint_layout else "Marlin"
         return shape_map[weight_name][backend_key]
 
     @staticmethod
@@ -217,7 +229,10 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         # Will transpose the loaded weight along the
         # intermediate and hidden dim sizes. Will
         # shard for TP along the transposed dims
-        is_transposed = self.wna16_backend != WNA16MoEBackend.FLASHINFER_TRTLLM
+        is_transposed = self.wna16_backend not in (
+            WNA16MoEBackend.FLASHINFER_TRTLLM,
+            WNA16MoEBackend.HUMMING,
+        )
         extra_weight_attrs.update(
             {"is_transposed": is_transposed, "quant_method": self.strategy}
         )
@@ -431,12 +446,24 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             w2_qzeros=getattr(layer, "w2_weight_zero_point", None),
         )
         if converted is None:
-            # In-place backends (e.g. Humming) are not wired through this
-            # marlin-only method; fail clearly rather than unpacking None.
-            raise NotImplementedError(
-                f"{type(self).__name__} does not support the "
-                f"{self.wna16_backend.value} MoE backend."
+            if self.wna16_backend != WNA16MoEBackend.HUMMING:
+                raise NotImplementedError(
+                    f"{type(self).__name__} does not support the "
+                    f"{self.wna16_backend.value} MoE backend."
+                )
+
+            assert self.experts_cls is not None
+            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+            assert self.moe_quant_config is not None
+            self.moe_kernel = make_wna16_moe_kernel(
+                moe_quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+                experts_cls=self.experts_cls,
+                backend=self.wna16_backend,
+                layer=layer,
+                routing_tables=layer._expert_routing_tables(),
             )
+            return
         (
             w13_qweight,
             w2_qweight,
@@ -514,6 +541,8 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
+            backend=self.wna16_backend,
+            layer=layer,
             routing_tables=layer._expert_routing_tables(),
             **marlin_args,
         )
@@ -521,6 +550,12 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
+        if self.wna16_backend == WNA16MoEBackend.HUMMING:
+            from vllm.model_executor.layers.quantization.utils.humming_utils import (
+                get_humming_moe_quant_config,
+            )
+
+            return get_humming_moe_quant_config(layer)
         return make_wna16_moe_quant_config(
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,

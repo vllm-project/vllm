@@ -37,6 +37,9 @@ from vllm.model_executor.layers.fused_moe.utils import (
     swiglu_limit_func,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    INT4_DTYPE,
+    INT8_DTYPE,
     QuantKey,
     kFp8Dynamic128Sym,
     kFp8DynamicTokenSym,
@@ -55,6 +58,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
+from vllm.scalar_type import ScalarType
 from vllm.utils.import_utils import has_humming
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -64,6 +68,29 @@ if TYPE_CHECKING:
 
 
 logger = init_logger(__name__)
+
+
+def _is_supported_wna16_weight_key(weight_key: QuantKey | None) -> bool:
+    if weight_key is None or weight_key.scale2 is not None:
+        return False
+
+    group_shape = weight_key.scale.group_shape
+    if not (
+        group_shape == GroupShape.PER_CHANNEL
+        or (group_shape.row == 1 and group_shape.col > 0)
+    ):
+        return False
+
+    dtype = weight_key.dtype
+    if dtype in (INT4_DTYPE, INT8_DTYPE, torch.uint8):
+        return True
+
+    return (
+        isinstance(dtype, ScalarType)
+        and dtype.is_integer()
+        and not dtype.is_signed()
+        and 2 <= dtype.size_bits <= 8
+    )
 
 
 def get_humming_moe_gemm_type() -> str:
@@ -210,7 +237,10 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             # mxfp8 (compressed-tensors / modelopt / online)
             (kMxfp8Static, kMxfp8Dynamic),
         ]
-        return (weight_key, activation_key) in SUPPORTED_W_A
+        return (weight_key, activation_key) in SUPPORTED_W_A or (
+            activation_key in (None, kFp8DynamicTokenSym)
+            and _is_supported_wna16_weight_key(weight_key)
+        )
 
     @property
     def expects_unquantized_inputs(self) -> bool:
