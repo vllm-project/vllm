@@ -35,6 +35,7 @@ def _make_scheduler_with_dynamic_sd(
     max_num_seqs: int = 16,
     max_num_batched_tokens: int = 8192,
     runtime_num_speculative_tokens: int = 3,
+    adaptive_verification: bool = False,
 ) -> Scheduler:
     base_scheduler = create_scheduler(
         max_num_seqs=max_num_seqs,
@@ -45,6 +46,7 @@ def _make_scheduler_with_dynamic_sd(
     speculative_config = base_scheduler.vllm_config.speculative_config
     assert speculative_config is not None
     speculative_config.num_speculative_tokens_per_batch_size = schedule
+    speculative_config.adaptive_verification = adaptive_verification
 
     return Scheduler(
         vllm_config=base_scheduler.vllm_config,
@@ -183,9 +185,104 @@ def test_v2_scheduler_selects_aggregate_dynamic_sd_budget():
     assert output.num_spec_tokens_to_schedule == 4
 
 
-@pytest.mark.parametrize("adaptive_verification", [False, True])
-def test_scheduler_preserves_actual_grammar_mask_layout(
+@pytest.mark.parametrize("optimal_k", [0, 2])
+def test_adaptive_scheduler_caps_fallback_decodes_at_dynamic_k(optimal_k: int):
+    scheduler = _make_scheduler_with_dynamic_sd(
+        [(1, 2, optimal_k)],
+        max_num_seqs=2,
+        max_num_batched_tokens=32,
+        runtime_num_speculative_tokens=4,
+        adaptive_verification=True,
+    )
+    decode_req, prefill_req = create_requests(num_requests=2, num_tokens=1)
+    scheduler.add_request(decode_req)
+    prefill_output = scheduler.schedule()
+    scheduler.update_from_output(
+        prefill_output,
+        ModelRunnerOutput(
+            req_ids=[decode_req.request_id],
+            req_id_to_index={decode_req.request_id: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    scheduler.update_draft_token_ids(
+        DraftTokenIds([decode_req.request_id], [[10, 11, 12, 13]])
+    )
+
+    scheduler.add_request(prefill_req)
+    output = scheduler.schedule()
+
+    expected_draft_tokens = [10, 11, 12, 13][:optimal_k]
+    assert output.scheduled_spec_decode_tokens == (
+        {decode_req.request_id: expected_draft_tokens} if expected_draft_tokens else {}
+    )
+    assert output.num_scheduled_tokens == {
+        decode_req.request_id: 1 + optimal_k,
+        prefill_req.request_id: 1,
+    }
+    assert output.total_num_scheduled_tokens == 2 + optimal_k
+    assert output.num_spec_tokens_to_schedule == 2 * optimal_k
+
+
+def test_adaptive_scheduler_preserves_full_windows_for_worker_allocation():
+    scheduler = _make_scheduler_with_dynamic_sd(
+        [(1, 2, 2)],
+        max_num_seqs=2,
+        max_num_batched_tokens=32,
+        runtime_num_speculative_tokens=4,
+        adaptive_verification=True,
+    )
+    requests = create_requests(num_requests=2, num_tokens=1)
+    for request in requests:
+        scheduler.add_request(request)
+    prefill_output = scheduler.schedule()
+    scheduler.update_from_output(
+        prefill_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id for request in requests],
+            req_id_to_index={
+                request.request_id: i for i, request in enumerate(requests)
+            },
+            sampled_token_ids=[[0], [0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    scheduler.update_draft_token_ids(
+        DraftTokenIds(
+            [request.request_id for request in requests],
+            [[10, 11, 12, 13], [20, 21, 22, 23]],
+        )
+    )
+
+    output = scheduler.schedule()
+
+    assert output.scheduled_spec_decode_tokens == {
+        requests[0].request_id: [10, 11, 12, 13],
+        requests[1].request_id: [20, 21, 22, 23],
+    }
+    assert output.num_scheduled_tokens == {
+        requests[0].request_id: 5,
+        requests[1].request_id: 5,
+    }
+    assert output.total_num_scheduled_tokens == 10
+    assert output.num_spec_tokens_to_schedule == 4
+
+
+@pytest.mark.parametrize(
+    ("adaptive_verification", "expected_spec_token_ids"),
+    [
+        (False, [10, 11, 12]),
+        (True, [10, 11, 12, -1]),
+    ],
+)
+def test_scheduler_preserves_grammar_mask_window(
     adaptive_verification: bool,
+    expected_spec_token_ids: list[int],
 ):
     scheduler = create_scheduler(
         num_speculative_tokens=4,
@@ -194,6 +291,7 @@ def test_scheduler_preserves_actual_grammar_mask_layout(
     speculative_config = scheduler.vllm_config.speculative_config
     assert speculative_config is not None
     speculative_config.adaptive_verification = adaptive_verification
+    scheduler.adaptive_verification = adaptive_verification
 
     request = create_requests(num_requests=1, num_tokens=1)[0]
     scheduler.add_request(request)
@@ -220,13 +318,16 @@ def test_scheduler_preserves_actual_grammar_mask_layout(
         )
     )
 
-    assert request.spec_token_ids == [10, 11, 12]
+    assert request.spec_token_ids == expected_spec_token_ids
     grammar.validate_tokens.assert_called_once_with([10, 11, 12, 13])
 
     output = scheduler.schedule()
-    assert output.scheduled_spec_decode_tokens[request.request_id] == [10, 11, 12]
+    assert (
+        output.scheduled_spec_decode_tokens[request.request_id]
+        == expected_spec_token_ids
+    )
 
-    bitmask = np.zeros((4, 1), dtype=np.int32)
+    bitmask = np.zeros((len(expected_spec_token_ids) + 1, 1), dtype=np.int32)
     scheduler.structured_output_manager.grammar_bitmask = Mock(return_value=bitmask)
     grammar_output = scheduler.get_grammar_bitmask(output)
 
@@ -234,7 +335,7 @@ def test_scheduler_preserves_actual_grammar_mask_layout(
     assert grammar_output.grammar_mask_stride == 5
     assert grammar_output.grammar_bitmask is bitmask
     assert scheduler.structured_output_manager.grammar_bitmask.call_args.args[2] == {
-        request.request_id: [10, 11, 12]
+        request.request_id: expected_spec_token_ids
     }
 
 
