@@ -1532,6 +1532,16 @@ def test_needs_dp_coordination(
     assert vllm_config.needs_dp_coordinator == expected_needs_coordinator
 
 
+def test_fault_tolerance_requires_single_api_server():
+    """Fault tolerance assumes one AsyncMPClient manages all engines, so it
+    is incompatible with API server scale-out (_api_process_count > 1)."""
+    with pytest.raises(ValueError, match="single API server"):
+        ParallelConfig(enable_fault_tolerance=True, _api_process_count=2)
+
+    # Single API server (the FT-supported topology) is accepted.
+    ParallelConfig(enable_fault_tolerance=True, _api_process_count=1)
+
+
 def test_renderer_num_workers_with_mm_cache():
     """Disallow renderer_num_workers > 1 when mm processor cache is enabled,
     since neither cache type is thread-safe."""

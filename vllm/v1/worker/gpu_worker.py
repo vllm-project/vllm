@@ -149,7 +149,7 @@ class Worker(WorkerBase):
         self.elastic_ep_executor = ElasticEPScalingExecutor(self)
         self.worker_sentinel: WorkerSentinel | None = None
         if self.parallel_config.enable_fault_tolerance:
-            self.worker_sentinel = WorkerSentinel(worker=self, device=self.device)
+            self.worker_sentinel = WorkerSentinel(worker=self)
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
         self._sleep_rebuild_draft_metadata_buffers = False
