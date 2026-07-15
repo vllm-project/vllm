@@ -48,6 +48,7 @@ from vllm.tasks import SupportedTask
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import PIN_MEMORY, STR_DTYPE_TO_TORCH_DTYPE
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
@@ -451,17 +452,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
             self.kv_cache_config, self.vllm_config, self.device
         )
-        if self.adaptive_verification:
-            backend_names = {
-                group.backend.__name__
-                for groups in self.attn_groups
-                for group in groups
-            }
-            if backend_names != {"FlashAttentionBackend"}:
-                raise NotImplementedError(
-                    "adaptive_verification currently requires the FlashAttention GQA "
-                    f"backend, got {sorted(backend_names)}."
-                )
+        if (
+            self.adaptive_verification
+            and attn_cg_support.min_cg_support.value
+            < AttentionCGSupport.VARLEN_BATCH.value
+        ):
+            raise NotImplementedError(
+                "adaptive_verification requires an attention backend with "
+                "variable-length decode CUDA graph support; "
+                f"{attn_cg_support.min_cg_attn_backend} reports "
+                f"{attn_cg_support.min_cg_support}."
+            )
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
