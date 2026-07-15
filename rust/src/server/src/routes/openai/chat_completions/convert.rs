@@ -299,6 +299,15 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
                     video_url: video_url.url,
                     uuid,
                 }),
+                ContentPart::AudioUrl { audio_url, uuid } => Ok(ChatContentPart::AudioUrl {
+                    audio_url: audio_url.url,
+                    uuid,
+                }),
+                ContentPart::InputAudio { input_audio, uuid } => Ok(ChatContentPart::InputAudio {
+                    data: input_audio.data,
+                    format: input_audio.format,
+                    uuid,
+                }),
             })
             .try_collect()
             .map(ChatContent::Parts),
@@ -402,8 +411,8 @@ mod tests {
         AssistantRole, ChatCompletionMessage, ChatCompletionRequest,
     };
     use crate::routes::openai::utils::types::{
-        ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, MessageContent,
-        StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
+        AudioUrl, ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, InputAudio,
+        MessageContent, StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
     };
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
@@ -807,6 +816,51 @@ mod tests {
                 video_url: "https://example.com/video.mp4".to_string(),
                 uuid: Some("video-uuid".to_string()),
             }])]
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_accepts_audio_content_parts() {
+        let request = ChatCompletionRequest {
+            model: "Qwen/Qwen3-ASR-1.7B".to_string(),
+            messages: vec![ChatMessage::User {
+                content: MessageContent::Parts(vec![
+                    ContentPart::InputAudio {
+                        input_audio: InputAudio {
+                            data: "dGVzdA==".to_string(),
+                            format: Some("wav".to_string()),
+                        },
+                        uuid: Some("audio-1".to_string()),
+                    },
+                    ContentPart::AudioUrl {
+                        audio_url: AudioUrl {
+                            url: "https://example.com/audio.mp3".to_string(),
+                        },
+                        uuid: None,
+                    },
+                ]),
+                name: None,
+            }],
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen3-ASR-1.7B"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::user(vec![
+                ChatContentPart::InputAudio {
+                    data: "dGVzdA==".to_string(),
+                    format: Some("wav".to_string()),
+                    uuid: Some("audio-1".to_string()),
+                },
+                ChatContentPart::audio_url("https://example.com/audio.mp3"),
+            ])]
         );
     }
 
