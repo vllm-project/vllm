@@ -159,7 +159,7 @@ cuda-bindings==13.0.3
     # via torch
 cuda-pathfinder==1.3.3
     # via cuda-bindings
-cuda-toolkit==13.0.3
+cuda-toolkit==13.0.3.0
     # via torch
 cupy-cuda12x==13.6.0
     # via ray
@@ -611,7 +611,9 @@ nvidia-cublas==13.1.1.3
 nvidia-cuda-cupti==13.0.85
     # via cuda-toolkit
 nvidia-cuda-nvrtc==13.0.88
-    # via cuda-toolkit
+    # via
+    #   cuda-toolkit
+    #   nvidia-cublas
 nvidia-cuda-runtime==13.0.96
     # via cuda-toolkit
 nvidia-cudnn-cu13==9.20.0.48
