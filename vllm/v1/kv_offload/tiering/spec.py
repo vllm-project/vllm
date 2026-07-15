@@ -110,7 +110,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         # engine_id is unique per DP replica (suffixed with _dp{rank} in both
         # the Ray and multiprocessing paths), so it names a per-replica offload
         # region.
-        assert config.engine_id is not None
         self._engine_id = config.engine_id
 
     @override
@@ -194,7 +193,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         # Fold the global physical device index into the replica-local
         # [0, world_size) slot range.
-        world_size = self.config.world_size
+        world_size = self.config.parallel.world_size
         rank = torch.accelerator.current_device_index() % world_size
         worker_mmap = SharedOffloadRegion(
             engine_id=self._engine_id,

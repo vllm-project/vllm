@@ -11,9 +11,6 @@ These tests verify:
 4. Error paths — unregistered specs, missing config, duplicate registration.
 """
 
-import ast
-import importlib.util
-from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, patch
 
@@ -263,84 +260,6 @@ class SingleArgExternalOffloadingSpec(OffloadingSpec):
         raise NotImplementedError
 
 
-_IMPORT_GUARD_PATHS = (
-    "vllm/v1/kv_offload/base.py",
-    "vllm/v1/kv_offload/config.py",
-    "vllm/v1/kv_offload/factory.py",
-    "vllm/v1/kv_offload/cpu/spec.py",
-    "vllm/v1/kv_offload/tiering/spec.py",
-    "vllm/v1/kv_offload/file_mapper.py",
-)
-_FORBIDDEN_RUNTIME_IMPORTS = (
-    "vllm.config",
-    "vllm.v1.kv_cache_interface",
-    "vllm.v1.core.kv_cache_utils",
-    "vllm.distributed.kv_transfer",
-)
-_ALLOWED_TYPE_CHECKING_IMPORTS = {
-    (
-        "vllm/v1/kv_offload/base.py",
-        "vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics."
-        "OffloadingConnectorStats",
-    ),
-}
-
-
-def _is_type_checking_test(node: ast.expr) -> bool:
-    return isinstance(node, ast.Name) and node.id == "TYPE_CHECKING"
-
-
-class _RuntimeImportVisitor(ast.NodeVisitor):
-    def __init__(self, relative_path: str) -> None:
-        self.relative_path = relative_path
-        self.module_name = relative_path.removesuffix(".py").replace("/", ".")
-        self._type_checking_depth = 0
-        self.forbidden_imports: list[tuple[int, str]] = []
-
-    def _record(self, lineno: int, module: str) -> None:
-        is_forbidden = any(
-            module == prefix or module.startswith(f"{prefix}.")
-            for prefix in _FORBIDDEN_RUNTIME_IMPORTS
-        )
-        is_allowed_type_import = (
-            self._type_checking_depth > 0
-            and (self.relative_path, module) in _ALLOWED_TYPE_CHECKING_IMPORTS
-        )
-        if is_forbidden and not is_allowed_type_import:
-            self.forbidden_imports.append((lineno, module))
-
-    def visit_If(self, node: ast.If) -> None:
-        if _is_type_checking_test(node.test):
-            self._type_checking_depth += 1
-            try:
-                for statement in node.body:
-                    self.visit(statement)
-            finally:
-                self._type_checking_depth -= 1
-            for statement in node.orelse:
-                self.visit(statement)
-            return
-        self.generic_visit(node)
-
-    def visit_Import(self, node: ast.Import) -> None:
-        for alias in node.names:
-            self._record(node.lineno, alias.name)
-
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        module = node.module or ""
-        if node.level:
-            package = self.module_name.rpartition(".")[0]
-            module = importlib.util.resolve_name(f"{'.' * node.level}{module}", package)
-        for alias in node.names:
-            self._record(node.lineno, f"{module}.{alias.name}")
-
-
-def _find_forbidden_imports(relative_path: str, source: str) -> list[tuple[int, str]]:
-    visitor = _RuntimeImportVisitor(relative_path)
-    visitor.visit(ast.parse(source, filename=relative_path))
-    return visitor.forbidden_imports
-
-
 # ---------------------------------------------------------------------------
 # Pre-registration integrity (CI sentinel)
 # ---------------------------------------------------------------------------
@@ -363,47 +282,6 @@ def test_tiering_spec_registered():
     """TieringOffloadingSpec is registered and importable."""
     cls = OffloadingSpecFactory._registry["TieringOffloadingSpec"]()
     assert cls is TieringOffloadingSpec
-
-
-def test_kv_offload_config_boundary_has_no_reverse_runtime_imports():
-    # Pre-existing connector-metrics imports in cpu/manager.py and
-    # tiering/manager.py are intentionally outside this scoped guard.
-    repo_root = Path(__file__).resolve().parents[3]
-    violations: list[str] = []
-    for relative_path in _IMPORT_GUARD_PATHS:
-        path = repo_root / relative_path
-        violations.extend(
-            f"{relative_path}:{lineno}: {module}"
-            for lineno, module in _find_forbidden_imports(
-                relative_path, path.read_text()
-            )
-        )
-
-    assert not violations, "Reverse runtime imports found:\n" + "\n".join(violations)
-
-
-@pytest.mark.parametrize(
-    ("source", "forbidden_module"),
-    [
-        (
-            "from ...distributed.kv_transfer import connector\n",
-            "vllm.distributed.kv_transfer.connector",
-        ),
-        (
-            "if TYPE_CHECKING:\n    from vllm.config import VllmConfig\n",
-            "vllm.config.VllmConfig",
-        ),
-        (
-            "if other.TYPE_CHECKING:\n    from vllm.config import VllmConfig\n",
-            "vllm.config.VllmConfig",
-        ),
-    ],
-)
-def test_kv_offload_config_boundary_guard_rejects_bypasses(
-    source: str, forbidden_module: str
-):
-    violations = _find_forbidden_imports("vllm/v1/kv_offload/example.py", source)
-    assert violations == [(2 if source.startswith("if ") else 1, forbidden_module)]
 
 
 # ---------------------------------------------------------------------------

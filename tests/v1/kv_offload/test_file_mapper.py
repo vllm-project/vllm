@@ -128,9 +128,11 @@ def test_get_run_config_fields():
         block_size_factor=3,
     )
     cfg = fm.get_run_config()
+    # hash_block_size is the resolved hash granularity and block_size is the
+    # context-parallel-scaled tokens_per_block (16 * dcp 2 * pcp 2 = 64).
     assert cfg == {
         "model_name": "my-model",
-        "hash_block_size": 16,
+        "hash_block_size": 64,
         "gpu_blocks_per_file": 3,
         "tp_size": 4,
         "pp_size": 3,
@@ -139,7 +141,7 @@ def test_get_run_config_fields():
         "dtype": "bfloat16",
         "kv_cache_groups": [
             {
-                "block_size": 16,
+                "block_size": 64,
                 "layer_names": ["layer0"],
             }
         ],
@@ -226,7 +228,7 @@ def test_parallel_agnostic_disabled_for_multiple_groups():
     assert fm.fields["tp_size"] == 2
 
 
-def test_hybrid_file_identity_preserves_cache_block_size():
+def test_hybrid_file_identity_uses_resolved_hash_block_size():
     fm = make_mapper_from_offloading_spec(
         cache_block_size=16,
         kv_cache_groups=[
@@ -235,9 +237,10 @@ def test_hybrid_file_identity_preserves_cache_block_size():
         ],
     )
 
-    # FileMapper has historically used cache_config.block_size here, which can
-    # differ from the resolved hash block size for heterogeneous groups.
-    assert fm.fields["hash_block_size"] == 16
+    # For heterogeneous groups the namespace records the resolved hash block
+    # size (GCD of the group block sizes), which is the actual granularity of
+    # the offload block hashes.
+    assert fm.fields["hash_block_size"] == 4
     assert fm.fields["kv_cache_groups"] == [
         {"block_size": 12, "layer_names": ["full_layer"]},
         {"block_size": 16, "layer_names": ["mla_layer"]},

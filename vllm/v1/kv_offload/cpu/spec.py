@@ -67,12 +67,12 @@ class CPUOffloadingSpec(OffloadingSpec):
                 "cpu_bytes_to_use must be specified in kv_connector_extra_config"
             )
 
-        world_size = config.world_size
+        world_size = config.parallel.world_size
         self.num_blocks = 0
         self.kv_bytes_per_offloaded_block = 0
         self.cpu_page_size_per_worker = 0
-        if config.num_gpu_blocks > 0 and world_size > 0:
-            kv_bytes_per_block = config.worker_kv_bytes_per_gpu_block * world_size
+        if config.worker_kv_bytes_per_block > 0 and world_size > 0:
+            kv_bytes_per_block = config.worker_kv_bytes_per_block * world_size
             kv_bytes_per_offloaded_block = kv_bytes_per_block * self.block_size_factor
 
             # calculate cpu_page_size_per_worker

@@ -72,38 +72,25 @@ class FileMapper:
         config = offloading_spec.config
         kv_cache_groups = [
             {
-                "block_size": group.block_size,
+                "block_size": group.tokens_per_block,
                 "layer_names": list(group.layer_names),
             }
             for group in config.groups
         ]
-        # Only a single full-attention group is parallelism-invariant. MLA is
-        # excluded: its latent KV is replicated per rank, never head-sharded.
-        # The V2 model runner is excluded: its KV layout is not known to be
-        # parallelism-invariant.
-        groups = config.groups
-        group = groups[0] if len(groups) == 1 else None
-        parallel_agnostic = (
-            parallel_agnostic
-            and not config.use_v2_model_runner
-            and group is not None
-            and group.is_non_mla_full_attention
-        )
+        parallel = config.parallel
         return cls(
             root_dir=root_dir,
-            model_name=config.model_name,
-            # Preserve the existing on-disk namespace. This can differ from
-            # the resolved offloading hash block size for heterogeneous groups.
-            hash_block_size=config.namespace_block_size,
+            model_name=config.model.name,
+            hash_block_size=config.cache.hash_block_size,
             gpu_blocks_per_file=gpu_blocks_per_file,
-            tp_size=config.tp_size,
-            pp_size=config.pp_size,
-            pcp_size=config.pcp_size,
-            dcp_size=config.dcp_size,
-            rank=config.rank,
-            dtype=config.kv_cache_dtype,
+            tp_size=parallel.tp_size,
+            pp_size=parallel.pp_size,
+            pcp_size=parallel.pcp_size,
+            dcp_size=parallel.dcp_size,
+            rank=parallel.rank,
+            dtype=config.model.dtype,
             kv_cache_groups=kv_cache_groups,
-            parallel_agnostic=parallel_agnostic,
+            parallel_agnostic=(parallel_agnostic and parallel.is_parallelism_agnostic),
         )
 
     def get_file_name(self, key: OffloadKey) -> str:

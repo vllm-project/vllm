@@ -25,7 +25,12 @@ from vllm.v1.kv_offload.base import (
     ScheduleEndContext,
     make_offload_key,
 )
-from vllm.v1.kv_offload.config import OffloadingConfig
+from vllm.v1.kv_offload.config import (
+    OffloadingCacheConfig,
+    OffloadingConfig,
+    OffloadingModelConfig,
+    OffloadingParallelConfig,
+)
 from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult
 from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
 from vllm.v1.kv_offload.tiering.obj.manager import ObjectStoreSecondaryTierManager
@@ -38,23 +43,21 @@ from vllm.v1.kv_offload.tiering.obj.manager import ObjectStoreSecondaryTierManag
 def _make_offloading_config(enable_kv_cache_events: bool) -> OffloadingConfig:
     return OffloadingConfig(
         groups=(),
-        hash_block_size=16,
-        block_size_factor=1,
-        num_gpu_blocks=0,
-        worker_kv_bytes_per_gpu_block=0,
-        world_size=1,
+        worker_kv_bytes_per_block=0,
         enable_kv_cache_events=enable_kv_cache_events,
         extra_config={},
-        model_name="test/model",
-        kv_cache_dtype="float16",
-        namespace_block_size=16,
-        tp_size=1,
-        pp_size=1,
-        pcp_size=1,
-        dcp_size=1,
-        rank=0,
-        use_v2_model_runner=False,
-        engine_id=None,
+        engine_id="test-engine",
+        model=OffloadingModelConfig(name="test/model", dtype="float16"),
+        cache=OffloadingCacheConfig(hash_block_size=16, blocks_per_key=1),
+        parallel=OffloadingParallelConfig(
+            rank=0,
+            world_size=1,
+            tp_size=1,
+            pp_size=1,
+            pcp_size=1,
+            dcp_size=1,
+            is_parallelism_agnostic=False,
+        ),
     )
 
 
