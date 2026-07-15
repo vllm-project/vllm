@@ -55,13 +55,33 @@ ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE="copy"
 
+# PyTorch provides its own indexes for standard and nightly builds.
+# PYTORCH_NIGHTLY=1 builds the CPU image against torch nightly (parity with the
+# GPU torch-nightly lane); default 0 keeps the pinned release CPU build.
+ARG PYTORCH_NIGHTLY=0
+ARG PYTORCH_CPU_INDEX_BASE_URL=https://download.pytorch.org/whl
+
 # Copy requirements files for installation
 COPY requirements/common.txt requirements/common.txt
 COPY requirements/cpu.txt requirements/cpu.txt
+COPY use_existing_torch.py use_existing_torch.py
 
+# For nightly: install torch nightly (CPU) first, strip torch pins from the
+# requirements via use_existing_torch.py so they can't pull it back to a release
+# build, then install the rest from the nightly CPU index (no --torch-backend,
+# which would force the stable channel). Release path is unchanged.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --upgrade pip && \
-    uv pip install -r requirements/cpu.txt --torch-backend cpu
+    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+        echo "Installing torch nightly (CPU)..." \
+        && uv pip install torch torchaudio torchvision --pre \
+            --index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu \
+        && python3 use_existing_torch.py --prefix \
+        && uv pip install -r requirements/cpu.txt \
+            --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu; \
+    else \
+        uv pip install -r requirements/cpu.txt --torch-backend cpu; \
+    fi
 
 ARG TARGETARCH
 ENV TARGETARCH=${TARGETARCH}
@@ -122,6 +142,10 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
 ######################### BUILD IMAGE #########################
 FROM base AS vllm-build
 
+# Re-declare torch-nightly args (ARGs do not cross FROM)
+ARG PYTORCH_NIGHTLY=0
+ARG PYTORCH_CPU_INDEX_BASE_URL=https://download.pytorch.org/whl
+
 ARG GIT_REPO_CHECK=0
 # Support for cross-compilation with x86 ISA including AVX2 and AVX512: docker build --build-arg VLLM_CPU_X86="true" ...
 ARG VLLM_CPU_X86=0
@@ -146,7 +170,13 @@ RUN if [ "$TARGETARCH" = "arm64" ] && [ "$VLLM_CPU_X86" != "0" ]; then \
 COPY requirements/build/cpu.txt requirements/build/cpu.txt
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r requirements/build/cpu.txt --torch-backend cpu
+    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+        python3 /workspace/use_existing_torch.py --prefix \
+        && uv pip install -r requirements/build/cpu.txt \
+            --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu; \
+    else \
+        uv pip install -r requirements/build/cpu.txt --torch-backend cpu; \
+    fi
 
 COPY . .
 
@@ -188,6 +218,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ######################### TEST DEPS #########################
 FROM base AS vllm-test-deps
 
+# Re-declare torch-nightly args (ARGs do not cross FROM)
+ARG PYTORCH_NIGHTLY=0
+ARG PYTORCH_CPU_INDEX_BASE_URL=https://download.pytorch.org/whl
+
 WORKDIR /vllm-workspace
 
 # Test requirements are compiled from requirements/test/cuda.in into
@@ -202,10 +236,20 @@ RUN case "$(uname -m)" in \
     esac
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r requirements/test/cpu.txt --torch-backend cpu
+    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+        python3 /workspace/use_existing_torch.py --prefix \
+        && uv pip install -r requirements/test/cpu.txt \
+            --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu; \
+    else \
+        uv pip install -r requirements/test/cpu.txt --torch-backend cpu; \
+    fi
 
 ######################### DEV IMAGE #########################
 FROM vllm-build AS vllm-dev
+
+# Re-declare torch-nightly args (ARGs do not cross FROM)
+ARG PYTORCH_NIGHTLY=0
+ARG PYTORCH_CPU_INDEX_BASE_URL=https://download.pytorch.org/whl
 
 WORKDIR /vllm-workspace
 
@@ -228,7 +272,12 @@ COPY --from=vllm-test-deps /vllm-workspace/requirements/test/cpu.txt requirement
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/lint.txt && \
-    uv pip install -r requirements/test/cpu.txt --torch-backend cpu && \
+    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+        uv pip install -r requirements/test/cpu.txt \
+            --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu; \
+    else \
+        uv pip install -r requirements/test/cpu.txt --torch-backend cpu; \
+    fi && \
     pre-commit install --hook-type pre-commit --hook-type commit-msg
 
 ENTRYPOINT ["bash"]
