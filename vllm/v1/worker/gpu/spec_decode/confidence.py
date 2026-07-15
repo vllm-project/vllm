@@ -3,7 +3,7 @@
 """Confidence-based verification for DSpark speculative decoding."""
 
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -205,19 +205,6 @@ def _mask_excess_draft_tokens_kernel(
         mask=mask,
     )
     tl.store(input_ids_ptr + token_idx, 0, mask=mask)
-
-
-def _count_valid_draft_tokens(
-    draft_token_lists: Sequence[Sequence[int]],
-    num_reqs: int,
-) -> np.ndarray:
-    """Grammar-validated draft ids round-trip through the scheduler; negative
-    ids mark invalidated drafts."""
-    return np.fromiter(
-        (sum(token_id >= 0 for token_id in tokens) for tokens in draft_token_lists),
-        dtype=np.int32,
-        count=num_reqs,
-    )
 
 
 def compute_prefix_survival(
@@ -667,7 +654,22 @@ class ConfidenceManager:
         return capacities
 
     def warmup(self, input_buffers: "InputBuffers") -> None:
-        pass
+        self._confidence_logits[:1].zero_()
+        self._valid_draft_tokens[:1].fill_(self.num_speculative_steps)
+        temperatures = None
+        if self._temperature_buffers is not None:
+            _, temperatures = self._temperature_buffers
+            temperatures.fill_(1.0)
+        idx_mapping = torch.zeros(1, dtype=torch.int32, device=self.req_states.device)
+        _compute_prefix_survival_kernel[(1,)](
+            self._confidence_logits,
+            self._confidence_logits.stride(0),
+            idx_mapping,
+            self._valid_draft_tokens,
+            temperatures,
+            self._survival,
+            NUM_STEPS=self.num_speculative_steps,
+        )
 
     @staticmethod
     def _get_num_bonus_tokens(input_batch: "InputBatch") -> int:
@@ -687,9 +689,13 @@ class ConfidenceManager:
         scheduled_drafts = input_batch.num_draft_tokens_per_req
         valid_drafts = scheduled_drafts
         if input_batch.has_structured_output_reqs:
-            valid_drafts = _count_valid_draft_tokens(
-                [draft_tokens.get(req_id, ()) for req_id in input_batch.req_ids],
-                input_batch.num_reqs,
+            valid_drafts = np.fromiter(
+                (
+                    sum(token >= 0 for token in draft_tokens.get(req_id, ()))
+                    for req_id in input_batch.req_ids
+                ),
+                dtype=np.int32,
+                count=input_batch.num_reqs,
             )
         required_targets = input_batch.num_scheduled_tokens - scheduled_drafts
         budget = self._plan_draft_token_budget(
@@ -764,8 +770,13 @@ class VarlenConfidenceManager(ConfidenceManager):
             count=num_reqs,
         )
         if has_structured_output_requests:
-            valid_num_draft_tokens_per_req = _count_valid_draft_tokens(
-                [draft_tokens.get(req_id, ()) for req_id in req_ids], num_reqs
+            valid_num_draft_tokens_per_req = np.fromiter(
+                (
+                    sum(token >= 0 for token in draft_tokens.get(req_id, ()))
+                    for req_id in req_ids
+                ),
+                dtype=np.int32,
+                count=num_reqs,
             )
         else:
             valid_num_draft_tokens_per_req = num_draft_tokens_per_req
@@ -783,19 +794,21 @@ class VarlenConfidenceManager(ConfidenceManager):
         return int(required_target_tokens_per_req.sum()) + draft_token_budget
 
     def warmup(self, input_buffers: "InputBuffers") -> None:
+        super().warmup(input_buffers)
         query_len = 1 + self.num_speculative_steps
-        self._required_target_tokens[:1].fill_(1)
-        self._batch_draft_capacity[:1].fill_(self.num_speculative_steps)
+        num_reqs = min(2, self.req_states.max_num_reqs)
+        self._required_target_tokens[:num_reqs].fill_(1)
+        self._batch_draft_capacity[:num_reqs].fill_(self.num_speculative_steps)
         _build_compact_offsets_kernel[(1,)](
             self._required_target_tokens,
             self._batch_draft_capacity,
             input_buffers.query_start_loc,
             self._cu_num_logits,
             input_buffers.seq_lens,
-            1,
+            num_reqs,
             self.req_states.max_num_reqs,
             1,
-            query_len,
+            num_reqs * query_len,
             BLOCK_SIZE=triton.next_power_of_2(self.req_states.max_num_reqs),
         )
         idx_mapping = torch.zeros(1, dtype=torch.int32, device=self.req_states.device)
@@ -953,6 +966,22 @@ class VarlenConfidenceManager(ConfidenceManager):
 
 
 class MaskedConfidenceManager(ConfidenceManager):
+    def warmup(self, input_buffers: "InputBuffers") -> None:
+        super().warmup(input_buffers)
+        query_len = 1 + self.num_speculative_steps
+        input_buffers.query_start_loc[:2] = torch.tensor(
+            [0, query_len], dtype=torch.int32, device=self.req_states.device
+        )
+        self._batch_draft_capacity[:1].fill_(self.num_speculative_steps - 1)
+        _mask_excess_draft_tokens_kernel[(1,)](
+            input_buffers.is_padding,
+            input_buffers.input_ids,
+            input_buffers.query_start_loc,
+            self._batch_draft_capacity,
+            1,
+            BLOCK_SIZE=triton.next_power_of_2(self.num_speculative_steps),
+        )
+
     def trim_batch(
         self,
         input_batch: "InputBatch",
