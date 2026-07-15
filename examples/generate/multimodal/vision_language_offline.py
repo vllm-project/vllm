@@ -521,7 +521,7 @@ def run_gemma4(questions: list[str], modality: str) -> ModelRequestData:
         prompts = [
             (
                 "<bos><start_of_turn>user\n"
-                f"<image>\n{question}<end_of_turn>\n"
+                f"<|image|>\n{question}<end_of_turn>\n"
                 "<start_of_turn>model\n"
             )
             for question in questions

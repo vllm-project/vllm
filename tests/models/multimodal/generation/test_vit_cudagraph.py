@@ -252,13 +252,14 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
     "gemma4": VitCudagraphTestConfig(
         model="google/gemma-4-31B-it",
         image_prompt=(
-            "<bos><start_of_turn>user\n<image>\nWhat is in this image?<end_of_turn>\n"
+            "<bos><start_of_turn>user\n<|image|>\nWhat is in this image?<end_of_turn>\n"
             "<start_of_turn>model\n"
         ),
         video_prompt=(
             "<bos><start_of_turn>user\n<|video|>\nDescribe this video in one sentence."
             "<end_of_turn>\n<start_of_turn>model\n"
         ),
+        needs_video_metadata=True,
         vllm_runner_kwargs={
             "load_format": "dummy",
             "hf_overrides": partial(
