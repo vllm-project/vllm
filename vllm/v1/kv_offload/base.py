@@ -503,7 +503,7 @@ class OffloadingSpec(ABC):
             self.extra_config.get("offload_prompt_only", True)
         )
 
-        self.gpu_block_size = tuple(group.tokens_per_block for group in config.groups)
+        self.tokens_per_block = tuple(group.tokens_per_block for group in config.groups)
         self.hash_block_size = config.cache.hash_block_size
         self.block_size_factor = config.cache.blocks_per_key
 
