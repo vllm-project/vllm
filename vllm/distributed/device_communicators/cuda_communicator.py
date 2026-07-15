@@ -419,7 +419,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
             chunk_size = input_tensor.shape[0] // world_size
         output_shape = (chunk_size,) + input_tensor.shape[1:]
 
-        # AITER custom reduce-scatter
         if self._can_use_aiter_ag_rs(sizes):
             aiter_comm = self.aiter_ag_rs_comm
             assert aiter_comm is not None
@@ -621,7 +620,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if sizes is not None and all(s == sizes[0] for s in sizes):
             sizes = None
 
-        # AITER custom all-gather
         if self._can_use_aiter_ag_rs(sizes):
             aiter_comm = self.aiter_ag_rs_comm
             assert aiter_comm is not None

@@ -623,7 +623,7 @@ class GroupCoordinator:
             if ca_comm is not None:
                 maybe_ca_context = ca_comm.capture()  # type: ignore
 
-            # Capture each group's own comm. A group-global lookup would double-capture
+            # Capture each group's own comm. A global lookup would double-capture
             aiter_ar_comm = getattr(self.device_communicator, "aiter_ar_comm", None)
             if aiter_ar_comm is not None:
                 maybe_aiter_ar_context = aiter_ar_comm.capture()  # type: ignore
