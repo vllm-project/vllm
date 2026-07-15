@@ -2201,79 +2201,83 @@ class NixlBaseConnectorWorker:
 
     def _apply_prefix_caching(
         self,
-        local_block_ids: BlockIds,
-        remote_block_ids: BlockIds,
-        remote_physical_per_logical: int,
-    ) -> tuple[BlockIds, list]:
-        """Apply prefix caching by trimming local/remote block ID lists.
+        decode_block_ids: BlockIds,
+        prefill_block_ids: BlockIds,
+        decode_physical_per_logical: int,
+        prefill_physical_per_logical: int,
+    ) -> tuple[BlockIds, BlockIds]:
+        """Trim block ID lists so only the uncomputed suffix is transferred.
 
-        For non-Mamba models: end-trim remote to match local count, so that
+        The prefix-cache hit is always on the decode (D) side, so ``decode``
+        holds only its uncomputed blocks while prefill (P) holds the full
+        sequence. This is mode-independent: pull passes its own (D) blocks as
+        ``decode``, push passes the remote D registration as ``decode``.
+
+        For non-Mamba models: end-trim ``prefill`` to match ``decode`` count, so
         already-cached prefix blocks are skipped in the transfer.
 
-        For Mamba hybrid (prefix caching not yet supported): front-trim both
-        to the minimum count to handle kernel block count discrepancies from
-        logical block rounding in heterogeneous TP.
+        For Mamba hybrid: SSM groups keep their single real (last) block and FA
+        groups end-trim to the uncomputed suffix when physical-per-logical
+        matches.
         """
-        # Partial prefix cache hit: just read uncomputed blocks.
+        # Partial prefix cache hit: just transfer uncomputed blocks.
         # Skip mamba groups — their blocks represent full state (conv+ssm),
         # not per-token data, so trimming would corrupt the transfer.
-        remote_block_ids = list(remote_block_ids)
+        prefill_block_ids = list(prefill_block_ids)
         if not self._has_mamba:
-            for i, remote_group in enumerate(remote_block_ids):
-                num_local_blocks = len(local_block_ids[i])
-                assert num_local_blocks <= len(remote_group)
-                if num_local_blocks < len(remote_group):
-                    remote_block_ids[i] = remote_group[-num_local_blocks:]
+            for i, prefill_group in enumerate(prefill_block_ids):
+                num_decode_blocks = len(decode_block_ids[i])
+                assert num_decode_blocks <= len(prefill_group)
+                if num_decode_blocks < len(prefill_group):
+                    prefill_block_ids[i] = prefill_group[-num_decode_blocks:]
         else:
-            # (NOTE: ZhanqiuHu) Mamba hybrid: no prefix caching support so far.HeteroTP
-            # can cause different kernel block counts due to logical block rounding.
+            # (NOTE: ZhanqiuHu) HeteroTP can cause different kernel block counts
+            # due to logical block rounding.
             # Example: 640 prompt tokens, kernel_block_size=64
-            #   remote physical_per_logical=10, local physical_per_logical=6
-            #   remote logical ids from kv_transfer_params = [0]
-            #   local logical ids allocated = [0, 1]
-            #   remote kernel blocks: [0..9]  (1*10=10)
-            #   local kernel blocks:  [0..11] (2*6=12)
+            #   prefill physical_per_logical=10, decode physical_per_logical=6
+            #   prefill logical ids from kv_transfer_params = [0]
+            #   decode logical ids allocated = [0, 1]
+            #   prefill kernel blocks: [0..9]  (1*10=10)
+            #   decode kernel blocks:  [0..11] (2*6=12)
             #   actual data blocks = ceil(640/64) = 10, trim both to 10
-            # Vice versa (remote physical_per_logical=6, local=10):
-            #   remote logical ids = [0, 1], local logical ids = [0]
-            #   remote kernel blocks: [0..11] (2*6=12)
-            #   local kernel blocks:  [0..9]  (1*10=10)
+            # Vice versa (prefill physical_per_logical=6, decode=10):
+            #   prefill logical ids = [0, 1], decode logical ids = [0]
+            #   prefill kernel blocks: [0..11] (2*6=12)
+            #   decode kernel blocks:  [0..9]  (1*10=10)
             #   actual data blocks = ceil(640/64) = 10, trim both to 10
-            local_block_ids = list(local_block_ids)
-            for i, remote_group in enumerate(remote_block_ids):
-                num_local_blocks = len(local_block_ids[i])
-                num_remote_blocks = len(remote_group)
+            decode_block_ids = list(decode_block_ids)
+            for i, prefill_group in enumerate(prefill_block_ids):
+                num_decode_blocks = len(decode_block_ids[i])
+                num_prefill_blocks = len(prefill_group)
                 if (
                     _is_ssm_spec(self._group_spec_types[i])
-                    and num_local_blocks < num_remote_blocks
+                    and num_decode_blocks < num_prefill_blocks
                 ):
-                    # NOTE (NickLucche): With prefix caching on SSM, (remote) blocks
-                    # prior to the last one are placeholders (null blocks). Mind that
-                    # this doesn't really impact transfer, as we only still care about
-                    # the last "block", the full in-place state.
-                    assert num_local_blocks == 1, "SSM can only have one local block"
-                    remote_block_ids[i] = remote_group[-num_local_blocks:]
+                    # NOTE (NickLucche): With prefix caching on SSM, (prefill)
+                    # blocks prior to the last one are placeholders (null blocks).
+                    # Mind that this doesn't really impact transfer, as we only
+                    # still care about the last "block", the full in-place state.
+                    assert num_decode_blocks == 1, "SSM can only have one local block"
+                    prefill_block_ids[i] = prefill_group[-num_decode_blocks:]
                 elif (
-                    self._physical_blocks_per_logical_kv_block
-                    == remote_physical_per_logical
-                    and num_local_blocks < num_remote_blocks
+                    decode_physical_per_logical == prefill_physical_per_logical
+                    and num_decode_blocks < num_prefill_blocks
                 ):
                     # Partial prefix cache hit for FA group.
-                    remote_block_ids[i] = remote_group[-num_local_blocks:]
+                    prefill_block_ids[i] = prefill_group[-num_decode_blocks:]
                 else:
                     # TODO Handle prefix caching with different block_sizes
                     max_padding = max(
-                        self._physical_blocks_per_logical_kv_block,
-                        remote_physical_per_logical,
+                        decode_physical_per_logical, prefill_physical_per_logical
                     )
-                    assert abs(num_local_blocks - num_remote_blocks) < max_padding, (
-                        f"Group {i}: |{num_local_blocks} - "
-                        f"{num_remote_blocks}| >= {max_padding}"
+                    assert abs(num_decode_blocks - num_prefill_blocks) < max_padding, (
+                        f"Group {i}: |{num_decode_blocks} - "
+                        f"{num_prefill_blocks}| >= {max_padding}"
                     )
-                    num_blocks = min(num_local_blocks, num_remote_blocks)
-                    local_block_ids[i] = local_block_ids[i][:num_blocks]
-                    remote_block_ids[i] = remote_group[:num_blocks]
-        return local_block_ids, remote_block_ids
+                    num_blocks = min(num_decode_blocks, num_prefill_blocks)
+                    decode_block_ids[i] = decode_block_ids[i][:num_blocks]
+                    prefill_block_ids[i] = prefill_group[:num_blocks]
+        return decode_block_ids, prefill_block_ids
 
     def _logical_to_remote_kernel_block_ids(
         self, block_ids: BlockIds, remote_physical_per_logical: int

@@ -414,6 +414,19 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # expands each side using the appropriate ratio.
         logical_local = self._as_grouped_block_ids(local_block_ids)
         logical_remote = self._as_grouped_block_ids(remote_block_ids)
+
+        # Prefix caching: D allocated only uncached blocks, so on a partial hit it
+        # sends fewer than P's. End-trim P's blocks to that same suffix so we WRITE only
+        # the uncomputed tail into D's slots.
+        assert self.transfer_topo is not None
+        decode_info = self.transfer_topo.get_engine_info(decode_engine_id)
+        logical_remote, logical_local = self._apply_prefix_caching(
+            decode_block_ids=logical_remote,
+            prefill_block_ids=logical_local,
+            decode_physical_per_logical=decode_info.remote_physical_blocks_per_logical,
+            prefill_physical_per_logical=self._physical_blocks_per_logical_kv_block,
+        )
+
         physical_local = self._logical_to_kernel_block_ids(logical_local)
 
         push_meta = ReqMeta(
@@ -628,16 +641,19 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             logger.warning("No blocks to push for request %s", request_id)
             return None
 
-        # Align per-group block counts for push.
+        # Per-group block counts are already aligned in `_apply_prefix_caching`
         local_block_ids = list(local_block_ids)
         remote_block_ids = list(remote_block_ids)
-        for i in range(min(len(local_block_ids), len(remote_block_ids))):
-            num_local = len(local_block_ids[i])
-            num_remote = len(remote_block_ids[i])
-            if num_local > num_remote:
-                local_block_ids[i] = local_block_ids[i][:num_remote]
-            elif num_local < num_remote:
-                remote_block_ids[i] = remote_block_ids[i][:num_local]
+        assert len(local_block_ids) == len(remote_block_ids), (
+            f"push group-count mismatch for {request_id}: {len(local_block_ids)} "
+            f"local vs {len(remote_block_ids)} remote groups"
+        )
+        for i in range(len(local_block_ids)):
+            assert len(local_block_ids[i]) == len(remote_block_ids[i]), (
+                f"push block-count mismatch for {request_id} group {i}: "
+                f"{len(local_block_ids[i])} local vs "
+                f"{len(remote_block_ids[i])} remote blocks"
+            )
 
         # Get descs ids.
         remote_block_descs_ids = self._compute_desc_ids(
