@@ -30,6 +30,7 @@ if rocm_aiter_ops.is_enabled():
     )
 
 if current_platform.is_cuda_alike() or current_platform.is_xpu():
+    from .fusion.add_rms_fusion import AddRMSNormFusionPass
     from .fusion.sequence_parallelism import SequenceParallelismPass
 
 if current_platform.is_cuda_alike():
@@ -147,6 +148,13 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 self.passes += [SequenceParallelismPass(config)]
                 if self.pass_config.fuse_gemm_comms:
                     self.passes += [AsyncTPPass(config)]
+
+            if (
+                self.pass_config.fuse_act_padding
+                or self.pass_config.fuse_allreduce_rms
+                or self.pass_config.fuse_norm_quant
+            ):
+                self.passes += [AddRMSNormFusionPass(config)]
 
             if self.pass_config.fuse_act_padding and rocm_aiter_ops.is_enabled():
                 # Run the more specific RMSNorm+router-pad fusion before
