@@ -27,7 +27,7 @@ from vllm.utils.torch_utils import set_random_seed
 
 if not has_helion():
     pytest.skip(
-        "Helion is not installed. Install with: pip install vllm[helion]",
+        "Helion is not installed. Install with: pip install helion",
         allow_module_level=True,
     )
 

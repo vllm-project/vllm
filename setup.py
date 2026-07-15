@@ -1256,11 +1256,10 @@ setup(
         ],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
         "flashinfer": [],  # Kept for backwards compatibility
-        # Optional deps for Helion kernel development
-        # NOTE: When updating helion version, also update CI files:
-        #   - .buildkite/test_areas/kernels.yaml
-        #   - .buildkite/test-amd.yaml
-        "helion": ["helion==1.1.0"],
+        # Helion is a base CUDA dependency (see requirements/cuda.txt); this
+        # extra is kept for backwards compatibility so `pip install vllm[helion]`
+        # still works. Keep the pin in sync with requirements/cuda.txt.
+        "helion": ["helion==1.2.0"],
         # Optional deps for gRPC server (vllm serve --grpc)
         "grpc": ["smg-grpc-servicer[vllm] >= 0.5.2"],
         # Optional deps for OpenTelemetry tracing

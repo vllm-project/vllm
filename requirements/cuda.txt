@@ -27,3 +27,9 @@ tokenspeed-mla==0.1.2
 
 # Humming kernels for quantization gemm
 humming-kernels[cu13]==0.1.6
+
+# Helion kernels (enabled by default via VLLM_USE_HELION_KERNELS)
+# NOTE: When updating helion version, also update CI files:
+#   - .buildkite/test_areas/kernels.yaml
+#   - .buildkite/test-amd.yaml
+helion==1.2.0
