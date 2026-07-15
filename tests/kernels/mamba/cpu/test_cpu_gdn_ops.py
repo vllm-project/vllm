@@ -425,7 +425,7 @@ def test_causal_conv1d_torch_two_call_split(total_tokens: int, split: int) -> No
     match the single-call result.
     """
     from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
-        causal_conv1d_torch,
+        causal_conv1d_fn_cpu as causal_conv1d_torch,
     )
 
     x, weight, bias = _conv_inputs(total_tokens)
@@ -536,3 +536,4 @@ def test_batch_memcpy_cpu_fallback() -> None:
 
     for src, dst in zip(srcs, dsts):
         torch.testing.assert_close(dst, src)
+
