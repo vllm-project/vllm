@@ -554,6 +554,7 @@ class _FakeSession:
         close_loads: list[tuple[int, str]] | None = None,
         close_stores: list[int] | None = None,
         close_orphans: list[ReqContext] | None = None,
+        close_stranded: list[str] | None = None,
     ) -> None:
         self.peer_id = peer_id
         self.alive = alive
@@ -565,6 +566,7 @@ class _FakeSession:
         self._close_loads = close_loads or []
         self._close_stores = close_stores or []
         self._close_orphans = close_orphans or []
+        self._close_stranded = close_stranded or []
         self.requests: list[tuple[int, str]] = []
         self.stores_added: list[tuple[str, list, object, int]] = []
         self.attached: list[object] = []
@@ -600,7 +602,12 @@ class _FakeSession:
         self.finishes.append(kv_request_id)
 
     def close(self):
-        return self._close_loads, self._close_stores, self._close_orphans
+        return (
+            self._close_loads,
+            self._close_stores,
+            self._close_orphans,
+            self._close_stranded,
+        )
 
 
 class TestGetFinished:
@@ -655,6 +662,29 @@ class TestGetFinished:
         assert JobResult(job_id=20, success=False) in results
         assert "dead:1234" not in mgr._sessions
         assert "req-load" in mgr._failed_req_ids
+
+    def test_reap_fails_stranded_lookups(self):
+        """A reaped session's in-flight lookups land in _failed_req_ids so
+        the consumer's lookup() returns MISS instead of RETRY forever."""
+
+        class FakeData:
+            def remove_remote_peer(self, pid):
+                pass
+
+        mgr = self._make()
+        mgr._data = FakeData()  # type: ignore[assignment]
+        dead = _FakeSession(
+            peer_id="dead:1234",
+            alive=False,
+            connected=True,
+            close_stranded=["req-probe-1", "req-probe-2"],
+        )
+        mgr._sessions["dead:1234"] = dead  # type: ignore[assignment]
+
+        list(mgr.get_finished_jobs())
+        assert "dead:1234" not in mgr._sessions
+        assert "req-probe-1" in mgr._failed_req_ids
+        assert "req-probe-2" in mgr._failed_req_ids
 
     def test_unbound_store_kept_within_timeout(self):
         """Recently-parked unbound stores stay across a poll."""

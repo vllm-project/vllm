@@ -162,12 +162,16 @@ class FakeConnection:
         self._inbox: list[dict] = []
         self._sent: list[dict] = []
         self._closed = False
+        # When True, send() raises to simulate a broken/dead connection.
+        self.fail_send = False
 
     @property
     def alive(self) -> bool:
         return not self._closed
 
     def send(self, msg: dict) -> None:
+        if self.fail_send:
+            raise ConnectionError("simulated dead connection")
         self._sent.append(msg)
 
     def recv(self) -> list[dict]:
@@ -989,7 +993,7 @@ class TestServerLookupHandling:
         assert len(session._server._inbound_lookups) == 1
         assert all(c[0] != "on_request_finished" for c in cb.calls)
 
-        _failed_loads, _failed_stores, orphan_ctxs = session.close()
+        _failed_loads, _failed_stores, orphan_ctxs, _stranded = session.close()
 
         assert len(orphan_ctxs) == 1
         assert ":req-1:" in orphan_ctxs[0].req_id
@@ -1905,10 +1909,11 @@ class TestPendingSession:
         )
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
         session.add_stored_blocks("req-2", [b"k2"], [1], job_id=2)
-        failed_loads, failed_stores, orphan_ctxs = session.close()
+        failed_loads, failed_stores, orphan_ctxs, stranded = session.close()
         assert failed_loads == []
         assert set(failed_stores) == {1, 2}
         assert orphan_ctxs == []
+        assert stranded == []
 
 
 # ---------------------------------------------------------------------------
@@ -1930,10 +1935,49 @@ class TestDisconnect:
         session.request_blocks(1, "req-1", [b"k"], [0])
         session.request_blocks(2, "req-2", [b"k"], [0])
         session.add_stored_blocks("req-srv", [b"k"], [0], job_id=10)
-        failed_loads, failed_stores, orphan_ctxs = session.close()
+        failed_loads, failed_stores, orphan_ctxs, stranded = session.close()
         assert set(failed_loads) == {(1, "req-1"), (2, "req-2")}
         assert set(failed_stores) == {10}
         assert orphan_ctxs == []
+        assert stranded == []
+
+    def test_send_failure_marks_connection_dead(self):
+        """A raising send must mark the connection dead, not silently drop
+        the message — otherwise the session lingers alive, is never reaped,
+        and in-flight lookups/loads toward the dead peer hang forever."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        assert session.alive
+
+        conn.fail_send = True
+        # request_blocks flushes a FetchMsg synchronously via _do_send.
+        session.request_blocks(1, "req-1", [b"k"], [0])
+
+        assert not session.alive
+
+    def test_close_surfaces_inflight_lookups(self):
+        """close() reports kv_request_ids whose symmetric-P2P probe is still
+        unresolved; resolved probes are not reported (their answer is in)."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        session.register_lookup("req-hit", b"hA")
+        session.register_lookup("req-inflight", b"hB")
+        session.flush_pending_lookups()
+
+        # Only req-hit is answered; req-inflight stays in flight.
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: "req-hit",
+                LookupRespMsg.BLOCK_HASHES: [b"hA"],
+                LookupRespMsg.HITS: [True],
+            }
+        )
+        session.poll()
+
+        _loads, _stores, _orphans, stranded = session.close()
+        assert stranded == ["req-inflight"]
 
 
 # ---------------------------------------------------------------------------

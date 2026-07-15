@@ -253,16 +253,22 @@ class P2PSession:
 
     def close(
         self,
-    ) -> tuple[list[tuple[int, str]], list[int], list[ReqContext]]:
-        """Shut down. Returns (failed_loads, failed_stores, orphan_ctxs).
+    ) -> tuple[list[tuple[int, str]], list[int], list[ReqContext], list[str]]:
+        """Shut down.
+
+        Returns (failed_loads, failed_stores, orphan_ctxs, stranded_lookups).
 
         failed_loads: list of (job_id, kv_request_id) pairs.
         failed_stores: list of job_ids.
         orphan_ctxs: synthetic lookup ctxs still owing
             ``parent.on_request_finished`` (the manager flushes these on
             its next ``serve_external_requests``).
+        stranded_lookups: kv_request_ids with an unresolved symmetric-P2P
+            probe toward the now-dead peer. The manager fails these so the
+            consumer's lookup() falls back to local prefill instead of
+            deferring forever on an answer that can never arrive.
         """
-        failed_loads = self._client.close()
+        failed_loads, stranded_lookups = self._client.close()
         failed_stores, orphan_ctxs = self._server.close()
 
         if self._conn is not None:
@@ -271,7 +277,7 @@ class P2PSession:
             self._conn.close()
             self._conn = None
 
-        return failed_loads, failed_stores, orphan_ctxs
+        return failed_loads, failed_stores, orphan_ctxs, stranded_lookups
 
     # ------------------------------------------------------------------
     # Message dispatch
@@ -499,8 +505,15 @@ class P2PSession:
             self._conn.send(msg)
             logger.debug("P2PSession %s: sent %s", self.peer_id, msg.get(TYPE_KEY))
         except Exception:
+            # A send failure means the connection is broken. Swallowing it
+            # silently strands every in-flight lookup/load toward this peer:
+            # the session stays alive, is never reaped, and the consumer's
+            # lookup() keeps returning RETRY until the HTTP client times out.
+            # Mark the connection dead so the manager reaps the session on
+            # its next poll and surfaces the stranded work as failures.
             logger.warning(
-                "P2PSession %s: failed to send %s",
+                "P2PSession %s: send of %s failed — marking connection dead",
                 self.peer_id,
                 msg.get(TYPE_KEY),
             )
+            self._conn.mark_dead()

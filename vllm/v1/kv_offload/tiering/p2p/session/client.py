@@ -374,13 +374,25 @@ class ClientRole:
         self._completed_loads = []
         return results
 
-    def close(self) -> list[tuple[int, str]]:
-        """Tear down. Returns ``(job_id, kv_request_id)`` for pending loads."""
+    def close(self) -> tuple[list[tuple[int, str]], list[str]]:
+        """Tear down.
+
+        Returns:
+            A ``(failed_loads, stranded_lookups)`` pair. ``failed_loads``
+            is ``(job_id, kv_request_id)`` for every load still in flight.
+            ``stranded_lookups`` is the kv_request_ids holding an
+            unresolved (in-flight) symmetric-P2P probe: with the peer gone
+            the probe can never be answered, so the manager must fail these
+            ids or the consumer's lookup() defers on them forever.
+        """
         failed = [(req.job_id, req.kv_request_id) for req in self._inbound.values()]
+        stranded_lookups = list(
+            {req_id for (req_id, _), hit in self._lookups.items() if hit is None}
+        )
         self._inbound.clear()
         self._completed_loads.clear()
         self._lookups.clear()
         self._unsent_lookups_by_req.clear()
         self._flushed_req_ids.clear()
         self._fetch_sent_req_ids.clear()
-        return failed
+        return failed, stranded_lookups
