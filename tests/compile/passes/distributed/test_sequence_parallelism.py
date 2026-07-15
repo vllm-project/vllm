@@ -326,9 +326,7 @@ def test_sequence_parallelism_pass(
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("fuse_norm_quant", [True, False])
 @pytest.mark.parametrize("dynamic", [False, True])
-@pytest.mark.skipif(
-    envs.VLLM_TARGET_DEVICE not in ["xpu"], reason="Only test on XPU"
-)
+@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["xpu"], reason="Only test on XPU")
 def test_sequence_parallelism_pass_block_fp8(
     test_model_cls: type[torch.nn.Module],
     custom_ops: str,
@@ -487,9 +485,7 @@ def sequence_parallelism_pass_on_test_model(
         # all reduce should not
         for op in model.ops_in_model_after():
             expected_count = (
-                model.ops_count_after(op)
-                if hasattr(model, "ops_count_after")
-                else 4
+                model.ops_count_after(op) if hasattr(model, "ops_count_after") else 4
             )
             assert backend.op_count(op, before=False) == expected_count
 

@@ -72,7 +72,6 @@ def get_sequence_parallelism_threshold(
     Formula: min_token_num = (min_per_gpu_size_mb * tp_size * MiB) //
              (hidden_size * element_size)
     """
-    from vllm.platforms import current_platform
 
     if current_platform.is_xpu():
         min_hidden_size = 4096
@@ -453,8 +452,7 @@ class MiddleAllReduceRMSNormBlockFP8Pattern(_SequenceParallelPatternHelper):
             reduce_scatter = self._reduce_scatter(mm_1)
             local_len = reduce_scatter.size(0)
             residual = residual[
-                self.tp_rank * local_len : self.tp_rank * local_len
-                + local_len, ...
+                self.tp_rank * local_len : self.tp_rank * local_len + local_len, ...
             ]
             rms, residual_out = vllm.ir.ops.fused_add_rms_norm(
                 reduce_scatter, residual, rms_norm_weights, self.epsilon
