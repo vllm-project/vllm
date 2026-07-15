@@ -245,6 +245,21 @@ def test_oov_decode(tokenizer, fast):
 # ---------- convert_ids_list_to_tokens collision tests ----------
 
 
+class _MockBackend:
+    """Fake backend_tokenizer that exposes pre_tokenizer config."""
+
+    def __init__(self, pre_tokenizer_type, replacement=None):
+        import json
+
+        pre: dict = {"type": pre_tokenizer_type}
+        if replacement is not None:
+            pre["replacement"] = replacement
+        self._config = json.dumps({"pre_tokenizer": pre})
+
+    def to_str(self):
+        return self._config
+
+
 class _MockTokenizer:
     """Minimal tokenizer mock for testing convert_ids_list_to_tokens."""
 
@@ -252,9 +267,12 @@ class _MockTokenizer:
         self,
         raw_tokens: dict[int, str],
         decoded_tokens: dict[int, str],
+        pre_tokenizer_type: str = "Metaspace",
+        replacement: str | None = "▁",
     ):
         self._raw = raw_tokens
         self._decoded = decoded_tokens
+        self.backend_tokenizer = _MockBackend(pre_tokenizer_type, replacement)
 
     def convert_ids_to_tokens(
         self, ids: list[int], skip_special_tokens: bool = False
@@ -294,6 +312,8 @@ def test_bpe_leading_space_already_preserved():
     tok = _MockTokenizer(
         raw_tokens={0: "Ġtrue", 1: "true"},
         decoded_tokens={0: " true", 1: "true"},
+        pre_tokenizer_type="ByteLevel",
+        replacement=None,
     )
     result = convert_ids_list_to_tokens(tok, [0, 1])
     assert result == [" true", "true"]

@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
+import json
+from functools import lru_cache
 
 from vllm.tokenizers import TokenizerLike
 
@@ -55,18 +59,42 @@ def _convert_tokens_to_string_with_added_encoders(
 # tokenizers (bigger = more conservative).
 INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET = 5
 
-# SentencePiece and byte-level BPE use these characters in raw vocab pieces
-# to represent a leading space. SentencePiece's decode() strips the first
-# one (the add_dummy_prefix inverse), which makes "▁true" and "true" both
-# decode to "true" — colliding as dict keys in the Legacy Completions API.
-_LEADING_SPACE_MARKERS = frozenset(("▁", "Ġ"))
+
+@lru_cache(maxsize=8)
+def _get_leading_space_marker(tokenizer: TokenizerLike) -> str | None:
+    """Read the space marker from the tokenizer's pre_tokenizer config.
+
+    Only Metaspace pre_tokenizers (used by SentencePiece-based models like
+    Llama, Mistral, T5) have a replacement character whose leading instance
+    gets stripped by decode(). ByteLevel (GPT-2), BertPreTokenizer (BERT),
+    and others do not have this issue.
+
+    Returns the marker character, or None if decode() is safe for single
+    tokens.
+    """
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    if backend is None:
+        return None
+    try:
+        config = json.loads(backend.to_str())
+    except Exception:
+        return None
+    pre = config.get("pre_tokenizer", {})
+    pre_type = pre.get("type")
+    if pre_type == "Metaspace":
+        return pre.get("replacement", "▁")
+    if pre_type == "Sequence":
+        for sub in pre.get("pretokenizers", []):
+            if sub.get("type") == "Metaspace":
+                return sub.get("replacement", "▁")
+    return None
 
 
-def _restore_leading_spaces(raw_token: str, token_str: str) -> str:
+def _restore_leading_spaces(raw_token: str, token_str: str, marker: str) -> str:
     """Restore leading spaces that decode() stripped from a raw vocab piece."""
     num_markers = 0
     for ch in raw_token:
-        if ch not in _LEADING_SPACE_MARKERS:
+        if ch != marker:
             break
         num_markers += 1
     if num_markers == 0:
@@ -120,9 +148,12 @@ def convert_ids_list_to_tokens(
     """
     if not token_ids:
         return []
+    marker = _get_leading_space_marker(tokenizer)
+    if marker is None:
+        return [tokenizer.decode([tid]) or "" for tid in token_ids]
     raw_tokens = tokenizer.convert_ids_to_tokens(token_ids)
     return [
-        _restore_leading_spaces(raw, tokenizer.decode([tid]) or "")
+        _restore_leading_spaces(raw, tokenizer.decode([tid]) or "", marker)
         for tid, raw in zip(token_ids, raw_tokens)
     ]
 
