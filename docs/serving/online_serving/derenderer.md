@@ -17,8 +17,11 @@ endpoints.
                 render                 generate                derender
   request  ───────────────▶  token_ids  ─────────▶  token_ids  ──────────▶  response
  (chat /            (GPU less)          (token-in /            (GPU less)   (OpenAI
- completion)                            token-out engine)                   compatible)
+ completion)            │               token-out engine)          ▲        compatible)
+                        └─────────────── request + prompt_tokens ──┘
 ```
+
+The derender step needs more than the engine's `token_ids`. It also consumes the original `chat_request`/`completion_request` and `prompt_tokens` carried over from the render step (see [Request format](#request-format)) so the tool and reasoning parsers have the context they need.
 
 ## API Reference
 
@@ -33,23 +36,21 @@ Each request wraps the engine's `GenerateResponse`(s) together with the caller m
 
 `/v1/chat/completions/derender`:
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `model` | `str` | Served model name |
-| `generate_response` | `GenerateResponse` | The complete token-in / token-out engine response to derender |
-| `prompt_tokens` | `int \| None` | Prompt token count for usage accounting. Defaults to `0` when omitted. The caller already has this from the `/render` step |
-| `chat_request` | `ChatCompletionRequest \| None` | The original (post `adjust_request`) request from `/render`. Required for tool/reasoning parsing so parsers receive `tools`, `tool_choice` and related context. When omitted, the endpoint falls back to plain detokenization |
+??? code
+
+    ```python
+    --8<-- "vllm/entrypoints/scale_out/token_in_token_out/protocol.py:derender-chat-request"
+    ```
 
 `/v1/completions/derender`:
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `model` | `str` | Served model name |
-| `generate_responses` | `list[GenerateResponse]` | One response per prompt, parallel to the `list[GenerateRequest]` returned by `/v1/completions/render` |
-| `prompt_tokens` | `list[int] \| None` | One prompt token count per response. Each defaults to `0`. If provided, its length must equal `len(generate_responses)` |
-| `completion_request` | `CompletionRequest \| None` | The original (post `adjust_request`) request from `/render`, mirroring `chat_request` |
+??? code
 
-The caller supplied token structures are validated against server resource bounds (`VLLM_MAX_N_SEQUENCES`, `max_model_len`, `max_logprobs`) before any `tokenizer.decode()` or parser runs, so oversized payloads are rejected with a `400` rather than exhausting CPU/memory.
+    ```python
+    --8<-- "vllm/entrypoints/scale_out/token_in_token_out/protocol.py:derender-completion-request"
+    ```
+
+Oversized payloads are rejected with a `400` before any `tokenizer.decode()` or parser runs.
 
 ## Example
 
