@@ -11,6 +11,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     USE_FP32_REDUCE_DEFAULT,
     get_marlin_input_dtype,
     marlin_make_workspace_new,
+    marlin_moe_padded_intermediate,
     marlin_pad_dim,
     marlin_pad_qweight,
     marlin_pad_scales,
@@ -610,6 +611,16 @@ def prepare_moe_mxfp4_layer_for_marlin(
     e = w13.shape[0]
     n = w13.shape[1] // 2  # intermediate_size_per_partition
     k = w13.shape[2] * 2  # hidden_size
+
+    padded_n = marlin_moe_padded_intermediate(n, group_size)
+    if padded_n != n:
+        w13 = torch.nn.functional.pad(w13, (0, 0, 0, 2 * (padded_n - n)))
+        w13_scale = torch.nn.functional.pad(w13_scale, (0, 0, 0, 2 * (padded_n - n)))
+        w2 = torch.nn.functional.pad(w2, (0, padded_n // 2 - w2.shape[-1]))
+        w2_scale = torch.nn.functional.pad(
+            w2_scale, (0, padded_n // group_size - w2_scale.shape[-1])
+        )
+        n = padded_n
 
     device = w13.device
     param_dtype = layer.params_dtype
