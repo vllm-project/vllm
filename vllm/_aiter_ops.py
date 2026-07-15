@@ -1049,6 +1049,10 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
 
+    original_shape = x.shape
+    x = x.reshape(-1, original_shape[-1])
+    residual = residual.reshape(-1, original_shape[-1])
+
     (x_quant, x_quant_scales), _, _, res = fused_rms_fp8_group_quant(
         x,
         weight,
@@ -1062,7 +1066,7 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
     )
     return (
         x_quant,
-        res,
+        res.reshape(original_shape),
         x_quant_scales,
     )
 
@@ -1074,10 +1078,12 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake(
     variance_epsilon: float,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    M, N = x.shape
+    original_shape = x.shape
+    x_2d = x.reshape(-1, original_shape[-1])
+    M, N = x_2d.shape
     scale_shape = (M, (N + group_size - 1) // group_size)
     return (
-        torch.empty_like(x, dtype=FP8_DTYPE, device=x.device),
+        torch.empty_like(x_2d, dtype=FP8_DTYPE, device=x.device),
         torch.empty_like(residual, device=residual.device),
         torch.empty(scale_shape, dtype=torch.float32, device=x.device),
     )

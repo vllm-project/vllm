@@ -218,6 +218,30 @@ def test_vllm_c_fused_add_rms_norm_accepts_nd_input():
     assert_close(ir.ops.fused_add_rms_norm, residual, ref_residual)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="AITER is only supported on ROCm",
+)
+def test_aiter_fused_add_rms_norm_accepts_nd_input():
+    torch.set_default_device(current_platform.device_type)
+    impl = ir.ops.fused_add_rms_norm.impls["aiter"]
+    if not impl.supported:
+        pytest.skip("AITER impl not supported on this platform")
+
+    x = torch.randn(1, 8, 4096, dtype=torch.bfloat16)
+    x_residual = torch.randn_like(x)
+    weight = torch.randn(4096, dtype=torch.bfloat16)
+    epsilon = 1e-6
+
+    output, residual = impl.impl_fn(x, x_residual, weight, epsilon)
+    ref_output, ref_residual = fused_add_rms_norm_native(x, x_residual, weight, epsilon)
+
+    assert output.shape == x.shape
+    assert residual.shape == x_residual.shape
+    assert_close(ir.ops.fused_add_rms_norm, output, ref_output)
+    assert_close(ir.ops.fused_add_rms_norm, residual, ref_residual)
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("n_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
