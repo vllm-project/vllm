@@ -145,6 +145,7 @@ _TEXT_GENERATION_MODELS = {
     # For decapoda-research/llama-*
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
     "LongcatFlashForCausalLM": ("longcat_flash", "LongcatFlashForCausalLM"),
+    "LongcatNextForCausalLM": ("longcat_next", "LongcatNextForCausalLM"),
     "LongcatFlashNgramForCausalLM": (
         "longcat_flash_ngram",
         "LongcatFlashNgramForCausalLM",
