@@ -30,6 +30,8 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic128Sym,
+    kFp8Static128BlockSym,
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
@@ -161,6 +163,99 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
             ]
 
 
+class TestAllReduceRMSNormBlockQuantFP8Model(torch.nn.Module):
+    activation_quant_key = kFp8Dynamic128Sym
+    weight_quant_key = kFp8Static128BlockSym
+
+    def __init__(self, hidden_size=128, eps=1e-6):
+        super().__init__()
+        self.vllm_config = get_current_vllm_config()
+        self.hidden_size = hidden_size
+        self.eps = eps
+        self.norm = [RMSNorm(hidden_size, eps) for i in range(4)]
+        self.fp8_linear_layers = [
+            TestFP8Layer(
+                weight_shape=(hidden_size, hidden_size),
+                activation_quant_key=self.activation_quant_key,
+                weight_quant_key=self.weight_quant_key,
+                input_dtype=self.vllm_config.model_config.dtype,
+            )
+            for i in range(3)
+        ]
+
+    def forward(self, hidden_states):
+        # avoid having graph input be an arg to a pattern directly
+        z = torch.relu(hidden_states)
+        x = resid = tensor_model_parallel_all_reduce(z)
+        y = self.norm[0](x)
+
+        z2 = self.fp8_linear_layers[0](y)
+
+        x2 = tensor_model_parallel_all_reduce(z2)
+        y2, resid = self.norm[1](x2, resid)
+
+        z3 = self.fp8_linear_layers[1](y2)
+
+        x3 = tensor_model_parallel_all_reduce(z3)
+        y3, resid = self.norm[2](x3, resid)  # use resid here
+
+        z4 = self.fp8_linear_layers[2](y3)
+        x4 = tensor_model_parallel_all_reduce(z4)
+        y4, resid = self.norm[3](x4, resid)  # use resid here
+        return y4
+
+    def ops_in_model_after(self):
+        return [
+            torch.ops.vllm.all_gather.default,
+            torch.ops.vllm.reduce_scatter.default,
+        ]
+
+    def ops_count_after(self, op) -> int:
+        quant_enabled = any(
+            layer.is_quant_fp8_enabled() for layer in self.fp8_linear_layers
+        )
+        if op == torch.ops.vllm.all_gather.default:
+            if quant_enabled:
+                # 3 of the 4 layers' rms_norm outputs feed into block-FP8
+                # quant (quant + scale, each independently all_gather'd);
+                # the last layer's output (y4) is not quantized and matches
+                # the plain RMSNorm SP pattern (single all_gather).
+                # Total: 3*2 + 1*1 = 7.
+                return 7
+            # quant_fp8 CustomOp disabled: quantization decomposes into
+            # primitive ops instead of the fused per_token_group_fp8_quant
+            # op, so the block-FP8 SP pattern never matches; only the
+            # plain RMSNorm SP pattern matches (one all_gather per layer).
+            return 4
+        return 4
+
+    def ops_in_model_before(self):
+        return [
+            torch.ops.vllm.all_reduce.default,
+        ]
+
+    def ops_in_model(self):
+        quant_enabled = any(
+            layer.is_quant_fp8_enabled() for layer in self.fp8_linear_layers
+        )
+        if (
+            quant_enabled
+            and self.vllm_config.compilation_config.pass_config.fuse_norm_quant
+            and hasattr(torch.ops._C, "rms_norm_per_block_quant")
+        ):
+            return [torch.ops._C.rms_norm_per_block_quant.default]
+        quant_ops = (
+            [torch.ops._C.per_token_group_fp8_quant.default]
+            if quant_enabled
+            else [torch.ops.aten.clamp_min]
+        )
+        return [
+            torch.ops.vllm_ir.rms_norm,
+            torch.ops.vllm_ir.fused_add_rms_norm,
+            *quant_ops,
+        ]
+
+
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "test_model_cls, custom_ops",
@@ -181,6 +276,58 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
 @pytest.mark.parametrize("dynamic", [False, True])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
 def test_sequence_parallelism_pass(
+    test_model_cls: type[torch.nn.Module],
+    custom_ops: str,
+    batch_size: int,
+    seq_len: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    fuse_norm_quant: bool,
+    dynamic: bool,
+):
+    num_processes = 2
+
+    def run_torch_spawn(fn, nprocs):
+        # need to use torch.mp.spawn otherwise will have problems with
+        # torch.distributed and cuda
+        torch.multiprocessing.spawn(
+            fn,
+            args=(
+                num_processes,
+                test_model_cls,
+                custom_ops,
+                batch_size,
+                seq_len,
+                hidden_size,
+                dtype,
+                fuse_norm_quant,
+                dynamic,
+            ),
+            nprocs=nprocs,
+        )
+
+    run_torch_spawn(sequence_parallelism_pass_on_test_model, num_processes)
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize(
+    "test_model_cls, custom_ops",
+    [
+        (TestAllReduceRMSNormBlockQuantFP8Model, "+rms_norm,+quant_fp8"),
+        (TestAllReduceRMSNormBlockQuantFP8Model, "+rms_norm,-quant_fp8"),
+        (TestAllReduceRMSNormBlockQuantFP8Model, "-rms_norm,+quant_fp8"),
+        (TestAllReduceRMSNormBlockQuantFP8Model, "-rms_norm,-quant_fp8"),
+    ],
+)
+@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("seq_len", [16])
+# block quant requires hidden_size to be a multiple of the 128 group size
+@pytest.mark.parametrize("hidden_size", [128])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("fuse_norm_quant", [True, False])
+@pytest.mark.parametrize("dynamic", [False, True])
+@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["xpu"], reason="Only test on XPU")
+def test_sequence_parallelism_pass_block_fp8(
     test_model_cls: type[torch.nn.Module],
     custom_ops: str,
     batch_size: int,
@@ -337,7 +484,10 @@ def sequence_parallelism_pass_on_test_model(
         # In post-nodes, reduce scatter and all gather should be there,
         # all reduce should not
         for op in model.ops_in_model_after():
-            assert backend.op_count(op, before=False) == 4
+            expected_count = (
+                model.ops_count_after(op) if hasattr(model, "ops_count_after") else 4
+            )
+            assert backend.op_count(op, before=False) == expected_count
 
         for op in model.ops_in_model():
             assert backend.op_count(op, before=False) > 0
