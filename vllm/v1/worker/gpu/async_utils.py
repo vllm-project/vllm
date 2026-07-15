@@ -5,7 +5,12 @@ import contextlib
 import numpy as np
 import torch
 
-from vllm.v1.outputs import AsyncModelRunnerOutput, LogprobsTensors, ModelRunnerOutput
+from vllm.v1.outputs import (
+    AsyncModelRunnerOutput,
+    LogprobsTensors,
+    ModelRunnerOutput,
+    PoolerOutput,
+)
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
 
@@ -74,7 +79,7 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
     def __init__(
         self,
         model_runner_output: ModelRunnerOutput,
-        pooler_output: torch.Tensor,
+        pooler_output: PoolerOutput,
         is_valid: torch.Tensor | None,
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
@@ -87,7 +92,15 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
-            self.pooler_output_cpu = self.pooler_output.to("cpu", non_blocking=True)
+            if isinstance(self.pooler_output, torch.Tensor):
+                self.pooler_output_cpu: PoolerOutput = self.pooler_output.to(
+                    "cpu", non_blocking=True
+                )
+            else:
+                self.pooler_output_cpu = [
+                    None if output is None else output.to("cpu", non_blocking=True)
+                    for output in self.pooler_output
+                ]
             if self.is_valid is not None:
                 self.is_valid_cpu = self.is_valid.to("cpu", non_blocking=True)
             else:
@@ -95,7 +108,10 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
             self.copy_event.record(copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:
-        pooler_output = list(self.pooler_output_cpu.unbind(dim=0))
+        if isinstance(self.pooler_output_cpu, torch.Tensor):
+            pooler_output = list(self.pooler_output_cpu.unbind(dim=0))
+        else:
+            pooler_output = self.pooler_output_cpu
         self.copy_event.synchronize()
         if self.is_valid_cpu is not None:
             is_valid_cpu = self.is_valid_cpu.tolist()

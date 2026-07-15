@@ -152,6 +152,9 @@ class ModelState(ABC):
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         raise NotImplementedError
 
+    def get_additional_attn_groups(self) -> list[AttentionGroup]:
+        return []
+
     @abstractmethod
     def prepare_attn(
         self,

@@ -77,11 +77,42 @@ def get_shared_kv_cache_layers(vllm_config: VllmConfig):
     }
 
 
+def create_attn_groups(
+    vllm_config: VllmConfig,
+    layer_specs: Mapping[str, KVCacheSpec],
+    kv_cache_group_id: int,
+) -> list[AttentionGroup]:
+    layer_names = list(layer_specs)
+    layer_type = cast(type[Any], AttentionLayerBase)
+    attn_layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
+    group_map: dict[tuple[tuple[str, str], KVCacheSpec, int], AttentionGroup] = {}
+    group_order: list[tuple[tuple[str, str], KVCacheSpec, int]] = []
+
+    for layer_name in layer_names:
+        attn_backend = attn_layers[layer_name].get_attn_backend()
+        layer_kv_cache_spec = layer_specs[layer_name]
+        # Split on per-rank num_heads_q so layers with different Q-head
+        # counts (e.g. a spec-decode draft head and its target) get separate
+        # metadata builders.
+        num_heads_q = getattr(attn_layers[layer_name], "num_heads", 0)
+        key = (attn_backend.full_cls_name(), layer_kv_cache_spec, num_heads_q)
+        if key not in group_map:
+            group_map[key] = AttentionGroup(
+                attn_backend, [layer_name], layer_kv_cache_spec, kv_cache_group_id
+            )
+            group_order.append(key)
+        else:
+            group_map[key].layer_names.append(layer_name)
+
+    return [group_map[key] for key in group_order]
+
+
 def init_attn_backend(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
     device: torch.device,
     active_layer_names: set[str] | None = None,
+    additional_attn_groups: Sequence[AttentionGroup] = (),
 ) -> tuple[list[list[AttentionGroup]], AttentionCGSupportInfo, list[int]]:
     # Phase 1: discover attention groups for each kv cache group.
     attn_groups: list[list[AttentionGroup]] = []
@@ -100,33 +131,17 @@ def init_attn_backend(
         if active_layer_names is not None:
             layer_names = list(active_layer_names.intersection(layer_names))
 
-        layer_type = cast(type[Any], AttentionLayerBase)
-        attn_layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
-
-        group_map: dict[tuple[tuple[str, str], KVCacheSpec, int], AttentionGroup] = {}
-        group_order: list[tuple[tuple[str, str], KVCacheSpec, int]] = []
-
-        for layer_name in layer_names:
-            attn_backend = attn_layers[layer_name].get_attn_backend()
-
-            layer_kv_cache_spec: KVCacheSpec = kv_cache_group_spec.kv_cache_spec
-            if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
-
-            # Split on per-rank num_heads_q so layers with different Q-head
-            # counts (e.g. a spec-decode draft head and its target) get separate
-            # metadata builders.
-            num_heads_q = getattr(attn_layers[layer_name], "num_heads", 0)
-            key = (attn_backend.full_cls_name(), layer_kv_cache_spec, num_heads_q)
-            if key not in group_map:
-                group_map[key] = AttentionGroup(
-                    attn_backend, [layer_name], layer_kv_cache_spec, kv_cache_group_id
-                )
-                group_order.append(key)
-            else:
-                group_map[key].layer_names.append(layer_name)
-
-        attn_groups.append([group_map[key] for key in group_order])
+        kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+        if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+            layer_specs = {
+                layer_name: kv_cache_spec.kv_cache_specs[layer_name]
+                for layer_name in layer_names
+            }
+        else:
+            layer_specs = {layer_name: kv_cache_spec for layer_name in layer_names}
+        attn_groups.append(
+            create_attn_groups(vllm_config, layer_specs, kv_cache_group_id)
+        )
 
     # Phase 2: pick a kernel block size per kv cache group that is supported
     # by all backends within that group.
@@ -136,9 +151,12 @@ def init_attn_backend(
     attn_backend_workspace: torch.Tensor | None = None
     min_cg_support = AttentionCGSupport.ALWAYS
     min_cg_attn_backend = None
-    for kv_cache_group_id, groups in enumerate(attn_groups):
+    group_sets = [*attn_groups, list(additional_attn_groups)]
+    for kv_cache_group_id, groups in enumerate(group_sets):
         kernel_block_size = None
-        if kv_cache_group_id < len(kernel_block_sizes):
+        if kv_cache_group_id < len(attn_groups) and kv_cache_group_id < len(
+            kernel_block_sizes
+        ):
             kernel_block_size = kernel_block_sizes[kv_cache_group_id]
         for group in groups:
             group.create_metadata_builders(
