@@ -23,6 +23,7 @@ class MockModelConfig:
         {"temperature": 0.7},
         {"temperature": 0.0},
         {"min_p": 0.1},
+        {"p_less": True},
         {"seed": 42},
         {"min_tokens": 5},
         {"logit_bias": {0: 1.0}},
