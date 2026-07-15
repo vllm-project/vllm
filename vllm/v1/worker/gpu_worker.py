@@ -487,9 +487,6 @@ class Worker(WorkerBase):
         ) as profile_result:
             self.model_runner.profile_run()
 
-            # Capture both peak and current allocation at the same point
-            # (after profile_run, before cudagraph) so transient headroom
-            # is measured consistently without cudagraph interference.
             stats = torch.accelerator.memory_stats(self.device)
             profile_torch_peak = stats.get("allocated_bytes.all.peak", 0)
             profile_torch_allocated = stats.get("allocated_bytes.all.current", 0)
@@ -512,10 +509,8 @@ class Worker(WorkerBase):
         profile_result.torch_peak_increase = (
             profile_torch_peak - profile_result.before_profile.torch_peak
         )
-        # transient_peak_headroom = peak - current (both pre-cudagraph).
-        # This is the extra memory needed at peak above the persistent level.
-        # Using torch_peak_increase (peak - before_profile) would double-count
-        # persistent torch allocations already included in total_consumed.
+        # Only the transient headroom above the persistent level; using
+        # torch_peak_increase would double-count what total_consumed covers.
         transient_peak_headroom = profile_torch_peak - profile_torch_allocated
         profile_result.non_kv_cache_memory = (
             profile_result.total_consumed + transient_peak_headroom

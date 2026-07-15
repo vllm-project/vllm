@@ -310,19 +310,15 @@ def memory_profiling(
     result.non_torch_increase = diff_from_create.non_torch_memory
     result.profile_time = diff_profile.timestamp
 
-    # total_consumed measures all GPU memory used between before_create and
-    # after_profile via the CUDA driver's mem_get_info(). This is reliable
-    # even when pluggable allocators (e.g. cumem) bypass PyTorch's
-    # memory_reserved() tracking, which can make non_torch_memory negative.
+    # Measure total consumption via mem_get_info() instead of
+    # memory_reserved(), which goes negative when pluggable allocators
+    # (e.g. cumem) bypass PyTorch's tracking.
     result.total_consumed = (
         result.before_create.free_memory - result.after_profile.free_memory
     )
 
-    # total_consumed already includes persistent torch allocations still alive
-    # at after_profile. The transient peak headroom is the extra memory needed
-    # at peak above the current persistent level: torch_peak - torch_allocated
-    # (both from after_profile). Using torch_peak_increase (peak - before)
-    # would double-count persistent torch allocations created during profiling.
+    # total_consumed already covers persistent torch allocations; add only the
+    # transient peak headroom to avoid double-counting.
     transient_peak_headroom = (
         result.after_profile.torch_peak - result.after_profile.torch_allocated
     )
