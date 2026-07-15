@@ -4082,11 +4082,6 @@ class GPUModelRunner(
         elif spec_config.method == "medusa":
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, MedusaProposer)
-            #print('weishu debug: sample_hidden_states', sample_hidden_states.shape)
-            #print('weishu debug: sampled_token_ids', len(sampled_token_ids), sampled_token_ids)
-            #print('weishu debug: self.inputs_embeds.gpu.shape', self.inputs_embeds.gpu.shape)
-            #print('weishu debug: num_scheduled_tokens', num_scheduled_tokens)
-            #print('weishu debug: spec_decode_metadata', spec_decode_metadata)
 
             if sample_hidden_states.shape[0] == len(sampled_token_ids):
                 # The input to the target model does not include draft tokens.
@@ -4114,7 +4109,6 @@ class GPUModelRunner(
                 sampling_metadata=sampling_metadata,
                 slot_mappings=slot_mappings,
             )
-            # print('weishu debug: draft_token_ids', draft_token_ids)
         elif spec_config.uses_extract_hidden_states():
             assert isinstance(self.drafter, ExtractHiddenStatesProposer)
             assert isinstance(sampled_token_ids, torch.Tensor), (
