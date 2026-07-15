@@ -812,15 +812,25 @@ class GPUModelRunner(
             # identical position IDs, making M-RoPE functionally equivalent to
             # 1D-RoPE.
             # See page 5 of https://arxiv.org/abs/2409.12191
+            # Add headroom for speculative decode tokens which are scheduled
+            # on top of the base token budget.
+            mrope_buf_size = self.max_num_tokens + 1
+            if self.speculative_config:
+                mrope_buf_size += self.num_spec_tokens * self.max_num_reqs
             self.mrope_positions = self._make_buffer(
-                (3, self.max_num_tokens + 1), dtype=torch.int64
+                (3, mrope_buf_size), dtype=torch.int64
             )
 
         # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
         if self.uses_xdrope_dim > 0:
             # Similar to mrope but use assigned dimension number for RoPE, 4 as default.
+            # Add headroom for speculative decode tokens which are scheduled
+            # on top of the base token budget.
+            xdrope_buf_size = self.max_num_tokens + 1
+            if self.speculative_config:
+                xdrope_buf_size += self.num_spec_tokens * self.max_num_reqs
             self.xdrope_positions = self._make_buffer(
-                (self.uses_xdrope_dim, self.max_num_tokens + 1), dtype=torch.int64
+                (self.uses_xdrope_dim, xdrope_buf_size), dtype=torch.int64
             )
 
         # None in the first PP rank. The rest are set after load_model.
