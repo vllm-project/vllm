@@ -662,6 +662,457 @@ def test_gptq_vs_awq_forward_agree(E, K, N, top_k, group_size, num_tokens):
     )
 
 
+# ---------------------------------------------------------------------------
+# EP (Expert Parallelism) tests
+# ---------------------------------------------------------------------------
+
+# (E, K, N, top_k, group_size, num_tokens, ep_size)
+EP_CONFIGS = [
+    pytest.param(4, 64, 32, 2, 32, 8, 2, id="E4-ep2"),
+    pytest.param(8, 64, 32, 2, 32, 16, 4, id="E8-ep4"),
+    pytest.param(8, 128, 64, 2, 64, 16, 2, id="E8-ep2"),
+]
+
+
+def _make_expert_map(global_num_experts: int, start: int, end: int) -> torch.Tensor:
+    """Build expert_map for a rank that owns experts [start, end)."""
+    expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32, device=device)
+    expert_map[start:end] = torch.arange(end - start, dtype=torch.int32, device=device)
+    return expert_map
+
+
+def _run_emulation_forward_ep(
+    experts,
+    w13_bf16,
+    w2_bf16,
+    hidden_states,
+    topk_weights,
+    topk_ids,
+    global_num_experts,
+    expert_map,
+):
+    """Run forward with EP expert_map; returns output tensor."""
+    T, K = hidden_states.shape
+    N = w2_bf16.shape[2]
+    ws13_size = T * topk_ids.shape[1] * max(N, K)
+    ws2_size = T * topk_ids.shape[1] * max(2 * N, K)
+    workspace13 = torch.zeros(ws13_size, dtype=hidden_states.dtype, device=device)
+    workspace2 = torch.zeros(ws2_size, dtype=hidden_states.dtype, device=device)
+    output = torch.zeros(T, K, dtype=hidden_states.dtype, device=device)
+    experts.apply(
+        output=output,
+        hidden_states=hidden_states,
+        w1=w13_bf16,
+        w2=w2_bf16,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        activation=MoEActivation.SILU,
+        global_num_experts=global_num_experts,
+        expert_map=expert_map,
+        a1q_scale=None,
+        a2_scale=None,
+        workspace13=workspace13,
+        workspace2=workspace2,
+        expert_tokens_meta=None,
+        apply_router_weight_on_input=False,
+    )
+    return output
+
+
+@pytest.mark.parametrize("E, K, N, top_k, group_size, num_tokens, ep_size", EP_CONFIGS)
+@pytest.mark.parametrize("fmt", ["gptq", "awq"])
+def test_ep_output_matches_no_ep(E, K, N, top_k, group_size, num_tokens, ep_size, fmt):
+    """EP simulation: sum of per-rank outputs equals the no-EP forward pass."""
+    assert E % ep_size == 0
+    num_local = E // ep_size
+
+    torch.manual_seed(20)
+
+    # Build all expert weights in BF16 (no-EP reference)
+    w13_fp = torch.randn(E, K, 2 * N, dtype=torch.float16, device=device) * 0.02
+    w2_fp = torch.randn(E, N, K, dtype=torch.float16, device=device) * 0.02
+
+    packed13_list, scales13_list, packed2_list, scales2_list = [], [], [], []
+    for e in range(E):
+        q13, s13 = _quantize_sym(w13_fp[e].float(), group_size)
+        q2, s2 = _quantize_sym(w2_fp[e].float(), group_size)
+        if fmt == "gptq":
+            packed13_list.append(gptq_pack(q13, 4, K, 2 * N))
+            packed2_list.append(gptq_pack(q2, 4, N, K))
+        else:
+            packed13_list.append(awq_pack(q13, 4, K, 2 * N))
+            packed2_list.append(awq_pack(q2, 4, N, K))
+        scales13_list.append(s13)
+        scales2_list.append(s2)
+
+    process_fn = (
+        _process_weights_emulation_gptq
+        if fmt == "gptq"
+        else _process_weights_emulation_awq
+    )
+    res = process_fn(
+        torch.stack(packed13_list),
+        torch.stack(packed2_list),
+        torch.stack(scales13_list),
+        torch.stack(scales2_list),
+        None,
+        None,
+    )
+    w13_all, w2_all = res[0], res[1]  # [E, 2N, K], [E, K, N]
+
+    hidden_states = torch.randn(num_tokens, K, dtype=torch.bfloat16, device=device)
+    topk_weights = torch.softmax(
+        torch.randn(num_tokens, top_k, dtype=torch.float32, device=device), dim=-1
+    )
+    topk_ids = torch.stack(
+        [torch.randperm(E, device=device)[:top_k] for _ in range(num_tokens)]
+    ).to(torch.int32)
+
+    # No-EP reference
+    dummy_scale = torch.ones(1, dtype=torch.float16, device=device)
+    moe_config_full = FusedMoEConfig(
+        num_experts=E,
+        experts_per_token=top_k,
+        hidden_dim=K,
+        intermediate_size=N,
+        num_local_experts=E,
+        num_logical_experts=E,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=MoEActivation.SILU,
+        in_dtype=torch.bfloat16,
+        device=device,
+        routing_method=RoutingMethodType.TopK,
+        max_num_tokens=512,
+    )
+    experts_ref = Int4EmulationTritonExperts(
+        moe_config_full, int4_w4a16_moe_quant_config(dummy_scale, dummy_scale)
+    )
+    out_no_ep = _run_emulation_forward(
+        experts_ref, w13_all, w2_all, hidden_states, topk_weights, topk_ids, E, K, N
+    )
+
+    # EP simulation: sum contributions from each rank
+    out_ep_sum = torch.zeros(num_tokens, K, dtype=torch.bfloat16, device=device)
+    for rank in range(ep_size):
+        start = rank * num_local
+        end = start + num_local
+        expert_map = _make_expert_map(E, start, end)
+        moe_config_ep = FusedMoEConfig(
+            num_experts=E,
+            experts_per_token=top_k,
+            hidden_dim=K,
+            intermediate_size=N,
+            num_local_experts=num_local,
+            num_logical_experts=E,
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            activation=MoEActivation.SILU,
+            in_dtype=torch.bfloat16,
+            device=device,
+            routing_method=RoutingMethodType.TopK,
+            max_num_tokens=512,
+        )
+        experts_ep = Int4EmulationTritonExperts(
+            moe_config_ep, int4_w4a16_moe_quant_config(dummy_scale, dummy_scale)
+        )
+        out_rank = _run_emulation_forward_ep(
+            experts_ep,
+            w13_all[start:end],
+            w2_all[start:end],
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            global_num_experts=E,
+            expert_map=expert_map,
+        )
+        out_ep_sum = out_ep_sum + out_rank
+
+    assert torch.allclose(out_ep_sum, out_no_ep, atol=1e-3), (
+        f"[{fmt}] EP sum max diff: {(out_ep_sum - out_no_ep).abs().max().item():.6f}"
+    )
+
+
+@pytest.mark.parametrize("E, K, N, top_k, group_size, num_tokens, ep_size", EP_CONFIGS)
+def test_ep_gptq_awq_agree(E, K, N, top_k, group_size, num_tokens, ep_size):
+    """With EP, GPTQ and AWQ emulation produce the same outputs per rank."""
+    assert E % ep_size == 0
+    num_local = E // ep_size
+
+    torch.manual_seed(21)
+    w13_fp = torch.randn(E, K, 2 * N, dtype=torch.float16, device=device) * 0.02
+    w2_fp = torch.randn(E, N, K, dtype=torch.float16, device=device) * 0.02
+
+    g13_list, g13s_list, g2_list, g2s_list = [], [], [], []
+    a13_list, a13s_list, a2_list, a2s_list = [], [], [], []
+    for e in range(E):
+        q13, s13 = _quantize_sym(w13_fp[e].float(), group_size)
+        q2, s2 = _quantize_sym(w2_fp[e].float(), group_size)
+        g13_list.append(gptq_pack(q13, 4, K, 2 * N))
+        a13_list.append(awq_pack(q13, 4, K, 2 * N))
+        g13s_list.append(s13)
+        a13s_list.append(s13.clone())
+        g2_list.append(gptq_pack(q2, 4, N, K))
+        a2_list.append(awq_pack(q2, 4, N, K))
+        g2s_list.append(s2)
+        a2s_list.append(s2.clone())
+
+    gptq_res = _process_weights_emulation_gptq(
+        torch.stack(g13_list),
+        torch.stack(g2_list),
+        torch.stack(g13s_list),
+        torch.stack(g2s_list),
+        None,
+        None,
+    )
+    awq_res = _process_weights_emulation_awq(
+        torch.stack(a13_list),
+        torch.stack(a2_list),
+        torch.stack(a13s_list),
+        torch.stack(a2s_list),
+        None,
+        None,
+    )
+    w13_gptq, w2_gptq = gptq_res[0], gptq_res[1]
+    w13_awq, w2_awq = awq_res[0], awq_res[1]
+
+    hidden_states = torch.randn(num_tokens, K, dtype=torch.bfloat16, device=device)
+    topk_weights = torch.softmax(
+        torch.randn(num_tokens, top_k, dtype=torch.float32, device=device), dim=-1
+    )
+    topk_ids = torch.stack(
+        [torch.randperm(E, device=device)[:top_k] for _ in range(num_tokens)]
+    ).to(torch.int32)
+
+    dummy_scale = torch.ones(1, dtype=torch.float16, device=device)
+
+    for rank in range(ep_size):
+        start = rank * num_local
+        end = start + num_local
+        expert_map = _make_expert_map(E, start, end)
+        moe_config_ep = FusedMoEConfig(
+            num_experts=E,
+            experts_per_token=top_k,
+            hidden_dim=K,
+            intermediate_size=N,
+            num_local_experts=num_local,
+            num_logical_experts=E,
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            activation=MoEActivation.SILU,
+            in_dtype=torch.bfloat16,
+            device=device,
+            routing_method=RoutingMethodType.TopK,
+            max_num_tokens=512,
+        )
+        experts_gptq = Int4EmulationTritonExperts(
+            moe_config_ep, int4_w4a16_moe_quant_config(dummy_scale, dummy_scale)
+        )
+        experts_awq = Int4EmulationTritonExperts(
+            moe_config_ep, int4_w4a16_moe_quant_config(dummy_scale, dummy_scale)
+        )
+        out_gptq = _run_emulation_forward_ep(
+            experts_gptq,
+            w13_gptq[start:end],
+            w2_gptq[start:end],
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            E,
+            expert_map,
+        )
+        out_awq = _run_emulation_forward_ep(
+            experts_awq,
+            w13_awq[start:end],
+            w2_awq[start:end],
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            E,
+            expert_map,
+        )
+        assert torch.allclose(out_gptq, out_awq, atol=0), (
+            f"rank={rank} max diff: {(out_gptq - out_awq).abs().max().item()}"
+        )
+
+
+@pytest.mark.parametrize("E, K, N, top_k, group_size, num_tokens, ep_size", EP_CONFIGS)
+def test_ep_partial_rank_no_active_experts(
+    E, K, N, top_k, group_size, num_tokens, ep_size
+):
+    """A rank that owns no token-selected experts produces an all-zero output."""
+    assert E % ep_size == 0
+    num_local = E // ep_size
+
+    torch.manual_seed(22)
+    w13_fp = torch.randn(E, K, 2 * N, dtype=torch.float16, device=device) * 0.02
+    w2_fp = torch.randn(E, N, K, dtype=torch.float16, device=device) * 0.02
+
+    packed13_list, scales13_list, packed2_list, scales2_list = [], [], [], []
+    for e in range(E):
+        q13, s13 = _quantize_sym(w13_fp[e].float(), group_size)
+        q2, s2 = _quantize_sym(w2_fp[e].float(), group_size)
+        packed13_list.append(gptq_pack(q13, 4, K, 2 * N))
+        packed2_list.append(gptq_pack(q2, 4, N, K))
+        scales13_list.append(s13)
+        scales2_list.append(s2)
+
+    res = _process_weights_emulation_gptq(
+        torch.stack(packed13_list),
+        torch.stack(packed2_list),
+        torch.stack(scales13_list),
+        torch.stack(scales2_list),
+        None,
+        None,
+    )
+    w13_all, w2_all = res[0], res[1]
+
+    # Force topk_ids to only use experts in [0, num_local) — rank 0's slice
+    topk_ids = torch.zeros(num_tokens, top_k, dtype=torch.int32, device=device)
+    topk_weights = torch.softmax(
+        torch.randn(num_tokens, top_k, dtype=torch.float32, device=device), dim=-1
+    )
+    hidden_states = torch.randn(num_tokens, K, dtype=torch.bfloat16, device=device)
+
+    dummy_scale = torch.ones(1, dtype=torch.float16, device=device)
+
+    # Last rank owns experts [E-num_local, E), tokens only route to [0, num_local)
+    last_rank = ep_size - 1
+    start = last_rank * num_local
+    end = E
+    expert_map = _make_expert_map(E, start, end)
+    moe_config_ep = FusedMoEConfig(
+        num_experts=E,
+        experts_per_token=top_k,
+        hidden_dim=K,
+        intermediate_size=N,
+        num_local_experts=num_local,
+        num_logical_experts=E,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=MoEActivation.SILU,
+        in_dtype=torch.bfloat16,
+        device=device,
+        routing_method=RoutingMethodType.TopK,
+        max_num_tokens=512,
+    )
+    experts_ep = Int4EmulationTritonExperts(
+        moe_config_ep, int4_w4a16_moe_quant_config(dummy_scale, dummy_scale)
+    )
+    out = _run_emulation_forward_ep(
+        experts_ep,
+        w13_all[start:end],
+        w2_all[start:end],
+        hidden_states,
+        topk_weights,
+        topk_ids,
+        E,
+        expert_map,
+    )
+    assert torch.all(out == 0), (
+        f"Expected zeros for inactive rank, got max={out.abs().max().item()}"
+    )
+
+
+@pytest.mark.parametrize("E, K, N, top_k, group_size, num_tokens, ep_size", EP_CONFIGS)
+def test_ep_sum_equals_full_forward(E, K, N, top_k, group_size, num_tokens, ep_size):
+    """With fixed routing, EP rank outputs sum to the single-rank full forward."""
+    assert E % ep_size == 0
+    num_local = E // ep_size
+
+    torch.manual_seed(23)
+    w13_fp = torch.randn(E, K, 2 * N, dtype=torch.float16, device=device) * 0.02
+    w2_fp = torch.randn(E, N, K, dtype=torch.float16, device=device) * 0.02
+
+    packed13_list, scales13_list, packed2_list, scales2_list = [], [], [], []
+    for e in range(E):
+        q13, s13 = _quantize_sym(w13_fp[e].float(), group_size)
+        q2, s2 = _quantize_sym(w2_fp[e].float(), group_size)
+        packed13_list.append(gptq_pack(q13, 4, K, 2 * N))
+        packed2_list.append(gptq_pack(q2, 4, N, K))
+        scales13_list.append(s13)
+        scales2_list.append(s2)
+
+    res = _process_weights_emulation_gptq(
+        torch.stack(packed13_list),
+        torch.stack(packed2_list),
+        torch.stack(scales13_list),
+        torch.stack(scales2_list),
+        None,
+        None,
+    )
+    w13_all, w2_all = res[0], res[1]
+
+    # Fix routing so every token uses exactly 2 consecutive experts (round-robin)
+    hidden_states = torch.randn(num_tokens, K, dtype=torch.bfloat16, device=device)
+    topk_ids = torch.stack(
+        [
+            torch.tensor([(t * top_k + k) % E for k in range(top_k)], dtype=torch.int32)
+            for t in range(num_tokens)
+        ]
+    ).to(device)
+    topk_weights = torch.full((num_tokens, top_k), 1.0 / top_k, device=device)
+
+    dummy_scale = torch.ones(1, dtype=torch.float16, device=device)
+
+    # Full (no-EP) reference
+    moe_config_full = FusedMoEConfig(
+        num_experts=E,
+        experts_per_token=top_k,
+        hidden_dim=K,
+        intermediate_size=N,
+        num_local_experts=E,
+        num_logical_experts=E,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=MoEActivation.SILU,
+        in_dtype=torch.bfloat16,
+        device=device,
+        routing_method=RoutingMethodType.TopK,
+        max_num_tokens=512,
+    )
+    experts_full = Int4EmulationTritonExperts(
+        moe_config_full, int4_w4a16_moe_quant_config(dummy_scale, dummy_scale)
+    )
+    out_full = _run_emulation_forward(
+        experts_full, w13_all, w2_all, hidden_states, topk_weights, topk_ids, E, K, N
+    )
+
+    # EP sum
+    out_ep_sum = torch.zeros(num_tokens, K, dtype=torch.bfloat16, device=device)
+    for rank in range(ep_size):
+        start = rank * num_local
+        end = start + num_local
+        expert_map = _make_expert_map(E, start, end)
+        moe_config_ep = FusedMoEConfig(
+            num_experts=E,
+            experts_per_token=top_k,
+            hidden_dim=K,
+            intermediate_size=N,
+            num_local_experts=num_local,
+            num_logical_experts=E,
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            activation=MoEActivation.SILU,
+            in_dtype=torch.bfloat16,
+            device=device,
+            routing_method=RoutingMethodType.TopK,
+            max_num_tokens=512,
+        )
+        experts_ep = Int4EmulationTritonExperts(
+            moe_config_ep, int4_w4a16_moe_quant_config(dummy_scale, dummy_scale)
+        )
+        out_rank = _run_emulation_forward_ep(
+            experts_ep,
+            w13_all[start:end],
+            w2_all[start:end],
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            E,
+            expert_map,
+        )
+        out_ep_sum = out_ep_sum + out_rank
+
+    assert torch.allclose(out_ep_sum, out_full, atol=1e-3), (
+        f"EP sum max diff: {(out_ep_sum - out_full).abs().max().item():.6f}"
+    )
+
+
 @pytest.mark.parametrize("E, K, N, top_k, group_size, num_tokens", E2E_CONFIGS)
 @pytest.mark.parametrize("fmt", ["gptq", "awq"])
 def test_emulation_output_close_to_bf16_reference(
