@@ -206,18 +206,18 @@ where
             .set_serving::<grpc::GenerateServer<grpc::GenerateServiceImpl>>()
             .await;
         health_reporter
-            .set_serving::<grpc::EngineServer<grpc::EngineServiceImpl>>()
+            .set_serving::<grpc::ControlServer<grpc::ControlServiceImpl>>()
             .await;
         let generate_service =
             grpc::GenerateServer::new(grpc::GenerateServiceImpl::new(state.clone()));
-        let engine_service = grpc::EngineServer::new(grpc::EngineServiceImpl::new());
+        let control_service = grpc::ControlServer::new(grpc::ControlServiceImpl::new());
         let svc = TonicServer::builder()
             .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
             .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
             .layer(middleware::request_runtime_layer(state.clone()))
             .add_service(health_service)
             .add_service(generate_service)
-            .add_service(engine_service);
+            .add_service(control_service);
         info!(%addr, tls = grpc_tls.is_some(), "starting gRPC server");
         Some((grpc_listener, svc, grpc_tls))
     } else {

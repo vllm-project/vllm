@@ -21,7 +21,7 @@ pub mod pb {
     tonic::include_proto!("vllm");
 }
 
-pub use pb::engine_server::EngineServer;
+pub use pb::control_server::ControlServer;
 pub use pb::generate_server::GenerateServer;
 
 #[cfg(test)]
@@ -40,9 +40,9 @@ impl GenerateServiceImpl {
 
 /// Unimplemented control-plane service registered on the existing gRPC listener.
 #[derive(Default)]
-pub struct EngineServiceImpl;
+pub struct ControlServiceImpl;
 
-impl EngineServiceImpl {
+impl ControlServiceImpl {
     pub fn new() -> Self {
         Self
     }
@@ -165,7 +165,7 @@ impl pb::generate_server::Generate for GenerateServiceImpl {
 }
 
 #[tonic::async_trait]
-impl pb::engine_server::Engine for EngineServiceImpl {
+impl pb::control_server::Control for ControlServiceImpl {
     async fn get_server_info(
         &self,
         _request: Request<pb::GetServerInfoRequest>,

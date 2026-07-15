@@ -11,7 +11,7 @@ service Generate {
   rpc GenerateStream (GenerateRequest) returns (stream GenerateResponse) {}
 }
 
-service Engine {
+service Control {
   rpc GetServerInfo (GetServerInfoRequest) returns (ServerInfo) {}
   rpc GetModelInfo (GetModelInfoRequest) returns (ModelInfo) {}
   rpc Abort (AbortRequest) returns (AbortResponse) {}
