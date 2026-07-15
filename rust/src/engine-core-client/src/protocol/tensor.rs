@@ -55,52 +55,57 @@ pub struct WireNdArray {
 
 impl WireNdArray {
     /// Build a float32 tensor/ndarray backed by native-endian raw-view bytes.
-    pub fn from_f32(shape: Vec<usize>, data: Vec<f32>) -> Result<Self, String> {
+    pub fn from_f32(shape: Vec<usize>, data: impl AsRef<[f32]>) -> Result<Self, String> {
+        let data = data.as_ref();
         validate_element_count(&shape, data.len())?;
         Ok(Self {
             dtype: "float32".to_string(),
             shape,
-            data: WireArrayData::RawView(pod_collect_to_vec::<f32, u8>(&data)),
+            data: WireArrayData::RawView(pod_collect_to_vec::<f32, u8>(data)),
         })
     }
 
     /// Build a float16 tensor/ndarray backed by native-endian raw-view bytes.
-    pub fn from_f16(shape: Vec<usize>, data: Vec<f16>) -> Result<Self, String> {
+    pub fn from_f16(shape: Vec<usize>, data: impl AsRef<[f16]>) -> Result<Self, String> {
+        let data = data.as_ref();
         validate_element_count(&shape, data.len())?;
         Ok(Self {
             dtype: "float16".to_string(),
             shape,
-            data: WireArrayData::RawView(pod_collect_to_vec::<f16, u8>(&data)),
+            data: WireArrayData::RawView(pod_collect_to_vec::<f16, u8>(data)),
         })
     }
 
     /// Build a bfloat16 tensor/ndarray backed by native-endian raw-view bytes.
-    pub fn from_bf16(shape: Vec<usize>, data: Vec<bf16>) -> Result<Self, String> {
+    pub fn from_bf16(shape: Vec<usize>, data: impl AsRef<[bf16]>) -> Result<Self, String> {
+        let data = data.as_ref();
         validate_element_count(&shape, data.len())?;
         Ok(Self {
             dtype: "bfloat16".to_string(),
             shape,
-            data: WireArrayData::RawView(pod_collect_to_vec::<bf16, u8>(&data)),
+            data: WireArrayData::RawView(pod_collect_to_vec::<bf16, u8>(data)),
         })
     }
 
     /// Build an int64 tensor/ndarray backed by native-endian raw-view bytes.
-    pub fn from_i64(shape: Vec<usize>, data: Vec<i64>) -> Result<Self, String> {
+    pub fn from_i64(shape: Vec<usize>, data: impl AsRef<[i64]>) -> Result<Self, String> {
+        let data = data.as_ref();
         validate_element_count(&shape, data.len())?;
         Ok(Self {
             dtype: "int64".to_string(),
             shape,
-            data: WireArrayData::RawView(pod_collect_to_vec::<i64, u8>(&data)),
+            data: WireArrayData::RawView(pod_collect_to_vec::<i64, u8>(data)),
         })
     }
 
     /// Build a uint32 tensor/ndarray backed by native-endian raw-view bytes.
-    pub fn from_u32(shape: Vec<usize>, data: Vec<u32>) -> Result<Self, String> {
+    pub fn from_u32(shape: Vec<usize>, data: impl AsRef<[u32]>) -> Result<Self, String> {
+        let data = data.as_ref();
         validate_element_count(&shape, data.len())?;
         Ok(Self {
             dtype: "uint32".to_string(),
             shape,
-            data: WireArrayData::RawView(pod_collect_to_vec::<u32, u8>(&data)),
+            data: WireArrayData::RawView(pod_collect_to_vec::<u32, u8>(data)),
         })
     }
 
@@ -229,7 +234,8 @@ mod tests {
 
     #[test]
     fn constructors_build_raw_view_tensors() {
-        let f32_tensor = WireNdArray::from_f32(vec![2], vec![1.0, 2.5]).unwrap();
+        let f32_data: &[f32] = &[1.0, 2.5];
+        let f32_tensor = WireNdArray::from_f32(vec![2], f32_data).unwrap();
         assert_eq!(f32_tensor.dtype, "float32");
         assert_eq!(f32_tensor.shape, vec![2]);
         assert_eq!(
@@ -237,27 +243,28 @@ mod tests {
             [1.0_f32, 2.5].into_iter().flat_map(f32::to_ne_bytes).collect::<Vec<_>>()
         );
 
-        let f16_tensor =
-            WireNdArray::from_f16(vec![2], vec![f16::from_f32(1.0), f16::from_f32(2.5)]).unwrap();
+        let f16_data: &[f16] = &[f16::from_f32(1.0), f16::from_f32(2.5)];
+        let f16_tensor = WireNdArray::from_f16(vec![2], f16_data).unwrap();
         assert_eq!(f16_tensor.dtype, "float16");
         assert_eq!(f16_tensor.shape, vec![2]);
         assert_eq!(f16_tensor.data.into_raw_view().expect("raw view").len(), 4);
 
-        let bf16_tensor =
-            WireNdArray::from_bf16(vec![2], vec![bf16::from_f32(1.0), bf16::from_f32(2.5)])
-                .unwrap();
+        let bf16_data: &[bf16] = &[bf16::from_f32(1.0), bf16::from_f32(2.5)];
+        let bf16_tensor = WireNdArray::from_bf16(vec![2], bf16_data).unwrap();
         assert_eq!(bf16_tensor.dtype, "bfloat16");
         assert_eq!(bf16_tensor.shape, vec![2]);
         assert_eq!(bf16_tensor.data.into_raw_view().expect("raw view").len(), 4);
 
-        let i64_tensor = WireNdArray::from_i64(vec![1], vec![-7]).unwrap();
+        let i64_data: &[i64] = &[-7];
+        let i64_tensor = WireNdArray::from_i64(vec![1], i64_data).unwrap();
         assert_eq!(i64_tensor.dtype, "int64");
         assert_eq!(
             i64_tensor.data.into_raw_view().expect("raw view"),
             (-7_i64).to_ne_bytes()
         );
 
-        let u32_tensor = WireNdArray::from_u32(vec![1], vec![42]).unwrap();
+        let u32_data: &[u32] = &[42];
+        let u32_tensor = WireNdArray::from_u32(vec![1], u32_data).unwrap();
         assert_eq!(u32_tensor.dtype, "uint32");
         assert_eq!(
             u32_tensor.data.into_raw_view().expect("raw view"),
