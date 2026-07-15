@@ -6,9 +6,9 @@ set -e
 
 # Default values
 # Keep DEEPGEMM_GIT_REF in sync with cmake/external_projects/deepgemm.cmake
-DEEPGEMM_GIT_REPO="https://github.com/vllm-project/DeepGEMM.git"
-# NOTE: This is currently targeting nv-dev branch due to sm120 support
-DEEPGEMM_GIT_REF="f5a76426fa084087169693fd0cd815223576d6e9"
+DEEPGEMM_GIT_REPO="https://github.com/cleonard530/DeepGEMM.git"
+# TORCH_LIBRARY migration (migrate_pybind_to_torch_library); see cleonard530/DeepGEMM#2
+DEEPGEMM_GIT_REF="5b266fb39a1c147793dea19d53d21bf8e8e3a256"
 WHEEL_DIR=""
 
 # Parse command line arguments
