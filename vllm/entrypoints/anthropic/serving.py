@@ -188,10 +188,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             return True
 
         model_name = self.model_config.model
-        if model_name in self._INLINE_SYSTEM_ALLOWLIST:
-            return False
-
-        return True
+        return model_name not in self._INLINE_SYSTEM_ALLOWLIST
 
     @staticmethod
     def _convert_image_source_to_url(source: dict[str, Any]) -> str:
