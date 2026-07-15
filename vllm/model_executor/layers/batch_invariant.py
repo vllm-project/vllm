@@ -138,7 +138,11 @@ def matmul_persistent(
     assert bias is None or bias.dim() == 1, (
         "Currently assuming bias is 1D, let Horace know if you run into this"
     )
-    NUM_SMS = num_compute_units(a.device.index)
+    # _NUM_SMS is set by enable_batch_invariant_mode() before torch.compile
+    # traces this function.  Dynamo lifts it as a compile-time constant.
+    # The fallback (num_compute_units) only runs in eager-mode tests that
+    # skip enable_batch_invariant_mode().
+    NUM_SMS = _NUM_SMS if _NUM_SMS > 0 else num_compute_units(0)
     M, K = a.shape
     K, N = b.shape
     dtype = a.dtype
@@ -881,6 +885,30 @@ def rms_norm_batch_invariant(
     return output.reshape(original_shape)
 
 
+def _linear_backward_xpu(input, grad_output, weight, output_mask):
+    """XPU implementation of aten::linear_backward."""
+    grad_input = grad_weight = grad_bias = None
+    go_2d = grad_output.reshape(-1, grad_output.shape[-1])
+    if output_mask[0]:
+        grad_input = torch.mm(go_2d, weight).reshape(input.shape)
+    if output_mask[1]:
+        grad_weight = torch.mm(go_2d.t(), input.reshape(-1, input.shape[-1]))
+    if output_mask[2]:
+        grad_bias = go_2d.sum(0)
+    return grad_input, grad_weight, grad_bias
+
+
+def _matmul_backward_xpu(grad, self, other, mask):
+    """XPU implementation of aten::matmul_backward."""
+    grad_self = (
+        matmul_batch_invariant(grad, other.transpose(-1, -2)) if mask[0] else None
+    )
+    grad_other = (
+        matmul_batch_invariant(self.transpose(-1, -2), grad) if mask[1] else None
+    )
+    return grad_self, grad_other
+
+
 def linear_batch_invariant(input, weight, bias=None):
     output = matmul_batch_invariant(input, weight.t())
 
@@ -892,16 +920,18 @@ def linear_batch_invariant(input, weight, bias=None):
 _batch_invariant_MODE = False
 _batch_invariant_LIB = None
 _fp16_block_size_n = 256
+_NUM_SMS: int = 0
 
 
 def enable_batch_invariant_mode():
     global _batch_invariant_MODE, _batch_invariant_LIB
-    global _fp16_block_size_n
+    global _fp16_block_size_n, _NUM_SMS
 
     if _batch_invariant_MODE:
         return
 
     _batch_invariant_MODE = True
+    _NUM_SMS = num_compute_units(0)
     _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
 
     key = current_platform.dispatch_key
@@ -925,8 +955,10 @@ def enable_batch_invariant_mode():
     elif current_platform.is_xpu():
         _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, key)
         _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, key)
-        # TODO: register matmul and linear for XPU
-        # once suitable Triton kernels are implemented
+        _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, key)
+        _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, key)
+        _batch_invariant_LIB.impl("aten::linear_backward", _linear_backward_xpu, key)
+        _batch_invariant_LIB.impl("aten::matmul_backward", _matmul_backward_xpu, key)
 
         _fp16_block_size_n = 128
 
