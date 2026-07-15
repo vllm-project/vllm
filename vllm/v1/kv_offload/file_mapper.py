@@ -72,7 +72,7 @@ class FileMapper:
         config = offloading_spec.config
         kv_cache_groups = [
             {
-                "block_size": group.tokens_per_block,
+                "tokens_per_block": group.tokens_per_block,
                 "layer_names": list(group.layer_names),
             }
             for group in config.groups
