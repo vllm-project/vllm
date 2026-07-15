@@ -536,6 +536,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 vllm_config=vllm_config,
             )
 
+        # Drop the prefill backend for sparse impls without a dense-MHA path
+        # so the shared forward keeps every token on the MQA path.
+        if (
+            self.impl.is_sparse
+            and self.prefill_backend is not None
+            and not self.impl.supports_dense_mha_prefill
+        ):
+            logger.warning_once(
+                "The sparse MLA backend %s does not implement a dense-MHA "
+                "prefill path; using the top-k MQA path only.",
+                type(self.impl).__name__,
+            )
+            self.prefill_backend = None
+
         self.kv_cache = torch.tensor([])
 
         self.use_sparse = use_sparse

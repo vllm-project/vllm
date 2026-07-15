@@ -13,6 +13,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
+    MLACommonPrefillMetadata,
     get_mla_dims,
 )
 from vllm.platforms import current_platform
@@ -30,6 +31,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
     AiterMLAHelper,
 )
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -333,6 +335,14 @@ class ROCMAiterMLASparseMetadata(AttentionMetadata):
     block_size: int = 1
     topk_tokens: int = 2048
 
+    # Decode/prefill split consumed by the shared MLA forward wrapper to keep
+    # all tokens on the MQA path; `prefill`/`prefill_max_seq_len` stay default.
+    num_decodes: int = 0
+    num_prefills: int = 0
+    num_decode_tokens: int = 0
+    prefill_max_seq_len: int = 0
+    prefill: MLACommonPrefillMetadata | None = None
+
     # Persistent MLA metadata (only populated when persistent mode is enabled,
     # i.e. when the aiter sparse decode kernel supports work-stealing splits).
     work_meta_data: torch.Tensor | None = None
@@ -488,6 +498,16 @@ class ROCMAiterMLASparseMetadataBuilder(
         fast_build: bool = False,
     ) -> ROCMAiterMLASparseMetadata:
         num_tokens = common_attn_metadata.num_actual_tokens
+        num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
+            common_attn_metadata,
+            decode_threshold=self.reorder_batch_threshold or 1,
+        )
+        prefill_max_seq_len = 0
+        if num_prefills > 0:
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+            prefill_max_seq_len = int(
+                seq_lens_cpu[num_decodes : num_decodes + num_prefills].max().item()
+            )
         starts = np.asarray(common_attn_metadata.query_start_loc_cpu, dtype=np.int32)
         seg_lengths = np.diff(starts)
         req_id_per_token = np.repeat(
@@ -604,6 +624,10 @@ class ROCMAiterMLASparseMetadataBuilder(
             block_size=self.kv_cache_spec.block_size,
             attn_out_dtype=self.model_dtype,
             topk_tokens=self.topk_tokens,
+            num_decodes=num_decodes,
+            num_prefills=num_prefills,
+            num_decode_tokens=num_decode_tokens,
+            prefill_max_seq_len=prefill_max_seq_len,
             qo_indptr=qo_indptr,
             paged_kv_last_page_len=paged_kv_last_page_len,
             paged_kv_indices=paged_kv_indices,
@@ -649,6 +673,9 @@ def reference_mla_sparse_prefill(
 
 class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
     is_sparse = True
+    # Only implements the top-k MQA path (forward_mqa), no dense-MHA prefill;
+    # the shared wrapper keeps every token on the MQA path.
+    supports_dense_mha_prefill = False
 
     def __init__(
         self,
