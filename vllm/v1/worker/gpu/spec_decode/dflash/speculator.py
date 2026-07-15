@@ -617,7 +617,7 @@ def prepare_dflash_inputs(
     assert num_reqs > 0
     # Cover the longest possible per-request span (ctx + query). Use the max
     # per-request query length, not the total token count across the batch.
-    max_target_query_len = input_batch.max_req_tokens or int(
+    max_target_query_len = input_batch.max_num_tokens_per_req or int(
         input_batch.num_scheduled_tokens.max()
     )
     max_tokens_per_req = max_target_query_len + num_query_per_req

@@ -1577,15 +1577,17 @@ def test_dspark_confidence_config_validation():
         method="ngram",
         num_speculative_tokens=1,
         dspark_budget_frac=0.5,
-        confidence_based_verification="mask",
+        dspark_enable_confidence_based_verification="mask",
     )
     assert config.dspark_budget_frac == 0.5
-    assert config.confidence_based_verification == "mask"
-    with pytest.raises(ValidationError, match="confidence_based_verification"):
+    assert config.dspark_enable_confidence_based_verification == "mask"
+    with pytest.raises(
+        ValidationError, match="dspark_enable_confidence_based_verification"
+    ):
         SpeculativeConfig(
             method="ngram",
             num_speculative_tokens=1,
-            confidence_based_verification="compact",
+            dspark_enable_confidence_based_verification="compact",
         )
 
 

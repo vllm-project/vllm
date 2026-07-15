@@ -310,9 +310,8 @@ def warmup_kernels(
         worker_execute_model(decode_output)
         worker_sample_tokens(None)
 
-        manager = model_runner.spec_decode_confidence_manager
-        if manager is not None:
-            manager.warmup()
+        if model_runner.adaptive_verification is not None:
+            model_runner.adaptive_verification.warmup()
 
     # Clean up - process finish_req_ids.
     cleanup_output = SchedulerOutput.make_empty()

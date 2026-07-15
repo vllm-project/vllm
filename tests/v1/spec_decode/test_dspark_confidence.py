@@ -28,6 +28,8 @@ from vllm.v1.worker.gpu.cudagraph_utils import (  # noqa: E402
 )
 from vllm.v1.worker.gpu.input_batch import (  # noqa: E402
     InputBatch,
+    combine_sampled_and_draft_tokens,
+    expand_idx_mapping,
     prepare_pos_seq_lens,
 )
 from vllm.v1.worker.gpu.spec_decode.confidence import (  # noqa: E402
@@ -37,9 +39,6 @@ from vllm.v1.worker.gpu.spec_decode.confidence import (  # noqa: E402
     compute_prefix_survival,
     make_confidence_manager,
 )
-from vllm.v1.worker.gpu.spec_decode.dspark.online_sts import (  # noqa: E402
-    DSparkOnlineSTS,
-)
 from vllm.v1.worker.gpu.states import RequestState  # noqa: E402
 
 
@@ -47,7 +46,6 @@ def _spec_config(**overrides: Any) -> SimpleNamespace:
     config = SimpleNamespace(
         dspark_budget_frac=1.0,
         dspark_sps_curve=None,
-        dspark_online_sts=False,
     )
     for key, value in overrides.items():
         setattr(config, key, value)
@@ -361,7 +359,6 @@ def test_graph_costs_use_rank_zero_curves_on_every_tp_rank(monkeypatch):
         max_num_reqs=1,
         max_num_batched_tokens=2,
     )
-    manager.online_sts = None
     speculator = SimpleNamespace(
         query_cudagraph_manager=SimpleNamespace(graph_timings={})
     )
@@ -374,63 +371,6 @@ def test_graph_costs_use_rank_zero_curves_on_every_tp_rank(monkeypatch):
     assert manager.cost_tables is not None
     assert np.array_equal(manager.cost_tables[0], expected[0])
     assert np.array_equal(manager.cost_tables[1], expected[1])
-
-
-def test_select_budget_temperature_desaturates_zeros():
-    """A confidence temperature > 1 keeps saturated-negative positions in the
-    candidate set (no exact-zero survival), so the budget is spent instead of
-    being truncated by miscalibrated zeros."""
-    logits = np.full((2, 5), 40.0)
-    logits[:, 2] = -800.0
-    budget_t1 = _plan_budget(compute_prefix_survival(logits), 2, 2, budget_frac=0.9)
-    budget_t80 = _plan_budget(
-        compute_prefix_survival(logits, 80.0), 2, 2, budget_frac=0.9
-    )
-    # T=1: exact-zero survival past position 2 truncates both requests.
-    assert budget_t1 == 4
-    # T=80: sigmoid(-10) > 0, so 90% of the candidates are admitted.
-    assert budget_t80 == 9
-
-
-def test_online_sts_fits_order_preserving_temperatures():
-    """Online STS fits per-position temperatures from rejection-sampler
-    outcomes: identity before data, softens over-confident positions,
-    sharpens under-confident ones, and never reorders candidates."""
-    sts = DSparkOnlineSTS(num_steps=3, device=torch.device("cuda"))
-
-    # Cold start: identity calibration.
-    assert np.array_equal(sts.temperatures, np.ones(3))
-
-    # Head claims p~0.88 everywhere (logit 2.0).
-    logits = np.full((2, 3), 2.0)
-    # Alternate outcomes so pos0 accepts 50% (head over-confident there)
-    # while pos1/pos2 always accept once reached (head under-confident).
-    acc_hi = np.array([3, 3])
-    acc_lo = np.array([0, 0])
-    ver = np.array([3, 3])
-    for _ in range(1000):
-        sts.update(logits, acc_hi, ver)
-        sts.update(logits, acc_lo, ver)
-
-    temps = sts.temperatures
-    calibrated = 1.0 / (1.0 + np.exp(-logits[0] / temps))
-    # pos0 empirical 0.5 vs raw 0.88: temperature must soften (T >> 1,
-    # pushed toward the grid edge since sigmoid(2/T) -> 0.5+).
-    assert temps[0] > 2.0
-    assert calibrated[0] < 0.65
-    # pos1/pos2 empirical 1.0 (conditioned on the prefix surviving):
-    # temperature sharpens (T < 1).
-    assert temps[1] < 1.0 and temps[2] < 1.0
-    assert calibrated[1] > 0.9
-
-    # Order preservation within every position, regardless of fit.
-    lo = 0.5 / temps
-    hi = 3.0 / temps
-    assert (hi > lo).all()
-
-    sts.reset()
-    assert np.array_equal(sts.temperatures, np.ones(3))
-    assert sts.copy_temperatures_to_gpu().cpu().tolist() == [1.0, 1.0, 1.0]
 
 
 def test_capacity_manager_assigns_budget_on_gpu():
@@ -454,6 +394,7 @@ def test_capacity_manager_assigns_budget_on_gpu():
         idx_mapping=torch.tensor([0, 1], dtype=torch.int32, device=device),
         cu_num_logits_np=np.array([0, 4, 8], dtype=np.int32),
         num_draft_tokens=6,
+        num_draft_tokens_per_req=np.array([3, 3], dtype=np.int32),
     )
     current_logits = torch.from_numpy(
         _logit(np.array([[0.90, 0.80, 0.70], [0.95, 0.40, 0.30]]))
@@ -466,7 +407,7 @@ def test_capacity_manager_assigns_budget_on_gpu():
     torch.cuda.set_sync_debug_mode(2)
     try:
         capacities = handler._assign_draft_token_budget(
-            input_batch,
+            input_batch.idx_mapping,
             valid_draft_tokens_per_req=np.array([3, 3], dtype=np.int32),
             draft_token_budget=3,
         )
@@ -477,31 +418,34 @@ def test_capacity_manager_assigns_budget_on_gpu():
 
     handler._confidence_logits[:2].zero_()
     assert handler._assign_draft_token_budget(
-        input_batch,
+        input_batch.idx_mapping,
         valid_draft_tokens_per_req=np.array([3, 3], dtype=np.int32),
         draft_token_budget=1,
     ).cpu().tolist() == [1, 0]
     assert handler._assign_draft_token_budget(
-        input_batch,
+        input_batch.idx_mapping,
         valid_draft_tokens_per_req=np.array([0, 3], dtype=np.int32),
         draft_token_budget=1,
     ).cpu().tolist() == [0, 1]
     handler._confidence_logits[:2].copy_(current_logits)
 
-    for _ in range(3):
-        handler.stage_confidences(
-            current_logits,
-            torch.tensor([2, 1], dtype=torch.int32, device=device),
-            input_batch,
-        )
+    torch.cuda.set_sync_debug_mode(2)
+    try:
+        for _ in range(3):
+            handler.stage_confidences(
+                current_logits,
+                input_batch,
+            )
+    finally:
+        torch.cuda.set_sync_debug_mode(0)
     assert handler._stale_confidences is not None
     assert handler._assign_draft_token_budget(
-        input_batch,
+        input_batch.idx_mapping,
         valid_draft_tokens_per_req=np.array([3, 3], dtype=np.int32),
         draft_token_budget=6,
     ).cpu().tolist() == [3, 3]
     assert handler._assign_draft_token_budget(
-        input_batch,
+        input_batch.idx_mapping,
         valid_draft_tokens_per_req=np.array([3, 3], dtype=np.int32),
         draft_token_budget=0,
     ).cpu().tolist() == [0, 0]
@@ -526,9 +470,11 @@ def test_varlen_capacity_manager_compacts_verifier_batch():
         [[11, 12, 13], [21, 22, 23]], dtype=torch.int64, device=device
     )
     req_states.req_id_to_index = {"req0": 0, "req1": 1}
+    query_start_loc = torch.tensor([0, 4, 8, 8, 8], dtype=torch.int32, device=device)
     handler = VarlenConfidenceManager(
         req_states=req_states,
         speculative_config=_spec_config(dspark_budget_frac=0.34),
+        query_start_loc=query_start_loc,
     )
     handler._confidence_logits[:2].copy_(
         torch.from_numpy(_logit(np.array([[0.90, 0.10, 0.10], [0.95, 0.95, 0.10]]))).to(
@@ -569,7 +515,7 @@ def test_varlen_capacity_manager_compacts_verifier_batch():
         num_tokens_after_padding=5,
         num_draft_tokens=6,
         num_draft_tokens_per_req=np.array([3, 3], dtype=np.int32),
-        query_start_loc=torch.tensor([0, 4, 8, 8, 8], dtype=torch.int32, device=device),
+        query_start_loc=query_start_loc,
         query_start_loc_np=query_start_loc_np,
         seq_lens=torch.zeros(4, dtype=torch.int32, device=device),
         seq_lens_cpu_upper_bound=torch.tensor([4, 4, 0, 0], dtype=torch.int32),
@@ -589,20 +535,51 @@ def test_varlen_capacity_manager_compacts_verifier_batch():
         prompt_lens=None,
     )
 
-    handler.trim_batch(input_batch, draft_tokens)
+    input_batch.num_tokens = 5
+    (
+        input_batch.cu_num_logits,
+        input_batch.query_start_loc,
+        input_batch.num_draft_tokens,
+    ) = handler.allocate_draft_token_budget(input_batch.idx_mapping)
+    prepare_pos_seq_lens(
+        input_batch.idx_mapping,
+        input_batch.query_start_loc,
+        req_states.num_computed_tokens.gpu,
+        input_batch.positions,
+        input_batch.seq_lens,
+    )
+    input_batch.logits_indices = combine_sampled_and_draft_tokens(
+        input_batch.input_ids,
+        input_batch.idx_mapping,
+        req_states.last_sampled_tokens,
+        input_batch.query_start_loc,
+        input_batch.seq_lens,
+        req_states.prefill_len.gpu,
+        req_states.draft_tokens,
+        input_batch.cu_num_logits,
+        input_batch.num_reqs + input_batch.num_draft_tokens,
+    )
+    input_batch.expanded_idx_mapping, input_batch.expanded_local_pos = (
+        expand_idx_mapping(
+            input_batch.idx_mapping,
+            input_batch.num_reqs + input_batch.num_draft_tokens,
+            input_batch.cu_num_logits,
+            4,
+        )
+    )
 
     torch.accelerator.synchronize()
-    # CPU metadata carries only the scalar budget; GPU offsets follow current
-    # confidence ordering and may distribute that budget differently.
-    assert input_batch.num_scheduled_tokens.tolist() == [3, 2]
-    assert input_batch.num_draft_tokens_per_req.tolist() == [2, 1]
+    # CPU metadata remains the scheduled upper bound; GPU offsets follow the
+    # confidence allocation.
+    assert input_batch.num_scheduled_tokens.tolist() == [4, 4]
+    assert input_batch.num_draft_tokens_per_req.tolist() == [3, 3]
     assert input_batch.num_tokens == 5
     assert input_batch.num_draft_tokens == 3
     assert input_batch.num_scheduled_tokens is num_scheduled_tokens
     assert input_batch.cu_num_logits_np is cu_num_logits_np
     assert input_batch.query_start_loc_np is query_start_loc_np
-    assert input_batch.cu_num_logits_np.tolist() == [0, 3, 5]
-    assert input_batch.query_start_loc_np.tolist() == [0, 3, 5, 5, 5]
+    assert input_batch.cu_num_logits_np.tolist() == [0, 4, 8]
+    assert input_batch.query_start_loc_np.tolist() == [0, 4, 8, 8, 8]
     assert input_batch.cu_num_logits.cpu().tolist() == [0, 2, 5]
     assert input_batch.query_start_loc.cpu().tolist() == [0, 2, 5, 5, 5]
     assert input_batch.input_ids.shape[0] == input_batch.num_tokens_after_padding
@@ -688,7 +665,11 @@ def test_masked_capacity_manager_marks_pruned_tokens_for_forward_and_sampler():
         prompt_lens=None,
     )
 
-    handler.trim_batch(input_batch, {})
+    torch.cuda.set_sync_debug_mode(2)
+    try:
+        handler.mask_batch(input_batch, {})
+    finally:
+        torch.cuda.set_sync_debug_mode(0)
     slot_mappings = torch.arange(20, dtype=torch.int64, device=device).view(2, 10)
     slot_mappings.masked_fill_(
         input_batch.is_padding[: slot_mappings.shape[1]].unsqueeze(0),
@@ -722,7 +703,7 @@ def test_masked_capacity_manager_marks_pruned_tokens_for_forward_and_sampler():
     assert draft_sampled.cpu().tolist() == [2, 3, -1, -1, 7, 8, 9, -1]
 
 
-def test_capacity_cudagraph_dispatch_filters_by_max_query_len():
+def test_capacity_cudagraph_dispatch_filters_by_max_num_tokens_per_req():
     manager = object.__new__(CudaGraphManager)
     manager._graphs_captured = True
     manager._resolve_effective_loras = lambda num_loras: num_loras
@@ -736,7 +717,7 @@ def test_capacity_cudagraph_dispatch_filters_by_max_query_len():
         CUDAGraphMode.FULL,
         num_tokens=15,
         num_reqs=4,
-        max_req_tokens=6,
+        max_num_tokens_per_req=6,
     )
     piecewise_desc = BatchExecutionDescriptor(
         CUDAGraphMode.PIECEWISE,
@@ -745,10 +726,10 @@ def test_capacity_cudagraph_dispatch_filters_by_max_query_len():
     )
     manager._candidates = {(11, 0): [regular_desc, full_capacity_desc, piecewise_desc]}
 
-    desc = manager.dispatch(4, 11, None, 0, max_req_tokens=6)
+    desc = manager.dispatch(4, 11, None, 0, max_num_tokens_per_req=6)
     assert desc is full_capacity_desc
 
-    desc = manager.dispatch(4, 11, None, 0, max_req_tokens=7)
+    desc = manager.dispatch(4, 11, None, 0, max_num_tokens_per_req=7)
     assert desc is piecewise_desc
 
     manager._candidates[(15, 0)] = [
@@ -756,14 +737,14 @@ def test_capacity_cudagraph_dispatch_filters_by_max_query_len():
         full_capacity_desc,
         piecewise_desc,
     ]
-    desc = manager.dispatch(4, 15, None, 0, max_req_tokens=6)
+    desc = manager.dispatch(4, 15, None, 0, max_num_tokens_per_req=6)
     assert desc is full_capacity_desc
 
     desc = manager.dispatch(4, 11, 6, 0)
     assert desc is regular_desc
 
 
-def test_varlen_cudagraph_capture_adds_full_desc():
+def test_adaptive_verification_cudagraph_capture_adds_full_desc():
     manager = object.__new__(CudaGraphManager)
     manager.vllm_config = SimpleNamespace(speculative_config=None)
     manager.compilation_config = SimpleNamespace(
@@ -772,7 +753,7 @@ def test_varlen_cudagraph_capture_adds_full_desc():
     )
     manager.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
     manager.decode_query_len = 4
-    manager.varlen_spec_decode = True
+    manager.adaptive_verification = True
     manager.max_num_reqs = 16
     manager.lora_capture_cases = [0]
     manager._candidates = {}
@@ -781,5 +762,6 @@ def test_varlen_cudagraph_capture_adds_full_desc():
     manager._init_candidates()
 
     descs = manager._capture_descs[CUDAGraphMode.FULL]
-    assert [desc.num_reqs for desc in descs] == [3, 5]
-    assert all(desc.max_req_tokens == manager.decode_query_len for desc in descs)
+    assert [desc.num_reqs for desc in descs] == [2]
+    assert descs[0].uniform_token_count is None
+    assert descs[0].max_num_tokens_per_req == manager.decode_query_len

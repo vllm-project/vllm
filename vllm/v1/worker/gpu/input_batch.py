@@ -99,7 +99,7 @@ class InputBatch:
     # [num_reqs] per-request prompt length, only populated for R-SWA.
     prompt_lens: torch.Tensor | None
 
-    max_req_tokens: int | None = None
+    max_num_tokens_per_req: int | None = None
 
     @classmethod
     def make_dummy(
@@ -107,7 +107,7 @@ class InputBatch:
         num_reqs: int,
         num_tokens: int,
         input_buffers: InputBuffers,
-        max_req_tokens: int | None = None,
+        max_num_tokens_per_req: int | None = None,
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
@@ -118,16 +118,16 @@ class InputBatch:
         expanded_idx_mapping = idx_mapping
         expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
 
-        if max_req_tokens is None:
+        if max_num_tokens_per_req is None:
             num_scheduled_tokens = np.full(
                 num_reqs, num_tokens // num_reqs, dtype=np.int32
             )
             num_scheduled_tokens[-1] += num_tokens % num_reqs
         else:
-            assert num_tokens <= num_reqs * max_req_tokens
+            assert num_tokens <= num_reqs * max_num_tokens_per_req
             num_scheduled_tokens = np.ones(num_reqs, dtype=np.int32)
             remaining = num_tokens - num_reqs
-            capacity = max_req_tokens - 1
+            capacity = max_num_tokens_per_req - 1
             num_scheduled_tokens += np.clip(
                 remaining - capacity * np.arange(num_reqs - 1, -1, -1), 0, capacity
             )
@@ -194,7 +194,7 @@ class InputBatch:
             cu_num_logits_np=cu_num_logits_np,
             has_structured_output_reqs=False,
             prompt_lens=None,
-            max_req_tokens=max_req_tokens,
+            max_num_tokens_per_req=max_num_tokens_per_req,
         )
 
 

@@ -236,14 +236,10 @@ class SpeculativeConfig:
     """Fraction of the full per-request draft-token budget available to the
     DSpark global prefix allocator."""
 
-    confidence_based_verification: ConfidenceBasedVerification = "auto"
+    dspark_enable_confidence_based_verification: ConfidenceBasedVerification = "auto"
     """Confidence-based verification mode. ``"auto"`` uses compact
     verification when supported and otherwise falls back to masking;
     ``"mask"`` always masks pruned tokens and ``"none"``/``"off"`` disable it."""
-
-    dspark_online_sts: bool = True
-    """Calibrate DSpark confidence logits online with Sequential Temperature
-    Scaling."""
 
     dspark_sps_curve: Literal["auto"] | None = None
     """Set to ``"auto"`` to time DSpark CUDA graphs after capture."""
@@ -252,7 +248,7 @@ class SpeculativeConfig:
     def use_confidence_based_verification(self) -> bool:
         return (
             self.method == "dspark"
-            and self.confidence_based_verification not in ("none", "off")
+            and self.dspark_enable_confidence_based_verification not in ("none", "off")
             and (self.dspark_budget_frac < 1.0 or self.dspark_sps_curve is not None)
         )
 

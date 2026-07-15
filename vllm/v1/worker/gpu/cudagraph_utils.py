@@ -54,7 +54,7 @@ class BatchExecutionDescriptor:
     num_tokens: int
     num_reqs: int | None  # None means no request padding is needed (PIECEWISE graphs)
     uniform_token_count: int | None = None
-    max_req_tokens: int | None = None
+    max_num_tokens_per_req: int | None = None
     num_active_loras: int = 0
 
 
@@ -76,7 +76,7 @@ def _is_compatible(
     num_tokens: int,
     uniform_token_count: int | None,
     num_active_loras: int,
-    max_req_tokens: int,
+    max_num_tokens_per_req: int,
 ) -> bool:
     # desc.uniform_token_count=None (PIECEWISE) can handle any uniform_token_count
     # desc.num_reqs=None means no request padding needed (PIECEWISE)
@@ -85,7 +85,10 @@ def _is_compatible(
             desc.uniform_token_count is None
             or desc.uniform_token_count == uniform_token_count
         )
-        and (desc.max_req_tokens is None or desc.max_req_tokens >= max_req_tokens)
+        and (
+            desc.max_num_tokens_per_req is None
+            or desc.max_num_tokens_per_req >= max_num_tokens_per_req
+        )
         and (desc.num_reqs is None or desc.num_reqs >= num_reqs)
         and desc.num_tokens >= num_tokens
         and desc.num_active_loras == num_active_loras
@@ -116,7 +119,7 @@ class CudaGraphManager:
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
-        varlen_spec_decode: bool = False,
+        adaptive_verification: bool = False,
         time_graphs: bool = False,
     ):
         self.vllm_config = vllm_config
@@ -126,7 +129,7 @@ class CudaGraphManager:
         assert self.compilation_config is not None
         self.cudagraph_mode = cudagraph_mode
         self.decode_query_len = decode_query_len
-        self.varlen_spec_decode = varlen_spec_decode
+        self.adaptive_verification = adaptive_verification
         self.time_graphs = time_graphs
         self.graph_timings: dict[BatchExecutionDescriptor, float] = {}
 
@@ -228,57 +231,44 @@ class CudaGraphManager:
         else:
             decode_query_lens = [self.decode_query_len]
 
-        def decode_descs(
-            num_tokens: int,
-            num_active_loras: int,
-        ):
-            if self.varlen_spec_decode:
-                if num_tokens > max_decode_tokens or num_tokens > max_cg_capture_size:
-                    return
-                max_requests = min(num_tokens, self.max_num_reqs)
-                request_counts = {(max_requests + 1) // 2, max_requests}
-                for num_reqs in sorted(request_counts):
-                    if num_reqs * self.decode_query_len < num_tokens:
-                        continue
-                    yield BatchExecutionDescriptor(
-                        cg_mode=decode_mode,
-                        num_tokens=num_tokens,
-                        num_reqs=num_reqs,
-                        max_req_tokens=self.decode_query_len,
-                        num_active_loras=num_active_loras,
-                    )
-                return
-
-            for decode_query_len in decode_query_lens:
-                rounded_num_tokens = round_up(num_tokens, decode_query_len)
-                rounded_num_reqs = rounded_num_tokens // decode_query_len
-
-                if (
-                    rounded_num_tokens > max_decode_tokens
-                    or rounded_num_tokens > max_cg_capture_size
-                    or rounded_num_reqs > self.max_num_reqs
-                ):
-                    continue
-
-                yield BatchExecutionDescriptor(
-                    cg_mode=decode_mode,
-                    num_tokens=rounded_num_tokens,
-                    num_reqs=rounded_num_reqs,
-                    uniform_token_count=decode_query_len,
-                    num_active_loras=num_active_loras,
-                )
-
         for num_tokens, num_active_loras in product(
             capture_sizes, self.lora_capture_cases
         ):
+            # Capture decode-specific graphs when decode and mixed batches use
+            # separate routines.
             if separate_decode_routine and decode_mode:
-                for desc in decode_descs(num_tokens, num_active_loras):
-                    if desc in descs_by_mode[desc.cg_mode]:
+                for decode_query_len in decode_query_lens:
+                    rounded_num_tokens = round_up(num_tokens, decode_query_len)
+                    rounded_num_reqs = rounded_num_tokens // decode_query_len
+
+                    if (
+                        rounded_num_tokens > max_decode_tokens
+                        or rounded_num_tokens > max_cg_capture_size
+                        or rounded_num_reqs > self.max_num_reqs
+                    ):
                         continue
-                    descs_by_mode[desc.cg_mode].append(desc)
-                    descs_by_token_lora[(desc.num_tokens, num_active_loras)].append(
-                        desc
+
+                    desc = BatchExecutionDescriptor(
+                        cg_mode=decode_mode,
+                        num_tokens=rounded_num_tokens,
+                        num_reqs=rounded_num_reqs,
+                        uniform_token_count=(
+                            None if self.adaptive_verification else decode_query_len
+                        ),
+                        max_num_tokens_per_req=(
+                            self.decode_query_len
+                            if self.adaptive_verification
+                            else None
+                        ),
+                        num_active_loras=num_active_loras,
                     )
+
+                    # Avoid duplicate graphs.
+                    if desc not in descs_by_mode[decode_mode]:
+                        descs_by_mode[decode_mode].append(desc)
+                        descs_by_token_lora[
+                            (rounded_num_tokens, num_active_loras)
+                        ].append(desc)
 
             if mixed_mode:
                 # for PIECEWISE graphs there is no limit on requests when replaying
@@ -405,7 +395,7 @@ class CudaGraphManager:
         num_tokens: int,
         uniform_token_count: int | None,
         num_active_loras: int,
-        max_req_tokens: int = 0,
+        max_num_tokens_per_req: int = 0,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
 
@@ -419,7 +409,7 @@ class CudaGraphManager:
                     num_tokens,
                     uniform_token_count,
                     effective_loras,
-                    max_req_tokens,
+                    max_num_tokens_per_req,
                 ):
                     return desc
         return BatchExecutionDescriptor(
@@ -468,7 +458,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
-        varlen_spec_decode: bool = False,
+        adaptive_verification: bool = False,
         time_graphs: bool = False,
     ):
         super().__init__(
@@ -477,7 +467,7 @@ class ModelCudaGraphManager(CudaGraphManager):
             cudagraph_mode,
             decode_query_len,
             lora_capture_cases=lora_capture_cases,
-            varlen_spec_decode=varlen_spec_decode,
+            adaptive_verification=adaptive_verification,
             time_graphs=time_graphs,
         )
         self.hidden_states: torch.Tensor | None = None
@@ -542,7 +532,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 attn_groups,
                 kv_cache_config,
                 skip_attn=(desc.cg_mode == CUDAGraphMode.PIECEWISE),
-                max_req_tokens=desc.max_req_tokens,
+                max_num_tokens_per_req=desc.max_num_tokens_per_req,
             )
 
             # Capture with dummy rows marked as padding.
@@ -639,13 +629,13 @@ def prepare_inputs_to_capture(
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
     skip_attn: bool = False,
-    max_req_tokens: int | None = None,
+    max_num_tokens_per_req: int | None = None,
 ) -> AttentionState:
     input_batch = InputBatch.make_dummy(
         num_reqs,
         num_tokens,
         input_buffers,
-        max_req_tokens=max_req_tokens,
+        max_num_tokens_per_req=max_num_tokens_per_req,
     )
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
     slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)

@@ -19,4 +19,4 @@ server_args: >-
   "model":"deepseek-ai/DeepSeek-V4-Flash-DSpark",
   "attention_backend":"FLASH_ATTN","num_speculative_tokens":7,
   "draft_sample_method":"probabilistic","dspark_sps_curve":"auto",
-  "confidence_based_verification":"auto"}'
+  "dspark_enable_confidence_based_verification":"auto"}'
