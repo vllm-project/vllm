@@ -95,6 +95,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.device,
             cudagraph_mode,
             decode_query_len=self.num_query_per_req,
+            allow_dynamic_decode_shapes=False, # adaptive specdec is only for verifier
         )
 
     def capture(self, attn_states: dict | None = None) -> None:

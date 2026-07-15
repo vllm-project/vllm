@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -14,6 +15,7 @@ from vllm.config import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
+from vllm.v1.attention.backend import AttentionCGSupport
 
 if current_platform.is_cuda():
     from vllm.platforms.cuda import CudaPlatform
@@ -33,6 +35,38 @@ from vllm.v1.attention.selector import _cached_get_attn_backend, get_attn_backen
 def clear_cache():
     """Clear lru cache to ensure each test case runs without caching."""
     _cached_get_attn_backend.cache_clear()
+
+
+def test_causal_dspark_drafter_skips_adaptive_verification_requirements(monkeypatch):
+    from vllm.compilation.backends import set_model_tag
+    from vllm.v1.attention import selector
+
+    vllm_config = SimpleNamespace(
+        cache_config=None,
+        kv_transfer_config=None,
+        speculative_config=SimpleNamespace(adaptive_verification=True),
+        attention_config=SimpleNamespace(backend=None, use_non_causal=False),
+    )
+    monkeypatch.setattr(
+        "vllm.config.get_current_vllm_config", lambda: vllm_config
+    )
+
+    selector_configs = []
+
+    def capture_selector_config(*, backend, attn_selector_config, num_heads):
+        selector_configs.append(attn_selector_config)
+
+    monkeypatch.setattr(selector, "_cached_get_attn_backend", capture_selector_config)
+
+    selector.get_attn_backend(16, torch.float16, None)
+    with set_model_tag("dspark_head"):
+        selector.get_attn_backend(16, torch.float16, None)
+
+    assert (
+        selector_configs[0].required_cg_support
+        == AttentionCGSupport.VARLEN_BATCH
+    )
+    assert selector_configs[1].required_cg_support is None
 
 
 # Define MLA and non-MLA backends separately

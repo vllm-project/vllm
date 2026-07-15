@@ -122,6 +122,7 @@ class CudaGraphManager:
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
+        allow_dynamic_decode_shapes: bool = True,
     ):
         self.vllm_config = vllm_config
         self.device = device
@@ -130,6 +131,7 @@ class CudaGraphManager:
         assert self.compilation_config is not None
         self.cudagraph_mode = cudagraph_mode
         self.decode_query_len = decode_query_len
+        self.allow_dynamic_decode_shapes = allow_dynamic_decode_shapes
 
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -208,11 +210,13 @@ class CudaGraphManager:
         # to capture graphs for all possible values during decode.
         speculative_config = self.vllm_config.speculative_config
         adaptive_verification = (
-            speculative_config is not None
+            self.allow_dynamic_decode_shapes
+            and speculative_config is not None
             and getattr(speculative_config, "adaptive_verification", False) is True
         )
         if (
-            speculative_config
+            self.allow_dynamic_decode_shapes
+            and speculative_config
             and speculative_config.uses_dynamic_speculative_decoding()
         ):
             num_spec_per_batch_size = (

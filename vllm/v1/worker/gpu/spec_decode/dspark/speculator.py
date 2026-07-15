@@ -68,7 +68,9 @@ def allocate_draft_token_budget_from_confidence(
     selected = torch.zeros(
         max_budget, dtype=torch.bool, device=confidence_logits.device
     )
-    selected[ranked_indices[:draft_token_budget]] = True
+    selected_indices = ranked_indices[:draft_token_budget]
+    selected_values = torch.ones_like(selected_indices, dtype=torch.bool)
+    selected.scatter_(0, selected_indices, selected_values)
     return selected.view(num_reqs, num_speculative_steps).sum(dim=1, dtype=torch.int32)
 
 

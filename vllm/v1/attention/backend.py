@@ -322,6 +322,7 @@ class AttentionBackend(ABC):
         use_non_causal: bool = False,
         use_batch_invariant: bool = False,
         use_kv_connector: bool = False,
+        required_cg_support: "AttentionCGSupport | None" = None,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -360,6 +361,16 @@ class AttentionBackend(ABC):
             invalid_reasons.append("batch invariance not supported")
         if use_kv_connector and not cls.supports_kv_connector():
             invalid_reasons.append("KV connector not supported")
+        if required_cg_support is not None:
+            builder_cls = cls.get_builder_cls()
+            if (
+                required_cg_support is not None
+                and builder_cls.get_cudagraph_support_for_selection().value
+                < required_cg_support.value
+            ):
+                invalid_reasons.append(
+                    f"{required_cg_support.name} CUDA graph support required"
+                )
         combination_reason = cls.supports_combination(
             head_size,
             dtype,
@@ -632,6 +643,11 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         kv_cache_spec: "AttentionSpec",
     ) -> AttentionCGSupport:
         """Get the cudagraph support level of this builder class."""
+        return cls._cudagraph_support
+
+    @classmethod
+    def get_cudagraph_support_for_selection(cls) -> AttentionCGSupport:
+        """Return conservative support before the KV cache spec is known."""
         return cls._cudagraph_support
 
     def _init_reorder_batch_threshold(

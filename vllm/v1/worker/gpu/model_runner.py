@@ -954,7 +954,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Compact the device layout to the selected per-request prefix lengths.
         if use_adaptive_verification:
             assert num_draft_tokens_per_req_gpu is not None
-            self.input_buffers.query_start_loc[0] = 0
+            self.input_buffers.query_start_loc[:1].zero_()
             torch.cumsum(
                 num_draft_tokens_per_req_gpu + 1,
                 dim=0,
