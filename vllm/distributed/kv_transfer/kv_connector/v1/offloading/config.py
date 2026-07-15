@@ -125,6 +125,7 @@ def build_offloading_config(
             pp_size=parallel_config.pipeline_parallel_size,
             pcp_size=parallel_config.prefill_context_parallel_size,
             dcp_size=parallel_config.decode_context_parallel_size,
+            data_parallel_index=parallel_config.data_parallel_index,
             is_parallelism_agnostic=is_parallelism_agnostic,
         ),
     )

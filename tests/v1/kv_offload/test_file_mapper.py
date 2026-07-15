@@ -48,6 +48,7 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
             pp_size=kwargs.get("pp_size", 1),
             pcp_size=kwargs.get("pcp_size", 1),
             dcp_size=kwargs.get("dcp_size", 1),
+            data_parallel_index=0,
             is_parallelism_agnostic=kwargs.get("is_parallelism_agnostic", False),
         ),
     )

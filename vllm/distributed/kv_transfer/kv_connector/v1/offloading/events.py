@@ -111,7 +111,7 @@ class OffloadingEventsTracker:
         """
         if not self.self_describing_enabled:
             return
-        if group_config.sliding_window_size_in_blocks is not None:
+        if group_config.sliding_window_size_in_chunks is not None:
             return
         meta = self._build_event_metadata(req, group_config, chunk_idx)
         self._pending_event_metadata[offload_key] = meta
@@ -164,7 +164,7 @@ class OffloadingEventsTracker:
             chunk_hashes.append(block_hash)
         assert len(chunk_hashes) == hbf
 
-        if group_config.sliding_window_size_in_blocks is not None:
+        if group_config.sliding_window_size_in_chunks is not None:
             # record_store filters these out before calling this helper.
             raise AssertionError("self-describing events only support full attention")
 

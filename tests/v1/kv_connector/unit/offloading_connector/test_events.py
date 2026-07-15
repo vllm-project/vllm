@@ -74,14 +74,14 @@ def _group_config(
     group_idx: int = 0,
     block_size: int = 4,
     blocks_per_chunk: int = 1,
-    sliding_window_size_in_blocks: int | None = None,
+    sliding_window_size_in_chunks: int | None = None,
 ) -> GroupOffloadConfig:
     return GroupOffloadConfig(
         group_idx=group_idx,
         tokens_per_block=block_size,
         tokens_per_chunk=block_size * blocks_per_chunk,
         hashes_per_chunk=blocks_per_chunk,
-        sliding_window_size_in_blocks=sliding_window_size_in_blocks,
+        sliding_window_size_in_chunks=sliding_window_size_in_chunks,
         kv_event_group_spec=_FULL_ATTENTION_EVENT_SPEC,
     )
 
@@ -247,7 +247,7 @@ def test_take_events_opt_out_keeps_placeholders():
 
 def test_record_store_skips_sliding_window_group():
     tracker = _tracker()
-    group_config = _group_config(sliding_window_size_in_blocks=2)
+    group_config = _group_config(sliding_window_size_in_chunks=2)
     req = _request(block_hashes=[_hash(i) for i in range(3)], token_count=12)
     keys = _record_chunks(tracker, req, group_config, num_chunks=3)
 

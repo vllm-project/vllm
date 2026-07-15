@@ -516,8 +516,8 @@ def test_two_groups_full_and_sliding_window(request_runner, async_scheduling: bo
     # Verify group configs: group 0 = full attention, group 1 = sliding window
     kv_group_configs = runner.connector_scheduler.config.kv_group_configs
     assert len(kv_group_configs) == 2
-    assert kv_group_configs[0].sliding_window_size_in_blocks is None
-    assert kv_group_configs[1].sliding_window_size_in_blocks == 2
+    assert kv_group_configs[0].sliding_window_size_in_chunks is None
+    assert kv_group_configs[1].sliding_window_size_in_chunks == 2
 
     # Blocks [0, 1, 2] miss
     runner.new_request(token_ids=[0] * block_size * 3)
@@ -1289,7 +1289,7 @@ def test_offload_prompt_only(request_runner, async_scheduling: bool):
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_reset_cache(request_runner, async_scheduling: bool):
     """reset_cache flushes in-flight loads, calls manager.reset_cache(), resets
-    next_stored_block_idx for active requests and clears job tracking."""
+    next_stored_chunk_idx for active requests and clears job tracking."""
     block_size = 4
     blocks_per_chunk = 3
     tokens_per_chunk = block_size * blocks_per_chunk
@@ -1333,11 +1333,11 @@ def test_reset_cache(request_runner, async_scheduling: bool):
     # Record job counter to verify the reset counter is set correctly.
     job_counter_before_reset = runner.connector_scheduler._job_counter
 
-    # After update_state_after_alloc, next_stored_block_idx is advanced to
+    # After update_state_after_alloc, next_stored_chunk_idx is advanced to
     # skip the loaded prefix; reset_cache must bring it back to 0.
     for req_status in runner.connector_scheduler._req_status.values():
         for group_state in req_status.group_states:
-            assert group_state.next_stored_block_idx > 0
+            assert group_state.next_stored_chunk_idx > 0
 
     # Reset the cache
     runner.connector_scheduler.reset_cache()
@@ -1359,11 +1359,11 @@ def test_reset_cache(request_runner, async_scheduling: bool):
     # pre-reset jobs arriving from workers are silently discarded.
     assert runner.connector_scheduler._stale_job_threshold == job_counter_before_reset
 
-    # next_stored_block_idx must be reset to 0 for every active request so
+    # next_stored_chunk_idx must be reset to 0 for every active request so
     # that post-reset stores restart from block 0.
     for req_status in runner.connector_scheduler._req_status.values():
         for group_state in req_status.group_states:
-            assert group_state.next_stored_block_idx == 0
+            assert group_state.next_stored_chunk_idx == 0
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -1528,8 +1528,8 @@ def test_swa_alignment_skip(request_runner, async_scheduling: bool):
       - Group 0: full attention (MLA-like), block_size=16
       - Group 1: SWA, block_size=4, sliding_window=8
 
-    alignment_block_count = 16 / 4 = 4 SWA blocks per alignment segment.
-    sliding_window_size_in_blocks = ceil(8 / 4) = 2.
+    alignment_chunk_count = 16 / 4 = 4 SWA blocks per alignment segment.
+    sliding_window_size_in_chunks = ceil(8 / 4) = 2.
     Within each segment of 4 SWA blocks, only the trailing 2 are stored.
 
     With 32 tokens (2 full-attn blocks, 8 SWA blocks):
@@ -1572,16 +1572,16 @@ def test_swa_alignment_skip(request_runner, async_scheduling: bool):
         kv_cache_groups=kv_cache_groups,
     )
 
-    # Verify config: alignment_block_count computed correctly
+    # Verify config: alignment_chunk_count computed correctly
     kv_group_configs = runner.connector_scheduler.config.kv_group_configs
     assert len(kv_group_configs) == 2
     # Group 0: full attention -> no alignment skip
-    assert kv_group_configs[0].alignment_block_count is None
-    assert kv_group_configs[0].sliding_window_size_in_blocks is None
+    assert kv_group_configs[0].alignment_chunk_count is None
+    assert kv_group_configs[0].sliding_window_size_in_chunks is None
     assert kv_group_configs[0].tokens_per_chunk == full_attn_block_size
-    # Group 1: SWA -> alignment_block_count = 16/4 = 4, tail = 2
-    assert kv_group_configs[1].alignment_block_count == 4
-    assert kv_group_configs[1].sliding_window_size_in_blocks == 2
+    # Group 1: SWA -> alignment_chunk_count = 16/4 = 4, tail = 2
+    assert kv_group_configs[1].alignment_chunk_count == 4
+    assert kv_group_configs[1].sliding_window_size_in_chunks == 2
     assert kv_group_configs[1].tokens_per_chunk == swa_block_size
 
     # Send 32 tokens = 2 full-attn blocks (block_size=16) = 8 SWA blocks
@@ -1682,7 +1682,7 @@ def test_stale_sliding_window_block_after_prepare_store_failure(
     runner.new_request(token_ids=[0] * block_size * 3)
 
     # First step: prepare_store FAILS -> offloading delayed.
-    # next_stored_block_idx stays at 0, block_ids[0] still holds the
+    # next_stored_chunk_idx stays at 0, block_ids[0] still holds the
     # original block_id for position 0.
     runner.manager.prepare_store.side_effect = lambda keys, req_context: None
     runner.run(decoded_tokens=[0])
@@ -2319,7 +2319,7 @@ class TestEagle:
         kv_group_configs = runner.connector_scheduler.config.kv_group_configs
         assert len(kv_group_configs) == 1
         assert kv_group_configs[0].is_eagle_group
-        assert kv_group_configs[0].sliding_window_size_in_blocks == 2
+        assert kv_group_configs[0].sliding_window_size_in_chunks == 2
 
         runner.new_request(token_ids=[0] * block_size * 3)
         runner.manager.prepare_store.side_effect = lambda keys, req_context: (
@@ -2376,14 +2376,14 @@ class TestEagle:
         """Eagle store must not drop interior blocks across prefill chunks.
 
         Regression: the trailing-block exclusion (num_blocks - 1) was applied
-        when collecting keys, but next_stored_block_idx advanced by the
+        when collecting keys, but next_stored_chunk_idx advanced by the
         non-decremented count, so the trailing block of every chunked-prefill
         chunk was skipped and never re-considered. With the harness chunk budget
         (1000 tokens) and block_size 4, a prompt longer than one chunk lost the
         block at the chunk boundary, leaving a permanent gap that caps prefix
         reuse at the first hole. Only the trailing decode block may be held
         back; all other blocks must be stored exactly once (no duplicates from
-        next_stored_block_idx regressing at the prefill->decode transition).
+        next_stored_chunk_idx regressing at the prefill->decode transition).
         """
         block_size = 4
         blocks_per_chunk = 1

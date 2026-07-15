@@ -46,6 +46,8 @@ class OffloadingParallelConfig:
     pcp_size: int
     # Decode context parallel size.
     dcp_size: int
+    # Data parallel replica index of this engine.
+    data_parallel_index: int
     # True when concatenating a block's data across all workers yields
     # the same result regardless of the parallelism configuration.
     is_parallelism_agnostic: bool

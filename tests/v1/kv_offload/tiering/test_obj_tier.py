@@ -56,6 +56,7 @@ def _make_offloading_config(enable_kv_cache_events: bool) -> OffloadingConfig:
             pp_size=1,
             pcp_size=1,
             dcp_size=1,
+            data_parallel_index=0,
             is_parallelism_agnostic=False,
         ),
     )

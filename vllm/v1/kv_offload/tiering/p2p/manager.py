@@ -164,7 +164,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # One control socket per DP replica: offset the base by the global
         # data-parallel index so replicas on a host don't collide (mirrors
         # NIXL). For DP=1 the index is 0, leaving the base port unchanged.
-        dp_index = offloading_spec.vllm_config.parallel_config.data_parallel_index
+        dp_index = offloading_spec.config.parallel.data_parallel_index
         port = int(port) + dp_index
         # Two decoupled identities:
         #   _local_id (``host:port``): the ZMQ control identity that peers
