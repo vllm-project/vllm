@@ -22,7 +22,7 @@ if(QUTLASS_SRC_DIR)
   set(qutlass_BINARY_DIR "${CMAKE_BINARY_DIR}/qutlass-binary-dir-unused")
 else()
   set(_QUTLASS_UPSTREAM_REPO "https://github.com/cleonard530/qutlass.git")
-  set(_QUTLASS_UPSTREAM_TAG "7b2601a46dfc6e17c2bf86f801e318aa17a1423a")
+  set(_QUTLASS_UPSTREAM_TAG "e2257ab82e0e3272bc993024aa3b7f304b1fb84d")
 
   set(_qutlass_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _qutlass_fc_root)
@@ -87,7 +87,6 @@ if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND QUTLASS_ARCHS)
     ${qutlass_SOURCE_DIR}/qutlass/csrc/gemm.cu
     ${qutlass_SOURCE_DIR}/qutlass/csrc/gemm_ada.cu
     ${qutlass_SOURCE_DIR}/qutlass/csrc/fused_quantize_mx.cu
-    ${qutlass_SOURCE_DIR}/qutlass/csrc/fused_quantize_mx_mask.cu
     ${qutlass_SOURCE_DIR}/qutlass/csrc/fused_quantize_nv.cu
     ${qutlass_SOURCE_DIR}/qutlass/csrc/fused_quantize_mx_sm100.cu
     ${qutlass_SOURCE_DIR}/qutlass/csrc/fused_quantize_nv_sm100.cu
@@ -138,7 +137,7 @@ if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND QUTLASS_ARCHS)
     WITH_SOABI)
 
   target_compile_definitions(_qutlass_C PRIVATE
-    QUTLASS_DISABLE_PYBIND=1
+    QUTLASS_MINIMAL_BUILD=1
     TARGET_CUDA_ARCH=${QUTLASS_TARGET_CC}
     CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1
     TORCH_TARGET_VERSION=0x020B000000000000ULL
