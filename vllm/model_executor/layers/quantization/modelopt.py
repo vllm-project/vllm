@@ -189,6 +189,36 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
         # handle exclusion
         if self.is_layer_excluded(prefix):
+            # Opt-in: requant an otherwise-bf16 dense QKV projection to FP8 at
+            # load time and dispatch through the FP8 CUTLASS GEMM. Halves the
+            # weight bytes streamed from HBM on the decode-bound QKV matmul.
+            # Scoped to *.self_attn.qkv_proj; everything else stays bf16.
+            if (
+                envs.VLLM_QKV_FP8_REQUANT
+                and isinstance(layer, LinearBase)
+                and prefix.endswith("self_attn.qkv_proj")
+            ):
+                from vllm.model_executor.layers.quantization.qkv_fp8_requant import (
+                    QkvFp8RequantLinearMethod,
+                )
+
+                return QkvFp8RequantLinearMethod()
+            # Opt-in: requant an otherwise-bf16 dense attention output
+            # projection to FP8 W8A16 via the weight-only FP8-Marlin GEMM
+            # (bf16 activations). Halves the O-proj weight bytes streamed from
+            # HBM on decode. Scoped to *.self_attn.o_proj; stacks on fp8-qkv.
+            if (
+                envs.VLLM_OPROJ_FP8_W8A16
+                and isinstance(layer, LinearBase)
+                and prefix.endswith("self_attn.o_proj")
+            ):
+                from vllm.model_executor.layers.quantization.oproj_fp8_w8a16 import (
+                    OprojFp8W8A16LinearMethod,
+                    is_oproj_fp8_w8a16_supported,
+                )
+
+                if is_oproj_fp8_w8a16_supported():
+                    return OprojFp8W8A16LinearMethod()
             if isinstance(layer, (LinearBase, ParallelLMHead)):
                 return UnquantizedLinearMethod()
             return None

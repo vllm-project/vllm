@@ -295,6 +295,8 @@ if TYPE_CHECKING:
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
     VLLM_PREFIX_CACHE_RETENTION_INTERVAL: int | None = None
+    VLLM_QKV_FP8_REQUANT: bool = False
+    VLLM_OPROJ_FP8_W8A16: bool = False
 
 
 def get_default_cache_root():
@@ -2018,6 +2020,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Each entry is VAR_NAME or VAR_NAME:<suffix> (suffix appended to
     # RDMA device name). Must be set together with VLLM_GPU_NIC_PCIE_MAPPING.
     "VLLM_NIC_SELECTION_VARS": lambda: os.getenv("VLLM_NIC_SELECTION_VARS", ""),
+    # Opt-in: requant an otherwise-bf16 (ignore-listed) dense attention
+    # qkv_proj to FP8-e4m3 at load time and dispatch through the FP8 CUTLASS
+    # GEMM, halving the weight bytes streamed from HBM on the decode-bound
+    # QKV matmul. Scoped to *.self_attn.qkv_proj. Lossy; off by default.
+    "VLLM_QKV_FP8_REQUANT": lambda: bool(int(os.getenv("VLLM_QKV_FP8_REQUANT", "0"))),
+    # Opt-in: requant an otherwise-bf16 (ignore-listed) dense attention
+    # o_proj to FP8-e4m3 W8A16 via the FP8-Marlin path (bf16 activations),
+    # halving the O-proj weight bytes streamed from HBM on decode. Scoped to
+    # *.self_attn.o_proj; stacks on VLLM_QKV_FP8_REQUANT. Lossy; off by default.
+    "VLLM_OPROJ_FP8_W8A16": lambda: bool(int(os.getenv("VLLM_OPROJ_FP8_W8A16", "0"))),
 }
 
 
