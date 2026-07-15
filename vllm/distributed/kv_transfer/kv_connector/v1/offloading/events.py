@@ -19,7 +19,12 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
+from vllm.distributed.kv_events import (
+    MEDIUM_CPU,
+    BlockRemoved,
+    BlockStored,
+    KVCacheEvent,
+)
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
@@ -28,6 +33,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_sliding_window,
 )
 from vllm.v1.kv_offload.base import (
+    LookupResult,
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadKey,
@@ -81,10 +87,11 @@ class _OffloadEventMetadata:
 class OffloadingEventsTracker:
     """Tracks offloaded chunks' KV event payloads from store to eviction.
 
-    The scheduler calls :meth:`record_store` from ``_build_store_jobs``
-    while the ``Request`` is available, and routes the manager's raw
-    :class:`OffloadingEvent` stream through :meth:`take_events`. All state
-    is bounded by the CPU pool capacity and cleared by :meth:`reset`.
+    The scheduler calls :meth:`record_store` from ``_build_store_jobs`` and
+    :meth:`record_speculative` from the full-attention lookup path for potential
+    tier promotions while the ``Request`` is available. It routes the manager's
+    raw :class:`OffloadingEvent` stream through :meth:`take_events` and cleans up
+    unconfirmed metadata when requests finish. :meth:`reset` clears all state.
     """
 
     def __init__(self, config: OffloadingKVEventsConfig):
@@ -93,9 +100,13 @@ class OffloadingEventsTracker:
             config.enable_kv_cache_events and config.self_describing_kv_events
         )
 
-        # OffloadKey -> payload snapshot, kept until the eviction event so
-        # BlockRemoved can fan out. Bounded: one entry per offloaded chunk.
+        # OffloadKey -> payload snapshot. Confirmed entries remain until CPU
+        # eviction or reset; speculative entries are also cleaned on request end.
         self._pending_event_metadata: dict[OffloadKey, _OffloadEventMetadata] = {}
+        # Presence means metadata is speculative; absence means metadata is
+        # confirmed, provided the key exists in _pending_event_metadata.
+        self._speculative_owners: dict[OffloadKey, set[str]] = {}
+        self._speculative_keys: dict[str, set[OffloadKey]] = {}
 
     def record_store(
         self,
@@ -104,7 +115,7 @@ class OffloadingEventsTracker:
         chunk_idx: int,
         offload_key: OffloadKey,
     ) -> None:
-        """Snapshot the KV cache event payload for one offloaded chunk.
+        """Snapshot and confirm one chunk from ``_build_store_jobs``.
 
         No-op when self-describing event capture is disabled or for
         sliding-window / SSM groups, which keep the legacy placeholder payload.
@@ -115,6 +126,70 @@ class OffloadingEventsTracker:
             return
         meta = self._build_event_metadata(req, group_config, chunk_idx)
         self._pending_event_metadata[offload_key] = meta
+        # Reverse request indexes may stay stale; finish cleanup tolerates that.
+        self._speculative_owners.pop(offload_key, None)
+
+    def record_speculative(
+        self,
+        req: Request,
+        group_config: "GroupOffloadConfig",
+        chunk_idx: int,
+        offload_key: OffloadKey,
+        result: LookupResult,
+    ) -> None:
+        """Snapshot metadata observed by a lookup helper.
+
+        A primary hit confirms the metadata immediately. Deferred results keep
+        it speculative until a CPU store event arrives or its owners finish.
+        """
+        if not self.self_describing_enabled:
+            return
+        if group_config.sliding_window_size_in_chunks is not None:
+            return
+        if result is LookupResult.MISS:
+            return
+
+        if result is LookupResult.HIT:
+            if offload_key not in self._pending_event_metadata:
+                self._pending_event_metadata[offload_key] = self._build_event_metadata(
+                    req, group_config, chunk_idx
+                )
+            # Reverse request indexes may stay stale; finish cleanup tolerates that.
+            self._speculative_owners.pop(offload_key, None)
+            return
+
+        assert result in (LookupResult.RETRY, LookupResult.HIT_PENDING)
+        if (
+            offload_key in self._pending_event_metadata
+            and offload_key not in self._speculative_owners
+        ):
+            return
+
+        if offload_key not in self._pending_event_metadata:
+            self._pending_event_metadata[offload_key] = self._build_event_metadata(
+                req, group_config, chunk_idx
+            )
+        req_id = req.request_id
+        owners = self._speculative_owners.setdefault(offload_key, set())
+        if req_id not in owners:
+            owners.add(req_id)
+            self._speculative_keys.setdefault(req_id, set()).add(offload_key)
+
+    def on_request_finished(self, req_id: str) -> None:
+        """Discard metadata left speculative only by a finished request."""
+        if not self.self_describing_enabled:
+            return
+        keys = self._speculative_keys.pop(req_id, None)
+        if keys is None:
+            return
+        for key in keys:
+            owners = self._speculative_owners.get(key)
+            if owners is None:
+                continue
+            owners.discard(req_id)
+            if not owners:
+                self._speculative_owners.pop(key, None)
+                self._pending_event_metadata.pop(key, None)
 
     def take_events(self, events: Iterable[OffloadingEvent]) -> Iterable[KVCacheEvent]:
         """Translate raw OffloadingEvents into self-describing KV events.
@@ -137,6 +212,8 @@ class OffloadingEventsTracker:
         """Drop all tracked state; pending payloads are stale after a
         manager cache reset."""
         self._pending_event_metadata.clear()
+        self._speculative_owners.clear()
+        self._speculative_keys.clear()
 
     def _build_event_metadata(
         self,
@@ -225,6 +302,9 @@ class OffloadingEventsTracker:
         locality = event.locality.value if event.locality is not None else None
         for key in event.keys:
             meta = self._pending_event_metadata.get(key)
+            if event.medium == MEDIUM_CPU:
+                # Reverse request indexes may stay stale; finish cleanup tolerates that.
+                self._speculative_owners.pop(key, None)
             if meta is None:
                 if self.self_describing_enabled:
                     # Expected for unsupported shapes; warn once only.
@@ -232,7 +312,8 @@ class OffloadingEventsTracker:
                         "OffloadingEventsTracker: no event metadata for "
                         "offload key during BlockStored emission; emitting a "
                         "placeholder payload. Expected for non-full-attention "
-                        "groups; otherwise indicates a missing populate path."
+                        "groups and externally-originated promotions; otherwise "
+                        "indicates a missing populate path."
                     )
                 yield self._placeholder_stored(key, event.medium, locality)
                 continue
@@ -267,7 +348,11 @@ class OffloadingEventsTracker:
         locality = event.locality.value if event.locality is not None else None
         by_group: dict[int, list] = {}
         for key in event.keys:
-            meta = self._pending_event_metadata.pop(key, None)
+            if event.medium == MEDIUM_CPU:
+                meta = self._pending_event_metadata.pop(key, None)
+                self._speculative_owners.pop(key, None)
+            else:
+                meta = self._pending_event_metadata.get(key)
             if meta is not None:
                 group_idx = meta.group_idx
                 by_group.setdefault(group_idx, []).extend(

@@ -419,6 +419,7 @@ class OffloadingConnectorScheduler:
         self._block_id_to_pending_jobs: dict[int, set[int]] = {}
 
         self._events_tracker = OffloadingEventsTracker(spec.kv_events_config)
+        self._flushed_events: list[KVCacheEvent] = []
 
     def _maybe_observe_lookup_async_delay(
         self, req_status: RequestOffloadState
@@ -463,14 +464,28 @@ class OffloadingConnectorScheduler:
             del self._req_status[req_id]
 
     def _maximal_prefix_lookup(
-        self, keys: Iterable[OffloadKey], req_context: ReqContext
+        self,
+        keys: Iterable[OffloadKey],
+        req_context: ReqContext,
+        req: Request,
+        group_config: GroupOffloadConfig,
+        start_chunk_idx: int,
     ) -> int | None:
         """Return the number of consecutive offloaded chunks from the start,
         or None if the backend deferred a lookup."""
         hit_count = 0
         defer_lookup = False
-        for key in keys:
-            match self.manager.lookup(key, req_context):
+        for local_idx, key in enumerate(keys):
+            result = self.manager.lookup(key, req_context)
+            if result is not LookupResult.MISS:
+                self._events_tracker.record_speculative(
+                    req,
+                    group_config,
+                    start_chunk_idx + local_idx,
+                    key,
+                    result,
+                )
+            match result:
                 case LookupResult.HIT:
                     hit_count += 1
                 case LookupResult.HIT_PENDING:
@@ -616,7 +631,11 @@ class OffloadingConnectorScheduler:
                 num_hit_chunks: int | None
                 if sliding_window_size_in_chunks is None:
                     num_hit_chunks = self._maximal_prefix_lookup(
-                        offload_keys, req_status.req_context
+                        offload_keys,
+                        req_status.req_context,
+                        req_status.req,
+                        group_config,
+                        start_chunk_idx,
                     )
                 else:
                     required_window = sliding_window_size_in_chunks
@@ -1280,6 +1299,7 @@ class OffloadingConnectorScheduler:
             returned by the engine.
         """
         req_status = self._req_status.get(request.request_id)
+        self._events_tracker.on_request_finished(request.request_id)
 
         if req_status is None:
             # Untracked request (offloading never started): no in-flight jobs,
@@ -1318,6 +1338,8 @@ class OffloadingConnectorScheduler:
             ``BlockStored`` or ``BlockRemoved`` events corresponding to
             the underlying :class:`OffloadingEvent` stream.
         """
+        flushed_events, self._flushed_events = self._flushed_events, []
+        yield from flushed_events
         yield from self._events_tracker.take_events(self.manager.take_events())
 
     def reset_cache(self) -> None:
@@ -1337,6 +1359,12 @@ class OffloadingConnectorScheduler:
 
         # Reset offloading manager cache
         self.manager.reset_cache()
+        if self._events_tracker.self_describing_enabled:
+            # Translate queued events before clearing their pre-reset metadata.
+            flushed_events = list(
+                self._events_tracker.take_events(self.manager.take_events())
+            )
+            self._flushed_events.extend(flushed_events)
 
         # Reset store progress so active requests re-offload from chunk 0.
         for status in self._req_status.values():

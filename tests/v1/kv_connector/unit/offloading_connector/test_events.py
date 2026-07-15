@@ -7,7 +7,13 @@ import torch
 
 from tests.v1.kv_connector.unit.utils import create_vllm_config
 from vllm.config import KVEventsConfig, KVTransferConfig
-from vllm.distributed.kv_events import MEDIUM_CPU, MEDIUM_FS, BlockRemoved, BlockStored
+from vllm.distributed.kv_events import (
+    MEDIUM_CPU,
+    MEDIUM_FS,
+    MEDIUM_OBJ,
+    BlockRemoved,
+    BlockStored,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
 )
@@ -27,6 +33,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_offload.base import (
     Locality,
+    LookupResult,
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadKey,
@@ -62,8 +69,9 @@ def _wire_hash(block_hash: BlockHash):
     return maybe_convert_block_hash(block_hash)
 
 
-def _request(*, block_hashes: list[BlockHash], token_count: int):
+def _request(*, block_hashes: list[BlockHash], token_count: int, req_id: str = "req"):
     req = MagicMock()
+    req.request_id = req_id
     req.block_hashes = block_hashes
     req.all_token_ids = list(range(1, token_count + 1))
     req.lora_request = None
@@ -104,10 +112,35 @@ def _record_chunks(
     return keys
 
 
+def _record_speculative_chunks(
+    tracker: OffloadingEventsTracker,
+    req,
+    group_config: GroupOffloadConfig,
+    num_chunks: int,
+    *,
+    result: LookupResult = LookupResult.RETRY,
+) -> list[OffloadKey]:
+    keys: list[OffloadKey] = []
+    hbf = group_config.hashes_per_chunk
+    for chunk_idx in range(num_chunks):
+        tail_hash = req.block_hashes[(chunk_idx + 1) * hbf - 1]
+        assert tail_hash is not None
+        key = make_offload_key(tail_hash, group_config.group_idx)
+        tracker.record_speculative(
+            req,
+            group_config,
+            chunk_idx,
+            key,
+            result,
+        )
+        keys.append(key)
+    return keys
+
+
 def _stored_event(
     keys: list[OffloadKey],
-    locality: Locality | None = None,
     medium: str = _CPU_MEDIUM,
+    locality: Locality | None = None,
 ) -> OffloadingEvent:
     return OffloadingEvent(
         keys=keys,
@@ -119,8 +152,8 @@ def _stored_event(
 
 def _removed_event(
     keys: list[OffloadKey],
-    locality: Locality | None = None,
     medium: str = _CPU_MEDIUM,
+    locality: Locality | None = None,
 ) -> OffloadingEvent:
     return OffloadingEvent(
         keys=keys,
@@ -128,6 +161,24 @@ def _removed_event(
         removed=True,
         locality=locality,
     )
+
+
+def _speculative_chunk(
+    *,
+    req_id: str = "req",
+    result: LookupResult = LookupResult.RETRY,
+) -> tuple[OffloadingEventsTracker, MagicMock, GroupOffloadConfig, OffloadKey]:
+    tracker = _tracker()
+    req = _request(block_hashes=[_hash(0)], token_count=4, req_id=req_id)
+    group_config = _group_config()
+    key = _record_speculative_chunks(
+        tracker,
+        req,
+        group_config,
+        num_chunks=1,
+        result=result,
+    )[0]
+    return tracker, req, group_config, key
 
 
 def test_take_events_forwards_locality_to_rich_store():
@@ -220,7 +271,26 @@ def test_take_events_publishes_routable_block_stored():
     assert len(tracker._pending_event_metadata) == 6
 
 
-def test_take_events_factor_gt_1_chunk_store_and_remove():
+def test_promotion_emits_full_cpu_stored_event():
+    tracker, _, _, key = _speculative_chunk()
+
+    [event] = tracker.take_events([_stored_event([key])])
+
+    assert isinstance(event, BlockStored)
+    assert event.medium == MEDIUM_CPU
+    assert event.block_hashes == [_wire_hash(_hash(0))]
+    assert event.parent_block_hash is None
+    assert event.token_ids == [1, 2, 3, 4]
+    assert event.block_size == 4
+    assert event.lora_id is None
+    assert event.lora_name is None
+    assert event.extra_keys is None
+    assert event.group_idx == 0
+    assert event.kv_cache_spec_kind == KVCacheSpecKind.FULL_ATTENTION.value
+    assert event.kv_cache_spec_sliding_window is None
+
+
+def test_speculative_promotion_factor_gt_1_store_and_remove():
     block_size = 4
     blocks_per_chunk = 3
     tracker = _tracker()
@@ -231,7 +301,9 @@ def test_take_events_factor_gt_1_chunk_store_and_remove():
         block_hashes=[_hash(i) for i in range(6)],
         token_count=block_size * blocks_per_chunk * 2,
     )
-    keys = _record_chunks(tracker, req, group_config, num_chunks=2)
+    keys = _record_speculative_chunks(tracker, req, group_config, num_chunks=2)
+
+    assert set(tracker._speculative_owners) == set(keys)
 
     stored = list(tracker.take_events([_stored_event(keys)]))
     assert len(stored) == 2
@@ -256,6 +328,10 @@ def test_take_events_factor_gt_1_chunk_store_and_remove():
         expected_hashes.extend(expected_chunk_hashes)
 
     assert len(tracker._pending_event_metadata) == 2
+    assert not tracker._speculative_owners
+
+    tracker.on_request_finished("req")
+    assert len(tracker._pending_event_metadata) == 2
 
     removed = list(tracker.take_events([_removed_event(keys)]))
     assert len(removed) == 1
@@ -264,6 +340,7 @@ def test_take_events_factor_gt_1_chunk_store_and_remove():
     assert removed[0].medium == _CPU_MEDIUM
     assert removed[0].group_idx == 0
     assert not tracker._pending_event_metadata
+    assert not tracker._speculative_keys
 
 
 def test_take_events_factor_gt_1_store_is_order_independent():
@@ -293,9 +370,13 @@ def test_take_events_opt_out_keeps_placeholders():
     group_config = _group_config()
     req = _request(block_hashes=[_hash(i) for i in range(3)], token_count=12)
     keys = _record_chunks(tracker, req, group_config, num_chunks=3)
+    _record_speculative_chunks(tracker, req, group_config, num_chunks=3)
+    tracker.on_request_finished("req")
 
     assert not tracker.self_describing_enabled
     assert not tracker._pending_event_metadata
+    assert not tracker._speculative_owners
+    assert not tracker._speculative_keys
 
     events = list(
         tracker.take_events(
@@ -315,18 +396,164 @@ def test_take_events_opt_out_keeps_placeholders():
     assert len(events[3].block_hashes) == 3
 
 
-def test_record_store_skips_sliding_window_group():
+@pytest.mark.parametrize(
+    "sliding_window_size_in_chunks",
+    [1, 2],
+    ids=["ssm", "sliding-window"],
+)
+def test_event_metadata_skips_non_full_attention_group(
+    sliding_window_size_in_chunks: int,
+):
     tracker = _tracker()
-    group_config = _group_config(sliding_window_size_in_chunks=2)
+    group_config = _group_config(
+        sliding_window_size_in_chunks=sliding_window_size_in_chunks
+    )
     req = _request(block_hashes=[_hash(i) for i in range(3)], token_count=12)
     keys = _record_chunks(tracker, req, group_config, num_chunks=3)
+    _record_speculative_chunks(tracker, req, group_config, num_chunks=3)
 
     assert not tracker._pending_event_metadata
+    assert not tracker._speculative_owners
+    assert not tracker._speculative_keys
 
     events = list(tracker.take_events([_stored_event(keys[:1])]))
     assert len(events) == 1
     assert isinstance(events[0], BlockStored)
     assert events[0].block_size == 0
+
+
+@pytest.mark.parametrize("lookup_result", [LookupResult.MISS, LookupResult.RETRY])
+def test_pending_cpu_removal_survives_interleaved_lookup(
+    lookup_result: LookupResult,
+):
+    tracker = _tracker()
+    block_hashes = [_hash(0), _hash(1)]
+    req = _request(block_hashes=block_hashes, token_count=8)
+    group_config = _group_config(blocks_per_chunk=2)
+    key = _record_chunks(tracker, req, group_config, num_chunks=1)[0]
+    confirmed_meta = tracker._pending_event_metadata[key]
+    lookup_req = _request(
+        block_hashes=block_hashes,
+        token_count=8,
+        req_id="new-request",
+    )
+
+    tracker.record_speculative(
+        lookup_req,
+        group_config,
+        0,
+        key,
+        lookup_result,
+    )
+    assert tracker._pending_event_metadata == {key: confirmed_meta}
+    assert not tracker._speculative_owners
+    assert not tracker._speculative_keys
+
+    tracker.on_request_finished("new-request")
+    assert tracker._pending_event_metadata == {key: confirmed_meta}
+
+    removed = list(tracker.take_events([_removed_event([key])]))
+    assert len(removed) == 1
+    assert removed[0].block_hashes == [
+        _wire_hash(_hash(0)),
+        _wire_hash(_hash(1)),
+    ]
+
+    if lookup_result is LookupResult.RETRY:
+        stored = list(tracker.take_events([_stored_event([key])]))
+        assert len(stored) == 1
+        assert stored[0].block_size == 0
+        assert stored[0].token_ids == []
+
+
+def test_two_speculators_survive_first_request_finish():
+    tracker, req, group_config, key = _speculative_chunk(req_id="req-a")
+    req_b = _request(
+        block_hashes=req.block_hashes,
+        token_count=len(req.all_token_ids),
+        req_id="req-b",
+    )
+    tracker.record_speculative(
+        req_b,
+        group_config,
+        0,
+        key,
+        LookupResult.HIT_PENDING,
+    )
+
+    tracker.on_request_finished("req-a")
+    assert tracker._speculative_owners[key] == {"req-b"}
+
+    stored = list(tracker.take_events([_stored_event([key])]))
+    assert stored[0].token_ids == [1, 2, 3, 4]
+    assert key not in tracker._speculative_owners
+
+    tracker.on_request_finished("req-b")
+    assert key in tracker._pending_event_metadata
+    removed = list(tracker.take_events([_removed_event([key])]))
+    assert removed[0].block_hashes == [_wire_hash(_hash(0))]
+    assert not tracker._pending_event_metadata
+    assert not tracker._speculative_keys
+
+
+def test_store_path_confirms_speculative_metadata():
+    tracker, req, group_config, key = _speculative_chunk()
+
+    tracker.record_store(req, group_config, 0, key)
+    assert key not in tracker._speculative_owners
+
+    tracker.on_request_finished("req")
+    assert key in tracker._pending_event_metadata
+    removed = list(tracker.take_events([_removed_event([key])]))
+    assert removed[0].block_hashes == [_wire_hash(_hash(0))]
+
+
+def test_primary_hit_confirms_before_store_event_translation():
+    tracker, req, group_config, key = _speculative_chunk()
+
+    tracker.record_speculative(
+        req,
+        group_config,
+        0,
+        key,
+        LookupResult.HIT,
+    )
+    tracker.on_request_finished("req")
+
+    assert key in tracker._pending_event_metadata
+    stored = list(tracker.take_events([_stored_event([key])]))
+    assert stored[0].token_ids == [1, 2, 3, 4]
+
+
+def test_hit_pending_remains_speculative_until_request_finish():
+    tracker, _, _, key = _speculative_chunk(result=LookupResult.HIT_PENDING)
+
+    tracker.on_request_finished("req")
+
+    assert not tracker._pending_event_metadata
+    assert not tracker._speculative_owners
+    assert not tracker._speculative_keys
+    stored = list(tracker.take_events([_stored_event([key])]))
+    assert stored[0].block_size == 0
+
+
+@pytest.mark.parametrize("medium", [MEDIUM_FS, MEDIUM_OBJ])
+def test_secondary_events_do_not_mutate_cpu_metadata(medium: str):
+    tracker, req, group_config, key = _speculative_chunk()
+
+    stored = list(tracker.take_events([_stored_event([key], medium)]))
+    assert stored[0].token_ids == [1, 2, 3, 4]
+    assert tracker._speculative_owners[key] == {"req"}
+
+    removed = list(tracker.take_events([_removed_event([key], medium)]))
+    assert removed[0].block_hashes == [_wire_hash(_hash(0))]
+    assert key in tracker._pending_event_metadata
+    assert tracker._speculative_owners[key] == {"req"}
+
+    tracker.record_store(req, group_config, 0, key)
+    cpu_removed = list(tracker.take_events([_removed_event([key])]))
+    assert cpu_removed[0].block_hashes == [_wire_hash(_hash(0))]
+    assert not tracker._pending_event_metadata
 
 
 def test_take_events_groups_removed_hashes_by_kv_group():
@@ -378,16 +605,20 @@ def test_reset_cache_clears_side_table():
     tracker = _tracker()
     group_config = _group_config()
     req = _request(block_hashes=[_hash(i) for i in range(3)], token_count=12)
-    _record_chunks(tracker, req, group_config, num_chunks=3)
+    _record_speculative_chunks(tracker, req, group_config, num_chunks=3)
 
     assert tracker._pending_event_metadata
+    assert tracker._speculative_owners
+    assert tracker._speculative_keys
 
     tracker.reset()
 
     assert not tracker._pending_event_metadata
+    assert not tracker._speculative_owners
+    assert not tracker._speculative_keys
 
 
-def test_tiering_rejects_self_describing_kv_events():
+def test_tiering_accepts_self_describing_kv_events():
     vllm_config = create_vllm_config(
         block_size=4,
         max_num_batched_tokens=16,
@@ -423,5 +654,9 @@ def test_tiering_rejects_self_describing_kv_events():
         ],
     )
 
-    with pytest.raises(ValueError, match="TieringOffloadingSpec"):
-        TieringOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+    spec = TieringOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+    tracker = OffloadingEventsTracker(spec.kv_events_config)
+
+    assert spec.kv_events_config.enable_kv_cache_events
+    assert spec.kv_events_config.self_describing_kv_events
+    assert tracker.self_describing_enabled
