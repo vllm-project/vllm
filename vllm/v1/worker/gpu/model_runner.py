@@ -890,7 +890,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_tokens_after_padding = batch_desc.num_tokens
         assert num_tokens > 0
         manager = self.spec_decode_confidence_manager
-        uses_padding_mask = envs.VLLM_MOE_SKIP_PADDING or manager is not None
+        uses_padding_mask = envs.VLLM_MOE_SKIP_PADDING or self.num_speculative_steps > 0
         num_tokens_per_req = scheduler_output.num_scheduled_tokens
         num_reqs = len(num_tokens_per_req)
 
@@ -1086,8 +1086,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_tokens_padded=input_batch.num_tokens_after_padding,
             is_padding=(
                 input_batch.is_padding
-                if envs.VLLM_MOE_SKIP_PADDING
-                or self.spec_decode_confidence_manager is not None
+                if envs.VLLM_MOE_SKIP_PADDING or self.num_speculative_steps > 0
                 else None
             ),
         )
