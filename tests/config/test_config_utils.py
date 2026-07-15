@@ -112,7 +112,7 @@ def test_normalize_value_uuid_and_to_json():
     [
         (lambda x: x),
         (type("CallableInstance", (), {"__call__": lambda self: 0}))(),
-        (lambda: (lambda: 0))(),  # nested function instance
+        (lambda: lambda: 0)(),  # nested function instance
     ],
 )
 def test_error_cases(bad):

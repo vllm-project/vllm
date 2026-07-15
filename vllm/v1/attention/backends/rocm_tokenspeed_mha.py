@@ -59,6 +59,13 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
     return parsed
 
 
+def _env_int_unbounded(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return int(value)
+
+
 def _env_extend_kernel_mode() -> str:
     value = os.getenv("VLLM_ROCM_TOKENSPEED_MHA_USE_EXTEND_KERNEL")
     if value is None:
@@ -398,7 +405,13 @@ class RocmTokenspeedMHAImpl(AttentionImpl[RocmTokenspeedMHAMetadata]):
         self.prefill_sliding_window = (
             -1 if sliding_window is None else sliding_window - 1
         )
-        self.decode_sliding_window = -1 if sliding_window is None else sliding_window
+        decode_sliding_delta = _env_int_unbounded(
+            "VLLM_ROCM_TOKENSPEED_MHA_DECODE_SLIDING_DELTA",
+            -1,
+        )
+        self.decode_sliding_window = (
+            -1 if sliding_window is None else sliding_window + decode_sliding_delta
+        )
         self.kv_cache_dtype = kv_cache_dtype
         self.logits_soft_cap = 0 if logits_soft_cap is None else logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
