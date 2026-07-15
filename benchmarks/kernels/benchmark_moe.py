@@ -627,6 +627,17 @@ class BenchmarkWorker:
                 except triton.runtime.autotuner.OutOfResources:
                     # Some configurations may be invalid and fail to compile.
                     continue
+                except Exception as e:
+                    # Some configs fail to compile for a given shape, e.g. Triton
+                    # "RuntimeError: PassManager::run failed" during make_ttgir, or
+                    # CUDA errors on an invalid tile. Skip the config instead of
+                    # killing the whole tuning run (one bad config would otherwise
+                    # abort the entire batch and lose all completed batches).
+                    print(
+                        f"[tune] skipping config {config} for num_tokens={num_tokens}: "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    continue
 
                 if kernel_time < best_time:
                     best_time = kernel_time
@@ -758,6 +769,11 @@ def get_model_params(config):
         E = config.num_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
+        hidden_size = config.hidden_size
+    elif config.architectures[0] == "IquestMoeV13ForCausalLM":
+        E = config.num_experts
+        topk = config.num_experts_per_tok
+        intermediate_size = config.intermediate_size
         hidden_size = config.hidden_size
     elif config.architectures[0] == "Qwen3VLMoeForConditionalGeneration":
         text_config = config.get_text_config()
