@@ -181,7 +181,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
         dtype="auto",  # not everything is supported
         gpu_memory_utilization=0.9,
         attention_config={
-            "backend": backend,
+            **get_attention_config(backend),
             "flex_attn_block_m": block_m,
             "flex_attn_block_n": block_n,
         },
