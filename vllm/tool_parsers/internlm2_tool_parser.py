@@ -146,9 +146,11 @@ class Internlm2ToolParser(ToolParser):
                 elif cur_arguments and not prev_arguments:
                     cur_arguments_json = json.dumps(cur_arguments, ensure_ascii=False)
 
-                    arguments_delta = cur_arguments_json[
-                        : cur_arguments_json.index(delta_text) + len(delta_text)
-                    ]
+                    # delta_text may not appear verbatim in cur_arguments_json
+                    # (e.g. compact model output vs. json.dumps spacing), so
+                    # diff against an empty previous string instead of
+                    # locating delta_text as a substring.
+                    arguments_delta = extract_intermediate_diff(cur_arguments_json, "")
                     delta = DeltaMessage(
                         tool_calls=[
                             DeltaToolCall(

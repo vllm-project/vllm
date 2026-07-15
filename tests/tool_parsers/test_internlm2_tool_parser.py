@@ -10,6 +10,7 @@ from tests.tool_parsers.common_tests import (
     ToolParserTests,
 )
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.internlm2_tool_parser import Internlm2ToolParser
 
 
 class TestInternLM2ToolParser(ToolParserTests):
@@ -120,3 +121,42 @@ class TestInternLM2ToolParser(ToolParserTests):
                 ),
             },
         )
+
+
+def test_streaming_first_arguments_delta_survives_compact_json_formatting():
+    """The first streamed arguments delta must not depend on delta_text
+    appearing verbatim inside json.dumps(cur_arguments): a model emitting
+    compact JSON (no space after ':') never matches Python's default
+    json.dumps formatting, so cur_arguments_json.index(delta_text) raises
+    ValueError, which the caller swallows into a lost delta.
+    """
+    parser = Internlm2ToolParser(tokenizer=None, tools=[])
+
+    first = parser.extract_tool_calls_streaming(
+        previous_text="",
+        current_text='<|action_start|><|plugin|>{"name":"get_weather"',
+        delta_text='<|action_start|><|plugin|>{"name":"get_weather"',
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+        request=None,
+    )
+    assert first is not None
+    assert first.tool_calls[0].function.name == "get_weather"
+
+    second = parser.extract_tool_calls_streaming(
+        previous_text='<|action_start|><|plugin|>{"name":"get_weather"',
+        current_text=(
+            '<|action_start|><|plugin|>{"name":"get_weather",'
+            '"parameters":{"city":"SF"}}'
+        ),
+        delta_text=',"parameters":{"city":"SF"}}',
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+        request=None,
+    )
+
+    assert second is not None
+    assert second.tool_calls[0].function.arguments is not None
+    assert parser.streamed_args_for_tool[0] != ""
