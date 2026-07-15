@@ -21,10 +21,7 @@ def sort_by_id(w, ids):
 @pytest.mark.parametrize("topk", [8])  # gemma4 topk
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half, torch.float32])
 def test_gemma4_routing_kernel_triton(
-    num_tokens: int,
-    num_experts: int,
-    topk: int,
-    dtype: torch.dtype,
+    num_tokens: int, num_experts: int, topk: int, dtype: torch.dtype, monkeypatch
 ):
     torch.manual_seed(0)
 
@@ -35,7 +32,7 @@ def test_gemma4_routing_kernel_triton(
 
     # Used with gamma4_routing_function_torch, it doesn't use the
     # first return value and the second value needs to be a LongTensor.
-    def topk_function(x, k, dim):
+    def mock_topk(x, k, dim):
         return None, tri_ids.long()
 
     # The two properties needed will be checked separately, in this order:
@@ -48,7 +45,7 @@ def test_gemma4_routing_kernel_triton(
     #
     # To check that the weights returned have been computed correctly,
     # take the returned ids, which were already checked and return them
-    # into the Torch implementation using the topk_function above.
+    # into the Torch implementation using the mock_topk above.
     #
     # This process is used  because torch.topk is unstable and tl.sort
     # uses Bitonic Mergesort, which is also unstable.
@@ -58,9 +55,9 @@ def test_gemma4_routing_kernel_triton(
     # that tied for the same place since the scale could be different,
     # but gating value the same.
 
-    ref_w, ref_ids = gemma4_routing_function_torch(
-        gating, topk, scales, topk_function=topk_function
-    )
+    monkeypatch.setattr(torch, "topk", mock_topk)
+
+    ref_w, ref_ids = gemma4_routing_function_torch(gating, topk, scales)
 
     assert ref_ids.shape == tri_ids.shape, (
         f"Returned weights shape must match reference weights shape,"
