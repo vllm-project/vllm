@@ -706,6 +706,7 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     new_computed_blocks = None
+                    fa_hit_diverged = False
                     if (
                         self.connector is not None
                         and self.has_mamba_layers
@@ -734,7 +735,14 @@ class Scheduler(SchedulerInterface):
                             num_new_local_computed_tokens = per_group_hits[fa_group_id]
                             # Per-group lookups don't detect shared prefixes.
                             request.shared_prefix_boundary = 0
-                            if self.kv_cache_manager.log_stats:
+                            # FA survived deeper than a lagging group (e.g. an
+                            # evicted Mamba state). Its deep hit only has a valid
+                            # state at that boundary if the connector supplies it,
+                            # so reconcile below once the external length is known.
+                            fa_hit_diverged = (
+                                min(per_group_hits) < num_new_local_computed_tokens
+                            )
+                            if not fa_hit_diverged and self.kv_cache_manager.log_stats:
                                 stats = self.kv_cache_manager.prefix_cache_stats
                                 assert stats is not None
                                 stats.record(
@@ -770,6 +778,29 @@ class Scheduler(SchedulerInterface):
                             continue
 
                         num_external_computed_tokens = ext_tokens
+
+                        if fa_hit_diverged:
+                            if num_external_computed_tokens == 0:
+                                # No external tokens back the deep FA hit, so the
+                                # resume boundary would have no valid Mamba state.
+                                # Reconcile to the convergent boundary every group
+                                # agrees on (records prefix-cache stats itself).
+                                (
+                                    new_computed_blocks,
+                                    num_new_local_computed_tokens,
+                                    request.shared_prefix_boundary,
+                                ) = self.kv_cache_manager.get_computed_blocks(request)
+                            elif self.kv_cache_manager.log_stats:
+                                # Connector supplies the Mamba state up to
+                                # local + ext; keep the FA hit and record the
+                                # deferred prefix-cache stats.
+                                stats = self.kv_cache_manager.prefix_cache_stats
+                                assert stats is not None
+                                stats.record(
+                                    num_tokens=request.num_tokens,
+                                    num_hits=num_new_local_computed_tokens,
+                                    preempted=request.num_preemptions > 0,
+                                )
 
                         connector_prefix_cache_queries = (
                             request.num_tokens - num_new_local_computed_tokens

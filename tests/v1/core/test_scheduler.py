@@ -5391,3 +5391,55 @@ def test_hybrid_per_group_hit_divergence_with_connector(
     output = scheduler.schedule()
     num_scheduled = output.num_scheduled_tokens[replay.request_id]
     assert replay.num_tokens - num_scheduled == expected_num_computed
+
+
+def test_hybrid_per_group_hit_divergence_fa_deeper_no_external():
+    """The opposite divergence: the FA prefix survives deeper than the Mamba
+    state and the connector supplies nothing (ext == 0). Reporting the deep FA
+    hit as locally computed would resume with no valid Mamba state at that
+    boundary (silent bad output). The scheduler must fall back to the
+    convergent boundary that every group agrees on (block 0's surviving state).
+    """
+    block_size = 16
+    scheduler = _create_hybrid_mamba_connector_scheduler(matched_tokens=0)
+    manager = scheduler.kv_cache_manager
+    assert isinstance(manager.coordinator, HybridKVCacheCoordinator)
+
+    # Seed a 4-block prefix in both groups.
+    [fill] = create_requests(
+        num_requests=1,
+        num_tokens=4 * block_size,
+        max_tokens=1,
+        same_prompt=True,
+        block_size=block_size,
+        req_ids=["fill"],
+    )
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(fill)
+    blocks = manager.allocate_slots(
+        fill, fill.num_tokens, num_computed, computed_blocks
+    )
+    mamba_ids = [b.block_id for b in blocks.blocks[1]]
+    manager.free(fill)
+
+    # Keep all FA blocks; evict every mamba state but block 0. FA reaches 4
+    # blocks, the mamba hit only reaches 1 -> diverged (FA > Mamba).
+    manager.block_pool.evict_blocks({mamba_ids[1], mamba_ids[2], mamba_ids[3]})
+
+    [replay] = create_requests(
+        num_requests=1,
+        num_tokens=5 * block_size,
+        max_tokens=1,
+        same_prompt=True,
+        block_size=block_size,
+        req_ids=["replay"],
+    )
+    _, per_group_hits = manager.coordinator.find_longest_cache_hit_per_group(
+        replay.block_hashes, replay.num_tokens - 1
+    )
+    assert per_group_hits == (4 * block_size, 1 * block_size)  # FA deeper
+
+    scheduler.add_request(replay)
+    output = scheduler.schedule()
+    num_scheduled = output.num_scheduled_tokens[replay.request_id]
+    # Must resume at the convergent boundary (block 0), not the deep FA hit.
+    assert replay.num_tokens - num_scheduled == block_size
