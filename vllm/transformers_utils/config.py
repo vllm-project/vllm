@@ -71,6 +71,7 @@ class LazyConfigDict(dict):
 
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
+    arctic="ArcticConfig",
     bagel="BagelConfig",
     umm="CheersConfig",
     chatglm="ChatGLMConfig",
@@ -80,6 +81,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     ops_colqwen3="OpsColQwen3Config",
     qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
     cosmos3_omni="Cosmos3Config",
+    cosmos3_edge="Cosmos3EdgeConfig",
     diffusion_gemma="DiffusionGemmaConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
@@ -103,7 +105,10 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     medusa="MedusaConfig",
     mellum="MellumConfig",
     midashenglm="MiDashengLMConfig",
+    minimax_m3_vl="MiniMaxM3Config",
+    minimax_m3_mtp="MiniMaxM3MTPConfig",
     moondream3="Moondream3Config",
+    moss_transcribe_diarize="MossTranscribeDiarizeConfig",
     eagle="EAGLEConfig",
     speculators="SpeculatorsConfig",
     nemotron="NemotronConfig",
@@ -121,12 +126,20 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     qwen3_5_moe="Qwen3_5MoeConfig",
     laguna="LagunaConfig",
     lfm2_moe="Lfm2MoeConfig",
-    tarsier2="Tarsier2Config",
+    **{"unlimited-ocr": "UnlimitedOCRConfig"},
 )
 
-_SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators"}
+_SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators", "medusa"}
 
 _PATCH_HF_VALIDATE_ROPE: set[str] = {"sarvam_mla"}
+
+# Model types whose checkpoints declare `layer_types` entries that upstream
+# transformers has not added to `ALLOWED_LAYER_TYPES` yet, so its strict config
+# validation rejects them (e.g.  GLM-5.2 `glm_moe_dsa` use
+# `deepseek_sparse_attention`). Extend the allowed set for these model types.
+_PATCH_HF_ALLOWED_LAYER_TYPES: dict[str, tuple[str, ...]] = {
+    "glm_moe_dsa": ("deepseek_sparse_attention",),
+}
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
     "llm_config": "text_config",
@@ -137,6 +150,22 @@ _AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
     "Llama_Nemotron_Nano_VL": {"attn_implementation": "eager"},
     "NVLM_D": {"has_no_defaults_at_init": True},
 }
+
+
+def _register_config_class(
+    model_type: str, config_class: type[PretrainedConfig]
+) -> None:
+    config_class.model_type = model_type
+    AutoConfig.register(model_type, config_class, exist_ok=True)
+
+
+def _maybe_register_hf_config(config: PretrainedConfig | None) -> None:
+    if config is None:
+        return
+
+    model_type = getattr(config, "model_type", None)
+    if isinstance(model_type, str) and model_type in _CONFIG_REGISTRY:
+        _register_config_class(model_type, _CONFIG_REGISTRY[model_type])
 
 
 def is_rope_parameters_nested(rope_parameters: dict[str, Any]) -> bool:
@@ -185,6 +214,24 @@ def _patch_hf_transformers_validate_rope():
     PretrainedConfig.validate_rope = patched_validate_rope
 
 
+def _patch_hf_transformers_allowed_layer_types(
+    extra_layer_types: tuple[str, ...],
+) -> None:
+    """Extend transformers' ``ALLOWED_LAYER_TYPES`` so its strict config
+    validation accepts layer types (e.g. ``deepseek_sparse_attention``) that a
+    checkpoint declares but upstream transformers has not registered yet.
+    """
+    import transformers.configuration_utils as hf_configuration_utils
+
+    missing = tuple(
+        layer_type
+        for layer_type in extra_layer_types
+        if layer_type not in hf_configuration_utils.ALLOWED_LAYER_TYPES
+    )
+    if missing:
+        hf_configuration_utils.ALLOWED_LAYER_TYPES += missing
+
+
 class HFConfigParser(ConfigParserBase):
     def parse(
         self,
@@ -227,6 +274,9 @@ class HFConfigParser(ConfigParserBase):
         if model_type in _PATCH_HF_VALIDATE_ROPE:
             _patch_hf_transformers_validate_rope()
 
+        if extra_layer_types := _PATCH_HF_ALLOWED_LAYER_TYPES.get(model_type):
+            _patch_hf_transformers_allowed_layer_types(extra_layer_types)
+
         if model_type in _SPECULATIVE_DECODING_CONFIGS:
             config_class = _CONFIG_REGISTRY[model_type]
             config = config_class.from_pretrained(
@@ -242,8 +292,7 @@ class HFConfigParser(ConfigParserBase):
                 # in future calls to `from_pretrained` (e.g. from
                 # AutoTokenizer or AutoProcessor).
                 config_class = _CONFIG_REGISTRY[model_type]
-                config_class.model_type = model_type
-                AutoConfig.register(model_type, config_class, exist_ok=True)
+                _register_config_class(model_type, config_class)
                 # If the on-disk model_type differs from the overridden
                 # one, register under both so AutoConfig.from_pretrained
                 # returns the correct class regardless of what the
@@ -251,8 +300,7 @@ class HFConfigParser(ConfigParserBase):
                 if (
                     config_model_type := config_dict.get("model_type")
                 ) and config_model_type != model_type:
-                    config_class.model_type = config_model_type
-                    AutoConfig.register(config_model_type, config_class, exist_ok=True)
+                    _register_config_class(config_model_type, config_class)
                     config_class.model_type = model_type
                 # Now that it is registered, it is not considered remote code anymore
                 trust_remote_code = False
@@ -880,9 +928,9 @@ def get_sentence_transformer_tokenizer_config(
     encoder_dict = None
 
     for config_file in sentence_transformer_config_files:
-        if (
-            try_get_local_file(model=model, file_name=config_file, revision=revision)
-            is not None
+        if isinstance(
+            try_get_local_file(model=model, file_name=config_file, revision=revision),
+            Path,
         ):
             encoder_dict = get_hf_file_to_dict(config_file, model, revision)
             if encoder_dict:

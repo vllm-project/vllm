@@ -99,9 +99,16 @@ ARG INSTALL_KV_CONNECTORS=false
 # prepare basic build environment
 FROM ${BUILD_BASE_IMAGE} AS base
 
+ARG TARGETPLATFORM
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
 ARG BUILD_OS
+ARG USE_SCCACHE
+ARG SCCACHE_DOWNLOAD_URL
+ARG SCCACHE_ENDPOINT
+ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
+ARG SCCACHE_REGION_NAME=us-west-2
+ARG SCCACHE_S3_NO_CREDENTIALS=0
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -161,6 +168,27 @@ RUN if [ "${BUILD_OS}" = "manylinux" ]; then \
         && (apt-get install -y --no-install-recommends python${PYTHON_VERSION}-dev 2>/dev/null || true) \
         && rm -rf /var/lib/apt/lists/*; \
     fi
+
+# Install sccache once in base so Rust and CMake/CUDA build stages share the
+# same binary and remote cache configuration.
+RUN if [ "$USE_SCCACHE" = "1" ]; then \
+        echo "Installing sccache..." \
+        && case "${TARGETPLATFORM}" in \
+          linux/arm64) SCCACHE_ARCH="aarch64" ;; \
+          linux/amd64) SCCACHE_ARCH="x86_64" ;; \
+          *) echo "Unsupported TARGETPLATFORM for sccache: ${TARGETPLATFORM}" >&2; exit 1 ;; \
+        esac \
+        && export SCCACHE_DOWNLOAD_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/v0.8.1/sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
+        && curl -L -o sccache.tar.gz ${SCCACHE_DOWNLOAD_URL} \
+        && tar -xzf sccache.tar.gz \
+        && sudo mv sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
+        && rm -rf sccache.tar.gz sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl; \
+    fi
+
+ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET_NAME}}
+ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
+ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
+ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
 
 # Install uv and bootstrap /opt/venv. Both paths converge on /opt/venv so all
 # downstream stages stay distro-agnostic.
@@ -261,7 +289,10 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Explicitly set the list to avoid issues with torch 2.2
 # See https://github.com/pytorch/pytorch/pull/123243
 # From versions.json: .torch.cuda_arch_list
-ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0+PTX'
+# Do not add +PTX here: vLLM filters torch's top-level PTX flag when it
+# converts global gencode flags into per-kernel arch lists. If a specific
+# kernel needs PTX, add +PTX to that kernel's CMake arch list instead.
+ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### BUILD BASE IMAGE ####################
 
@@ -272,6 +303,8 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 # csrc-build/extensions-build.
 FROM base AS rust-build
 ARG BUILD_OS
+ARG USE_SCCACHE
+ARG SCCACHE_ENDPOINT
 
 # Install native tools needed only for Rust/protoc builds.
 RUN if [ "${BUILD_OS}" = "manylinux" ]; then \
@@ -305,17 +338,29 @@ COPY build_rust.sh build_rust.sh
 # (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
 ENV CARGO_BUILD_JOBS=4
 
+# BuildKit can run this stage in parallel with csrc-build. Keep Rust on a
+# separate local sccache daemon while sharing the same remote cache backend.
+ENV SCCACHE_SERVER_PORT=4227
+
 # Build the release artifacts. Cache cargo registry/git, but not target/,
 # because stale target metadata can outlive source updates across BuildKit
 # cache reuse.
-RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
-    bash build_rust.sh
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
+    --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
+    if [ "$USE_SCCACHE" = "1" ]; then \
+        if [ -n "${SCCACHE_ENDPOINT}" ]; then export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; fi; \
+        export RUSTC_WRAPPER=sccache; \
+        sccache --show-stats; \
+    fi \
+    && bash build_rust.sh \
+    && if [ "$USE_SCCACHE" = "1" ]; then \
+        sccache --show-stats; \
+    fi
 #################### RUST BUILD IMAGE ####################
 
 #################### CSRC BUILD IMAGE ####################
 FROM base AS csrc-build
-ARG TARGETPLATFORM
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -367,11 +412,7 @@ ARG nvcc_threads=8
 ENV NVCC_THREADS=$nvcc_threads
 
 ARG USE_SCCACHE
-ARG SCCACHE_DOWNLOAD_URL
 ARG SCCACHE_ENDPOINT
-ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
-ARG SCCACHE_REGION_NAME=us-west-2
-ARG SCCACHE_S3_NO_CREDENTIALS=0
 
 # Flag to control whether to use pre-built vLLM wheels
 ARG VLLM_USE_PRECOMPILED=""
@@ -401,22 +442,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
     if [ "$USE_SCCACHE" = "1" ]; then \
-        echo "Installing sccache..." \
-        && case "${TARGETPLATFORM}" in \
-          linux/arm64) SCCACHE_ARCH="aarch64" ;; \
-          linux/amd64) SCCACHE_ARCH="x86_64" ;; \
-          *) echo "Unsupported TARGETPLATFORM for sccache: ${TARGETPLATFORM}" >&2; exit 1 ;; \
-        esac \
-        && export SCCACHE_DOWNLOAD_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/v0.8.1/sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
-        && curl -L -o sccache.tar.gz ${SCCACHE_DOWNLOAD_URL} \
-        && tar -xzf sccache.tar.gz \
-        && sudo mv sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
-        && rm -rf sccache.tar.gz sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl \
-        && if [ ! -z ${SCCACHE_ENDPOINT} ] ; then export SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT} ; fi \
-        && export SCCACHE_BUCKET=${SCCACHE_BUCKET_NAME} \
-        && export SCCACHE_REGION=${SCCACHE_REGION_NAME} \
-        && export SCCACHE_S3_NO_CREDENTIALS=${SCCACHE_S3_NO_CREDENTIALS} \
-        && export SCCACHE_IDLE_TIMEOUT=0 \
+        if [ -n "${SCCACHE_ENDPOINT}" ]; then export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; fi \
         && export CMAKE_BUILD_TYPE=Release \
         && export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" \
         && export VLLM_PRECOMPILED_WHEEL_COMMIT="${VLLM_MERGE_BASE_COMMIT}" \
@@ -548,8 +574,16 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi && \
     python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
 
+# Record the wheel checksum so downstream stages can bust their layer cache
+# when the wheel changes, without copying the wheel itself into the image.
+RUN sha256sum dist/*.whl > dist/wheel.sha256
+
 # Copy extension wheels from extensions-build stage for later use
 COPY --from=extensions-build /tmp/ep_kernels_workspace/dist /tmp/ep_kernels_workspace/dist
+
+# Record the EP kernels wheel checksum for the same cache-busting purpose.
+RUN sha256sum /tmp/ep_kernels_workspace/dist/*.whl \
+    > /tmp/ep_kernels_workspace/dist/wheels.sha256
 
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
 COPY .buildkite/check-wheel-size.py check-wheel-size.py
@@ -781,7 +815,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.6.12
+ARG FLASHINFER_VERSION=0.6.13
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
         --index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
@@ -820,7 +854,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     else \
         BITSANDBYTES_VERSION="${BITSANDBYTES_VERSION_X86}"; \
     fi; \
-    uv pip install --system accelerate modelscope \
+    uv pip install --system accelerate 'modelscope<1.38' \
         "bitsandbytes>=${BITSANDBYTES_VERSION}" "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs,azure]${RUNAI_MODEL_STREAMER_VERSION}"
 
 # ============================================================
@@ -838,6 +872,11 @@ ARG PYTORCH_NIGHTLY
 # Install vLLM wheel first, so that torch etc will be installed.
 # Check whether to install torch nightly instead of release for this build.
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
+# Copy only the wheel checksum (a few bytes) so a wheel change invalidates this
+# install layer. The wheel itself is bind-mounted below and never enters the
+# image. Without this the bind mount is not part of the layer cache key, so a
+# warm BuildKit agent can skip the install and ship a stale wheel.
+COPY --from=build /workspace/dist/wheel.sha256 /tmp/vllm-wheel.sha256
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/opt/uv/cache \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
@@ -860,7 +899,10 @@ uv pip list
 # Pytorch now installs NVSHMEM, setting LD_LIBRARY_PATH
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
-# Install EP kernels wheels (DeepEP) that have been built in the `build` stage
+# Install EP kernels wheels (DeepEP) that have been built in the `build` stage.
+# As with the vLLM wheel above, copy only the checksum to bust the layer cache
+# and bind-mount the wheel for the actual install to keep it out of the image.
+COPY --from=build /tmp/ep_kernels_workspace/dist/wheels.sha256 /tmp/ep-kernels-wheels.sha256
 RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
     --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system ep_kernels/dist/*.whl --verbose \
@@ -878,13 +920,6 @@ RUN --mount=type=cache,target=/opt/uv/cache \
                 "nvidia-cutlass-dsl-libs-cu13==${CUTLASS_DSL_VERSION}"; \
         fi; \
     fi
-
-# Download FlashInfer precompiled cubins AFTER all pip installs are done.
-# This must run after the vLLM wheel and EP kernels installs above, because
-# those can reinstall/touch flashinfer packages. Downloading cubins earlier
-# (in the flashinfer-jit-cache layer) causes ~2.5 GB of layer duplication
-# when a later pip install overwrites flashinfer package files.
-RUN flashinfer show-config && flashinfer download-cubin
 
 # CUDA image changed from /usr/local/nvidia to /usr/local/cuda in 12.8 but will
 # return to /usr/local/nvidia in 13.0 to allow container providers to mount drivers
@@ -994,7 +1029,8 @@ ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ENV UV_HTTP_TIMEOUT=500
 
 # install kv_connectors if requested
-ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0+PTX'
+# Do not add +PTX here; see the main TORCH_CUDA_ARCH_LIST comment above.
+ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/kv_connectors.txt,ro \

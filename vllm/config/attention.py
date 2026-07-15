@@ -9,6 +9,8 @@ from vllm.config.utils import config
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+IndexerKVDType = Literal["bf16", "fp8", "mxfp4", "nvfp4"]
+
 
 @config
 class AttentionConfig:
@@ -50,8 +52,17 @@ class AttentionConfig:
     use_fp4_indexer_cache: bool = False
     """If set, use fp4 indexer cache for dsv32 family model (not support yet)"""
 
+    indexer_kv_dtype: IndexerKVDType = "bf16"
+    """Data type for the sparse-attention indexer K cache. Quantized formats
+    (fp8, mxfp4, nvfp4) require indexer kernel support in the backend."""
+
     use_non_causal: bool = False
     """Whether to use non-causal (bidirectional) attention."""
+
+    sparse_mla_force_mqa: bool = False
+    """Force sparse MLA to use forward_mqa for all requests, including prefill.
+    When False (default), pure prefill batches use forward_mha when implemented.
+    Set to True to always use the MQA path."""
 
     flex_attn_block_m: int | None = None
     """Triton kernel BLOCK_M tile size for flex attention.

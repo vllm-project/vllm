@@ -53,6 +53,16 @@ from common import (
 from vllm.v1.worker.workspace import init_workspace_manager
 
 
+def _str2bool(v) -> bool:
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("true", "1", "yes", "t"):
+        return True
+    if v.lower() in ("false", "0", "no", "f"):
+        return False
+    raise argparse.ArgumentTypeError(f"expected a boolean, got {v!r}")
+
+
 def run_standard_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
     """Run standard attention benchmark (Flash/Triton/FlashInfer)."""
     from runner import run_attention_benchmark
@@ -65,7 +75,11 @@ def run_mla_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:
     from mla_runner import run_mla_benchmark as run_mla
 
     return run_mla(
-        config.backend, config, prefill_backend=config.prefill_backend, **kwargs
+        config.backend,
+        config,
+        prefill_backend=config.prefill_backend,
+        sparse_mla_force_mqa=config.sparse_mla_force_mqa,
+        **kwargs,
     )
 
 
@@ -485,6 +499,20 @@ def main():
         help="Prefill backends to compare (fa2, fa3, fa4). "
         "Uses the first decode backend for impl construction.",
     )
+    parser.add_argument(
+        "--fp8-output-scale",
+        type=float,
+        help="Static per-tensor scale enabling the MLA prefill FP8-output "
+        "comparison on FA4 (fused write vs standalone post-quant).",
+    )
+    parser.add_argument(
+        "--fuse-quant-op",
+        nargs="+",
+        type=_str2bool,
+        help="FP8-output write path(s) to run: false = bf16 attention + "
+        "standalone static-FP8 quant, true = FA4 writes FP8 directly. "
+        "Default: both.",
+    )
 
     # Batch specifications
     parser.add_argument(
@@ -568,6 +596,30 @@ def main():
         default="profile",
         help="Output file name for ncu profile (default: 'profile').",
     )
+    parser.add_argument(
+        "--torch-profile",
+        action="store_true",
+        default=False,
+        help="Collect a PyTorch profiler Chrome trace for each benchmark run.",
+    )
+    parser.add_argument(
+        "--torch-profile-dir",
+        default=None,
+        help="Directory for PyTorch profiler traces.",
+    )
+    parser.add_argument(
+        "--torch-profile-iters",
+        type=int,
+        default=3,
+        help="Number of forward passes to record per PyTorch profiler trace.",
+    )
+    parser.add_argument(
+        "--sparse-mla-mha-variants",
+        nargs="+",
+        default=None,
+        choices=["dense_mha", "mqa"],
+        help="Sparse MLA variants to run in mha_vs_mqa mode. Defaults to both.",
+    )
 
     # Parameter sweep (use YAML config for advanced sweeps)
     parser.add_argument(
@@ -617,6 +669,13 @@ def main():
 
         # Prefill backends (e.g., ["fa3", "fa4"])
         args.prefill_backends = yaml_config.get("prefill_backends", None)
+        args.prefill_backend = yaml_config.get("prefill_backend", None)
+
+        # FP8 output benchmark knobs; CLI wins.
+        if args.fp8_output_scale is None:
+            args.fp8_output_scale = yaml_config.get("fp8_output_scale", None)
+        if args.fuse_quant_op is None:
+            args.fuse_quant_op = yaml_config.get("fuse_quant_op", None)
 
         # Check for special modes
         args.mode = yaml_config.get("mode", None)
@@ -653,6 +712,9 @@ def main():
             args.num_q_heads = model.get("num_q_heads", args.num_q_heads)
             args.num_kv_heads = model.get("num_kv_heads", args.num_kv_heads)
             args.block_size = model.get("block_size", args.block_size)
+            args.max_model_len = model.get(
+                "max_model_len", getattr(args, "max_model_len", None)
+            )
             # MLA-specific dimensions
             args.kv_lora_rank = model.get("kv_lora_rank", args.kv_lora_rank)
             args.qk_nope_head_dim = model.get("qk_nope_head_dim", args.qk_nope_head_dim)
@@ -671,6 +733,21 @@ def main():
             args.cuda_graphs = yaml_config["cuda_graphs"]
         if "ncu_profile" in yaml_config:
             args.ncu_profile = yaml_config["ncu_profile"]
+        if "torch_profile" in yaml_config:
+            args.torch_profile = yaml_config["torch_profile"]
+        if "torch_profile_dir" in yaml_config:
+            args.torch_profile_dir = yaml_config["torch_profile_dir"]
+        if "torch_profile_iters" in yaml_config:
+            args.torch_profile_iters = yaml_config["torch_profile_iters"]
+        args.sparse_mla_topk_pattern = yaml_config.get(
+            "sparse_mla_topk_pattern", "random"
+        )
+        args.sparse_mla_dense_mha_max_seq_len = yaml_config.get(
+            "sparse_mla_dense_mha_max_seq_len", None
+        )
+        args.sparse_mla_mha_variants = yaml_config.get(
+            "sparse_mla_mha_variants", args.sparse_mla_mha_variants
+        )
 
         # Parameter sweep configuration
         if "parameter_sweep" in yaml_config:
@@ -787,8 +864,57 @@ def main():
             "skipped (timings are placeholder zeros).[/]"
         )
 
+    # FA4 fused FP8 output vs standalone post-quant, on the same fa4 kernel:
+    # the delta is the post-quant kernel the fused path removes.
+    fp8_output_scale = getattr(args, "fp8_output_scale", None)
+    if fp8_output_scale is not None:
+        decode_backend = backends[0]
+        fuse_variants = args.fuse_quant_op or [False, True]
+        label_of = {False: "post_quant", True: "fused"}
+        console.print(
+            f"[yellow]FP8 output comparison @ scale={fp8_output_scale} "
+            f"(prefill=fa4, decode impl={decode_backend})[/]"
+        )
+        fp8_results = []
+        total = len(fuse_variants) * len(args.batch_specs)
+        with tqdm(total=total, desc="FP8 output benchmarking") as pbar:
+            for spec in args.batch_specs:
+                for fuse in fuse_variants:
+                    config = BenchmarkConfig(
+                        backend=decode_backend,
+                        batch_spec=spec,
+                        num_layers=args.num_layers,
+                        head_dim=args.head_dim,
+                        num_q_heads=args.num_q_heads,
+                        num_kv_heads=args.num_kv_heads,
+                        block_size=args.block_size,
+                        device=args.device,
+                        profile_memory=args.profile_memory,
+                        kv_cache_dtype=args.kv_cache_dtype,
+                        use_cuda_graphs=args.cuda_graphs,
+                        prefill_backend="fa4",
+                    )
+                    result = run_benchmark(
+                        config, output_scale=fp8_output_scale, fuse_quant_op=fuse
+                    )
+                    label = label_of[fuse]
+                    labeled_config = replace(result.config, backend=label)
+                    result = replace(result, config=labeled_config)
+                    fp8_results.append(result)
+
+                    if not result.success:
+                        console.print(f"[red]Error {label} {spec}: {result.error}[/]")
+
+                    pbar.update(1)
+
+        console.print("\n[bold green]FP8 Output Results:[/]")
+        formatter = ResultsFormatter(console)
+        labels = [label_of[f] for f in fuse_variants]
+        formatter.print_table(fp8_results, labels, compare_to_fastest=True)
+        all_results = fp8_results
+
     # Handle special mode: decode_vs_prefill comparison
-    if hasattr(args, "mode") and args.mode == "decode_vs_prefill":
+    elif hasattr(args, "mode") and args.mode == "decode_vs_prefill":
         console.print("[yellow]Mode: Decode vs Prefill pipeline comparison[/]")
         console.print(
             "[dim]For each query length, testing both decode and prefill pipelines[/]"
@@ -981,6 +1107,133 @@ def main():
                 console.print(
                     f"\n  [yellow]Prefill always faster for batch_size={bs}[/]"
                 )
+
+    # Handle MHA vs MQA comparison mode for sparse MLA
+    elif hasattr(args, "mode") and args.mode == "mha_vs_mqa":
+        console.print("[yellow]Mode: MHA vs MQA comparison for sparse MLA[/]")
+
+        sparse_mla_topk_pattern = getattr(args, "sparse_mla_topk_pattern", "random")
+        dense_mha_max_seq_len = getattr(args, "sparse_mla_dense_mha_max_seq_len", None)
+        prefill_backend = getattr(args, "prefill_backend", None)
+        if prefill_backend:
+            console.print(f"Prefill backend: {prefill_backend}")
+        available_variants = [
+            ("dense_mha", False, "dense"),
+            ("mqa", True, "auto"),
+        ]
+        requested_variants = getattr(args, "sparse_mla_mha_variants", None)
+        if requested_variants is not None:
+            valid_variants = {label for label, _, _ in available_variants}
+            invalid_variants = sorted(set(requested_variants) - valid_variants)
+            if invalid_variants:
+                raise ValueError(
+                    "Invalid sparse_mla_mha_variants entries: "
+                    f"{invalid_variants}. Valid variants are: "
+                    f"{sorted(valid_variants)}"
+                )
+            requested_variant_set = set(requested_variants)
+            variants = [
+                variant
+                for variant in available_variants
+                if variant[0] in requested_variant_set
+            ]
+        else:
+            variants = available_variants
+        formatter = ResultsFormatter(console)
+        total = 0
+        for spec in args.batch_specs:
+            q_len = max(request.q_len for request in parse_batch_spec(spec))
+            for variant_label, _, _ in variants:
+                if (
+                    variant_label == "dense_mha"
+                    and dense_mha_max_seq_len is not None
+                    and q_len > dense_mha_max_seq_len
+                ):
+                    continue
+                total += len(backends)
+
+        with tqdm(total=total, desc="Benchmarking") as pbar:
+            for spec in args.batch_specs:
+                q_len = max(request.q_len for request in parse_batch_spec(spec))
+                for backend in backends:
+                    for variant_label, force_mqa, mha_mode in variants:
+                        if (
+                            variant_label == "dense_mha"
+                            and dense_mha_max_seq_len is not None
+                            and q_len > dense_mha_max_seq_len
+                        ):
+                            continue
+                        config = BenchmarkConfig(
+                            backend=f"{backend}_{variant_label}",
+                            batch_spec=spec,
+                            num_layers=args.num_layers,
+                            head_dim=args.head_dim,
+                            num_q_heads=args.num_q_heads,
+                            num_kv_heads=args.num_kv_heads,
+                            block_size=args.block_size,
+                            device=args.device,
+                            max_model_len=getattr(args, "max_model_len", None),
+                            kv_cache_dtype=args.kv_cache_dtype,
+                            profile_memory=args.profile_memory,
+                            use_cuda_graphs=args.cuda_graphs,
+                            ncu_profile=args.ncu_profile,
+                            torch_profile=args.torch_profile,
+                            torch_profile_dir=args.torch_profile_dir,
+                            torch_profile_iters=args.torch_profile_iters,
+                            warmup_ms=args.warmup_ms,
+                            kv_lora_rank=getattr(args, "kv_lora_rank", None),
+                            qk_nope_head_dim=getattr(args, "qk_nope_head_dim", None),
+                            qk_rope_head_dim=getattr(args, "qk_rope_head_dim", None),
+                            v_head_dim=getattr(args, "v_head_dim", None),
+                            sparse_mla_force_mqa=force_mqa,
+                            sparse_mla_mha_mode=mha_mode,
+                            sparse_mla_dense_mha_max_seq_len=dense_mha_max_seq_len,
+                            sparse_mla_topk_pattern=sparse_mla_topk_pattern,
+                            prefill_backend=prefill_backend,
+                        )
+
+                        # run_mla_benchmark needs the real backend name
+                        from mla_runner import run_mla_benchmark as run_mla
+
+                        run_label = f"{backend}_{variant_label} {spec}"
+                        pbar.set_postfix_str(run_label)
+
+                        try:
+                            result = run_mla(
+                                backend,
+                                config,
+                                prefill_backend=prefill_backend,
+                                sparse_mla_force_mqa=force_mqa,
+                            )
+                        except Exception as e:
+                            result = BenchmarkResult(
+                                config=config,
+                                mean_time=float("inf"),
+                                median_time=float("inf"),
+                                std_time=0,
+                                min_time=float("inf"),
+                                max_time=float("inf"),
+                                error=str(e),
+                            )
+
+                        all_results.append(result)
+                        if args.output_csv:
+                            formatter.save_csv(all_results, args.output_csv)
+                        if args.output_json:
+                            formatter.save_json(all_results, args.output_json)
+
+                        if not result.success:
+                            console.print(
+                                f"[red]Error {backend}_{variant_label} "
+                                f"{spec}: {result.error}[/]"
+                            )
+
+                        pbar.update(1)
+
+        # Display results with variant labels as separate "backends"
+        console.print("\n[bold green]MHA vs MQA Results:[/]")
+        variant_backends = [f"{b}_{v}" for b in backends for v, _, _ in variants]
+        formatter.print_table(all_results, variant_backends)
 
     # Handle model parameter sweep mode
     elif hasattr(args, "model_parameter_sweep") and args.model_parameter_sweep:

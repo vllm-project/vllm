@@ -76,7 +76,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.common import (
     ApplyRotaryEmb,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -618,6 +617,16 @@ class Glm4vVisionEmbeddings(nn.Module):
 
 
 class Glm4vVisionTransformer(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".attn.q.": (".attn.qkv.", "q"),
+            ".attn.k.": (".attn.qkv.", "k"),
+            ".attn.v.": (".attn.qkv.", "v"),
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+        }
+    )
+
     def __init__(
         self,
         text_config: Glm4vTextConfig,
@@ -958,33 +967,8 @@ class Glm4vVisionTransformer(nn.Module):
         return x
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("attn.qkv.", "attn.q.", "q"),
-            ("attn.qkv.", "attn.k.", "k"),
-            ("attn.qkv.", "attn.v.", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class Glm4vProcessingInfo(BaseProcessingInfo):
@@ -997,14 +981,42 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
     def get_video_processor(self, **kwargs: object) -> Glm4vVideoProcessor:
         return self.get_hf_processor(**kwargs).video_processor
 
+    def _get_processor_class_name(self) -> str | None:
+        from vllm.transformers_utils.processor import (
+            get_processor_cls_name_from_config,
+        )
+        from vllm.transformers_utils.utils import convert_model_repo_to_path
+
+        return get_processor_cls_name_from_config(
+            convert_model_repo_to_path(self.ctx.model_config.model),
+            revision=self.ctx.model_config.revision,
+        )
+
+    @staticmethod
+    def _get_longest_edge(size: Any, config_name: str) -> int:
+        if isinstance(size, dict):
+            longest_edge = size.get("longest_edge")
+        else:
+            longest_edge = getattr(size, "longest_edge", None)
+
+        if longest_edge is None:
+            raise ValueError(f"{config_name} must define longest_edge")
+
+        return int(longest_edge)
+
     def get_mm_max_tokens_per_item(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int] | None:
-        processor = self.get_hf_processor()
-        if isinstance(processor, Glm4vProcessor):
+        processor_class_name = self._get_processor_class_name()
+        if processor_class_name == "Glm4vProcessor":
             return None
+
+        if processor_class_name is None:
+            processor = self.get_hf_processor()
+            if isinstance(processor, Glm4vProcessor):
+                return None
 
         result: dict[str, int] = {}
 
@@ -1012,8 +1024,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
             result["image"] = self.get_max_image_tokens()
 
         if mm_counts.get("video", 0) > 0:
-            video_processor = self.get_video_processor()
-            max_pixels = video_processor.size["longest_edge"]
+            max_pixels = self._get_video_max_pixels()
 
             vision_config = self.get_hf_config().vision_config
             temporal_patch_size = vision_config.temporal_patch_size
@@ -1092,7 +1103,40 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         ``smart_resize`` as the ``max_pixels`` argument, which constrains
         ``t_bar * h_bar * w_bar <= max_pixels``.
         """
-        return self.get_image_processor().size["longest_edge"]
+        mm_kwargs = self.ctx.get_merged_mm_kwargs({})
+        if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
+            return int(override_max_pixels)
+
+        image_processor_config = self.ctx.get_hf_image_processor_config()
+        if not image_processor_config.get("size"):
+            from transformers.image_processing_base import ImageProcessingMixin
+
+            image_processor_config, _ = ImageProcessingMixin.get_image_processor_dict(
+                self.ctx.model_config.model,
+                revision=self.ctx.model_config.revision,
+            )
+        size = image_processor_config["size"]
+        if override_size := mm_kwargs.get("size"):
+            size = size | override_size
+
+        return self._get_longest_edge(size, "GLM4V image processor size")
+
+    def _get_video_max_pixels(self) -> int:
+        from transformers.video_processing_utils import BaseVideoProcessor
+
+        mm_kwargs = self.ctx.get_merged_mm_kwargs({})
+        if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
+            return int(override_max_pixels)
+
+        video_processor_config, _ = BaseVideoProcessor.get_video_processor_dict(
+            self.ctx.model_config.model,
+            revision=self.ctx.model_config.revision,
+        )
+        size = video_processor_config["size"]
+        if override_size := mm_kwargs.get("size"):
+            size = size | override_size
+
+        return self._get_longest_edge(size, "GLM4V video processor size")
 
     def get_image_size_with_most_features(self) -> ImageSize:
         # Use num_frames=1 for single-image budget estimation.
@@ -1440,13 +1484,12 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
         num_videos = mm_counts.get("video", 0)
 
         hf_config = self.info.get_hf_config()
-        hf_processor = self.info.get_hf_processor()
         tokenizer = self.info.get_tokenizer()
 
-        image_token: str = hf_processor.image_token
+        image_token = tokenizer.decode([hf_config.image_token_id])
         video_token_ids = [
             hf_config.video_start_token_id,
-            hf_processor.video_token_id,
+            hf_config.video_token_id,
             hf_config.video_end_token_id,
         ]
         video_token = tokenizer.decode(video_token_ids)
@@ -2068,6 +2111,7 @@ class Glm4vForConditionalGeneration(
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -2145,6 +2189,7 @@ class Glm4vForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
+        path: str = "default",
     ):
         modality = self.get_input_modality(mm_kwargs)
         grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
@@ -2170,6 +2215,7 @@ class Glm4vForConditionalGeneration(
     def encoder_cudagraph_forward(
         self,
         values: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
         pixel_values = values.pop("pixel_values")
         metadata = values
@@ -2178,6 +2224,7 @@ class Glm4vForConditionalGeneration(
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
         grid_thw = self._get_grid_thw_by_modality(mm_kwargs)

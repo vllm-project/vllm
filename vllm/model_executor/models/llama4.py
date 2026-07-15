@@ -729,8 +729,6 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
         self.set_moe_parameters()
 
     def set_moe_parameters(self):
-        self.expert_weights = []
-
         self.moe_layers = []
         example_moe = None
         for layer in self.model.layers:
@@ -798,10 +796,14 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
             self,
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
-        weights = [
+        # Use a generator (not a list comprehension) so the weights iterator is
+        # consumed lazily by AutoWeightsLoader. Materializing it here would hold
+        # the entire language-model checkpoint in host memory at once, which can
+        # OOM loaders that return private copies rather than mmap views.
+        weights = (
             self.permute_qk_weight_for_rotary(name, loaded_weight)
             for name, loaded_weight in weights
-        ]
+        )
         return loader.load_weights(weights)
 
     def permute_qk_weight_for_rotary(

@@ -1,6 +1,7 @@
 # For hf script, without -t option (tensor parallel size).
 # bash .buildkite/lm-eval-harness/run-lm-eval-mmlupro-vllm-baseline.sh -m meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8 -l 250 -t 8 -f 5
 model_name: "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
+rocm_safetensors_load_strategy: lazy
 required_gpu_arch:
   - gfx942
   - gfx950

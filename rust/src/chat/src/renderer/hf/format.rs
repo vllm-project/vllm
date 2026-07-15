@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::str::FromStr;
@@ -361,7 +364,6 @@ mod tests {
 
         expect![[r#"
             template_alpaca.jinja                              => String
-            template_baichuan.jinja                            => String
             template_chatglm.jinja                             => String
             template_chatglm2.jinja                            => String
             template_chatml.jinja                              => String
@@ -386,7 +388,6 @@ mod tests {
             tool_chat_template_llama3.2_pythonic.jinja         => String
             tool_chat_template_llama4_json.jinja               => OpenAi
             tool_chat_template_llama4_pythonic.jinja           => OpenAi
-            tool_chat_template_minimax_m1.jinja                => OpenAi
             tool_chat_template_mistral.jinja                   => String
             tool_chat_template_mistral3.jinja                  => OpenAi
             tool_chat_template_mistral_parallel.jinja          => String

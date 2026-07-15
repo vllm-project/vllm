@@ -56,7 +56,7 @@ class FlashInferMxFp4LinearKernel(MxFp4LinearKernel):
         out_shape = x.shape[:-1] + (layer.output_size_per_partition,)
         x_2d = x.reshape(-1, x.shape[-1])
 
-        x_fp4, x_scale = flashinfer_mxfp4_quantize(x_2d)
+        x_fp4, x_scale = flashinfer_mxfp4_quantize(x_2d.contiguous())
         out = flashinfer_scaled_fp4_mm(
             x_fp4,
             weight,
