@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import functools
 import json
+import re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -63,6 +64,44 @@ def _strip_partial_delim(value: str) -> str:
         if value.endswith(suffix):
             return value[: -len(suffix)]
     return value
+
+
+# ``STRING_DELIM`` doubles as the literal-quote token inside values, so the
+# first occurrence after an opener is not reliably the closer (e.g. a Python
+# ``\"\"\"`` in a code argument is three consecutive delimiter tokens).
+_KEY_AFTER_COMMA_RE = re.compile(r",\s*[A-Za-z_][A-Za-z0-9_.-]*\s*:")
+
+
+def _find_closing_delim(
+    s: str, start: int, *, in_array: bool = False, structural: bool = False
+) -> int:
+    """Return the index of the closing ``STRING_DELIM`` for a string value
+    opened at *start*.
+
+    A delimiter is treated as the closer when the text after it
+    (whitespace-stripped) is empty (end of args) or is a plausible value
+    boundary: ``,key:`` between keyword args, a bare ``,`` between array
+    items, and — only when *structural* is set, i.e. when skipping strings
+    while brace-counting a nested container — a ``}`` or ``]``. The first
+    such delimiter wins, so sibling arguments are never absorbed. When none
+    qualifies (malformed or mid-stream input) fall back to the last
+    delimiter, so a streamed value only ever grows as more of the argument
+    string arrives. Returns -1 when no delimiter exists at all, matching
+    ``str.find``.
+    """
+    pos = s.find(STRING_DELIM, start)
+    last = pos
+    while pos != -1:
+        tail = s[pos + _DELIM_LEN :].lstrip()
+        if not tail:
+            return pos
+        if tail[0] == "," and (in_array or _KEY_AFTER_COMMA_RE.match(tail)):
+            return pos
+        if structural and tail[0] in "}]":
+            return pos
+        last = pos
+        pos = s.find(STRING_DELIM, pos + _DELIM_LEN)
+    return last
 
 
 def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
@@ -122,7 +161,7 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
         if args_str[i : i + _DELIM_LEN] == STRING_DELIM:
             i += _DELIM_LEN
             val_start = i
-            end_pos = args_str.find(STRING_DELIM, i)
+            end_pos = _find_closing_delim(args_str, i)
             if end_pos == -1:
                 # Unterminated string — take rest, strip partial delimiter.
                 value = args_str[val_start:]
@@ -141,7 +180,7 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
                 if args_str[i : i + _DELIM_LEN] == STRING_DELIM:
                     # Skip over string contents to avoid counting { inside strings
                     i += _DELIM_LEN
-                    next_delim = args_str.find(STRING_DELIM, i)
+                    next_delim = _find_closing_delim(args_str, i, structural=True)
                     i = n if next_delim == -1 else next_delim + _DELIM_LEN
                     continue
                 if args_str[i] == "{":
@@ -163,7 +202,9 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
             while i < n and depth > 0:
                 if args_str[i : i + _DELIM_LEN] == STRING_DELIM:
                     i += _DELIM_LEN
-                    next_delim = args_str.find(STRING_DELIM, i)
+                    next_delim = _find_closing_delim(
+                        args_str, i, in_array=True, structural=True
+                    )
                     i = n if next_delim == -1 else next_delim + _DELIM_LEN
                     continue
                 if args_str[i] == "[":
@@ -214,7 +255,7 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
 
         if arr_str[i : i + _DELIM_LEN] == STRING_DELIM:
             i += _DELIM_LEN
-            end_pos = arr_str.find(STRING_DELIM, i)
+            end_pos = _find_closing_delim(arr_str, i, in_array=True)
             if end_pos == -1:
                 items.append(arr_str[i:])
                 break
@@ -228,7 +269,7 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
             while i < n and depth > 0:
                 if arr_str[i : i + _DELIM_LEN] == STRING_DELIM:
                     i += _DELIM_LEN
-                    nd = arr_str.find(STRING_DELIM, i)
+                    nd = _find_closing_delim(arr_str, i, structural=True)
                     i = nd + _DELIM_LEN if nd != -1 else n
                     continue
                 if arr_str[i] == "{":
@@ -248,7 +289,7 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
             while i < n and depth > 0:
                 if arr_str[i : i + _DELIM_LEN] == STRING_DELIM:
                     i += _DELIM_LEN
-                    nd = arr_str.find(STRING_DELIM, i)
+                    nd = _find_closing_delim(arr_str, i, in_array=True, structural=True)
                     i = nd + _DELIM_LEN if nd != -1 else n
                     continue
                 if arr_str[i] == "[":

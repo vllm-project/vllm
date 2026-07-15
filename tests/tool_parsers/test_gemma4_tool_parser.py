@@ -278,6 +278,73 @@ class TestParseGemma4Array:
         assert result == ["42"]
 
 
+class TestStringValuesContainingDelim:
+    """Regression tests for string values whose content contains STRING_DELIM.
+
+    ``<|"|>`` doubles as the literal-quote token inside values, so e.g. a
+    Python triple-quoted string inside an ``execute_python``-style ``code``
+    argument is three consecutive delimiter tokens. The closing-delimiter
+    scan must not stop at the first interior token, and must not absorb
+    sibling arguments. Regression tests for #44715.
+    """
+
+    def test_triple_quote_in_code_argument(self):
+        code = (
+            'result = duckdb.sql(<|"|><|"|><|"|> SELECT a, b FROM t '
+            '<|"|><|"|><|"|>).df()'
+        )
+        args = (
+            f'code:<|"|>{code}<|"|>,'
+            'data_refs:[<|"|>df_1<|"|>],return_vars:[<|"|>result<|"|>]'
+        )
+        result = _parse_gemma4_args(args)
+        assert result == {
+            "code": code,
+            "data_refs": ["df_1"],
+            "return_vars": ["result"],
+        }
+
+    def test_escaped_quote_pair_in_value(self):
+        result = _parse_gemma4_args(
+            'code:<|"|>print(<|"|>hi<|"|>)<|"|>,return_vars:[<|"|>x<|"|>]'
+        )
+        assert result == {
+            "code": 'print(<|"|>hi<|"|>)',
+            "return_vars": ["x"],
+        }
+
+    def test_dict_literal_in_code_argument(self):
+        """Quoted keys inside content must not be mistaken for arg boundaries."""
+        code = 'params = {<|"|>a<|"|>: 1, <|"|>b<|"|>: 2}'
+        result = _parse_gemma4_args(
+            f'code:<|"|>{code}<|"|>,return_vars:[<|"|>params<|"|>]'
+        )
+        assert result == {"code": code, "return_vars": ["params"]}
+
+    def test_list_literal_in_code_argument(self):
+        code = 'xs = [<|"|>a<|"|>, <|"|>b<|"|>]'
+        result = _parse_gemma4_args(f'code:<|"|>{code}<|"|>,data_refs:[<|"|>df<|"|>]')
+        assert result == {"code": code, "data_refs": ["df"]}
+
+    def test_delim_content_in_last_value(self):
+        result = _parse_gemma4_args('a:<|"|>1<|"|>,code:<|"|>f(<|"|>x<|"|>)<|"|>')
+        assert result == {"a": "1", "code": 'f(<|"|>x<|"|>)'}
+
+    def test_delim_content_in_array_item(self):
+        result = _parse_gemma4_array('<|"|>say <|"|>hi<|"|> now<|"|>')
+        assert result == ['say <|"|>hi<|"|> now']
+
+    @pytest.mark.timeout(5)
+    def test_streaming_prefixes_no_crash(self):
+        """Every prefix must parse without crashing (streaming path)."""
+        full = (
+            'code:<|"|>r = duckdb.sql(<|"|><|"|><|"|>SELECT 1<|"|><|"|><|"|>'
+            ').df()<|"|>,data_refs:[<|"|>df_1<|"|>],return_vars:[<|"|>r<|"|>]'
+        )
+        for cut in range(1, len(full) + 1):
+            _parse_gemma4_args(full[:cut], partial=True)
+
+
 # ---------------------------------------------------------------------------
 # Non-streaming extraction tests
 # ---------------------------------------------------------------------------
