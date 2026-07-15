@@ -7,6 +7,7 @@ import pytest
 
 from vllm.entrypoints.prefix_cache_analysis import (
     PromptRecord,
+    _group_requests_by_shared_prefix,
     _reusable_tokens_from_chains,
     analyze,
     load_plain_prompt_jsonl,
@@ -105,6 +106,46 @@ def test_reusable_tokens_does_not_double_count_overlapping_groups():
         "c": [BlockHash(h) for h in (b"h0", b"h1", b"hC_diverge")],
     }
     assert _reusable_tokens_from_chains(chains, block_size=16) == 112
+
+
+def test_group_requests_by_shared_prefix_finds_maximal_distinct_groups():
+    """Regression test for the trie-based rewrite of the O(N*L^2)
+    tuple-slicing grouping (flagged in PR review as quadratic in chain
+    length -- see _group_requests_by_shared_prefix's docstring). Reuses the
+    same a/b/c fixture as the reusable-tokens test: {a,b} share a 5-block
+    prefix, {a,b,c} share a shorter 2-block prefix within that. Both are
+    real, distinct-membership groups and must both be reported.
+    """
+    chains = {
+        "a": [BlockHash(h) for h in (b"h0", b"h1", b"h2", b"h3", b"h4", b"hA_only")],
+        "b": [BlockHash(h) for h in (b"h0", b"h1", b"h2", b"h3", b"h4", b"hB_only")],
+        "c": [BlockHash(h) for h in (b"h0", b"h1", b"hC_diverge")],
+    }
+    groups = _group_requests_by_shared_prefix(chains, top_k_groups=10)
+
+    by_members = {tuple(sorted(g.request_ids)): g for g in groups}
+    assert set(by_members) == {("a", "b"), ("a", "b", "c")}
+    assert len(by_members[("a", "b")].shared_block_hashes) == 5
+    assert len(by_members[("a", "b", "c")].shared_block_hashes) == 2
+
+
+def test_group_requests_by_shared_prefix_breaks_ties_deterministically():
+    """Two groups can tie exactly on (depth, request count) -- e.g. two
+    unrelated pairs each sharing a single block. Without an explicit
+    tiebreak, which one wins the last top_k slot depends on incidental
+    dict/stack iteration order. Assert it's actually deterministic (smallest
+    request_id in the group wins) rather than order-dependent.
+    """
+    chains = {
+        "a": [BlockHash(b"hA")],
+        "b": [BlockHash(b"hA")],
+        "y": [BlockHash(b"hY")],
+        "z": [BlockHash(b"hY")],
+    }
+    groups = _group_requests_by_shared_prefix(chains, top_k_groups=1)
+
+    assert len(groups) == 1
+    assert set(groups[0].request_ids) == {"a", "b"}
 
 
 def test_analyze_rejects_duplicate_request_ids():
