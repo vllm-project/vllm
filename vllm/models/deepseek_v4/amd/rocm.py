@@ -8,7 +8,7 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CUDAGraphMode
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -452,24 +452,34 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
     backend_cls = DeepseekV4ROCMAiterMLASparseBackend
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str,
+        topk_indices_buffer: torch.Tensor | None = None,
+        aux_stream_list: list[torch.cuda.Stream] | None = None,
+    ):
+        super().__init__(vllm_config, prefix, topk_indices_buffer, aux_stream_list)
         # Block scale for the preshuffled weight; None = not preshuffled.
         self._wqa_wkv_scale: torch.Tensor | None = None
         self._wo_b_scale: torch.Tensor | None = None
-
-    def _use_aiter_tgemm(self, hidden_states: torch.Tensor) -> bool:
-        forward_context = get_forward_context()
-        return (
+        self._tgemm_static_eligible = (
             self.compressor is not None
             and rocm_aiter_ops.is_tgemm_enabled()
-            and hidden_states.dtype == torch.bfloat16
             and self.compressor.fused_wkv_wgate.weight.dtype == torch.bfloat16
             and (
                 self.indexer is None
                 or self.indexer.compressor.fused_wkv_wgate.weight.dtype
                 == torch.bfloat16
             )
+        )
+
+    def _use_aiter_tgemm(self, hidden_states: torch.Tensor) -> bool:
+        forward_context = get_forward_context()
+
+        return (
+            self._tgemm_static_eligible
+            and hidden_states.dtype == torch.bfloat16
             and (
                 forward_context.additional_kwargs.get("cudagraph_warmup_mode")
                 == CUDAGraphMode.FULL
