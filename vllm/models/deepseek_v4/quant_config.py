@@ -140,6 +140,13 @@ class DeepseekV4FP8Config(Fp8Config):
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             if self.expert_dtype == "fp4":
+                parallel_config = get_current_vllm_config().parallel_config
+                if parallel_config.tensor_parallel_size > 1:
+                    raise ValueError(
+                        "DeepSeek V4 FP4 MoE is not supported with tensor "
+                        "parallelism. Use data parallelism with expert "
+                        "parallelism instead."
+                    )
                 if self.moe_quant_algo == "NVFP4":
                     from vllm.model_executor.layers.quantization.modelopt import (
                         ModelOptNvFp4FusedMoE,
