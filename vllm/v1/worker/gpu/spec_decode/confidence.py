@@ -39,7 +39,6 @@ def _build_compact_offsets_kernel(
     num_reqs,
     max_num_reqs,
     num_bonus_tokens,
-    num_tokens,
     BLOCK_SIZE: tl.constexpr,
 ):
     offsets = tl.arange(0, BLOCK_SIZE)
@@ -48,6 +47,7 @@ def _build_compact_offsets_kernel(
     capacity = tl.load(draft_capacity_ptr + offsets, mask=active, other=0)
     query_end = tl.cumsum(required + capacity, axis=0)
     logits_end = tl.cumsum(capacity + num_bonus_tokens, axis=0)
+    num_tokens = tl.sum(required + capacity, axis=0)
 
     tl.store(query_start_loc_ptr, 0)
     tl.store(cu_num_logits_ptr, 0)
@@ -795,7 +795,6 @@ class VarlenConfidenceManager(ConfidenceManager):
 
     def warmup(self, input_buffers: "InputBuffers") -> None:
         super().warmup(input_buffers)
-        query_len = 1 + self.num_speculative_steps
         num_reqs = min(2, self.req_states.max_num_reqs)
         self._required_target_tokens[:num_reqs].fill_(1)
         self._batch_draft_capacity[:num_reqs].fill_(self.num_speculative_steps)
@@ -808,7 +807,6 @@ class VarlenConfidenceManager(ConfidenceManager):
             num_reqs,
             self.req_states.max_num_reqs,
             1,
-            num_reqs * query_len,
             BLOCK_SIZE=triton.next_power_of_2(self.req_states.max_num_reqs),
         )
         idx_mapping = torch.zeros(1, dtype=torch.int32, device=self.req_states.device)
@@ -881,7 +879,6 @@ class VarlenConfidenceManager(ConfidenceManager):
             num_reqs,
             self.req_states.max_num_reqs,
             num_bonus_tokens,
-            num_tokens,
             BLOCK_SIZE=triton.next_power_of_2(self.req_states.max_num_reqs),
         )
 
