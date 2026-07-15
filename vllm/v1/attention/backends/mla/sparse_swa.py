@@ -292,8 +292,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
     - Chunked prefill (aligns with the indexer's chunking)
     """
 
-    # Base threshold: query_len <= 1 is decode
-    reorder_batch_threshold: int = 1
+    reorder_batch_threshold: int | None = None
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(self, *args, **kwargs):
@@ -315,14 +314,13 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         )
         # Decode can have query_len up to
         #   1 + (2 if parallel drafting else 1) * num_speculative_tokens.
-        # This MUST match the flashmla_sparse / indexer threshold so that
-        # all backends agree on the decode/prefill split.
+        # sparse_swa has no MQA-vs-dense-MHA routing, so multi-token queries take
+        # the prefill path and the decode/prefill split stays at that width.
         spec_mult = (
             2 if (spec_config is not None and spec_config.parallel_drafting) else 1
         )
-        self.decode_threshold = (
-            self.reorder_batch_threshold + spec_mult * self.num_speculative_tokens
-        )
+        self.decode_threshold = 1 + spec_mult * self.num_speculative_tokens
+        self.reorder_batch_threshold = None
 
         hf_config = self.vllm_config.model_config.hf_config
         assert hasattr(hf_config, "sliding_window")

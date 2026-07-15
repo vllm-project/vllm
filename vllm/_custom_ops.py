@@ -1539,7 +1539,11 @@ def scaled_fp4_quant(
     Args:
         input: The input tensor to be quantized to FP4
         input_global_scale: A scalar scaling factor for the entire tensor.
-        use_8x4_sf_layout: Whether to use the 8x4 or 128x4 layout for the scaling
+        is_sf_swizzled_layout: Whether to store the scaling factors in the
+            swizzled layout (default `True`).
+        backend: Quantization kernel backend to dispatch to. For `"trtllm"`
+            backends the 8x4 scale-factor layout is selected for small
+            batches (m <= 32) instead of the 128x4 layout.
         padded_n: Optional padded K dimension. When provided, the quantized
             output and scale tensors are allocated for ``padded_n``
 
@@ -2077,6 +2081,42 @@ def wvSplitK(
     return torch.ops._rocm_C.wvSplitK(a, b, bias, cu_count)
 
 
+def wvSplitK_int4_g(
+    weight: torch.Tensor,
+    activation: torch.Tensor,
+    scale: torch.Tensor,
+    cu_count: int,
+    group_size: int,
+    zero_points: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    # NOTE: the kernel is weight-major; `weight` is the packed int4 operand
+    # (in_a, [out_features, K/2]) and `activation` is in_b ([num_tokens, K]).
+    return torch.ops._rocm_C.wvSplitK_int4_g(
+        weight, activation, scale, zero_points, bias, cu_count, group_size
+    )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "wvSplitK_int4_g"):
+
+    @register_fake("_rocm_C::wvSplitK_int4_g")
+    def _wvSplitK_int4_g_fake(
+        in_a: torch.Tensor,  # packed int4 weight [out_features, K/2]
+        in_b: torch.Tensor,  # activation [num_tokens, K]
+        in_scale: torch.Tensor,
+        in_zero_points: torch.Tensor | None,
+        in_bias: torch.Tensor | None,
+        CuCount: int,
+        group_size: int,
+    ) -> torch.Tensor:
+        # Kernel returns {in_b.size(0), in_a.size(0)} = [num_tokens, out_features].
+        num_tokens = in_b.size(0)
+        out_features = in_a.size(0)
+        return torch.empty(
+            (num_tokens, out_features), dtype=in_b.dtype, device=in_b.device
+        )
+
+
 def wvSplitKrc(
     a: torch.Tensor, b: torch.Tensor, cu_count: int, bias: torch.Tensor = None
 ) -> torch.Tensor:
@@ -2098,8 +2138,13 @@ def wvSplitKQ(
 
 
 # moe
-def moe_sum(input: torch.Tensor, output: torch.Tensor):
-    torch.ops._moe_C.moe_sum(input, output)
+def moe_sum(
+    input: torch.Tensor,
+    output: torch.Tensor,
+    topk_ids: torch.Tensor | None = None,
+    expert_map: torch.Tensor | None = None,
+):
+    torch.ops._moe_C.moe_sum(input, output, topk_ids, expert_map)
 
 
 def moe_align_block_size(
