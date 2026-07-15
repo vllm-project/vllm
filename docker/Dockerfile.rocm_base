@@ -189,60 +189,6 @@ RUN mkdir -p /app/install && cp /app/pytorch/dist/*.whl /app/install \
 
 
 ###
-### Pytorch build
-###
-FROM base AS build_pytorch
-ARG PYTORCH_BRANCH
-ARG PYTORCH_VISION_BRANCH
-ARG PYTORCH_AUDIO_BRANCH
-ARG PYTORCH_REPO
-ARG PYTORCH_VISION_REPO
-ARG PYTORCH_AUDIO_REPO
-ARG USE_SCCACHE
-
-RUN apt-get update && apt-get install -y pkg-config liblzma-dev
-RUN git clone ${PYTORCH_REPO} pytorch
-RUN cd pytorch && git checkout ${PYTORCH_BRANCH}
-RUN cd pytorch \
-    && pip install -r requirements.txt && git submodule update --init --recursive
-RUN cd pytorch && python3 tools/amd_build/build_amd.py \
-    && if [ "$USE_SCCACHE" = "1" ]; then \
-           export HIP_CLANG_PATH=/opt/sccache-wrappers \
-           && export CMAKE_C_COMPILER_LAUNCHER=sccache \
-           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache \
-           && sccache --show-stats; \
-       fi \
-    && CMAKE_PREFIX_PATH=$(python3 -c 'import sys; print(sys.prefix)') python3 setup.py bdist_wheel --dist-dir=dist \
-    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
-    && pip install dist/*.whl
-RUN git clone ${PYTORCH_VISION_REPO} vision
-RUN cd vision && git checkout ${PYTORCH_VISION_BRANCH} \
-    && if [ "$USE_SCCACHE" = "1" ]; then \
-           export HIP_CLANG_PATH=/opt/sccache-wrappers \
-           && export CMAKE_C_COMPILER_LAUNCHER=sccache \
-           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache; \
-       fi \
-    && python3 setup.py bdist_wheel --dist-dir=dist \
-    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
-    && pip install dist/*.whl
-RUN git clone ${PYTORCH_AUDIO_REPO} audio
-RUN cd audio && git checkout ${PYTORCH_AUDIO_BRANCH} \
-    && git submodule update --init --recursive \
-    && pip install -r requirements.txt \
-    && if [ "$USE_SCCACHE" = "1" ]; then \
-           export HIP_CLANG_PATH=/opt/sccache-wrappers \
-           && export CMAKE_C_COMPILER_LAUNCHER=sccache \
-           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache; \
-       fi \
-    && python3 setup.py bdist_wheel --dist-dir=dist \
-    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
-    && pip install dist/*.whl
-RUN mkdir -p /app/install && cp /app/pytorch/dist/*.whl /app/install \
-    && cp /app/vision/dist/*.whl /app/install \
-    && cp /app/audio/dist/*.whl /app/install
-
-
-###
 ### MORI Build
 ###
 FROM base AS build_mori
