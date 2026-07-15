@@ -528,7 +528,6 @@ class ModelCudaGraphManager(CudaGraphManager):
                 attn_groups,
                 kv_cache_config,
                 skip_attn=(desc.cg_mode == CUDAGraphMode.PIECEWISE),
-                max_query_len=desc.max_query_len,
             )
 
             # Capture with dummy rows marked as padding.
@@ -625,14 +624,8 @@ def prepare_inputs_to_capture(
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
     skip_attn: bool = False,
-    max_query_len: int | None = None,
 ) -> AttentionState:
-    input_batch = InputBatch.make_dummy(
-        num_reqs,
-        num_tokens,
-        input_buffers,
-        max_num_tokens_per_req=max_query_len,
-    )
+    input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
     slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = build_slot_mappings_by_layer(

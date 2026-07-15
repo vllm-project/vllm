@@ -1082,7 +1082,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits_np=cu_num_logits_np,
             has_structured_output_reqs=scheduler_output.has_structured_output_requests,
             prompt_lens=prompt_lens,
-            max_num_tokens_per_req=batch_desc.max_query_len,
         )
         if self.adaptive_verification is not None:
             self.adaptive_verification.mask_batch(input_batch)
@@ -1287,7 +1286,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 batch_desc.num_reqs or num_reqs,
                 batch_desc.num_tokens,
                 self.input_buffers,
-                max_num_tokens_per_req=batch_desc.max_query_len,
             )
             if not skip_attn_for_dummy_run:
                 block_tables, slot_mappings = self.prepare_dummy_attn(input_batch)
