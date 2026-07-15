@@ -109,6 +109,7 @@ steps:
   - pytest -s -v compile/passes --ignore compile/passes/distributed
   mirror:
     amd:
+      dind: false
       device: mi300_1
       timeout_in_minutes: 65
       depends_on:
@@ -197,6 +198,7 @@ steps:
   - bash standalone_tests/pytorch_nightly_dependency.sh
   mirror:
     amd:
+      dind: false
       device: mi300_1
       depends_on:
       - image-build-amd
