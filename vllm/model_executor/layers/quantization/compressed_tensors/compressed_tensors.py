@@ -47,6 +47,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A8Mxfp8,
     CompressedTensorsW8A16Fp8,
+    CompressedTensorsWNA4Int,
+    CompressedTensorsWNA8Int,
     CompressedTensorsWNA8O8Int,
     CompressedTensorsWNA16,
 )
@@ -682,6 +684,41 @@ class CompressedTensorsConfig(QuantizationConfig):
         )
         return is_intN_weight and (is_static_int8_in and is_static_int8_out)
 
+    @staticmethod
+    def _is_wNaM_int(
+        weight_quant: QuantizationArgs,
+        input_quant: QuantizationArgs | None,
+        format: str | None,
+    ) -> bool:
+        """Weight N-bit INT with symmetric dynamic INT activation quant
+        via Humming kernel."""
+        if input_quant is None:
+            return False
+        is_pack_format = format == CompressionFormat.pack_quantized.value
+        is_channel_group = weight_quant.strategy in (
+            QuantizationStrategy.CHANNEL.value,
+            QuantizationStrategy.GROUP.value,
+        )
+        is_int_N_weight = (
+            weight_quant.type == QuantizationType.INT and not weight_quant.dynamic
+        )
+        is_int_input = input_quant.type == QuantizationType.INT
+        is_symmetric_input = input_quant.symmetric
+        is_dynamic_input = input_quant.dynamic
+        is_per_token_or_group_input = input_quant.strategy in (
+            QuantizationStrategy.TOKEN.value,
+            QuantizationStrategy.GROUP.value,
+        )
+        return (
+            is_int_N_weight
+            and is_channel_group
+            and is_pack_format
+            and is_int_input
+            and is_symmetric_input
+            and is_dynamic_input
+            and is_per_token_or_group_input
+        )
+
     def _get_scheme_from_parts(
         self,
         weight_quant: QuantizationArgs,
@@ -729,6 +766,31 @@ class CompressedTensorsConfig(QuantizationConfig):
                 group_size=weight_quant.group_size,
                 has_input_act=input_quant is not None,
                 has_output_act=output_quant is not None,
+                layer_name=layer_name,
+                quant_format=format,
+            )
+
+        if (
+            self._is_wNaM_int(weight_quant, input_quant, format)
+            and input_quant.num_bits == 8
+        ):
+            return CompressedTensorsWNA8Int(
+                num_bits=weight_quant.num_bits,
+                strategy=weight_quant.strategy,
+                group_size=weight_quant.group_size,
+                input_quant=input_quant,
+                layer_name=layer_name,
+                quant_format=format,
+            )
+        if (
+            self._is_wNaM_int(weight_quant, input_quant, format)
+            and input_quant.num_bits == 4
+        ):
+            return CompressedTensorsWNA4Int(
+                num_bits=weight_quant.num_bits,
+                strategy=weight_quant.strategy,
+                group_size=weight_quant.group_size,
+                input_quant=input_quant,
                 layer_name=layer_name,
                 quant_format=format,
             )
