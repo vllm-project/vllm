@@ -145,12 +145,6 @@ class ThinkingBudgetStateHolder:
                 state["spec_token_ids"] = []
             state["in_spec_mode"] = self.in_spec_mode
             state["force_index"] = []
-            if len(state["output_tok_ids"]) > 0:
-                spec_len = len(state["spec_token_ids"])
-                # Only strip draft suffix when there are spec tokens; ``[:-0]`` would
-                # clear the whole list (Python treats stop index 0 as "up to empty").
-                if spec_len > 0 and len(state["output_tok_ids"]) >= spec_len:
-                    state["output_tok_ids"] = state["output_tok_ids"][:-spec_len]
             self._update_think_state(state)
 
     def apply_to_logits(
