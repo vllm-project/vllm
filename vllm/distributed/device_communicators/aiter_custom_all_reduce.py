@@ -70,25 +70,6 @@ class AiterCustomAllreduce:
     ) -> torch.Tensor | None:
         return self._impl.custom_reduce_scatter(inp, out, dim=dim)
 
-    @staticmethod
-    def build_supports_ag_rs() -> bool:
-        """True if the running AITER build exposes the custom AG/RS kernels and
-        their ``should_*`` predicates. Older builds only expose all-reduce.
-        """
-        from aiter.dist.device_communicators.custom_all_reduce import (
-            CustomAllreduce as _AiterCustomAllreduce,
-        )
-
-        return all(
-            hasattr(_AiterCustomAllreduce, name)
-            for name in (
-                "custom_all_gather",
-                "custom_reduce_scatter",
-                "should_custom_ag",
-                "should_custom_rs",
-            )
-        )
-
     def capture(self):
         return self._impl.capture()
 

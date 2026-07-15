@@ -130,8 +130,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             "dp" in unique_name
             and self.world_size in (2, 4, 8)
             and current_platform.is_rocm()
-            and rocm_aiter_ops.is_moe_ag_rs_enabled()
-            and AiterCustomAllreduce.build_supports_ag_rs()
+            and rocm_aiter_ops.is_ag_rs_enabled()
         ):
             self.aiter_ag_rs_comm = AiterCustomAllreduce(
                 group=self.cpu_group,

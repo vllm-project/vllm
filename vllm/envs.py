@@ -125,7 +125,7 @@ if TYPE_CHECKING:
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
-    VLLM_ROCM_USE_AITER_MOE_AG_RS: bool = False
+    VLLM_ROCM_USE_AITER_AG_RS: bool = True
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
@@ -1171,10 +1171,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_CUSTOM_AR": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_CUSTOM_AR", "True").lower() in ("true", "1")
     ),
-    # Use AITER's custom all-gather / reduce-scatter kernels for the MoE
-    # DP-attention dispatch/combine (pure-decode full-cudagraph path only).
-    "VLLM_ROCM_USE_AITER_MOE_AG_RS": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_MOE_AG_RS", "False").lower() in ("true", "1")
+    # Use AITER's custom all-gather / reduce-scatter kernels on the DP group
+    # (pure-decode full-cudagraph path only). Enabled by default.
+    "VLLM_ROCM_USE_AITER_AG_RS": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_AG_RS", "True").lower() in ("true", "1")
     ),
     # Whether to use aiter paged attention.
     # By default is disabled.
