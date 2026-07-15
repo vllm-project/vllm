@@ -274,6 +274,57 @@ def test_flashinfer_nvfp4_same_head_shape_keeps_stacked_layout() -> None:
     assert shape == (3, 2, 16, 2, nvfp4_kv_cache_full_dim(256))
 
 
+@pytest.mark.parametrize(
+    ("cache_dtype", "head_size_v"),
+    [
+        pytest.param("auto", None, id="auto"),
+        pytest.param("fp8", None, id="fp8"),
+        pytest.param("nvfp4", 256, id="nvfp4"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("cache_layout", "include_num_layers_dimension", "expected_stride_order"),
+    [
+        pytest.param("NHD", False, (0, 1, 2, 3, 4), id="NHD"),
+        pytest.param("HND", False, (0, 1, 3, 2, 4), id="HND"),
+        pytest.param("NHD", True, (1, 0, 2, 3, 4, 5), id="NHD-with-layers"),
+        pytest.param("HND", True, (1, 2, 4, 0, 3, 5), id="HND-with-layers"),
+    ],
+)
+def test_flashinfer_stacked_kv_cache_shape_matches_stride_order(
+    monkeypatch,
+    cache_dtype: str,
+    head_size_v: int | None,
+    cache_layout: str,
+    include_num_layers_dimension: bool,
+    expected_stride_order: tuple[int, ...],
+) -> None:
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    monkeypatch.setattr(flashinfer_backend, "get_kv_cache_layout", lambda: cache_layout)
+
+    shape = flashinfer_backend.FlashInferBackend.get_kv_cache_shape(
+        num_blocks=1392,
+        block_size=32,
+        num_kv_heads=4,
+        head_size=256,
+        cache_dtype_str=cache_dtype,
+        head_size_v=head_size_v,
+    )
+    if include_num_layers_dimension:
+        shape = (64, *shape)
+    stride_order = flashinfer_backend.FlashInferBackend.get_kv_cache_stride_order(
+        include_num_layers_dimension=include_num_layers_dimension,
+        head_size=256,
+        head_size_v=head_size_v,
+        cache_dtype_str=cache_dtype,
+    )
+
+    assert stride_order == expected_stride_order
+    assert len(stride_order) == len(shape)
+    assert sorted(stride_order) == list(range(len(shape)))
+
+
 def _storage_offsets(tensor: torch.Tensor) -> set[int]:
     return {
         tensor.storage_offset()

@@ -501,19 +501,19 @@ class FlashInferBackend(AttentionBackend):
                 return (0, 2, 1, 3)
             else:
                 raise ValueError(f"Unknown cache layout format {cache_layout}.")
-        if cache_layout == "NHD" and include_num_layers_dimension:
-            # (num_blocks, num_layers, 2, block_size, num_kv_heads, head_size)
-            return (1, 0, 2, 3, 4, 5)
-        elif cache_layout == "NHD":
-            stride_order = (0, 1, 2, 3, 4)
-        elif cache_layout == "HND" and include_num_layers_dimension:
-            # (num_blocks, 2, num_kv_heads, num_layers, block_size, head_size)
-            return (1, 2, 4, 0, 3, 5)
+        # Same-head NVFP4 and non-NVFP4 caches keep K and V in a distinct
+        # dimension, so their shape and stride order remain rank 5.
+        if cache_layout == "NHD":
+            if include_num_layers_dimension:
+                # (num_blocks, num_layers, 2, block_size, num_kv_heads, head_size)
+                return (1, 0, 2, 3, 4, 5)
+            return (0, 1, 2, 3, 4)
         elif cache_layout == "HND":
-            stride_order = (0, 1, 3, 2, 4)
-        else:
-            raise ValueError(f"Unknown cache layout format {cache_layout}.")
-        return stride_order
+            if include_num_layers_dimension:
+                # (num_blocks, 2, num_kv_heads, num_layers, block_size, head_size)
+                return (1, 2, 4, 0, 3, 5)
+            return (0, 1, 3, 2, 4)
+        raise ValueError(f"Unknown cache layout format {cache_layout}.")
 
     @staticmethod
     def get_dtype_for_flashinfer(kv_cache_dtype: str) -> torch.dtype:
