@@ -444,8 +444,51 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         layer.a13_scale = None
         layer.a2_scale = None
 
+    def _setup_kernel(self, layer: RoutedExperts):
+        assert self.experts_cls is not None
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.moe_quant_config is not None
+
+        # Add Marlin-specific arguments
+        marlin_args: dict[str, Any] = {}
+        if self.is_marlin:
+            marlin_args = {
+                "w13_g_idx": layer.w13_weight_g_idx,
+                "w2_g_idx": layer.w2_weight_g_idx,
+                "w13_g_idx_sort_indices": layer.w13_g_idx_sort_indices,
+                "w2_g_idx_sort_indices": layer.w2_g_idx_sort_indices,
+                "is_k_full": self.is_k_full,
+            }
+
+        self.moe_kernel = make_wna16_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            experts_cls=self.experts_cls,
+            routing_tables=layer._expert_routing_tables(),
+            **marlin_args,
+        )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Process weights using the shared oracle infrastructure
+        converted = convert_to_wna16_moe_kernel_format(
+            backend=self.wna16_backend,
+            layer=layer,
+            quant_config=self.weight_quant,
+            input_dtype=self.input_dtype,
+            w13=layer.w13_weight_packed,
+            w2=layer.w2_weight_packed,
+            w13_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            w13_g_idx=layer.w13_weight_g_idx,
+            w2_g_idx=layer.w2_weight_g_idx,
+            w13_qzeros=getattr(layer, "w13_weight_zero_point", None),
+            w2_qzeros=getattr(layer, "w2_weight_zero_point", None),
+        )
+
+        if converted is None:
+            self._setup_kernel(layer)
+            return
+
         (
             w13_qweight,
             w2_qweight,
@@ -461,20 +504,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             w2_input_global_scale,
             _,  # w13_bias
             _,  # w2_bias
-        ) = convert_to_wna16_moe_kernel_format(
-            backend=self.wna16_backend,
-            layer=layer,
-            quant_config=self.weight_quant,
-            input_dtype=self.input_dtype,
-            w13=layer.w13_weight_packed,
-            w2=layer.w2_weight_packed,
-            w13_scale=layer.w13_weight_scale,
-            w2_scale=layer.w2_weight_scale,
-            w13_g_idx=layer.w13_weight_g_idx,
-            w2_g_idx=layer.w2_weight_g_idx,
-            w13_qzeros=getattr(layer, "w13_weight_zero_point", None),
-            w2_qzeros=getattr(layer, "w2_weight_zero_point", None),
-        )
+        ) = converted
 
         # Replace common parameters
         replace_parameter(layer, "w13_weight_packed", w13_qweight)
@@ -515,28 +545,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         layer.w13_weight = layer.w13_weight_packed
         layer.w2_weight = layer.w2_weight_packed
 
-        assert self.experts_cls is not None
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        assert self.moe_quant_config is not None
-
-        # Add Marlin-specific arguments
-        marlin_args: dict[str, Any] = {}
-        if self.is_marlin:
-            marlin_args = {
-                "w13_g_idx": layer.w13_weight_g_idx,
-                "w2_g_idx": layer.w2_weight_g_idx,
-                "w13_g_idx_sort_indices": layer.w13_g_idx_sort_indices,
-                "w2_g_idx_sort_indices": layer.w2_g_idx_sort_indices,
-                "is_k_full": self.is_k_full,
-            }
-
-        self.moe_kernel = make_wna16_moe_kernel(
-            moe_quant_config=self.moe_quant_config,
-            moe_config=self.moe,
-            experts_cls=self.experts_cls,
-            routing_tables=layer._expert_routing_tables(),
-            **marlin_args,
-        )
+        self._setup_kernel(layer)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
