@@ -591,6 +591,8 @@ class Base(
         def _init_parameters(module: nn.Module, dtype: torch.dtype | None):
             for name, param in module.named_parameters(recurse=False):
                 if param.device == torch.device("meta"):
+                    if hasattr(param, "weight_loader"):
+                        continue
                     new_param = nn.Parameter(
                         torch.empty_like(
                             param.data,
