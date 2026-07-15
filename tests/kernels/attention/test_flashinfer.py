@@ -275,29 +275,45 @@ def test_flashinfer_nvfp4_same_head_shape_keeps_stacked_layout() -> None:
 
 
 @pytest.mark.parametrize(
-    ("cache_dtype", "head_size_v"),
+    ("cache_dtype", "head_size_v", "expected_shape"),
     [
-        pytest.param("auto", None, id="auto"),
-        pytest.param("fp8", None, id="fp8"),
-        pytest.param("nvfp4", 256, id="nvfp4"),
+        pytest.param("auto", None, (1392, 2, 32, 4, 256), id="auto"),
+        pytest.param("fp8", None, (1392, 2, 32, 4, 256), id="fp8"),
+        pytest.param(
+            "nvfp4",
+            256,
+            (1392, 2, 32, 4, nvfp4_kv_cache_full_dim(256)),
+            id="nvfp4-same-head",
+        ),
+        pytest.param(
+            "nvfp4",
+            128,
+            (
+                1392,
+                32,
+                4,
+                nvfp4_kv_cache_full_dim(256) + nvfp4_kv_cache_full_dim(128),
+            ),
+            id="nvfp4-mixed-head",
+        ),
     ],
 )
 @pytest.mark.parametrize(
-    ("cache_layout", "include_num_layers_dimension", "expected_stride_order"),
+    ("cache_layout", "include_num_layers_dimension"),
     [
-        pytest.param("NHD", False, (0, 1, 2, 3, 4), id="NHD"),
-        pytest.param("HND", False, (0, 1, 3, 2, 4), id="HND"),
-        pytest.param("NHD", True, (1, 0, 2, 3, 4, 5), id="NHD-with-layers"),
-        pytest.param("HND", True, (1, 2, 4, 0, 3, 5), id="HND-with-layers"),
+        pytest.param("NHD", False, id="NHD"),
+        pytest.param("HND", False, id="HND"),
+        pytest.param("NHD", True, id="NHD-with-layers"),
+        pytest.param("HND", True, id="HND-with-layers"),
     ],
 )
-def test_flashinfer_stacked_kv_cache_shape_matches_stride_order(
+def test_flashinfer_kv_cache_shape_matches_stride_order(
     monkeypatch,
     cache_dtype: str,
     head_size_v: int | None,
+    expected_shape: tuple[int, ...],
     cache_layout: str,
     include_num_layers_dimension: bool,
-    expected_stride_order: tuple[int, ...],
 ) -> None:
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 
@@ -313,6 +329,7 @@ def test_flashinfer_stacked_kv_cache_shape_matches_stride_order(
     )
     if include_num_layers_dimension:
         shape = (64, *shape)
+        expected_shape = (64, *expected_shape)
     stride_order = flashinfer_backend.FlashInferBackend.get_kv_cache_stride_order(
         include_num_layers_dimension=include_num_layers_dimension,
         head_size=256,
@@ -320,9 +337,71 @@ def test_flashinfer_stacked_kv_cache_shape_matches_stride_order(
         cache_dtype_str=cache_dtype,
     )
 
+    mixed_nvfp4 = cache_dtype == "nvfp4" and head_size_v != 256
+    if mixed_nvfp4:
+        expected_stride_order = {
+            ("NHD", False): (0, 1, 2, 3),
+            ("HND", False): (0, 2, 1, 3),
+            ("NHD", True): (1, 0, 2, 3, 4),
+            ("HND", True): (1, 3, 0, 2, 4),
+        }[(cache_layout, include_num_layers_dimension)]
+    else:
+        expected_stride_order = {
+            ("NHD", False): (0, 1, 2, 3, 4),
+            ("HND", False): (0, 1, 3, 2, 4),
+            ("NHD", True): (1, 0, 2, 3, 4, 5),
+            ("HND", True): (1, 2, 4, 0, 3, 5),
+        }[(cache_layout, include_num_layers_dimension)]
+
+    assert shape == expected_shape
     assert stride_order == expected_stride_order
     assert len(stride_order) == len(shape)
     assert sorted(stride_order) == list(range(len(shape)))
+
+
+def test_flashinfer_cascade_keeps_stacked_kv_cache() -> None:
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    impl = flashinfer_backend.FlashInferImpl.__new__(flashinfer_backend.FlashInferImpl)
+    impl.bmm1_scale = None
+    impl.bmm2_scale = None
+    impl.scale = 1.0
+    impl.kv_cache_dtype = "auto"
+    impl.is_kvcache_nvfp4 = False
+
+    seen_kv_caches: list[torch.Tensor] = []
+
+    def run_cascade(query: torch.Tensor, paged_kv_cache: torch.Tensor) -> torch.Tensor:
+        seen_kv_caches.append(paged_kv_cache)
+        return torch.zeros_like(query)
+
+    attn_metadata = SimpleNamespace(
+        num_actual_tokens=2,
+        prefill=None,
+        decode=None,
+        use_cascade=True,
+        cascade_wrapper=SimpleNamespace(run=run_cascade),
+    )
+    query = torch.ones((2, 1, 8))
+    key = torch.ones_like(query)
+    value = torch.ones_like(query)
+    kv_cache = torch.empty((3, 2, 4, 1, 8))
+    output = torch.ones_like(query)
+
+    result = impl.forward(
+        layer=SimpleNamespace(),
+        query=query,
+        key=key,
+        value=value,
+        kv_cache=kv_cache,
+        attn_metadata=attn_metadata,
+        output=output,
+    )
+
+    assert len(seen_kv_caches) == 1
+    assert seen_kv_caches[0] is kv_cache
+    assert seen_kv_caches[0].ndim == 5
+    assert torch.count_nonzero(result) == 0
 
 
 def _storage_offsets(tensor: torch.Tensor) -> set[int]:

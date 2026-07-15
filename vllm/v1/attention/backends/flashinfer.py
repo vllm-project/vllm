@@ -2127,6 +2127,8 @@ class FlashInferImpl(AttentionImpl):
         if attn_metadata.use_cascade:
             # Cascade attention (rare case).
             assert attn_metadata.cascade_wrapper is not None
+            # The cascade wrapper accepts the backend-native stacked rank-5
+            # cache directly; do not apply the packed-cache conversion here.
             output.copy_(attn_metadata.cascade_wrapper.run(query, kv_cache))
             return output
 
