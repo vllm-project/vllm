@@ -247,6 +247,10 @@ class SamplingParams(
     """Represents the minimum probability for a token to be considered,
     relative to the probability of the most likely token. Must be in [0, 1].
     Set to 0 to disable this."""
+    p_less: bool = False
+    """Boolean controlling whether or not to use the p-less sampling method
+    that considers the entire token probability distribution. Set to True to
+    use this method or False to disable."""
     seed: int | None = None
     """Random seed to use for the generation."""
     stop: str | list[str] | None = None
@@ -362,6 +366,7 @@ class SamplingParams(
         top_p: float | None = 1.0,
         top_k: int = 0,
         min_p: float = 0.0,
+        p_less: bool = False,
         seed: int | None = None,
         stop: str | list[str] | None = None,
         stop_token_ids: list[int] | None = None,
@@ -423,6 +428,7 @@ class SamplingParams(
             top_p=1.0 if top_p is None else top_p,
             top_k=top_k,
             min_p=min_p,
+            p_less=p_less,
             seed=seed,
             stop=stop,
             stop_token_ids=stop_token_ids,
@@ -494,6 +500,7 @@ class SamplingParams(
             self.top_p = 1.0
             self.top_k = 0
             self.min_p = 0.0
+            self.p_less = False
             self._verify_greedy_sampling()
 
         # eos_token_id is added to this by the engine
@@ -570,6 +577,8 @@ class SamplingParams(
             )
         if not 0.0 <= self.min_p <= 1.0:
             raise ValueError(f"min_p must be in [0, 1], got {self.min_p}.")
+        if not isinstance(self.p_less, bool):
+            raise ValueError(f"p_less must be a boolean, got {self.p_less}.")
         if self.max_tokens is not None and self.max_tokens < 1:
             raise VLLMValidationError(
                 f"max_tokens must be at least 1, got {self.max_tokens}.",
@@ -875,9 +884,9 @@ class SamplingParams(
             return
 
         # Some sampling parameters are not yet compatible with spec decoding.
-        if self.min_p > _SAMPLING_EPS or self.logit_bias:
+        if self.min_p > _SAMPLING_EPS or self.p_less or self.logit_bias:
             raise ValueError(
-                "The min_p and logit_bias sampling parameters "
+                "The min_p, p_less and logit_bias sampling parameters "
                 "are not yet supported with speculative decoding."
             )
 
@@ -891,6 +900,7 @@ class SamplingParams(
         if (
             self.temperature != 1.0
             or self.min_p > _SAMPLING_EPS
+            or self.p_less
             or self.seed is not None
             or self.min_tokens > 0
             or self.logit_bias
@@ -898,7 +908,7 @@ class SamplingParams(
             or self.allowed_token_ids
         ):
             raise ValueError(
-                "The temperature, min_p, seed, min_tokens, logit_bias, "
+                "The temperature, min_p, p_less, seed, min_tokens, logit_bias, "
                 "bad_words, and allowed_token_ids sampling parameters "
                 "are not yet supported with diffusion models."
             )
@@ -1074,6 +1084,7 @@ class SamplingParams(
             f"top_p={self.top_p}, "
             f"top_k={self.top_k}, "
             f"min_p={self.min_p}, "
+            f"p_less={self.p_less}, "
             f"seed={self.seed}, "
             f"stop={self.stop}, "
             f"stop_token_ids={self.stop_token_ids}, "
@@ -1100,6 +1111,7 @@ class SamplingParams(
             top_p=0.9,
             top_k=50,
             min_p=0.1,
+            p_less=True,
             frequency_penalty=0.5,
             presence_penalty=0.5,
             repetition_penalty=1.2,
