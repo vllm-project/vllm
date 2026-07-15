@@ -16,7 +16,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     build_mla_chunked_context_metadata,
     get_mla_dims,
 )
-from vllm.model_executor.layers.attention.pcp import uses_replicated_mla_pcp_dcp
+from vllm.model_executor.layers.attention.pcp import get_dcp_tp_size
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.torch_utils import np_to_pinned_tensor
@@ -69,7 +69,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
         self.dcp_local_block_size = self.cp_kv_cache_interleave_size
         self.dcp_virtual_block_size = self.dcp_local_block_size * self.dcp_world_size
-        self.use_replicated_q_dcp = uses_replicated_mla_pcp_dcp(parallel_config)
+        self.dcp_tp_size = get_dcp_tp_size(parallel_config)
 
         self.chunked_prefill_workspace_size = (
             self.determine_chunked_prefill_workspace_size(vllm_config)
@@ -163,7 +163,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             dcp_rank=self.dcp_rank,
             dcp_local_block_size=self.dcp_local_block_size,
             dcp_virtual_block_size=self.dcp_virtual_block_size,
-            use_replicated_q_dcp=self.use_replicated_q_dcp,
+            dcp_tp_size=self.dcp_tp_size,
         )
 
     def build(

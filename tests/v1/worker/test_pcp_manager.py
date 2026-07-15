@@ -6,12 +6,13 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.config import CUDAGraphMode
+from vllm.config import CUDAGraphMode, ParallelConfig
 from vllm.model_executor.layers.attention import pcp as attention_pcp
 from vllm.model_executor.layers.attention.mla_pcp import (
     build_pcp_chunked_context_kwargs,
 )
 from vllm.model_executor.layers.attention.pcp import (
+    get_dcp_tp_size,
     maybe_gather_indexer_cache_inputs,
     maybe_gather_mla_latent_cache_inputs,
 )
@@ -30,6 +31,19 @@ def _manager(rank: int, size: int = 2, dcp_size: int = 1) -> PCPManager:
         device=torch.device("cpu"),
         dcp_world_size=dcp_size,
     )
+
+
+@pytest.mark.parametrize(
+    ("pcp_size", "dcp_size", "expected"),
+    [(4, 1, 0), (4, 4, 1), (2, 4, 2)],
+)
+def test_dcp_tp_size(pcp_size: int, dcp_size: int, expected: int) -> None:
+    parallel_config = ParallelConfig(
+        tensor_parallel_size=max(expected, 1),
+        prefill_context_parallel_size=pcp_size,
+        decode_context_parallel_size=dcp_size,
+    )
+    assert get_dcp_tp_size(parallel_config) == expected
 
 
 def _patch_fake_pcp_group(

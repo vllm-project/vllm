@@ -231,10 +231,9 @@ from vllm.model_executor.layers.attention.mla_pcp import (
 )
 from vllm.model_executor.layers.attention.pcp import (
     finalize_mla_pcp_decode,
+    get_dcp_tp_size,
     maybe_gather_mla_latent_cache_inputs,
     prepare_mla_pcp_decode_query,
-    uses_replicated_mla_pcp_dcp,
-    uses_tp_mla_pcp_dcp,
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
@@ -497,7 +496,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
-        self.use_tp_pcp_dcp = uses_tp_mla_pcp_dcp(parallel_config)
+        self.dcp_tp_size = get_dcp_tp_size(parallel_config)
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -719,7 +718,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
 
         num_actual_toks = attn_metadata.num_actual_tokens
-        use_tp_pcp_dcp = self.use_tp_pcp_dcp and self.impl.dcp_world_size > 1
         if self.use_pcp and self.impl.dcp_world_size > 1 and quant_key is not None:
             raise NotImplementedError(
                 "MRV2 MLA PCP+DCP does not support fused output quantization yet."
@@ -849,7 +847,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             if self.impl.dcp_world_size > 1:
                 if self.use_pcp:
                     mqa_q = prepare_mla_pcp_decode_query(
-                        mqa_q, use_tp_pcp_dcp, fp8_attention
+                        mqa_q, self.dcp_tp_size, fp8_attention
                     )
                 else:
                     if isinstance(mqa_q, tuple):
@@ -868,7 +866,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     attn_out = finalize_mla_pcp_decode(
                         attn_out,
                         lse,
-                        use_tp_pcp_dcp,
+                        self.dcp_tp_size,
                         self.dcp_a2a,
                         self.num_heads,
                         self.impl.lse_base_on_e,
@@ -1487,7 +1485,7 @@ def build_mla_chunked_context_metadata(
     dcp_rank: int,
     dcp_local_block_size: int,
     dcp_virtual_block_size: int,
-    use_replicated_q_dcp: bool,
+    dcp_tp_size: int,
 ) -> "MLACommonPrefillMetadata.ChunkedContextMetadata | None":
     """Build chunked-context metadata for an MLA prefill.
 
@@ -1508,7 +1506,7 @@ def build_mla_chunked_context_metadata(
         dcp_rank: Rank within the decode-context-parallel group.
         dcp_local_block_size: Per-rank interleave block size for DCP.
         dcp_virtual_block_size: ``dcp_local_block_size * dcp_world_size``.
-        use_replicated_q_dcp: Whether PCP replicates queries across DCP ranks.
+        dcp_tp_size: Number of TP ranks included in each DCP group.
 
     Returns:
         The chunked-context metadata, or None when no prefill has any context.
@@ -1616,7 +1614,7 @@ def build_mla_chunked_context_metadata(
             padded_local_token_to_seq_cpu[i, : tts.shape[0]] = tts
 
         pcp_chunked_context_kwargs = {}
-        if use_replicated_q_dcp:
+        if dcp_tp_size == 1 and dcp_world_size > 1:
             pcp_chunked_context_kwargs = build_pcp_chunked_context_kwargs(
                 context_lens_cpu,
                 dcp_world_size,
@@ -1799,7 +1797,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.dcp_local_block_size = parallel_config.cp_kv_cache_interleave_size
         self.dcp_virtual_block_size = self.dcp_local_block_size * self.dcp_world_size
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
-        self.use_replicated_q_dcp = uses_replicated_mla_pcp_dcp(parallel_config)
+        self.dcp_tp_size = get_dcp_tp_size(parallel_config)
 
         self.page_size = self.kv_cache_spec.block_size
 
@@ -1951,7 +1949,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 dcp_rank=self.dcp_rank,
                 dcp_local_block_size=self.dcp_local_block_size,
                 dcp_virtual_block_size=self.dcp_virtual_block_size,
-                use_replicated_q_dcp=self.use_replicated_q_dcp,
+                dcp_tp_size=self.dcp_tp_size,
             )
 
             prefill_metadata = MLACommonPrefillMetadata(
@@ -2120,7 +2118,7 @@ class MLACommonBaseImpl(MLAPCPImplMixin, MLAAttentionImpl[A], Generic[A]):
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj
         parallel_config = get_current_vllm_config().parallel_config
-        self.use_replicated_q_dcp = uses_replicated_mla_pcp_dcp(parallel_config)
+        self.dcp_tp_size = get_dcp_tp_size(parallel_config)
         self.dcp_a2a = (
             parallel_config.decode_context_parallel_size > 1
             and parallel_config.dcp_comm_backend == "a2a"
@@ -2461,7 +2459,7 @@ class MLACommonBaseImpl(MLAPCPImplMixin, MLAAttentionImpl[A], Generic[A]):
             assert prefill_metadata.chunked_context is not None
             suffix_output, suffix_lse = output_prefill
             if self.dcp_world_size > 1:
-                if self.use_replicated_q_dcp:
+                if self.dcp_tp_size == 1:
                     context_output, context_lse = (
                         self._dcp_compute_local_prefill_context(
                             q,

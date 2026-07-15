@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, cast
+from typing import TYPE_CHECKING, cast
 
 import torch
 
@@ -12,19 +12,14 @@ from vllm.distributed.parallel_state import (
 from vllm.v1.attention.ops.common import cp_lse_ag_out_ar
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 
-
-def uses_replicated_mla_pcp_dcp(parallel_config: Any) -> bool:
-    pcp_size = parallel_config.prefill_context_parallel_size
-    return pcp_size > 1 and parallel_config.decode_context_parallel_size == pcp_size
+if TYPE_CHECKING:
+    from vllm.config import ParallelConfig
 
 
-def uses_tp_mla_pcp_dcp(parallel_config: Any) -> bool:
-    tp_size = parallel_config.tensor_parallel_size
-    pcp_size = parallel_config.prefill_context_parallel_size
+def get_dcp_tp_size(parallel_config: "ParallelConfig") -> int:
     return (
-        pcp_size > 1
-        and tp_size > 1
-        and parallel_config.decode_context_parallel_size == tp_size * pcp_size
+        parallel_config.decode_context_parallel_size
+        // parallel_config.prefill_context_parallel_size
     )
 
 
@@ -96,10 +91,10 @@ def pcp_dcp_a2a_lse_reduce(
 
 def prepare_mla_pcp_decode_query(
     q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-    use_tp_pcp_dcp: bool,
+    dcp_tp_size: int,
     fp8_attention: bool,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    if not use_tp_pcp_dcp:
+    if dcp_tp_size <= 1:
         return q
     if fp8_attention:
         raise NotImplementedError("DCP does not support FP8 KV cache yet.")
@@ -111,7 +106,7 @@ def prepare_mla_pcp_decode_query(
 def finalize_mla_pcp_decode(
     output: torch.Tensor,
     lse: torch.Tensor,
-    use_tp_pcp_dcp: bool,
+    dcp_tp_size: int,
     use_dcp_a2a: bool,
     num_heads: int,
     is_lse_base_on_e: bool,
@@ -128,7 +123,7 @@ def finalize_mla_pcp_decode(
         get_dcp_group(),
         is_lse_base_on_e=is_lse_base_on_e,
     )
-    if use_tp_pcp_dcp:
+    if dcp_tp_size > 1:
         head_start = get_tp_group().rank_in_group * num_heads
         output = output[:, head_start : head_start + num_heads]
     return output
