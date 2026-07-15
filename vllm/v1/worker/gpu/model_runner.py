@@ -99,6 +99,8 @@ from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pcp_manager import (
     PCPManager,
     maybe_build_pcp_manager,
+    maybe_partition_pcp_batch,
+    maybe_restore_pcp_for_sampling,
 )
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
@@ -1019,7 +1021,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # prompt_lens is only used in R-SWA case.
             prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
 
-        return InputBatch(
+        input_batch = InputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
             num_reqs_after_padding=num_reqs_padded,
@@ -1051,6 +1053,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             has_structured_output_reqs=scheduler_output.has_structured_output_requests,
             prompt_lens=prompt_lens,
         )
+        return maybe_partition_pcp_batch(self.pcp_manager, input_batch)
 
     def prepare_attn(
         self, input_batch: InputBatch
@@ -1212,8 +1215,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
             input_batch = self.prepare_inputs(scheduler_output, batch_desc)
-            if self.pcp_manager is not None:
-                input_batch = self.pcp_manager.partition_batch(input_batch)
             block_tables, slot_mappings, cache_slot_mappings = self.prepare_attn(
                 input_batch
             )
@@ -1437,10 +1438,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Last rank: sample tokens
         assert hidden_states is not None
-        if self.pcp_manager is not None:
-            hidden_states, input_batch = self.pcp_manager.restore_for_sampling(
-                hidden_states
-            )
+        hidden_states, input_batch = maybe_restore_pcp_for_sampling(
+            self.pcp_manager, hidden_states, input_batch
+        )
 
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output

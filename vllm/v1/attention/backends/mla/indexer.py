@@ -6,7 +6,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.distributed import get_dcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -29,7 +29,7 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
-from vllm.v1.worker.cp_utils import get_total_cp_world_size
+from vllm.v1.worker.cp_utils import get_kv_cache_shard_count
 
 logger = init_logger(__name__)
 
@@ -118,6 +118,10 @@ def split_indexer_prefill_chunks(
 
 
 class DeepseekV32IndexerBackend(AttentionBackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
+
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_V32_INDEXER"
@@ -256,6 +260,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         parallel_config = self.vllm_config.parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
+        self.pcp_world_size = parallel_config.prefill_context_parallel_size
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
         # The DCP sparse-indexer code is parameterized by interleave size, but
         # interleave > 1 is not yet validated end-to-end (gsm8k parity fails),
@@ -339,7 +344,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         )
         max_num_blocks_per_req = cdiv(
             self.vllm_config.model_config.max_model_len,
-            self.kv_cache_spec.block_size * get_total_cp_world_size(),
+            self.kv_cache_spec.block_size * get_kv_cache_shard_count(),
         )
         self.expanded_block_table_buffer = torch.zeros(
             (
@@ -579,6 +584,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         compressed_slot_mapping = slot_mapping
         compressed_seq_lens = seq_lens
         if self.compress_ratio > 1:
+            padded_num_tokens = num_tokens
+            if self.pcp_world_size > 1:
+                padded_num_tokens = slot_mapping.shape[0] // self.pcp_world_size
             compressed_slot_mapping = get_compressed_slot_mapping(
                 num_tokens,
                 query_start_loc,
@@ -588,6 +596,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
             )
+            if self.pcp_world_size > 1:
+                compressed_slot_mapping = get_pcp_group().all_gather(
+                    self.compressed_slot_mapping_buffer[:padded_num_tokens],
+                    dim=0,
+                )
             compressed_seq_lens = seq_lens // self.compress_ratio
 
         prefill_metadata = None

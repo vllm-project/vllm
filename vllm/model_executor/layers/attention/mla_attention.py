@@ -226,7 +226,10 @@ from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
 )
 from vllm.model_executor.layers.attention.pcp import (
+    finalize_mla_pcp_decode,
+    get_dcp_tp_size,
     maybe_gather_mla_latent_cache_inputs,
+    prepare_mla_decode_query,
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
@@ -489,6 +492,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
+        self.dcp_tp_size = get_dcp_tp_size(parallel_config)
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -710,6 +714,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
 
         num_actual_toks = attn_metadata.num_actual_tokens
+        if self.use_pcp and self.impl.dcp_world_size > 1 and quant_key is not None:
+            raise NotImplementedError(
+                "MRV2 MLA PCP+DCP does not support fused output quantization yet."
+            )
 
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
@@ -833,9 +841,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             else:
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
             if self.impl.dcp_world_size > 1:
-                if isinstance(mqa_q, tuple):
-                    mqa_q = torch.cat(mqa_q, dim=-1)
-                mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
+                mqa_q = prepare_mla_decode_query(
+                    mqa_q,
+                    self.use_pcp,
+                    self.dcp_tp_size,
+                    fp8_attention,
+                )
 
             # call decode attn
             if not self.impl.is_sparse:
@@ -845,7 +856,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:
                 assert lse is not None
-                if self.dcp_a2a:
+                if self.use_pcp:
+                    attn_out = finalize_mla_pcp_decode(
+                        attn_out,
+                        lse,
+                        self.dcp_tp_size,
+                        self.dcp_a2a,
+                        self.num_heads,
+                        self.impl.lse_base_on_e,
+                    )
+                elif self.dcp_a2a:
                     attn_out = dcp_a2a_lse_reduce(
                         attn_out,
                         lse,

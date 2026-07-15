@@ -3,14 +3,13 @@
 import hashlib
 import importlib
 from collections.abc import Callable
-from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import pytest
 import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
@@ -38,7 +37,6 @@ from vllm.v1.core.kv_cache_utils import (
     init_none_hash,
     is_kv_cache_spec_uniform,
     make_block_hash_with_group_id,
-    resolve_kv_cache_block_sizes,
     tensor_data,
 )
 from vllm.v1.kv_cache_interface import (
@@ -1544,60 +1542,6 @@ def test_allocate_with_lookahead():
         num_lookahead_tokens=4,
     )
     assert len(blocks.get_block_ids()[0]) == 2
-
-
-def test_kv_cache_cp_sizing_uses_dcp_only_for_pcp():
-    block_size = 8
-    spec = FullAttentionSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=16,
-        dtype=torch.float16,
-    )
-    kv_cache_config = KVCacheConfig(
-        num_blocks=16,
-        kv_cache_tensors=[
-            KVCacheTensor(size=spec.page_size_bytes * 16, shared_by=["layer"]),
-        ],
-        kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)],
-    )
-
-    def make_config(dcp: int, pcp: int) -> VllmConfig:
-        return cast(
-            VllmConfig,
-            SimpleNamespace(
-                model_config=SimpleNamespace(max_model_len=128),
-                cache_config=CacheConfig(
-                    block_size=block_size,
-                    gpu_memory_utilization=0.9,
-                ),
-                parallel_config=SimpleNamespace(
-                    decode_context_parallel_size=dcp,
-                    prefill_context_parallel_size=pcp,
-                ),
-                use_v2_model_runner=True,
-                kv_transfer_config=None,
-            ),
-        )
-
-    base_config = make_config(dcp=1, pcp=1)
-    pcp_config = make_config(dcp=1, pcp=2)
-    dcp_config = make_config(dcp=2, pcp=1)
-    both_config = make_config(dcp=2, pcp=2)
-
-    assert resolve_kv_cache_block_sizes(kv_cache_config, base_config) == (8, 8)
-    assert resolve_kv_cache_block_sizes(kv_cache_config, pcp_config) == (8, 8)
-    assert resolve_kv_cache_block_sizes(kv_cache_config, dcp_config) == (16, 16)
-    assert resolve_kv_cache_block_sizes(kv_cache_config, both_config) == (16, 16)
-
-    assert spec.max_memory_usage_bytes(pcp_config) == spec.max_memory_usage_bytes(
-        base_config
-    )
-    assert spec.max_memory_usage_bytes(both_config) == spec.max_memory_usage_bytes(
-        dcp_config
-    )
-    assert spec.max_num_blocks_per_req(pcp_config, 128) == 16
-    assert spec.max_num_blocks_per_req(both_config, 128) == 8
 
 
 def test_get_kv_cache_config_one_worker():

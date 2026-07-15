@@ -144,33 +144,6 @@ class TestDCPCommBackendConfig:
         )
         assert config.dcp_comm_backend == "ag_rs"
 
-    def test_dcp_without_pcp_keeps_tp_divisibility_rule(self):
-        """DCP without PCP still requires TP to be divisible by DCP."""
-        with pytest.raises(ValueError, match="must be divisible"):
-            ParallelConfig(
-                tensor_parallel_size=4,
-                prefill_context_parallel_size=1,
-                decode_context_parallel_size=3,
-            )
-
-    @pytest.mark.parametrize("dcp_size", [1, 2, 4])
-    def test_dcp_with_pcp_allows_supported_layouts(self, dcp_size):
-        """PCP does not change the TP divisibility rule for DCP."""
-        config = ParallelConfig(
-            tensor_parallel_size=4,
-            prefill_context_parallel_size=2,
-            decode_context_parallel_size=dcp_size,
-        )
-        assert config.decode_context_parallel_size == dcp_size
-
-    def test_dcp_with_pcp_rejects_dcp_larger_than_tp(self):
-        with pytest.raises(ValueError, match="must be divisible"):
-            ParallelConfig(
-                tensor_parallel_size=4,
-                prefill_context_parallel_size=2,
-                decode_context_parallel_size=8,
-            )
-
 
 class TestLSEWeightedCombine:
     """Test LSE-weighted combination logic (CPU only, no GPU).

@@ -9,7 +9,7 @@ from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_dcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -373,10 +373,10 @@ def sparse_attn_indexer(
     else:
         assert q_scale is None, "q_scale must be None when use_fp4_cache=False"
 
-    # During speculative decoding, k may be padded to the CUDA graph batch
-    # size while slot_mapping only covers actual tokens. Truncate k to avoid
-    # out-of-bounds reads in the kernel.
+    # Keep PCP padding so every rank contributes the same all-gather shape.
     num_tokens = slot_mapping.shape[0]
+    if use_pcp:
+        num_tokens //= get_pcp_group().world_size
     if k is not None:
         k = k[:num_tokens]
 

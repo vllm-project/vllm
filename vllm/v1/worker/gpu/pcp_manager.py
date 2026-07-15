@@ -7,6 +7,7 @@ import torch
 
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
+from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -20,10 +21,14 @@ from vllm.v1.worker.gpu.input_batch import (
 )
 from vllm.v1.worker.gpu.states import RequestState
 
+logger = init_logger(__name__)
+
 
 @dataclass
 class PCPBatchLayout:
     hidden_restore_idx: torch.Tensor
+    cache_write_idx: torch.Tensor
+    cache_is_padding: torch.Tensor
     per_rank_num_tokens: list[int]
     rank_segments: list[list[tuple[int, int, int]]]
 
@@ -140,9 +145,6 @@ class PCPManager:
         self._physical_batch: InputBatch | None = None
         self._req_states = req_states
         self._block_tables = block_tables
-        self._compute_slot_mappings = (
-            block_tables.compute_slot_mappings if block_tables is not None else None
-        )
         self._batch_layout: PCPBatchLayout | None = None
 
         max_num_virtual_reqs = (
@@ -161,17 +163,22 @@ class PCPManager:
         self._virtual_block_tables: tuple[torch.Tensor, ...] | None
         self._virtual_block_table_ptrs: torch.Tensor | None
         if block_tables is not None and max_num_virtual_reqs is not None:
-            (
-                self._virtual_block_tables,
-                self._virtual_block_table_ptrs,
-            ) = block_tables.make_input_block_tables(max_num_virtual_reqs)
+            self._virtual_block_tables = tuple(
+                table.new_zeros((max_num_virtual_reqs, table.shape[1]))
+                for table in block_tables.input_block_tables
+            )
+            self._virtual_block_table_ptrs = torch.tensor(
+                [table.data_ptr() for table in self._virtual_block_tables],
+                dtype=torch.uint64,
+                device=device,
+            )
         else:
             self._virtual_block_tables = None
             self._virtual_block_table_ptrs = None
         num_kv_cache_groups = (
             block_tables.num_kv_cache_groups if block_tables is not None else 0
         )
-        self._local_slot_mappings = (
+        self._physical_slot_mappings = (
             torch.empty(
                 num_kv_cache_groups,
                 max_num_tokens,
@@ -238,16 +245,6 @@ class PCPManager:
             * self.pcp_world_size
         )
 
-    @staticmethod
-    def _set_padding_mask(
-        is_padding: torch.Tensor,
-        num_tokens: int,
-        num_tokens_after_padding: int,
-    ) -> torch.Tensor:
-        is_padding[:num_tokens].fill_(False)
-        is_padding[num_tokens:num_tokens_after_padding].fill_(True)
-        return is_padding[:num_tokens_after_padding]
-
     def _get_rank_segments(
         self,
         rank: int,
@@ -255,8 +252,10 @@ class PCPManager:
         num_computed_tokens: np.ndarray,
         is_prefilling: np.ndarray,
     ) -> list[tuple[int, int, int]]:
-        """Return (physical_req_idx, start_pos, num_tokens) for one PCP rank."""
-        segments: list[tuple[int, int, int]] = []
+        """Build one rank's attention-compatible virtual rows."""
+        decode_segments: list[tuple[int, int, int]] = []
+        context_prefill_segments: list[tuple[int, int, int]] = []
+        fresh_prefill_segments: list[tuple[int, int, int]] = []
         num_chunks = 2 * self.pcp_world_size
         for req_idx, num_tokens in enumerate(num_scheduled_tokens):
             base_pos = int(num_computed_tokens[req_idx])
@@ -264,7 +263,7 @@ class PCPManager:
             if query_len == 0:
                 continue
             if not bool(is_prefilling[req_idx]):
-                segments.append((req_idx, base_pos, query_len))
+                decode_segments.append((req_idx, base_pos, query_len))
                 continue
 
             chunk_base, remainder = divmod(query_len, num_chunks)
@@ -275,16 +274,14 @@ class PCPManager:
                     continue
                 chunk_offset = chunk_idx * chunk_base + min(chunk_idx, remainder)
                 start_pos = base_pos + chunk_offset
-                segments.append((req_idx, start_pos, chunk_len))
-        return sorted(
-            segments,
-            key=lambda segment: (
-                bool(is_prefilling[segment[0]]),
-                int(segment[1]) == 0,
-                segment[0],
-                segment[1],
-            ),
-        )
+                segment = (req_idx, start_pos, chunk_len)
+                if start_pos == 0:
+                    fresh_prefill_segments.append(segment)
+                else:
+                    context_prefill_segments.append(segment)
+
+        # MLA's scalar prefix cutoff requires fresh rows after context rows.
+        return decode_segments + context_prefill_segments + fresh_prefill_segments
 
     def _build_batch_layout(
         self,
@@ -311,15 +308,26 @@ class PCPManager:
             )
 
         restore_idx = np.empty(int(query_start_loc_np[-1]), dtype=np.int64)
+        padded_num_tokens = max(per_rank_num_tokens)
+        full_num_tokens = padded_num_tokens * self.pcp_world_size
+        cache_write_idx = np.zeros(full_num_tokens, dtype=np.int64)
+        cache_is_padding = np.ones(full_num_tokens, dtype=np.bool_)
         for rank, segments in enumerate(all_rank_segments):
             rank_offset = 0
             for req_idx, start_pos, num_tokens in segments:
                 base_pos = int(num_computed_tokens[req_idx])
                 gathered_start = int(rank_base_offsets[rank] + rank_offset)
+                cache_start = rank * padded_num_tokens + rank_offset
                 rank_offset += num_tokens
+                output_start = int(query_start_loc_np[req_idx]) + start_pos - base_pos
+                cache_write_idx[cache_start : cache_start + num_tokens] = np.arange(
+                    output_start,
+                    output_start + num_tokens,
+                    dtype=np.int64,
+                )
+                cache_is_padding[cache_start : cache_start + num_tokens] = False
                 if not bool(is_prefilling[req_idx]) and rank != 0:
                     continue
-                output_start = int(query_start_loc_np[req_idx]) + start_pos - base_pos
                 restore_idx[output_start : output_start + num_tokens] = np.arange(
                     gathered_start,
                     gathered_start + num_tokens,
@@ -328,6 +336,8 @@ class PCPManager:
 
         return PCPBatchLayout(
             hidden_restore_idx=async_copy_to_gpu(restore_idx, device=self.device),
+            cache_write_idx=async_copy_to_gpu(cache_write_idx, device=self.device),
+            cache_is_padding=async_copy_to_gpu(cache_is_padding, device=self.device),
             per_rank_num_tokens=per_rank_num_tokens,
             rank_segments=all_rank_segments,
         )
@@ -344,6 +354,7 @@ class PCPManager:
                 "MRV2 PCP does not support request-padded CUDA graphs yet."
             )
 
+        # Physical is the full scheduled batch; virtual is this PCP rank's batch.
         physical_batch = input_batch
         self._physical_batch = physical_batch
 
@@ -394,6 +405,25 @@ class PCPManager:
 
         virtual_num_tokens = int(virtual_num_scheduled.sum())
         virtual_num_tokens_padded = max(batch_layout.per_rank_num_tokens)
+        fresh_prefills = int(
+            np.count_nonzero(is_prefilling & (num_computed_tokens == 0))
+        )
+        continued_prefills = int(
+            np.count_nonzero(is_prefilling & (num_computed_tokens > 0))
+        )
+        logger.debug(
+            "PCP batch: rank=%d physical_reqs=%d fresh_prefills=%d "
+            "continued_prefills=%d decodes=%d virtual_reqs=%d "
+            "virtual_tokens=%d per_rank_tokens=%s",
+            self.pcp_rank,
+            physical_batch.num_reqs,
+            fresh_prefills,
+            continued_prefills,
+            physical_batch.num_reqs - fresh_prefills - continued_prefills,
+            num_virtual_reqs,
+            virtual_num_tokens,
+            batch_layout.per_rank_num_tokens,
+        )
         if virtual_num_tokens_padded > input_buffers.max_num_tokens:
             raise RuntimeError(
                 "PCP virtual token count exceeds the MRV2 input buffer size: "
@@ -431,18 +461,16 @@ class PCPManager:
             input_buffers.seq_lens[:num_virtual_reqs_padded],
         )
         seq_lens = input_buffers.seq_lens[:num_virtual_reqs_padded]
+        is_padding = input_buffers.is_padding[:virtual_num_tokens_padded]
+        is_padding[:virtual_num_tokens].fill_(False)
+        is_padding[virtual_num_tokens:].fill_(True)
         if virtual_num_tokens_padded > virtual_num_tokens:
-            input_buffers.input_ids[
-                virtual_num_tokens:virtual_num_tokens_padded
-            ].zero_()
-            input_buffers.positions[
-                virtual_num_tokens:virtual_num_tokens_padded
-            ].zero_()
-        is_padding = self._set_padding_mask(
-            input_buffers.is_padding,
-            virtual_num_tokens,
-            virtual_num_tokens_padded,
-        )
+            input_buffers.input_ids[:virtual_num_tokens_padded].masked_fill_(
+                is_padding, 0
+            )
+            input_buffers.positions[:virtual_num_tokens_padded].masked_fill_(
+                is_padding, 0
+            )
 
         total_num_logits = num_virtual_reqs if virtual_num_tokens > 0 else 0
         if total_num_logits > 0:
@@ -542,103 +570,57 @@ class PCPManager:
             out=self._virtual_block_tables,
             out_ptrs=self._virtual_block_table_ptrs,
         )
-        slot_mappings, cache_slot_mappings = self.compute_slot_mappings(
-            input_batch.idx_mapping,
-            input_batch.query_start_loc,
-            input_batch.positions,
-            input_batch.num_tokens_after_padding,
-        )
-        return block_tables, slot_mappings, cache_slot_mappings
+        slot_mappings = self.prepare_slot_mappings()
+        return block_tables, slot_mappings, slot_mappings
 
     def prepare_dummy_attn(
         self, input_batch: InputBatch
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor, torch.Tensor]:
         assert self._virtual_block_tables is not None
-        assert self._local_slot_mappings is not None
+        assert self._physical_slot_mappings is not None
         block_tables = tuple(
             block_table[: input_batch.num_reqs]
             for block_table in self._virtual_block_tables
         )
-        slot_mappings = self._local_slot_mappings[:, : input_batch.num_tokens]
+        slot_mappings = self._physical_slot_mappings[:, : input_batch.num_tokens]
         cache_slot_mappings = self.dummy_cache_slot_mappings(slot_mappings)
         return block_tables, cache_slot_mappings, cache_slot_mappings
 
-    def compute_slot_mappings(
-        self,
-        idx_mapping: torch.Tensor,
-        query_start_loc: torch.Tensor,
-        positions: torch.Tensor,
-        num_tokens_padded: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert self._compute_slot_mappings is not None
-        assert self._local_slot_mappings is not None
-        local_slot_mappings = self._compute_slot_mappings(
-            idx_mapping,
-            query_start_loc,
-            positions,
-            num_tokens_padded,
-            self._local_slot_mappings,
-        )
-        cache_slot_mappings = self._compute_cache_slot_mappings(local_slot_mappings)
-        return local_slot_mappings, cache_slot_mappings
-
-    def _compute_cache_slot_mappings(
-        self,
-        local_slot_mappings: torch.Tensor,
-    ) -> torch.Tensor:
-        assert self._compute_slot_mappings is not None
+    def prepare_slot_mappings(self) -> torch.Tensor:
+        assert self._block_tables is not None
+        assert self._physical_slot_mappings is not None
         assert self._physical_batch is not None
-        assert self._batch_layout is not None
-
-        padded_num_tokens = max(self._batch_layout.per_rank_num_tokens)
-        full_num_tokens = padded_num_tokens * self.pcp_world_size
         physical_batch = self._physical_batch
-        idx_mapping_entries: list[int] = []
-        query_start_locs = [0]
-        positions_np = np.zeros(full_num_tokens, dtype=np.int64)
-        is_padding_np = np.zeros(full_num_tokens, dtype=np.bool_)
+        physical_slot_mappings = self._block_tables.compute_slot_mappings(
+            physical_batch.idx_mapping,
+            physical_batch.query_start_loc,
+            physical_batch.positions,
+            physical_batch.num_tokens,
+            out=self._physical_slot_mappings,
+        )
+        return self._expand_slot_mappings(physical_slot_mappings)
 
-        for rank, segments in enumerate(self._batch_layout.rank_segments):
-            rank_start = rank * padded_num_tokens
-            cursor = rank_start
-            for req_idx, start_pos, num_tokens in segments:
-                idx_mapping_entries.append(int(physical_batch.idx_mapping_np[req_idx]))
-                positions_np[cursor : cursor + num_tokens] = np.arange(
-                    start_pos,
-                    start_pos + num_tokens,
-                    dtype=np.int64,
-                )
-                cursor += num_tokens
-                query_start_locs.append(cursor)
-
-            rank_end = rank_start + padded_num_tokens
-            if cursor < rank_end:
-                idx_mapping_entries.append(0)
-                is_padding_np[cursor:rank_end] = True
-                cursor = rank_end
-                query_start_locs.append(cursor)
-
-        idx_mapping_np = np.array(idx_mapping_entries, dtype=np.int32)
-        query_start_loc_np = np.array(query_start_locs, dtype=np.int32)
-        idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
-        query_start_loc = async_copy_to_gpu(query_start_loc_np, device=self.device)
-        positions = async_copy_to_gpu(positions_np, device=self.device)
-
+    def _expand_slot_mappings(
+        self,
+        physical_slot_mappings: torch.Tensor,
+    ) -> torch.Tensor:
+        assert self._batch_layout is not None
+        cache_write_idx = self._batch_layout.cache_write_idx
+        full_num_tokens = cache_write_idx.shape[0]
         if self._cache_slot_mappings is None:
-            self._cache_slot_mappings = local_slot_mappings.new_empty(
-                local_slot_mappings.shape[0], full_num_tokens
+            self._cache_slot_mappings = physical_slot_mappings.new_empty(
+                physical_slot_mappings.shape[0], full_num_tokens
             )
         cache_slot_mappings = self._cache_slot_mappings[:, :full_num_tokens]
-        cache_slot_mappings = self._compute_slot_mappings(
-            idx_mapping,
-            query_start_loc,
-            positions,
-            full_num_tokens,
-            cache_slot_mappings,
+        torch.index_select(
+            physical_slot_mappings,
+            1,
+            cache_write_idx,
+            out=cache_slot_mappings,
         )
-        if is_padding_np.any():
-            is_padding = async_copy_to_gpu(is_padding_np, device=self.device)
-            cache_slot_mappings.masked_fill_(is_padding.unsqueeze(0), PAD_SLOT_ID)
+        cache_slot_mappings.masked_fill_(
+            self._batch_layout.cache_is_padding.unsqueeze(0), PAD_SLOT_ID
+        )
         return cache_slot_mappings
 
     def dummy_cache_slot_mappings(
@@ -669,6 +651,25 @@ class PCPManager:
         assert self._physical_batch is not None
         physical_batch = self._physical_batch
         return self.restore_hidden_states(hidden_states), physical_batch
+
+
+def maybe_partition_pcp_batch(
+    manager: PCPManager | None,
+    input_batch: InputBatch,
+) -> InputBatch:
+    if manager is None:
+        return input_batch
+    return manager.partition_batch(input_batch)
+
+
+def maybe_restore_pcp_for_sampling(
+    manager: PCPManager | None,
+    hidden_states: torch.Tensor,
+    input_batch: InputBatch,
+) -> tuple[torch.Tensor, InputBatch]:
+    if manager is None:
+        return hidden_states, input_batch
+    return manager.restore_for_sampling(hidden_states)
 
 
 def maybe_build_pcp_manager(

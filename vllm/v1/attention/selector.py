@@ -33,6 +33,7 @@ class AttentionSelectorConfig(NamedTuple):
     use_non_causal: bool = False
     use_batch_invariant: bool = False
     use_kv_connector: bool = False
+    use_pcp: bool = False
 
     def __repr__(self):
         return (
@@ -49,7 +50,8 @@ class AttentionSelectorConfig(NamedTuple):
             f"has_sliding_window={self.has_sliding_window}, "
             f"use_non_causal={self.use_non_causal}, "
             f"use_batch_invariant={self.use_batch_invariant}, "
-            f"use_kv_connector={self.use_kv_connector})"
+            f"use_kv_connector={self.use_kv_connector}, "
+            f"use_pcp={self.use_pcp})"
         )
 
 
@@ -106,6 +108,7 @@ def get_attn_backend(
         use_non_causal=vllm_config.attention_config.use_non_causal,
         use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
         use_kv_connector=use_kv_connector,
+        use_pcp=vllm_config.parallel_config.prefill_context_parallel_size > 1,
     )
 
     return _cached_get_attn_backend(

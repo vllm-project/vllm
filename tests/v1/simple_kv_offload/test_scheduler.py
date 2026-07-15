@@ -1643,11 +1643,8 @@ def _allocate_cp_gpu_blocks(
         (2, 2),  # DCP + PCP
     ],
 )
-def test_cp_block_size_scaling(
-    dcp_world_size: int, pcp_world_size: int, monkeypatch
-) -> None:
+def test_cp_block_size_scaling(dcp_world_size: int, pcp_world_size: int) -> None:
     """Verify block size scaling follows DCP ownership."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     fix = _make_cp_scheduler(
         dcp_world_size=dcp_world_size, pcp_world_size=pcp_world_size
     )
@@ -1668,12 +1665,11 @@ def test_cp_block_size_scaling(
     ],
 )
 def test_cp_eager_store_and_load_roundtrip(
-    dcp_world_size: int, pcp_world_size: int, monkeypatch
+    dcp_world_size: int, pcp_world_size: int
 ) -> None:
     """With CP enabled, store blocks to CPU and reload them for a new request
     with matching tokens.  Verifies that hash matching and transfer-pair
     construction work with the virtual block size."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     fix = _make_cp_scheduler(
         dcp_world_size=dcp_world_size,
         pcp_world_size=pcp_world_size,
@@ -1746,10 +1742,9 @@ def test_cp_eager_store_and_load_roundtrip(
     ],
 )
 def test_cp_effective_block_size_store_and_load(
-    dcp_world_size: int, pcp_world_size: int, monkeypatch
+    dcp_world_size: int, pcp_world_size: int
 ) -> None:
     """Verify store/load physical block counts scale with DCP, not PCP."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     fix = _make_cp_scheduler(
         dcp_world_size=dcp_world_size, pcp_world_size=pcp_world_size
     )
@@ -1815,9 +1810,9 @@ def test_cp_effective_block_size_store_and_load(
 # ---------------------------------------------------------------------------
 # Test 17: CP lazy target blocks are scaled correctly
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("dcp_world_size", [1, 2, 4])
-def test_cp_lazy_target_blocks_scaling(dcp_world_size: int) -> None:
-    """_estimate_lazy_target_blocks returns fewer blocks when dcp_world_size > 1
+@pytest.mark.parametrize("cp_world_size", [1, 2, 4])
+def test_cp_lazy_target_blocks_scaling(cp_world_size: int) -> None:
+    """_estimate_lazy_target_blocks returns fewer blocks when cp_world_size > 1
     because each virtual block covers more tokens."""
     kv_cache_config = _make_kv_cache_config(num_blocks=16)
     max_batched = 64
@@ -1825,14 +1820,14 @@ def test_cp_lazy_target_blocks_scaling(dcp_world_size: int) -> None:
     target_base = SimpleCPUOffloadScheduler._estimate_lazy_target_blocks(
         kv_cache_config, max_batched, cp_world_size=1
     )
-    target_dcp = SimpleCPUOffloadScheduler._estimate_lazy_target_blocks(
-        kv_cache_config, max_batched, cp_world_size=dcp_world_size
+    target_cp = SimpleCPUOffloadScheduler._estimate_lazy_target_blocks(
+        kv_cache_config, max_batched, cp_world_size=cp_world_size
     )
 
-    if dcp_world_size == 1:
-        assert target_dcp == target_base
+    if cp_world_size == 1:
+        assert target_cp == target_base
     else:
-        assert target_dcp < target_base, (
-            f"dcp_world_size={dcp_world_size}: target_dcp={target_dcp} should be "
+        assert target_cp < target_base, (
+            f"cp_world_size={cp_world_size}: target_cp={target_cp} should be "
             f"less than target_base={target_base}"
         )

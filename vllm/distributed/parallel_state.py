@@ -1815,7 +1815,9 @@ def initialize_model_parallel(
     assert _DCP is None, "decode context model parallel group is already initialized"
     dcp_size = decode_context_model_parallel_size or 1
     dcp_ranks = local_all_ranks if enable_elastic_ep else all_ranks
-    # DCP is a subgroup of TP; PCP remains an orthogonal axis.
+    if dcp_size > 1:
+        # DCP spans PCP first, then TP for full TP x PCP groups.
+        dcp_ranks = dcp_ranks.transpose(-1, -2)
     group_ranks = dcp_ranks.reshape(-1, dcp_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     _DCP = init_model_parallel_group(

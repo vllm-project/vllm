@@ -131,15 +131,6 @@ class BlockTables:
             )
         self.num_blocks.copy_to_uva()
 
-    def make_input_block_tables(
-        self, max_num_reqs: int
-    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
-        block_tables = tuple(
-            block_table.new_zeros((max_num_reqs, block_table.shape[1]))
-            for block_table in self.input_block_tables
-        )
-        return block_tables, self._make_ptr_tensor(block_tables)
-
     def gather_block_tables(
         self,
         idx_mapping: torch.Tensor,
