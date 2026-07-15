@@ -42,9 +42,15 @@ if os.getenv("VLLM_TEST_MODEL"):
         BACKENDS = ["TRITON_MLA"]
         if flash_attn_supports_mla():
             BACKENDS.append("FLASH_ATTN_MLA")
-    # GDN_ATTN is only for models with dual_chunk_attention_config (Qwen3-Next/Qwen3.6 hybrid models)
-    elif hasattr(config, "dual_chunk_attention_config") and config.dual_chunk_attention_config is not None:
-        # For GDN models, only test GDN backend
+    # GDN_ATTN is for Qwen3.5 models (model_type="qwen3_5") and
+    # Qwen3-Next/Qwen3.6 hybrid models (dual_chunk_attention_config present)
+    elif (
+        getattr(config, "model_type", "") == "qwen3_5"
+        or (
+            hasattr(config, "dual_chunk_attention_config")
+            and config.dual_chunk_attention_config is not None
+        )
+    ):
         BACKENDS = ["GDN_ATTN"]
     else:
         # Remove GDN_ATTN for models that don't have GDN architecture
