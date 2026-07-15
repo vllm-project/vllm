@@ -306,3 +306,49 @@ def test_extract_tool_calls_streaming(
         )
     ]
     assert_tool_calls(actual_tool_calls, expected_tool_calls)
+
+
+def test_flush_on_new_tool_replaces_only_leading_occurrence(jamba_tool_parser):
+    # Regression test for the "starting a new tool" flush path: the leftover,
+    # not-yet-streamed tail of the PREVIOUS tool's arguments is computed with
+    # `json.dumps(diff).replace(streamed_prefix, "")`. Without `count=1`, that
+    # `.replace()` removes EVERY occurrence of `streamed_prefix`, not just the
+    # leading one -- so if the streamed prefix's text recurs elsewhere in the
+    # arguments (e.g. a nested object that repeats a top-level key/value, a
+    # realistic pattern for find/replace-style tools), the recurrence is
+    # silently deleted from the flushed diff too, corrupting the JSON. State is
+    # set up manually to isolate this one code path.
+    jamba_tool_parser.current_tool_id = 0
+    jamba_tool_parser.current_tool_name_sent = True
+    jamba_tool_parser.streamed_args_for_tool = ['{"find": "cat"']
+    jamba_tool_parser.prev_tool_call_arr = [
+        {"name": "find_replace", "arguments": {"find": "cat"}}
+    ]
+
+    previous_text = (
+        ' <tool_calls>[\n    {"name": "find_replace", "arguments": '
+        '{"find": "cat", "options": {"find": "cat", "replace": "dog"}}},\n'
+        '    {"name": "get_current_weather", "arguments": '
+    )
+    current_text = previous_text + "{"
+
+    result = jamba_tool_parser.extract_tool_calls_streaming(
+        previous_text=previous_text,
+        current_text=current_text,
+        delta_text="{",
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+        request=None,  # type: ignore[arg-type]
+    )
+
+    assert result is not None
+    assert result.tool_calls
+    flushed = result.tool_calls[0]
+    assert flushed.index == 0
+    assert flushed.function is not None and flushed.function.arguments
+
+    assert json.loads(jamba_tool_parser.streamed_args_for_tool[0]) == {
+        "find": "cat",
+        "options": {"find": "cat", "replace": "dog"},
+    }
