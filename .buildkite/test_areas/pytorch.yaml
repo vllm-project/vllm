@@ -5,7 +5,7 @@ steps:
 - label: PyTorch Compilation Unit Tests
   device: h200_35gb
   key: pytorch-compilation-unit-tests
-  timeout_in_minutes: 10
+  timeout_in_minutes: 90
   source_file_dependencies:
     - vllm/__init__.py
     - vllm/_aiter_ops.py
@@ -78,7 +78,7 @@ steps:
 
 - label: PyTorch Compilation Passes Unit Tests
   key: pytorch-compilation-passes-unit-tests
-  timeout_in_minutes: 20
+  timeout_in_minutes: 45
   source_file_dependencies:
     - vllm/__init__.py
     - vllm/_aiter_ops.py
@@ -109,14 +109,15 @@ steps:
   - pytest -s -v compile/passes --ignore compile/passes/distributed
   mirror:
     amd:
+      dind: false
       device: mi300_1
-      timeout_in_minutes: 180
+      timeout_in_minutes: 65
       depends_on:
       - image-build-amd
 
 - label: PyTorch Fullgraph Smoke Test
   key: pytorch-fullgraph-smoke-test
-  timeout_in_minutes: 35
+  timeout_in_minutes: 60
   source_file_dependencies:
   - vllm/__init__.py
   - vllm/_aiter_ops.py
@@ -152,7 +153,7 @@ steps:
 
 - label: PyTorch Fullgraph
   key: pytorch-fullgraph
-  timeout_in_minutes: 30
+  timeout_in_minutes: 40
   device: h200_18gb
   source_file_dependencies:
   - vllm/__init__.py
@@ -197,6 +198,7 @@ steps:
   - bash standalone_tests/pytorch_nightly_dependency.sh
   mirror:
     amd:
+      dind: false
       device: mi300_1
       depends_on:
       - image-build-amd
