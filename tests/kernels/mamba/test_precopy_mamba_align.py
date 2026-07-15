@@ -115,7 +115,12 @@ def _reference(convs, ssms, bt, src_col, dst_col, bias, num_reqs):
 
 @_parametrize("num_reqs", [1, 4, 16])
 @_parametrize("token_bias", [0, 1, 2])
-def test_precopy_matches_v1_copy_specs(num_reqs, token_bias):
+# TEMPORAL_TILES is the number of CTAs the u64 body is split across (grid_z).
+# 1 keeps the untiled path; the other values exercise tile-boundary rounding
+# in _memcpy_u64_tiled (per_tile_u64 rounded up to COPY_BLOCK_SIZE, only tile 0
+# owns head/tail). The result must be invariant of this constexpr.
+@_parametrize("temporal_tiles", [1, 2, 4, 8, 16, 32])
+def test_precopy_matches_v1_copy_specs(num_reqs, token_bias, temporal_tiles):
     device = torch.device("cuda")
     torch.manual_seed(0)
     # Distinct physical block per (req, col) so copies never alias.
@@ -146,7 +151,7 @@ def test_precopy_matches_v1_copy_specs(num_reqs, token_bias):
     )
     bt_ptrs = torch.tensor([bt.data_ptr()], dtype=torch.int64, device=device)
     idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
-    grid = (num_reqs, NUM_LAYERS * 2)
+    grid = (num_reqs, NUM_LAYERS * 2, temporal_tiles)
     precopy_mamba_align_fused_kernel[grid](
         dst_col,
         src_col,
@@ -165,6 +170,7 @@ def test_precopy_matches_v1_copy_specs(num_reqs, token_bias):
         num_reqs,
         COPY_BLOCK_SIZE=1024,
         CONV_STATE_DIM_FIRST=False,
+        TEMPORAL_TILES=temporal_tiles,
     )
     torch.accelerator.synchronize()
 
@@ -176,5 +182,6 @@ def test_precopy_matches_v1_copy_specs(num_reqs, token_bias):
 if __name__ == "__main__":
     for nr in (1, 4, 16):
         for tb in (0, 1, 2):
-            test_precopy_matches_v1_copy_specs(nr, tb)
+            for tt in (1, 2, 4, 8, 16, 32):
+                test_precopy_matches_v1_copy_specs(nr, tb, tt)
             print(f"OK num_reqs={nr} token_bias={tb}")
