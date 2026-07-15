@@ -338,6 +338,8 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._recving_metadata = {}
         w._recving_transfers = defaultdict(list)
         w._is_hma_required = False
+        w._packed_block_stride = 0
+        w._packed_layer_info = {}
         w._member_xfer_state = {}
         w._reqs_to_process = set()
         w._reqs_to_send = {}
@@ -351,6 +353,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         # Single non-hybrid attention group, matching the stub block id lists.
         w._has_mamba = False
         w._group_spec_types = (FullAttentionSpec,)
+        w._engine_clock_offset = {}
 
         # Track _do_start_push_kv invocations.
         calls: list[tuple[str, Any, dict[str, Any]]] = []
@@ -1182,9 +1185,13 @@ def test_member_identity_gate_preserves_the_non_hma_path():
     metadata.region_members = [["a"]]
     assert not worker._use_member_identity(metadata)
 
+    # A PP-sharded packed layout requires the same member route independently
+    # of whether HMA is required.
+    worker._packed_layer_info = {"a": (0, 128)}
+    assert worker._use_member_identity(metadata)
+
     # PP=1 has congruent local/remote regions and keeps the legacy route even
-    # when its allocator is hybrid.
-    worker._is_hma_required = True
+    # when its allocator is hybrid or packed.
     worker.pp_size = 1
     assert not worker._use_member_identity(metadata)
 

@@ -102,14 +102,15 @@ The default (pull) NixlConnector does **not** support
 layout: region indices are not a stable identity across the
 prefill/decode layer split, so the connector raises at startup. Use the
 push connector (`NixlPushConnector`) for pipeline parallelism with
-hybrid KV caches — it routes transfers by layer-name (member) identity,
-so a PP-sharded prefiller can write into a `PP=1` decoder. See
+hybrid or packed KV caches — it routes transfers by layer-name (member)
+identity, so a PP-sharded prefiller can write into a `PP=1` decoder. See
 [NIXL push-mode KV transfer](../design/nixl_kv_push_connector.md).
 
 Current push PP + HMA limitations:
 
 - Only the prefiller (producer) may be PP-sharded; decode-side PP is not supported.
 - Hybrid SSM/Mamba layouts are not supported under PP.
+- Packed (cross-layer) KV caches from a PP-sharded push producer are routed by member identity and are currently limited to MLA caches. Pull and `PP=1` push transfer packed caches whole-region regardless of attention type.
 - HMA requires the same block size on P and D.
 
 ### Quantized KV cache

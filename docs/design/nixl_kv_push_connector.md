@@ -186,23 +186,27 @@ accounting code is unchanged.
 The pull connector requires the local and remote workers to expose a
 congruent list of KV regions — region *i* here corresponds to region
 *i* there. That assumption breaks under pipeline parallelism (PP)
-combined with a hybrid (HMA) KV layout:
+combined with a hybrid (HMA) or packed KV layout:
 
 * a PP-sharded prefiller (**P**) holds only a slice of the model's
   layers while the `PP=1` decoder (**D**) holds them all, so region
   counts differ;
 * with HMA, several layer names are pooled into one region and the layer
-  that represents a pooled region can differ between P and D.
+  that represents a pooled region can differ between P and D;
+* with packed (cross-layer) allocations, one region interleaves many
+  layers per block.
 
 `NixlPushConnector` handles this for PP-sharded producers by routing
 **by layer-name (member) identity** instead of by region index. Each
 worker advertises which layer names back each of its NIXL regions in the
-handshake metadata (`NixlAgentMetadata.region_members`). When a push
-producer's local layout requires member routing, `add_remote_agent`
-expands the remote metadata into exactly the members this stage owns and
-emits the local and remote descriptors in one canonical (local) member
-order, so both sides stay paired regardless of how each remote rank
-happens to order its metadata.
+handshake metadata
+(`NixlAgentMetadata.region_members`, plus `packed_block_stride` /
+`packed_member_layouts` for packed layouts). When a push producer's
+local layout requires member routing, `add_remote_agent` expands the
+remote metadata into exactly the members this stage owns and emits the
+local and remote descriptors in one canonical (local) member order, so
+both sides stay paired regardless of how each remote rank happens to
+order its metadata.
 
 Invariants enforced during expansion:
 
@@ -219,7 +223,10 @@ Invariants enforced during expansion:
   handle is reused.
 
 Decode-side PP is unsupported because completions are counted per
-consumer rank. Mamba/SSM hybrids are unsupported under PP.
+consumer rank. Mamba/SSM hybrids are unsupported under PP. Packed caches
+from a PP-sharded push producer are routed by member identity and are
+currently limited to MLA caches. Pull and `PP=1` push transfer packed
+caches whole-region regardless of attention type.
 
 ## Scheduler-side responsibilities
 
