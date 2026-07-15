@@ -470,7 +470,7 @@ def test_rwkv7_linear_op_honors_fp16_accumulation() -> None:
 @pytest.mark.parametrize("batch,time", [(2, 1), (3, 1), (2, 2), (1, 8)])
 def test_rwkv7_wkv_fp16_is_repeatable(batch: int, time: int) -> None:
     torch.manual_seed(20260714 + batch * 10 + time)
-    C = H = 64
+    C, H = 64, 1
     state = torch.randn((batch, H, 64, 64), device="cuda", dtype=torch.float16)
     payload = torch.randn((6, batch, time, C), device="cuda", dtype=torch.float16)
     w0 = torch.randn((C,), device="cuda", dtype=torch.float16)
