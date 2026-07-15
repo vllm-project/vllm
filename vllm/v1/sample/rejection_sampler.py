@@ -292,11 +292,8 @@ class RejectionSampler(nn.Module):
         any_penalties_or_bad_words = (
             sampling_metadata.bad_words_token_ids or has_penalties
         )
-        holder = sampling_metadata.thinking_budget_state_holder
-        needs_thinking = holder is not None and holder.has_tracked_requests()
-
         output_token_ids = sampling_metadata.output_token_ids
-        if any_penalties_or_bad_words or needs_thinking:
+        if any_penalties_or_bad_words:
             output_token_ids = self._combine_outputs_with_spec_tokens(
                 output_token_ids,
                 sampling_metadata.spec_token_ids,
@@ -305,9 +302,7 @@ class RejectionSampler(nn.Module):
         # Calculate indices of target logits.
         repeat_indices: torch.Tensor | None = None
         need_repeat_indices = (
-            sampling_metadata.allowed_token_ids_mask is not None
-            or has_penalties
-            or needs_thinking
+            sampling_metadata.allowed_token_ids_mask is not None or has_penalties
         )
         if need_repeat_indices:
             num_requests = len(metadata.num_draft_tokens)
@@ -337,6 +332,7 @@ class RejectionSampler(nn.Module):
                 logits = processor.apply_with_spec_decode(
                     logits, metadata.num_draft_tokens
                 )
+        holder = sampling_metadata.thinking_budget_state_holder
         if holder is not None and holder.has_tracked_requests():
             logits = holder.apply_to_logits(
                 logits,
@@ -748,7 +744,8 @@ def rejection_greedy_sample_kernel(
             if SYNTHETIC_MODE:
                 uniform_prob = tl.load(uniform_probs_ptr + start_idx + pos)
                 rate = tl.load(synthetic_conditional_rates_ptr + pos)
-                accepted = uniform_prob < rate
+                # -1 is used for padded draft token ids that should be rejected.
+                accepted = (uniform_prob < rate) and draft_token_id >= 0
                 token_id = draft_token_id if accepted else target_argmax_id
                 rejected = not accepted
             else:
@@ -805,7 +802,10 @@ def rejection_random_sample_kernel(
         if not rejected:
             draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
             uniform_prob = tl.load(uniform_probs_ptr + start_idx + pos)
-            if SYNTHETIC_MODE:
+            if draft_token_id < 0:
+                # -1 is used for padded draft token ids that should be rejected.
+                accepted = False
+            elif SYNTHETIC_MODE:
                 rate = tl.load(synthetic_conditional_rates_ptr + pos)
                 accepted = uniform_prob < rate
             else:

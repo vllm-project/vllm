@@ -24,6 +24,7 @@ from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
 
 from .audio import AudioResampler, AudioSpec, normalize_audio
+from .image import convert_image_mode, normalize_image
 from .inputs import (
     AudioItem,
     HfAudioItem,
@@ -620,6 +621,13 @@ class MultiModalDataParser:
             data_items = [elem for elem in data]
         else:
             data_items = data
+
+        data_items = [
+            convert_image_mode(normalize_image(item), "RGB")
+            if isinstance(item, PILImage.Image)
+            else item
+            for item in data_items
+        ]
 
         return ImageProcessorItems(data_items)
 
