@@ -4,6 +4,7 @@ from typing import Any
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
+from vllm.entrypoints.generate.base.serving import resolve_token_id_placeholder
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,
     ChatCompletionRequest,
@@ -15,7 +16,6 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionResponseChoice,
 )
 from vllm.entrypoints.openai.engine.protocol import ToolCall
-from vllm.entrypoints.openai.engine.serving import resolve_token_id_placeholder
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateResponse
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
