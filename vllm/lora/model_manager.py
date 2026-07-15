@@ -132,8 +132,13 @@ class LoRAModelManager:
             and self.model.is_3d_moe_weight
             and not self._enable_mixed_moe_lora_format
         )
+        # Shared MoE adapters: w13 lora_A / w2 lora_B shared across experts,
+        # stored as pre-stacked experts.w{1,2,3} tensors (startup opt-in).
+        self._enable_moe_shared_loras = is_moe and lora_config.enable_moe_shared_loras
         self.packed_modules_mapping = process_packed_modules_mapping(
-            self.model, force_2d_moe=self._enable_mixed_moe_lora_format
+            self.model,
+            force_2d_moe=self._enable_mixed_moe_lora_format,
+            enable_moe_shared_loras=self._enable_moe_shared_loras,
         )
         self._is_non_gated_moe = is_moe and self.model.is_non_gated_moe
         self._use_ep = bool(
@@ -761,6 +766,16 @@ class LoRAModelManager:
                 if lora_model.check_lora_name(replaced_module_name):
                     module_name = replaced_module_name
             if module_name.endswith(".experts"):
+                if self._enable_moe_shared_loras:
+                    lora_model.loras[module_name] = (
+                        PackedLoRALayerWeights.pack_moe_stacked(
+                            replacement_loras,
+                            module_name,
+                        )
+                    )
+                    for module in packed_module_names:
+                        lora_model.loras.pop(module, None)
+                    continue
                 if self._is_non_gated_moe and len(replacement_loras) > 0:
                     replacement_loras = self._pad_lora_pairs_to_triplets(
                         replacement_loras
@@ -1021,18 +1036,25 @@ class LoRAModelManager:
     ) -> None:
         """Slice the cached LoRA tensors down to this rank's local experts.
 
-        The 2D MoE checkpoint enters as a list of per-(w1/w2/w3) tensors of
-        shape (num_experts, rank, in) / (num_experts, out, rank). When EP
-        is active each rank only owns local_num_experts; without this slice
-        the CPU LoRAModel keeps the full global weight and set_lora has to
-        re-slice on every activation.
+         The 2D MoE checkpoint enters as a list of per-(w1/w2/w3) tensors of
+         shape (num_experts, rank, in) / (num_experts, out, rank). When EP
+         is active each rank only owns local_num_experts; without this slice
+         the CPU LoRAModel keeps the full global weight and set_lora has to
+         re-slice on every activation.
 
-        With the load-time / pack-time slicing in
-        ``_restrict_to_local_experts``, the stacked tensors already match
-        ``local_num_experts`` and the inner branch becomes a no-op. The
-        guard remains so checkpoints that bypassed the pre-slicing (e.g.
-        ``.bin``/``.pt`` adapters with weights mappers we don't recognize)
-        still get sliced here.
+         With the load-time / pack-time slicing in
+         ``_restrict_to_local_experts``, the stacked tensors already match
+         ``local_num_experts`` and the inner branch becomes a no-op. The
+         guard remains so checkpoints that bypassed the pre-slicing (e.g.
+         ``.bin``/``.pt`` adapters with weights mappers we don't recognize)
+         still get sliced here.
+
+        shared-loras adapters (``enable_moe_shared_loras``) always reach
+         this path: they arrive as pre-stacked ``experts.w{1,2,3}`` tensors
+         that carry no per-expert key, so load-time slicing cannot touch them.
+         Each factor is sliced independently by its own expert dim -- per-expert
+         factors are narrowed to the local block while the shared (expert-dim 1)
+         factors are left whole on every rank.
         """
         if not module.use_ep:
             return
@@ -1046,34 +1068,38 @@ class LoRAModelManager:
         expert_start = ep_rank * local_num_experts
         expert_end = expert_start + local_num_experts
 
-        new_lora_a: list[torch.Tensor | None] = []
-        new_lora_b: list[torch.Tensor | None] = []
-        for a, b in zip(module_lora.lora_a, module_lora.lora_b):
-            if a is not None and b is not None and a.shape[0] == global_num_experts:
-                a = a[expert_start:expert_end].contiguous()
-                b = b[expert_start:expert_end].contiguous()
-            new_lora_a.append(a)
-            new_lora_b.append(b)
-        module_lora.lora_a = new_lora_a
-        module_lora.lora_b = new_lora_b
+        def _slice_local(t: torch.Tensor | None) -> torch.Tensor | None:
+            # Slice each factor independently by its own expert dim. Per-expert
+            # factors (expert-dim == global) are narrowed to this rank's block.
+            # shared-loras factors are stored collapsed (expert-dim 1) and are
+            # identical across experts, so every rank keeps the full factor
+            # untouched -- no slicing, no communication. Pairing lora_a with
+            # lora_b would break here because a shared adapter mixes dim-1 and
+            # per-expert factors within a single (a, b) pair.
+            if t is not None and t.shape[0] == global_num_experts:
+                return t[expert_start:expert_end].contiguous()
+            return t
+
+        module_lora.lora_a = [_slice_local(a) for a in module_lora.lora_a]
+        module_lora.lora_b = [_slice_local(b) for b in module_lora.lora_b]
 
     def _restrict_to_local_experts(
         self, module_name: str, new_module_names: list[str]
     ) -> list[str]:
         """Narrow a flat expert-major sub-module list to this rank's experts.
+        ·
+                ``new_module_names`` is produced by
+                ``fused_moe_make_expert_params_mapping`` and is ordered
+                ``[e=0,w1, e=0,w2, e=0,w3, e=1,w1, ...]`` (non-gated MoE has 2
+                entries per expert instead of 3). When the module is a 2D
+                ``FusedMoEWithLoRA`` with EP enabled, we slice the list to the
+                contiguous block of experts owned by this rank so the downstream
+                ``pack_moe`` call only consumes local weights and produces a
+                tensor sized to ``local_num_experts`` directly.
 
-        ``new_module_names`` is produced by
-        ``fused_moe_make_expert_params_mapping`` and is ordered
-        ``[e=0,w1, e=0,w2, e=0,w3, e=1,w1, ...]`` (non-gated MoE has 2
-        entries per expert instead of 3). When the module is a 2D
-        ``FusedMoEWithLoRA`` with EP enabled, we slice the list to the
-        contiguous block of experts owned by this rank so the downstream
-        ``pack_moe`` call only consumes local weights and produces a
-        tensor sized to ``local_num_experts`` directly.
-
-        Returns the original list unchanged for non-MoE modules, the 3D
-        MoE path (handled separately by ``_stack_moe_lora_weights``),
-        modules without EP, or layouts we cannot cleanly partition.
+                Returns the original list unchanged for non-MoE modules, the 3D
+                MoE path (handled separately by ``_stack_moe_lora_weights``),
+                modules without EP, or layouts we cannot cleanly partition.
         """
         module = self.modules.get(module_name)
         if not isinstance(module, FusedMoEWithLoRA):

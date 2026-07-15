@@ -46,10 +46,12 @@ class CudagraphDispatcher:
             is_breakable_cudagraph_enabled,
         )
 
+        self.use_breakable_cg = is_breakable_cudagraph_enabled()
+
         assert (
             not self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
             or self.compilation_config.is_attention_compiled_piecewise()
-            or is_breakable_cudagraph_enabled()
+            or self.use_breakable_cg
         ), (
             "Compilation mode should be CompilationMode.VLLM_COMPILE when "
             "cudagraph_mode piecewise cudagraphs is used, "
@@ -196,9 +198,14 @@ class CudagraphDispatcher:
                 batch_desc = self._create_padded_batch_descriptor(
                     bs, False, num_active_loras > 0, num_active_loras
                 )
-                # Only relax for PIECEWISE mode. FULL mode needs exact num_reqs
-                # because FA3's scheduler_metadata computation depends on it.
-                if cudagraph_mode.mixed_mode() == CUDAGraphMode.PIECEWISE:
+                # Compiled PIECEWISE graphs do not capture attention and can
+                # reuse one token-shape graph across different request counts.
+                # Breakable graphs capture attention-dependent kernels, so
+                # their request-shaped metadata must remain padded and static.
+                if (
+                    cudagraph_mode.mixed_mode() == CUDAGraphMode.PIECEWISE
+                    and not self.use_breakable_cg
+                ):
                     batch_desc = replace(batch_desc, num_reqs=None, uniform=False)
                 self.add_cudagraph_key(cudagraph_mode.mixed_mode(), batch_desc)
 
@@ -311,9 +318,11 @@ class CudagraphDispatcher:
                 return CUDAGraphMode.FULL, batch_desc_to_check
 
         if CUDAGraphMode.PIECEWISE in allowed_modes:
-            # also check if the relaxed key exists for more "general"
-            # piecewise cudagraph
-            batch_desc_to_check = replace(batch_desc, num_reqs=None, uniform=False)
+            # Compiled PIECEWISE uses a request-count-agnostic key. Breakable
+            # PIECEWISE keeps the padded request count for static metadata.
+            batch_desc_to_check = batch_desc
+            if not self.use_breakable_cg:
+                batch_desc_to_check = replace(batch_desc, num_reqs=None, uniform=False)
             if batch_desc_to_check in self.cudagraph_keys[CUDAGraphMode.PIECEWISE]:
                 return CUDAGraphMode.PIECEWISE, batch_desc_to_check
 

@@ -232,6 +232,7 @@ class Scheduler(SchedulerInterface):
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
+        self.num_spec_prefill_steps = 1
         self.num_lookahead_tokens = 0
         self.dynamic_sd_lookup: list[int] | None = None
         if speculative_config is not None:
@@ -244,6 +245,9 @@ class Scheduler(SchedulerInterface):
             if speculative_config.use_eagle():
                 self.use_eagle = True
                 self.num_lookahead_tokens = self.num_spec_tokens
+                self.num_spec_prefill_steps = (
+                    speculative_config.num_speculative_prefill_steps()
+                )
             if speculative_config.uses_draft_model():
                 self.num_lookahead_tokens = self.num_spec_tokens
             if speculative_config.use_dflash():
@@ -267,6 +271,7 @@ class Scheduler(SchedulerInterface):
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
             enable_caching=self.cache_config.enable_prefix_caching,
             use_eagle=self.use_eagle,
+            num_spec_prefill_steps=self.num_spec_prefill_steps,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,

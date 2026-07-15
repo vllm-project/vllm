@@ -547,6 +547,12 @@ class ChunkedLocalAttentionSpec(AttentionSpec):
 class SlidingWindowSpec(AttentionSpec):
     sliding_window: int
     head_size_v: int = None  # type: ignore[assignment]
+    # The trailing edge of the window is extended by ``extra_retained_tokens``
+    # so that those extra trailing tokens' blocks are retained (but not
+    # attended). This is needed for multi-module spec decoding which can
+    # re-prefill the last num_spec_prefill_tokens - 1 tokens from the end
+    # of the sequence, and thus needs to delay freeing/caching of blocks.
+    extra_retained_tokens: int = 0
 
     def __post_init__(self):
         if self.head_size_v is None:
@@ -588,8 +594,13 @@ class SlidingWindowSpec(AttentionSpec):
         """
         # During chunked prefill, we hold KV for the last `sliding_window-1`
         # computed tokens plus the in-flight tokens (frees happen on the
-        # processed-token basis); never more than `max_model_len`.
-        num_tokens = min(self.sliding_window - 1 + max_in_flight_tokens, max_model_len)
+        # processed-token basis); never more than `max_model_len`. An additional
+        # `extra_retained_tokens` trailing tokens are kept alive below the
+        # window for multi-module spec decoding, and must be accounted here too.
+        num_tokens = min(
+            self.sliding_window - 1 + self.extra_retained_tokens + max_in_flight_tokens,
+            max_model_len,
+        )
         # +1 because the sliding window may not start from the beginning of
         # the block. E.g. block size 4 and num_token 4 needs two blocks
         # [XXCD][EF] to store the 6-token window [CDEF].

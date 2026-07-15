@@ -54,6 +54,7 @@ MTPModelTypes = Literal[
     "step3p5_mtp",
     "hy_v3_mtp",
     "gemma4_mtp",
+    "inkling_mtp",
 ]
 NgramGPUTypes = Literal["ngram_gpu"]
 DFlashModelTypes = Literal["dflash"]
@@ -547,6 +548,31 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["HYV3MTPModel"]}
+            )
+
+        if hf_config.model_type in ("inkling_mm_model", "inkling_model"):
+            # MTP weights live on the text backbone; promote text_config and
+            # attach the (nested) mtp_config fields so the flat draft config the
+            # MTP module reads exposes them directly.
+            mtp_config = getattr(hf_config, "mtp_config", None) or {}
+            hf_config = getattr(hf_config, "text_config", hf_config)
+            n_predict = mtp_config.get("num_nextn_predict_layers")
+            hf_config.model_type = "inkling_mtp"
+            hf_config.update(
+                {
+                    "n_predict": n_predict,
+                    "num_nextn_predict_layers": n_predict,
+                    "chain_hidden_post_norm": mtp_config.get(
+                        "chain_hidden_post_norm", True
+                    ),
+                    # The MTP depth blocks carry their own sliding-window
+                    # pattern (which depths use SWA vs full attention), which
+                    # differs from the backbone's local_layer_ids just promoted
+                    # from text_config; overwrite it so the MTP module sizes and
+                    # loads each depth's attention correctly.
+                    "local_layer_ids": mtp_config.get("local_layer_ids", []),
+                    "architectures": ["InklingMTPModel"],
+                }
             )
 
         if hf_config.model_type in ("gemma4_assistant", "gemma4_unified_assistant"):
@@ -1267,6 +1293,15 @@ class SpeculativeConfig:
         # target model hidden states"
         # TODO(ben): Refactor this so the naming is clearer
         return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
+
+    def num_speculative_prefill_steps(self) -> int:
+        if self.method == "mtp" and self.draft_model_config is not None:
+            n_predict = getattr(
+                self.draft_model_config.hf_config, "num_nextn_predict_layers", None
+            )
+            if n_predict:
+                return min(int(n_predict), self.num_speculative_tokens)
+        return 1
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"
