@@ -41,7 +41,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .bert import BertPooler
-from .interfaces import SupportsCrossEncoding, SupportsQuant
+from .interfaces import SupportsCrossEncoding, SupportsLoRA, SupportsQuant
 from .interfaces_base import default_pooling_type
 
 
@@ -442,7 +442,14 @@ class BertWithRopeEncoder(nn.Module):
 
 @support_torch_compile
 @default_pooling_type(seq_pooling_type="CLS")
-class BertWithRope(nn.Module, SupportsQuant):
+class BertWithRope(nn.Module, SupportsLoRA, SupportsQuant):
+    packed_modules_mapping = {
+        "qkv_proj": ["qkv_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+    embedding_modules = {}
+    embedding_padding_modules: list[str] = []
+
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
 
     def __init__(
