@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
 )
+from vllm.platforms import current_platform
 
 _DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
 
@@ -140,7 +141,10 @@ class DeepseekV4FP8Config(Fp8Config):
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             if self.expert_dtype == "fp4":
-                if layer.moe_config.moe_parallel_config.tp_size > 1:
+                if (
+                    current_platform.is_cuda()
+                    and layer.moe_config.moe_parallel_config.tp_size > 1
+                ):
                     raise ValueError(
                         "DeepSeek V4 FP4 MoE is not supported with tensor "
                         "parallelism. Use data parallelism with expert "
