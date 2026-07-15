@@ -83,38 +83,19 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
         the smaller [N, embed_dim] output is cast — avoids a temporary
         allocation that can be 4-8x larger than the final result.
         """
-        # Project in the input's native dtype (fp16) to avoid casting
-        # the large [N, hidden_dim] tensor to fp32.  We temporarily cast
-        # the small weight [embed, hidden] instead.  Only the small
-        # [N, embed_dim] output is cast to head_dtype afterwards.
-        if self.projector is not None:
-            if (
-                isinstance(self.projector, nn.Linear)
-                and self.projector.weight.dtype != hidden_states.dtype
-            ):
-                import torch.nn.functional as F
-
-                w = self.projector.weight.to(hidden_states.dtype)
-                b = (
-                    self.projector.bias.to(hidden_states.dtype)
-                    if self.projector.bias is not None
-                    else None
-                )
-                hidden_states = F.linear(hidden_states, w, b)
-            else:
-                # nn.Sequential or other non-Linear projector: we can't
-                # downcast the projector weights, so cast the input up
-                # to head_dtype to match the projector's parameter
-                # dtype.  Mirrors forward_chunk's behavior.
-                if (
-                    self.head_dtype is not None
-                    and hidden_states.dtype != self.head_dtype
-                ):
-                    hidden_states = hidden_states.to(self.head_dtype)
-                hidden_states = self.projector(hidden_states)
-        # Cast the small [N, embed_dim] result, not the big [N, hidden].
-        if self.head_dtype is not None:
+        # Cast BEFORE projection, exactly like forward_chunk, so queries
+        # (forward_chunk path) and documents (this path) are projected at
+        # identical precision. An earlier revision projected in the input
+        # dtype with downcast weights to avoid materialising [N, hidden]
+        # in head_dtype; that made Q/D projection precision diverge for
+        # models whose head_dtype differs from the activation dtype
+        # (e.g. BF16 ColPali/ColQwen with an fp32 head) — see the
+        # PR #40337 review. Exact parity wins over the transient
+        # allocation.
+        if self.head_dtype is not None and hidden_states.dtype != self.head_dtype:
             hidden_states = hidden_states.to(self.head_dtype)
+        if self.projector is not None:
+            hidden_states = self.projector(hidden_states)
         if self.activation is not None:
             hidden_states = self.activation(hidden_states)
         return hidden_states

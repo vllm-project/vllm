@@ -3431,9 +3431,13 @@ class GPUModelRunner(
             projected_batch = pooler.head.project_batch(hidden_states)  # type: ignore[operator,union-attr]
             # Per-request slicing: AllPool extracts views of hidden_states
             pooled_data = pooler.pooling(hidden_states, pooling_metadata)  # type: ignore[operator]
-            # Single GPU->CPU sync instead of N .item() calls per request.
-            firsts = cursor.first_token_indices_gpu.tolist()
-            lasts = cursor.last_token_indices_gpu.tolist()
+            # Offsets from CPU-side scheduled-token metadata — no GPU sync.
+            if cursor.first_token_indices_cpu is not None:
+                firsts = cursor.first_token_indices_cpu.tolist()
+                lasts = cursor.last_token_indices_cpu.tolist()
+            else:  # fallback: single sync (older cursor producers)
+                firsts = cursor.first_token_indices_gpu.tolist()
+                lasts = cursor.last_token_indices_gpu.tolist()
             params_list = pooling_metadata.pooling_params
             # Build output: docs get projected_batch slices (views),
             # queries/other go through normal forward_chunk.
