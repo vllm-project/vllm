@@ -456,12 +456,9 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             num_kv_heads=self.num_heads_kv,
             head_dim=self.headdim,
             page_size=self.block_size,
-            max_blocks_per_seq=cdiv(
-                self.model_config.max_model_len, self.block_size
-            ),
+            max_blocks_per_seq=cdiv(self.model_config.max_model_len, self.block_size),
             scale=self.headdim**-0.5,
             fa_version=self.vllm_flash_attn_version,
-            has_fp8_kv=self.kv_cache_dtype in (torch.float8_e4m3fn, torch.float8_e5m2),
         )
         return tuple(iter_fa4_dense_compile_units(ctx))
 
