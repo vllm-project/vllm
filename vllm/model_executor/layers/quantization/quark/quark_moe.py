@@ -522,8 +522,9 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
         # The modular TritonExperts kernel consumes float activations and
         # quantizes them to int8 itself, so it cannot apply a loaded static
         # activation scale (this matches CompressedTensorsW8A8Int8MoEMethod).
-        # Static-activation INT8 therefore stays on the legacy fused_experts
-        # path (see apply()), preserving pre-refactor behavior.
+        # TODO: Static-activation INT8 therefore stays on the legacy fused_experts
+        # path (see apply()) for now, preserving pre-refactor behavior.
+        # Needs to be migrated to expert backend.
         if not self.static_input_scales:
             # Map the Quark weight scheme to oracle quant keys. Per-channel
             # weights pair with dynamic per-token activations; per-tensor
@@ -783,8 +784,6 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
         if not self.static_input_scales:
             assert self.int8_backend is not None
             assert self.experts_cls is not None
-            # Apply any backend-specific INT8 weight relayout (no-op for TRITON;
-            # HUMMING/CPU reshape the weights into their kernel format).
             w13, w2 = convert_to_int8_moe_kernel_format(
                 int8_backend=self.int8_backend,
                 w13=layer.w13_weight,
@@ -799,6 +798,8 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
         assert self.moe_quant_config is not None
 
         if not self.static_input_scales:
+            assert self.int8_backend is not None
+            assert self.experts_cls is not None
             self.moe_kernel = make_int8_moe_kernel(
                 int8_backend=self.int8_backend,
                 moe_quant_config=self.moe_quant_config,
