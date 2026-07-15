@@ -330,6 +330,7 @@ class ServingTokens(GenerateBaseServing):
             usage=usage,
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
             kv_transfer_params=final_res.kv_transfer_params,
+            ec_transfer_params=final_res.ec_transfer_params,
         )
 
         # Log complete response if output logging is enabled

@@ -106,7 +106,7 @@ class OffloadingConnectorWorker:
                     )
                     page_size_bytes[layer_name] = layer_kv_cache_spec.page_size_bytes
                     unpadded_page_size_bytes[layer_name] = (
-                        layer_kv_cache_spec.real_page_size_bytes
+                        layer_kv_cache_spec.unpadded_page_size_bytes
                     )
 
                 elif isinstance(layer_kv_cache_spec, MambaSpec):
