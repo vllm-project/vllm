@@ -7,7 +7,6 @@ from typing import Any
 
 import torch
 
-from vllm import _custom_ops as ops
 from vllm.kernels.helion.case_key import CaseKey
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -28,30 +27,32 @@ logger = init_logger(__name__)
 
 
 def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
-    # TODO(xiaohongchen1991): it is difficult for kernel author to cover
-    # all input property combination. Currently, dtypes are fixed. We need
-    # optimization to bucket/skip some combinations
-    m_size_list = [1, 2, 4, 8, 16, 32, 64, 128]
+    # The Helion linear kernel is autotuned per shape.
+    # m_size_list follows cudagraph_capture_sizes pattern:
+    # [1, 2, 4] + range(8, 256, 8) + range(256, max_graph_size + 1, 16),
+    # but is capped here to cover only small M values.
+    m_size_list = [1, 2, 4, 8, 16, 24, 32]
     b_shape_list = [
-        # Qwen3-1.7B
+        # qwen3-1.7B
         # TP=1
         (2048, 4096),
         (2048, 2048),
         (2048, 12288),
         (6144, 2048),
-        # Qwen3-8B
+        # qwen3-8B
         # TP=1
         (4096, 6144),
         (4096, 4096),
         (4096, 24576),
         (12288, 4096),
-        # Qwen3-32B
+        # qwen3-32B
         # TP=1
         (5120, 10240),
-        (5120, 5120),
+        (8192, 5120),
         (5120, 51200),
         (25600, 5120),
     ]
+    has_bias = False
 
     in_dtype: torch.dtype = current_platform.fp8_dtype()
     scale_dtype: torch.dtype = torch.float32
@@ -66,18 +67,18 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
             in_dtype
         )
         b = b.t()
-        scale_a = 0.5 + torch.rand((M, 1), dtype=scale_dtype, device="cuda")
-        scale_b = 0.5 + torch.rand((N, 1), dtype=scale_dtype, device="cuda")
-        bias = 0.5 * (torch.rand(N, dtype=out_dtype, device="cuda") - 0.5)
-
-        config_key = CaseKey(
-            {
-                "K": K,
-                "N": N,
-                "M": M,
-            }
+        out = torch.empty((M, N), dtype=out_dtype, device=a.device)
+        a_scales = 0.5 + torch.rand((1, M), dtype=scale_dtype, device="cuda")
+        a_scales = a_scales.t()
+        b_scales = 0.5 + torch.rand((N, 1), dtype=scale_dtype, device="cuda")
+        bias = (
+            0.5 * (torch.rand(N, dtype=out_dtype, device="cuda") - 0.5)
+            if has_bias
+            else None
         )
-        inputs[config_key] = (a, b, scale_a, scale_b, out_dtype, bias)
+
+        config_key = CaseKey({"K": K, "N": N, "M": M})
+        inputs[config_key] = (out, a, b, a_scales, b_scales, bias)
 
     return inputs
 
@@ -87,35 +88,33 @@ _pick_cache: dict[tuple[int, int, int], CaseKey | None] = {}
 
 def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | None:
     """Pick the best pre-tuned config for the given input shape.
-    Selection strategy:
-      1. Find the closest K among available configs
-         (exact match preferred).
-      2. Find the closest N among available configs
-         (exact match preferred).
-      3. Among the M values tuned for that K and N, pick
-         the smallest M >= the input's M. If the input is
-         larger than all available Ms, fall back to the largest.
+
+    K/N are picked by closest match. M is bucketed to the smallest tuned
+    M >= runtime M.
     """
 
     if not config_keys:
         return None
 
-    a, b, *_ = args
+    out, a, b, *_ = args
+
     M, K = a.shape
     N = b.shape[1]
 
     cache_key = (M, K, N)
-    cached = _pick_cache.get(cache_key)
-    if cached is not None:
-        return cached
+    if cache_key in _pick_cache:
+        return _pick_cache[cache_key]
 
     configs: dict[int, dict[int, list[int]]] = {}
     for key in config_keys:
         if key.is_default():
             continue
-        configs.setdefault(key["K"], {}).setdefault(key["N"], []).append(key["M"])
+
+        if all(k in key for k in ("K", "N", "M")):
+            configs.setdefault(key["K"], {}).setdefault(key["N"], []).append(key["M"])
 
     if not configs:
+        _pick_cache[cache_key] = None
         return None
 
     best_K = min(configs, key=lambda s: abs(s - K))
@@ -135,51 +134,68 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
 
 
 def fake_impl(
+    out: torch.Tensor,  # [M, N]
     a: torch.Tensor,  # [M, K]
     b: torch.Tensor,  # [K, N]
-    scale_a: torch.Tensor,  # [1]/[1, 1]/[M]/[M, 1]
-    scale_b: torch.Tensor,  # [1]/[1, 1]/[N]/[N, 1]
-    out_dtype: torch.dtype,
+    a_scales: torch.Tensor,  # [1]/[1, 1]/[M]/[M, 1]
+    b_scales: torch.Tensor,  # [1]/[1, 1]/[N]/[N, 1]
     bias: torch.Tensor | None = None,  # [N]
-) -> torch.Tensor:
-    M = a.shape[0]
-    N = b.shape[1]
-    c = torch.empty((M, N), dtype=out_dtype, device=a.device)
-    return c
+) -> None:
+    return
 
 
 def baseline(
+    out: torch.Tensor,  # [M, N]
     a: torch.Tensor,  # [M, K]
     b: torch.Tensor,  # [K, N]
-    scale_a: torch.Tensor,  # [1]/[1, 1]/[M]/[M, 1]
-    scale_b: torch.Tensor,  # [1]/[1, 1]/[N]/[N, 1]
-    out_dtype: torch.dtype,
+    a_scales: torch.Tensor,  # [1]/[1, 1]/[M]/[M, 1]
+    b_scales: torch.Tensor,  # [1]/[1, 1]/[N]/[N, 1]
     bias: torch.Tensor | None = None,  # [N]
-) -> torch.Tensor:
-    return ops.cutlass_scaled_mm(
-        a, b, out_dtype=out_dtype, scale_a=scale_a, scale_b=scale_b, bias=bias
-    )
+) -> None:
+    c = torch.mm(a.to(torch.float32), b.to(torch.float32))
+    c = a_scales * c
+    c = b_scales.T * c
+    c = c.to(out.dtype)
+    if bias is not None:
+        c = c + bias
+
+    out.copy_(c)
 
 
-# Overwrite autotune_baseline_atol and autotune_baseline_rtol
-# if too many configs failed due to baseline check during autotuning
+# TODO(xiaohongchen1991):
+# 1. Remove ProcessGroupNameNotFound from ignore_warning after fix for
+# https://github.com/pytorch/helion/issues/3024 is available in vLLM
+# 2. Conditionally use SwapAB trick when the fix for
+# https://github.com/pytorch/helion/issues/3044 is available in vLLM
+
+
+# Quantized GEMM kernels can have relatively large numerical differences
+# from the baseline.
+# Override autotune_baseline_atol and autotune_baseline_rtol to prevent
+# excessive config failures from baseline accuracy checks during autotuning.
 @register_kernel(
+    mutates_args=["out"],
     config_picker=pick_config,
     input_generator=generate_inputs,
     fake_impl=fake_impl,
     helion_settings=helion.Settings(
         autotune_baseline_fn=baseline,
-        ignore_warnings=[helion.exc.TensorOperationInWrapper],
+        autotune_baseline_atol=1e-1,
+        autotune_baseline_rtol=1e-1,
+        ignore_warnings=[
+            helion.exc.TensorOperationInWrapper,
+            helion.exc.ProcessGroupNameNotFound,
+        ],
     ),
 )  # type: ignore[misc]
 def scaled_mm(
+    out: torch.Tensor,  # [M, N]
     a: torch.Tensor,  # [M, K]
     b: torch.Tensor,  # [K, N]
-    scale_a: torch.Tensor,  # [1]/[1, 1]/[M]/[M, 1]
-    scale_b: torch.Tensor,  # [1]/[1, 1]/[N]/[N, 1]
-    out_dtype: torch.dtype,
+    a_scales: torch.Tensor,  # [1]/[1, 1]/[M]/[M, 1]
+    b_scales: torch.Tensor,  # [1]/[1, 1]/[N]/[N, 1]
     bias: torch.Tensor | None = None,  # [N]
-) -> torch.Tensor:
+) -> None:
     M, K = a.shape
     N = b.shape[1]
     hl.specialize(K)
@@ -191,49 +207,50 @@ def scaled_mm(
     assert a.stride(1) == 1
     assert b.stride(0) == 1
 
-    scale_a = scale_a.reshape(-1, 1) if scale_a.dim() <= 1 else scale_a
-    scale_b = scale_b.reshape(-1, 1) if scale_b.dim() <= 1 else scale_b
+    a_scales = a_scales.reshape(-1, 1) if a_scales.dim() <= 1 else a_scales
+    b_scales = b_scales.reshape(-1, 1) if b_scales.dim() <= 1 else b_scales
 
-    assert scale_a.dtype == scale_b.dtype and scale_a.is_floating_point()
-    assert scale_a.shape[1] == 1 and (scale_a.shape[0] == 1 or scale_a.shape[0] == M)
-    assert scale_b.shape[1] == 1 and (scale_b.shape[0] == 1 or scale_b.shape[0] == N)
-    hl.specialize(scale_b.shape[1])
+    assert a_scales.dtype == b_scales.dtype and a_scales.is_floating_point()
+    assert a_scales.shape[1] == 1 and (a_scales.shape[0] == 1 or a_scales.shape[0] == M)
+    assert b_scales.shape[1] == 1 and (b_scales.shape[0] == 1 or b_scales.shape[0] == N)
+    hl.specialize(b_scales.shape[1])
+
+    out_dtype = out.dtype
     assert out_dtype.is_floating_point
-
     if bias is not None:
         assert bias.numel() == N and bias.dtype == out_dtype
 
-    c = torch.empty((M, N), dtype=out_dtype, device=a.device)
     acc_dtype = torch.float32 if a.is_floating_point() else torch.int32
 
     for tile_m, tile_n in hl.tile([M, N]):
-        acc = hl.zeros([tile_m, tile_n], acc_dtype)
+        acc = hl.zeros([tile_n, tile_m], acc_dtype)
         for tile_k in hl.tile(K):
+            a_blk = hl.load(a, [tile_m.index[None, :], tile_k.index[:, None]])
+            b_blk = hl.load(b, [tile_k.index[None, :], tile_n.index[:, None]])
             acc = hl.dot(
-                a[tile_m, tile_k],
-                b[tile_k, tile_n],
+                b_blk,
+                a_blk,
                 acc=acc,
                 out_dtype=acc_dtype,
             )
 
-        acc = acc.to(torch.float32)
-        if scale_a.shape[0] == M:
-            scale_a_blk = scale_a[tile_m, :]
-        else:
-            scale_a_blk = scale_a[0, 0].expand(tile_m.block_size, 1)
-        acc = scale_a_blk * acc
+        acc = acc.t().to(torch.float32)
 
-        if scale_b.shape[0] == N:
-            scale_b_blk = scale_b[tile_n, :]
+        if a_scales.shape[0] == M:
+            a_scales_blk = a_scales[tile_m, :]
         else:
-            scale_b_blk = scale_b[0, 0].expand(tile_n.block_size, 1)
-        acc = scale_b_blk.T * acc
+            a_scales_blk = a_scales[0, 0].expand(tile_m.block_size, 1)
+        acc = a_scales_blk * acc
 
-        c_blk = acc.to(out_dtype)
+        if b_scales.shape[0] == N:
+            b_scales_blk = b_scales[tile_n, :]
+        else:
+            b_scales_blk = b_scales[0, 0].expand(tile_n.block_size, 1)
+        acc = b_scales_blk.T * acc
+
+        out_blk = acc.to(out_dtype)
 
         if bias is not None:
-            c_blk += bias[tile_n]
+            out_blk += bias[tile_n]
 
-        c[tile_m, tile_n] = c_blk
-
-    return c
+        out[tile_m, tile_n] = out_blk

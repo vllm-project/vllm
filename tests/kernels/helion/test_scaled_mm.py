@@ -30,18 +30,20 @@ if not has_helion():
     )
 
 
-def _generate_input(M: int, K: int, N: int) -> tuple[Any, ...]:
+def _generate_input(M: int, K: int, N: int, has_bias: bool = False) -> tuple[Any, ...]:
     in_dtype = current_platform.fp8_dtype()
     a = torch.randn(M, K, dtype=torch.float32, device="cuda").to(in_dtype)
     b = torch.randn(N, K, dtype=torch.float32, device="cuda").to(in_dtype)
     b = b.t()
+    c = torch.empty((M, N), dtype=torch.bfloat16, device=a.device)
     scale_a = torch.randn(M, 1, dtype=torch.float32, device="cuda")
     scale_b = torch.randn(N, 1, dtype=torch.float32, device="cuda")
-    bias = torch.randn(N, dtype=torch.bfloat16, device="cuda")
-    out_dtype = torch.bfloat16
 
-    args = (a, b, scale_a, scale_b, out_dtype, bias)
-    return args
+    if has_bias:
+        bias = torch.randn(N, dtype=torch.bfloat16, device="cuda")
+        return c, a, b, scale_a, scale_b, bias
+
+    return c, a, b, scale_a, scale_b
 
 
 @pytest.fixture(autouse=True)
@@ -60,9 +62,10 @@ class TestScaledMmConfigPicker:
         config_keys = [
             CaseKey({"K": 2048, "N": 4096, "M": 16}),
             CaseKey({"K": 4096, "N": 6144, "M": 16}),
+            CaseKey({"K": 4096, "N": 4096, "M": 16}),
         ]
 
-        args = _generate_input(16, 4096, 6144)
+        args = _generate_input(16, 4096, 6144, True)
         selected_key = pick_config(args, config_keys)
         assert selected_key == CaseKey({"K": 4096, "N": 6144, "M": 16})
 
@@ -78,7 +81,7 @@ class TestScaledMmConfigPicker:
             CaseKey({"K": 4096, "N": 6144, "M": 32}),
         ]
 
-        args = _generate_input(20, 3000, 500)
+        args = _generate_input(20, 3000, 500, False)
         selected_key = pick_config(args, config_keys)
         assert selected_key == CaseKey({"K": 2048, "N": 4096, "M": 32})
 
@@ -101,7 +104,7 @@ class TestScaledMmConfigPicker:
             CaseKey({"K": 4096, "N": 6144, "M": 32}),
         ]
 
-        args = _generate_input(64, 8192, 7000)
+        args = _generate_input(64, 8192, 7000, False)
         selected_key = pick_config(args, config_keys)
         assert selected_key == CaseKey({"K": 4096, "N": 6144, "M": 32})
 
@@ -184,9 +187,11 @@ class TestScaledMmCorrectness:
         if use_bias:
             bias = torch.rand((N,), device=a.device, dtype=out_dtype)
 
-        c_check = scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
+        c_check = torch.empty((M, N), dtype=out_dtype, device=a.device)
+        c_actual = torch.empty((M, N), dtype=out_dtype, device=a.device)
 
-        c_actual = baseline(a, b, scale_a, scale_b, out_dtype, bias)
+        scaled_mm(c_check, a, b, scale_a, scale_b, bias)
+        baseline(c_actual, a, b, scale_a, scale_b, bias)
 
         torch.testing.assert_close(c_check, c_actual, rtol=1e-1, atol=1e-1)
 
@@ -201,7 +206,7 @@ class TestScaledMmIntegration:
         kernel_wrapper = registered_kernels["scaled_mm"]
         assert kernel_wrapper.op_name == "scaled_mm"
         assert kernel_wrapper._config_picker is not None
-        assert kernel_wrapper._mutates_args is None
+        assert kernel_wrapper._mutates_args == ["out"]
 
     def test_fake_impl_functionality(self):
         skip_if_platform_unsupported("scaled_mm")
@@ -211,10 +216,5 @@ class TestScaledMmIntegration:
         kernel_wrapper = registered_kernels["scaled_mm"]
         fake_impl = kernel_wrapper._fake_impl
 
-        a, b, scale_a, scale_b, out_dtype, bias = _generate_input(16, 4096, 4096)
-        fake_output = fake_impl(a, b, scale_a, scale_b, out_dtype, bias)
-
-        assert fake_output.shape[0] == a.shape[0]
-        assert fake_output.shape[1] == b.shape[1]
-        assert fake_output.dtype == out_dtype
-        assert fake_output.device == a.device
+        args = _generate_input(16, 4096, 4096)
+        assert fake_impl(*args) is None
