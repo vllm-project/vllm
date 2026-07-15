@@ -1368,16 +1368,18 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/attention.cu")
   set(VLLM_ROCM_EXT_FLAGS ${VLLM_GPU_FLAGS})
 
-  # skinny_gemms.cu is built on gfx9/gfx11 ISA (MFMA, dot2/dot4, legacy
-  # s_waitcnt asm) that gfx1250 (gfx12) does not provide. Exclude it from the
-  # gfx1250 build and disable its op registrations (VLLM_SKIP_SKINNY_GEMMS);
+  # skinny_gemms*.cu are built on gfx9/gfx11 ISA (MFMA, dot2/dot4, legacy
+  # s_waitcnt asm) that gfx1250 (gfx12) does not provide. Exclude them from the
+  # gfx1250 build and disable their op registrations (VLLM_SKIP_SKINNY_GEMMS);
   # vLLM falls back to default/Triton GEMM for those ops on gfx1250.
   list(REMOVE_ITEM VLLM_ROCM_EXT_SRC "csrc/rocm/skinny_gemms.cu")
+  list(REMOVE_ITEM VLLM_ROCM_EXT_SRC "csrc/rocm/skinny_gemms_int4.cu")
   set(VLLM_SKINNY_ARCHES ${VLLM_GPU_ARCHES})
   list(FILTER VLLM_SKINNY_ARCHES EXCLUDE REGEX "gfx1250")
   if(VLLM_SKINNY_ARCHES)
     message(STATUS "Building skinny_gemms for archs: ${VLLM_SKINNY_ARCHES}")
-    hipify_sources_target(VLLM_SKINNY_HIP_SRCS _rocm_C_skinny "csrc/rocm/skinny_gemms.cu")
+    hipify_sources_target(VLLM_SKINNY_HIP_SRCS _rocm_C_skinny
+      "csrc/rocm/skinny_gemms.cu" "csrc/rocm/skinny_gemms_int4.cu")
     unset(_VLLM_LAST_HIPIFY_TARGET)
     add_library(_rocm_C_skinny OBJECT ${VLLM_SKINNY_HIP_SRCS})
     add_dependencies(_rocm_C_skinny hipify_all)
