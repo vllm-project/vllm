@@ -19,7 +19,7 @@ from vllm.platforms import current_platform
 if not current_platform.is_cuda_alike():
     pytest.skip("Requires CUDA or ROCm", allow_module_level=True)
 
-from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
+from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend, DmaCopyEvent
 from vllm.v1.simple_kv_offload.cuda_mem_ops import (
     CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
     CU_MEMCPY_SRC_ACCESS_ORDER_STREAM,
@@ -82,7 +82,7 @@ def _drive_store(
             wait_event = torch.Event()
             wait_event.record(compute_stream)
 
-        store_events: list[tuple[int, torch.Event]] = []
+        store_events: list[DmaCopyEvent] = []
         backend.launch_copy(
             block_ids,
             block_ids,
@@ -96,7 +96,7 @@ def _drive_store(
         while not store_events and time.time() < deadline:
             time.sleep(0.0005)
         assert store_events, "background copy was never enqueued"
-        store_events[0][1].synchronize()
+        store_events[0].end_event.synchronize()
 
         if int((cpu[:, 0].to(torch.int32) != val).sum().item()):
             corrupt += 1

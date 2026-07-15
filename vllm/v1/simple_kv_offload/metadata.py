@@ -8,6 +8,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    TransferStats,
+)
 
 INVALID_JOB_ID = -1
 
@@ -46,9 +49,14 @@ class SimpleCPUOffloadWorkerMetadata(KVConnectorWorkerMetadata):
     ``aggregate()`` sums counts across workers within a step.
     The scheduler-side manager accumulates across steps and processes
     a store completion only when count reaches ``world_size``.
+
+    ``transfer_stats`` carries completed-transfer byte/time samples since the
+    worker's last report (poll-and-reset); ``aggregate()`` sums across
+    workers (TP/PP) the same way ``completed_store_events`` does.
     """
 
     completed_store_events: dict[int, int]
+    transfer_stats: TransferStats = field(default_factory=TransferStats)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -57,4 +65,7 @@ class SimpleCPUOffloadWorkerMetadata(KVConnectorWorkerMetadata):
         merged = dict(self.completed_store_events)
         for k, v in other.completed_store_events.items():
             merged[k] = merged.get(k, 0) + v
-        return SimpleCPUOffloadWorkerMetadata(completed_store_events=merged)
+        return SimpleCPUOffloadWorkerMetadata(
+            completed_store_events=merged,
+            transfer_stats=self.transfer_stats.aggregate(other.transfer_stats),
+        )

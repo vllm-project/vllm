@@ -158,15 +158,33 @@ def build_params(
     )
 
 
-def copy_blocks(
+class PreparedBatchCopy(NamedTuple):
+    """Host-side (pure NumPy) staging for a batch memcpy call.
+
+    Kept separate from submission so callers can time the DMA submit alone,
+    excluding this NumPy prep, while still keeping the arrays alive for the
+    lifetime of the in-flight `cuMemcpyBatchAsync` call (the driver reads
+    them synchronously at submit time, so no extra lifetime management is
+    needed beyond holding a reference to this tuple until submit returns).
+    """
+
+    src_all: np.ndarray
+    dst_all: np.ndarray
+    sz_all: np.ndarray
+    total_transfers: int
+    total_bytes: int
+
+
+def prepare_copy_blocks(
     src_block_ids: list[int],
     dst_block_ids: list[int],
     params: BatchMemcpyParams,
-) -> None:
-    """Copy blocks via cuMemcpyBatchAsync / hipMemcpyBatchAsync."""
+) -> PreparedBatchCopy | None:
+    """Compute per-transfer src/dst addresses and sizes. Returns None iff
+    there are zero transfers (nothing to submit)."""
     n = len(src_block_ids)
     if n == 0:
-        return
+        return None
 
     src_ids = np.array(src_block_ids, dtype=np.uint64)
     dst_ids = np.array(dst_block_ids, dtype=np.uint64)
@@ -180,16 +198,30 @@ def copy_blocks(
     sz_all = np.repeat(params.bpb, n)
     total = n * params.num_layers
 
+    return PreparedBatchCopy(
+        src_all=src_all,
+        dst_all=dst_all,
+        sz_all=sz_all,
+        total_transfers=total,
+        total_bytes=int(sz_all.sum()),
+    )
+
+
+def submit_prepared_copy(
+    prepared: PreparedBatchCopy,
+    params: BatchMemcpyParams,
+) -> None:
+    """Submit a prepared batch to cuMemcpyBatchAsync / hipMemcpyBatchAsync."""
     # ROCm 7.2.1/7.2.2 rejects any call with numAttrs>0 (hipMemcpyBatchAsync
     # hipamd/src/hip_memory.cpp:2819-2822); CUDA uses one attrs entry so
     # srcAccessOrder is honored. attrs / attrsIdxs are ignored when
     # numAttrs==0, so we pass the same values from both paths.
     num_attrs = 0 if current_platform.is_rocm() else 1
     err = _batch_memcpy_fn(
-        dst_all.ctypes.data,
-        src_all.ctypes.data,
-        sz_all.ctypes.data,
-        total,
+        prepared.dst_all.ctypes.data,
+        prepared.src_all.ctypes.data,
+        prepared.sz_all.ctypes.data,
+        prepared.total_transfers,
         ctypes.addressof(params.attrs),
         ctypes.byref(params.attrs_idx),
         num_attrs,
@@ -200,3 +232,20 @@ def copy_blocks(
         raise RuntimeError(
             f"batch memcpy failed: err={err} failIdx={params.fail_idx.value}"
         )
+
+
+def copy_blocks(
+    src_block_ids: list[int],
+    dst_block_ids: list[int],
+    params: BatchMemcpyParams,
+) -> None:
+    """Copy blocks via cuMemcpyBatchAsync / hipMemcpyBatchAsync.
+
+    Thin prepare+submit wrapper kept for compatibility; callers that need
+    DMA-only timing should call `prepare_copy_blocks`/`submit_prepared_copy`
+    directly so host-side NumPy prep is excluded from the timed region.
+    """
+    prepared = prepare_copy_blocks(src_block_ids, dst_block_ids, params)
+    if prepared is None:
+        return
+    submit_prepared_copy(prepared, params)
