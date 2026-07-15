@@ -109,3 +109,35 @@ def causal_conv1d_update_cpu(
         query_start_loc,
         pad_slot_id,
     )
+
+
+def causal_conv1d_update_torch(
+    x: torch.Tensor,
+    conv_state: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    activation: str | None = None,
+) -> torch.Tensor:
+    """
+    Pure PyTorch fallback for causal_conv1d_update.
+    Currently used as a fallback for Arm (aarch64) to leverage
+    oneDNN/ACL F.conv1d kernels for batched decoding.
+    """
+    assert activation in {None, "silu", "swish"}
+
+    _, dim, seq_len = x.shape
+    state_len = conv_state.shape[-1]
+
+    x_new = torch.cat([conv_state, x], dim=-1).to(weight.dtype)
+    conv_state.copy_(x_new[:, :, -state_len:])
+
+    out = F.conv1d(
+        x_new,
+        weight.unsqueeze(1),
+        bias,
+        padding=0,
+        groups=dim,
+    )[:, :, -seq_len:]
+    if activation in ("silu", "swish"):
+        out = F.silu(out)
+    return out

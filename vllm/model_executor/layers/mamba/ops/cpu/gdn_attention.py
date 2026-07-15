@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import platform
+
 import torch
 import torch.nn.functional as F
 
@@ -14,6 +16,7 @@ from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
 )
 from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
     causal_conv1d_update_cpu,
+    causal_conv1d_update_torch,
 )
 from vllm.utils.torch_utils import (
     LayerNameType,
@@ -147,14 +150,25 @@ def _cpu_gdn_attention_nonspec(
                 is_vnni=True,
             )
         else:
-            decode_mixed_qkv = causal_conv1d_update_cpu(
-                x=decode_mixed_qkv,
-                conv_state=conv_state,
-                weight=conv_weights,
-                bias=layer.conv1d.bias,
-                activation=layer.activation,
-                conv_state_indices=decode_state_indices,
-            )
+            if platform.machine() == "aarch64":
+                decode_conv_state = conv_state[decode_state_indices].contiguous()
+                decode_mixed_qkv = causal_conv1d_update_torch(
+                    x=decode_mixed_qkv.unsqueeze(-1),
+                    conv_state=decode_conv_state,
+                    weight=conv_weights,
+                    bias=layer.conv1d.bias,
+                    activation=layer.activation,
+                ).squeeze(-1)
+                conv_state[decode_state_indices] = decode_conv_state
+            else:
+                decode_mixed_qkv = causal_conv1d_update_cpu(
+                    x=decode_mixed_qkv,
+                    conv_state=conv_state,
+                    weight=conv_weights,
+                    bias=layer.conv1d.bias,
+                    activation=layer.activation,
+                    conv_state_indices=decode_state_indices,
+                )
 
         query, key, value = layer.rearrange_mixed_qkv(decode_mixed_qkv)
 
@@ -495,14 +509,26 @@ def _spec_aware_nonspec(
         decode_a = a[:num_decode_tokens]
         decode_state_indices = state_indices_tensor[:num_decodes]
         # Only the first ``width-1`` columns hold the real conv state.
-        decode_mixed_qkv = causal_conv1d_update_cpu(
-            x=decode_mixed_qkv,
-            conv_state=conv_buf[:, :, : width - 1],
-            weight=conv_weights,
-            bias=layer.conv1d.bias,
-            activation=layer.activation,
-            conv_state_indices=decode_state_indices,
-        )
+        if platform.machine() == "aarch64":
+            conv_state_view = conv_buf[:, :, : width - 1]
+            decode_conv_state = conv_state_view[decode_state_indices].contiguous()
+            decode_mixed_qkv = causal_conv1d_update_torch(
+                x=decode_mixed_qkv.unsqueeze(-1),
+                conv_state=decode_conv_state,
+                weight=conv_weights,
+                bias=layer.conv1d.bias,
+                activation=layer.activation,
+            ).squeeze(-1)
+            conv_state_view[decode_state_indices] = decode_conv_state
+        else:
+            decode_mixed_qkv = causal_conv1d_update_cpu(
+                x=decode_mixed_qkv,
+                conv_state=conv_buf[:, :, : width - 1],
+                weight=conv_weights,
+                bias=layer.conv1d.bias,
+                activation=layer.activation,
+                conv_state_indices=decode_state_indices,
+            )
 
         query, key, value = layer.rearrange_mixed_qkv(decode_mixed_qkv)
         # rearrange_mixed_qkv can return views whose last dim is not
