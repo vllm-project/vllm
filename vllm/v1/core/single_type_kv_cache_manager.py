@@ -359,6 +359,11 @@ class SingleTypeKVCacheManager(ABC):
                 self.new_block_ids.extend(b.block_id for b in new_blocks)
             return cow_blocks + new_blocks
 
+    @property
+    def records_new_block_ids(self) -> bool:
+        """Whether this manager's new blocks are zeroed by the worker."""
+        return self._record_new_block_ids
+
     def take_new_block_ids(self) -> list[int]:
         """Drain and return block IDs allocated since the last call."""
         ids = self.new_block_ids
