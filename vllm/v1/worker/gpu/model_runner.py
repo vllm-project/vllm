@@ -447,10 +447,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
             self.kv_cache_config, self.vllm_config, self.device
         )
-        if self.speculator is not None and getattr(
-            self.speculator, "use_confidence_based_verification", False
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.use_confidence_based_verification
         ):
-            assert self.speculative_config is not None
             self.spec_decode_confidence_manager = make_confidence_manager(
                 self.speculative_config.confidence_based_verification,
                 attn_cg_support,
@@ -492,7 +492,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ),
             time_graphs=(
                 self.spec_decode_confidence_manager is not None
-                and self.spec_decode_confidence_manager.should_profile
+                and self.spec_decode_confidence_manager.time_graphs
             ),
         )
         if self.speculator is not None:
@@ -748,8 +748,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.speculator is not None:
                 self.speculator.capture()
             manager = self.spec_decode_confidence_manager
-            if manager is not None and manager.should_profile:
-                manager.set_cost_profile(self.cudagraph_manager, self.speculator)
+            if manager is not None and manager.time_graphs:
+                manager.set_graph_costs(self.cudagraph_manager, self.speculator)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
@@ -889,10 +889,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_tokens = scheduler_output.total_num_scheduled_tokens
         num_tokens_after_padding = batch_desc.num_tokens
         assert num_tokens > 0
-        uses_padding_mask = (
-            envs.VLLM_MOE_SKIP_PADDING
-            or self.spec_decode_confidence_manager is not None
-        )
+        manager = self.spec_decode_confidence_manager
+        uses_padding_mask = envs.VLLM_MOE_SKIP_PADDING or manager is not None
         num_tokens_per_req = scheduler_output.num_scheduled_tokens
         num_reqs = len(num_tokens_per_req)
 
@@ -1050,8 +1048,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_lens=prompt_lens,
             max_req_tokens=batch_desc.max_req_tokens,
         )
-        if self.spec_decode_confidence_manager is not None:
-            self.spec_decode_confidence_manager.trim_batch(input_batch, draft_tokens)
+        if manager is not None:
+            manager.trim_batch(input_batch, draft_tokens)
         if self.use_dcp:
             prepare_dcp_local_seq_lens(
                 self.input_buffers.dcp_local_seq_lens,
@@ -1196,7 +1194,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_toks = scheduler_output.total_num_scheduled_tokens
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
         uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
-        max_req_tokens = max_query_len
         manager = self.spec_decode_confidence_manager
 
         num_active_loras = 0
@@ -1232,9 +1229,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_reqs,
             num_toks,
             uniform_tok_count,
-            max_req_tokens,
             self.dp_size,
             self.dp_rank,
+            max_req_tokens=max_query_len,
             need_eager=is_profile or skip_compiled,
             num_active_loras=num_active_loras,
         )
@@ -1466,8 +1463,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
 
         # Last rank: sample tokens
-        if self.spec_decode_confidence_manager is not None:
-            self.spec_decode_confidence_manager.wait_for_staged_copy()
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
         )
@@ -1534,6 +1529,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if self.speculator is not None:
             assert self.sampler is not None
+            if self.spec_decode_confidence_manager is not None:
+                self.spec_decode_confidence_manager.wait_for_staged_copy()
             # Let the target override the hidden state fed to the drafter
             # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
             # target returns a persistent buffer sized at max_num_batched_tokens;

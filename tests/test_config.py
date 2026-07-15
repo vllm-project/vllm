@@ -1589,19 +1589,13 @@ def test_dspark_confidence_config_validation():
         )
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("dspark_budget_frac", 0.0),
-        ("dspark_budget_frac", 1.1),
-    ],
-)
-def test_dspark_confidence_config_rejects_invalid_ranges(field, value):
-    with pytest.raises(ValueError, match=field):
+@pytest.mark.parametrize("value", [0.0, 1.1])
+def test_dspark_confidence_config_rejects_invalid_ranges(value):
+    with pytest.raises(ValueError, match="dspark_budget_frac"):
         SpeculativeConfig(
             method="ngram",
             num_speculative_tokens=1,
-            **{field: value},
+            dspark_budget_frac=value,
         )
 
 

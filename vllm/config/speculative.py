@@ -232,22 +232,29 @@ class SpeculativeConfig:
     synthetic_acceptance_rates. Only valid when rejection_sample_method is 'synthetic'.
     Mutually exclusive with synthetic_acceptance_rates."""
 
-    dspark_budget_frac: float = 1.0
+    dspark_budget_frac: float = Field(default=1.0, gt=0.0, le=1.0)
     """Fraction of the full per-request draft-token budget available to the
     DSpark global prefix allocator."""
 
     confidence_based_verification: ConfidenceBasedVerification = "auto"
-    """Confidence-based verification mode. ``"none"`` and ``"off"``
-    disable it, ``"auto"`` uses compact verification when supported and
-    otherwise falls back to masking, and ``"mask"`` always masks pruned
-    verification tokens."""
+    """Confidence-based verification mode. ``"auto"`` uses compact
+    verification when supported and otherwise falls back to masking;
+    ``"mask"`` always masks pruned tokens and ``"none"``/``"off"`` disable it."""
 
     dspark_online_sts: bool = True
     """Calibrate DSpark confidence logits online with Sequential Temperature
     Scaling."""
 
     dspark_sps_curve: Literal["auto"] | None = None
-    """Set to ``"auto"`` to profile DSpark step costs during warmup."""
+    """Set to ``"auto"`` to time DSpark CUDA graphs after capture."""
+
+    @property
+    def use_confidence_based_verification(self) -> bool:
+        return (
+            self.method == "dspark"
+            and self.confidence_based_verification not in ("none", "off")
+            and (self.dspark_budget_frac < 1.0 or self.dspark_sps_curve is not None)
+        )
 
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
@@ -1211,14 +1218,8 @@ class SpeculativeConfig:
                 "are only valid with rejection_sample_method='synthetic'."
             )
 
-        if not 0.0 < self.dspark_budget_frac <= 1.0:
-            raise ValueError(
-                f"dspark_budget_frac must be in (0, 1], got {self.dspark_budget_frac}."
-            )
         if (
-            self.method == "dspark"
-            and self.confidence_based_verification in ("auto", "mask")
-            and (self.dspark_budget_frac < 1.0 or self.dspark_sps_curve is not None)
+            self.use_confidence_based_verification
             and "VLLM_MOE_SKIP_PADDING" not in os.environ
         ):
             # Set before spawning workers so masked rows can skip MoE work.

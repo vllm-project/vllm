@@ -77,13 +77,12 @@ class DSparkSpeculator(DFlashSpeculator):
             device=device,
         )
         self.use_confidence_based_verification = (
-            self.speculative_config.confidence_based_verification not in ("none", "off")
-            and (
-                self.speculative_config.dspark_budget_frac < 1.0
-                or self.speculative_config.dspark_sps_curve == "auto"
-            )
+            self.speculative_config.use_confidence_based_verification
         )
-        self.time_cudagraphs = self.speculative_config.dspark_sps_curve == "auto"
+        self.time_graphs = (
+            self.use_confidence_based_verification
+            and self.speculative_config.dspark_sps_curve == "auto"
+        )
 
     def load_draft_model(
         self,
@@ -127,9 +126,7 @@ class DSparkSpeculator(DFlashSpeculator):
         # Draft-vocab logits; sampled ids are remapped to target vocab below.
         base_logits = self.model.compute_draft_logits(
             sample_hidden.reshape(num_sample, -1)
-        )
-        vocab_size = base_logits.shape[-1]
-        base_logits = base_logits.view(num_reqs, n_spec, vocab_size)
+        ).view(num_reqs, n_spec, -1)
 
         idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
         sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)

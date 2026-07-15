@@ -127,12 +127,10 @@ class InputBatch:
             assert num_tokens <= num_reqs * max_req_tokens
             num_scheduled_tokens = np.ones(num_reqs, dtype=np.int32)
             remaining = num_tokens - num_reqs
-            for i in range(num_reqs - 1, -1, -1):
-                added = min(remaining, max_req_tokens - 1)
-                num_scheduled_tokens[i] += added
-                remaining -= added
-                if remaining == 0:
-                    break
+            capacity = max_req_tokens - 1
+            num_scheduled_tokens += np.clip(
+                remaining - capacity * np.arange(num_reqs - 1, -1, -1), 0, capacity
+            )
         assert int(num_scheduled_tokens.sum()) == num_tokens
 
         # seq_len equals to query_len

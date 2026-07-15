@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any
 
@@ -90,8 +91,6 @@ def _plan_budget(
 @pytest.fixture(autouse=True)
 def _single_rank_tp_group(monkeypatch):
     group = SimpleNamespace(
-        rank_in_group=0,
-        broadcast=lambda tensor, src=0: tensor,
         broadcast_object=lambda value, src=0: value,
     )
     monkeypatch.setattr(
@@ -131,7 +130,7 @@ def test_auto_verification_selects_supported_manager(cg_support, expected_type):
     assert isinstance(manager, expected_type)
 
 
-def test_masked_verification_does_not_auto_profile_sps():
+def test_masked_verification_does_not_time_cudagraphs():
     device = torch.device("cuda")
     manager = MaskedConfidenceManager(
         req_states=RequestState(
@@ -145,7 +144,7 @@ def test_masked_verification_does_not_auto_profile_sps():
         speculative_config=_spec_config(dspark_sps_curve="auto"),
     )
 
-    assert not manager.should_profile
+    assert not manager.time_graphs
     assert manager.cost_tables is None
 
 
@@ -304,6 +303,46 @@ def test_cost_tables_keep_draft_and_verification_costs_separate():
     assert verify_cost_ms[65] == pytest.approx(5.0 + 2.0 / 56.0)
 
 
+def test_cudagraph_manager_optionally_times_replays(monkeypatch):
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.cudagraph_utils.graph_capture",
+        lambda device: nullcontext(),
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.cudagraph_utils.is_global_first_rank", lambda: False
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.cudagraph_utils.get_offloader",
+        lambda: SimpleNamespace(
+            sync_prev_onload=lambda: None,
+            join_after_forward=lambda: None,
+        ),
+    )
+
+    desc = BatchExecutionDescriptor(CUDAGraphMode.FULL, 1, 1)
+    manager = object.__new__(CudaGraphManager)
+    manager.device = torch.device("cuda")
+    manager._capture_descs = {CUDAGraphMode.FULL: [desc]}
+    manager.graphs = {}
+    manager.pool = None
+    manager.time_graphs = True
+    manager.graph_timings = {}
+    manager._graphs_captured = False
+    value = torch.zeros((), device="cuda")
+
+    def create_forward_fn(desc, warmup):
+        return lambda mode: value.add_(1)
+
+    def prepare_timing(desc):
+        value.zero_()
+
+    manager.capture(create_forward_fn, prepare_timing=prepare_timing)
+    torch.accelerator.synchronize()
+
+    assert value.item() == 3
+    assert manager.graph_timings[desc] >= 0.0
+
+
 def test_graph_costs_use_rank_zero_curves_on_every_tp_rank(monkeypatch):
     canonical_curves = ([(1, 2.0)], [(1, 3.0), (2, 4.0)])
     broadcasts = []
@@ -323,20 +362,15 @@ def test_graph_costs_use_rank_zero_curves_on_every_tp_rank(monkeypatch):
         max_num_batched_tokens=2,
     )
     manager.online_sts = None
-    draft_desc = BatchExecutionDescriptor(CUDAGraphMode.FULL, 1, 1)
-    target_descs = (
-        BatchExecutionDescriptor(CUDAGraphMode.FULL, 1, 1),
-        BatchExecutionDescriptor(CUDAGraphMode.FULL, 2, 1),
-    )
     speculator = SimpleNamespace(
-        query_cudagraph_manager=SimpleNamespace(graph_timings={draft_desc: 2.0})
+        query_cudagraph_manager=SimpleNamespace(graph_timings={})
     )
-    model_graphs = SimpleNamespace(graph_timings=dict(zip(target_descs, (3.0, 4.0))))
+    model_graphs = SimpleNamespace(graph_timings={})
 
-    manager.set_cost_profile(model_graphs, speculator)
+    manager.set_graph_costs(model_graphs, speculator)
 
     expected = build_cost_tables_from_curves(*canonical_curves, 1, 2)
-    assert broadcasts == [(canonical_curves, 0)]
+    assert broadcasts == [(([], []), 0)]
     assert manager.cost_tables is not None
     assert np.array_equal(manager.cost_tables[0], expected[0])
     assert np.array_equal(manager.cost_tables[1], expected[1])
@@ -399,46 +433,7 @@ def test_online_sts_fits_order_preserving_temperatures():
     assert sts.copy_temperatures_to_gpu().cpu().tolist() == [1.0, 1.0, 1.0]
 
 
-def test_capacity_manager_plans_budget_without_tp_broadcast(monkeypatch):
-    def fail_broadcast(*args, **kwargs):
-        pytest.fail("budget planning must not broadcast")
-
-    monkeypatch.setattr(
-        "vllm.v1.worker.gpu.spec_decode.confidence.get_tp_group",
-        lambda: SimpleNamespace(broadcast_object=fail_broadcast),
-    )
-    manager = object.__new__(VarlenConfidenceManager)
-    manager.num_speculative_steps = 2
-    manager.req_states = SimpleNamespace(
-        req_id_to_index={"req0": 0},
-        num_computed_tokens_np=np.array([0], dtype=np.int32),
-        prefill_len=SimpleNamespace(np=np.array([0], dtype=np.int32)),
-    )
-    manager._stale_confidences = None
-    manager.budget_frac = 0.5
-    manager.cost_tables = None
-
-    budget = manager._plan_draft_token_budget(
-        ["req0"],
-        num_required_target_tokens_per_req=np.array([1], dtype=np.int32),
-        valid_draft_tokens_per_req=np.array([2], dtype=np.int32),
-    )
-
-    assert budget == 1
-
-
-def test_capacity_manager_assigns_scalar_budget_on_every_tp_rank(monkeypatch):
-    def fail_broadcast(*args, **kwargs):
-        pytest.fail("capacity assignment must not broadcast")
-
-    monkeypatch.setattr(
-        "vllm.v1.worker.gpu.spec_decode.confidence.get_tp_group",
-        lambda: SimpleNamespace(
-            rank_in_group=1,
-            broadcast=fail_broadcast,
-            broadcast_object=lambda value, src=0: value,
-        ),
-    )
+def test_capacity_manager_assigns_budget_on_gpu():
     device = torch.device("cuda")
     req_states = RequestState(
         max_num_reqs=4,
@@ -468,13 +463,30 @@ def test_capacity_manager_assigns_scalar_budget_on_every_tp_rank(monkeypatch):
     )
     handler._confidence_logits[:2].copy_(current_logits)
 
-    capacities = handler._assign_draft_token_budget(
-        input_batch,
-        valid_draft_tokens_per_req=np.array([3, 3], dtype=np.int32),
-        draft_token_budget=3,
-    )
+    torch.cuda.set_sync_debug_mode(2)
+    try:
+        capacities = handler._assign_draft_token_budget(
+            input_batch,
+            valid_draft_tokens_per_req=np.array([3, 3], dtype=np.int32),
+            draft_token_budget=3,
+        )
+    finally:
+        torch.cuda.set_sync_debug_mode(0)
 
     assert capacities.cpu().tolist() == [2, 1]
+
+    handler._confidence_logits[:2].zero_()
+    assert handler._assign_draft_token_budget(
+        input_batch,
+        valid_draft_tokens_per_req=np.array([3, 3], dtype=np.int32),
+        draft_token_budget=1,
+    ).cpu().tolist() == [1, 0]
+    assert handler._assign_draft_token_budget(
+        input_batch,
+        valid_draft_tokens_per_req=np.array([0, 3], dtype=np.int32),
+        draft_token_budget=1,
+    ).cpu().tolist() == [0, 1]
+    handler._confidence_logits[:2].copy_(current_logits)
 
     for _ in range(3):
         handler.stage_confidences(
@@ -493,6 +505,8 @@ def test_capacity_manager_assigns_scalar_budget_on_every_tp_rank(monkeypatch):
         valid_draft_tokens_per_req=np.array([3, 3], dtype=np.int32),
         draft_token_budget=0,
     ).cpu().tolist() == [0, 0]
+    handler.warmup()
+    assert handler._stale_confidences is None
 
 
 def test_varlen_capacity_manager_compacts_verifier_batch():

@@ -27,6 +27,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import round_up
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
@@ -383,17 +384,18 @@ class CudaGraphManager:
                         compilation_counter.num_cudagraph_captured += 1
         # Collective graph addresses are registered when graph_capture exits.
         if self.time_graphs:
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
             for desc, graph in self.graphs.items():
                 create_forward_fn(desc, warmup=False)
                 if prepare_timing is not None:
                     prepare_timing(desc)
-                start = torch.cuda.Event(enable_timing=True)
-                end = torch.cuda.Event(enable_timing=True)
                 start.record()
                 for _ in range(3):
                     graph.replay()
                 end.record()
-                end.synchronize()
+                with gpu_sync_allowed():
+                    end.synchronize()
                 self.graph_timings[desc] = start.elapsed_time(end) / 3
         self._graphs_captured = True
 
