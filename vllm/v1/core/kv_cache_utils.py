@@ -1962,7 +1962,14 @@ def _auto_fit_max_model_len(
     for groups, avail_mem in zip(projected_groups_per_worker, available_memory):
         if not groups:
             continue
-        worker_max = _estimate_max_model_len_from_groups(vllm_config, groups, avail_mem)
+        # Fit against the schedulable capacity, not the raw pool size:
+        # BlockPool permanently reserves one block as the null block, so a
+        # request at a length that needs every block can never be scheduled
+        # and waits forever.
+        usable_mem = avail_mem - _pool_bytes_per_block(vllm_config, groups)
+        worker_max = _estimate_max_model_len_from_groups(
+            vllm_config, groups, usable_mem
+        )
         if worker_max < auto_fit_max:
             auto_fit_max = worker_max
             limiting_worker_mem = avail_mem
