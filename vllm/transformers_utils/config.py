@@ -1066,12 +1066,30 @@ def get_hf_text_config(config: PretrainedConfig):
     return text_config
 
 
+def _generation_config_from_hf_configs(
+    hf_config: PretrainedConfig,
+    hf_text_config: PretrainedConfig | None = None,
+) -> GenerationConfig | None:
+    try:
+        return GenerationConfig.from_model_config(hf_config)
+    except ValueError:
+        if hf_text_config is not None and hf_text_config is not hf_config:
+            try:
+                return GenerationConfig.from_model_config(hf_text_config)
+            except ValueError:
+                return None
+        return None
+
+
 def try_get_generation_config(
     model: str,
     trust_remote_code: bool,
     revision: str | None = None,
     config_format: str | ConfigFormat = "auto",
     hf_token: bool | str | None = None,
+    *,
+    hf_config: PretrainedConfig | None = None,
+    hf_text_config: PretrainedConfig | None = None,
 ) -> GenerationConfig | None:
     try:
         return GenerationConfig.from_pretrained(
@@ -1080,6 +1098,14 @@ def try_get_generation_config(
             token=hf_token,
         )
     except OSError:  # Not found
+        if hf_config is not None:
+            text_config = hf_text_config
+            if text_config is None:
+                try:
+                    text_config = get_hf_text_config(hf_config)
+                except ValueError:
+                    text_config = None
+            return _generation_config_from_hf_configs(hf_config, text_config)
         try:
             config = get_config(
                 model,
@@ -1088,8 +1114,9 @@ def try_get_generation_config(
                 config_format=config_format,
                 token=hf_token,
             )
-            return GenerationConfig.from_model_config(config)
-        except OSError:  # Not found
+            text_config = get_hf_text_config(config)
+            return _generation_config_from_hf_configs(config, text_config)
+        except (OSError, ValueError):
             return None
 
 

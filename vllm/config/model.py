@@ -1479,6 +1479,8 @@ class ModelConfig:
                 revision=self.revision,
                 config_format=self.config_format,
                 hf_token=self.hf_token,
+                hf_config=self.hf_config,
+                hf_text_config=self.hf_text_config,
             )
         else:
             config = try_get_generation_config(
