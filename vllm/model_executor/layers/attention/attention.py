@@ -355,6 +355,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 use_mm_prefix=self.use_mm_prefix,
                 use_per_head_quant_scales=use_per_head_quant_scales,
                 attn_type=attn_type,
+                has_sliding_window=sliding_window is not None,
             )
         else:
             self.attn_backend = attn_backend
@@ -627,8 +628,8 @@ class Attention(nn.Module, AttentionLayerBase):
         assert self.attn_type == AttentionType.DECODER
         quant_mode = get_kv_quant_mode(self.kv_cache_dtype)
         if self.sliding_window is not None:
-            assert not vllm_config.model_config.use_mla, (
-                "MLA is not supported for slidingwindow"
+            assert not self.attn_backend.is_mla(), (
+                "MLA is not supported for sliding window"
             )
             # SW chooses its own block_size, decoupled from the user's
             # ``--block-size`` (which only constrains primary attention).
