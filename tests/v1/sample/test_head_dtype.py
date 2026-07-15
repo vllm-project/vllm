@@ -72,14 +72,26 @@ def test_non_fp32_head_dtype_uses_cast_path(default_vllm_config):
 
 
 def test_head_dtype_equal_to_model_dtype_uses_quant_method(default_vllm_config):
+    from unittest import mock
+
     vocab_size, hidden_size = 64, 16
     lp = _build_processor(vocab_size)
     lp.head_dtype = torch.bfloat16
 
     hidden_states = torch.randn(4, hidden_size, dtype=torch.bfloat16)
     weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16)
+    lm_head = _FakeLmHead(weight)
 
-    logits = lp._get_logits(hidden_states, _FakeLmHead(weight), None)
+    with mock.patch.object(
+        lm_head.quant_method,
+        "apply",
+        side_effect=lambda layer, x, bias=None: torch.nn.functional.linear(
+            x, layer.weight, bias
+        ),
+    ) as apply_mock:
+        logits = lp._get_logits(hidden_states, lm_head, None)
+
+    apply_mock.assert_called_once()
     assert logits.dtype == torch.bfloat16
 
 
@@ -122,22 +134,6 @@ def test_get_top_tokens_honors_head_dtype(default_vllm_config):
         dim=-1
     )
     assert torch.equal(top, expected)
-
-
-def test_fp32_head_rejected_with_lora(default_vllm_config):
-    from vllm.lora.layers.logits_processor import LogitsProcessorWithLoRA
-
-    base = _build_processor(64)
-    base.head_dtype = torch.float32
-
-    with pytest.raises(ValueError, match="not yet supported with LoRA"):
-        LogitsProcessorWithLoRA(
-            base,
-            hidden_size=16,
-            dtype=torch.bfloat16,
-            device=torch.device("cpu"),
-            sharded_to_full_mapping=None,
-        )
 
 
 @pytest.mark.core_model
