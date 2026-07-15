@@ -13,6 +13,10 @@ from vllm.distributed import get_dcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.dsa_litetopk import (
+    dsa_litetopk_available,
+    dsa_litetopk_indexer,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
@@ -451,7 +455,33 @@ def sparse_attn_indexer(
                     q_slice_cast = q_slice
                     k_quant_cast = k_quant
                     k_scale_cast = k_scale.view(torch.float32).squeeze(-1)
-                if current_platform.is_xpu():
+                # Opt-in fused DSA indexer (SM100): fp8 scoring + bucket gate +
+                # compact top-k in one pass, no [num_q, seq_len] logits. Only for
+                # the fp8 cache, non-DCP, GLM/DeepSeek H=32/D=128 shape; falls
+                # back to the dense path otherwise.
+                use_fused_indexer = (
+                    envs.VLLM_SPARSE_INDEXER_FUSED
+                    and not use_fp4_cache
+                    and dcp_world_size == 1
+                    and not current_platform.is_xpu()
+                    and q_slice_cast.dim() == 3
+                    and q_slice_cast.shape[1] == 32
+                    and q_slice_cast.shape[2] == 128
+                    and dsa_litetopk_available()
+                )
+                if use_fused_indexer:
+                    dsa_litetopk_indexer(
+                        q_slice_cast,
+                        k_quant_cast,
+                        k_scale_cast,
+                        weights[chunk.token_start : chunk.token_end],
+                        cu_seqlen_ks,
+                        cu_seqlen_ke,
+                        topk_tokens,
+                        topk_indices,
+                    )
+                    logits = None
+                elif current_platform.is_xpu():
                     if q_scale_slice is not None:
                         raise RuntimeError("XPU fp8_mqa_logits does not support FP4 Q")
                     logits = torch.ops.vllm.xpu_fp8_mqa_logits(
@@ -483,15 +513,19 @@ def sparse_attn_indexer(
                     topk_tokens,
                 )
 
-            _merge_dcp_topk_global(
-                logits,
-                topk_indices,
-                topk_tokens,
-                dcp_rank,
-                dcp_world_size,
-                cp_kv_cache_interleave_size,
-                row_starts=chunk.cu_seqlen_ks,
-            )
+            # The fused indexer path writes topk_indices directly and produces no
+            # logits tensor; it is gated to dcp_world_size == 1, so the DCP merge
+            # (a no-op without context parallelism) is skipped.
+            if logits is not None:
+                _merge_dcp_topk_global(
+                    logits,
+                    topk_indices,
+                    topk_tokens,
+                    dcp_rank,
+                    dcp_world_size,
+                    cp_kv_cache_interleave_size,
+                    row_starts=chunk.cu_seqlen_ks,
+                )
 
     if has_decode:
         decode_metadata = attn_metadata_narrowed.decode
