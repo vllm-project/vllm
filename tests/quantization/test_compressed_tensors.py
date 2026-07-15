@@ -39,6 +39,11 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target,
 )
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    QuantKey,
+    ScaleDesc,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
@@ -932,6 +937,90 @@ def test_wna16_marlin_moe_w2_scale_sharding(actorder, group_size, part, full, ex
         actorder, group_size, part, full
     )
     assert result == expected
+
+
+def test_humming_supports_compressed_tensors_w2a16_quant_key():
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingExpertsBase,
+    )
+    from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa: E501
+        WNA16_SUPPORTED_TYPES_MAP,
+    )
+
+    weight_key = QuantKey(
+        dtype=WNA16_SUPPORTED_TYPES_MAP[2],
+        scale=ScaleDesc(
+            dtype=torch.float16,
+            static=True,
+            group_shape=GroupShape(row=1, col=128),
+        ),
+        symmetric=True,
+    )
+
+    assert HummingExpertsBase._supports_quant_scheme(weight_key, None)
+
+
+def test_humming_wna16_weight_schema_accepts_compressed_tensors_args():
+    from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+        _humming_wna16_weight_schema,
+    )
+
+    quant_args = QuantizationArgs(
+        num_bits=2,
+        type=QuantizationType.INT,
+        strategy=QuantizationStrategy.GROUP,
+        symmetric=True,
+        dynamic=False,
+        group_size=128,
+    )
+
+    assert _humming_wna16_weight_schema(quant_args) == {
+        "quant_method": "compressed-tensors",
+        "format": "pack-quantized",
+        "type": "int",
+        "num_bits": 2,
+        "strategy": "group",
+        "group_size": 128,
+        "symmetric": True,
+    }
+
+
+def test_wna16_marlin_moe_allows_humming_only_bitwidths(monkeypatch):
+    from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import WNA16MoEBackend
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
+        compressed_tensors_moe_wna16_marlin as marlin_module,
+    )
+
+    captured = {}
+
+    def fake_select_wna16_moe_backend(*, config, weight_key):
+        del config
+        captured["weight_key"] = weight_key
+        return WNA16MoEBackend.HUMMING, object
+
+    monkeypatch.setattr(
+        marlin_module,
+        "select_wna16_moe_backend",
+        fake_select_wna16_moe_backend,
+    )
+
+    quant_args = QuantizationArgs(
+        num_bits=2,
+        type=QuantizationType.INT,
+        strategy=QuantizationStrategy.GROUP,
+        symmetric=True,
+        dynamic=False,
+        group_size=128,
+    )
+
+    method = marlin_module.CompressedTensorsWNA16MarlinMoEMethod(
+        quant_args,
+        None,
+        Mock(),
+    )
+
+    assert method.wna16_backend == WNA16MoEBackend.HUMMING
+    assert captured["weight_key"].dtype is torch.uint8
 
 
 @pytest.mark.skipif(
