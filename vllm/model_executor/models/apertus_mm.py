@@ -44,7 +44,9 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 
 from .apertus import ApertusForCausalLM
+from .apertus_emu35 import IBQ
 from .apertus_utils import ApertusAudioTokenizer, ApertusImageTokenizer
+from .apertus_wavetokenizer import WavTokenizer40
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal
 
 logger = init_logger(__name__)
@@ -171,7 +173,7 @@ class ApertusMultiModalProcessor(BaseMultiModalProcessor[ApertusProcessingInfo])
         num_images = inputs.mm_data_items.get_count("image", strict=False)
         num_audios = inputs.mm_data_items.get_count("audio", strict=False)
 
-        mm_kwargs: dict[str, Any] = {}
+        mm_kwargs: dict[str, torch.Tensor | list[torch.Tensor]] = {}
         mm_counts: dict[str, int] = {}
 
         # 1. Vision Preprocessing (Mathematical Layout Only)
@@ -340,8 +342,8 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
         config = vllm_config.model_config.hf_config
         self.image_tokenizer = ApertusImageTokenizer(config.vision_config)
         self.audio_tokenizer = ApertusAudioTokenizer(config.audio_config)
-        self.vision_tower: Any | None = None
-        self.audio_tower: Any | None = None
+        self.vision_tower: IBQ | None = None
+        self.audio_tower: WavTokenizer40 | None = None
 
         dummy_image_token_id = getattr(config, "dummy_image_token_id", 131272)
         dummy_audio_token_id = getattr(config, "dummy_audio_token_id", 262344)
@@ -509,7 +511,6 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
             )
 
             valid_codes_embeds = []
-
             for audio in audio_items:
                 with torch.inference_mode():
                     valid_codes_i = self.audio_tower.encode_audio(

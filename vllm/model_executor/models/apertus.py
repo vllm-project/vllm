@@ -35,7 +35,6 @@ from transformers import ApertusConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import XIELU
 from vllm.model_executor.layers.attention import (
     Attention,
@@ -73,8 +72,6 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
-
-logger = init_logger(__name__)
 
 
 class ApertusMLP(nn.Module):

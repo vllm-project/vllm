@@ -10,7 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import reduce
+from safetensors.torch import load_file
 from torch import einsum
 
 
@@ -22,29 +22,17 @@ def Normalize(in_channels: int) -> nn.GroupNorm:
     return nn.GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True)
 
 
-class Upsample(nn.Module):
-    def __init__(self, in_channels: int, with_conv: bool):
-        super().__init__()
-        self.with_conv = with_conv
-        if self.with_conv:
-            self.conv = nn.Conv2d(
-                in_channels, in_channels, kernel_size=3, stride=1, padding=1
-            )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.interpolate(x, scale_factor=2.0, mode="nearest")
-        if self.with_conv:
-            x = self.conv(x)
-        return x
-
-
 class Downsample(nn.Module):
     def __init__(self, in_channels: int, with_conv: bool):
         super().__init__()
         self.with_conv = with_conv
         if self.with_conv:
             self.conv = nn.Conv2d(
-                in_channels, in_channels, kernel_size=3, stride=2, padding=0
+                in_channels,
+                in_channels,
+                kernel_size=3,
+                stride=2,
+                padding=0,
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -74,14 +62,22 @@ class ResnetBlock(nn.Module):
 
         self.norm1 = Normalize(in_channels)
         self.conv1 = nn.Conv2d(
-            in_channels, out_channels, kernel_size=3, stride=1, padding=1
+            in_channels,
+            out_channels,
+            kernel_size=3,
+            stride=1,
+            padding=1,
         )
         if temb_channels > 0:
             self.temb_proj = nn.Linear(temb_channels, out_channels)
         self.norm2 = Normalize(out_channels)
         self.dropout = nn.Dropout(dropout)
         self.conv2 = nn.Conv2d(
-            out_channels, out_channels, kernel_size=3, stride=1, padding=1
+            out_channels,
+            out_channels,
+            kernel_size=3,
+            stride=1,
+            padding=1,
         )
         if self.in_channels != self.out_channels:
             if self.use_conv_shortcut:
@@ -94,7 +90,11 @@ class ResnetBlock(nn.Module):
                 )
             else:
                 self.nin_shortcut = nn.Conv2d(
-                    in_channels, out_channels, kernel_size=1, stride=1, padding=0
+                    in_channels,
+                    out_channels,
+                    kernel_size=1,
+                    stride=1,
+                    padding=0,
                 )
 
     def forward(self, x: torch.Tensor, temb: torch.Tensor | None) -> torch.Tensor:
@@ -130,7 +130,11 @@ class AttnBlock(nn.Module):
         self.k = nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
         self.v = nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
         self.proj_out = nn.Conv2d(
-            in_channels, in_channels, kernel_size=1, stride=1, padding=0
+            in_channels,
+            in_channels,
+            kernel_size=1,
+            stride=1,
+            padding=0,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -186,7 +190,11 @@ class Encoder(nn.Module):
         self.in_channels = in_channels
 
         self.conv_in = nn.Conv2d(
-            in_channels, self.ch, kernel_size=3, stride=1, padding=1
+            in_channels,
+            self.ch,
+            kernel_size=3,
+            stride=1,
+            padding=1,
         )
 
         curr_res = resolution
@@ -204,7 +212,7 @@ class Encoder(nn.Module):
                         out_channels=block_out,
                         temb_channels=self.temb_ch,
                         dropout=dropout,
-                    )
+                    ),
                 )
                 block_in = block_out
                 if curr_res in attn_resolutions:
@@ -262,152 +270,6 @@ class Encoder(nn.Module):
         h = nonlinearity(h)
         h = self.conv_out(h)
         return h
-
-
-class Decoder(nn.Module):
-    def __init__(
-        self,
-        *,
-        ch: int,
-        out_ch: int,
-        ch_mult: tuple[int, ...] = (1, 2, 4, 8),
-        num_res_blocks: int,
-        attn_resolutions: list[int],
-        dropout: float = 0.0,
-        resamp_with_conv: bool = True,
-        in_channels: int,
-        resolution: int,
-        z_channels: int,
-        give_pre_end: bool = False,
-        **ignore_kwargs,
-    ):
-        super().__init__()
-        self.ch = ch
-        self.temb_ch = 0
-        self.num_resolutions = len(ch_mult)
-        self.num_res_blocks = num_res_blocks
-        self.resolution = resolution
-        self.in_channels = in_channels
-        self.give_pre_end = give_pre_end
-
-        block_in = ch * ch_mult[self.num_resolutions - 1]
-        curr_res = resolution // 2 ** (self.num_resolutions - 1)
-        self.z_shape = (1, z_channels, curr_res, curr_res)
-
-        self.conv_in = nn.Conv2d(
-            z_channels, block_in, kernel_size=3, stride=1, padding=1
-        )
-
-        self.mid = nn.Module()
-        self.mid.block_1 = ResnetBlock(
-            in_channels=block_in,
-            out_channels=block_in,
-            temb_channels=self.temb_ch,
-            dropout=dropout,
-        )
-        self.mid.attn_1 = AttnBlock(block_in)
-        self.mid.block_2 = ResnetBlock(
-            in_channels=block_in,
-            out_channels=block_in,
-            temb_channels=self.temb_ch,
-            dropout=dropout,
-        )
-
-        self.up = nn.ModuleList()
-        for i_level in reversed(range(self.num_resolutions)):
-            block = nn.ModuleList()
-            attn = nn.ModuleList()
-            block_out = ch * ch_mult[i_level]
-            for i_block in range(self.num_res_blocks + 1):
-                block.append(
-                    ResnetBlock(
-                        in_channels=block_in,
-                        out_channels=block_out,
-                        temb_channels=self.temb_ch,
-                        dropout=dropout,
-                    )
-                )
-                block_in = block_out
-                if curr_res in attn_resolutions:
-                    attn.append(AttnBlock(block_in))
-            up = nn.Module()
-            up.block = block
-            up.attn = attn
-            if i_level != 0:
-                up.upsample = Upsample(block_in, resamp_with_conv)
-                curr_res = curr_res * 2
-            self.up.insert(0, up)
-
-        self.norm_out = Normalize(block_in)
-        self.conv_out = nn.Conv2d(block_in, out_ch, kernel_size=3, stride=1, padding=1)
-
-    def forward(
-        self, z: torch.Tensor, return_intermediate_feature: bool = False
-    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
-        self.last_z_shape = z.shape
-        temb = None
-        h = self.conv_in(z)
-
-        h = self.mid.block_1(h, temb)
-        h = self.mid.attn_1(h)
-        h = self.mid.block_2(h, temb)
-
-        im_feat_list = []
-        for i_level in reversed(range(self.num_resolutions)):
-            for i_block in range(self.num_res_blocks + 1):
-                h = self.up[i_level].block[i_block](h, temb)
-                if len(self.up[i_level].attn) > 0:
-                    h = self.up[i_level].attn[i_block](h)
-
-            if i_level != 0:
-                h = self.up[i_level].upsample(h)
-
-            im_feat_list.append(h)
-
-        if self.give_pre_end:
-            return h
-
-        h = self.norm_out(h)
-        h = nonlinearity(h)
-        h = self.conv_out(h)
-
-        if return_intermediate_feature:
-            return h, im_feat_list
-
-        return h
-
-
-def compute_entropy_loss(
-    logits,
-    temperature=0.01,
-    sample_minimization_weight=1.0,
-    batch_maximization_weight=1.0,
-    eps=1e-5,
-):
-    """
-    Entropy loss of unnormalized logits
-
-    logits: Affinities are over the last dimension
-
-    https://github.com/google-research/magvit/blob/05e8cfd6559c47955793d70602d62a2f9b0bdef5/videogvt/train_lib/losses.py#L279
-    LANGUAGE MODEL BEATS DIFFUSION — TOKENIZER IS KEY TO VISUAL GENERATION (2024)
-    """
-    probs = F.softmax(logits / temperature, -1)
-    log_probs = F.log_softmax(logits / temperature + eps, -1)
-
-    avg_probs = reduce(probs, "... D -> D", "mean")
-
-    avg_entropy = -torch.sum(avg_probs * torch.log(avg_probs + eps))
-
-    sample_entropy = -torch.sum(probs * log_probs, -1)
-    sample_entropy = torch.mean(sample_entropy)
-
-    loss = (
-        sample_minimization_weight * sample_entropy
-        - batch_maximization_weight * avg_entropy
-    )
-
-    return sample_entropy, avg_entropy, loss
 
 
 class IndexPropagationQuantize(nn.Module):
@@ -468,7 +330,7 @@ class IndexPropagationQuantize(nn.Module):
         unknown = match.sum(2) < 1
         if self.unknown_index == "random":
             new[unknown] = torch.randint(0, self.re_embed, size=new[unknown].shape).to(
-                device=new.device
+                device=new.device,
             )
         else:
             new[unknown] = self.unknown_index
@@ -508,33 +370,12 @@ class IndexPropagationQuantize(nn.Module):
         dim = 1
         ind = soft_one_hot.max(dim, keepdim=True)[1]
         hard_one_hot = torch.zeros_like(
-            logits, memory_format=torch.legacy_contiguous_format
+            logits,
+            memory_format=torch.legacy_contiguous_format,
         ).scatter_(dim, ind, 1.0)
 
-        if self.training:
-            one_hot = hard_one_hot - soft_one_hot.detach() + soft_one_hot
-
-            z_q = einsum("b n h w, n d -> b d h w", one_hot, embedding)
-            z_q_2 = einsum("b n h w, n d -> b d h w", hard_one_hot, embedding)
-
-            quant_loss = (
-                torch.mean((z_q - z) ** 2)
-                + torch.mean((z_q_2.detach() - z) ** 2)
-                + torch.mean((z_q_2 - z.detach()) ** 2) * self.beta
-            )
-            diff = quant_loss
-        else:
-            diff = 0.0
-            z_q = einsum("b n h w, n d -> b d h w", hard_one_hot, embedding)
-
-        if self.use_entropy_loss:
-            sample_entropy, avg_entropy, entropy_loss = compute_entropy_loss(
-                logits=logits.permute(0, 2, 3, 1).reshape(-1, self.n_e),
-                temperature=self.entropy_temperature,
-                sample_minimization_weight=self.sample_minimization_weight,
-                batch_maximization_weight=self.batch_maximization_weight,
-            )  # logits [b d h w] -> [b * h * w, n]
-            diff = (quant_loss, sample_entropy, avg_entropy, entropy_loss)
+        diff = 0.0
+        z_q = einsum("b n h w, n d -> b d h w", hard_one_hot, embedding)
 
         ind = torch.flatten(ind)
         if self.remap is not None:
@@ -579,7 +420,6 @@ class IBQ(nn.Module):
         super().__init__()
 
         self.encoder = Encoder(**ddconfig)
-        self.decoder = Decoder(**ddconfig)
 
         self.quantize = IndexPropagationQuantize(
             n_embed,
@@ -593,40 +433,15 @@ class IBQ(nn.Module):
         )
 
         self.quant_conv = nn.Conv2d(ddconfig["z_channels"], embed_dim, 1)
-        self.post_quant_conv = nn.Conv2d(embed_dim, ddconfig["z_channels"], 1)
 
     def encode(
-        self, x: torch.Tensor
+        self,
+        x: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor | tuple, tuple]:
         h = self.encoder(x)
         h = self.quant_conv(h)
         quant, emb_loss, info = self.quantize(h)
         return quant, emb_loss, info
-
-    def decode(
-        self, quant: torch.Tensor, return_intermediate_feature: bool = False
-    ) -> torch.Tensor:
-        quant = self.post_quant_conv(quant)
-        dec = self.decoder(
-            quant, return_intermediate_feature=return_intermediate_feature
-        )
-        return dec
-
-    def decode_code(
-        self, code_b: torch.Tensor, shape: tuple[int, ...] | None = None
-    ) -> torch.Tensor:
-        quant_b = self.quantize.get_codebook_entry(code_b, shape=shape)
-        dec = self.decode(quant_b)
-        return dec
-
-    def forward(
-        self, input: torch.Tensor, return_intermediate_feature: bool = False
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        quant, diff, _ = self.encode(input)
-        dec = self.decode(
-            quant, return_intermediate_feature=return_intermediate_feature
-        )
-        return dec, diff
 
 
 def build_vision_tokenizer(
@@ -634,7 +449,7 @@ def build_vision_tokenizer(
     model_path: str,
     device: str = "cuda:0",
     vision_config: dict | None = None,
-) -> nn.Module:
+) -> IBQ:
     if type != "ibq":
         raise NotImplementedError(f"Unsupported vision tokenizer type: {type}")
 
@@ -668,29 +483,29 @@ def build_vision_tokenizer(
         "cosine_similarity": vision_config.get("cosine_similarity", False),
         "entropy_temperature": vision_config.get("entropy_temperature", 0.01),
         "sample_minimization_weight": vision_config.get(
-            "sample_minimization_weight", 1.0
+            "sample_minimization_weight",
+            1.0,
         ),
         "batch_maximization_weight": vision_config.get(
-            "batch_maximization_weight", 1.0
+            "batch_maximization_weight",
+            1.0,
         ),
     }
 
     tokenizer = IBQ(**cfg)
 
     if osp.exists(safetensors_path):
-        from safetensors.torch import load_file
-
         ckpt = load_file(safetensors_path, device="cpu")
         tokenizer.load_state_dict(ckpt)
     elif osp.exists(ckpt_path):
-        ckpt = torch.load(ckpt_path, map_location="cpu")
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         if isinstance(ckpt, dict) and "state_dict" in ckpt:
             ckpt = ckpt["state_dict"]
         tokenizer.load_state_dict(ckpt)
     else:
         raise FileNotFoundError(
             f"Apertus vision tokenizer checkpoint not found under {model_path}. "
-            f"Expected either 'emu35_vison_tokenizer.safetensors' or 'model.ckpt'."
+            f"Expected either 'emu35_vison_tokenizer.safetensors' or 'model.ckpt'.",
         )
 
     tokenizer.eval().to(device)
