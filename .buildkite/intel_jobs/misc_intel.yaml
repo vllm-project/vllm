@@ -32,7 +32,7 @@ steps:
       cd tests &&
       pytest -v -s v1/executor'
 
-- label: V1 Sample + Logits
+- label: V1 Logits + Sample
   timeout_in_minutes: 90
   device: intel_gpu
   agent_tags:
@@ -57,11 +57,11 @@ steps:
     - vllm/transformers_utils/
     - vllm/utils/
     - vllm/v1/
-    - tests/v1/sample
     - tests/v1/logits_processors
     - tests/v1/test_oracle.py
     - tests/v1/test_request.py
     - tests/v1/test_outputs.py
+    - tests/v1/sample
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -72,7 +72,41 @@ steps:
       pytest -v -s v1/test_oracle.py &&
       pytest -v -s v1/test_request.py &&
       pytest -v -s v1/test_outputs.py &&
-      pytest -v -s v1/sample'
+      pytest -v -s v1/sample --ignore=v1/sample/test_logprobs.py'
+
+- label: V1 Sample Logprobs
+  timeout_in_minutes: 90
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/config/
+    - vllm/distributed/
+    - vllm/engine/
+    - vllm/inputs/
+    - vllm/logger.py
+    - vllm/model_executor/
+    - vllm/platforms/
+    - vllm/sampling_params.py
+    - vllm/transformers_utils/
+    - vllm/utils/
+    - vllm/v1/
+    - tests/v1/sample/test_logprobs.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'pip install lm_eval[api]>=0.4.12 &&
+      export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
+      cd tests &&
+      pytest -v -s v1/sample/test_logprobs.py'
 
 - label: Basic Models Tests (Initialization)
   timeout_in_minutes: 60
