@@ -536,4 +536,3 @@ def test_batch_memcpy_cpu_fallback() -> None:
 
     for src, dst in zip(srcs, dsts):
         torch.testing.assert_close(dst, src)
-

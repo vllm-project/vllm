@@ -93,8 +93,6 @@ class ShortConv(MambaBase, CustomOp):
     ):
         # Reference torch causal conv1d; runs on all CPU platforms. AMX kernels
         # for causal conv can be plugged in here later.
-        from vllm.platforms import CpuArchEnum, current_platform
-
         from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
             causal_conv1d_fn_cpu as causal_conv1d_torch,
         )
@@ -102,6 +100,7 @@ class ShortConv(MambaBase, CustomOp):
             causal_conv1d_update_cpu,
             causal_conv1d_update_torch,
         )
+        from vllm.platforms import CpuArchEnum, current_platform
 
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata

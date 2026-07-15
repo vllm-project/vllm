@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm._custom_ops import causal_conv1d_update_cpu_vec
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID, NULL_BLOCK_ID
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
 
 def causal_conv1d_fn_cpu(
@@ -125,7 +125,7 @@ def causal_conv1d_update_torch(
 ) -> torch.Tensor:
     """
     Pure PyTorch fallback for causal_conv1d_update.
-    Currently used as a fallback for Arm (aarch64) to leverage 
+    Currently used as a fallback for Arm (aarch64) to leverage
     oneDNN/ACL F.conv1d kernels for batched decoding.
     """
     assert activation in {None, "silu", "swish"}
@@ -146,4 +146,3 @@ def causal_conv1d_update_torch(
     if activation in ("silu", "swish"):
         out = F.silu(out)
     return out
-

@@ -283,4 +283,3 @@ void mamba_chunk_scan_fwd_cpu_impl(
         ngroups, headdim, dstate);
   });
 }
-
