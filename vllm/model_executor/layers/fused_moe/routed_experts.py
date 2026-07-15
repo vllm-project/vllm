@@ -884,6 +884,10 @@ class RoutedExperts(PluggableLayer):
                 matched = True
                 weight_name = qual_name.replace(weight_name, param_name)
                 param_name = weight_name.removeprefix(f"{self.layer_name}.")
+                # Checkpoint may carry expert biases (e.g. all-zero) even when
+                # the MoE method did not register w13_bias/w2_bias.
+                if not hasattr(self, param_name):
+                    continue
                 param = getattr(self, param_name)
                 if is_fused:
                     # w1 and w3 share one fused tensor; use a local copy so the

@@ -41,6 +41,9 @@ from vllm.model_executor.utils import replace_parameter
 def _quantize_mxfp8(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """MXFP8 weight quant *bit-identical* to compressed-tensors' MXFP8 export.
 
+    Ports ``generate_mx_scales`` / ``round_to_power_2`` from
+    https://github.com/vllm-project/compressed-tensors/blob/f96819e16d6928d41171946cb89647ad783cc67c/src/compressed_tensors/quantization/utils/mxfp_utils.py
+
     FlashInfer's ``mxfp8_quantize`` picks the E8M0 exponent via
     ``ceil(log2(amax / 448))``, which disagrees with compressed-tensors on the
     ``amax = 1.75 * 2**f`` boundary. For exact bytes we use the ported

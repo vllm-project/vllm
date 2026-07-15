@@ -65,6 +65,11 @@ def _quantize_fp8_symmetric(
     """Symmetric FP8 weight quant shared by the block/channel helpers,
     bit-identical to compressed-tensors' offline export.
 
+    Ports ``calculate_qparams`` (symmetric scale) and ``_quantize`` from
+    https://github.com/vllm-project/compressed-tensors/blob/f96819e16d6928d41171946cb89647ad783cc67c/src/compressed_tensors/quantization/utils/helpers.py
+    and
+    https://github.com/vllm-project/compressed-tensors/blob/f96819e16d6928d41171946cb89647ad783cc67c/src/compressed_tensors/quantization/lifecycle/forward_helpers.py
+
     Reduces ``x`` over ``reduce_dims`` (keepdim so the scale broadcasts back)
     and applies the ported CT scale/quantize math. Returns ``(qweight, scale)``
     with the scale in ``x``'s dtype.
