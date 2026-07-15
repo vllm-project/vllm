@@ -435,6 +435,7 @@ def _get_backend_priorities(
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
     if is_aiter_found_and_supported():
         backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
+    backends.append(AttentionBackendEnum.ROCM_TOKENSPEED_MHA)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
     backends.append(AttentionBackendEnum.TURBOQUANT)
 
