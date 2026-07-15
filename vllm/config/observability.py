@@ -83,6 +83,12 @@ class ObservabilityConfig:
     """Log every monitored JIT compile with runtime details. This can emit many
     logs and add overhead, so it is intended for debugging."""
 
+    enable_zmq_metrics: bool = False
+    """Enable publishing metrics via ZMQ."""
+
+    zmq_metrics_port: int = 5556
+    """Port to bind the ZMQ PUB socket to."""
+
     @cached_property
     def collect_model_forward_time(self) -> bool:
         """Whether to collect model forward time for the request."""

@@ -442,7 +442,15 @@ class LLMEngine:
             if isinstance(module, TorchCompileWithNoGuardsWrapper):
                 module.cleanup()
 
-    def __del__(self):
+    def shutdown(self):
+        if self.logger_manager is not None:
+            self.logger_manager.shutdown()
+            self.logger_manager = None
+
         dp_group = getattr(self, "dp_group", None)
         if dp_group is not None and not self.external_launcher_dp:
             stateless_destroy_torch_distributed_process_group(dp_group)
+            self.dp_group = None
+
+    def __del__(self):
+        self.shutdown()
