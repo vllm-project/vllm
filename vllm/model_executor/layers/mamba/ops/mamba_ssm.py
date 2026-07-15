@@ -846,7 +846,8 @@ def selective_scan_fn(
     else:
         return z  # output written inplace to z
 
-from vllm.platforms import current_platform
+
+from vllm.platforms import current_platform  # noqa: E402
 
 if current_platform.is_cpu():
     from vllm.model_executor.layers.mamba.ops.cpu.mamba_ssm import (
