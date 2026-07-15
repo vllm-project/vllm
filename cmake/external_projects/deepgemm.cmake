@@ -28,9 +28,9 @@ if(DEEPGEMM_SRC_DIR)
   message(STATUS "DeepGEMM using local DEEPGEMM_SRC_DIR: ${deepgemm_SOURCE_DIR}")
 else()
   # Keep in sync with tools/install_deepgemm.sh
-  set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/deepseek-ai/DeepGEMM.git")
-  # NOTE: This is currently targeting nv-dev branch due to sm120 support
-  set(_DEEPGEMM_UPSTREAM_TAG "a6b593d2826719dcf4892609af7b84ee23aaf32a")
+  set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/cleonard530/DeepGEMM.git")
+  # TORCH_LIBRARY migration (migrate_pybind_to_torch_library); see cleonard530/DeepGEMM#2
+  set(_DEEPGEMM_UPSTREAM_TAG "5b266fb39a1c147793dea19d53d21bf8e8e3a256")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
@@ -40,7 +40,8 @@ else()
   set(_deepgemm_bin "${_deepgemm_fc_root}/deepgemm-build")
   set(_deepgemm_sub "${_deepgemm_fc_root}/deepgemm-subbuild")
 
-  if(EXISTS "${_deepgemm_src}/csrc/python_api.cpp")
+  # Require the TORCH_LIBRARY shim layout; stale pybind-only checkouts re-fetch.
+  if(EXISTS "${_deepgemm_src}/deep_gemm/_C.py")
     set(deepgemm_SOURCE_DIR "${_deepgemm_src}")
     set(deepgemm_BINARY_DIR "${_deepgemm_bin}")
   else()
@@ -87,33 +88,17 @@ if(DEEPGEMM_ARCHS)
   #
   # DeepGEMM integration notes
   # --------------------------
-  # We vendor DeepGEMM into vllm/third_party/deep_gemm/ and bundle a
-  # `_C.cpython-X.Y-*.so` for every CPython in `requires-python`. The
-  # per-Python build is delegated to tools/build_deepgemm_C.py.
+  # We vendor DeepGEMM into vllm/third_party/deep_gemm/ and bundle:
+  #   - deep_gemm/_C.py (Python shim over torch.ops.deep_gemm)
+  #   - deep_gemm/_C_extension.abi3.so (single limited-API extension)
+  # The build is delegated to tools/build_deepgemm_C.py (setup.py build_ext).
   #
-  # Why per-Python: DeepGEMM's binding uses PYBIND11_MODULE, which links
-  # private CPython symbols — a single `_C.abi3.so` is not viable today
-  # (see #41476 / #41512 for the failed attempt).
-  #
-  # TODOs (tracked in vllm-project/vllm#42431):
-  #   - Replace DeepGEMM's pybind11 binding with a TORCH_LIBRARY + shim
-  #     binding (cf. vllm-flash-attention/csrc/common/pytorch_shim.h) to
-  #     collapse to one `_C.abi3.so`. Needs either an upstream change or
-  #     a maintained binding fork in vLLM.
-  #   - AOT-compile DeepGEMM's CUDA kernels instead of runtime JIT to drop
-  #     the vendored CUTLASS/CCCL headers and the CUDA-toolkit-at-runtime
-  #     requirement.
+  # TODO: AOT-compile DeepGEMM's CUDA kernels instead of runtime JIT to drop
+  # the vendored CUTLASS/CCCL headers and the CUDA-toolkit-at-runtime
+  # requirement.
   #
 
-  # DEEPGEMM_PYTHON_INTERPRETERS: ":"-separated target Python paths.
-  # Empty/unset → fall back to the build interpreter (editable installs).
-  # (Empty-but-set env vars test as DEFINED in cmake — treat as unset.)
-  if(NOT "$ENV{DEEPGEMM_PYTHON_INTERPRETERS}" STREQUAL "")
-    string(REPLACE ":" ";" _dg_pythons "$ENV{DEEPGEMM_PYTHON_INTERPRETERS}")
-  else()
-    set(_dg_pythons "${Python_EXECUTABLE}")
-  endif()
-  message(STATUS "DeepGEMM _C will be built for: ${_dg_pythons}")
+  message(STATUS "DeepGEMM extension will be built with: ${Python_EXECUTABLE}")
 
   # add_custom_command does no implicit header scanning; glob explicitly so
   # header-only edits in DeepGEMM/cutlass/fmt re-trigger the rebuild.
@@ -124,40 +109,29 @@ if(DEEPGEMM_ARCHS)
     "${deepgemm_SOURCE_DIR}/deep_gemm/include/*.hpp"
     "${deepgemm_SOURCE_DIR}/deep_gemm/include/*.cuh")
 
-  set(_dg_markers)
-  set(_dg_seen_soabis)
-  foreach(_pybin IN LISTS _dg_pythons)
-    execute_process(
-      COMMAND "${_pybin}" -c
-        "import sysconfig; print(sysconfig.get_config_var('SOABI'))"
-      OUTPUT_VARIABLE _dg_soabi
-      OUTPUT_STRIP_TRAILING_WHITESPACE
-      COMMAND_ERROR_IS_FATAL ANY)
-    # Dedup interpreters that resolve to the same CPython.
-    if(_dg_soabi IN_LIST _dg_seen_soabis)
-      continue()
-    endif()
-    list(APPEND _dg_seen_soabis "${_dg_soabi}")
-    set(_dg_dir "${CMAKE_CURRENT_BINARY_DIR}/deepgemm_C_${_dg_soabi}")
-    set(_dg_marker "${_dg_dir}/.built")
-    add_custom_command(
-      OUTPUT "${_dg_marker}"
-      COMMAND "${Python_EXECUTABLE}"
-              "${CMAKE_SOURCE_DIR}/tools/build_deepgemm_C.py"
-              "${deepgemm_SOURCE_DIR}" "${_dg_dir}" "${_pybin}"
-      COMMAND "${CMAKE_COMMAND}" -E touch "${_dg_marker}"
-      DEPENDS "${CMAKE_SOURCE_DIR}/tools/build_deepgemm_C.py"
-              "${deepgemm_SOURCE_DIR}/csrc/python_api.cpp"
-              ${_dg_headers}
-      COMMENT "Building DeepGEMM _C for ${_pybin}"
-      VERBATIM)
-    list(APPEND _dg_markers "${_dg_marker}")
-    install(DIRECTORY "${_dg_dir}/"
-      DESTINATION vllm/third_party/deep_gemm
-      COMPONENT _deep_gemm_C
-      FILES_MATCHING PATTERN "_C.cpython-*.so")
-  endforeach()
-  add_custom_target(_deep_gemm_C ALL DEPENDS ${_dg_markers})
+  set(_dg_dir "${CMAKE_CURRENT_BINARY_DIR}/deepgemm_C")
+  set(_dg_marker "${_dg_dir}/.built")
+  add_custom_command(
+    OUTPUT "${_dg_marker}"
+    COMMAND "${Python_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/tools/build_deepgemm_C.py"
+            "${deepgemm_SOURCE_DIR}" "${_dg_dir}" "${Python_EXECUTABLE}"
+    COMMAND "${CMAKE_COMMAND}" -E touch "${_dg_marker}"
+    DEPENDS "${CMAKE_SOURCE_DIR}/tools/build_deepgemm_C.py"
+            "${deepgemm_SOURCE_DIR}/csrc/python_api.cpp"
+            "${deepgemm_SOURCE_DIR}/deep_gemm/_C.py"
+            "${deepgemm_SOURCE_DIR}/setup.py"
+            ${_dg_headers}
+    COMMENT "Building DeepGEMM _C_extension (abi3)"
+    VERBATIM)
+  add_custom_target(_deep_gemm_C ALL DEPENDS "${_dg_marker}")
+
+  install(DIRECTORY "${_dg_dir}/"
+    DESTINATION vllm/third_party/deep_gemm
+    COMPONENT _deep_gemm_C
+    FILES_MATCHING
+      PATTERN "_C.py"
+      PATTERN "_C_extension*.so")
 
   #
   # Vendor DeepGEMM Python package files
