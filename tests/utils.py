@@ -2327,9 +2327,10 @@ class TestFP8Layer(torch.nn.Module):
         is_block_wise = act_scale_desc.group_shape.is_per_group()
         if is_block_wise:
             block_size = weight_scale_desc.group_shape.col
-            weight_scale_shape = weight_shape[0] // block_size
+            n_groups = -(-weight_shape[0] // block_size)  # ceil division
+            k_groups = -(-weight_shape[1] // block_size)  # ceil division
             self.weight_scale_inv = torch.rand(
-                (weight_scale_shape, weight_scale_shape), dtype=torch.float32
+                (n_groups, k_groups), dtype=torch.float32
             )
             self.weight = torch.rand(weight_shape).to(dtype=FP8_DTYPE)
             self.input_scale = None
