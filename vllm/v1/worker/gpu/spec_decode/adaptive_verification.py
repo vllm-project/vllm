@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
@@ -121,7 +122,7 @@ class AdaptiveVerificationManager:
 
         self.num_bonus_tokens = num_bonus_tokens
         self.cost_tables: tuple[np.ndarray, np.ndarray] | None = None
-        self._planned_batch: tuple[dict[str, tuple[int, int]], int] | None = None
+        self._batch_budget: tuple[dict[str, int], dict[str, int], int] | None = None
         max_num_reqs = req_states.max_num_reqs
         self._confidence_probs = torch.empty(
             (max_num_reqs, self.num_speculative_steps),
@@ -164,13 +165,17 @@ class AdaptiveVerificationManager:
         draft_graphs: dict[Any, float],
     ) -> None:
         def collapse(timings: dict[Any, float], field: str) -> list[tuple[int, float]]:
-            points: dict[int, float] = {}
+            full_points: dict[int, float] = {}
+            piecewise_points: dict[int, float] = {}
             for desc, ms in timings.items():
                 if desc.num_active_loras == 0:
                     x = getattr(desc, field)
                     assert x is not None
-                    points[x] = max(points.get(x, 0.0), ms)
-            return sorted(points.items())
+                    if desc.cg_mode == CUDAGraphMode.FULL:
+                        full_points[x] = max(full_points.get(x, 0.0), ms)
+                    elif desc.cg_mode == CUDAGraphMode.PIECEWISE:
+                        piecewise_points[x] = max(piecewise_points.get(x, 0.0), ms)
+            return sorted((piecewise_points | full_points).items())
 
         draft_curve = collapse(draft_graphs, "num_reqs")
         verify_curve = collapse(model_graphs, "num_tokens")
@@ -222,22 +227,22 @@ class AdaptiveVerificationManager:
         has_structured_output_requests: bool = False,
         uniform_tok_count: int | None = None,
     ) -> tuple[int, int | None]:
-        plan, budget = self._plan_batch(
+        self._batch_budget = self._compute_budget(
             num_tokens_per_req,
             draft_tokens,
             has_structured_output_requests,
         )
-        self._planned_batch = plan, budget
+        _, num_non_draft_tokens_per_req, draft_budget = self._batch_budget
         if self.varlen_spec_decode:
-            return sum(tokens for tokens, _ in plan.values()) + budget, None
+            return sum(num_non_draft_tokens_per_req.values()) + draft_budget, None
         return sum(num_tokens_per_req.values()), uniform_tok_count
 
-    def _plan_batch(
+    def _compute_budget(
         self,
         num_tokens_per_req: dict[str, int],
         draft_tokens: dict[str, list[int]],
         has_structured_output: bool,
-    ) -> tuple[dict[str, tuple[int, int]], int]:
+    ) -> tuple[dict[str, int], dict[str, int], int]:
         assert self.cost_tables is not None
         req_ids = list(num_tokens_per_req)
         num_reqs = len(req_ids)
@@ -259,7 +264,7 @@ class AdaptiveVerificationManager:
                 dtype=np.int32,
                 count=len(req_ids),
             )
-        scheduled_non_draft_tokens = scheduled_tokens - scheduled_drafts
+        num_non_draft_tokens = scheduled_tokens - scheduled_drafts
         slots = np.fromiter(
             (self.req_states.req_id_to_index[req_id] for req_id in req_ids),
             dtype=np.int32,
@@ -272,11 +277,11 @@ class AdaptiveVerificationManager:
         steps = np.arange(self.num_speculative_steps)
         valid = steps[None, :] < valid_drafts[:, None]
         scores = np.sort(survival_probability[valid])[::-1]
-        num_scheduled_non_draft_tokens = int(scheduled_non_draft_tokens.sum())
+        num_non_draft_tokens_total = int(num_non_draft_tokens.sum())
         max_draft_budget = int(valid_drafts.sum())
         draft_cost_ms, verify_cost_ms = self.cost_tables
         num_sampling_requests = np.count_nonzero(
-            self.req_states.num_computed_tokens_np[slots] + scheduled_non_draft_tokens
+            self.req_states.num_computed_tokens_np[slots] + num_non_draft_tokens
             >= self.req_states.prefill_len.np[slots]
         )
         num_tokens_to_estimated_accepted_tokens = np.concatenate(
@@ -285,29 +290,38 @@ class AdaptiveVerificationManager:
         costs = (
             draft_cost_ms[len(req_ids)]
             + verify_cost_ms[
-                num_scheduled_non_draft_tokens : num_scheduled_non_draft_tokens
+                num_non_draft_tokens_total : num_non_draft_tokens_total
                 + max_draft_budget
                 + 1
             ]
         )
-        plan = dict(
-            zip(
-                req_ids,
-                zip(scheduled_non_draft_tokens, valid_drafts, strict=True),
-                strict=True,
-            )
-        )
-        return plan, int(np.argmax(num_tokens_to_estimated_accepted_tokens / costs))
+        valid_drafts_per_req = {
+            req_id: int(num_valid_drafts)
+            for req_id, num_valid_drafts in zip(req_ids, valid_drafts, strict=True)
+        }
+        num_non_draft_tokens_per_req = {
+            req_id: int(num_tokens)
+            for req_id, num_tokens in zip(req_ids, num_non_draft_tokens, strict=True)
+        }
+        draft_budget = int(np.argmax(num_tokens_to_estimated_accepted_tokens / costs))
+        return valid_drafts_per_req, num_non_draft_tokens_per_req, draft_budget
 
-    def _consume_plan(self, req_ids: list[str]) -> tuple[np.ndarray, np.ndarray, int]:
-        planned_batch = self._planned_batch
-        self._planned_batch = None
-        assert planned_batch is not None
-        plan, budget = planned_batch
-        scheduled_non_draft_tokens, valid_drafts = np.asarray(
-            [plan[req_id] for req_id in req_ids], dtype=np.int32
-        ).T
-        return scheduled_non_draft_tokens, valid_drafts, budget
+    def _consume_budget(self, req_ids: list[str]) -> tuple[np.ndarray, np.ndarray, int]:
+        batch_budget = self._batch_budget
+        self._batch_budget = None
+        assert batch_budget is not None
+        valid_drafts_per_req, num_non_draft_tokens_per_req, draft_budget = batch_budget
+        valid_drafts = np.fromiter(
+            (valid_drafts_per_req[req_id] for req_id in req_ids),
+            dtype=np.int32,
+            count=len(req_ids),
+        )
+        num_non_draft_tokens = np.fromiter(
+            (num_non_draft_tokens_per_req[req_id] for req_id in req_ids),
+            dtype=np.int32,
+            count=len(req_ids),
+        )
+        return valid_drafts, num_non_draft_tokens, draft_budget
 
     def allocate_draft_token_budget(
         self, req_ids: list[str], idx_mapping: torch.Tensor
@@ -332,20 +346,20 @@ class VarlenAdaptiveVerificationManager(AdaptiveVerificationManager):
             num_bonus_tokens,
         )
         self.query_start_loc = query_start_loc
-        self._scheduled_non_draft_tokens = torch.empty_like(query_start_loc[:-1])
+        self._num_non_draft_tokens = torch.empty_like(query_start_loc[:-1])
         self._cu_num_logits = torch.empty_like(query_start_loc)
 
     def allocate_draft_token_budget(
         self, req_ids: list[str], idx_mapping: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
-        scheduled_non_draft_tokens, valid_drafts, budget = self._consume_plan(req_ids)
+        valid_drafts, num_non_draft_tokens, draft_budget = self._consume_budget(req_ids)
         num_reqs = idx_mapping.shape[0]
         capacities = self._batch_draft_capacity[:num_reqs]
-        if budget == 0:
+        if draft_budget == 0:
             capacities.zero_()
         else:
             async_copy_to_gpu(valid_drafts, out=capacities)
-            if budget != int(valid_drafts.sum()):
+            if draft_budget != int(valid_drafts.sum()):
                 block_size = triton.next_power_of_2(
                     num_reqs * self.num_speculative_steps
                 )
@@ -355,16 +369,16 @@ class VarlenAdaptiveVerificationManager(AdaptiveVerificationManager):
                     idx_mapping,
                     capacities,
                     num_reqs,
-                    budget,
+                    draft_budget,
                     NUM_STEPS=self.num_speculative_steps,
                     BLOCK_SIZE=block_size,
                     num_warps=4 if block_size <= 256 else 8,
                 )
-        num_tokens = int(scheduled_non_draft_tokens.sum()) + budget
-        scheduled_non_draft_tokens_gpu = self._scheduled_non_draft_tokens[:num_reqs]
+        num_tokens = int(num_non_draft_tokens.sum()) + draft_budget
+        num_non_draft_tokens_gpu = self._num_non_draft_tokens[:num_reqs]
         async_copy_to_gpu(
-            scheduled_non_draft_tokens,
-            out=scheduled_non_draft_tokens_gpu,
+            num_non_draft_tokens,
+            out=num_non_draft_tokens_gpu,
         )
         self._cu_num_logits[:1].zero_()
         torch.cumsum(
@@ -374,7 +388,7 @@ class VarlenAdaptiveVerificationManager(AdaptiveVerificationManager):
         )
         self.query_start_loc[:1].zero_()
         torch.cumsum(
-            capacities + scheduled_non_draft_tokens_gpu,
+            capacities + num_non_draft_tokens_gpu,
             dim=0,
             out=self.query_start_loc[1 : num_reqs + 1],
         )
@@ -382,7 +396,7 @@ class VarlenAdaptiveVerificationManager(AdaptiveVerificationManager):
         return (
             self._cu_num_logits[: num_reqs + 1],
             self.query_start_loc,
-            budget,
+            draft_budget,
         )
 
 
@@ -392,14 +406,14 @@ class MaskedAdaptiveVerificationManager(AdaptiveVerificationManager):
         if scheduled_drafts is None:
             self._batch_draft_capacity[: input_batch.num_reqs].zero_()
             return
-        _, valid_drafts, budget = self._consume_plan(input_batch.req_ids)
+        valid_drafts, _, draft_budget = self._consume_budget(input_batch.req_ids)
         num_reqs = input_batch.num_reqs
         capacities = self._batch_draft_capacity[:num_reqs]
-        if budget == 0:
+        if draft_budget == 0:
             capacities.zero_()
         else:
             async_copy_to_gpu(valid_drafts, out=capacities)
-            if budget != int(valid_drafts.sum()):
+            if draft_budget != int(valid_drafts.sum()):
                 block_size = triton.next_power_of_2(
                     num_reqs * self.num_speculative_steps
                 )
@@ -409,7 +423,7 @@ class MaskedAdaptiveVerificationManager(AdaptiveVerificationManager):
                     input_batch.idx_mapping,
                     capacities,
                     num_reqs,
-                    budget,
+                    draft_budget,
                     NUM_STEPS=self.num_speculative_steps,
                     BLOCK_SIZE=block_size,
                     num_warps=4 if block_size <= 256 else 8,
