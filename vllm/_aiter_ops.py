@@ -1814,7 +1814,7 @@ class rocm_aiter_ops:
         )
 
     @classmethod
-    def get_aiter_dp_ag_rs(cls):
+    def get_aiter_ag_rs(cls):
         """Return the DP device communicator's AITER all-gather/reduce-scatter
         communicator if it has one, return None otherwise.
         """

@@ -1447,16 +1447,13 @@ def graph_capture(device: torch.device):
     """
     context = GraphCaptureContext(torch.cuda.Stream(device=device))
 
-    # DP-group AITER AG/RS comm must enter capture so the custom all-gather /
-    # reduce-scatter kernels record their registered (no-copy) path into the
-    # graph. This is separate from the TP/PP graph_capture below because the DP
-    # comm lives on the DP group, and with tp_size=1 the TP group has no device
-    # communicator at all (world_size==1), so its graph_capture would skip it.
+    # The DP-group AITER AG/RS comm captures separately from TP/PP: it lives on
+    # the DP group, and with tp_size=1 the TP group has no device communicator.
     maybe_aiter_ag_rs_context = nullcontext()
     from vllm._aiter_ops import rocm_aiter_ops
 
     if rocm_aiter_ops.is_enabled():
-        aiter_ag_rs = rocm_aiter_ops.get_aiter_dp_ag_rs()
+        aiter_ag_rs = rocm_aiter_ops.get_aiter_ag_rs()
         if aiter_ag_rs is not None:
             maybe_aiter_ag_rs_context = aiter_ag_rs.capture()
 

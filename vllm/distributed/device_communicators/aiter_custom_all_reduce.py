@@ -72,9 +72,8 @@ class AiterCustomAllreduce:
 
     @staticmethod
     def build_supports_ag_rs() -> bool:
-        """True if the running AITER build exposes the custom all-gather /
-        reduce-scatter kernels (``custom_all_gather`` / ``custom_reduce_scatter``
-        plus their ``should_*`` predicates). Older builds only expose all-reduce.
+        """True if the running AITER build exposes the custom AG/RS kernels and
+        their ``should_*`` predicates. Older builds only expose all-reduce.
         """
         from aiter.dist.device_communicators.custom_all_reduce import (
             CustomAllreduce as _AiterCustomAllreduce,
