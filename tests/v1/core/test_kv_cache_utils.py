@@ -1596,6 +1596,8 @@ def test_kv_cache_cp_sizing_uses_dcp_only_for_pcp():
     assert spec.max_memory_usage_bytes(both_config) == spec.max_memory_usage_bytes(
         dcp_config
     )
+    assert spec.max_num_blocks_per_req(pcp_config, 128) == 16
+    assert spec.max_num_blocks_per_req(both_config, 128) == 8
 
 
 def test_get_kv_cache_config_one_worker():

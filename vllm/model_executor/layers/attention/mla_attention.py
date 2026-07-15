@@ -225,16 +225,8 @@ from vllm.model_executor.layers.attention.attention import (
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
 )
-from vllm.model_executor.layers.attention.mla_pcp import (
-    MLAPCPChunkedContextMetadata,
-    MLAPCPImplMixin,
-    build_pcp_chunked_context_metadata,
-)
 from vllm.model_executor.layers.attention.pcp import (
-    finalize_mla_pcp_decode,
-    get_dcp_tp_size,
     maybe_gather_mla_latent_cache_inputs,
-    prepare_mla_decode_query,
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
@@ -497,7 +489,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
-        self.dcp_tp_size = get_dcp_tp_size(parallel_config)
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -719,10 +710,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
 
         num_actual_toks = attn_metadata.num_actual_tokens
-        if self.use_pcp and self.impl.dcp_world_size > 1 and quant_key is not None:
-            raise NotImplementedError(
-                "MRV2 MLA PCP+DCP does not support fused output quantization yet."
-            )
 
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
@@ -846,12 +833,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             else:
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
             if self.impl.dcp_world_size > 1:
-                mqa_q = prepare_mla_decode_query(
-                    mqa_q,
-                    self.use_pcp,
-                    self.dcp_tp_size,
-                    fp8_attention,
-                )
+                if isinstance(mqa_q, tuple):
+                    mqa_q = torch.cat(mqa_q, dim=-1)
+                mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
 
             # call decode attn
             if not self.impl.is_sparse:
@@ -861,16 +845,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:
                 assert lse is not None
-                if self.use_pcp:
-                    attn_out = finalize_mla_pcp_decode(
-                        attn_out,
-                        lse,
-                        self.dcp_tp_size,
-                        self.dcp_a2a,
-                        self.num_heads,
-                        self.impl.lse_base_on_e,
-                    )
-                elif self.dcp_a2a:
+                if self.dcp_a2a:
                     attn_out = dcp_a2a_lse_reduce(
                         attn_out,
                         lse,
@@ -1334,7 +1309,6 @@ class MLACommonPrefillMetadata:
         padded_local_token_to_seq: torch.Tensor | None = None
         cu_seq_lens_lst: list[list[int]] | None = None
         chunk_size: int | None = None
-        pcp_chunk_metadata: MLAPCPChunkedContextMetadata | None = None
         prefill_tokens_with_context: int | None = None
 
     block_table: torch.Tensor
@@ -1478,10 +1452,8 @@ def build_mla_chunked_context_metadata(
     align_chunk_to_block: bool,
     device: torch.device,
     dcp_world_size: int,
-    dcp_rank: int,
     dcp_local_block_size: int,
     dcp_virtual_block_size: int,
-    dcp_tp_size: int,
 ) -> "MLACommonPrefillMetadata.ChunkedContextMetadata | None":
     """Build chunked-context metadata for an MLA prefill.
 
@@ -1499,10 +1471,8 @@ def build_mla_chunked_context_metadata(
         align_chunk_to_block: Round the chunk size down to ``block_size``.
         device: Target device for the returned tensors.
         dcp_world_size: Decode-context-parallel world size (1 if disabled).
-        dcp_rank: Rank within the decode-context-parallel group.
         dcp_local_block_size: Per-rank interleave block size for DCP.
         dcp_virtual_block_size: ``dcp_local_block_size * dcp_world_size``.
-        dcp_tp_size: Number of TP ranks included in each DCP group.
 
     Returns:
         The chunked-context metadata, or None when no prefill has any context.
@@ -1609,18 +1579,6 @@ def build_mla_chunked_context_metadata(
             tts = torch.repeat_interleave(req_indices, padded_local_chunk_seq_lens[i])
             padded_local_token_to_seq_cpu[i, : tts.shape[0]] = tts
 
-        pcp_chunk_metadata = None
-        if dcp_tp_size == 1 and dcp_world_size > 1:
-            pcp_chunk_metadata = build_pcp_chunked_context_metadata(
-                context_lens_cpu,
-                dcp_world_size,
-                dcp_rank,
-                dcp_local_block_size,
-                local_chunk_starts,
-                padded_local_max_context_chunk,
-                device,
-            )
-
         chunked_context_metadata = metadata_cls(
             cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
             starts=local_chunk_starts.to(device, non_blocking=True),
@@ -1641,7 +1599,6 @@ def build_mla_chunked_context_metadata(
             ),
             cu_seq_lens_lst=cu_seq_lens_cpu.tolist(),
             chunk_size=padded_local_max_context_chunk,
-            pcp_chunk_metadata=pcp_chunk_metadata,
         )
     else:
         chunked_context_metadata = metadata_cls(
@@ -1785,15 +1742,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         try:
             self.dcp_world_size = get_dcp_group().world_size
-            self.dcp_rank = get_dcp_group().rank_in_group
         except AssertionError:
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
-            self.dcp_rank = 0
         self.dcp_local_block_size = parallel_config.cp_kv_cache_interleave_size
         self.dcp_virtual_block_size = self.dcp_local_block_size * self.dcp_world_size
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
-        self.dcp_tp_size = get_dcp_tp_size(parallel_config)
 
         self.page_size = self.kv_cache_spec.block_size
 
@@ -1942,10 +1896,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 align_chunk_to_block=True,
                 device=device,
                 dcp_world_size=self.dcp_world_size,
-                dcp_rank=self.dcp_rank,
                 dcp_local_block_size=self.dcp_local_block_size,
                 dcp_virtual_block_size=self.dcp_virtual_block_size,
-                dcp_tp_size=self.dcp_tp_size,
             )
 
             prefill_metadata = MLACommonPrefillMetadata(
@@ -2079,7 +2031,7 @@ def reorg_kvcache(
     return reorganized_kv_c_normed, reorganized_k_pe
 
 
-class MLACommonBaseImpl(MLAPCPImplMixin, MLAAttentionImpl[A], Generic[A]):
+class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
     """
     Shared MLA base providing dense-MHA prefill (via the selected
     MLAPrefillBackend) for both dense and sparse impls; subclasses add decode
@@ -2113,12 +2065,6 @@ class MLACommonBaseImpl(MLAPCPImplMixin, MLAAttentionImpl[A], Generic[A]):
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj
-        parallel_config = get_current_vllm_config().parallel_config
-        self.dcp_tp_size = get_dcp_tp_size(parallel_config)
-        self.dcp_a2a = (
-            parallel_config.decode_context_parallel_size > 1
-            and parallel_config.dcp_comm_backend == "a2a"
-        )
 
     def _concat_k_nope_k_pe(
         self, k_nope: torch.Tensor, k_pe: torch.Tensor
@@ -2455,11 +2401,14 @@ class MLACommonBaseImpl(MLAPCPImplMixin, MLAAttentionImpl[A], Generic[A]):
             assert prefill_metadata.chunked_context is not None
             suffix_output, suffix_lse = output_prefill
             if self.dcp_world_size > 1:
-                context_output, context_lse = self._compute_dcp_prefill_context(
-                    q,
-                    kv_c_and_k_pe_cache,
-                    attn_metadata,
-                    k_scale,
+                context_output, context_lse = (
+                    self._context_parallel_compute_prefill_context(
+                        q,
+                        kv_c_and_k_pe_cache,
+                        attn_metadata,
+                        k_scale=k_scale,
+                        dcp_world_size=self.dcp_world_size,
+                    )
                 )
             else:
                 context_output, context_lse = self._compute_prefill_context(

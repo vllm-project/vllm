@@ -494,19 +494,9 @@ class ParallelConfig:
                 )
 
         tp = self.tensor_parallel_size
-        pcp = self.prefill_context_parallel_size
         dcp = self.decode_context_parallel_size
-        if pcp == 1:
-            # DCP reuses the TP ranks when PCP is disabled.
-            if tp % dcp != 0:
-                raise ValueError(f"tp_size={tp} must be divisible by dcp_size={dcp}.")
-        elif dcp not in (1, pcp, tp * pcp):
-            raise ValueError(
-                "When PCP is enabled, DCP must be disabled, span the PCP "
-                "axis, or span the full TP x PCP axis. "
-                f"Got TP={tp}, PCP={pcp}, DCP={dcp}; valid DCP sizes are "
-                f"{sorted({1, pcp, tp * pcp})}."
-            )
+        if tp % dcp != 0:
+            raise ValueError(f"tp_size={tp} must be divisible by dcp_size={dcp}.")
 
         if self.dcp_comm_backend == "a2a" and self.decode_context_parallel_size <= 1:
             raise ValueError(
