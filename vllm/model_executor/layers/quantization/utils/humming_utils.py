@@ -498,7 +498,7 @@ def prepare_humming_layer(
         input_schema=input_schema,
         pad_n_to_multiple=256,
         pad_k_to_multiple=128,
-        has_bias=layer.has_bias,
+        has_bias=bool(layer.has_bias) if layer.has_bias is not None else False,
         torch_dtype=layer.params_dtype,
     )
 
