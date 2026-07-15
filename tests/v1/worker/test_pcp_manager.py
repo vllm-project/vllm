@@ -9,12 +9,13 @@ import torch
 from vllm.config import CUDAGraphMode, ParallelConfig
 from vllm.model_executor.layers.attention import pcp as attention_pcp
 from vllm.model_executor.layers.attention.mla_pcp import (
-    build_pcp_chunked_context_kwargs,
+    build_pcp_chunked_context_metadata,
 )
 from vllm.model_executor.layers.attention.pcp import (
     get_dcp_tp_size,
-    maybe_gather_indexer_cache_inputs,
+    maybe_gather_indexer_k,
     maybe_gather_mla_latent_cache_inputs,
+    prepare_mla_decode_query,
 )
 from vllm.v1.worker.gpu import pcp_manager
 from vllm.v1.worker.gpu.pcp_manager import (
@@ -44,6 +45,34 @@ def test_dcp_tp_size(pcp_size: int, dcp_size: int, expected: int) -> None:
         decode_context_parallel_size=dcp_size,
     )
     assert get_dcp_tp_size(parallel_config) == expected
+
+
+def test_prepare_mla_decode_query_selects_comm_group(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class FakeGroup:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def all_gather(self, tensor: torch.Tensor, dim: int) -> torch.Tensor:
+            assert dim == 1
+            calls.append(self.name)
+            return torch.cat((tensor, tensor), dim=dim)
+
+    monkeypatch.setattr(attention_pcp, "get_dcp_group", lambda: FakeGroup("dcp"))
+    monkeypatch.setattr(attention_pcp, "get_tp_group", lambda: FakeGroup("tp"))
+
+    q = (torch.ones(1, 2, 3), torch.ones(1, 2, 1))
+    pcp_only_q = prepare_mla_decode_query(q, True, 1, False)
+    assert pcp_only_q is q
+
+    dcp_q = prepare_mla_decode_query(q, False, 2, False)
+    tp_pcp_q = prepare_mla_decode_query(q, True, 2, False)
+
+    assert calls == ["dcp", "tp"]
+    assert isinstance(dcp_q, torch.Tensor)
+    assert isinstance(tp_pcp_q, torch.Tensor)
+    assert dcp_q.shape == tp_pcp_q.shape == (1, 4, 4)
 
 
 def _patch_fake_pcp_group(
@@ -332,7 +361,7 @@ def test_pcp_dcp_a2a_restores_pcp_head_chunks(monkeypatch) -> None:
 
 
 def test_pcp_chunked_context_uses_local_dcp_lengths() -> None:
-    metadata = build_pcp_chunked_context_kwargs(
+    metadata = build_pcp_chunked_context_metadata(
         context_lens_cpu=torch.tensor([8, 6]),
         dcp_world_size=2,
         dcp_rank=0,
@@ -342,11 +371,11 @@ def test_pcp_chunked_context_uses_local_dcp_lengths() -> None:
         device=torch.device("cpu"),
     )
 
-    assert metadata["local_chunk_seq_lens"] == [[2, 2], [2, 1]]
-    assert metadata["local_seq_tot"] == [4, 3]
-    assert metadata["local_max_seq_lens"] == [2, 2]
+    assert metadata.seq_lens == [[2, 2], [2, 1]]
+    assert metadata.seq_tot == [4, 3]
+    assert metadata.max_seq_lens == [2, 2]
     torch.testing.assert_close(
-        metadata["local_cu_seq_lens"],
+        metadata.cu_seq_lens,
         torch.tensor([[0, 2, 4], [0, 2, 3]], dtype=torch.int32),
     )
 
@@ -358,9 +387,7 @@ def test_indexer_cache_gather_exchanges_only_latent_k(monkeypatch) -> None:
     k = torch.arange(16, dtype=torch.float32).view(4, 4)
     slot_mapping = torch.arange(80, 88, dtype=torch.int64)
 
-    restored_k, restored_slots = maybe_gather_indexer_cache_inputs(
-        k, slot_mapping, True
-    )
+    restored_k, restored_slots = maybe_gather_indexer_k(k, slot_mapping, True)
 
     assert len(gathered_payloads) == 1
     torch.testing.assert_close(gathered_payloads[0][0], k)
@@ -380,7 +407,7 @@ def test_slot_mapping_is_not_gathered_with_cache_payload(monkeypatch) -> None:
     _, _, mla_slots = maybe_gather_mla_latent_cache_inputs(
         object(), kv_c_normed, k_pe, slot_mapping, True
     )
-    _, indexer_slots = maybe_gather_indexer_cache_inputs(k, slot_mapping, True)
+    _, indexer_slots = maybe_gather_indexer_k(k, slot_mapping, True)
 
     assert len(gathered_payloads) == 3
     torch.testing.assert_close(gathered_payloads[0][0], kv_c_normed)

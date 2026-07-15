@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -13,7 +13,15 @@ from vllm.v1.attention.ops.common import cp_lse_ag_out_ar
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 
 
-def build_pcp_chunked_context_kwargs(
+@dataclass
+class MLAPCPChunkedContextMetadata:
+    seq_lens: list[list[int]]
+    cu_seq_lens: torch.Tensor
+    seq_tot: list[int]
+    max_seq_lens: list[int]
+
+
+def build_pcp_chunked_context_metadata(
     context_lens_cpu: torch.Tensor,
     dcp_world_size: int,
     dcp_rank: int,
@@ -21,7 +29,7 @@ def build_pcp_chunked_context_kwargs(
     local_chunk_starts: torch.Tensor,
     chunk_size: int,
     device: torch.device,
-) -> dict[str, Any]:
+) -> MLAPCPChunkedContextMetadata:
     local_context_lens = get_dcp_local_seq_lens(
         context_lens_cpu,
         dcp_world_size,
@@ -47,12 +55,12 @@ def build_pcp_chunked_context_kwargs(
         out=local_cu_seq_lens[:, 1:],
         dtype=torch.int32,
     )
-    return {
-        "local_chunk_seq_lens": local_chunk_seq_lens.tolist(),
-        "local_cu_seq_lens": local_cu_seq_lens.to(device, non_blocking=True),
-        "local_seq_tot": local_cu_seq_lens[:, -1].tolist(),
-        "local_max_seq_lens": local_chunk_seq_lens.max(dim=1).values.tolist(),
-    }
+    return MLAPCPChunkedContextMetadata(
+        seq_lens=local_chunk_seq_lens.tolist(),
+        cu_seq_lens=local_cu_seq_lens.to(device, non_blocking=True),
+        seq_tot=local_cu_seq_lens[:, -1].tolist(),
+        max_seq_lens=local_chunk_seq_lens.max(dim=1).values.tolist(),
+    )
 
 
 class MLAPCPImplMixin:
@@ -62,12 +70,24 @@ class MLAPCPImplMixin:
     qk_nope_head_dim: int
     kv_b_proj: Any
     lse_base_on_e: bool
+    dcp_tp_size: int
+    dcp_world_size: int
+    dcp_a2a: bool
 
     if TYPE_CHECKING:
 
         def _concat_k_nope_k_pe(
             self, k_nope: torch.Tensor, k_pe: torch.Tensor
         ) -> torch.Tensor: ...
+
+        def _context_parallel_compute_prefill_context(
+            self,
+            q: torch.Tensor,
+            kv_c_and_k_pe_cache: torch.Tensor,
+            attn_metadata: Any,
+            k_scale: torch.Tensor,
+            dcp_world_size: int,
+        ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
     def _empty_context_chunk_output(
         self, q: torch.Tensor
@@ -116,7 +136,7 @@ class MLAPCPImplMixin:
         k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         return self._concat_k_nope_k_pe(k_nope, k_pe), v
 
-    def _dcp_compute_local_prefill_context(
+    def _compute_pcp_dcp_prefill_context(
         self,
         q: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
@@ -130,16 +150,14 @@ class MLAPCPImplMixin:
         chunked_context = prefill_metadata.chunked_context
         assert chunked_context.padded_local_chunk_seq_lens is not None
         assert chunked_context.padded_local_cu_seq_lens is not None
-        assert chunked_context.local_chunk_seq_lens is not None
-        assert chunked_context.local_cu_seq_lens is not None
-        assert chunked_context.local_seq_tot is not None
-        assert chunked_context.local_max_seq_lens is not None
+        assert chunked_context.pcp_dcp is not None
+        pcp_dcp = chunked_context.pcp_dcp
 
         local_chunked_context = replace(
             chunked_context,
-            cu_seq_lens=chunked_context.local_cu_seq_lens,
-            seq_tot=chunked_context.local_seq_tot,
-            max_seq_lens=chunked_context.local_max_seq_lens,
+            cu_seq_lens=pcp_dcp.cu_seq_lens,
+            seq_tot=pcp_dcp.seq_tot,
+            max_seq_lens=pcp_dcp.max_seq_lens,
         )
         local_prefill_metadata = replace(
             prefill_metadata, chunked_context=local_chunked_context
@@ -150,7 +168,7 @@ class MLAPCPImplMixin:
         merge_output = None
         workspace = chunked_context.workspace
         for i, padded_toks in enumerate(chunked_context.seq_tot):
-            local_toks = chunked_context.local_seq_tot[i]
+            local_toks = pcp_dcp.seq_tot[i]
             ops.cp_gather_cache(
                 src_cache=kv_c_and_k_pe_cache,
                 dst=workspace,
@@ -166,7 +184,7 @@ class MLAPCPImplMixin:
                 local_kvcache = self._unpad_dcp_local_kvcache(
                     workspace[:padded_toks],
                     chunked_context.padded_local_chunk_seq_lens[i],
-                    chunked_context.local_chunk_seq_lens[i],
+                    pcp_dcp.seq_lens[i],
                     local_toks,
                 )
                 k, v = self._project_context_kv(local_kvcache)
@@ -214,3 +232,25 @@ class MLAPCPImplMixin:
                 is_lse_base_on_e=self.lse_base_on_e,
             )
         return output, output_lse_t.transpose(0, 1)
+
+    def _compute_dcp_prefill_context(
+        self,
+        q: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: Any,
+        k_scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.dcp_tp_size == 1:
+            return self._compute_pcp_dcp_prefill_context(
+                q,
+                kv_c_and_k_pe_cache,
+                attn_metadata,
+                self.dcp_a2a,
+            )
+        return self._context_parallel_compute_prefill_context(
+            q,
+            kv_c_and_k_pe_cache,
+            attn_metadata,
+            k_scale=k_scale,
+            dcp_world_size=self.dcp_world_size,
+        )

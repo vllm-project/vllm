@@ -55,7 +55,7 @@ def maybe_gather_mla_latent_cache_inputs(
     return gathered_kv_c, gathered_k_pe, slot_mapping[: gathered_kv_c.shape[0]]
 
 
-def maybe_gather_indexer_cache_inputs(
+def maybe_gather_indexer_k(
     k: torch.Tensor,
     slot_mapping: torch.Tensor,
     use_pcp: bool,
@@ -89,18 +89,24 @@ def pcp_dcp_a2a_lse_reduce(
     return pcp_group.all_gather(cast(torch.Tensor, combined), dim=1)
 
 
-def prepare_mla_pcp_decode_query(
+def prepare_mla_decode_query(
     q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+    use_pcp: bool,
     dcp_tp_size: int,
     fp8_attention: bool,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    if dcp_tp_size <= 1:
-        return q
-    if fp8_attention:
-        raise NotImplementedError("DCP does not support FP8 KV cache yet.")
+    if use_pcp:
+        if dcp_tp_size <= 1:
+            return q
+        if fp8_attention:
+            raise NotImplementedError("DCP does not support FP8 KV cache yet.")
+        comm_group = get_tp_group()
+    else:
+        comm_group = get_dcp_group()
+
     if isinstance(q, tuple):
         q = torch.cat(q, dim=-1)
-    return get_tp_group().all_gather(q, dim=1)
+    return comm_group.all_gather(q, dim=1)
 
 
 def finalize_mla_pcp_decode(

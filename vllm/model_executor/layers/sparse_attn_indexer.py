@@ -13,9 +13,7 @@ from vllm.distributed import get_dcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.layers.attention.pcp import (
-    maybe_gather_indexer_cache_inputs,
-)
+from vllm.model_executor.layers.attention.pcp import maybe_gather_indexer_k
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
@@ -384,7 +382,7 @@ def sparse_attn_indexer(
 
     if not skip_k_cache_insert:
         assert k is not None
-        k, slot_mapping_for_cache = maybe_gather_indexer_cache_inputs(
+        k, slot_mapping_for_cache = maybe_gather_indexer_k(
             k,
             slot_mapping,
             use_pcp,
