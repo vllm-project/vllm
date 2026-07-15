@@ -965,13 +965,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             and num_draft_tokens_per_req is not None
         ):
             cu_num_logits, query_start_loc, total_num_draft_tokens = (
-                self.adaptive_verification.compact_batch(
-                    req_ids, idx_mapping, num_tokens
-                )
-            )
-            num_tokens = (
-                int(num_scheduled_tokens.sum() - num_draft_tokens_per_req.sum())
-                + total_num_draft_tokens
+                self.adaptive_verification.compact_batch(req_ids, idx_mapping)
             )
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
         if draft_tokens:
@@ -1266,9 +1260,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not dummy_run:
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
-            num_toks = min(
-                scheduler_output.total_num_scheduled_tokens, batch_desc.num_tokens
-            )
             input_batch = self.prepare_inputs(scheduler_output, batch_desc, num_toks)
             block_tables, slot_mappings = self.prepare_attn(input_batch)
             # Mamba "align" pre-copy: migrate recurrent state across block
