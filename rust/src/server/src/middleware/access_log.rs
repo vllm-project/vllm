@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Per-request HTTP access log, enabled by default: one INFO line per response
 //! on the `vllm_server::access` target. Mirrors Python's uvicorn access log
 //! (`--disable-uvicorn-access-log` turns it off; `--disable-access-log-for-endpoints`
