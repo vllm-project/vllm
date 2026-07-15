@@ -8,6 +8,7 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal, TypeAlias
 
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -19,13 +20,9 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    QKVParallelLinear,
-    ReplicatedLinear,
-    RowParallelLinear,
-)
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -62,6 +59,7 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
+from .whisper import WhisperEncoder, WhisperEncoderLayer
 
 _AUDIO_PLACEHOLDER_OVERRIDE = "<|audio|>"
 _MAX_ENCODER_BATCH_SIZE = 16
@@ -307,152 +305,62 @@ class StackAudioFrames(nn.Module):
         return audio_embeds
 
 
-def _get_key_padding_mask(
-    valid_lens: torch.Tensor, seq_len: int, device: torch.device
-) -> torch.Tensor:
-    """Boolean SDPA key-padding mask of shape [B, 1, 1, seq_len].
+def _build_chunk_attn_metadata(
+    attn: MMEncoderAttention,
+    feature_lens: torch.Tensor,
+    seq_len: int,
+    hidden_size: int,
+    device: torch.device,
+) -> dict[str, torch.Tensor | None]:
+    """Segmented varlen attention metadata for a padded batch of audio chunks.
 
-    True marks key positions that may be attended to. Equivalent to the
-    additive `get_extended_attention_mask` the HF implementation used: only
-    keys are masked, so queries at padding positions still produce (garbage)
-    outputs, which are trimmed by `audio_token_len` downstream.
+    Each padded row contributes up to two sequences to `cu_seqlens`: its valid
+    frames and its padding tail. Attention therefore never crosses a
+    valid/padding boundary (equivalent to the key-padding mask the HF
+    implementation uses), while every row still flows through the
+    (potentially LoRA-wrapped) linears, keeping the per-chunk token counts
+    constant as required by `get_num_mm_encoder_tokens` /
+    `get_num_mm_connector_tokens`. Queries at padding positions produce
+    (garbage) outputs, which are trimmed by `audio_token_len` downstream.
     """
-    mask = torch.arange(seq_len, device=device)[None, :].lt(valid_lens.view(-1, 1))
-    return mask[:, None, None, :]
+    batch_size = feature_lens.shape[0]
+    starts = np.arange(batch_size, dtype=np.int64) * seq_len
+    lens_np = feature_lens.cpu().numpy().astype(np.int64)
+    bounds = np.stack([starts + lens_np, starts + seq_len], axis=1).reshape(-1)
+    cu_seqlens_np = np.concatenate(([0], bounds))
+    # Fully-valid rows produce empty padding segments; drop the duplicates.
+    cu_seqlens_np = np.unique(cu_seqlens_np).astype(np.int32)
 
-
-class UltravoxWhisperAttention(nn.Module):
-    """Whisper-style bidirectional self-attention with vLLM-native linears
-    (so tower/connector LoRA can wrap them) and key-padding mask support."""
-
-    def __init__(
-        self,
-        embed_dim: int,
-        num_heads: int,
-        *,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        tp_size = get_tensor_model_parallel_world_size()
-        if embed_dim % num_heads != 0:
-            raise ValueError(
-                f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})"
-            )
-        if num_heads % tp_size != 0:
-            # The HF-based tower this replaces was replicated across TP ranks
-            # and had no such constraint; whisper-large has 20 heads, so e.g.
-            # TP=8 hits this. Matches the constraint of the native whisper
-            # encoder (vllm/model_executor/models/whisper.py).
-            raise ValueError(
-                f"The audio tower's attention heads ({num_heads}) must be "
-                f"divisible by the tensor parallel size ({tp_size})"
-            )
-        self.num_heads = num_heads // tp_size
-        self.head_dim = embed_dim // num_heads
-
-        # HF whisper has no k_proj bias; the fused bias' k-slice is zeroed
-        # during weight loading (see `_load_whisper_layer_weights`).
-        self.qkv_proj = QKVParallelLinear(
-            hidden_size=embed_dim,
-            head_size=self.head_dim,
-            total_num_heads=num_heads,
-            total_num_kv_heads=num_heads,
-            bias=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
-        )
-        self.out_proj = RowParallelLinear(
-            input_size=embed_dim,
-            output_size=embed_dim,
-            bias=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.out_proj",
-        )
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        bsz, seq_len, _ = hidden_states.shape
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.chunk(3, dim=-1)
-        q = q.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        v = v.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-
-        attn_output = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_mask)
-        attn_output = attn_output.transpose(1, 2).reshape(bsz, seq_len, -1)
-
-        output, _ = self.out_proj(attn_output)
-        return output
-
-
-class UltravoxWhisperEncoderLayer(nn.Module):
-    """vLLM-native mirror of HF `WhisperEncoderLayer` (pre-norm)."""
-
-    def __init__(
-        self,
-        *,
-        d_model: int,
-        num_heads: int,
-        ffn_dim: int,
-        act_fn: str,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        self.self_attn = UltravoxWhisperAttention(
-            d_model,
-            num_heads,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
-        )
-        self.self_attn_layer_norm = nn.LayerNorm(d_model)
-        self.activation_fn = get_act_fn(act_fn)
-        self.fc1 = ColumnParallelLinear(
-            input_size=d_model,
-            output_size=ffn_dim,
-            bias=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.fc1",
-        )
-        self.fc2 = RowParallelLinear(
-            input_size=ffn_dim,
-            output_size=d_model,
-            bias=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.fc2",
-        )
-        self.final_layer_norm = nn.LayerNorm(d_model)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        residual = hidden_states
-        hidden_states = self.self_attn_layer_norm(hidden_states)
-        hidden_states = self.self_attn(hidden_states, attention_mask)
-        hidden_states = residual + hidden_states
-
-        residual = hidden_states
-        hidden_states = self.final_layer_norm(hidden_states)
-        hidden_states, _ = self.fc1(hidden_states)
-        hidden_states = self.activation_fn(hidden_states)
-        hidden_states, _ = self.fc2(hidden_states)
-        hidden_states = residual + hidden_states
-        return hidden_states
+    attn_backend = attn.attn_backend
+    sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
+        attn_backend, cu_seqlens_np, device
+    )
+    max_seqlen = torch.tensor(
+        MMEncoderAttention.compute_max_seqlen(attn_backend, cu_seqlens_np),
+        dtype=torch.int32,
+    )
+    cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
+        attn_backend,
+        cu_seqlens_np,
+        hidden_size,
+        get_tensor_model_parallel_world_size(),
+        device,
+    )
+    return {
+        "cu_seqlens": cu_seqlens,
+        "max_seqlen": max_seqlen,
+        "sequence_lengths": sequence_lengths,
+    }
 
 
 def _load_whisper_layer_weights(
     module: nn.Module, weights: Iterable[tuple[str, torch.Tensor]]
 ) -> set[str]:
-    """Weight loader for modules containing `UltravoxWhisperEncoderLayer`s.
+    """Weight loader for modules containing `WhisperEncoderLayer`s.
 
-    Handles fusing HF's separate q/k/v projections into `qkv_proj` and
-    zero-initializes the fused bias' k-slice (HF whisper k_proj has no bias).
+    Handles fusing HF's separate q/k/v projections into `qkv_proj`,
+    zero-initializes the fused bias' k-slice (HF whisper k_proj has no bias)
+    and renames HF's flat `fc1`/`fc2` to the nested `mlp.fc1`/`mlp.fc2`.
     Unknown names are skipped to tolerate unused checkpoint weights (e.g. the
     whisper decoder when loading the tower from a full whisper checkpoint).
     """
@@ -461,6 +369,11 @@ def _load_whisper_layer_weights(
         (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
         (".self_attn.qkv_proj", ".self_attn.k_proj", "k"),
         (".self_attn.qkv_proj", ".self_attn.v_proj", "v"),
+    ]
+    params_mapping = [
+        # (param_name, weight_name)
+        (".mlp.fc1", ".fc1"),
+        (".mlp.fc2", ".fc2"),
     ]
     params_dict = dict(module.named_parameters())
     loaded_params: set[str] = set()
@@ -487,6 +400,10 @@ def _load_whisper_layer_weights(
                 loaded_params.add(name)
             break
         else:
+            for param_name, weight_name in params_mapping:
+                if weight_name in name:
+                    name = name.replace(weight_name, param_name)
+                    break
             if name not in params_dict:
                 continue
             param = params_dict[name]
@@ -560,12 +477,13 @@ class UltravoxFeedForwardProjector(nn.Module):
 class UltravoxTransformerProjector(nn.Module):
     def __init__(
         self,
-        config: UltravoxConfig,
+        vllm_config: VllmConfig,
         *,
-        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        config: UltravoxConfig = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
         audio_config = config.audio_config
 
         self._pad_and_stack = StackAudioFrames(config.stack_factor)
@@ -585,19 +503,17 @@ class UltravoxTransformerProjector(nn.Module):
             audio_config.d_model,
         )
 
+        audio_vllm_config = vllm_config.with_hf_config(audio_config)
         self.layers = nn.ModuleList(
             [
-                UltravoxWhisperEncoderLayer(
-                    d_model=audio_config.d_model,
-                    num_heads=audio_config.encoder_attention_heads,
-                    ffn_dim=audio_config.encoder_ffn_dim,
-                    act_fn=audio_config.activation_function,
-                    quant_config=quant_config,
+                WhisperEncoderLayer(
+                    vllm_config=audio_vllm_config,
                     prefix=f"{prefix}.layers.{idx}",
                 )
                 for idx in range(config.num_projector_layers)
             ]
         )
+        self._d_model = audio_config.d_model
 
         self.ln_post = RMSNorm(audio_config.d_model)
         self.linear_out = ReplicatedLinear(
@@ -613,10 +529,6 @@ class UltravoxTransformerProjector(nn.Module):
     ) -> torch.Tensor:
         audio_features = self._pad_and_stack(audio_features)
 
-        attention_mask = _get_key_padding_mask(
-            audio_token_len, audio_features.shape[1], audio_features.device
-        )
-
         hidden_states = self.ln_pre(audio_features)
         hidden_states, _ = self.linear_in(hidden_states)
 
@@ -625,8 +537,18 @@ class UltravoxTransformerProjector(nn.Module):
         )
         hidden_states = hidden_states + positions
 
+        batch_size, seq_len, d_model = hidden_states.shape
+        attn_metadata = _build_chunk_attn_metadata(
+            self.layers[0].self_attn.attn,
+            audio_token_len,
+            seq_len,
+            d_model,
+            hidden_states.device,
+        )
+        hidden_states = hidden_states.reshape(batch_size * seq_len, d_model)
         for layer in self.layers:
-            hidden_states = layer(hidden_states, attention_mask)
+            hidden_states = layer(hidden_states, **attn_metadata)
+        hidden_states = hidden_states.reshape(batch_size, seq_len, d_model)
 
         hidden_states = self.ln_post(hidden_states)
         hidden_states, _ = self.linear_out(hidden_states)
@@ -636,42 +558,17 @@ class UltravoxTransformerProjector(nn.Module):
         return _load_whisper_layer_weights(self, weights)
 
 
-class UltravoxWhisperEncoder(nn.Module):
-    """vLLM-native port of Ultravox's `ModifiedWhisperEncoder`.
+class UltravoxWhisperEncoder(WhisperEncoder):
+    """Ultravox's `ModifiedWhisperEncoder` on top of vLLM's `WhisperEncoder`.
 
     Like the original (a modified HF whisper encoder,
     see https://github.com/huggingface/transformers/issues/25744), it accepts
     mel inputs shorter than 30s (positions are sliced to the input length) and
-    masks attention to padding frames based on `audio_lens`, so its outputs
-    match the HF implementation for valid positions. The linears are
+    confines attention to each chunk's valid frames based on `audio_lens`
+    (via segmented `cu_seqlens` instead of a dense key-padding mask), so its
+    outputs match the HF implementation for valid positions. The linears are
     vLLM-native so the tower can be wrapped for LoRA.
     """
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        embed_dim = config.d_model
-        self.num_mel_bins = config.num_mel_bins
-        self.max_source_positions = config.max_source_positions
-
-        self.conv1 = nn.Conv1d(self.num_mel_bins, embed_dim, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv1d(embed_dim, embed_dim, kernel_size=3, stride=2, padding=1)
-        self.embed_positions = nn.Embedding(self.max_source_positions, embed_dim)
-        self.layers = nn.ModuleList(
-            [
-                UltravoxWhisperEncoderLayer(
-                    d_model=embed_dim,
-                    num_heads=config.encoder_attention_heads,
-                    ffn_dim=config.encoder_ffn_dim,
-                    act_fn=config.activation_function,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.layers.{idx}",
-                )
-                for idx in range(config.encoder_layers)
-            ]
-        )
-        self.layer_norm = nn.LayerNorm(embed_dim)
 
     @property
     def dtype(self) -> torch.dtype:
@@ -679,36 +576,17 @@ class UltravoxWhisperEncoder(nn.Module):
 
     @property
     def max_context_length(self) -> int:
-        return self.max_source_positions * self.conv1.stride[0] * self.conv2.stride[0]
+        return self.max_source_positions * self.total_stride
 
     def _get_feat_extract_output_lengths(
         self, input_lengths: torch.Tensor
     ) -> torch.Tensor:
         return (input_lengths - 1) // 2 + 1
 
-    def get_attention_mask_by_audio_len(
-        self, audio_lens: torch.Tensor | None, hidden_states: torch.Tensor
-    ) -> torch.Tensor | None:
-        """
-        Create attention mask based on audio lengths to mask out padding tokens
-        For each sample in batch:
-        - Convert raw audio length to feature length after convolutions
-        - Create bool mask: True for valid positions and False for padding
-        This masking ensures consistent behavior between training and inference
-        by preventing the model from attending to padding tokens in both cases
-        """
-        if audio_lens is None:
-            return None
-
-        audio_feature_len = self._get_feat_extract_output_lengths(audio_lens)
-        return _get_key_padding_mask(
-            audio_feature_len, hidden_states.shape[1], hidden_states.device
-        )
-
     def forward(
         self,
         input_features: torch.Tensor,
-        audio_lens: torch.Tensor | None = None,
+        audio_lens: torch.Tensor,
     ) -> torch.Tensor:
         expected_seq_length = self.max_context_length
         if input_features.shape[-1] > expected_seq_length:
@@ -725,12 +603,20 @@ class UltravoxWhisperEncoder(nn.Module):
         inputs_embeds = inputs_embeds.permute(0, 2, 1)
         embed_pos = self.embed_positions.weight[: inputs_embeds.size(-2)]
 
-        hidden_states = inputs_embeds + embed_pos
+        hidden_states = (inputs_embeds + embed_pos).to(inputs_embeds.dtype)
 
-        attention_mask = self.get_attention_mask_by_audio_len(audio_lens, hidden_states)
-
+        batch_size, seq_len, d_model = hidden_states.shape
+        attn_metadata = _build_chunk_attn_metadata(
+            self.layers[0].self_attn.attn,
+            self._get_feat_extract_output_lengths(audio_lens),
+            seq_len,
+            d_model,
+            hidden_states.device,
+        )
+        hidden_states = hidden_states.reshape(batch_size * seq_len, d_model)
         for encoder_layer in self.layers:
-            hidden_states = encoder_layer(hidden_states, attention_mask)
+            hidden_states = encoder_layer(hidden_states, **attn_metadata)
+        hidden_states = hidden_states.reshape(batch_size, seq_len, d_model)
 
         hidden_states = self.layer_norm(hidden_states)
         return hidden_states
@@ -813,8 +699,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             )
             if config.num_projector_layers > 0:
                 self.multi_modal_projector = UltravoxTransformerProjector(
-                    config,
-                    quant_config=quant_config,
+                    vllm_config,
                     prefix=maybe_prefix(prefix, "multi_modal_projector"),
                 )
             else:
