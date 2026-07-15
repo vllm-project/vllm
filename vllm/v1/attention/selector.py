@@ -97,13 +97,9 @@ def get_attn_backend(
         kv_transfer_config is not None and kv_transfer_config.is_kv_transfer_instance
     )
     speculative_config = vllm_config.speculative_config
-    from vllm.compilation import backends as compilation_backends
-
-    is_dspark_drafter = compilation_backends.model_tag == "dspark_head"
     adaptive_verification = bool(
         speculative_config is not None
         and speculative_config.adaptive_verification
-        and not is_dspark_drafter  # We only need VARLEN_BATCH for the verifier
     )
 
     attn_selector_config = AttentionSelectorConfig(

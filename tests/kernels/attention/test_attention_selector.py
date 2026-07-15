@@ -37,7 +37,7 @@ def clear_cache():
     _cached_get_attn_backend.cache_clear()
 
 
-def test_causal_dspark_drafter_skips_adaptive_verification_requirements(monkeypatch):
+def test_adaptive_verification_requires_varlen_for_dspark_drafter(monkeypatch):
     from vllm.compilation.backends import set_model_tag
     from vllm.v1.attention import selector
 
@@ -61,7 +61,7 @@ def test_causal_dspark_drafter_skips_adaptive_verification_requirements(monkeypa
         selector.get_attn_backend(16, torch.float16, None)
 
     assert selector_configs[0].required_cg_support == AttentionCGSupport.VARLEN_BATCH
-    assert selector_configs[1].required_cg_support is None
+    assert selector_configs[1].required_cg_support == AttentionCGSupport.VARLEN_BATCH
 
 
 # Define MLA and non-MLA backends separately
