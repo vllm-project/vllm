@@ -3,8 +3,7 @@
 
 from __future__ import annotations
 
-import platform
-
+from vllm.platforms import CpuArchEnum, current_platform
 import torch
 import torch.nn.functional as F
 
@@ -150,7 +149,7 @@ def _cpu_gdn_attention_nonspec(
                 is_vnni=True,
             )
         else:
-            if platform.machine() == "aarch64":
+            if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
                 decode_conv_state = conv_state[decode_state_indices].contiguous()
                 decode_mixed_qkv = causal_conv1d_update_torch(
                     x=decode_mixed_qkv.unsqueeze(-1),
@@ -509,7 +508,7 @@ def _spec_aware_nonspec(
         decode_a = a[:num_decode_tokens]
         decode_state_indices = state_indices_tensor[:num_decodes]
         # Only the first ``width-1`` columns hold the real conv state.
-        if platform.machine() == "aarch64":
+        if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
             conv_state_view = conv_buf[:, :, : width - 1]
             decode_conv_state = conv_state_view[decode_state_indices].contiguous()
             decode_mixed_qkv = causal_conv1d_update_torch(

@@ -93,7 +93,7 @@ class ShortConv(MambaBase, CustomOp):
     ):
         # Reference torch causal conv1d; runs on all CPU platforms. AMX kernels
         # for causal conv can be plugged in here later.
-        import platform
+        from vllm.platforms import CpuArchEnum, current_platform
 
         from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
             causal_conv1d_fn_cpu as causal_conv1d_torch,
@@ -170,7 +170,7 @@ class ShortConv(MambaBase, CustomOp):
             assert attn_metadata.state_indices_tensor_d is not None
             state_indices_d = attn_metadata.state_indices_tensor_d.flatten()
             Bx_d = B_d * x_d  # (num_decodes, dim)
-            if platform.machine() == "aarch64":
+            if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
                 conv_state_view = conv_state[state_indices_d].contiguous()
                 out_d = causal_conv1d_update_torch(
                     Bx_d.unsqueeze(-1),
