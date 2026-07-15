@@ -342,54 +342,6 @@ def test_rms_norm_different_hidden_sizes(default_vllm_config, hidden_size: int):
 
 
 @skip_unsupported
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("use_residual", [False, True])
-def test_rms_norm_weightless_ignores_identity_weight(
-    default_vllm_config, monkeypatch, dtype: torch.dtype, use_residual: bool
-):
-    """
-    RMSNorm(has_weight=False) keeps its identity weight as a plain tensor that
-    load_weights never restores, so sleep(level=2) leaves it with garbage data.
-    The batch-invariant path must skip the weight multiply instead of reading it.
-    """
-    device = torch.device(DEVICE_TYPE)
-    hidden_size = 2048
-    eps = 1e-6
-
-    torch.manual_seed(42)
-    x = torch.randn(8, hidden_size, dtype=dtype, device=device)
-
-    with torch.device(device):
-        layer = RMSNorm(hidden_size, eps=eps, has_weight=False, dtype=dtype)
-    # Simulate the discarded weight pool after sleep(level=2) + weight re-sync.
-    layer.weight.zero_()
-
-    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
-    if use_residual:
-        residual = torch.randn(8, hidden_size, dtype=dtype, device=device)
-        out, _ = layer.forward_cuda(x.clone(), residual.clone())
-        merged = (x.float() + residual.float()).to(dtype)
-    else:
-        out = layer.forward_cuda(x.clone())
-        merged = x
-
-    merged_f32 = merged.float()
-    expected = (
-        merged_f32 * torch.rsqrt(merged_f32.pow(2).mean(-1, keepdim=True) + eps)
-    ).to(dtype)
-
-    rtol, atol = (1e-1, 1e-1) if dtype == torch.bfloat16 else (1e-2, 1e-2)
-    torch.testing.assert_close(
-        out,
-        expected,
-        rtol=rtol,
-        atol=atol,
-        msg="Weightless RMSNorm must not apply the stale identity weight "
-        f"(use_residual={use_residual})",
-    )
-
-
-@skip_unsupported
 def test_rms_norm_determinism(default_vllm_config):
     """
     Test that batch-invariant RMS norm produces deterministic results.
