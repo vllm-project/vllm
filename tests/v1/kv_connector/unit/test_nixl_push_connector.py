@@ -32,6 +32,13 @@ from unittest.mock import MagicMock, patch
 import msgspec
 import pytest
 
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+    NixlBaseConnectorWorker,
+    _MemberTransferState,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.member_transfer import (
+    MemberTransferPlan,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
     NixlAgentMetadata,
@@ -330,11 +337,14 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         # Base worker fields touched by start_load_kv / _get_new_notifs.
         w._recving_metadata = {}
         w._recving_transfers = defaultdict(list)
+        w._is_hma_required = False
+        w._member_xfer_state = {}
         w._reqs_to_process = set()
         w._reqs_to_send = {}
         w.consumer_notification_counts_by_req = defaultdict(int)
         w.tp_rank = 0
         w.world_size = 1
+        w.pp_size = 1
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
         w._physical_blocks_per_logical_kv_block = 1
@@ -1102,3 +1112,146 @@ class TestPushWriterMlaReplication:
         # All of the request's WRITE handles must be tracked together, so the
         # engine thread never sees a partial set and double-frees the request.
         assert sorted(w._sending_transfers["p-req"]) == [1000, 1001]
+
+
+def _agent_metadata(
+    region_members: list[list[str]],
+    base_addresses: list[int],
+    block_lens: list[int],
+) -> NixlAgentMetadata:
+    return NixlAgentMetadata(
+        engine_id="remote-engine",
+        agent_metadata=b"agent",
+        kv_caches_base_addr=base_addresses,
+        device_id=7,
+        num_blocks=2,
+        block_lens=block_lens,
+        kv_cache_layout="HND",
+        block_size=16,
+        ssm_sizes=(0, 0),
+        attn_backend_name="FLASH_ATTN",
+        physical_blocks_per_logical_kv_block=1,
+        region_members=region_members,
+    )
+
+
+def _member_worker(
+    region_members: list[list[str]],
+    group_by_member: dict[str, int],
+) -> _StubWriterWorker:
+    worker = _StubWriterWorker.fresh()
+    worker.pp_size = 2
+    worker._has_mamba = False
+    worker._is_hma_required = True
+    worker._layer_name_to_kv_group_index = group_by_member
+    worker.transfer_topo = MagicMock()
+    worker._set_region_members(region_members)
+    return worker
+
+
+def test_member_plan_routes_descriptor_blocks():
+    worker = _StubWriterWorker.fresh()
+    worker._has_mamba = False
+    worker.num_regions = 3
+    desc_ids = worker._compute_desc_ids(
+        block_ids=[[1, 2], [5]],
+        dst_num_blocks=10,
+        block_size_ratio=None,
+        physical_blocks_per_logical=1,
+        region_group_ids=(0, 1, 0),
+    )
+    assert desc_ids.tolist() == [1, 2, 15, 21, 22]
+
+
+def test_member_identity_gate_preserves_the_non_hma_path():
+    metadata = _agent_metadata([["a"]], [0xA000], [128])
+    worker = _member_worker([["a"]], {"a": 0})
+
+    assert worker._use_member_identity(metadata)
+    # A bare base worker (pull) never requires member routing.
+    assert not object.__new__(NixlBaseConnectorWorker)._use_member_identity(metadata)
+
+    # Local layout requires routing but the remote omitted member metadata:
+    # fail loud instead of silently falling back to region-index routing.
+    metadata.region_members = []
+    with pytest.raises(RuntimeError, match="requires member-identity routing"):
+        worker._use_member_identity(metadata)
+
+    # A non-HMA local layout does not require member routing.
+    worker._is_hma_required = False
+    metadata.region_members = [["a"]]
+    assert not worker._use_member_identity(metadata)
+
+    # PP=1 has congruent local/remote regions and keeps the legacy route even
+    # when its allocator is hybrid.
+    worker._is_hma_required = True
+    worker.pp_size = 1
+    assert not worker._use_member_identity(metadata)
+
+
+def test_attention_member_routing_rejects_decode_tp_fanout():
+    metadata = _agent_metadata([["a"]], [0xA000], [128])
+    worker = _member_worker([["a"]], {"a": 0})
+    worker.use_mla = False
+    worker.transfer_topo.get_engine_info.return_value.remote_tp_size = 2
+    worker.transfer_topo.tp_ratio.return_value = -2
+
+    with pytest.raises(NotImplementedError, match="decode TP greater"):
+        worker._validate_remote_agent_handshake(metadata, 2, MagicMock())
+
+
+def test_remote_cleanup_releases_member_handle():
+    worker = _StubWriterWorker.fresh()
+    worker.nixl_wrapper = MagicMock()
+    worker._remote_agents = {"remote": {(0, 0): "agent"}}
+    worker.dst_xfer_side_handles = {"remote": {0: 11}}
+    worker._member_xfer_state = {
+        "remote": _MemberTransferState(
+            handle=22,
+            plan=MemberTransferPlan(
+                member_names=("a",),
+                local_regions=(0,),
+                group_ids=(0,),
+            ),
+        )
+    }
+    worker.kv_caches_base_addr = {"remote": {0: [0x1000]}}
+    worker.dst_num_blocks = {"remote": 2}
+    worker.tp_mappings = {"remote": MagicMock()}
+    worker.transfer_topo = MagicMock()
+    worker._engine_last_active = {}
+    worker._engine_clock_offset = {}
+
+    worker._cleanup_remote_engine("remote")
+
+    released = [
+        call.args[0] for call in worker.nixl_wrapper.release_dlist_handle.call_args_list
+    ]
+    assert released == [11, 22]
+    assert "remote" not in worker._member_xfer_state
+    worker.nixl_wrapper.remove_remote_agent.assert_called_once_with("agent")
+
+
+def test_member_state_rejects_divergent_remote_ranks():
+    worker = _StubWriterWorker.fresh()
+    worker.register_local_xfer_handler = MagicMock(return_value=(99, []))
+    plan_a = MemberTransferPlan(
+        member_names=("a", "b"),
+        local_regions=(0, 1),
+        group_ids=(0, 1),
+    )
+    plan_b = MemberTransferPlan(
+        member_names=("b", "a"),
+        local_regions=(1, 0),
+        group_ids=(1, 0),
+    )
+
+    worker._register_member_state("eng", plan_a, 16)
+    assert worker._member_xfer_state["eng"].handle == 99
+    # A matching later rank passes the consistency check and reuses the handle.
+    worker._check_member_plan_consistency("eng", plan_a)
+    worker._register_member_state("eng", plan_a, 16)
+    worker.register_local_xfer_handler.assert_called_once()
+    # A rank whose member order differs is rejected before any registration.
+    with pytest.raises(RuntimeError, match="inconsistent member layouts"):
+        worker._check_member_plan_consistency("eng", plan_b)
