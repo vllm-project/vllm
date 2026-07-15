@@ -967,7 +967,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             and num_draft_tokens_per_req is not None
         ):
             cu_num_logits, query_start_loc, total_num_draft_tokens = (
-                self.adaptive_verification.compact_batch(req_ids, idx_mapping)
+                self.adaptive_verification.compact_batch(
+                    req_ids, idx_mapping, num_tokens
+                )
             )
             num_tokens = (
                 int(num_scheduled_tokens.sum() - num_draft_tokens_per_req.sum())
@@ -1088,7 +1090,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits_np=cu_num_logits_np,
             has_structured_output_reqs=scheduler_output.has_structured_output_requests,
             prompt_lens=prompt_lens,
-            max_num_tokens_per_req=batch_desc.max_num_tokens_per_req,
+            max_num_tokens_per_req=batch_desc.max_query_len,
         )
         if self.adaptive_verification is not None:
             self.adaptive_verification.mask_batch(input_batch)
@@ -1218,10 +1220,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Get batch descriptor and sync across DP ranks.
         num_reqs = len(scheduler_output.num_scheduled_tokens)
         num_toks = scheduler_output.total_num_scheduled_tokens
-        max_num_tokens_per_req = max(scheduler_output.num_scheduled_tokens.values())
-        uniform_tok_count = get_uniform_token_count(
-            num_reqs, num_toks, max_num_tokens_per_req
-        )
+        max_query_len = max(scheduler_output.num_scheduled_tokens.values())
+        uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
         num_active_loras = 0
         if self.lora_config:
             req_ids = list(scheduler_output.num_scheduled_tokens.keys())
@@ -1255,7 +1255,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             uniform_tok_count,
             self.dp_size,
             self.dp_rank,
-            max_num_tokens_per_req=max_num_tokens_per_req,
+            max_query_len=max_query_len,
             need_eager=is_profile or skip_compiled,
             num_active_loras=num_active_loras,
         )
@@ -1295,7 +1295,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 batch_desc.num_reqs or num_reqs,
                 batch_desc.num_tokens,
                 self.input_buffers,
-                max_num_tokens_per_req=batch_desc.max_num_tokens_per_req,
+                max_num_tokens_per_req=batch_desc.max_query_len,
             )
             if not skip_attn_for_dummy_run:
                 block_tables, slot_mappings = self.prepare_dummy_attn(input_batch)

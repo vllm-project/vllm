@@ -54,7 +54,7 @@ class BatchExecutionDescriptor:
     num_tokens: int
     num_reqs: int | None  # None means no request padding is needed (PIECEWISE graphs)
     uniform_token_count: int | None = None
-    max_num_tokens_per_req: int | None = None
+    max_query_len: int | None = None
     num_active_loras: int = 0
 
 
@@ -76,7 +76,7 @@ def _is_compatible(
     num_tokens: int,
     uniform_token_count: int | None,
     num_active_loras: int,
-    max_num_tokens_per_req: int,
+    max_query_len: int,
 ) -> bool:
     # desc.uniform_token_count=None (PIECEWISE) can handle any uniform_token_count
     # desc.num_reqs=None means no request padding needed (PIECEWISE)
@@ -85,10 +85,7 @@ def _is_compatible(
             desc.uniform_token_count is None
             or desc.uniform_token_count == uniform_token_count
         )
-        and (
-            desc.max_num_tokens_per_req is None
-            or desc.max_num_tokens_per_req >= max_num_tokens_per_req
-        )
+        and (desc.max_query_len is None or desc.max_query_len >= max_query_len)
         and (desc.num_reqs is None or desc.num_reqs >= num_reqs)
         and desc.num_tokens >= num_tokens
         and desc.num_active_loras == num_active_loras
@@ -255,7 +252,7 @@ class CudaGraphManager:
                         uniform_token_count=(
                             None if self.adaptive_verification else decode_query_len
                         ),
-                        max_num_tokens_per_req=(
+                        max_query_len=(
                             self.decode_query_len
                             if self.adaptive_verification
                             else None
@@ -394,7 +391,7 @@ class CudaGraphManager:
         num_tokens: int,
         uniform_token_count: int | None,
         num_active_loras: int,
-        max_num_tokens_per_req: int = 0,
+        max_query_len: int = 0,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
 
@@ -408,7 +405,7 @@ class CudaGraphManager:
                     num_tokens,
                     uniform_token_count,
                     effective_loras,
-                    max_num_tokens_per_req,
+                    max_query_len,
                 ):
                     return desc
         return BatchExecutionDescriptor(
@@ -531,7 +528,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 attn_groups,
                 kv_cache_config,
                 skip_attn=(desc.cg_mode == CUDAGraphMode.PIECEWISE),
-                max_num_tokens_per_req=desc.max_num_tokens_per_req,
+                max_query_len=desc.max_query_len,
             )
 
             # Capture with dummy rows marked as padding.
@@ -628,13 +625,13 @@ def prepare_inputs_to_capture(
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
     skip_attn: bool = False,
-    max_num_tokens_per_req: int | None = None,
+    max_query_len: int | None = None,
 ) -> AttentionState:
     input_batch = InputBatch.make_dummy(
         num_reqs,
         num_tokens,
         input_buffers,
-        max_num_tokens_per_req=max_num_tokens_per_req,
+        max_num_tokens_per_req=max_query_len,
     )
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
     slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)

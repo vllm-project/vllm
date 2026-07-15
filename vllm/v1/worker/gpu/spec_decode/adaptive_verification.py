@@ -307,7 +307,10 @@ class AdaptiveVerificationManager:
         return valid_drafts_per_req, num_non_draft_tokens_per_req, draft_budget
 
     def allocate_draft_token_budget(
-        self, req_ids: list[str], idx_mapping: torch.Tensor
+        self,
+        req_ids: list[str],
+        idx_mapping: torch.Tensor,
+        num_tokens: int | None = None,
     ) -> tuple[torch.Tensor, np.ndarray, int]:
         batch_budget = self._batch_budget
         self._batch_budget = None
@@ -323,13 +326,19 @@ class AdaptiveVerificationManager:
             dtype=np.int32,
             count=len(req_ids),
         )
+        num_scheduled_draft_tokens = int(valid_drafts.sum())
+        if num_tokens is not None:
+            draft_budget = min(
+                num_scheduled_draft_tokens,
+                num_tokens - int(num_non_draft_tokens.sum()),
+            )
         num_reqs = idx_mapping.shape[0]
         capacities = self._batch_draft_capacity[:num_reqs]
         if draft_budget == 0:
             capacities.zero_()
         else:
             async_copy_to_gpu(valid_drafts, out=capacities)
-            if draft_budget != int(valid_drafts.sum()):
+            if draft_budget != num_scheduled_draft_tokens:
                 block_size = triton.next_power_of_2(
                     num_reqs * self.num_speculative_steps
                 )
@@ -347,7 +356,7 @@ class AdaptiveVerificationManager:
         return capacities, num_non_draft_tokens, draft_budget
 
     def compact_batch(
-        self, req_ids: list[str], idx_mapping: torch.Tensor
+        self, req_ids: list[str], idx_mapping: torch.Tensor, num_tokens: int
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
         raise NotImplementedError
 
@@ -373,10 +382,10 @@ class VarlenAdaptiveVerificationManager(AdaptiveVerificationManager):
         self._cu_num_logits = torch.empty_like(query_start_loc)
 
     def compact_batch(
-        self, req_ids: list[str], idx_mapping: torch.Tensor
+        self, req_ids: list[str], idx_mapping: torch.Tensor, num_tokens: int
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
         capacities, num_non_draft_tokens, draft_budget = (
-            self.allocate_draft_token_budget(req_ids, idx_mapping)
+            self.allocate_draft_token_budget(req_ids, idx_mapping, num_tokens)
         )
         num_reqs = idx_mapping.shape[0]
         num_tokens = int(num_non_draft_tokens.sum()) + draft_budget
