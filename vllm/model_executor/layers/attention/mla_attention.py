@@ -1334,7 +1334,7 @@ class MLACommonPrefillMetadata:
         padded_local_token_to_seq: torch.Tensor | None = None
         cu_seq_lens_lst: list[list[int]] | None = None
         chunk_size: int | None = None
-        pcp_dcp: MLAPCPChunkedContextMetadata | None = None
+        pcp_chunk_metadata: MLAPCPChunkedContextMetadata | None = None
         prefill_tokens_with_context: int | None = None
 
     block_table: torch.Tensor
@@ -1609,9 +1609,9 @@ def build_mla_chunked_context_metadata(
             tts = torch.repeat_interleave(req_indices, padded_local_chunk_seq_lens[i])
             padded_local_token_to_seq_cpu[i, : tts.shape[0]] = tts
 
-        pcp_dcp = None
+        pcp_chunk_metadata = None
         if dcp_tp_size == 1 and dcp_world_size > 1:
-            pcp_dcp = build_pcp_chunked_context_metadata(
+            pcp_chunk_metadata = build_pcp_chunked_context_metadata(
                 context_lens_cpu,
                 dcp_world_size,
                 dcp_rank,
@@ -1641,7 +1641,7 @@ def build_mla_chunked_context_metadata(
             ),
             cu_seq_lens_lst=cu_seq_lens_cpu.tolist(),
             chunk_size=padded_local_max_context_chunk,
-            pcp_dcp=pcp_dcp,
+            pcp_chunk_metadata=pcp_chunk_metadata,
         )
     else:
         chunked_context_metadata = metadata_cls(

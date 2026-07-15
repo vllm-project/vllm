@@ -150,14 +150,14 @@ class MLAPCPImplMixin:
         chunked_context = prefill_metadata.chunked_context
         assert chunked_context.padded_local_chunk_seq_lens is not None
         assert chunked_context.padded_local_cu_seq_lens is not None
-        assert chunked_context.pcp_dcp is not None
-        pcp_dcp = chunked_context.pcp_dcp
+        assert chunked_context.pcp_chunk_metadata is not None
+        pcp_chunk_metadata = chunked_context.pcp_chunk_metadata
 
         local_chunked_context = replace(
             chunked_context,
-            cu_seq_lens=pcp_dcp.cu_seq_lens,
-            seq_tot=pcp_dcp.seq_tot,
-            max_seq_lens=pcp_dcp.max_seq_lens,
+            cu_seq_lens=pcp_chunk_metadata.cu_seq_lens,
+            seq_tot=pcp_chunk_metadata.seq_tot,
+            max_seq_lens=pcp_chunk_metadata.max_seq_lens,
         )
         local_prefill_metadata = replace(
             prefill_metadata, chunked_context=local_chunked_context
@@ -168,7 +168,7 @@ class MLAPCPImplMixin:
         merge_output = None
         workspace = chunked_context.workspace
         for i, padded_toks in enumerate(chunked_context.seq_tot):
-            local_toks = pcp_dcp.seq_tot[i]
+            local_toks = pcp_chunk_metadata.seq_tot[i]
             ops.cp_gather_cache(
                 src_cache=kv_c_and_k_pe_cache,
                 dst=workspace,
@@ -184,7 +184,7 @@ class MLAPCPImplMixin:
                 local_kvcache = self._unpad_dcp_local_kvcache(
                     workspace[:padded_toks],
                     chunked_context.padded_local_chunk_seq_lens[i],
-                    pcp_dcp.seq_lens[i],
+                    pcp_chunk_metadata.seq_lens[i],
                     local_toks,
                 )
                 k, v = self._project_context_kv(local_kvcache)
