@@ -16,6 +16,7 @@ from vllm.config import (
     CompilationConfig,
     CUDAGraphMode,
     DeviceConfig,
+    KernelConfig,
     ModelConfig,
     PassConfig,
     VllmConfig,
@@ -38,7 +39,10 @@ from vllm.utils.torch_utils import set_random_seed
 
 DEVICE_TYPE = current_platform.device_type
 
-pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
+pytestmark = pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_xpu()),
+    reason="Only test CUDA and XPU",
+)
 
 FP8_DTYPE = current_platform.fp8_dtype()
 prompts = [
@@ -179,7 +183,9 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("fuse_norm_quant", [True, False])
 @pytest.mark.parametrize("dynamic", [False, True])
-@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
+@pytest.mark.skipif(
+    envs.VLLM_TARGET_DEVICE not in ["cuda", "xpu"], reason="Only test on CUDA and XPU"
+)
 def test_sequence_parallelism_pass(
     test_model_cls: type[torch.nn.Module],
     custom_ops: str,
@@ -262,7 +268,7 @@ def sequence_parallelism_pass_on_test_model(
     )
 
     # initialize distributed
-    init_distributed_environment()
+    init_distributed_environment(backend=current_platform.dist_backend)
 
     # configure vllm config for SequenceParallelismPass
     custom_ops_list = custom_ops.split(",") if custom_ops else []
@@ -285,10 +291,16 @@ def sequence_parallelism_pass_on_test_model(
         model=model_name, trust_remote_code=True, dtype=dtype, seed=42
     )
 
+    is_fp8_model = test_model_cls is TestAllReduceRMSNormStaticQuantFP8Model
+    kernel_config = KernelConfig(
+        linear_backend="xpu" if is_fp8_model and current_platform.is_xpu() else "auto"
+    )
+
     vllm_config = VllmConfig(
         model_config=model_config,
         device_config=device_config,
         compilation_config=compilation_config,
+        kernel_config=kernel_config,
     )
 
     with set_current_vllm_config(vllm_config):
