@@ -357,6 +357,66 @@ class ChunkGatedDeltaRule(CustomOp):
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
     ):
+        from vllm import envs
+
+        # BATCH INVARIANCE FIX:
+        # The FLA chunk_gated_delta_rule kernel is not reduction-order invariant
+        # because its internal chunking depends on sequence geometry. Different
+        # batch sizes lead to different reduction patterns and non-deterministic results.
+        #
+        # Fix: When batch invariance is enabled, process sequences one at a time
+        # to ensure consistent reduction order regardless of batch composition.
+        if envs.VLLM_BATCH_INVARIANT and cu_seqlens is not None and len(cu_seqlens) > 2:
+            # Process each sequence independently
+            batch_size = len(cu_seqlens) - 1
+            outputs = []
+            final_states = []
+
+            for i in range(batch_size):
+                start_idx = cu_seqlens[i]
+                end_idx = cu_seqlens[i + 1]
+                seq_len = end_idx - start_idx
+
+                if seq_len == 0:
+                    continue
+
+                # Extract single sequence
+                q_seq = q[start_idx:end_idx].unsqueeze(0)
+                k_seq = k[start_idx:end_idx].unsqueeze(0)
+                v_seq = v[start_idx:end_idx].unsqueeze(0)
+                g_seq = g[start_idx:end_idx].unsqueeze(0)
+                beta_seq = beta[start_idx:end_idx].unsqueeze(0)
+
+                # Single sequence cu_seqlens
+                cu_seqlens_single = torch.tensor([0, seq_len], device=q.device, dtype=cu_seqlens.dtype)
+
+                # Process single sequence
+                o_seq, final_state_seq = fla_chunk_gated_delta_rule(
+                    q=q_seq,
+                    k=k_seq,
+                    v=v_seq,
+                    g=g_seq,
+                    beta=beta_seq,
+                    initial_state=initial_state[i:i+1] if initial_state is not None else None,
+                    output_final_state=output_final_state,
+                    cu_seqlens=cu_seqlens_single,
+                    chunk_indices=None,  # Will be recomputed for single sequence
+                    chunk_offsets=None,
+                    use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+                    core_attn_out=None,
+                )
+
+                outputs.append(o_seq.squeeze(0))
+                if output_final_state:
+                    final_states.append(final_state_seq)
+
+            # Concatenate results
+            o = torch.cat(outputs, dim=0)
+            final_state = torch.cat(final_states, dim=0) if output_final_state else None
+
+            return o, final_state
+
+        # Original non-deterministic path
         return fla_chunk_gated_delta_rule(
             q=q,
             k=k,

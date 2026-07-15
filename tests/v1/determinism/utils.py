@@ -27,6 +27,7 @@ BACKENDS: list[str] = [
     "FLASH_ATTN",
     "TRITON_ATTN",
     "FLEX_ATTENTION",
+    "GDN_ATTN",
 ]
 
 # FlashInfer temporarily disabled due to invariant CTA sizes.
@@ -41,6 +42,20 @@ if os.getenv("VLLM_TEST_MODEL"):
         BACKENDS = ["TRITON_MLA"]
         if flash_attn_supports_mla():
             BACKENDS.append("FLASH_ATTN_MLA")
+    # GDN_ATTN is for Qwen3.5 models (model_type="qwen3_5") and
+    # Qwen3-Next/Qwen3.6 hybrid models (dual_chunk_attention_config present)
+    elif (
+        getattr(config, "model_type", "") == "qwen3_5"
+        or (
+            hasattr(config, "dual_chunk_attention_config")
+            and config.dual_chunk_attention_config is not None
+        )
+    ):
+        BACKENDS = ["GDN_ATTN"]
+    else:
+        # Remove GDN_ATTN for models that don't have GDN architecture
+        if "GDN_ATTN" in BACKENDS:
+            BACKENDS.remove("GDN_ATTN")
 
 
 def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
@@ -107,3 +122,18 @@ def _extract_step_logprobs(request_output):
 
 def is_device_capability_below_90() -> bool:
     return not current_platform.has_device_capability(90)
+
+
+def get_attention_config(backend: str) -> dict:
+    """Return attention_config dict for the given backend.
+
+    GDN_ATTN is a Mamba-specific backend that is auto-selected by model
+    architecture (Qwen3.5/Qwen3.6 GDN layers). It cannot be set via
+    attention_config["backend"] since it is not a standard AttentionBackendEnum
+    value. For GDN_ATTN, return an empty dict so the engine uses its default
+    attention backend for transformer layers while GDN layers use GDN_ATTN
+    automatically.
+    """
+    if backend == "GDN_ATTN":
+        return {}
+    return {"backend": backend}

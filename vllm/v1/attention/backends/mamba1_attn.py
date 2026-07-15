@@ -24,6 +24,10 @@ class Mamba1AttentionBackend(AttentionBackend):
     def is_ssm(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
 
 @dataclass
 class Mamba1AttentionMetadata(BaseMambaAttentionMetadata):

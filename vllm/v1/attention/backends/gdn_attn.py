@@ -37,6 +37,10 @@ class GDNAttentionBackend(AttentionBackend):
     def is_ssm(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
 
 @dataclass
 class GDNAttentionMetadata:

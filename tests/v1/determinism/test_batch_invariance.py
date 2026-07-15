@@ -11,6 +11,7 @@ from utils import (
     TEST_MODEL,
     _extract_step_logprobs,
     _random_prompt,
+    get_attention_config,
     skip_unsupported,
 )
 
@@ -52,7 +53,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
 
-    attention_config = {"backend": backend}
+    attention_config = get_attention_config(backend)
     # Allow overrides from environment (useful for CI tuning)
     # "facebook/opt-125m" is too small, doesn't reliably test determinism
     model = TEST_MODEL
@@ -180,7 +181,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
         dtype="auto",  # not everything is supported
         gpu_memory_utilization=0.9,
         attention_config={
-            "backend": backend,
+            **get_attention_config(backend),
             "flex_attn_block_m": block_m,
             "flex_attn_block_n": block_n,
         },
@@ -395,7 +396,7 @@ def test_simple_generation(backend):
         max_model_len=2048,
         dtype="auto",
         enable_prefix_caching=False,
-        attention_config={"backend": backend},
+        attention_config=get_attention_config(backend),
     )
 
     prompt = "the capital of france is"
@@ -459,7 +460,7 @@ def test_logprobs_without_batch_invariance_should_fail(
         max_num_seqs=32,
         max_model_len=8192,
         dtype="auto",
-        attention_config={"backend": backend},
+        attention_config=get_attention_config(backend),
     )
 
     # build ragged prompts to change shapes significantly across BS=1 vs BS=N
@@ -678,7 +679,7 @@ def test_decode_logprobs_match_prefill_logprobs(
         max_num_seqs=32,
         max_model_len=8192,
         dtype="auto",
-        attention_config={"backend": backend},
+        attention_config=get_attention_config(backend),
     )
 
     # Use a few test prompts
