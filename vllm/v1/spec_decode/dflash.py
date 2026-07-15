@@ -71,9 +71,9 @@ class DFlashProposer(SpecDecodeBaseProposer):
         self.parallel_drafting_hidden_state_tensor = None
 
         # Uniform-causality scalar; honors SWA-derived causality, not just the override.
-        from vllm.model_executor.models.qwen3_dflash import dflash_has_any_noncausal
+        from vllm.model_executor.models.qwen3_dflash import dflash_has_any_non_causal
 
-        self.dflash_causal = not dflash_has_any_noncausal(
+        self.dflash_causal = not dflash_has_any_non_causal(
             self.draft_model_config.hf_config
         )
 

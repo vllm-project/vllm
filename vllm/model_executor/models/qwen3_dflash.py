@@ -64,7 +64,7 @@ def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
     return bool(layer_types) and layer_types[layer_idx] == _SLIDING_ATTENTION
 
 
-def dflash_has_any_noncausal(config: Qwen3Config) -> bool:
+def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
     """Whether the draft needs a non-causal-capable backend, resolved from config
     (config mirror of the model's ``get_draft_attn_causal``, usable pre-build)."""
     return not all(

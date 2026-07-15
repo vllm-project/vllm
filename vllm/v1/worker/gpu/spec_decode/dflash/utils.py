@@ -13,7 +13,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
 
 def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
     from vllm.compilation.backends import set_model_tag
-    from vllm.model_executor.models.qwen3_dflash import dflash_has_any_noncausal
+    from vllm.model_executor.models.qwen3_dflash import dflash_has_any_non_causal
 
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
@@ -24,7 +24,7 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
         vllm_config,
         attention_config=replace(
             vllm_config.attention_config,
-            use_non_causal=dflash_has_any_noncausal(draft_model_config.hf_config),
+            use_non_causal=dflash_has_any_non_causal(draft_model_config.hf_config),
             backend=speculative_config.attention_backend,
         ),
     )

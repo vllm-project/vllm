@@ -48,9 +48,9 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.draft_model_config.hf_config
         )
 
-        from vllm.model_executor.models.qwen3_dflash import dflash_has_any_noncausal
+        from vllm.model_executor.models.qwen3_dflash import dflash_has_any_non_causal
 
-        self.use_non_causal = dflash_has_any_noncausal(
+        self.requires_non_causal = dflash_has_any_non_causal(
             self.draft_model_config.hf_config
         )
 
@@ -93,7 +93,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.vllm_config,
             attention_config=replace(
                 self.vllm_config.attention_config,
-                use_non_causal=self.use_non_causal,
+                use_non_causal=self.requires_non_causal,
             ),
         )
 
@@ -184,7 +184,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         # leave this as None and share one context slot mapping.
         self._layer_group_idx: list[int] | None = None
         # Per-KV-group causal, falling back to whether the drafter is all-causal.
-        self._group_causal: dict[int, bool] | bool = not self.use_non_causal
+        self._group_causal: dict[int, bool] | bool = not self.requires_non_causal
         if hasattr(self.model, "get_draft_kv_cache_layer_names"):
             layer_names = self.model.get_draft_kv_cache_layer_names()
             name_to_gid = {
