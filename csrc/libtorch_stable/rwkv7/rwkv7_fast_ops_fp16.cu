@@ -33,7 +33,8 @@ constexpr int MIX_3D_MAX_GRID = 65535;
 inline int64_t ceil_div(int64_t n, int64_t d) { return (n + d - 1) / d; }
 
 bool use_3d_mix(int B, int T, int C) {
-  return C == MIX_3D_C && B <= MIX_3D_MAX_GRID && T <= MIX_3D_MAX_GRID &&
+  return T > 1 && C == MIX_3D_C && B <= MIX_3D_MAX_GRID &&
+         T <= MIX_3D_MAX_GRID &&
          (B >= 2 || T == 2 || T == 4 || T == 16 || T == 64 || T == 512);
 }
 
