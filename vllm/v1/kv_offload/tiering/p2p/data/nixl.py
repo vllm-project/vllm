@@ -48,14 +48,14 @@ class NixlTransport(DataTransport):
 
     def __init__(
         self,
-        local_id: str,
+        agent_name: str,
         view: memoryview,
         config_fields: dict | None = None,
         backends: list[str] | None = None,
         num_threads: int = 4,
     ) -> None:
         super().__init__(view, config_fields=config_fields)
-        self._local_id = local_id
+        self._agent_name = agent_name
         self._backends = list(backends) if backends else ["UCX"]
         self._num_threads = num_threads
         self._agent: Any = None
@@ -82,7 +82,7 @@ class NixlTransport(DataTransport):
             cfg = _NixlAgentConfig(backends=self._backends, capture_telemetry=True)
             logger.info(
                 "NixlTransport %s: NIXL backends=%s",
-                self._local_id,
+                self._agent_name,
                 self._backends,
             )
         else:
@@ -91,10 +91,10 @@ class NixlTransport(DataTransport):
             )
             logger.info(
                 "NixlTransport %s: NIXL backends=[UCX] num_threads=%d",
-                self._local_id,
+                self._agent_name,
                 self._num_threads,
             )
-        self._agent = _NixlAgent(self._local_id, cfg)
+        self._agent = _NixlAgent(self._agent_name, cfg)
 
         total_size = self._num_blocks * self._block_len
         reg_descs = [(self._base_addr, total_size, 0, "")]
@@ -107,7 +107,7 @@ class NixlTransport(DataTransport):
         xfer_dlist = self._agent.get_xfer_descs(block_tuples, mem_type="DRAM")
         self._local_dlist = self._agent.prep_xfer_dlist("NIXL_INIT_AGENT", xfer_dlist)
         logger.info(
-            "NixlTransport %s: registered %d blocks", self._local_id, self._num_blocks
+            "NixlTransport %s: registered %d blocks", self._agent_name, self._num_blocks
         )
 
     def get_agent_metadata(self) -> bytes:
@@ -164,14 +164,14 @@ class NixlTransport(DataTransport):
             logger.warning(
                 "NixlTransport %s: write_blocks NO REMOTE DLIST for peer=%s "
                 "(known peers=%s)",
-                self._local_id,
+                self._agent_name,
                 peer_id,
                 list(self._remote_dlists.keys()),
             )
             return None
         logger.debug(
             "NixlTransport %s: write_blocks NIXL.transfer peer=%s blocks=%d",
-            self._local_id,
+            self._agent_name,
             peer_id,
             len(local_idxs),
         )
@@ -212,7 +212,7 @@ class NixlTransport(DataTransport):
             except Exception as exc:
                 logger.warning(
                     "NixlTransport %s: check_xfer_state failed for transfer_id=%d: %s",
-                    self._local_id,
+                    self._agent_name,
                     transfer_id,
                     exc,
                 )
@@ -272,7 +272,7 @@ class NixlTransport(DataTransport):
             except Exception as exc:
                 logger.debug(
                     "NixlTransport %s: cancel pending for transfer_id=%d: %s",
-                    self._local_id,
+                    self._agent_name,
                     tid,
                     exc,
                 )
@@ -313,6 +313,6 @@ class NixlTransport(DataTransport):
             except Exception as exc:
                 logger.warning(
                     "NixlTransport %s: release_xfer_handle failed: %s",
-                    self._local_id,
+                    self._agent_name,
                     exc,
                 )
