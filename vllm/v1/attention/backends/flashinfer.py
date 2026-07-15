@@ -975,6 +975,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # directly and does not need a dequant scratch buffer.
             return
 
+        if not getattr(self.model_config, "uses_alibi", True):
+            return
+
         scratch_shape = (
             self.model_config.max_model_len,
             self.num_kv_heads,
@@ -1871,9 +1874,29 @@ class FlashInferImpl(AttentionImpl):
         else:
             output_slice.copy_(attn_out)
 
+    def _run_native_nvfp4_prefill(
+        self,
+        layer: torch.nn.Module,
+        prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper,
+        prefill_query: torch.Tensor,
+        output: torch.Tensor,
+        nvfp4_kv_data: tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor],
+        nvfp4_kv_block_scales: tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor],
+    ) -> None:
+        prefill_wrapper.run(
+            prefill_query,
+            nvfp4_kv_data,
+            q_scale=layer._q_scale_float,
+            k_scale=layer._k_scale_float,
+            v_scale=layer._v_scale_float,
+            out=output,
+            kv_cache_sf=nvfp4_kv_block_scales,
+        )
+
     def _run_nvfp4_fa2_prefill(
         self,
         layer: torch.nn.Module,
+        prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper,
         prefill_query: torch.Tensor,
         prefill_key: torch.Tensor,
         prefill_value: torch.Tensor,
@@ -1884,13 +1907,13 @@ class FlashInferImpl(AttentionImpl):
     ) -> bool:
         if (
             not self.is_kvcache_nvfp4
-            or self._nvfp4_paged_dequant is None
             or self.fa_version is None
             or self.head_size != self.head_size_v
             or max(self.head_size, self.head_size_v) > 256
             or not _is_flash_attn_varlen_func_available()
             or prefill_query.dtype not in (torch.float16, torch.bfloat16)
             or not isinstance(attn_metadata.causal, bool)
+            or getattr(attn_metadata, "mm_prefix_range", None) is not None
             or self.dcp_world_size > 1
             or attn_metadata.use_cascade
             or self._nvfp4_fa2_cu_q is None
@@ -1900,6 +1923,8 @@ class FlashInferImpl(AttentionImpl):
 
         assert isinstance(attn_metadata.prefill, FIPrefill)
         prefill = attn_metadata.prefill
+        if getattr(prefill, "mm_wrapper", None) is not None:
+            return False
         if (
             prefill.block_tables is None
             or prefill.seq_lens is None
@@ -1915,29 +1940,60 @@ class FlashInferImpl(AttentionImpl):
         qsl = prefill.query_start_loc_cpu.tolist()
         seq_lens = prefill.seq_lens_cpu.tolist()
 
+        first_chunk_reqs: list[int] = []
+        continuation_reqs: list[int] = []
         for req_idx in range(num_reqs):
+            q_len = int(qsl[req_idx + 1]) - int(qsl[req_idx])
+            seq_len = int(seq_lens[req_idx])
+            if q_len <= 0 or seq_len <= 0:
+                continue
+            if q_len == seq_len:
+                first_chunk_reqs.append(req_idx)
+            else:
+                continuation_reqs.append(req_idx)
+
+        if not first_chunk_reqs and not continuation_reqs:
+            return True
+
+        use_legacy_scratch = self.alibi_slopes is not None
+        if use_legacy_scratch:
+            if continuation_reqs and (
+                self._nvfp4_paged_dequant is None
+                or not is_workspace_manager_initialized()
+            ):
+                return False
+            request_indices = sorted(first_chunk_reqs + continuation_reqs)
+        else:
+            if not first_chunk_reqs:
+                return False
+            if continuation_reqs:
+                self._run_native_nvfp4_prefill(
+                    layer,
+                    prefill_wrapper,
+                    prefill_query,
+                    output,
+                    nvfp4_kv_data,
+                    nvfp4_kv_block_scales,
+                )
+            request_indices = first_chunk_reqs
+
+        for req_idx in request_indices:
             q_start = int(qsl[req_idx])
             q_end = int(qsl[req_idx + 1])
             q_len = q_end - q_start
-            if q_len <= 0:
-                continue
-
             seq_len = int(seq_lens[req_idx])
-            if seq_len <= 0:
-                continue
 
             q_seq = prefill_query[q_start:q_end]
             if q_len == seq_len:
                 k_seq = prefill_key[q_start:q_end]
                 v_seq = prefill_value[q_start:q_end]
             else:
-                if not is_workspace_manager_initialized():
-                    return False
                 # FlashInfer's paged NVFP4 dequant helper writes a padded
                 # [batch, max_seq_len, ...] buffer, while flash-attn varlen
                 # consumes compact per-request K/V. The reserved scratch space
                 # is also sized for one request, so continuation chunks are
                 # dequantized and processed one request at a time.
+                assert self._nvfp4_paged_dequant is not None
                 k_buf, v_buf = current_workspace_manager().get_simultaneous(
                     (
                         (1, seq_len, self.num_kv_heads, self.head_size),
@@ -2208,6 +2264,7 @@ class FlashInferImpl(AttentionImpl):
                         assert nvfp4_kv_block_scales is not None
                         used_nvfp4_fa2_prefill = self._run_nvfp4_fa2_prefill(
                             layer,
+                            prefill_wrapper,
                             prefill_query,
                             key[num_decode_tokens:],
                             value[num_decode_tokens:],
@@ -2219,20 +2276,26 @@ class FlashInferImpl(AttentionImpl):
 
                     if not used_nvfp4_fa2_prefill:
                         if self.is_kvcache_nvfp4:
-                            kv_cache_permute = nvfp4_kv_data
-                        kv_cache_sf = (
-                            nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
-                        )
-
-                        prefill_wrapper.run(
-                            prefill_query,
-                            kv_cache_permute,
-                            q_scale=layer._q_scale_float,
-                            k_scale=layer._k_scale_float,
-                            v_scale=layer._v_scale_float,
-                            out=out_prefill,
-                            kv_cache_sf=kv_cache_sf,
-                        )
+                            assert nvfp4_kv_data is not None
+                            assert nvfp4_kv_block_scales is not None
+                            self._run_native_nvfp4_prefill(
+                                layer,
+                                prefill_wrapper,
+                                prefill_query,
+                                out_prefill,
+                                nvfp4_kv_data,
+                                nvfp4_kv_block_scales,
+                            )
+                        else:
+                            prefill_wrapper.run(
+                                prefill_query,
+                                kv_cache_permute,
+                                q_scale=layer._q_scale_float,
+                                k_scale=layer._k_scale_float,
+                                v_scale=layer._v_scale_float,
+                                out=out_prefill,
+                                kv_cache_sf=None,
+                            )
 
             else:
                 assert isinstance(attn_metadata.prefill, TRTLLMPrefill)
