@@ -931,35 +931,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Get the number of draft tokens for each request.
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
-        num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
-        num_draft_tokens_per_req = (
-            np.fromiter(
+        num_draft_tokens_per_req = None
+        if not draft_tokens:
+            total_num_draft_tokens = 0
+            total_num_logits = num_reqs
+            cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
+        else:
+            num_draft_tokens_per_req = np.fromiter(
                 (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
                 dtype=np.int32,
                 count=num_reqs,
             )
-            if draft_tokens
-            else None
-        )
-        planned_num_draft_tokens = (
-            0
-            if num_draft_tokens_per_req is None
-            else int(num_draft_tokens_per_req.sum())
-        )
-        total_num_draft_tokens = (
-            planned_num_draft_tokens
-            if draft_token_budget is None
-            else draft_token_budget
-        )
-        total_num_logits = (
-            num_reqs
-            if num_draft_tokens_per_req is None
-            else num_reqs * num_bonus_tokens + total_num_draft_tokens
-        )
-
-        if num_draft_tokens_per_req is None:
-            cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
-        else:
+            num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
+            total_num_draft_tokens = (
+                int(num_draft_tokens_per_req.sum())
+                if draft_token_budget is None
+                else draft_token_budget
+            )
+            total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
             num_logits = num_draft_tokens_per_req + num_bonus_tokens
             cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
             cu_num_logits_np[0] = 0
@@ -979,7 +968,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         drafting_manager = self.adaptive_drafting_manager
         if drafting_manager is not None:
             assert draft_token_budget is not None
-            assert num_bonus_tokens == 1
+            assert self.model_state.num_new_sampled_tokens_per_step == 1
             (
                 num_draft_tokens_per_req_gpu,
                 cu_num_logits,
