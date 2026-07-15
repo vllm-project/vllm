@@ -76,3 +76,32 @@ def test_qwen3_5_mtp_lm_head_receives_quant_config():
         MockLMHead.assert_called_once()
         call_kwargs = MockLMHead.call_args.kwargs
         assert call_kwargs["quant_config"] is mock_quant_config
+
+
+def test_qwen3_5_mtp_remaps_multimodal_weights():
+    from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MTP
+
+    weights = [
+        ("mtp.layers.0.self_attn.q_proj.weight", Mock()),
+        ("language_model.embed_tokens.weight", Mock()),
+        ("language_model.embed_tokens_extend.weight", Mock()),
+        ("language_model.lm_head.weight", Mock()),
+        ("visual.patch_embed.weight", Mock()),
+    ]
+    remapped_names = []
+
+    with patch(
+        "vllm.model_executor.models.qwen3_5_mtp.AutoWeightsLoader"
+    ) as MockLoader:
+        def capture_weights(remapped_weights):
+            remapped_names.extend(name for name, _ in remapped_weights)
+            return set(remapped_names)
+
+        MockLoader.return_value.load_weights.side_effect = capture_weights
+        Qwen3_5MTP.load_weights(Mock(), weights)
+
+    assert remapped_names == [
+        "model.layers.0.self_attn.q_proj.weight",
+        "embed_tokens.weight",
+        "lm_head.weight",
+    ]
