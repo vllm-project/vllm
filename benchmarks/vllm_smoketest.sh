@@ -20,7 +20,7 @@
 # Each of --gptoss / --dsr1 / --dsv4f / --minimax takes an OPTIONAL model path.
 set -uo pipefail
 
-PORT=8420
+PORT=8000
 CANONICAL_ORDER=(gptoss dsr1 dsv4f minimax)
 
 # --- default model paths (from the per-model serve scripts) ---
