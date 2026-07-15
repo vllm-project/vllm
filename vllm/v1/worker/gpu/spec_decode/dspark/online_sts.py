@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import numpy as np
+import torch
 
 
 class DSparkOnlineSTS:
@@ -20,13 +21,20 @@ class DSparkOnlineSTS:
     TEMP_GRID_MAX = 8.0
     TEMP_GRID_SIZE = 49
 
-    def __init__(self, num_steps: int):
+    def __init__(self, num_steps: int, device: torch.device):
         self.num_steps = num_steps
         # EMA counters per (position, logit bin).
         self.bin_trials = np.zeros((num_steps, self.NUM_BINS), dtype=np.float64)
         self.bin_hits = np.zeros_like(self.bin_trials)
         # Per-position temperatures; identity until observations accumulate.
         self.temperatures = np.ones(num_steps, dtype=np.float64)
+        self._temperatures_cpu = torch.empty(
+            num_steps, dtype=torch.float32, pin_memory=True
+        )
+        self._temperatures_cpu_np = self._temperatures_cpu.numpy()
+        self._temperatures_gpu = torch.empty(
+            num_steps, dtype=torch.float32, device=device
+        )
 
         bin_width = 2 * self.LOGIT_RANGE / self.NUM_BINS
         self._bin_mids = (
@@ -42,6 +50,11 @@ class DSparkOnlineSTS:
             1.0 + np.exp(-self._bin_mids[None, :] / self._temp_grid[:, None])
         )
         self._log_temp_grid = np.log(self._temp_grid)
+
+    def copy_temperatures_to_gpu(self) -> torch.Tensor:
+        self._temperatures_cpu_np[:] = self.temperatures
+        self._temperatures_gpu.copy_(self._temperatures_cpu, non_blocking=True)
+        return self._temperatures_gpu
 
     def reset(self) -> None:
         """Discard accumulated observations (e.g. from warmup/profiling

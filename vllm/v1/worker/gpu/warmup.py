@@ -313,13 +313,6 @@ def warmup_kernels(
         manager = model_runner.spec_decode_confidence_manager
         if manager is not None:
             manager.warmup(model_runner.input_buffers)
-            if manager.should_profile:
-                manager.profile_step_costs(
-                    model_runner,
-                    worker_execute_model,
-                    worker_sample_tokens,
-                    decode_output,
-                )
 
     # Clean up - process finish_req_ids.
     cleanup_output = SchedulerOutput.make_empty()

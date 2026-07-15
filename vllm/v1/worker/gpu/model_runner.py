@@ -490,6 +490,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.spec_decode_confidence_manager is not None
                 and self.spec_decode_confidence_manager.varlen_spec_decode
             ),
+            time_graphs=(
+                self.spec_decode_confidence_manager is not None
+                and self.spec_decode_confidence_manager.should_profile
+            ),
         )
         if self.speculator is not None:
             self.speculator.init_cudagraph_manager(cudagraph_mode)
@@ -743,6 +747,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             if self.speculator is not None:
                 self.speculator.capture()
+            manager = self.spec_decode_confidence_manager
+            if manager is not None and manager.should_profile:
+                manager.set_cost_profile(self.cudagraph_manager, self.speculator)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.accelerator.get_memory_info()[0]

@@ -116,6 +116,7 @@ class CudaGraphManager:
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
         varlen_spec_decode: bool = False,
+        time_graphs: bool = False,
     ):
         self.vllm_config = vllm_config
         self.device = device
@@ -125,6 +126,8 @@ class CudaGraphManager:
         self.cudagraph_mode = cudagraph_mode
         self.decode_query_len = decode_query_len
         self.varlen_spec_decode = varlen_spec_decode
+        self.time_graphs = time_graphs
+        self.graph_timings: dict[BatchExecutionDescriptor, float] = {}
 
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -321,6 +324,7 @@ class CudaGraphManager:
         self,
         create_forward_fn: CreateForwardFn,
         progress_bar_desc: str = "Capturing CUDA graphs",
+        prepare_timing: Callable[[BatchExecutionDescriptor], None] | None = None,
     ) -> None:
         """Capture CUDA graphs.
 
@@ -332,6 +336,7 @@ class CudaGraphManager:
                 that perform lazy metadata initialization (e.g. FlashMLA),
                 FULL cudagraph capture requires distinct metadatas for warmup
                 and capture.
+            prepare_timing: Optional input preparation before timed replays.
         """
         with graph_capture(device=self.device):
             # Capture in order: PIECEWISE first, then FULL. PIECEWISE has larger
@@ -376,6 +381,17 @@ class CudaGraphManager:
                             get_offloader().join_after_forward()
                         self.graphs[desc] = graph
                         compilation_counter.num_cudagraph_captured += 1
+                        if self.time_graphs:
+                            if prepare_timing is not None:
+                                prepare_timing(desc)
+                            start = torch.cuda.Event(enable_timing=True)
+                            end = torch.cuda.Event(enable_timing=True)
+                            start.record()
+                            for _ in range(3):
+                                graph.replay()
+                            end.record()
+                            end.synchronize()
+                            self.graph_timings[desc] = start.elapsed_time(end) / 3
         self._graphs_captured = True
 
     def dispatch(
@@ -448,6 +464,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
         varlen_spec_decode: bool = False,
+        time_graphs: bool = False,
     ):
         super().__init__(
             vllm_config,
@@ -456,6 +473,7 @@ class ModelCudaGraphManager(CudaGraphManager):
             decode_query_len,
             lora_capture_cases=lora_capture_cases,
             varlen_spec_decode=varlen_spec_decode,
+            time_graphs=time_graphs,
         )
         self.hidden_states: torch.Tensor | None = None
         self.aux_hidden_states: list[torch.Tensor] = []
@@ -585,7 +603,11 @@ class ModelCudaGraphManager(CudaGraphManager):
 
             return forward_fn
 
-        super().capture(create_forward_fn, progress_bar_desc)
+        super().capture(
+            create_forward_fn,
+            progress_bar_desc,
+            lambda desc: input_buffers.is_padding[: desc.num_tokens].zero_(),
+        )
 
     def run_fullgraph(
         self, desc: BatchExecutionDescriptor

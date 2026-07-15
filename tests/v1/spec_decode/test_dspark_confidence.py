@@ -294,15 +294,17 @@ def test_cost_tables_keep_draft_and_verification_costs_separate():
     draft_curve = [(1, 0.2), (4, 0.8), (8, 1.6)]
     verify_curve = [(1, 2.0), (8, 3.0), (64, 5.0)]
 
-    draft_cost_ms, verify_and_sample_cost_ms = build_cost_tables_from_curves(
-        draft_curve, verify_curve, max_num_reqs=8, max_batch_tokens=64
+    draft_cost_ms, verify_cost_ms = build_cost_tables_from_curves(
+        draft_curve, verify_curve, max_num_reqs=10, max_batch_tokens=66
     )
 
-    assert draft_cost_ms[1] + verify_and_sample_cost_ms[8] == pytest.approx(3.2)
-    assert draft_cost_ms[8] + verify_and_sample_cost_ms[8] == pytest.approx(4.6)
+    assert draft_cost_ms[2] == pytest.approx(0.8)
+    assert verify_cost_ms[2] == pytest.approx(3.0)
+    assert draft_cost_ms[9] == pytest.approx(1.8)
+    assert verify_cost_ms[65] == pytest.approx(5.0 + 2.0 / 56.0)
 
 
-def test_profile_uses_rank_zero_cost_curves_on_every_tp_rank(monkeypatch):
+def test_graph_costs_use_rank_zero_curves_on_every_tp_rank(monkeypatch):
     canonical_curves = ([(1, 2.0)], [(1, 3.0), (2, 4.0)])
     broadcasts = []
 
@@ -315,56 +317,26 @@ def test_profile_uses_rank_zero_cost_curves_on_every_tp_rank(monkeypatch):
         lambda: SimpleNamespace(broadcast_object=broadcast_object),
     )
 
-    class FakeEvent:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def record(self):
-            pass
-
-        def synchronize(self):
-            pass
-
-        def elapsed_time(self, end):
-            return 15.0
-
-    monkeypatch.setattr(torch.cuda, "Event", FakeEvent)
     manager = object.__new__(VarlenConfidenceManager)
-    manager.num_speculative_steps = 1
     manager.req_states = SimpleNamespace(
         max_num_reqs=1,
         max_num_batched_tokens=2,
     )
-    manager.budget_frac = 1.0
     manager.online_sts = None
+    draft_desc = BatchExecutionDescriptor(CUDAGraphMode.FULL, 1, 1)
+    target_descs = (
+        BatchExecutionDescriptor(CUDAGraphMode.FULL, 1, 1),
+        BatchExecutionDescriptor(CUDAGraphMode.FULL, 2, 1),
+    )
     speculator = SimpleNamespace(
-        propose=lambda *args, **kwargs: None,
-        draft_tokens=torch.empty((1, 1), device="cuda"),
+        query_cudagraph_manager=SimpleNamespace(graph_timings={draft_desc: 2.0})
     )
-    model_runner = SimpleNamespace(
-        max_num_reqs=1,
-        max_num_tokens=2,
-        decode_query_len=2,
-        sampler=None,
-        speculator=speculator,
-    )
-    cached_output = SimpleNamespace(
-        req_ids=["req0"],
-        num_computed_tokens=[1],
-        num_output_tokens=[1],
-        new_block_ids=[None],
-    )
-    decode_output = SimpleNamespace(scheduled_cached_reqs=cached_output)
+    model_graphs = SimpleNamespace(graph_timings=dict(zip(target_descs, (3.0, 4.0))))
 
-    manager.profile_step_costs(
-        model_runner,
-        worker_execute_model=lambda output: None,
-        worker_sample_tokens=lambda output: None,
-        decode_output=decode_output,
-    )
+    manager.set_cost_profile(model_graphs, speculator)
 
     expected = build_cost_tables_from_curves(*canonical_curves, 1, 2)
-    assert broadcasts == [(([(1, 0.0)], [(1, 1.5), (2, 1.5)]), 0)]
+    assert broadcasts == [(canonical_curves, 0)]
     assert manager.cost_tables is not None
     assert np.array_equal(manager.cost_tables[0], expected[0])
     assert np.array_equal(manager.cost_tables[1], expected[1])
@@ -390,7 +362,7 @@ def test_online_sts_fits_order_preserving_temperatures():
     """Online STS fits per-position temperatures from rejection-sampler
     outcomes: identity before data, softens over-confident positions,
     sharpens under-confident ones, and never reorders candidates."""
-    sts = DSparkOnlineSTS(num_steps=3)
+    sts = DSparkOnlineSTS(num_steps=3, device=torch.device("cuda"))
 
     # Cold start: identity calibration.
     assert np.array_equal(sts.temperatures, np.ones(3))
@@ -424,6 +396,7 @@ def test_online_sts_fits_order_preserving_temperatures():
 
     sts.reset()
     assert np.array_equal(sts.temperatures, np.ones(3))
+    assert sts.copy_temperatures_to_gpu().cpu().tolist() == [1.0, 1.0, 1.0]
 
 
 def test_capacity_manager_plans_budget_without_tp_broadcast(monkeypatch):
@@ -510,6 +483,16 @@ def test_capacity_manager_assigns_scalar_budget_on_every_tp_rank(monkeypatch):
             input_batch,
         )
     assert handler._stale_confidences is not None
+    assert handler._assign_draft_token_budget(
+        input_batch,
+        valid_draft_tokens_per_req=np.array([3, 3], dtype=np.int32),
+        draft_token_budget=6,
+    ).cpu().tolist() == [3, 3]
+    assert handler._assign_draft_token_budget(
+        input_batch,
+        valid_draft_tokens_per_req=np.array([3, 3], dtype=np.int32),
+        draft_token_budget=0,
+    ).cpu().tolist() == [0, 0]
 
 
 def test_varlen_capacity_manager_compacts_verifier_batch():
