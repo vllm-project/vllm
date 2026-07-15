@@ -860,15 +860,19 @@ class SpeculativeConfig:
                     MTPModelTypes
                 ):
                     self.method = "mtp"
+                    n_predict = getattr(
+                        self.draft_model_config.hf_config, "n_predict", None
+                    )
                     if (
-                        self.num_speculative_tokens > 1
-                        and self.draft_model_config.hf_config.model_type
-                        != "step3p5_mtp"
+                        n_predict is not None
+                        and self.num_speculative_tokens > n_predict
                     ):
                         logger.warning(
-                            "Enabling num_speculative_tokens > 1 will run "
-                            "multiple times of forward on same MTP layer"
-                            ",which may result in lower acceptance rate"
+                            "num_speculative_tokens=%d exceeds the %d trained MTP "
+                            "layers; layers will be reused cyclically, which may "
+                            "lower acceptance rate",
+                            self.num_speculative_tokens,
+                            n_predict,
                         )
                 elif self.method == "draft_model":
                     pass

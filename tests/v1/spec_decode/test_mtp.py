@@ -115,7 +115,7 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
     assert proposer.model.model.embed_tokens == target_model.model.embed_tokens
 
 
-@pytest.mark.parametrize("num_speculative_tokens", [1])
+@pytest.mark.parametrize("num_speculative_tokens", [1, 3])
 def test_mtp_propose(num_speculative_tokens, monkeypatch):
     """Test that MTP's forward method returns hidden states directly"""
 
@@ -126,6 +126,7 @@ def test_mtp_propose(num_speculative_tokens, monkeypatch):
     vocab_size = 100
 
     proposer = _create_mtp_proposer(num_speculative_tokens)
+    proposer.block_size = 16
     hidden_size = proposer.hidden_size
 
     # Mock the MTP model to verify it returns hidden states directly
@@ -217,5 +218,9 @@ def test_mtp_propose(num_speculative_tokens, monkeypatch):
 
     # Verify the model was called correctly
     assert model_mock.called
+    assert [
+        model_call.kwargs["spec_step_idx"]
+        for model_call in model_mock.call_args_list
+    ] == list(range(num_speculative_tokens))
     # Verify output shape
     assert result.shape == (batch_size, num_speculative_tokens)
