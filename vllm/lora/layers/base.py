@@ -54,8 +54,21 @@ class BaseLayerWithLoRA(nn.Module):
             child_prefix = f"{prefix}.{name}" if prefix else name
             yield from child.named_modules(memo, child_prefix, remove_duplicate)
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Forward checkpoint weights to the unwrapped base layer."""
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[str]:
+        """Forward checkpoint weights to the unwrapped base layer.
+
+        Delegate to the base layer's own ``load_weights`` when it defines
+        one — fused layers (e.g. ``MergedColumnParallelLinear``) read the
+        shard id off the loaded tensor there, which an outside-in walk
+        with ``AutoWeightsLoader`` would bypass. Fall back to loading the
+        base layer's parameters directly otherwise.
+        """
+        base_load_weights = getattr(self.base_layer, "load_weights", None)
+        if callable(base_load_weights):
+            return base_load_weights(weights)
+
         from vllm.model_executor.models.utils import AutoWeightsLoader
 
         loader = AutoWeightsLoader(self.base_layer)
