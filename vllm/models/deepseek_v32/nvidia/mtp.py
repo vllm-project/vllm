@@ -21,7 +21,10 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.deepseek_mtp import SharedHead
+from vllm.model_executor.models.deepseek_mtp import (
+    SharedHead,
+    _restore_full_token_layout_if_needed,
+)
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2MixtureOfExperts,
     DeepseekV2MoE,
@@ -88,6 +91,11 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         hidden_states = self.eh_proj(eh_input)
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
+        )
+        hidden_states, residual = _restore_full_token_layout_if_needed(
+            hidden_states,
+            residual,
+            positions.shape[0],
         )
         # mtp_block's MoE output is left un-reduced (skip_final_all_reduce); the
         # main model fuses that all-reduce into the next norm, but here the
