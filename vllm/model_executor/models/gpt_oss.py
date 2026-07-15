@@ -1010,7 +1010,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
         tp_rank_end = min((tp_rank + 1) * per_rank_intermediate_size, intermediate_size)
 
         # Use centralized weight remapping for MoE expert parameters.
-        # The FusedMoE refactor moved expert params under
+        # The MoERunner refactor moved expert params under
         # `mlp.experts.routed_experts.*`; this remaps checkpoint names so
         # MoE weight/bias keys resolve against params_dict.
         for name, weight in remap_moe_expert_weights(weights, params_dict):

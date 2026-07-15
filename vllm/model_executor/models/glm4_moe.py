@@ -170,7 +170,7 @@ class Glm4MoE(nn.Module):
         )
 
         # AITER fused shared-expert (FSE) gate; mirrors the deepseek_v2.py
-        # pattern (see Glm4MoE / FusedMoE wiring there).
+        # pattern (see Glm4MoE / MoERunner wiring there).
         self.is_rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
         self.is_fusion_moe_shared_experts_enabled = (
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()

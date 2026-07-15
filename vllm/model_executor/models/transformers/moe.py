@@ -265,7 +265,7 @@ class MoEMixin(MixtureOfExperts):
                     fuser = MoEBlockFuser.match(moe_block, experts_name)
                     if self.num_expert_groups <= 1 and fuser is not None:
                         # MoE block forward is fully replaced.
-                        # gate/router and shared expert (if any) runs in FusedMoE.
+                        # gate/router and shared expert (if any) runs in MoERunner
                         kwargs |= dict(
                             scoring_func=fuser.scoring_func,
                             is_sequence_parallel=(
@@ -279,7 +279,7 @@ class MoEMixin(MixtureOfExperts):
                         if fuser.shared_name:
                             routed += " + shared experts"
                         logger.info_once(
-                            "Fused: %s (%s) -> FusedMoE (internal routing)",
+                            "Fused: %s (%s) -> MoERunner (internal routing)",
                             routed,
                             moe_block_cls,
                         )
@@ -321,7 +321,7 @@ class MoEMixin(MixtureOfExperts):
                             runner_args={"moe_state": moe_state},
                         )
                         logger.info_once(
-                            "Fused: experts (%s) -> FusedMoE (external routing)",
+                            "Fused: experts (%s) -> MoERunner (external routing)",
                             experts_cls,
                         )
                     fused_experts = FusedMoEFactory(**kwargs)
