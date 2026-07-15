@@ -1,4 +1,4 @@
-model_name: "nm-testing/Qwen3-4B-mixed-quant-RTN-wNaM"
+model_name: "nm-testing/Qwen3-4B-mixed-quant-RTN-wNaM-asym"
 accuracy_threshold: 0.85
 num_questions: 1319
 num_fewshot: 5
