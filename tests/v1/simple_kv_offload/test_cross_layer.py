@@ -219,10 +219,7 @@ def _register_cross_layer(worker, kv_cache=None):
     mock_stream_cls.priority_range.return_value = (-1, 0)
 
     with (
-        patch(
-            "vllm.v1.simple_kv_offload.worker.is_pin_memory_available",
-            return_value=False,
-        ),
+        patch("vllm.v1.simple_kv_offload.worker.PIN_MEMORY", False),
         patch("torch.cuda.Stream", mock_stream_cls),
     ):
         worker.register_cross_layers_kv_cache(kv_cache, MagicMock())

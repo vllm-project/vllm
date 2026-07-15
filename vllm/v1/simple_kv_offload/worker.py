@@ -192,6 +192,17 @@ class SimpleCPUOffloadWorker:
         attn_backend: type["AttentionBackend"],
     ) -> None:
         """Register a cross-layer KV cache tensor for offloading."""
+        assert self.kv_cache_config is not None
+        assert len(self.kv_cache_config.kv_cache_groups) == 1, (
+            "Cross-layer KV cache offloading requires a single KV cache "
+            f"group, got {len(self.kv_cache_config.kv_cache_groups)}."
+        )
+        num_blocks = self.kv_cache_config.num_blocks
+        total_bytes = kv_cache.untyped_storage().nbytes()
+        assert total_bytes % num_blocks == 0, (
+            f"Cross-layer KV cache storage ({total_bytes} bytes) is not "
+            f"divisible by num_blocks ({num_blocks})."
+        )
         self.register_kv_caches({"cross_layer": kv_cache})
 
     def bind_connector_metadata(self, metadata: SimpleCPUOffloadMetadata) -> None:
