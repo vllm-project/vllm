@@ -55,7 +55,7 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
-from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput, PoolerOutput
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu import pcp_manager as pcp
 from vllm.v1.worker.gpu.async_utils import AsyncOutput, AsyncPoolingOutput
@@ -366,7 +366,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         if self.is_pooling_model and self.is_last_pp_rank:
-            self.pooling_runner = PoolingRunner(self.model)
+            self.pooling_runner = PoolingRunner(self.model, self.vllm_config)
         eplb_models_added |= self.eplb.maybe_register_model(
             self.model,
             self.model_config,
@@ -681,9 +681,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.sampler(logits, dummy_input_batch)
 
     @torch.inference_mode()
-    def _dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:
+    def _dummy_pooler_run(self, hidden_states: torch.Tensor) -> PoolerOutput:
         assert self.pooling_runner is not None
-        self.pooling_runner.dummy_pooler_run(hidden_states)
+        return self.pooling_runner.dummy_pooler_run(hidden_states)
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -707,16 +707,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.max_num_tokens, skip_attn=True, is_profile=True
         )
 
+        pooler_output: PoolerOutput | None = None
         # Only run sampler/pooler on last PP rank (non-last ranks return None).
         if self.is_last_pp_rank:
             assert sample_hidden_states is not None
             if self.pooling_runner is None:
                 self._dummy_sampler_run(sample_hidden_states)
             else:
-                self._dummy_pooler_run(hidden_states)
+                pooler_output = self._dummy_pooler_run(hidden_states)
 
         torch.accelerator.synchronize()
-        del hidden_states, sample_hidden_states
+        del hidden_states, sample_hidden_states, pooler_output
         self.reset_encoder_cache()
         gc.collect()
 
@@ -791,6 +792,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         req_idx = self.req_states.remove_request(req_id)
         if req_idx is None:
             return False
+        if self.pooling_runner is not None:
+            self.pooling_runner.remove_request(req_idx)
         if self.pp_handler is not None:
             self.pp_handler.on_req_idx_freed(req_idx)
         if self.encoder_cache is not None:
@@ -842,6 +845,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_tokens=sampling_params.max_tokens if sampling_params else 1,  # type: ignore[arg-type]
             )
             req_index = self.req_states.req_id_to_index[req_id]
+
+            if self.pooling_runner is not None:
+                assert new_req_data.pooling_params is not None
+                self.pooling_runner.add_request(
+                    req_index,
+                    new_req_data.pooling_params,
+                    new_req_data.prompt_token_ids,
+                )
 
             if self.encoder_cache is not None:
                 self.encoder_cache.add_request(req_id, new_req_data.mm_features)
@@ -1591,7 +1602,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
 
         assert self.pooling_runner is not None
-        pooler_output, is_valid = self.pooling_runner.pool(
+        pooler_output, finished_mask = self.pooling_runner.pool(
             hidden_states, input_batch, self.req_states
         )
 
@@ -1604,7 +1615,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         async_output = AsyncPoolingOutput(
             model_runner_output=model_runner_output,
             pooler_output=pooler_output,
-            is_valid=is_valid,
+            finished_mask=finished_mask,
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
         )
