@@ -471,9 +471,9 @@ def test_rwkv7_linear_op_honors_fp16_accumulation() -> None:
 def test_rwkv7_wkv_fp16_is_repeatable(batch: int, time: int) -> None:
     torch.manual_seed(20260714 + batch * 10 + time)
     C, H = 64, 1
-    state = torch.randn((batch, H, 64, 64), device="cuda", dtype=torch.float16)
-    payload = torch.randn((6, batch, time, C), device="cuda", dtype=torch.float16)
-    w0 = torch.randn((C,), device="cuda", dtype=torch.float16)
+    state = 0.01 * torch.randn((batch, H, 64, 64), device="cuda", dtype=torch.float16)
+    payload = 0.01 * torch.randn((6, batch, time, C), device="cuda", dtype=torch.float16)
+    w0 = 0.01 * torch.randn((C,), device="cuda", dtype=torch.float16)
     elapsed = torch.arange(batch, device="cuda", dtype=torch.int32)
     op = torch.ops.rwkv7_wkv_fp16_v2.wkv_seq_w0
 
