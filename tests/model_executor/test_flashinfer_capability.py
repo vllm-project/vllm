@@ -43,3 +43,15 @@ def test_fp4_capability_requires_supported_nvcc_without_cubin():
         ):
             assert flashinfer.has_flashinfer_cutlass_fused_moe_fp4() is expected
     _clear_cache()
+
+
+def test_fp4_capability_rejects_missing_nvcc_without_cubin():
+    _clear_cache()
+    with (
+        patch.object(flashinfer, "has_flashinfer_cutlass_fused_moe", return_value=True),
+        patch.object(flashinfer, "has_flashinfer_cubin", return_value=False),
+        patch.object(flashinfer.importlib.util, "find_spec", return_value=None),
+        patch.object(flashinfer.shutil, "which", return_value=None),
+    ):
+        assert not flashinfer.has_flashinfer_cutlass_fused_moe_fp4()
+    _clear_cache()
