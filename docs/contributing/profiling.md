@@ -129,14 +129,19 @@ The Proton-specific options are:
 
 - `proton_context`: `shadow` (default) or `python`
 - `proton_data`: `tree` (default) or `trace`
-- `proton_backend`: `cupti`, `roctracer`, `instrumentation`, or automatic
+- `proton_backend`: `cupti`, `roctracer`, or automatic
 - `proton_mode`: an optional backend mode string
 - `proton_hook`: `triton` to record Triton launch metadata, or unset
 
 Automatic backend selection is recommended. `cupti` is for NVIDIA GPUs and
-`roctracer` requires a ROCm installation. Instrumentation support depends on
-the Triton build; use `proton-viewer --list PROFILE` to confirm that the build
-emits the expected metrics before relying on instrumentation results.
+`roctracer` requires a ROCm installation. vLLM does not expose Proton's
+experimental instrumentation backend because current upstream Triton builds
+can produce profiles without timing metrics.
+
+Each model execution scope also records the context/generation request and
+token counts as numeric Proton metrics. This keeps the existing readable scope
+names while making iteration shapes directly available to Proton analysis
+tools.
 
 Inspect tree profiles with:
 

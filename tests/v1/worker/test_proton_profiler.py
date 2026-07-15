@@ -59,6 +59,7 @@ class TestProtonConfig:
             ("proton_context", "invalid"),
             ("proton_data", "invalid"),
             ("proton_backend", "invalid"),
+            ("proton_backend", "instrumentation"),
             ("proton_hook", "invalid"),
         ],
     )
@@ -221,7 +222,8 @@ class TestProtonProfilerWrapper:
     def test_scope_annotations_delegate_to_proton(self, tmp_path):
         wrapper, proton = make_wrapper(tmp_path)
 
-        context = wrapper.annotate_context_manager("decode")
+        metrics = {"num_tokens": 32, "num_requests": 2}
+        context = wrapper.annotate_context_manager("decode", metrics=metrics)
 
-        proton.scope.assert_called_once_with("decode")
+        proton.scope.assert_called_once_with("decode", metrics=metrics)
         assert context is not None

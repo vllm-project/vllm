@@ -14,7 +14,7 @@ from vllm.utils.hashing import safe_hash
 logger = init_logger(__name__)
 
 ProfilerKind = Literal["torch", "cuda", "proton"]
-ProtonBackend = Literal["cupti", "roctracer", "instrumentation"]
+ProtonBackend = Literal["cupti", "roctracer"]
 ProtonContext = Literal["shadow", "python"]
 ProtonData = Literal["tree", "trace"]
 ProtonHook = Literal["triton"]

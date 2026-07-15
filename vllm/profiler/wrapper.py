@@ -145,7 +145,9 @@ class WorkerProfiler(ABC):
         if self._running:
             self.stop()
 
-    def annotate_context_manager(self, name: str):
+    def annotate_context_manager(
+        self, name: str, metrics: dict[str, float | int] | None = None
+    ):
         """Return a context manager to annotate profiler traces."""
         return nullcontext()
 
@@ -305,7 +307,9 @@ class TorchProfilerWrapper(WorkerProfiler):
         return True
 
     @override
-    def annotate_context_manager(self, name: str):
+    def annotate_context_manager(
+        self, name: str, metrics: dict[str, float | int] | None = None
+    ):
         return torch.profiler.record_function(name)
 
 
@@ -367,9 +371,7 @@ class ProtonProfilerWrapper(WorkerProfiler):
     def set_worker_name(self, worker_name: str) -> None:
         """Set the next profile's rank-qualified output name."""
         if self._session_id is None:
-            self._output_path = os.path.join(
-                self._output_dir, f"proton_{worker_name}"
-            )
+            self._output_path = os.path.join(self._output_dir, f"proton_{worker_name}")
 
     @contextmanager
     def capture_cuda_graphs(self) -> Iterator[None]:
@@ -422,8 +424,10 @@ class ProtonProfilerWrapper(WorkerProfiler):
                 os.remove(f"{self._capture_output_path}.hatchet")
 
     @override
-    def annotate_context_manager(self, name: str):
-        return self._proton.scope(name)
+    def annotate_context_manager(
+        self, name: str, metrics: dict[str, float | int] | None = None
+    ):
+        return self._proton.scope(name, metrics=metrics)
 
 
 class CudaProfilerWrapper(WorkerProfiler):
@@ -443,5 +447,7 @@ class CudaProfilerWrapper(WorkerProfiler):
         self._cuda_profiler.stop()
 
     @override
-    def annotate_context_manager(self, name: str):
+    def annotate_context_manager(
+        self, name: str, metrics: dict[str, float | int] | None = None
+    ):
         return torch.cuda.nvtx.range(name)

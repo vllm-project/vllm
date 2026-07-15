@@ -785,7 +785,7 @@ class Worker(WorkerBase):
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
-            capture_context = nullcontext()
+            capture_context: AbstractContextManager[None] = nullcontext()
             if self.profiler_config.profiler == "proton":
                 self._get_or_create_profiler()
                 assert isinstance(self.profiler, ProtonProfilerWrapper)
@@ -1084,7 +1084,13 @@ class Worker(WorkerBase):
                     ")",
                 ]
             )
-        return self.profiler.annotate_context_manager(annotation)
+        metrics = {
+            "num_context_requests": iteration_details.num_ctx_requests,
+            "num_context_tokens": iteration_details.num_ctx_tokens,
+            "num_generation_requests": iteration_details.num_generation_requests,
+            "num_generation_tokens": iteration_details.num_generation_tokens,
+        }
+        return self.profiler.annotate_context_manager(annotation, metrics=metrics)
 
     @torch.inference_mode()
     @with_gpu_sync_check
@@ -1228,6 +1234,7 @@ class Worker(WorkerBase):
 
         if is_start:
             self._get_or_create_profiler(profile_prefix)
+            assert self.profiler is not None
             self.profiler.start()
         else:
             if self.profiler is None:
