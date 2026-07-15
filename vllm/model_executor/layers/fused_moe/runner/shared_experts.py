@@ -73,7 +73,7 @@ class SharedExperts(torch.nn.Module):
 
     # TODO(bnell): Hack for elastic_ep. Get rid of this
     def _set_moe_config(self, new_moe_config: FusedMoEConfig):
-        self.moe_config = new_moe_config
+        self._moe_config = new_moe_config
 
     @property
     def _disable_shared_experts_overlap(self) -> bool:
