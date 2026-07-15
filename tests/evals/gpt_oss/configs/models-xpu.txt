@@ -1,0 +1,2 @@
+# Intel XPU model configurations for GPQA evaluation
+gpt-oss-20b-xpu-baseline.yaml
