@@ -226,16 +226,17 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
             )
             return
 
-        if layer.head_size not in SUPPORTED_FUSED_QK_NORM_ROPE_HEAD_DIMS:
-            logger.warning_once(
-                "QK Norm+RoPE fusion not enabled: layer head_size=%d is not "
-                "supported by fused_qk_norm_rope kernel (supported: %s). "
-                "Falling back to unfused QK norm + RoPE path.",
-                layer.head_size,
-                SUPPORTED_FUSED_QK_NORM_ROPE_HEAD_DIMS,
-            )
-            return
-      
+        for layer in attn_layers.values():
+            if layer.head_size not in SUPPORTED_FUSED_QK_NORM_ROPE_HEAD_DIMS:
+                logger.warning_once(
+                    "QK Norm+RoPE fusion not enabled: layer head_size=%d is not "
+                    "supported by fused_qk_norm_rope kernel (supported: %s). "
+                    "Falling back to unfused QK norm + RoPE path.",
+                    layer.head_size,
+                    SUPPORTED_FUSED_QK_NORM_ROPE_HEAD_DIMS,
+                )
+                return
+
         self._attention_geometries = tuple(
             sorted(
                 {
