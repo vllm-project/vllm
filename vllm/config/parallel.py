@@ -457,6 +457,13 @@ class ParallelConfig:
                 f"but found: {self._api_process_rank}"
             )
 
+        if self.enable_fault_tolerance and self._api_process_count > 1:
+            raise ValueError(
+                "Fault tolerance requires a single API server process "
+                f"(--api-server-count=1), but got {self._api_process_count}. "
+                "The FT system assumes one AsyncMPClient manages all engines."
+            )
+
         if self.all2all_backend in ["pplx", "naive"]:
             logger.warning(
                 "The '%s' all2all backend has been removed. "

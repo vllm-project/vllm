@@ -105,14 +105,30 @@ class All2AllManagerBase:
         raise NotImplementedError
 
     def query_active_mask(self) -> torch.Tensor:
+        """Return the all2all liveness mask for the EP ranks.
+
+        Returns:
+            An int32 device tensor where 0 marks a live rank and 1 marks a
+            masked (dead/unreachable) rank.
+        """
         raise NotImplementedError
 
     def query_fault(self) -> torch.Tensor:
-        """Returns has_fault scalar."""
+        """Return a scalar bool tensor, True if a new fault appeared.
+
+        Compares the current mask against the baseline recorded at the last
+        recovery point.
+        """
         raise NotImplementedError
 
     def clean_buffers(self) -> None:
-        """Clean RDMA buffers and mask state during FT retry."""
+        """Reset this rank's RDMA buffers and all2all mask state (rank-local).
+
+        Post-fault cleanup: a dispatch/combine that hit a dead peer or timed
+        out can leave partially-written or stale tokens in the RDMA receive
+        buffer, so it is zeroed to stop the next forward from reading that
+        contaminated data.
+        """
         raise NotImplementedError
 
     def set_num_sms(self, num_sms: int):

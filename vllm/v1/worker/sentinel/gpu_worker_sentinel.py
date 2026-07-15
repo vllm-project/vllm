@@ -32,17 +32,17 @@ class WorkerSentinel:
     Methods are called via collective_rpc from EngineCoreSentinel.
     """
 
-    def __init__(self, worker: "Worker", device: torch.device):
+    def __init__(self, worker: "Worker"):
         self.worker = worker
-        self.device = device
         self.dp_rank = worker.parallel_config.data_parallel_rank
         self.dp_size = worker.parallel_config.data_parallel_size
         self.data_parallel_master_ip = worker.parallel_config.data_parallel_master_ip
         all2all_backend = worker.parallel_config.all2all_backend
-        assert all2all_backend in FT_BACKEND_SET, (
-            f"Fault tolerance requires an FT-capable all2all backend "
-            f"(one of {sorted(FT_BACKEND_SET)}), but got '{all2all_backend}'."
-        )
+        if all2all_backend not in FT_BACKEND_SET:
+            raise ValueError(
+                f"Fault tolerance requires an FT-capable all2all backend "
+                f"(one of {sorted(FT_BACKEND_SET)}), but got '{all2all_backend}'."
+            )
 
     def handle_command(self, ft_request: FaultToleranceRequest):
         """Dispatch an FT command by instruction name."""
@@ -54,6 +54,7 @@ class WorkerSentinel:
         params = ft_request.params
         self._clean_worker_state()
         if self.dp_size > 1:
+            get_ep_all2all_manager().clean_buffers()
             old_cpu_group = get_dp_group().cpu_group
             stateless_destroy_torch_distributed_process_group(old_cpu_group)
             world_size = self.worker.parallel_config.world_size
@@ -65,7 +66,6 @@ class WorkerSentinel:
                 self.dp_size,
                 backend="gloo",
             )
-            get_ep_all2all_manager().clean_buffers()
 
     def _clean_worker_state(self):
         model_runner = self.worker.model_runner
@@ -76,9 +76,14 @@ class WorkerSentinel:
                 runner._remove_request(req_id)
         else:
             model_runner.kv_connector_output = None
+
             input_batch = model_runner.input_batch
-            for req_id in list(input_batch.req_id_to_index):
+            cached_req_ids = list(input_batch.req_id_to_index)
+            for req_id in cached_req_ids:
+                model_runner.requests.pop(req_id, None)
+                model_runner.num_prompt_logprobs.pop(req_id, None)
                 input_batch.remove_request(req_id)
+
             input_batch.condense()
             input_batch.refresh_metadata()
             input_batch.req_prompt_embeds.clear()

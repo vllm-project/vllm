@@ -79,7 +79,7 @@ class EngineCoreSentinel:
             engine.batch_queue.clear()
 
         self.status_type = EngineStatusType.UNHEALTHY
-        self.fault_info = f"{type(exc).__name__}: {exc}"
+        self.fault_info = f"{type(exc).__name__}"
         logger.info(
             "[FT] Engine %d status -> UNHEALTHY:", self.engine_index, exc_info=exc
         )
