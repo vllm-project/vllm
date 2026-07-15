@@ -28,7 +28,8 @@ RUN for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/so
     done; true
 
 # 系统依赖: git/curl(构建), ccache(增量编译), libibverbs(RDMA),
-# ffmpeg/libgl 等(多模态模型运行时)
+# ffmpeg/libgl 等(多模态模型运行时),
+# xz-utils(解压 NVSHMEM 的 .tar.xz), libnuma-dev(DeepEP 编译依赖)
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \
         git \
@@ -39,6 +40,8 @@ RUN apt-get update -y \
         libsm6 \
         libxext6 \
         libgl1 \
+        xz-utils \
+        libnuma-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # 构建期断言: 基础镜像的 torch 必须和仓库 requirements 钉版一致,
@@ -116,6 +119,69 @@ RUN set -eu; \
     git checkout "$TRANSFORMER_BRANCH"; \
     if [ -n "$TRANSFORMER_COMMIT" ]; then git checkout "$TRANSFORMER_COMMIT"; fi; \
     uv pip install --system --no-build-isolation --no-deps -e .
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 额外推理加速 / 调试组件: py-spy, instanttensor, DeepGEMM, DeepEP(+pplx), lmcache
+# 此时 WORKDIR 仍是 /vllm-workspace, vLLM 源码在 vllm/ (含 tools/ 脚本)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# py-spy: 采样式 profiler, 线上抓 Python 调用栈排查卡顿/死锁
+# instanttensor: pip 直接安装
+RUN uv pip install --system --no-cache-dir py-spy instanttensor
+
+# deep* kernel 仅支持 Hopper/Blackwell, 编译 arch 覆盖为 9.0a/10.0a
+# (与官方 docker/Dockerfile 一致; base 默认的 "8.9 ..." 含 Ada, DeepEP 不支持)
+ARG DEEP_KERNELS_CUDA_ARCH="9.0a 10.0a"
+
+# DeepGEMM (deepseek-ai): 复用仓库自带脚本从源码编译并装进系统 python。
+# VLLM_DOCKER_BUILD_CONTEXT=1 让脚本走 `uv pip install --system`;
+# CUDA 版本由脚本按 nvcc 自动探测; ref 留空则用脚本内置默认 commit。
+ARG DEEPGEMM_GIT_REF=
+RUN VLLM_DOCKER_BUILD_CONTEXT=1 TORCH_CUDA_ARCH_LIST="${DEEP_KERNELS_CUDA_ARCH}" \
+    bash vllm/tools/install_deepgemm.sh \
+        ${DEEPGEMM_GIT_REF:+--ref "$DEEPGEMM_GIT_REF"}
+
+# pplx-kernels + DeepEP (deepseek-ai): 复用仓库自带脚本源码编译 (--mode install)。
+# 脚本会下载 NVSHMEM 并从 github 克隆源码编译, 需构建机能访问外网。
+# UV_SYSTEM_PYTHON=1: 让脚本内部不带 --system 的 `uv pip install` 也落到系统环境。
+# NVSHMEM 运行时共享库保留在 workspace 并加入 LD_LIBRARY_PATH (DeepEP 运行时依赖);
+# 只删体积大的静态库和已装进 site-packages 的源码目录。
+ARG PPLX_COMMIT_HASH=12cecfd
+ARG DEEPEP_COMMIT_HASH=73b6ea4
+ARG NVSHMEM_VER=3.3.24
+RUN UV_SYSTEM_PYTHON=1 TORCH_CUDA_ARCH_LIST="${DEEP_KERNELS_CUDA_ARCH}" \
+    bash vllm/tools/ep_kernels/install_python_libraries.sh \
+        --mode install \
+        --workspace /opt/ep_kernels_workspace \
+        --pplx-ref "${PPLX_COMMIT_HASH}" \
+        --deepep-ref "${DEEPEP_COMMIT_HASH}" \
+        --nvshmem-ver "${NVSHMEM_VER}" \
+    && find /opt/ep_kernels_workspace/nvshmem -name '*.a' -delete \
+    && rm -rf /opt/ep_kernels_workspace/DeepEP \
+              /opt/ep_kernels_workspace/pplx-kernels \
+              /opt/ep_kernels_workspace/dist
+# DeepEP 运行时链接 NVSHMEM 共享库; cuda/nvidia 路径与官方 docker/Dockerfile 对齐
+ENV LD_LIBRARY_PATH=/opt/ep_kernels_workspace/nvshmem/lib:/usr/local/cuda/lib64:/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
+
+# lmcache: 内部 gitlab develop 分支, 以可编辑形式安装 (源码留在 /vllm-workspace/lmcache)。
+# Dockerfile.update 里通过 CI/CD Variable LMCACHE_COMMIT 做 git fetch+checkout 增量更新。
+# 克隆 URL 内联 GITLAB_TOKEN (与 transformers 一致), 使 update 阶段的 git fetch
+# 无需再传 token 即可鉴权 (token 会留在 lmcache/.git/config, 与本仓库既有做法一致)。
+ARG LMCACHE_REPO_URL=https://gitlab-cn-beijing.siflow.cn/inference/lmcache.git
+ARG LMCACHE_BRANCH=develop
+ARG LMCACHE_COMMIT=
+RUN set -eu; \
+    if [ -n "$GITLAB_TOKEN" ]; then \
+        lm_clone_url="https://oauth2:${GITLAB_TOKEN}@${LMCACHE_REPO_URL#https://}"; \
+    else \
+        lm_clone_url="$LMCACHE_REPO_URL"; \
+    fi; \
+    git clone "$lm_clone_url" lmcache; \
+    unset lm_clone_url; \
+    cd lmcache; \
+    git checkout "$LMCACHE_BRANCH"; \
+    if [ -n "$LMCACHE_COMMIT" ]; then git checkout "$LMCACHE_COMMIT"; fi; \
+    uv pip install --system --no-build-isolation -e .
 
 WORKDIR /vllm-workspace/vllm
 ENTRYPOINT ["vllm", "serve"]

@@ -37,6 +37,8 @@
 #   BASE_IMAGE_TAG      日常构建基于的 base 镜像 tag (默认 base-latest)
 #   CUDA_ARCH_LIST      base 构建的目标 GPU 架构
 #   SOURCE_BRANCH       镜像 tag 中的分支段 (tag 流水线拿不到分支名, 默认 develop)
+#   LMCACHE_COMMIT      release (update) 镜像里 lmcache 要 checkout 的 commit;
+#                       留空则沿用 base 里的 develop HEAD (base 已可编辑安装该分支)
 
 stages:
   - lint
@@ -398,6 +400,7 @@ image-build:
         --dockerfile "${CI_PROJECT_DIR}/docker/Dockerfile.update" \
         --build-arg "BASE_IMAGE=${REGISTRY_HOST}/${REGISTRY_IMAGE}:${BASE_IMAGE_TAG}" \
         --build-arg "VLLM_BUILD_VERSION=${VLLM_BUILD_VERSION}" \
+        --build-arg "LMCACHE_COMMIT=${LMCACHE_COMMIT}" \
         --destination "${REGISTRY_HOST}/${REGISTRY_IMAGE}:${IMAGE_TAG}" \
         --ignore-path=/workspace || KANIKO_EXIT=$?
       mkdir -p /workspace 2>/dev/null || /busybox/mkdir -p /workspace 2>/dev/null || true

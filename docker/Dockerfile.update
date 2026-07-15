@@ -41,4 +41,19 @@ WORKDIR /vllm-workspace/vllm
 # 编译产物完好保留
 COPY . .
 
+# lmcache 增量更新: base 里 lmcache 已可编辑安装 (源码在 /vllm-workspace/lmcache),
+# 这里按 CI/CD Variable LMCACHE_COMMIT git fetch+checkout 到指定 commit。
+# 编辑模式安装, 纯 Python 改动 checkout 后即生效, 无需重装 (与 vLLM update 同理:
+# 只换源码, 不重跑 pip install)。留空则保持 base 里的 develop HEAD 不变。
+# 克隆时 token 已内联进 lmcache/.git/config, fetch 无需再传凭据。
+ARG LMCACHE_COMMIT=
+RUN if [ -n "$LMCACHE_COMMIT" ]; then \
+        cd /vllm-workspace/lmcache && \
+        git fetch --all --tags && \
+        git checkout "$LMCACHE_COMMIT" && \
+        echo "lmcache checked out to ${LMCACHE_COMMIT}"; \
+    else \
+        echo "LMCACHE_COMMIT 未设置, 保持 base 里的 lmcache 版本不变"; \
+    fi
+
 ENTRYPOINT ["vllm", "serve"]
