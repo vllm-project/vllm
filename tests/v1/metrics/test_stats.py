@@ -1,17 +1,65 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.v1.engine import FinishReason
+from dataclasses import dataclass
+
+from vllm.v1.engine import EngineCoreEvent, EngineCoreEventType, FinishReason
 from vllm.v1.metrics.stats import (
     IterationStats,
+    LoRARequestStates,
     PrefillStats,
     PromptTokenStats,
     RequestStateStats,
+    compute_request_modality,
 )
 
 
 def test_iteration_stats_repr():
     iteration_stats = IterationStats()
     assert repr(iteration_stats).startswith("IterationStats(")
+
+
+def test_compute_request_modality():
+    """Request modality: text / single modality / mixed."""
+
+    @dataclass
+    class _Feature:
+        modality: str
+
+    assert compute_request_modality(None) == "text"
+    assert compute_request_modality([]) == "text"
+    assert compute_request_modality([_Feature("image")]) == "image"
+    assert compute_request_modality([_Feature("audio"), _Feature("audio")]) == "audio"
+    assert compute_request_modality([_Feature("image"), _Feature("audio")]) == "mixed"
+    # A single modality is passed through as the model reports it.
+    assert compute_request_modality([_Feature("vision_chunk")]) == "vision_chunk"
+
+
+def test_received_request_modality_tracking():
+    """A request's modality is recorded once when it is admitted (QUEUED)."""
+    iteration_stats = IterationStats()
+    lora_states = LoRARequestStates()
+    queued = EngineCoreEvent(type=EngineCoreEventType.QUEUED, timestamp=1.0)
+
+    # Image request.
+    iteration_stats.update_from_events(
+        req_id="img-req",
+        events=[queued],
+        is_prefilling=True,
+        req_stats=RequestStateStats(arrival_time=0.0, modality="image"),
+        lora_states=lora_states,
+        lora_name=None,
+    )
+    # Text-only request: modality defaults to text.
+    iteration_stats.update_from_events(
+        req_id="text-req",
+        events=[queued],
+        is_prefilling=True,
+        req_stats=RequestStateStats(arrival_time=0.0),
+        lora_states=lora_states,
+        lora_name=None,
+    )
+
+    assert iteration_stats.received_requests == ["image", "text"]
 
 
 def test_prefill_kv_computed_with_cache():

@@ -14,6 +14,32 @@ from vllm.v1.spec_decode.metrics import SpecDecodingStats
 if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
 
+# Modality label values for request metrics. "text" and "mixed" are computed;
+# any other value is a model-reported modality string passed through as-is.
+REQUEST_MODALITY_TEXT = "text"
+REQUEST_MODALITY_MIXED = "mixed"
+
+
+def compute_request_modality(mm_features) -> str:
+    """Return the request-level modality label for metrics.
+
+    Args:
+        mm_features: The request's multi-modal feature specs, or None for a
+            text-only request. Each item is expected to expose a ``modality``
+            attribute (e.g. ``"image"``, ``"audio"``, ``"video"``).
+
+    Returns:
+        ``"text"`` when there is no multi-modal data, the single modality string
+        when all items share one (passed through as the model reports it, e.g.
+        ``"image"`` or ``"vision_chunk"``), otherwise ``"mixed"``.
+    """
+    if not mm_features:
+        return REQUEST_MODALITY_TEXT
+    modalities = {feature.modality for feature in mm_features}
+    if len(modalities) == 1:
+        return next(iter(modalities))
+    return REQUEST_MODALITY_MIXED
+
 
 @dataclass
 class BaseCacheStats:
@@ -219,6 +245,9 @@ class RequestStateStats:
     # Track if this request is corrupted (NaNs in logits)
     is_corrupted: bool = False
 
+    # Request-level input modality, used for the request_received metric label.
+    modality: str = REQUEST_MODALITY_TEXT
+
 
 @dataclass
 class FinishedRequestStats:
@@ -331,6 +360,9 @@ class IterationStats:
         self.prompt_token_stats = PromptTokenStats()
         self.num_preempted_reqs = 0
         self.finished_requests: list[FinishedRequestStats] = []
+        # Input modality of each request admitted to the engine-core queue this
+        # iteration, used for the request_received metric.
+        self.received_requests: list[str] = []
         self.max_num_generation_tokens_iter: list[int] = []
         self.n_params_iter: list[int] = []
         self.time_to_first_tokens_iter: list[float] = []
@@ -416,6 +448,9 @@ class IterationStats:
         for event in events:
             if event.type == EngineCoreEventType.QUEUED:
                 req_stats.queued_ts = event.timestamp
+                # QUEUED fires once per request (preemption/resumption use
+                # PREEMPTED/SCHEDULED), so this counts each request once.
+                self.received_requests.append(req_stats.modality)
                 lora_states.request_waiting(req_id, lora_name)
             elif event.type == EngineCoreEventType.SCHEDULED:
                 if req_stats.scheduled_ts == 0.0:  # ignore preemptions
