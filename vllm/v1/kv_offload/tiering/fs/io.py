@@ -6,6 +6,18 @@ import os
 import random
 import threading
 
+try:
+    from vllm.fs_io_C import (  # pyright: ignore[reportMissingImports]
+        batch_load_block as batch_load_block_C,
+    )
+    from vllm.fs_io_C import (
+        batch_store_block as batch_store_block_C,
+    )
+
+    _HAS_FSIO_C = True
+except ImportError:
+    _HAS_FSIO_C = False
+
 logger = logging.getLogger(__name__)
 
 # O_DIRECT is Linux-specific and not available on macOS
@@ -38,17 +50,22 @@ def store_block(
     """
     Store callback: Writes to a temp file then atomically replaces the destination.
     """
-    # Check if block already exists to avoid redundant writes
-    if os.path.exists(dest_path):
-        return
-
     tmp_path = dest_path + _get_tmp_suffix()
-    # Ensure parent directories exist
-    _ensure_dirs(dest_path)
 
     # Write block atomically. Cast to a flat byte view so the slice uses byte
     # indices; the raw memoryview may be multi-dimensional with itemsize > 1.
     view_slice = buffer.cast("B")[offset : offset + block_size]
+
+    if _HAS_FSIO_C:
+        return batch_store_block_C([tmp_path], [dest_path], [view_slice])
+
+    # Check if block already exists to avoid redundant writes
+    if os.path.exists(dest_path):
+        return
+
+    # Ensure parent directories exist
+    _ensure_dirs(dest_path)
+
     try:
         fd = os.open(
             tmp_path,
@@ -81,8 +98,12 @@ def load_block(
     """
     Load callback: read one KV block from disk. Remove the file on failure.
     """
-    fd: int | None = None
     view_slice = view.cast("B")[offset : offset + block_size]
+
+    if _HAS_FSIO_C:
+        return batch_load_block_C([source_path], [view_slice])
+
+    fd: int | None = None
     try:
         fd = os.open(source_path, os.O_RDONLY | O_DIRECT)
         bytes_read = os.readv(fd, [view_slice])
@@ -99,3 +120,46 @@ def load_block(
     finally:
         if fd is not None:
             os.close(fd)
+
+
+def batch_store_block(
+    paths: list[str],
+    view: memoryview,
+    offsets: list[int],
+    block_size: int,
+) -> None:
+    """
+    Store a batch of KV blocks from a shared buffer to disk in one call.
+
+    Each block buffer[offsets[i] : offsets[i]+block_size] is written atomically
+    to dest_paths[i] via a temp-file rename.  Raises on first error.
+    """
+    if _HAS_FSIO_C:
+        view_B = view.cast("B")
+        view_slices = [view_B[x : x + block_size] for x in offsets]
+        tmp_paths = [p + _get_tmp_suffix() for p in paths]
+        return batch_store_block_C(tmp_paths, paths, view_slices)
+
+    for path, offset in zip(paths, offsets):
+        store_block(path, view, offset, block_size)
+
+
+def batch_load_block(
+    paths: list[str],
+    view: memoryview,
+    offsets: list[int],
+    block_size: int,
+) -> None:
+    """
+    Load a batch of KV blocks from disk into a shared buffer in one call.
+
+    Block i is read from source_paths[i] into view[offsets[i] : offsets[i]+block_size].
+    Raises on first error and removes the offending file.
+    """
+    if _HAS_FSIO_C:
+        view_B = view.cast("B")
+        view_slices = [view_B[x : x + block_size] for x in offsets]
+        return batch_load_block_C(paths, view_slices)
+
+    for path, offset in zip(paths, offsets):
+        load_block(path, view, offset, block_size)
