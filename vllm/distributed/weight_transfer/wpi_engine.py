@@ -37,13 +37,16 @@ Key differences from NCCL/IPC engines:
 """
 
 import math
+import os
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
+import ray
+import requests
 import torch
 
 from vllm.config.weight_transfer import WeightTransferConfig
@@ -53,6 +56,11 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateInfo,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader.reload import (
+    finalize_layerwise_reload,
+    initialize_layerwise_reload,
+)
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -70,6 +78,19 @@ class WPITrainerContext:
     buffer_id: str
     buffer_size_bytes: int
     target_node_ids: list[str]
+    effective_buffer_id: str = ""
+    claim_id: str = ""
+
+    def close(self) -> None:
+        """Release the staged trainer VRAM buffer and close the client."""
+        if self.client is not None:
+            if self.claim_id:
+                try:
+                    self.client.unstage_weight(self.claim_id)
+                except Exception as e:
+                    logger.warning("WPI: Error during trainer unstage: %s", e)
+            self.client.close()
+            self.client = None
 
 
 @dataclass
@@ -171,6 +192,12 @@ class WPIWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     total_bytes: int = 0
     """Total bytes packed into the buffer."""
 
+    shard_index: int = -1
+    """Shard index of the update."""
+
+    total_shards: int = 0
+    """Total number of shards of the update."""
+
     def __post_init__(self):
         num_params = len(self.names)
         if len(self.dtype_names) != num_params:
@@ -241,6 +268,9 @@ class WPIWeightTransferEngine(
         self._buffer_id: str = ""
         self._buffer_size: int = 0
         self._staged: bool = False
+        self._shard_index: int = -1
+        self._total_shards: int = 0
+        self._claim_id: str = ""
 
     def init_transfer_engine(self, init_info: WPIWeightTransferInitInfo) -> None:
         """Initialize WPI driver connection and stage the persistent VRAM buffer.
@@ -257,60 +287,89 @@ class WPIWeightTransferEngine(
         """
         WPIClient = _import_wpi_client()
 
+        if self._client is not None:
+            logger.info(
+                "WPI: Re-initializing transfer engine. "
+                "Shutting down old instance first."
+            )
+            self.shutdown()
+
         self._buffer_id = init_info.buffer_id
-        self._buffer_size = init_info.buffer_size_bytes
+        # Round up size to an even number of bytes to avoid FP16
+        # alignment issues in WPI driver
+        self._buffer_size = (init_info.buffer_size_bytes + 1) // 2 * 2
         shard_index = init_info.shard_index
         total_shards = init_info.total_shards
 
-        # Map tp_rank to shard_index if sharding is requested but index not set
-        if total_shards > 0 and shard_index < 0:
-            shard_index = self.parallel_config.rank
-            logger.info(
-                "WPI: Auto-mapping tp_rank=%d to shard_index=%d",
-                self.parallel_config.rank,
-                shard_index,
+        if total_shards > 0:
+            raise NotImplementedError(
+                "Sharded WPI is temporarily disabled until updates are re-sliced. "
+                "Please run in broadcast mode (total_shards=0)."
             )
+
+        self._shard_index = shard_index
+        self._total_shards = total_shards
 
         self._client = WPIClient(
             socket_dir=init_info.socket_dir,
             driver_port=init_info.driver_port,
         )
 
-        # Stage the empty receive buffer on the local WPI driver
-        if not self._staged:
-            self._client.stage_weight(
-                buffer_id=self._buffer_id,
-                size_bytes=self._buffer_size,
-                claim_id=f"{self._buffer_id}-claim",
+        rank = getattr(self.parallel_config, "rank", 0)
+        self._claim_id = f"{self._buffer_id}-claim"
+        if total_shards > 0:
+            self._claim_id = f"{self._claim_id}__shard_{shard_index}"
+        else:
+            self._claim_id = f"{self._claim_id}__rank_{rank}"
+
+        try:
+            # Stage the empty receive buffer on the local WPI driver
+            if not self._staged:
+                self._client.stage_weight(
+                    buffer_id=self._buffer_id,
+                    size_bytes=self._buffer_size,
+                    claim_id=self._claim_id,
+                    shard_index=shard_index,
+                    total_shards=total_shards,
+                )
+                self._staged = True
+
+            # Receive FD and import CUDA memory
+            device_index = torch.accelerator.current_device_index()
+            try:
+                absolute_gpu_id = (
+                    current_platform.visible_device_id_to_physical_device_id(
+                        device_index
+                    )
+                )
+            except Exception:
+                absolute_gpu_id = device_index
+
+            fd = self._client.receive_fd(
+                self._buffer_id,
+                gpu_id=absolute_gpu_id,
                 shard_index=shard_index,
                 total_shards=total_shards,
             )
-            self._staged = True
+            device_ptr = self._client.import_cuda_memory(
+                fd,
+                self._buffer_size,
+                device_id=device_index,
+            )
+            self._vram_buffer = self._client.wrap_as_buffer(
+                device_ptr,
+                self._buffer_size,
+            )
 
-        # Receive FD and import CUDA memory
-        device_index = torch.accelerator.current_device_index()
-        fd = self._client.receive_fd(
-            self._buffer_id,
-            gpu_id=device_index,
-            shard_index=shard_index,
-            total_shards=total_shards,
-        )
-        device_ptr = self._client.import_cuda_memory(
-            fd,
-            self._buffer_size,
-            device_id=device_index,
-        )
-        self._vram_buffer = self._client.wrap_as_buffer(
-            device_ptr,
-            self._buffer_size,
-        )
-
-        # Connect to the notify socket for READY signals from NodePropagate
-        self._client.connect_notify_socket(
-            self._buffer_id,
-            shard_index=shard_index,
-            total_shards=total_shards,
-        )
+            # Connect to the notify socket for READY signals from NodePropagate
+            self._client.connect_notify_socket(
+                self._buffer_id,
+                shard_index=shard_index,
+                total_shards=total_shards,
+            )
+        except Exception as e:
+            self.shutdown()
+            raise e
 
         logger.info(
             "WPI: Engine initialized — buffer=%s, size=%d bytes, "
@@ -324,18 +383,10 @@ class WPIWeightTransferEngine(
 
     def start_weight_update(self) -> None:
         """Initialize layerwise reloading for the incoming checkpoint weights."""
-        from vllm.model_executor.model_loader.reload import (
-            initialize_layerwise_reload,
-        )
-
         initialize_layerwise_reload(self.model)
 
     def finish_weight_update(self) -> None:
         """Finalize layerwise reloading after all weights have been received."""
-        from vllm.model_executor.model_loader.reload import (
-            finalize_layerwise_reload,
-        )
-
         finalize_layerwise_reload(self.model, self.model_config)
 
     def receive_weights(
@@ -359,8 +410,26 @@ class WPIWeightTransferEngine(
                 "WPI engine not initialized. Call init_transfer_engine() first."
             )
 
+        # Skip weight updates for other shards in tensor-parallel WPI
+        if (
+            update_info.total_shards > 0
+            and update_info.shard_index != self._shard_index
+        ):
+            logger.info(
+                "WPI: Skipping weight update for shard %d (local shard index is %d)",
+                update_info.shard_index,
+                self._shard_index,
+            )
+            return
+
         # Wait for the WPI driver to signal that NCCL broadcast is complete
         self._client.wait_for_ready(timeout=300.0)
+
+        logger.info(
+            "WPI: Received weight update request. Params: %s, Shapes: %s",
+            update_info.names,
+            update_info.shapes,
+        )
 
         # Unpack tensors from the flat VRAM buffer and load incrementally
         for name, dtype_name, shape, offset in zip(
@@ -391,7 +460,7 @@ class WPIWeightTransferEngine(
         if self._client is not None:
             if self._staged:
                 try:
-                    self._client.unstage_weight(f"{self._buffer_id}-claim")
+                    self._client.unstage_weight(self._claim_id)
                 except Exception as e:
                     logger.warning("WPI: Error during unstage: %s", e)
                 self._staged = False
@@ -446,24 +515,45 @@ class WPIWeightTransferEngine(
             shard_index = init_info.shard_index
             total_shards = init_info.total_shards
 
+        if total_shards > 0:
+            raise NotImplementedError(
+                "Sharded WPI is temporarily disabled until updates are re-sliced. "
+                "Please run in broadcast mode (total_shards=0)."
+            )
+
+        # Round up size to an even number of bytes to avoid FP16
+        # alignment issues in WPI driver
+        buffer_size_bytes = (buffer_size_bytes + 1) // 2 * 2
+
         client = WPIClient(socket_dir=socket_dir, driver_port=driver_port)
+
+        trainer_claim_id = f"{buffer_id}-trainer-claim"
+        if total_shards > 0:
+            trainer_claim_id = f"{trainer_claim_id}__shard_{shard_index}"
+        else:
+            trainer_claim_id = f"{trainer_claim_id}__pid_{os.getpid()}"
 
         # Stage the source buffer on the trainer's WPI driver
         client.stage_weight(
             buffer_id=buffer_id,
             size_bytes=buffer_size_bytes,
-            claim_id=f"{buffer_id}-trainer-claim",
+            claim_id=trainer_claim_id,
             shard_index=shard_index,
             total_shards=total_shards,
         )
 
         # Receive FD and import CUDA memory on trainer GPU
-        import torch as _torch
+        device_index = torch.accelerator.current_device_index()
+        try:
+            absolute_gpu_id = current_platform.visible_device_id_to_physical_device_id(
+                device_index
+            )
+        except Exception:
+            absolute_gpu_id = device_index
 
-        device_index = _torch.accelerator.current_device_index()
         fd = client.receive_fd(
             buffer_id,
-            gpu_id=device_index,
+            gpu_id=absolute_gpu_id,
             shard_index=shard_index,
             total_shards=total_shards,
         )
@@ -474,9 +564,14 @@ class WPIWeightTransferEngine(
         )
         vram_buffer = client.wrap_as_buffer(device_ptr, buffer_size_bytes)
 
+        effective_buffer_id = client._effective_buffer_id(
+            buffer_id, shard_index, total_shards
+        )
+
         logger.info(
-            "WPI: Trainer initialized — buffer=%s, size=%d, targets=%s",
+            "WPI: Trainer initialized — buffer=%s (effective=%s), size=%d, targets=%s",
             buffer_id,
+            effective_buffer_id,
             buffer_size_bytes,
             target_node_ids,
         )
@@ -487,6 +582,8 @@ class WPIWeightTransferEngine(
             buffer_id=buffer_id,
             buffer_size_bytes=buffer_size_bytes,
             target_node_ids=target_node_ids or [],
+            effective_buffer_id=effective_buffer_id,
+            claim_id=trainer_claim_id,
         )
 
     @staticmethod
@@ -600,15 +697,13 @@ class WPIWeightTransferEngine(
 
         # --- Step 2: Trigger NCCL broadcast via WPI driver ---
         ctx.client.propagate(
-            buffer_id=ctx.buffer_id,
+            buffer_id=ctx.effective_buffer_id,
             target_node_ids=ctx.target_node_ids,
         )
 
         logger.info("WPI trainer: NodePropagate complete")
 
         # --- Step 3: Send metadata to vLLM workers ---
-        from dataclasses import asdict
-
         update_info = asdict(
             WPIWeightTransferUpdateInfo(
                 names=names,
@@ -616,18 +711,16 @@ class WPIWeightTransferEngine(
                 shapes=shapes,
                 offsets=offsets,
                 total_bytes=total_bytes,
+                shard_index=args.shard_index,
+                total_shards=args.total_shards,
             )
         )
 
         if args.send_mode == "ray":
-            import ray
-
             ray.get(
                 args.llm_handle.update_weights.remote(dict(update_info=update_info))
             )
         elif args.send_mode == "http":
-            import requests
-
             url = f"{args.url}/update_weights"
             payload = {"update_info": update_info}
             response = requests.post(url, json=payload, timeout=300)

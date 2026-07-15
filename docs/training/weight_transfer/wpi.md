@@ -48,8 +48,7 @@ llm.init_weight_transfer_engine(
             buffer_size_bytes=20 * 1024**3,  # 20 GiB (must hold all weights)
             socket_dir="/run/wpi/sockets",
             driver_port=50051,
-            # Optional sharding config for tensor parallel:
-            # shard_index=-1 (defaults to tp_rank if total_shards > 0)
+            # Note: sharded WPI is temporarily disabled; keep total_shards=0
             # total_shards=0
         )
     )
