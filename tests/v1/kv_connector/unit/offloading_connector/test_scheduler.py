@@ -481,7 +481,7 @@ def test_abort_loading_requests(request_runner, async_scheduling: bool):
 def test_two_groups_full_and_sliding_window(request_runner, async_scheduling: bool):
     block_size = 4
     num_gpu_blocks = 100
-    # sliding_window=8 -> 2 offloaded blocks (blocks_per_chunk=1)
+    # sliding_window=8 -> 2 offloaded chunks (blocks_per_chunk=1)
     sliding_window = 8
 
     kv_cache_groups = [
@@ -942,7 +942,7 @@ def test_request_level_policy_stores_all_blocks(request_runner, async_scheduling
         async_scheduling=async_scheduling,
     )
 
-    # Store 1 offloaded block (3 GPU blocks) via a normal request.
+    # Store 1 offloaded chunk (3 GPU blocks) via a normal request.
     runner.new_request(token_ids=[0] * tokens_per_chunk)
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
@@ -960,14 +960,14 @@ def test_request_level_policy_stores_all_blocks(request_runner, async_scheduling
         policy=OffloadPolicy.REQUEST_LEVEL
     )
 
-    # New request with 2 offloaded blocks; first matches what's in CPU.
+    # New request with 2 offloaded chunks; first matches what's in CPU.
     runner.new_request(token_ids=[0] * tokens_per_chunk * 2)
     runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
 
-    # Load the first offloaded block from CPU.
+    # Load the first offloaded chunk from CPU.
     runner.run(decoded_tokens=[0], expected_loaded=(0, 1, 2))
 
     # Store must include ALL 6 GPU blocks (both the loaded prefix and
@@ -1146,7 +1146,7 @@ def test_complete_store_called_per_job(request_runner, async_scheduling: bool):
 def test_max_offload_tokens_validation(request_runner, async_scheduling: bool):
     """Validates max_offload_tokens: type coercion, boundary values, and capping.
 
-    Setup: 3 offloaded blocks × 3 GPU blocks each = 9 GPU block offsets (0–8).
+    Setup: 3 offloaded chunks × 3 GPU blocks each = 9 GPU block offsets (0–8).
     """
     tokens_per_block = 4
     blocks_per_chunk = 3
@@ -1226,9 +1226,9 @@ def test_max_offload_tokens_validation(request_runner, async_scheduling: bool):
     setup(r, 0)
     r.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=())
 
-    # positive int cap -> limits offload to first 2 offloaded blocks (offsets 0–5)
+    # positive int cap -> limits offload to first 2 chunks (offsets 0–5)
     r = make_runner()
-    setup(r, 24)  # 24 tokens = 2 offloaded blocks × 12 tokens each
+    setup(r, 24)  # 24 tokens = 2 offloaded chunks × 12 tokens each
     r.run(
         decoded_tokens=[EOS_TOKEN_ID],
         expected_stored=(0, 1, 2, 3, 4, 5),
@@ -1240,8 +1240,8 @@ def test_max_offload_tokens_validation(request_runner, async_scheduling: bool):
 def test_offload_prompt_only(request_runner, async_scheduling: bool):
     """offload_prompt_only=True offloads prompt blocks but never decode blocks.
 
-    Setup: a 2-offloaded-block prompt followed by enough decode tokens to fill
-    4 more offloaded blocks. The flag clamps the offloadable token count to the
+    Setup: a 2-chunk prompt followed by enough decode tokens to fill
+    4 more offloaded chunks. The flag clamps the offloadable token count to the
     prompt length, so only the prompt's blocks (GPU offsets 0-5) are ever
     eligible for store; the decode blocks (offsets >= 6) are skipped.
 
@@ -1302,7 +1302,7 @@ def test_reset_cache(request_runner, async_scheduling: bool):
         blocks_per_chunk=blocks_per_chunk,
     )
 
-    # Store 1 offloaded block (3 GPU blocks) to CPU.
+    # Store 1 offloaded chunk (3 GPU blocks) to CPU.
     runner.new_request(token_ids=[0] * tokens_per_chunk)
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
@@ -1352,8 +1352,8 @@ def test_reset_cache(request_runner, async_scheduling: bool):
     # All internal job tracking must be cleared.
     assert not runner.connector_scheduler._jobs
     assert not runner.connector_scheduler._block_id_to_pending_jobs
-    if runner.connector_scheduler._blocks_being_loaded is not None:
-        assert not runner.connector_scheduler._blocks_being_loaded
+    if runner.connector_scheduler._chunks_being_loaded is not None:
+        assert not runner.connector_scheduler._chunks_being_loaded
 
     # Job reset counter must equal the job counter so that completions for
     # pre-reset jobs arriving from workers are silently discarded.
@@ -1428,7 +1428,7 @@ def test_pending_transfer_defers_prefix_lookup():
     With async scheduling, a preempted request's store can be flushed by the
     worker before the scheduler consumes its completion. If the request is
     re-admitted in that window, the connector should defer it instead of
-    looking up offloaded blocks and later asserting when a load is queued while
+    looking up offloaded chunks and later asserting when a load is queued while
     the store job is still tracked.
     """
     scheduler = object.__new__(OffloadingConnectorScheduler)
@@ -1600,9 +1600,9 @@ def test_swa_alignment_skip(request_runner, async_scheduling: bool):
     )
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
-        # Group 0 (full attn, block_size=16): 2 offloaded blocks
+        # Group 0 (full attn, block_size=16): 2 offloaded chunks
         #   -> GPU blocks (0, 0) and (0, 1)
-        # Group 1 (SWA, block_size=4): 8 offloaded blocks, skip first 2
+        # Group 1 (SWA, block_size=4): 8 offloaded chunks, skip first 2
         #   per segment of 4:
         #   Segment 0 (blocks 0-3): skip 0,1 -> store (1, 2), (1, 3)
         #   Segment 1 (blocks 4-7): skip 4,5 -> store (1, 6), (1, 7)
@@ -1623,7 +1623,7 @@ def test_swa_alignment_skip(request_runner, async_scheduling: bool):
     runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 2
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
-        # Group 0: full prefix lookup hits 2 offloaded blocks
+        # Group 0: full prefix lookup hits 2 offloaded chunks
         #   -> loads GPU blocks (0, 0), (0, 1)
         # Group 1: sliding window lookup finds trailing 2 from last segment
         #   (blocks 6, 7 which were stored)
@@ -2217,7 +2217,7 @@ class TestEagle:
     def test_full_attn_store_excludes_trailing_decode_block(
         self, request_runner, async_scheduling: bool
     ):
-        """Eagle full-attention group excludes the trailing block only while
+        """Eagle full-attention group excludes the trailing chunk only while
         decoding.
 
         Setup: 2 groups — group 0 is normal full-attention, group 1 is
@@ -2290,7 +2290,7 @@ class TestEagle:
         self, request_runner, async_scheduling: bool
     ):
         """Eagle sliding-window group stores all prompt blocks but excludes
-        the trailing block while decoding."""
+        the trailing chunk while decoding."""
         block_size = 4
         sliding_window = 8
         num_gpu_blocks = 100
@@ -2377,7 +2377,7 @@ class TestEagle:
 
         Regression: the trailing-block exclusion (num_blocks - 1) was applied
         when collecting keys, but next_stored_chunk_idx advanced by the
-        non-decremented count, so the trailing block of every chunked-prefill
+        non-decremented count, so the trailing chunk of every chunked-prefill
         chunk was skipped and never re-considered. With the harness chunk budget
         (1000 tokens) and block_size 4, a prompt longer than one chunk lost the
         block at the chunk boundary, leaving a permanent gap that caps prefix
@@ -2427,7 +2427,7 @@ class TestEagle:
             for b in t.gpu_blocks
         )
         # The stored blocks must be contiguous from 0: no interior block is
-        # dropped at a chunk boundary. (The bug left a gap at offloaded block
+        # dropped at a chunk boundary. (The bug left a gap at offloaded chunk
         # 249, the tail of the first 1000-token chunk.)
         assert offsets == list(range(len(offsets))), (
             f"interior hole in stored blocks: {offsets}"
@@ -2437,7 +2437,7 @@ class TestEagle:
     def test_full_attn_store_then_load(self, request_runner, async_scheduling: bool):
         """Eagle group constrains load: convergence tightens both groups.
 
-        Store 3 offloaded blocks per group (all prompt blocks, so the eagle
+        Store 3 offloaded chunks per group (all prompt chunks, so the eagle
         group stores all 3 as well). Then a new request loads from CPU. The
         eagle group pops its trailing hit block on load, tightening the hit
         to 2 blocks for both groups.

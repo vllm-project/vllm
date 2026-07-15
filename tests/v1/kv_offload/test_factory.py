@@ -399,6 +399,15 @@ def test_offloading_spec_resolves_prefill_context_parallel_block_sizes():
     assert spec.blocks_per_chunk == 2
 
 
+def test_offloading_config_preserves_data_parallel_index():
+    config = _make_layout_vllm_config()
+    config.parallel_config.data_parallel_index = 2
+
+    offloading_config = build_offloading_config(config, _make_kv_cache_config())
+
+    assert offloading_config.parallel.data_parallel_index == 2
+
+
 def test_offloading_spec_resolves_heterogeneous_hybrid_block_sizes():
     config = _make_layout_vllm_config(cpu_bytes_to_use=65536)
     config.cache_config.block_size = 4
