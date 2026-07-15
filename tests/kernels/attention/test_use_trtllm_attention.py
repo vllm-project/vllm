@@ -154,6 +154,17 @@ def test_use_dcp_fallback(_mock):
     assert _call(dcp_world_size=2) is False
 
 
+@patch("vllm.utils.flashinfer.supports_trtllm_attention", return_value=True)
+def test_use_dcp_fallback_prefill(_mock):
+    # TRTLLM prefill has no cross-rank LSE combine for DCP-sharded KV.
+    assert _call(dcp_world_size=2, is_prefill=True) is False
+
+
+@patch("vllm.utils.flashinfer.supports_trtllm_attention", return_value=True)
+def test_use_dcp_fallback_prefill_force_on_still_false(_mock):
+    assert _call(dcp_world_size=2, is_prefill=True, force_use_trtllm=True) is False
+
+
 @patch("vllm.utils.flashinfer.supports_trtllm_attention", return_value=False)
 def test_use_platform_unsupported(_mock):
     assert _call() is False
