@@ -99,7 +99,7 @@ def get_attn_backend(
     adaptive_verification = bool(
         speculative_config is not None
         and speculative_config.adaptive_verification
-        and not is_dspark_drafter # We only need VARLEN_BATCH for the verifier
+        and not is_dspark_drafter  # We only need VARLEN_BATCH for the verifier
     )
 
     attn_selector_config = AttentionSelectorConfig(

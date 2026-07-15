@@ -47,9 +47,7 @@ def test_causal_dspark_drafter_skips_adaptive_verification_requirements(monkeypa
         speculative_config=SimpleNamespace(adaptive_verification=True),
         attention_config=SimpleNamespace(backend=None, use_non_causal=False),
     )
-    monkeypatch.setattr(
-        "vllm.config.get_current_vllm_config", lambda: vllm_config
-    )
+    monkeypatch.setattr("vllm.config.get_current_vllm_config", lambda: vllm_config)
 
     selector_configs = []
 
@@ -62,10 +60,7 @@ def test_causal_dspark_drafter_skips_adaptive_verification_requirements(monkeypa
     with set_model_tag("dspark_head"):
         selector.get_attn_backend(16, torch.float16, None)
 
-    assert (
-        selector_configs[0].required_cg_support
-        == AttentionCGSupport.VARLEN_BATCH
-    )
+    assert selector_configs[0].required_cg_support == AttentionCGSupport.VARLEN_BATCH
     assert selector_configs[1].required_cg_support is None
 
 
