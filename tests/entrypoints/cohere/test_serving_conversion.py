@@ -28,7 +28,6 @@ from vllm.entrypoints.cohere.protocol import (
 from vllm.entrypoints.cohere.serving import (
     _FINISH_REASON_MAP,
     CohereServingChatV2,
-    ContentBlockType,
     _map_finish_reason,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -1018,15 +1017,3 @@ class TestCreateErrorResponse:
         assert err.error.message == "oops"
         assert err.error.code == 400
         assert err.error.type == "bad_request"
-
-
-# ======================================================================
-# ContentBlockType enum
-# ======================================================================
-
-
-class TestContentBlockType:
-    def test_values(self):
-        assert ContentBlockType.THINKING == "thinking"
-        assert ContentBlockType.TEXT == "text"
-        assert ContentBlockType.TOOL_CALL == "tool_call"

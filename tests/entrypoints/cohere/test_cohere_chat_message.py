@@ -20,8 +20,6 @@ from vllm.entrypoints.cohere.cohere_chat_message import (
     CohereChatMessage,
     CohereDeltaMessage,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import ChatMessage
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 
 # ======================================================================
 # CitationSource

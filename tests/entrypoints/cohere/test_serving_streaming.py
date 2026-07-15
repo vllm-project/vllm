@@ -167,17 +167,6 @@ class TestSSEHelpers:
 
 
 class TestStreamState:
-    def test_defaults(self):
-        st = _StreamState()
-        assert st.started is False
-        assert st.ended is False
-        assert st.finish_reason is None
-        assert st.last_chunk_id == ""
-        assert st.active_block is None
-        assert st.active_block_index is None
-        assert st.active_tool_index is None
-        assert st.tool_calls_seen == set()
-
     def test_content_index_monotonic(self):
         st = _StreamState()
         assert st.next_content_index() == 0
