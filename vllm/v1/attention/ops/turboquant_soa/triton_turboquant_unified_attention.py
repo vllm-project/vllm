@@ -1283,12 +1283,12 @@ def triton_turboquant_unified_attention(
 
 
 # ---------------------------------------------------------------------------
-# Thin decode adapter: lets callers who currently use v1/v2's decode launcher
-# signature switch to v3 without rebuilding query_start_loc themselves.
+# Thin decode adapter: lets callers who use the AoS decode launcher signature
+# switch to the SoA decode without rebuilding query_start_loc themselves.
 # ---------------------------------------------------------------------------
 
 
-def triton_turboquant_decode_attention_v3(
+def triton_turboquant_decode_attention_soa(
     query: torch.Tensor,  # [B, Hq, D]
     kv_cache: torch.Tensor,
     block_table: torch.Tensor,

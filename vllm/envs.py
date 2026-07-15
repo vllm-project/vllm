@@ -36,7 +36,6 @@ if TYPE_CHECKING:
     VLLM_USAGE_STATS_SERVER: str = "https://stats.vllm.ai"
     VLLM_NO_USAGE_STATS: bool = False
     VLLM_ROCM_TQ_FLYDSL_DECODE: bool = False
-    VLLM_TQ_FLYDSL_WHT_BUTTERFLY: bool = False
     VLLM_DO_NOT_TRACK: bool = False
     VLLM_USAGE_SOURCE: str = "production"
     VLLM_CONFIGURE_LOGGING: bool = True
@@ -765,15 +764,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_NO_USAGE_STATS": lambda: os.environ.get("VLLM_NO_USAGE_STATS", "0") == "1",
     # Opt-in FlyDSL TurboQuant decode (AMD MI355X / gfx950). When set, the
     # whole SoA TurboQuant pipeline (SoA store + FlyDSL decode + SoA-aware
-    # continuation + SoA Triton v3 fallback) is enabled. Default off keeps the
+    # continuation + SoA Triton decode fallback) is enabled. Default off keeps the
     # upstream TurboQuant v1 path unchanged.
     "VLLM_ROCM_TQ_FLYDSL_DECODE": lambda: os.environ.get(
         "VLLM_ROCM_TQ_FLYDSL_DECODE", "0"
-    )
-    == "1",
-    # Use the pure in-kernel FlyDSL Hadamard butterfly inside the FlyDSL decode.
-    "VLLM_TQ_FLYDSL_WHT_BUTTERFLY": lambda: os.environ.get(
-        "VLLM_TQ_FLYDSL_WHT_BUTTERFLY", "0"
     )
     == "1",
     "VLLM_DO_NOT_TRACK": lambda: (

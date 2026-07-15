@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FlyDSL TurboQuant decode launcher (vLLM-side).
 
-Drop-in replacement for ``triton_turboquant_decode_attention_v3`` for the
+Drop-in replacement for ``triton_turboquant_decode_attention_soa`` for the
 TQ decode profile HEAD_SIZE=128, MSE_BITS=4 K, VQB=4 V, N_CENTROIDS=16,
 BLOCK_SIZE in {16, 32}.
 
@@ -27,7 +28,6 @@ max_blocks_per_seq, scale)`` shape and cached.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import torch
@@ -40,7 +40,7 @@ logger = init_logger(__name__)
 
 # -- FlyDSL import bootstrap --------------------------------------------------
 # FlyDSL is imported directly and must be importable (pip-installed, or on
-# PYTHONPATH). Import failures are caught below and fall back to the Triton v3
+# PYTHONPATH). Import failures are caught below and fall back to the SoA Triton
 # decode, so vLLM startup is unaffected on hosts without FlyDSL.
 
 
@@ -89,7 +89,7 @@ def is_flydsl_available() -> bool:
         _FLYDSL_AVAILABLE = False
         logger.warning_once(
             "FlyDSL TQ decode launcher: unavailable (%s). "
-            "Falling back to Triton v3.",
+            "Falling back to SoA Triton decode.",
             ex,
         )
         return _FLYDSL_AVAILABLE
@@ -105,7 +105,7 @@ def is_flydsl_available() -> bool:
         _TQ_MOD_GQA6 = None
         logger.info_once(
             "FlyDSL TQ decode GQA-6 sibling: not available (%s); "
-            "GQA-6 models will fall back to Triton v3.",
+            "GQA-6 models will fall back to SoA Triton decode.",
             ex,
         )
     return _FLYDSL_AVAILABLE
@@ -116,7 +116,7 @@ def is_flydsl_gqa6_available() -> bool:
 
     Used by the eligibility gate in turboquant_attn.py to decide whether
     a layer with num_kv_groups==6 can run on FlyDSL or must fall back
-    to Triton v3.
+    to the SoA Triton decode.
     """
     if _FLYDSL_AVAILABLE is None:
         is_flydsl_available()
@@ -130,7 +130,7 @@ def is_flydsl_gqa6_available() -> bool:
 _KERN_CACHE: dict[tuple, Any] = {}
 
 
-# -- Tier-1 launcher overhead state -------------------------------------------
+# -- One-shot log guards ------------------------------------------------------
 # Replaces vllm `logger.{info,warning}_once` (which hashes the format string
 # every call to dedup) with a true zero-overhead bool guard.
 _LOG_INVOKED_ONCE: bool = False
@@ -147,9 +147,8 @@ def _detect_max_capture_B() -> int:
 
     Used to size the segm-pool bucket once, so that all distinct B's
     (whether captured in a graph, or hit eagerly in mixed batches) share
-    a single allocation per shape — eliminating the per-B 52 MiB growth
-    that previously dominated dense-capture VRAM cost (1.3 GiB at the
-    25-size custom set, ~2.8 GiB at vLLM's full default sweep).
+    a single allocation per shape — eliminating the per-B growth that
+    previously dominated dense-capture VRAM cost.
     """
     try:
         from vllm.config import get_current_vllm_config
@@ -176,13 +175,11 @@ class _SegmBufPool:
 
     Why a single bucket: cudagraph records launch pointers at capture
     time. With per-B allocations, every captured size triggered a fresh
-    52-MiB-each allocation (M2.5 64K shape) → 1.3 GiB at our 25-size
-    capture set, ~2.8 GiB at vLLM's full default sweep up to B=512.
+    allocation, so total VRAM scaled with the number of captured sizes.
     With single-bucket, the pool tops out at one max_B-sized buffer per
-    shape (~213 MiB at B_max=512 for M2.5), shared across ALL captured
-    sizes and ALL eager mixed-batch calls. The data_ptr is stable from
-    first allocation onward, so cudagraph capture is happy across all
-    captured B's.
+    shape, shared across ALL captured sizes and ALL eager mixed-batch
+    calls. The data_ptr is stable from first allocation onward, so
+    cudagraph capture is happy across all captured B's.
 
     Eliminates per-decode-step ``cudaMalloc`` (× 4) plus the device-side
     memset kernels behind ``torch.full(-inf)`` and ``torch.zeros``.
@@ -263,7 +260,7 @@ class _SegmBufPool:
                     dtype=q_dtype,
                     device=device,
                 ),
-                # q_rot fix: stable pre-allocated buffer for the rotated query
+                # Stable pre-allocated buffer for the rotated query
                 # tensor. On ROCm, fresh torch.empty / matmul-result allocations
                 # after HIP graph capture can land in the graph memory pool and
                 # cause GPU memory faults when passed as kernel arguments in the
@@ -333,33 +330,26 @@ _SEGM_POOL = _SegmBufPool()
 
 
 _HW_TR_CACHED: bool | None = None
-_WHT_BF_CACHED: bool | None = None
 
 
 def _wht_butterfly_enabled() -> bool:
-    """Return True iff the in-kernel WHT butterfly path is requested.
+    """Whether the in-kernel WHT butterfly path (STEP B') is used.
 
-    Set ``VLLM_TQ_FLYDSL_WHT_BUTTERFLY=1`` to enable.  When enabled
-    the launcher skips the external T1.0 GEMM (``q @ PiT``) and passes
-    the raw ``query`` tensor to a butterfly-capable kernel that computes
-    ``H @ q`` in-register, eliminating the HBM round-trip for q_rot.
+    Hardwired to ``False``. The butterfly path (skip the external
+    ``q @ PiT`` GEMM and compute ``H @ q`` in-register) is kept in the
+    kernels (see STEP B' in ``tq_decode.py`` / ``tq_decode_gqa6.py``) but is
+    intentionally never taken: it has known correctness issues and is not
+    validated. Left as a single switch point so it can be re-enabled in the
+    future once the STEP B' path is fixed and validated.
     """
-    global _WHT_BF_CACHED
-    if _WHT_BF_CACHED is not None:
-        return _WHT_BF_CACHED
-    _WHT_BF_CACHED = os.environ.get("VLLM_TQ_FLYDSL_WHT_BUTTERFLY", "0") == "1"
-    if _WHT_BF_CACHED:
-        logger.info_once(
-            "FlyDSL TQ: WHT butterfly ON (VLLM_TQ_FLYDSL_WHT_BUTTERFLY=1)"
-        )
-    return _WHT_BF_CACHED
+    return False
 
 
 def _hw_tr_enabled() -> bool:
     """Resolve the HW V-transpose build flag.
 
-    ON for gfx950+ (ds_read_tr16_b64 is bit-exact vs baseline and 5-7%
-    faster on Qwen-class shapes), off elsewhere. Resolved from the GPU arch.
+    ON for gfx950+ (ds_read_tr16_b64 is bit-exact vs baseline and faster
+    on Qwen-class shapes), off elsewhere. Resolved from the GPU arch.
     """
     global _HW_TR_CACHED
     if _HW_TR_CACHED is not None:
@@ -398,7 +388,7 @@ def _get_kernel(
     # kernel body uses gpu.block_idx.x (= seq index at runtime) and is
     # GQA-symmetric across B at build time.
     #
-    # ``tile_groups_per_partition`` (Option A) IS in the cache key — each
+    # ``tile_groups_per_partition`` IS in the cache key — each
     # value compiles a different unrolled K-tile loop body.
     key = (
         num_kv_heads,
@@ -644,13 +634,13 @@ def flydsl_turboquant_decode_attention(
             "FlyDSL launcher: GQA-6 requested (MiniMax-class) but the "
             "tq_decode_gqa6 sibling module is not available. Update your "
             "FlyDSL checkout (must include kernels/tq_decode_gqa6.py) or "
-            "set VLLM_ROCM_TQ_FLYDSL_DECODE=0 to fall back to Triton v3."
+            "set VLLM_ROCM_TQ_FLYDSL_DECODE=0 to fall back to SoA Triton decode."
         )
     assert centroids.numel() == _TQ_MOD.N_CENTROIDS, (
         f"centroids.numel={centroids.numel()} != {_TQ_MOD.N_CENTROIDS}"
     )
 
-    # ---- T1.1 / T1.4: per-layer cache for PiT_f32 + contiguous centroids ---
+    # ---- Per-layer cache for PiT_f32 + contiguous centroids ---
     # PiT and centroids are model constants (set once at layer warmup).
     # Avoid the per-decode-step transpose+cast and `.contiguous()` no-op
     # check by stashing the pre-cooked tensors on ``buf_holder`` (= layer).
@@ -678,7 +668,7 @@ def flydsl_turboquant_decode_attention(
         )
         centroids_c = centroids.contiguous()
 
-    # ---- T1.0: pooled q_rot (Bug-1 fix: stable data_ptr post-capture) ------
+    # ---- Pooled q_rot (stable data_ptr post-capture) ------
     # On ROCm, fresh tensor allocations made AFTER HIP graph capture can land
     # in the graph memory pool and cause GPU memory faults when passed as kernel
     # pointer arguments in the eager mixed-batch path. We pool q_rot and the
@@ -687,7 +677,8 @@ def flydsl_turboquant_decode_attention(
     #
     # Note: pool_bufs is computed BELOW after num_partitions is determined;
     # q_rot needs pool_bufs["q_float"] and pool_bufs["q_rot"]. We compute the
-    # rotation inline after the pool is fetched (see T1.2).
+    # rotation inline after the pool is fetched (see the pooled-buffers
+    # section below).
 
     # ---- Partition count (FA2 split-KV) ----------------------------------
     #
@@ -715,22 +706,19 @@ def flydsl_turboquant_decode_attention(
         max_seq_len = worst_case_max_seq_len
     sizing_max_seq_len = worst_case_max_seq_len
 
-    # ── Option A: bounded num_partitions + internal tile-group looping ──
+    # ── Bounded num_partitions + internal tile-group looping ──
     # The kernel previously hardcoded one partition = 256 tokens (=
     # KV_COMPUTE_BLOCK), forcing num_partitions to scale linearly with
-    # max_model_len. For 32K that gave grid.z = 256 and a 19.6 GiB
-    # cudagraph capture (Qwen 72B 32K, MI355X). The new kernel takes
+    # max_model_len, which made the cudagraph capture cost grow
+    # prohibitively at long context. The new kernel takes
     # ``tile_groups_per_partition`` (TGPP); each CTA processes
     # ``TGPP * 16`` K-tiles = ``TGPP * KV_COMPUTE_BLOCK`` tokens with the
     # FA-2 online-softmax state accumulating across all of them. This
-    # mirrors what Triton v3 / HIP SoA-fusion already do.
+    # mirrors what the SoA Triton decode / HIP SoA-fusion already do.
     #
-    # Strategy: cap num_partitions at ``MAX_PARTITIONS`` (default 32 — the
-    # same constant Triton v3's launcher uses, see
-    # triton_turboquant_unified_attention.py L1224 ``num_kv_splits=16``
-    # baseline + L370 HIP launcher ``max_num_kv_splits=32``), then derive
-    # TGPP so that ``num_partitions * TGPP * KV_COMPUTE_BLOCK >=
-    # sizing_max_seq_len``.
+    # Strategy: cap num_partitions at ``MAX_PARTITIONS`` (default 32),
+    # then derive TGPP so that ``num_partitions * TGPP * KV_COMPUTE_BLOCK
+    # >= sizing_max_seq_len``.
     #
     # Examples (block_size=32 → worst_case max_bps*32):
     #   max_model_len=8K:   required=32, parts=32, TGPP=1  (no waste)
@@ -765,7 +753,7 @@ def flydsl_turboquant_decode_attention(
     )
     tile_groups_per_partition = int(triton.next_power_of_2(_tgpp_required))
 
-    # ---- T1.2: pooled buffers (no per-call cudaMalloc / memset) ----------
+    # ---- Pooled buffers (no per-call cudaMalloc / memset) ----------
     # The FlyDSL kernel writes the FULL [B, Hk, P, QG, D] segm_out and the
     # FULL [B, Hk, P, QG] segm_max / segm_sum (running_max=-inf, sum=0 for
     # empty partitions are stored by the kernel itself), so uninitialized
@@ -789,16 +777,12 @@ def flydsl_turboquant_decode_attention(
     else:
         output = output_buf[:B] if output_buf.shape[0] != B else output_buf
 
-    # ---- T1.0 (continued): q rotation -----------------------------------
-    # Normal path: GEMM q @ PiT via stable pooled buffers.
-    # Butterfly path (VLLM_TQ_FLYDSL_WHT_BUTTERFLY=1): skip the GEMM
-    # entirely; the kernel computes H @ q in-register (STEP B').  We still
-    # allocate/preserve the pool slots so the pool state is consistent, but
-    # no computation is performed on them.
-    # The in-kernel WHT butterfly (STEP B') is implemented in both the
-    # canonical GQA-{8,16} kernel and the GQA-6 sibling. When enabled the
-    # launcher skips the external q@PiT GEMM and the kernel computes H @ q
-    # in-register (see STEP B' in the kernels).
+    # ---- q rotation -----------------------------------
+    # Only the normal path is used: GEMM q @ PiT via stable pooled buffers.
+    # The alternative butterfly path (skip the GEMM; compute H @ q in-register
+    # via STEP B') is kept in the kernels (GQA-{8,16} and GQA-6) but is never
+    # taken here -- ``_wht_butterfly_enabled()`` is hardwired to False. See its
+    # docstring for the rationale and how to re-enable it in the future.
     use_wht_bf = _wht_butterfly_enabled()
     if not use_wht_bf:
         _q_float = pool_bufs["q_float"]  # [B, Hq, D] fp32, stable
@@ -834,7 +818,7 @@ def flydsl_turboquant_decode_attention(
         tile_groups_per_partition=int(tile_groups_per_partition),
         use_wht_butterfly=use_wht_bf,
     )
-    # T1.3: zero-overhead one-shot info log (replaces logger.info_once which
+    # Zero-overhead one-shot info log (replaces logger.info_once which
     # hashes its format string on every call to dedup).
     global _LOG_INVOKED_ONCE, _LOG_SINKS_WARNED, _LOG_NORM_WARNED
     if not _LOG_INVOKED_ONCE:
@@ -893,24 +877,20 @@ def flydsl_turboquant_decode_attention(
     if sinks is not None and not _LOG_SINKS_WARNED:
         _LOG_SINKS_WARNED = True
         logger.warning(
-            "FlyDSL launcher: sinks ignored (NYI). Disable sinks or "
-            "use VLLM_TQ_DECODE_V3 if sinks are required."
+            "FlyDSL launcher: sinks ignored (NYI). Disable sinks if they "
+            "are required for correctness."
         )
     # ── norm_correction is honored IMPLICITLY ───────────────────────────
     # When the model was stored with norm_correction=True (the *_nc presets
     # turboquant_4bit_nc / k3v4_nc / 3bit_nc), the per-token K-norm scalar
-    # was pre-folded to ||k_t|| / ||c_t|| at store time by
-    # triton_turboquant_store._store_packed_key step 3 (see lines 339-349:
-    # `vn_f32 = vn_f32 * c_inv_norm`). The decode kernel just multiplies
-    # `c_vals * stored_knorm` (kernels/tq_decode.py line 388:
-    # `cent_f32 * knorm_f32`), which then equals
-    # `(c_vals / ||c_t||) * ||k_t||` — exactly the unit-norm-renormalized
-    # centroid times the original key norm. v3 does the identical multiply
-    # (triton_turboquant_decode.py line 416-417). Therefore both decoders
-    # honor norm_correction equivalently and there is nothing to "do" at
-    # decode time. The launcher's `norm_correction` arg is only kept for
-    # API parity. We emit a one-shot INFO log to make the contract explicit
-    # rather than the previous misleading "NYI" warning.
+    # was pre-folded to ||k_t|| / ||c_t|| at store time by the TurboQuant
+    # store path. The decode kernel just multiplies `c_vals * stored_knorm`,
+    # which then equals `(c_vals / ||c_t||) * ||k_t||` — exactly the
+    # unit-norm-renormalized centroid times the original key norm. The
+    # Triton decode does the identical multiply, so both decoders honor
+    # norm_correction equivalently and there is nothing to "do" at decode
+    # time. The launcher's `norm_correction` arg is only kept for API
+    # parity; we emit a one-shot INFO log to make the contract explicit.
     if norm_correction and not _LOG_NORM_WARNED:
         _LOG_NORM_WARNED = True
         logger.info(
