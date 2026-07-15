@@ -174,6 +174,7 @@ class DeepSeekMultiTokenPredictor(nn.Module):
             config.vocab_size,
             config.hidden_size,
             prefix=maybe_prefix(prefix, "embed_tokens"),
+            quant_config=vllm_config.quant_config,
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
 

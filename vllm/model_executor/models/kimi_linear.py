@@ -392,6 +392,7 @@ class KimiLinearModel(nn.Module):
                 config.vocab_size,
                 config.hidden_size,
                 prefix=f"{prefix}.embed_tokens",
+                quant_config=vllm_config.quant_config,
             )
         else:
             self.embed_tokens = PPMissingLayer()

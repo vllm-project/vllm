@@ -809,6 +809,7 @@ class Moondream3TextModel(nn.Module):
             config.vocab_size,
             config.dim,
             prefix=f"{prefix}.wte",
+            quant_config=quant_config,
         )
 
         blocks_prefix = maybe_prefix(prefix, "blocks")

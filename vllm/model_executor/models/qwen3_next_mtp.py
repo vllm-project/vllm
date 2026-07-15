@@ -62,6 +62,8 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.embed_tokens",
         )
 
         # Workaround: mtp.fc is stored as BF16 in NVFP4 checkpoints but is

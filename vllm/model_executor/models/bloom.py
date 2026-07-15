@@ -251,6 +251,8 @@ class BloomModel(nn.Module):
         self.word_embeddings = VocabParallelEmbedding(
             config.vocab_size,
             self.embed_dim,
+            quant_config=quant_config,
+            prefix=f"{prefix}.word_embeddings",
         )
         self.word_embeddings_layernorm = nn.LayerNorm(
             self.embed_dim, eps=config.layer_norm_epsilon

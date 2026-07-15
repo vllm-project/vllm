@@ -495,6 +495,7 @@ class FlashModel(nn.Module):
                 config.vocab_size,
                 config.hidden_size,
                 prefix=maybe_prefix(prefix, "embed_tokens"),
+                quant_config=quant_config,
             )
         else:
             self.embed_tokens = PPMissingLayer()

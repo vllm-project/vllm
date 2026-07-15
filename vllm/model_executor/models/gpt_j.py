@@ -200,6 +200,8 @@ class GPTJModel(nn.Module):
         self.wte = VocabParallelEmbedding(
             config.vocab_size,
             self.embed_dim,
+            quant_config=quant_config,
+            prefix=f"{prefix}.wte",
         )
         self.start_layer, self.end_layer, self.h = make_layers(
             config.n_layer,

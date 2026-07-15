@@ -359,6 +359,7 @@ class DFlashQwen3Model(nn.Module):
             self.config.vocab_size,
             self.config.hidden_size,
             prefix=maybe_prefix(prefix, "embed_tokens"),
+            quant_config=vllm_config.quant_config,
         )
 
         # Masked query slots are fed to the draft as `mask_token_id`. Most DFlash

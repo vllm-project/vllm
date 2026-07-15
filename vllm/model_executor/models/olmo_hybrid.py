@@ -310,6 +310,7 @@ class OlmoHybridModel(nn.Module):
             self.config.vocab_size,
             self.config.hidden_size,
             prefix=f"{prefix}.embed_tokens",
+            quant_config=vllm_config.quant_config,
         )
 
         self.start_layer, self.end_layer, self.layers = make_layers(

@@ -326,6 +326,7 @@ class Plamo3Model(nn.Module):
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
             prefix=f"{prefix}.embed_tokens",
+            quant_config=vllm_config.quant_config,
         )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
