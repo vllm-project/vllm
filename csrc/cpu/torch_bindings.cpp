@@ -570,7 +570,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #endif
 
   // fused moe
-#if defined(__AVX512F__) || (defined(ARM_BF16_SUPPORT))
+#if defined(__AVX512F__) || \
+    (defined(__aarch64__) && !defined(__APPLE__) && defined(ARM_BF16_SUPPORT))
   ops.def(
       "prepack_moe_weight(Tensor weight, Tensor(a1!) packed_weight, str isa) "
       "-> ()");
@@ -581,7 +582,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool skip_weighted, "
       "str act, str isa) -> ()");
   ops.impl("cpu_fused_moe", torch::kCPU, &cpu_fused_moe);
-#endif  // #if defined(__AVX512F__) || (defined(ARM_BF16_SUPPORT))
+#endif
   ops.def(
       "mla_decode_kvcache("
       "   Tensor! out, Tensor query, Tensor kv_cache,"
