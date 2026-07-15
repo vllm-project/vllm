@@ -188,16 +188,13 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     Without autotuning, FlashInfer will rely on heuristics, which may
     be significantly slower.
 
-    Single-rank tuning writes the cache directly. Pure tensor-parallel runs
-    tune on every rank with synchronized timings, then rank 0 persists and
-    broadcasts the resulting cache.
+    Tuning is performed only on rank 0. The resulting cache is broadcast
+    to every rank so all ranks dispatch the same kernel tactic.
     """
     import vllm.utils.flashinfer as fi_utils
-    from vllm.distributed.parallel_state import get_tp_group, get_world_group
+    from vllm.distributed.parallel_state import get_world_group
 
     world = get_world_group()
-    tp = get_tp_group()
-    is_distributed = world.world_size > 1
 
     autotune_kwargs: dict = {}
     skip_ops = _flashinfer_autotune_skip_ops(runner)
@@ -210,30 +207,11 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
 
     synchronized_autotune: Callable[[Any], None] | None = None
     tuner: Any = None
-    if is_distributed and world.world_size == tp.world_size:
-        try:
-            from flashinfer.autotuner import (
-                AutoTuner,
-                set_autotune_process_group,
-            )
-        except ImportError:
-            logger.info(
-                "FlashInfer distributed autotune synchronization is unavailable; "
-                "using non-persistent autotune."
-            )
-        else:
-            synchronized_autotune = set_autotune_process_group
-            tuner = AutoTuner.get()
+    if world.world_size > 1:
+        from flashinfer.autotuner import AutoTuner, set_autotune_process_group
 
-    if is_distributed and synchronized_autotune is None:
-        with torch.inference_mode(), fi_utils.autotune(**autotune_kwargs):
-            runner._dummy_run(
-                num_tokens=runner.scheduler_config.max_num_batched_tokens,
-                skip_eplb=True,
-                is_profile=True,
-            )
-        world.barrier()
-        return
+        synchronized_autotune = set_autotune_process_group
+        tuner = AutoTuner.get()
 
     is_leader = world.rank_in_group == 0
 
@@ -265,7 +243,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
             assert tuner is not None
             cache_valid = tuner.load_configs(str(cache_path))
 
-        synchronized_autotune(tp.cpu_group)
+        synchronized_autotune(world.cpu_group)
         try:
             with (
                 torch.inference_mode(),
