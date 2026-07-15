@@ -42,6 +42,7 @@ from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.parallel_state import (
+    GraphCaptureContext,
     get_dcp_group,
     get_pp_group,
     get_tp_group,
@@ -6607,11 +6608,29 @@ class GPUModelRunner(
         per_graph_estimate = {}
         encoder_memory_estimate = 0
 
+        # On ROCm, capture these throwaway profiling graphs on the current stream
+        # instead of the fresh side stream graph_capture() allocates by default.
+        # torch's allocator pools free blocks per stream, so a side-stream forward
+        # strands a persistent aiter scratch buffer in a separate pool, shifting
+        # the physical placement of the real KV cache allocated afterward and
+        # slowing bandwidth-bound decode ~20%. The graphs are discarded, so a
+        # side stream is unnecessary here.
+        # cap_ctx=None keeps the side-stream path on CUDA, where the current
+        # stream is the legacy default stream, on which capture cannot begin.
+        cap_ctx = (
+            GraphCaptureContext(torch.cuda.current_stream(self.device))
+            if current_platform.is_rocm()
+            else None
+        )
+
         # Cleanup-only guard: CUDA graph capture errors should still propagate
         # because encoder graph capture is opt-in.
         try:
             set_cudagraph_capturing_enabled(True)
-            with self._freeze_gc(), graph_capture(device=self.device):
+            with (
+                self._freeze_gc(),
+                graph_capture(device=self.device, graph_capture_context=cap_ctx),
+            ):
                 torch.accelerator.synchronize()
                 torch.accelerator.empty_cache()
 
@@ -7042,12 +7061,14 @@ class GPUModelRunner(
         # Initialize drafter's cudagraph dispatcher if using spec decode.
         if self.speculative_config and (
             self.speculative_config.use_eagle()
+            or self.speculative_config.uses_draft_model()
             or self.speculative_config.uses_extract_hidden_states()
         ):
             assert isinstance(
                 self.drafter,
                 EagleProposer
                 | DFlashProposer
+                | DraftModelProposer
                 | ExtractHiddenStatesProposer
                 | Gemma4Proposer,
             )
@@ -7589,7 +7610,7 @@ class GPUModelRunner(
             BaseRouter,
         )
 
-        for module in self.compilation_config.static_forward_context.values():
+        for module in self.model.modules():
             if isinstance(module, MoERunner) and isinstance(module.router, BaseRouter):
                 layer_id = module.layer_id
 
