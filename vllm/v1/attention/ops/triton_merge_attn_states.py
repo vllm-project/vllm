@@ -68,7 +68,8 @@ def merge_attn_states_kernel(
     HEAD_SIZE: tl.constexpr,
     PADDED_HEAD_SIZE: tl.constexpr,
     OUTPUT_LSE: tl.constexpr,
-    prefill_tokens_with_context: tl.constexpr,
+    # This value varies per batch and does not affect tensor shapes.
+    prefill_tokens_with_context,
     USE_FP8: tl.constexpr,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
