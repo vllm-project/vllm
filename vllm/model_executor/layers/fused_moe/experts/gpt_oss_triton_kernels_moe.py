@@ -852,21 +852,23 @@ def masked_moe_sum(
 
 @triton.jit
 def _remap_topk_to_local_kernel(
-    topk_ids_ptr,  # [n] global expert IDs (-1 = invalid)
+    topk_ids_ptr,  # [n] global expert IDs (invalid: -1 or >= num_experts)
     expert_map_ptr,  # [num_experts] global->local (-1 for non-local)
     out_ptr,  # [n] int64 local expert IDs (-1 for invalid/non-local)
     n_elements,
+    num_experts,
     BLOCK: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n_elements
     tid = tl.load(topk_ids_ptr + offs, mask=mask, other=-1)
-    # Gather expert_map[tid] for valid (tid >= 0); clamp the index so invalid
-    # rows don't read OOB, then select -1 for them. Matches
-    # torch.where(tid >= 0, expert_map[clamp(tid, 0)], -1) -- preserving -1 (a
-    # plain expert_map[-1] would wrap to a valid local id and misroute).
-    valid = tid >= 0
+    # Gather expert_map[tid] only for ids inside [0, num_experts); clamp the
+    # index so invalid rows don't read OOB, then select -1 for them. Invalid
+    # rows carry an EP dispatch sentinel: -1 (e.g. DeepEP) or num_experts
+    # (FlashInfer NVLink a2a) -- a plain expert_map[tid] would read out of
+    # range or wrap to a valid local id and misroute.
+    valid = (tid >= 0) & (tid < num_experts)
     idx = tl.where(valid, tid, 0)
     local = tl.load(expert_map_ptr + idx, mask=mask, other=-1)
     out = tl.where(valid, local.to(tl.int64), -1)
@@ -876,10 +878,10 @@ def _remap_topk_to_local_kernel(
 def remap_topk_to_local(
     topk_ids: torch.Tensor, expert_map: torch.Tensor
 ) -> torch.Tensor:
-    """Fused global->local expert-id mapping over a topk_ids tensor, preserving -1.
+    """Fused global->local expert-id mapping over a topk_ids tensor.
 
-    Replaces ``torch.where(topk_ids >= 0, expert_map[topk_ids.clamp(min=0)], -1)``
-    with one kernel. Returns a NEW int64 tensor -- the caller keeps the original
+    Ids outside [0, num_experts) (EP dispatch sentinels, -1 or num_experts)
+    map to -1. Returns a NEW int64 tensor -- the caller keeps the original
     ``topk_ids`` as ``global_topk_ids``, so this must not write in place.
 
     (Distinct from ``deep_gemm_utils.apply_expert_map``, which is a scalar
@@ -889,7 +891,9 @@ def remap_topk_to_local(
     n = topk_ids.numel()
     BLOCK = 1024
     grid = (triton.cdiv(n, BLOCK),)
-    _remap_topk_to_local_kernel[grid](topk_ids, expert_map, out, n, BLOCK=BLOCK)
+    _remap_topk_to_local_kernel[grid](
+        topk_ids, expert_map, out, n, expert_map.numel(), BLOCK=BLOCK
+    )
     return out
 
 
@@ -1024,8 +1028,9 @@ class OAITritonExperts(BaseOAITritonExperts):
             self.quant_config: FusedMoEQuantConfig = FUSED_MOE_UNQUANTIZED_CONFIG
 
         if expert_map is not None:
-            # Preserve -1 (invalid / non-local slots, e.g. from EP dispatch):
-            # make_routing_data treats -1 as the skip sentinel.
+            # Normalize invalid / non-local slots (EP dispatch sentinels,
+            # -1 or num_experts) to -1: make_routing_data treats -1 as the
+            # skip sentinel.
             topk_ids = remap_topk_to_local(topk_ids, expert_map)
 
         local_num_experts = w1.shape[0]
@@ -1168,8 +1173,9 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
 
         global_topk_ids = topk_ids
         if expert_map is not None:
-            # Preserve -1 (invalid / non-local slots, e.g. from EP dispatch):
-            # make_routing_data treats -1 as the skip sentinel.
+            # Normalize invalid / non-local slots (EP dispatch sentinels,
+            # -1 or num_experts) to -1: make_routing_data treats -1 as the
+            # skip sentinel.
             topk_ids = remap_topk_to_local(topk_ids, expert_map)
 
         local_num_experts = w1.shape[0]

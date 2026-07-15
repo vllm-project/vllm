@@ -28,7 +28,9 @@ def moe_align_block_size(
 
     Parameters:
     - topk_ids: A tensor of shape [total_tokens, top_k] representing the
-        top-k expert indices for each token.
+        top-k expert indices for each token. Entries outside [0, num_experts)
+        (EP dispatch sentinels such as -1 or num_experts) are skipped by the
+        kernel.
     - block_size: The block size used in block matrix multiplication.
     - num_experts: The total number of experts.
     - expert_map: A tensor of shape [num_experts] that maps the expert index

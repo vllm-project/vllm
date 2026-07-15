@@ -533,7 +533,7 @@ class FusedMoEQuantConfig:
         - g2_alphas: Optional global quantization scales for w2 (for nvfp4).
                      Optional per-channel scales for w2 (for W4A8 FP8).
                      Optional dq scale i.e. w_scale * a_scale (for W8A8 fp8).
-        - a1_gscale: Optional global quantization scales for a1 (1.0 /a2_scale).
+        - a1_gscale: Optional global quantization scales for a1 (1.0 /a1_scale).
         - a2_gscale: Optional global quantization scales for a2 (1.0 /a2_scale).
 
         - w1_bias: Optional biases for w1 (GPT OSS Triton).
