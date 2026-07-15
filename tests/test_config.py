@@ -5,6 +5,7 @@ import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from types import SimpleNamespace
+from typing import get_args
 from unittest.mock import patch
 
 import pydantic
@@ -25,6 +26,7 @@ from vllm.config import (
     VllmConfig,
     update_config,
 )
+from vllm.config.cache import CacheConfig, CacheDType
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
@@ -1647,3 +1649,38 @@ def test_load_config_rejects_invalid_safetensors_load_strategy():
 def test_load_config_rejects_non_string_load_format(bad_load_format):
     with pytest.raises(pydantic.ValidationError):
         LoadConfig(load_format=bad_load_format)
+
+
+# ---- KV-cache dtype platform support (issue #48099) ----
+
+
+def test_default_supported_kv_cache_dtypes_covers_all_known():
+    # By default a platform supports every known kv-cache dtype, so behavior is
+    # unchanged until a platform opts in to restrict or extend the set.
+    assert set(current_platform.get_supported_kv_cache_dtypes()) == set(
+        get_args(CacheDType)
+    )
+
+
+def test_cache_dtype_rejected_when_platform_unsupported(monkeypatch):
+    monkeypatch.setattr(
+        current_platform,
+        "get_supported_kv_cache_dtypes",
+        lambda: ["auto", "fp8"],
+    )
+    # A supported dtype is accepted.
+    assert CacheConfig(cache_dtype="fp8").cache_dtype == "fp8"
+    # An unsupported (but otherwise valid) dtype is rejected with a clear error.
+    with pytest.raises(pydantic.ValidationError, match="not supported"):
+        CacheConfig(cache_dtype="fp8_e5m2")
+
+
+def test_cache_dtype_auto_always_allowed(monkeypatch):
+    # "auto" defers dtype resolution and must stay valid even if a platform
+    # omits it from its supported list.
+    monkeypatch.setattr(
+        current_platform,
+        "get_supported_kv_cache_dtypes",
+        lambda: ["fp8"],
+    )
+    assert CacheConfig(cache_dtype="auto").cache_dtype == "auto"
