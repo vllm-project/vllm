@@ -128,7 +128,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             "dp" in unique_name
             and self.world_size in (2, 4, 8)
             and current_platform.is_rocm()
-            and rocm_aiter_ops.is_ag_rs_enabled()
+            and rocm_aiter_ops.is_custom_ag_rs_enabled()
         ):
             self.aiter_ag_rs_comm = AiterCustomAllreduce(
                 group=self.cpu_group,
@@ -621,18 +621,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if sizes is not None and all(s == sizes[0] for s in sizes):
             sizes = None
 
-        # AITER custom all-gather (pure-decode full-cudagraph path). Uniform
-        # shapes only; each tensor must clear aiter's own should_custom_ag gate.
+        # AITER custom all-gather
         if self._can_use_aiter_ag_rs(sizes):
-            aiter = self.aiter_ag_rs_comm
-            assert aiter is not None
+            aiter_comm = self.aiter_ag_rs_comm
+            assert aiter_comm is not None
             if isinstance(input_, torch.Tensor):
-                if aiter.should_custom_ag(input_):
-                    out = aiter.custom_all_gather(input_, dim=0)
+                if aiter_comm.should_custom_ag(input_):
+                    out = aiter_comm.custom_all_gather(input_, dim=0)
                     if out is not None:
                         return out
-            elif all(aiter.should_custom_ag(inp) for inp in input_):
-                outs = [aiter.custom_all_gather(inp, dim=0) for inp in input_]
+            elif all(aiter_comm.should_custom_ag(inp) for inp in input_):
+                outs = [aiter_comm.custom_all_gather(inp, dim=0) for inp in input_]
                 if all(o is not None for o in outs):
                     return outs
 

@@ -635,11 +635,7 @@ class GroupCoordinator:
         if curr_stream != stream:
             stream.wait_stream(curr_stream)
 
-        with (
-            torch.cuda.stream(stream),
-            maybe_ca_context,
-            maybe_aiter_context,
-        ):
+        with torch.cuda.stream(stream), maybe_ca_context, maybe_aiter_context:
             yield graph_capture_context
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:

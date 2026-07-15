@@ -1171,8 +1171,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_CUSTOM_AR": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_CUSTOM_AR", "True").lower() in ("true", "1")
     ),
-    # Use AITER's custom all-gather / reduce-scatter kernels on the DP group
-    # (pure-decode full-cudagraph path only). Enabled by default.
+    # Use AITER's custom all-gather / reduce-scatter kernels on the DP group.
     "VLLM_ROCM_USE_AITER_AG_RS": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_AG_RS", "True").lower() in ("true", "1")
     ),
