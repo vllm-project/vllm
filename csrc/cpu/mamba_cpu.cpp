@@ -65,7 +65,7 @@ at::Tensor causal_conv1d_update_cpu_impl(
   int64_t stride_s_dim = state_c.stride(1);
   int64_t stride_s_state = state_c.stride(2);
 
-  at::Tensor out = at::empty_like(x_c);  // native dtype, no float32 alloc
+  at::Tensor out = x_c.clone();  // native dtype, no float32 alloc
 
   const int32_t* cache_idx_ptr = nullptr;
   at::Tensor cache_idx_int;
@@ -283,3 +283,4 @@ void mamba_chunk_scan_fwd_cpu_impl(
         ngroups, headdim, dstate);
   });
 }
+

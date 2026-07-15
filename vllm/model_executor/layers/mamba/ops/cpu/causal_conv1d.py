@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm._custom_ops import causal_conv1d_update_cpu_vec
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID, NULL_BLOCK_ID
 
 
 def causal_conv1d_fn_cpu(
@@ -92,12 +92,17 @@ def causal_conv1d_update_cpu(
     activation: bool | str | None = None,
     conv_state_indices: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
-    pad_slot_id: int = PAD_SLOT_ID,
+    pad_slot_id: int | None = None,
     **kwargs,
 ) -> torch.Tensor:
     """CPU implementation for causal_conv1d_update."""
     if isinstance(activation, bool):
         activation = "silu" if activation else None
+
+    if pad_slot_id is None:
+        pad_slot_id = kwargs.get("null_block_id", NULL_BLOCK_ID)
+        if pad_slot_id is None:
+            pad_slot_id = NULL_BLOCK_ID
 
     return causal_conv1d_update_cpu_vec(
         x,
@@ -120,7 +125,7 @@ def causal_conv1d_update_torch(
 ) -> torch.Tensor:
     """
     Pure PyTorch fallback for causal_conv1d_update.
-    Currently used as a fallback for Arm (aarch64) to leverage
+    Currently used as a fallback for Arm (aarch64) to leverage 
     oneDNN/ACL F.conv1d kernels for batched decoding.
     """
     assert activation in {None, "silu", "swish"}
@@ -141,3 +146,4 @@ def causal_conv1d_update_torch(
     if activation in ("silu", "swish"):
         out = F.silu(out)
     return out
+
