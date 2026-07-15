@@ -234,6 +234,9 @@ class Scheduler(SchedulerInterface):
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = 0
         self.dynamic_sd_lookup: list[int] | None = None
+        self.adaptive_verification = bool(
+            speculative_config is not None and speculative_config.adaptive_verification
+        )
         if speculative_config is not None:
             if speculative_config.num_speculative_tokens_per_batch_size:
                 self.dynamic_sd_lookup = build_dynamic_sd_schedule_lookup(
@@ -1040,6 +1043,37 @@ class Scheduler(SchedulerInterface):
             if not defer_prefills:
                 self.prefill_capacity_bound = bool(self.waiting)
 
+        # Dynamic speculative decoding: compute the aggregate draft-token budget.
+        num_scheduled_reqs = len(num_scheduled_tokens)
+        num_spec_tokens_per_req = self.num_spec_tokens
+        if self.dynamic_sd_lookup is not None and num_scheduled_reqs > 0:
+            num_spec_tokens_per_req = self.dynamic_sd_lookup[num_scheduled_reqs]
+        num_spec_tokens_to_schedule = num_scheduled_reqs * num_spec_tokens_per_req
+
+        # Adaptive verification needs a full draft window for every request.
+        # Otherwise, truncate our drafts down to the uniform Dynamic SD width.
+        has_full_draft_windows = len(
+            scheduled_spec_decode_tokens
+        ) == num_scheduled_reqs and all(
+            len(spec_token_ids) == self.num_spec_tokens
+            for spec_token_ids in scheduled_spec_decode_tokens.values()
+        )
+        if self.adaptive_verification and not has_full_draft_windows:
+            for req_id, spec_token_ids in list(scheduled_spec_decode_tokens.items()):
+                if len(spec_token_ids) <= num_spec_tokens_per_req:
+                    # (rare case) some requests have fewer spec tokens than the
+                    # uniform width. Don't need to truncate
+                    continue
+                num_scheduled_tokens[req_id] -= (
+                    len(spec_token_ids) - num_spec_tokens_per_req
+                )
+                if num_spec_tokens_per_req:
+                    scheduled_spec_decode_tokens[req_id] = spec_token_ids[
+                        :num_spec_tokens_per_req
+                    ]
+                else:
+                    del scheduled_spec_decode_tokens[req_id]
+
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
@@ -1113,13 +1147,6 @@ class Scheduler(SchedulerInterface):
             # have run.
             self._free_cow_retained_blocks(cow_retained_blocks, self.sched_step_seq + 1)
         pending_kv_cache_block_copies = kv_cache_block_copies or None
-
-        # Dynamic speculative decoding: compute the aggregate draft-token budget.
-        num_scheduled_reqs = len(num_scheduled_tokens)
-        num_spec_tokens_per_req = self.num_spec_tokens
-        if self.dynamic_sd_lookup is not None and num_scheduled_reqs > 0:
-            num_spec_tokens_per_req = self.dynamic_sd_lookup[num_scheduled_reqs]
-        num_spec_tokens_to_schedule = num_scheduled_reqs * num_spec_tokens_per_req
 
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
