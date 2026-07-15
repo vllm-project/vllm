@@ -840,7 +840,7 @@ class WavTokenizer40(WavTokenizerBase):
             ):
                 state_dict[k] = v
 
-        self.model.load_state_dict(state_dict)
+        self.model.load_state_dict(state_dict, strict=False)
         self.model.to(self.device)
         self.model.eval()
 

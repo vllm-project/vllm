@@ -496,12 +496,12 @@ def build_vision_tokenizer(
 
     if osp.exists(safetensors_path):
         ckpt = load_file(safetensors_path, device="cpu")
-        tokenizer.load_state_dict(ckpt)
+        tokenizer.load_state_dict(ckpt, strict=False)
     elif osp.exists(ckpt_path):
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         if isinstance(ckpt, dict) and "state_dict" in ckpt:
             ckpt = ckpt["state_dict"]
-        tokenizer.load_state_dict(ckpt)
+        tokenizer.load_state_dict(ckpt, strict=False)
     else:
         raise FileNotFoundError(
             f"Apertus vision tokenizer checkpoint not found under {model_path}. "
