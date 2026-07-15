@@ -28,6 +28,14 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             use_non_causal=not causal,
             backend=speculative_config.attention_backend,
         ),
+        cache_config=(
+            replace(
+                vllm_config.cache_config,
+                cache_dtype=speculative_config.kv_cache_dtype,
+            )
+            if speculative_config.kv_cache_dtype is not None
+            else vllm_config.cache_config
+        ),
     )
 
     with set_model_tag("dspark_head"):
