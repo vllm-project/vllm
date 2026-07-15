@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -17,13 +18,10 @@ from vllm.v1.worker.gpu.attn_utils import (
     init_attn_backend,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cudagraph_utils import (
-    AttentionStatePair,
-    BatchExecutionDescriptor,
-)
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
 
@@ -34,10 +32,7 @@ class BaseSpeculator(ABC):
         pass
 
     @abstractmethod
-    def capture(
-        self,
-        attn_states: dict[BatchExecutionDescriptor, AttentionStatePair],
-    ) -> None:
+    def capture(self) -> None:
         pass
 
     @abstractmethod
@@ -185,6 +180,8 @@ class DraftModelSpeculator(BaseSpeculator):
         model_state: ModelState,
         kv_cache_config: KVCacheConfig,
         block_tables: BlockTables,
+        target_input_buffers: InputBuffers,
+        target_attn_groups: list[list[AttentionGroup]],
     ) -> None:
         self.model_state = model_state
         self.kv_cache_config = kv_cache_config
@@ -195,6 +192,12 @@ class DraftModelSpeculator(BaseSpeculator):
             active_layer_names=self.draft_attn_layer_names,
         )
         self.block_tables = block_tables
+        # The target model runner's buffers and attention groups. Draft
+        # prefill reuses the target model's attention metadata, so its
+        # cudagraph capture must build dummy metadata through the same
+        # builders and buffers.
+        self.target_input_buffers = target_input_buffers
+        self.target_attn_groups = target_attn_groups
 
     def _build_draft_attn_metadata(
         self,
@@ -202,7 +205,7 @@ class DraftModelSpeculator(BaseSpeculator):
         num_reqs_padded: int,
         num_tokens_padded: int,
         num_query_per_req: int = 1,
-        causal: bool = True,
+        causal: bool | Mapping[int, bool] = True,
     ) -> dict[str, Any] | None:
         # Uniform query: query_start_loc[i] = min(i, num_reqs) * num_query_per_req.
         # Clamp keeps the series non-decreasing past num_reqs, which some
@@ -304,3 +307,7 @@ class DraftModelSpeculator(BaseSpeculator):
         self.temperature.copy_(temperature)
         self.seeds.copy_(seeds)
         self.idx_mapping[:num_reqs].copy_(idx_mapping)
+        if self.draft_logits is not None:
+            # idx_mapping for CG padded requests points to -1, which is ignored
+            # during sampling to prevent writing stale values to draft logits.
+            self.idx_mapping[num_reqs:].fill_(-1)
