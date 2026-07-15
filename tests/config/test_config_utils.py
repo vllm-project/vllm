@@ -6,6 +6,7 @@ from enum import Enum
 
 import pytest
 
+from vllm.config.cache import CacheConfig
 from vllm.config.utils import get_hash_factors, hash_factors, normalize_value
 
 # Helpers
@@ -201,3 +202,15 @@ print(hash_factors(envs.compile_factors()))
         "compile_factors hash differs between fresh initializations - "
         "dynamic env vars may not be properly ignored"
     )
+
+
+def test_cache_config_hash_ignores_kv_cache_sizing_knobs():
+    """kv_cache_memory_bytes only sizes the KV cache allocation (like
+    gpu_memory_utilization, which is already ignored); it does not affect
+    the compiled computation graph. If it leaks into the hash, setting the
+    documented fast-boot knob silently invalidates the torch.compile cache
+    and forces a full recompile.
+    """
+    base_hash = CacheConfig().compute_hash()
+    assert CacheConfig(kv_cache_memory_bytes=1 << 30).compute_hash() == base_hash
+    assert CacheConfig(gpu_memory_utilization=0.5).compute_hash() == base_hash
