@@ -40,18 +40,20 @@ def causal_conv1d_fn_cpu(
         for idx in range(query_start_loc.shape[0] - 1)
     ]
     weight = weight.unsqueeze(1)
-    
+
     for seq_idx, (bos, eos) in enumerate(seq_begin_end_idx):
         if bos == eos:
             continue
-            
-        slot = int(cache_indices[seq_idx].item()) if cache_indices is not None else seq_idx
-        
+
+        slot = (
+            int(cache_indices[seq_idx].item()) if cache_indices is not None else seq_idx
+        )
+
         if slot == pad_slot_id:
             continue
 
         seq_x = x[:, bos:eos].unsqueeze(0)
-        
+
         if has_initial_state is not None and bool(has_initial_state[seq_idx].item()):
             initial_state = conv_states[slot, :, :state_len].unsqueeze(0)
         else:
@@ -72,7 +74,7 @@ def causal_conv1d_fn_cpu(
             groups=weight.shape[0],
         )
         seq_out = seq_out[..., -seq_x.shape[-1] :].to(dtype=x.dtype)
-        
+
         if activation in ("silu", "swish"):
             seq_out = F.silu(seq_out)
 
