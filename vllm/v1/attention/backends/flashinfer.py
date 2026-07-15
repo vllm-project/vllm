@@ -94,6 +94,7 @@ from vllm.v1.worker.workspace import (
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
 FLASHINFER_DEFAULT_INT_WORKSPACE_BYTES = 8 * 1024 * 1024
 FLASHINFER_INT_WORKSPACE_GRANULARITY_BYTES = 1 << 20
+FLASHINFER_PREFILL_WORKSPACE_BYTES_PER_ELEM = 16
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
@@ -766,6 +767,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.disable_split_kv = False
 
         self.compilation_config = vllm_config.compilation_config
+        self.max_num_batched_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens
+        )
         max_num_pages_per_req = cdiv(
             self.model_config.max_model_len, self.kv_cache_spec.block_size
         )
@@ -1068,7 +1072,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def _default_workspace_buffer_size(self) -> int:
         if envs.VLLM_BATCH_INVARIANT:
             return FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
-        return envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
+        # FlashInfer prefill temp buffers scale with the prefill chunk and
+        # query-head footprint, rather than the context length.
+        estimated_prefill_size = (
+            self.max_num_batched_tokens
+            * self.num_qo_heads
+            * self.head_dim
+            * FLASHINFER_PREFILL_WORKSPACE_BYTES_PER_ELEM
+        )
+        return max(
+            envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,
+            estimated_prefill_size,
+        )
 
     def _native_initial_workspace_buffer_size(self) -> int:
         if envs.VLLM_BATCH_INVARIANT or self.use_dcp:

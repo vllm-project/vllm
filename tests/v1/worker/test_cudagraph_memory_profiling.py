@@ -72,6 +72,38 @@ def _make_flashinfer_builder(flashinfer_backend):
     return builder
 
 
+def test_flashinfer_default_workspace_covers_prefill_head_footprint(monkeypatch):
+    pytest.importorskip("flashinfer")
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    builder = _make_flashinfer_builder(flashinfer_backend)
+    builder.max_num_batched_tokens = 8
+    builder.num_qo_heads = 4
+    builder.head_dim = 16
+    estimated_prefill_size = (
+        builder.max_num_batched_tokens
+        * builder.num_qo_heads
+        * builder.head_dim
+        * flashinfer_backend.FLASHINFER_PREFILL_WORKSPACE_BYTES_PER_ELEM
+    )
+
+    monkeypatch.setattr(flashinfer_backend.envs, "VLLM_BATCH_INVARIANT", False)
+    monkeypatch.setattr(
+        flashinfer_backend.envs,
+        "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE",
+        1,
+    )
+    assert builder._default_workspace_buffer_size() == estimated_prefill_size
+
+    configured_size = estimated_prefill_size + 1
+    monkeypatch.setattr(
+        flashinfer_backend.envs,
+        "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE",
+        configured_size,
+    )
+    assert builder._default_workspace_buffer_size() == configured_size
+
+
 def test_flashinfer_workspace_size_parses_sequence_like_array():
     pytest.importorskip("flashinfer")
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
