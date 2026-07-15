@@ -491,10 +491,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.adaptive_verification is not None
                 and self.adaptive_verification.varlen_spec_decode
             ),
-            time_graphs=(
-                self.adaptive_verification is not None
-                and self.adaptive_verification.time_graphs
-            ),
+            time_graphs=self.adaptive_verification is not None,
         )
         if self.speculator is not None:
             self.speculator.init_cudagraph_manager(cudagraph_mode)
@@ -748,10 +745,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             if self.speculator is not None:
                 self.speculator.capture()
-            if (
-                self.adaptive_verification is not None
-                and self.adaptive_verification.time_graphs
-            ):
+            if self.adaptive_verification is not None:
                 self.adaptive_verification.set_graph_costs(
                     self.cudagraph_manager, self.speculator
                 )

@@ -94,7 +94,7 @@ def build_cost_tables_from_curves(
         xs, ys = np.asarray(curve, dtype=np.float64).T
         ys = np.maximum.accumulate(ys)
         values = np.arange(limit + 1)
-        result = ys[np.minimum(np.searchsorted(xs, values), len(xs) - 1)]
+        result = np.interp(values, xs, ys)
         if len(xs) > 1:
             after = values > xs[-1]
             slope = (ys[-1] - ys[-2]) / (xs[-1] - xs[-2])
@@ -108,7 +108,6 @@ def build_cost_tables_from_curves(
 
 class ConfidenceManager:
     varlen_spec_decode = False
-    time_graphs = True
 
     def __init__(
         self,
