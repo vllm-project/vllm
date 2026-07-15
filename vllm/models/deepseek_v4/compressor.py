@@ -4,6 +4,7 @@
 from dataclasses import dataclass
 from typing import Any, ClassVar, cast
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -12,12 +13,19 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
     compress_norm_rope_store_triton,
 )
 from vllm.models.deepseek_v4.common.ops.fused_indexer_q import MXFP4_BLOCK_SIZE
 from vllm.models.deepseek_v4.common.ops.save_partial_states import (
     save_partial_states,
+)
+from vllm.models.deepseek_v4.online_c128 import (
+    DeepseekOnlineC128State,
+    assert_online_c128_supported,
+    online_c128_compress_enabled,
+    register_online_c128_state,
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
@@ -81,6 +89,9 @@ class CompressorMetadata:
     block_size: int
 
     token_to_req_indices: torch.Tensor | None = None  # [num_tokens]
+    query_start_loc_cpu: torch.Tensor | None = None
+    seq_lens_cpu: np.ndarray | None = None
+    req_state_indices_cpu: np.ndarray | None = None
 
 
 class CompressorMetadataBuilder(AttentionMetadataBuilder):
@@ -97,6 +108,7 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
+        self._online_c128 = online_c128_compress_enabled()
 
     def build(
         self,
@@ -107,11 +119,33 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
         token_to_req_indices = common_attn_metadata.token_to_req_indices(
             self.token_to_req_indices
         )
+        planner_query_start_loc_cpu = None
+        seq_lens_cpu = None
+        req_state_indices_cpu = None
+        if self._online_c128:
+            num_reqs = common_attn_metadata.num_reqs
+            req_state_indices_cpu = common_attn_metadata.req_state_indices_cpu
+            assert req_state_indices_cpu is not None, (
+                "C128 online compression requires req_state_indices_cpu."
+            )
+
+            planner_query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+            seq_lens_upper_bound = common_attn_metadata.seq_lens_cpu_upper_bound
+            if seq_lens_upper_bound is not None:
+                seq_lens_cpu = seq_lens_upper_bound[:num_reqs].cpu().numpy()
+            else:
+                query_lens_np = (
+                    planner_query_start_loc_cpu[1:] - planner_query_start_loc_cpu[:-1]
+                ).numpy()
+                seq_lens_cpu = query_lens_np
         return CompressorMetadata(
             block_table=common_attn_metadata.block_table_tensor.clamp_(min=0),
             slot_mapping=common_attn_metadata.slot_mapping,
             block_size=self.block_size,
             token_to_req_indices=token_to_req_indices,
+            query_start_loc_cpu=planner_query_start_loc_cpu,
+            seq_lens_cpu=seq_lens_cpu,
+            req_state_indices_cpu=req_state_indices_cpu,
         )
 
 
@@ -122,6 +156,7 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         dtype: torch.dtype,
         compress_ratio: int,
         prefix: str,
+        online_c128: bool = False,
     ):
         super().__init__()
         self.state_dim = state_dim
@@ -136,7 +171,6 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         assert self.dtype == torch.float32
         assert compress_ratio in [4, 128]
         coff = 1 + (compress_ratio == 4)
-        self.sliding_window = coff * compress_ratio
         # Block size is constrained by tensor sharing between compressor states
         # and KV blocks. Since compressor states share the same physical tensor
         # as KV blocks, they must use the same page size.
@@ -150,6 +184,8 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
             self.block_size = 8
         else:
             raise ValueError(f"Invalid compress ratio: {compress_ratio}")
+
+        self.sliding_window = self.block_size if online_c128 else coff * compress_ratio
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # fp8_ds_mla is the UE8M0 paged layout and needs 576B alignment. Plain
@@ -234,11 +270,17 @@ class DeepseekCompressor(nn.Module):
         )
         self.norm = RMSNorm(self.head_dim, self.rms_norm_eps)
 
+        self._use_online_c128 = (
+            online_c128_compress_enabled()
+            and compress_ratio == 128
+            and self.head_dim == 512
+        )
         self.state_cache = CompressorStateCache(
             state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
             dtype=state_dtype,
             compress_ratio=compress_ratio,
             prefix=f"{prefix}.state_cache",
+            online_c128=self._use_online_c128,
         )
 
         # Save reference to static_forward_context for forward-time KV cache lookup.
@@ -246,6 +288,21 @@ class DeepseekCompressor(nn.Module):
         self._static_forward_context = (
             vllm_config.compilation_config.static_forward_context
         )
+
+        self.online_c128_state: DeepseekOnlineC128State | None = None
+        if self._use_online_c128:
+            assert_online_c128_supported(
+                vllm_config,
+                compress_ratio=self.compress_ratio,
+                head_dim=self.head_dim,
+            )
+            self.online_c128_state = DeepseekOnlineC128State(
+                vllm_config=vllm_config,
+                head_dim=self.head_dim,
+                layer_index=extract_layer_index(prefix) if prefix else 0,
+                device=self.device,
+            )
+            register_online_c128_state(self.online_c128_state)
 
         if self.head_dim == 512:
             assert not use_fp4_cache, (
@@ -306,6 +363,37 @@ class DeepseekCompressor(nn.Module):
             else {"launch_pdl": False}
         )
 
+        cos_sin_cache = rotary_emb.cos_sin_cache
+        k_cache_metadata = cast(Any, attn_metadata[self.k_cache_prefix])
+        k_cache_layer = self._static_forward_context[self.k_cache_prefix]
+        kv_cache = k_cache_layer.kv_cache
+
+        # Plain-row V4 reads a contiguous bf16 / per-tensor fp8 cache row; the
+        # fp8_ds_mla path uses the UE8M0 paged uint8 layout.
+        store_full_kv = self.head_dim == 512 and kv_cache.dtype != torch.uint8
+        store_full_fp8 = kv_cache.dtype == torch.float8_e4m3fn
+        fp8_scale = (
+            getattr(k_cache_layer, "_flashinfer_fp8_kv_scale", None)
+            if store_full_fp8
+            else None
+        )
+
+        if self.online_c128_state is not None:
+            self._online_forward(
+                kv=kv,
+                score=score,
+                positions=positions,
+                state_metadata=state_metadata,
+                num_actual=num_actual,
+                cos_sin_cache=cos_sin_cache,
+                kv_cache=kv_cache,
+                k_cache_metadata=k_cache_metadata,
+                store_full_kv=store_full_kv,
+                store_full_fp8=store_full_fp8,
+                fp8_scale=fp8_scale,
+            )
+            return
+
         # Store the KV and score (with fused APE addition) in the state.
         # NOTE: PDL is disabled — both this kernel and the compress kernels
         # below depend on preceding kernel outputs (kv/score from the cublas
@@ -332,20 +420,6 @@ class DeepseekCompressor(nn.Module):
         #   second half sin (per-pair, length rope_head_dim // 2 each)
         # - applied to LAST rope_head_dim elements of head_dim
         # - position used: (positions // compress_ratio) * compress_ratio
-        cos_sin_cache = rotary_emb.cos_sin_cache
-        k_cache_metadata = cast(Any, attn_metadata[self.k_cache_prefix])
-        k_cache_layer = self._static_forward_context[self.k_cache_prefix]
-        kv_cache = k_cache_layer.kv_cache
-
-        # Plain-row V4 reads a contiguous bf16 / per-tensor fp8 cache row; the
-        # fp8_ds_mla path uses the UE8M0 paged uint8 layout.
-        store_full_kv = self.head_dim == 512 and kv_cache.dtype != torch.uint8
-        store_full_fp8 = kv_cache.dtype == torch.float8_e4m3fn
-        fp8_scale = (
-            getattr(k_cache_layer, "_flashinfer_fp8_kv_scale", None)
-            if store_full_fp8
-            else None
-        )
 
         # cutedsl (head=512) accepts the full-cache flags; triton (indexer/AMD)
         # does not, so the two callables have different signatures.
@@ -393,4 +467,133 @@ class DeepseekCompressor(nn.Module):
             token_stride=self._token_stride,
             scale_dim=self._scale_dim,
             **extra_kwargs,
+        )
+
+    def _online_forward(
+        self,
+        kv: torch.Tensor,
+        score: torch.Tensor,
+        positions: torch.Tensor,
+        state_metadata: CompressorMetadata,
+        num_actual: int,
+        cos_sin_cache: torch.Tensor,
+        kv_cache: torch.Tensor,
+        k_cache_metadata: Any,
+        store_full_kv: bool,
+        store_full_fp8: bool,
+        fp8_scale: torch.Tensor | None,
+    ) -> None:
+        online_state = self.online_c128_state
+        assert online_state is not None
+
+        self._online_forward_planned(
+            kv=kv,
+            score=score,
+            positions=positions,
+            state_metadata=state_metadata,
+            num_actual=num_actual,
+            run_state=online_state.state,
+            online_state=online_state,
+            cos_sin_cache=cos_sin_cache,
+            kv_cache=kv_cache,
+            k_cache_metadata=k_cache_metadata,
+            store_full_kv=store_full_kv,
+            store_full_fp8=store_full_fp8,
+            fp8_scale=fp8_scale,
+        )
+
+    def _online_forward_planned(
+        self,
+        kv: torch.Tensor,
+        score: torch.Tensor,
+        positions: torch.Tensor,
+        state_metadata: CompressorMetadata,
+        num_actual: int,
+        run_state: torch.Tensor,
+        online_state: DeepseekOnlineC128State,
+        cos_sin_cache: torch.Tensor,
+        kv_cache: torch.Tensor,
+        k_cache_metadata: Any,
+        store_full_kv: bool,
+        store_full_fp8: bool,
+        fp8_scale: torch.Tensor | None,
+    ) -> None:
+        from vllm.models.deepseek_v4.nvidia.ops.online_c128_cutedsl import (
+            online_c128_merge,
+        )
+        from vllm.models.deepseek_v4.nvidia.ops.sparse_attn_compress_cutedsl import (
+            store_compressed_kv_cutedsl,
+        )
+        from vllm.models.deepseek_v4.online_c128 import plan_online_c128_segments
+
+        query_start_loc_cpu = state_metadata.query_start_loc_cpu
+        seq_lens_cpu = state_metadata.seq_lens_cpu
+        req_state_indices_cpu = state_metadata.req_state_indices_cpu
+        assert (
+            query_start_loc_cpu is not None
+            and seq_lens_cpu is not None
+            and req_state_indices_cpu is not None
+        ), "C128 online forward requires host-side segment-plan metadata."
+
+        compressed_kv = torch.empty(
+            (num_actual, self.head_dim),
+            dtype=torch.float32,
+            device=kv.device,
+        )
+        plan = plan_online_c128_segments(
+            query_start_loc_cpu=query_start_loc_cpu.numpy(),
+            seq_lens_cpu=seq_lens_cpu,
+            req_state_indices_cpu=req_state_indices_cpu,
+            max_num_reqs=online_state.max_num_reqs,
+            device=kv.device,
+            compress_ratio=self.compress_ratio,
+        )
+
+        online_c128_merge(
+            kv=kv,
+            score=score,
+            ape=self.ape,
+            positions=positions,
+            run_state=run_state,
+            segments=plan.emit_segments,
+            compressed_kv=compressed_kv,
+            compress_ratio=self.compress_ratio,
+        )
+        online_c128_merge(
+            kv=kv,
+            score=score,
+            ape=self.ape,
+            positions=positions,
+            run_state=run_state,
+            segments=plan.update_segments,
+            compressed_kv=compressed_kv,
+            compress_ratio=self.compress_ratio,
+        )
+        if plan.reset_rows.numel() > 0:
+            online_state.reset_rows(plan.reset_rows)
+
+        store_compressed_kv_cutedsl(
+            compressed_kv=compressed_kv,
+            positions=positions,
+            slot_mapping=state_metadata.slot_mapping,
+            block_size=state_metadata.block_size,
+            rms_norm_weight=self.norm.weight,
+            rms_norm_eps=self.rms_norm_eps,
+            cos_sin_cache=cos_sin_cache,
+            k_cache=kv_cache,
+            kv_slot_mapping=k_cache_metadata.slot_mapping,
+            kv_cache_block_size=kv_cache.shape[1],
+            kv_block_stride=kv_cache.stride(0),
+            head_size=self.head_dim,
+            state_width=self.head_dim,
+            rope_head_dim=self.rope_head_dim,
+            fp8_max=448.0,
+            quant_block=self._quant_block,
+            token_stride=self._token_stride,
+            scale_dim=self._scale_dim,
+            compress_ratio=self.compress_ratio,
+            overlap=self.overlap,
+            store_full_kv=store_full_kv,
+            store_full_fp8=store_full_fp8,
+            fp8_scale=fp8_scale,
         )

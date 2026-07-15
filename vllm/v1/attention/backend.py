@@ -446,6 +446,9 @@ class CommonAttentionMetadata:
     has positions available so that builders can pre-compute position-dependent
     sparse metadata for DeepSeek V4 C128A layers."""
 
+    req_state_indices_cpu: np.ndarray | None = None
+    """Mapping from batch slot to persistent request-state slot."""
+
     is_prefilling: torch.Tensor | None = None
     """(batch_size,) bool tensor: True if request is still in prefill phase
     (num_computed_tokens < num_prompt_tokens). Used by some backends to
@@ -579,6 +582,7 @@ class CommonAttentionMetadata:
             encoder_seq_lens_cpu=maybe_slice_reqs(self.encoder_seq_lens_cpu),
             dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
             dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
+            req_state_indices_cpu=maybe_slice_reqs(self.req_state_indices_cpu),
             is_prefilling=maybe_slice_reqs(self.is_prefilling),
             rswa_prefix_lens=maybe_slice_reqs(self.rswa_prefix_lens),
         )

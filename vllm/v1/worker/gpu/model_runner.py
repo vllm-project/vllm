@@ -237,6 +237,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
         self.cudagraph_manager: ModelCudaGraphManager | None = None
+        self._online_c128_enabled = False
 
         # LoRA-related workers.
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
@@ -274,6 +275,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         time_before_load = time.perf_counter()
         if load_dummy_weights:
             self.load_config.load_format = "dummy"
+        from vllm.models.deepseek_v4.online_c128 import (
+            clear_online_c128_states,
+            online_c128_compress_enabled,
+        )
+
+        self._online_c128_enabled = online_c128_compress_enabled()
+        clear_online_c128_states()
         self.eplb.prepare_load()
         eplb_models_added = False
         with DeviceMemoryProfiler() as m:
@@ -744,6 +752,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         req_idx = self.req_states.remove_request(req_id)
         if req_idx is None:
             return False
+        if self._online_c128_enabled:
+            from vllm.models.deepseek_v4.online_c128 import (
+                reset_online_c128_state_rows,
+            )
+
+            reset_online_c128_state_rows(
+                torch.tensor([req_idx], device=self.device, dtype=torch.int32)
+            )
         if self.pp_handler is not None:
             self.pp_handler.on_req_idx_freed(req_idx)
         if self.encoder_cache is not None:

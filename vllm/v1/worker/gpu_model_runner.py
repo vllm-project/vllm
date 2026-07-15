@@ -667,6 +667,13 @@ class GPUModelRunner(
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
+        self._online_c128_enabled = bool(envs.VLLM_USE_ONLINE_C128_COMPRESS)
+        if self._online_c128_enabled:
+            self.req_id_to_state_index: dict[str, int] = {}
+            self.free_req_state_indices: list[int] = list(
+                reversed(range(self.max_num_reqs))
+            )
+        self.req_state_indices_cpu = np.empty(self.max_num_reqs, dtype=np.int32)
         # NOTE(rob): num_prompt_logprobs only includes reqs
         # that are currently in the prefill phase.
         self.num_prompt_logprobs: dict[str, int] = {}
@@ -1160,6 +1167,32 @@ class GPUModelRunner(
             self.async_output_copy_stream = stream
         return stream
 
+    def _allocate_c128_state_index(self, req_id: str) -> int:
+        state_index = self.req_id_to_state_index.get(req_id)
+        if state_index is not None:
+            return state_index
+        if not self.free_req_state_indices:
+            raise RuntimeError(
+                "C128 request-state slots exhausted: "
+                f"max_num_reqs={self.max_num_reqs}"
+            )
+        state_index = self.free_req_state_indices.pop()
+        self.req_id_to_state_index[req_id] = state_index
+        return state_index
+
+    def _release_c128_state_index(self, req_id: str) -> None:
+        state_index = self.req_id_to_state_index.pop(req_id, None)
+        if state_index is None:
+            return
+        from vllm.models.deepseek_v4.online_c128 import (
+            reset_online_c128_state_rows,
+        )
+
+        reset_online_c128_state_rows(
+            torch.tensor([state_index], device=self.device, dtype=torch.int32)
+        )
+        self.free_req_state_indices.append(state_index)
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
         """Update the cached states and the persistent batch with the scheduler
         output.
@@ -1174,6 +1207,11 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
+            if self._online_c128_enabled:
+                self._release_c128_state_index(req_id)
+        if self._online_c128_enabled:
+            for req_id in scheduler_output.preempted_req_ids or ():
+                self._release_c128_state_index(req_id)
         self.late_interaction_runner.on_requests_finished(
             scheduler_output.finished_req_ids
         )
@@ -1239,6 +1277,8 @@ class GPUModelRunner(
             if req_id in self.requests:
                 # For streaming case only.
                 req_state = self._update_streaming_request(req_id, new_req_data)
+                if self._online_c128_enabled:
+                    self._allocate_c128_state_index(req_id)
                 reqs_to_add.append(req_state)
                 continue
 
@@ -1278,6 +1318,8 @@ class GPUModelRunner(
                 lora_request=new_req_data.lora_request,
             )
             self.requests[req_id] = req_state
+            if self._online_c128_enabled:
+                self._allocate_c128_state_index(req_id)
             self.late_interaction_runner.register_request(req_id, pooling_params)
 
             if sampling_params and sampling_params.prompt_logprobs is not None:
@@ -1426,6 +1468,8 @@ class GPUModelRunner(
                 # The request is not in the persistent batch.
                 # The request was either preempted and resumed later, or was not
                 # scheduled in the previous step and needs to be added again.
+                if self._online_c128_enabled:
+                    self._allocate_c128_state_index(req_id)
 
                 if self.use_async_scheduling and num_output_tokens > 0:
                     # We must recover the output token ids for resumed requests in the
@@ -2411,6 +2455,17 @@ class GPUModelRunner(
             mm_req_doc_ranges=req_doc_ranges,
             rswa_prefix_lens=rswa_prefix_lens,
         )
+
+        req_state_indices_cpu = self.req_state_indices_cpu[:num_reqs_padded]
+        req_state_indices_cpu.fill(-1)
+        if self._online_c128_enabled:
+            for req_index, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+                state_index = self.req_id_to_state_index.get(req_id)
+                if state_index is not None:
+                    req_state_indices_cpu[req_index] = state_index
+        else:
+            req_state_indices_cpu[:num_reqs] = np.arange(num_reqs, dtype=np.int32)
+        cm_base.req_state_indices_cpu = req_state_indices_cpu
 
         if self.dcp_world_size > 1:
             self.dcp_local_seq_lens.cpu[:num_reqs] = get_dcp_local_seq_lens(
@@ -5239,6 +5294,9 @@ class GPUModelRunner(
             self.model_config.model,
             scope="global",
         )
+        from vllm.models.deepseek_v4.online_c128 import clear_online_c128_states
+
+        clear_online_c128_states()
 
         if self.parallel_config.enable_eplb:
             self.eplb_state = EplbState(self.parallel_config, self.device)
