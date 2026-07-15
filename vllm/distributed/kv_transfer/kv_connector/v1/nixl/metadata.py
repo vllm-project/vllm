@@ -42,8 +42,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   5: Add remote_blocks_expiry_time to kv_transfer_params + handshake
 #      clock-sync timestamp
 #   6: Add per-region member names for PP push.
+#   7: Add packed-member offsets and block strides for PP push.
 #
-NIXL_CONNECTOR_VERSION: int = 6
+NIXL_CONNECTOR_VERSION: int = 7
 
 
 @dataclass
@@ -61,6 +62,9 @@ class NixlAgentMetadata:
     physical_blocks_per_logical_kv_block: int
     # Layer names sharing each advertised region, in region order.
     region_members: list[list[str]] = field(default_factory=list)
+    # Single-region packed layout; zero/empty for contiguous regions.
+    packed_block_stride: int = 0
+    packed_member_layouts: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 
 @dataclass
