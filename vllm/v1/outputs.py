@@ -228,6 +228,19 @@ class ECConnectorOutput:
     finished_recving: set[str] | None = None
 
 
+@dataclass
+class LoRACacheStats:
+    gpu_cached_adapters: list[str]
+    cpu_cached_adapters: list[str]
+    pinned_adapters: list[str]
+    gpu_usage: float
+    cpu_usage: float
+    gpu_hits: int
+    gpu_lookups: int
+    cpu_hits: int
+    cpu_lookups: int
+
+
 # ModelRunnerOutput is serialized and sent to the scheduler process.
 # This is expensive for torch.Tensor so prefer to use list instead.
 @dataclass
@@ -268,6 +281,8 @@ class ModelRunnerOutput:
 
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
+
+    lora_cache_stats: LoRACacheStats | None = None
 
     # Per-step routed experts data captured by the worker.
     # ``routing_data`` shape: (num_scheduled_tokens, num_layers,

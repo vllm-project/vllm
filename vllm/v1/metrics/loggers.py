@@ -1036,6 +1036,48 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 ],
             )
 
+        self.gauge_lora_cache_info: Gauge | None = None
+        if vllm_config.lora_config is not None:
+            self.gauge_lora_cache_info = self._gauge_cls(
+                name="vllm:lora_cache_info",
+                documentation=(
+                    "LoRA adapters cached in GPU and CPU, "
+                    "independent of active requests."
+                ),
+                multiprocess_mode="mostrecent",
+                labelnames=[
+                    "gpu_cached_adapters",
+                    "cpu_cached_adapters",
+                    "pinned_adapters",
+                ],
+            )
+            self.gauge_lora_cache_usage = self._gauge_cls(
+                name="vllm:lora_cache_usage_ratio",
+                documentation=("Fraction of LoRA cache capacity occupied."),
+                multiprocess_mode="mostrecent",
+                labelnames=["tier"],
+            )
+            self.gauge_lora_cache_num = self._gauge_cls(
+                name="vllm:lora_cache_num_adapters",
+                documentation="Number of adapters in LoRA cache.",
+                multiprocess_mode="mostrecent",
+                labelnames=["tier"],
+            )
+            self.counter_lora_cache_hits = self._counter_cls(
+                name="vllm:lora_cache_hits_total",
+                documentation="Cumulative LoRA cache hits.",
+                labelnames=["tier"],
+            )
+            self.counter_lora_cache_lookups = self._counter_cls(
+                name="vllm:lora_cache_lookups_total",
+                documentation="Cumulative LoRA cache lookups.",
+                labelnames=["tier"],
+            )
+            self._prev_gpu_hits = 0
+            self._prev_gpu_lookups = 0
+            self._prev_cpu_hits = 0
+            self._prev_cpu_lookups = 0
+
     def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
         metrics_info = config_obj.metrics_info()
         metrics_info["engine"] = ""
@@ -1140,6 +1182,47 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     self.labelname_max_lora: self.max_lora,
                 }
                 self.gauge_lora_info.labels(**lora_info_labels).set_to_current_time()
+
+            if (
+                self.gauge_lora_cache_info is not None
+                and scheduler_stats.lora_cache_stats is not None
+            ):
+                lcs = scheduler_stats.lora_cache_stats
+                self.gauge_lora_cache_info.labels(
+                    gpu_cached_adapters=",".join(lcs.gpu_cached_adapters),
+                    cpu_cached_adapters=",".join(lcs.cpu_cached_adapters),
+                    pinned_adapters=",".join(lcs.pinned_adapters),
+                ).set_to_current_time()
+
+                self.gauge_lora_cache_usage.labels(tier="gpu").set(lcs.gpu_usage)
+                self.gauge_lora_cache_usage.labels(tier="cpu").set(lcs.cpu_usage)
+                self.gauge_lora_cache_num.labels(tier="gpu").set(
+                    len(lcs.gpu_cached_adapters)
+                )
+                self.gauge_lora_cache_num.labels(tier="cpu").set(
+                    len(lcs.cpu_cached_adapters)
+                )
+
+                gpu_hit_delta = lcs.gpu_hits - self._prev_gpu_hits
+                gpu_lookup_delta = lcs.gpu_lookups - self._prev_gpu_lookups
+                cpu_hit_delta = lcs.cpu_hits - self._prev_cpu_hits
+                cpu_lookup_delta = lcs.cpu_lookups - self._prev_cpu_lookups
+                if gpu_hit_delta > 0:
+                    self.counter_lora_cache_hits.labels(tier="gpu").inc(gpu_hit_delta)
+                if gpu_lookup_delta > 0:
+                    self.counter_lora_cache_lookups.labels(tier="gpu").inc(
+                        gpu_lookup_delta
+                    )
+                if cpu_hit_delta > 0:
+                    self.counter_lora_cache_hits.labels(tier="cpu").inc(cpu_hit_delta)
+                if cpu_lookup_delta > 0:
+                    self.counter_lora_cache_lookups.labels(tier="cpu").inc(
+                        cpu_lookup_delta
+                    )
+                self._prev_gpu_hits = lcs.gpu_hits
+                self._prev_gpu_lookups = lcs.gpu_lookups
+                self._prev_cpu_hits = lcs.cpu_hits
+                self._prev_cpu_lookups = lcs.cpu_lookups
 
         if mm_cache_stats is not None:
             self.counter_mm_cache_queries[engine_idx].inc(mm_cache_stats.queries)

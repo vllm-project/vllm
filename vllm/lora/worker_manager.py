@@ -19,6 +19,7 @@ from vllm.lora.model_manager import (
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
+from vllm.v1.outputs import LoRACacheStats
 
 logger = init_logger(__name__)
 
@@ -247,6 +248,16 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
 
     _manager_cls: type[LRUCacheLoRAModelManager] = LRUCacheLoRAModelManager
 
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        embedding_modules: dict[str, str],
+        lora_model_cls: type[LoRAModel] = LoRAModel,
+    ):
+        super().__init__(vllm_config, device, embedding_modules, lora_model_cls)
+        self._adapter_names: dict[int, str] = {}
+
     def create_lora_manager(
         self,
         model: torch.nn.Module,
@@ -315,5 +326,23 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             loaded = (
                 self._adapter_manager.get_adapter(lora_request.lora_int_id) is not None
             )
+        self._adapter_names[lora_request.lora_int_id] = lora_request.lora_name
         self._adapter_manager.activate_adapter(lora_request.lora_int_id)
         return loaded
+
+    def get_lora_cache_stats(self) -> LoRACacheStats:
+        assert isinstance(self._adapter_manager, LRUCacheLoRAModelManager)
+        raw = self._adapter_manager.get_lora_cache_stats()
+        resolve = self._adapter_names.get
+
+        return LoRACacheStats(
+            gpu_cached_adapters=[resolve(i, str(i)) for i in raw["gpu_ids"]],
+            cpu_cached_adapters=[resolve(i, str(i)) for i in raw["cpu_only_ids"]],
+            pinned_adapters=[resolve(i, str(i)) for i in raw["pinned_ids"]],
+            gpu_usage=raw["gpu_usage"],
+            cpu_usage=raw["cpu_usage"],
+            gpu_hits=raw["gpu_hits"],
+            gpu_lookups=raw["gpu_lookups"],
+            cpu_hits=raw["cpu_hits"],
+            cpu_lookups=raw["cpu_lookups"],
+        )
