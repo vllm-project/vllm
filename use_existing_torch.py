@@ -3,6 +3,7 @@
 
 import argparse
 import glob
+import os
 import sys
 
 # Only strip targeted libraries when checking prefix
@@ -34,6 +35,11 @@ def main(argv):
         *glob.glob("requirements/**/*.in", recursive=True),
         "pyproject.toml",
     ):
+        # Some build stages copy only a subset of these (e.g. the CPU image
+        # copies requirements/*.txt but not pyproject.toml), so skip any that
+        # aren't present rather than failing.
+        if not os.path.exists(file):
+            continue
         with open(file) as f:
             lines = f.readlines()
         if "torch" in "".join(lines).lower():
