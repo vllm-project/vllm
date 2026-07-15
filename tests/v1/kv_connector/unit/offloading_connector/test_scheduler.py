@@ -621,9 +621,9 @@ def test_two_groups_different_block_sizes(request_runner, async_scheduling: bool
     # Verify group configs
     kv_group_configs = runner.connector_scheduler.config.kv_group_configs
     assert len(kv_group_configs) == 2
-    assert kv_group_configs[0].gpu_block_size == 12
+    assert kv_group_configs[0].tokens_per_block == 12
     assert kv_group_configs[0].tokens_per_chunk == 12
-    assert kv_group_configs[1].gpu_block_size == 16
+    assert kv_group_configs[1].tokens_per_block == 16
     assert kv_group_configs[1].tokens_per_chunk == 16
 
     # Prompt: 25 tokens, unaligned to both block sizes.
@@ -930,14 +930,14 @@ class TestSlidingWindowLookup:
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_request_level_policy_stores_all_blocks(request_runner, async_scheduling: bool):
     """With REQUEST_LEVEL policy, all blocks are stored — including prefix hits."""
-    gpu_block_size = 4
+    tokens_per_block = 4
     blocks_per_chunk = 3
-    tokens_per_chunk = gpu_block_size * blocks_per_chunk
+    tokens_per_chunk = tokens_per_block * blocks_per_chunk
     num_gpu_blocks = 100
 
     runner = request_runner(
         blocks_per_chunk=blocks_per_chunk,
-        block_size=gpu_block_size,
+        block_size=tokens_per_block,
         num_gpu_blocks=num_gpu_blocks,
         async_scheduling=async_scheduling,
     )
@@ -1106,12 +1106,12 @@ def test_fence_at_build_store_jobs(request_runner):
 def test_complete_store_called_per_job(request_runner, async_scheduling: bool):
     """complete_store fires per-job, not deferred to request finish.
     Each call carries only that store's keys."""
-    gpu_block_size = 4
+    tokens_per_block = 4
     blocks_per_chunk = 3
-    tokens_per_chunk = gpu_block_size * blocks_per_chunk
+    tokens_per_chunk = tokens_per_block * blocks_per_chunk
     runner = request_runner(
         blocks_per_chunk=blocks_per_chunk,
-        block_size=gpu_block_size,
+        block_size=tokens_per_block,
         num_gpu_blocks=100,
         async_scheduling=async_scheduling,
     )
@@ -1148,15 +1148,15 @@ def test_max_offload_tokens_validation(request_runner, async_scheduling: bool):
 
     Setup: 3 offloaded blocks × 3 GPU blocks each = 9 GPU block offsets (0–8).
     """
-    gpu_block_size = 4
+    tokens_per_block = 4
     blocks_per_chunk = 3
-    tokens_per_chunk = gpu_block_size * blocks_per_chunk  # 12
+    tokens_per_chunk = tokens_per_block * blocks_per_chunk  # 12
     num_gpu_blocks = 100
     all_offsets = (0, 1, 2, 3, 4, 5, 6, 7, 8)
 
     def make_runner():
         return request_runner(
-            block_size=gpu_block_size,
+            block_size=tokens_per_block,
             num_gpu_blocks=num_gpu_blocks,
             async_scheduling=async_scheduling,
             blocks_per_chunk=blocks_per_chunk,
@@ -1251,15 +1251,15 @@ def test_offload_prompt_only(request_runner, async_scheduling: bool):
     subtleties. The decode steps are still enough for the prompt store to
     complete and show up in expected_stored.
     """
-    gpu_block_size = 4
+    tokens_per_block = 4
     blocks_per_chunk = 3
-    tokens_per_chunk = gpu_block_size * blocks_per_chunk  # 12
+    tokens_per_chunk = tokens_per_block * blocks_per_chunk  # 12
     num_prompt_blocks = 2
     num_decode_blocks = 4
     prompt_offsets = (0, 1, 2, 3, 4, 5)
 
     runner = request_runner(
-        block_size=gpu_block_size,
+        block_size=tokens_per_block,
         num_gpu_blocks=100,
         async_scheduling=async_scheduling,
         blocks_per_chunk=blocks_per_chunk,

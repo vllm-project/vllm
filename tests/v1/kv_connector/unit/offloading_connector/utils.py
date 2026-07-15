@@ -313,9 +313,9 @@ class RequestRunner:
             self.connector_scheduler.config.kv_group_configs,
             kv_cache_config.kv_cache_groups,
         ):
-            gpu_block_size = kv_cache_group.kv_cache_spec.block_size
-            assert group_config.gpu_block_size == gpu_block_size
-            assert group_config.tokens_per_chunk == gpu_block_size * blocks_per_chunk
+            tokens_per_block = kv_cache_group.kv_cache_spec.block_size
+            assert group_config.tokens_per_block == tokens_per_block
+            assert group_config.tokens_per_chunk == tokens_per_block * blocks_per_chunk
 
         # extract OffloadingSpec of worker_connector
         connector_worker = self.worker_connector.connector_worker

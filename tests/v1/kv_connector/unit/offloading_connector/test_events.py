@@ -78,7 +78,7 @@ def _group_config(
 ) -> GroupOffloadConfig:
     return GroupOffloadConfig(
         group_idx=group_idx,
-        gpu_block_size=block_size,
+        tokens_per_block=block_size,
         tokens_per_chunk=block_size * blocks_per_chunk,
         hashes_per_chunk=blocks_per_chunk,
         sliding_window_size_in_blocks=sliding_window_size_in_blocks,

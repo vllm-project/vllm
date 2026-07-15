@@ -76,7 +76,7 @@ class TransferJobStatus:
 
 class GroupOffloadConfig(NamedTuple):
     group_idx: int
-    gpu_block_size: int
+    tokens_per_block: int
     tokens_per_chunk: int
     hashes_per_chunk: int
     # KV cache spec metadata propagated onto emitted BlockStored events so
@@ -122,10 +122,10 @@ def resolve_mamba_align_size(
     groups agree on the same value.
     """
     mamba_align_size: int | None = None
-    for idx, gpu_block_size in enumerate(spec.tokens_per_block):
+    for idx, tokens_per_block in enumerate(spec.tokens_per_block):
         kv_spec = kv_cache_config.kv_cache_groups[idx].kv_cache_spec
         if isinstance(kv_spec, MambaSpec) and kv_spec.mamba_cache_mode == "align":
-            offload_block_size = gpu_block_size * spec.blocks_per_chunk
+            offload_block_size = tokens_per_block * spec.blocks_per_chunk
             assert mamba_align_size is None or mamba_align_size == offload_block_size
             mamba_align_size = offload_block_size
     return mamba_align_size
@@ -150,13 +150,13 @@ class SchedulerOffloadConfig(NamedTuple):
         # each segment can never serve a load hit. Relevant for hybrid
         # architectures like DeepSeek V4 (MLA + SWA groups).
         full_attn_tokens_per_chunk: set[int] = set()
-        for idx, gpu_block_size in enumerate(spec.tokens_per_block):
+        for idx, tokens_per_block in enumerate(spec.tokens_per_block):
             kv_spec = kv_cache_config.kv_cache_groups[idx].kv_cache_spec
             sw = get_sliding_window_size_in_blocks(
-                kv_spec, gpu_block_size * spec.blocks_per_chunk
+                kv_spec, tokens_per_block * spec.blocks_per_chunk
             )
             if sw is None:
-                full_attn_tokens_per_chunk.add(gpu_block_size * spec.blocks_per_chunk)
+                full_attn_tokens_per_chunk.add(tokens_per_block * spec.blocks_per_chunk)
 
         # Only apply the optimization if there's a single consistent
         # full-attention alignment size.
@@ -203,26 +203,27 @@ class SchedulerOffloadConfig(NamedTuple):
             kv_group_configs=tuple(
                 GroupOffloadConfig(
                     group_idx=idx,
-                    gpu_block_size=gpu_block_size,
-                    tokens_per_chunk=gpu_block_size * spec.blocks_per_chunk,
+                    tokens_per_block=tokens_per_block,
+                    tokens_per_chunk=tokens_per_block * spec.blocks_per_chunk,
                     hashes_per_chunk=(
-                        (gpu_block_size * spec.blocks_per_chunk) // spec.tokens_per_hash
+                        (tokens_per_block * spec.blocks_per_chunk)
+                        // spec.tokens_per_hash
                     ),
                     sliding_window_size_in_blocks=(
                         sw := get_sliding_window_size_in_blocks(
                             kv_cache_config.kv_cache_groups[idx].kv_cache_spec,
-                            gpu_block_size * spec.blocks_per_chunk,
+                            tokens_per_block * spec.blocks_per_chunk,
                         )
                     ),
                     alignment_block_count=_alignment_block_count(
-                        gpu_block_size * spec.blocks_per_chunk, sw
+                        tokens_per_block * spec.blocks_per_chunk, sw
                     ),
                     kv_event_group_spec=get_offloading_event_group_spec(
                         kv_cache_config.kv_cache_groups[idx]
                     ),
                     is_eagle_group=idx in eagle_groups,
                 )
-                for idx, gpu_block_size in enumerate(spec.tokens_per_block)
+                for idx, tokens_per_block in enumerate(spec.tokens_per_block)
             ),
             blocks_per_chunk=spec.blocks_per_chunk,
             offload_prompt_only=spec.offload_prompt_only,
@@ -780,10 +781,10 @@ class OffloadingConnectorScheduler:
                 block.block_id for block in group_blocks if block.block_id != 0
             )
 
-            gpu_block_size = group_config.gpu_block_size
+            tokens_per_block = group_config.tokens_per_block
             tokens_per_chunk = group_config.tokens_per_chunk
             offload_keys = group_state.offload_keys
-            num_gpu_blocks = cdiv(num_cached_tokens, gpu_block_size)
+            num_gpu_blocks = cdiv(num_cached_tokens, tokens_per_block)
 
             assert len(group_blocks) >= num_gpu_blocks
             num_locally_computed_gpu_blocks = num_gpu_blocks
@@ -795,7 +796,7 @@ class OffloadingConnectorScheduler:
 
             assert (
                 num_locally_computed_tokens
-                <= num_locally_computed_gpu_blocks * gpu_block_size
+                <= num_locally_computed_gpu_blocks * tokens_per_block
             )
             num_pending_gpu_blocks = num_gpu_blocks - num_locally_computed_gpu_blocks
 
