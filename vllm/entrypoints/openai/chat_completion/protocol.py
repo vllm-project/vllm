@@ -249,6 +249,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     use_beam_search: bool = False
     top_k: int | None = None
     min_p: float | None = None
+    p_less: bool | None = None
     repetition_penalty: float | None = None
     length_penalty: float = 1.0
     stop_token_ids: list[int] | None = []
@@ -584,6 +585,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         "top_p": 1.0,
         "top_k": 0,
         "min_p": 0.0,
+        "p_less": False,
     }
 
     def to_beam_search_params(
@@ -638,6 +640,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
             min_p = default_sampling_params.get(
                 "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"]
             )
+        if (p_less := self.p_less) is None:
+            p_less = default_sampling_params.get(
+                "p_less", self._DEFAULT_SAMPLING_PARAMS["p_less"]
+            )
 
         # Merge server-default stop_token_ids (e.g., model-specific tokens
         # like </call> for gpt-oss) with any request-specified ones
@@ -671,6 +677,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             top_p=top_p,
             top_k=top_k,
             min_p=min_p,
+            p_less=p_less,
             seed=self.seed,
             stop=self.stop,
             stop_token_ids=stop_token_ids,
@@ -1049,6 +1056,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     use_beam_search: bool = False
     top_k: int | None = None
     min_p: float | None = None
+    p_less: bool | None = None
     repetition_penalty: float | None = None
     length_penalty: float | None = 1.0
     early_stopping: bool = False
