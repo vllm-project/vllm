@@ -230,6 +230,9 @@ def main():
     if args.layers:
         target_layers = [int(x.strip()) for x in args.layers.split(",")]
 
+    # Allow pickle serialization for apply_model to pass closures
+    os.environ.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
     # Lazy import vLLM to allow --help without GPU
     from vllm import LLM, SamplingParams
 
