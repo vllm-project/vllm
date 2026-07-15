@@ -15,7 +15,6 @@ if TYPE_CHECKING:
 
 
 class BaseLayerWithLoRA(nn.Module):
-
     def named_modules(
         self,
         memo: set[nn.Module] | None = None,
@@ -41,49 +40,45 @@ class BaseLayerWithLoRA(nn.Module):
         yield prefix, self
 
         base: nn.Module | None = getattr(self, "base_layer", None)
-        if base is not None:
-            if not (remove_duplicate and base in memo):
-                memo.add(base)
-                yield prefix, base
-                for name, child in base._modules.items():
-                    if child is not None:
-                        child_prefix = f"{prefix}.{name}" if prefix else name
-                        yield from child.named_modules(
-                            memo, child_prefix, remove_duplicate
-                        )
+        if base is not None and not (remove_duplicate and base in memo):
+            memo.add(base)
+            yield prefix, base
+            for name, child in base._modules.items():
+                if child is not None:
+                    child_prefix = f"{prefix}.{name}" if prefix else name
+                    yield from child.named_modules(memo, child_prefix, remove_duplicate)
 
         for name, child in self._modules.items():
             if name == "base_layer" or child is None:
                 continue
             child_prefix = f"{prefix}.{name}" if prefix else name
-            yield from child.named_modules(
-                memo, child_prefix, remove_duplicate
-            )
+            yield from child.named_modules(memo, child_prefix, remove_duplicate)
 
-    def load_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Forward checkpoint weights to the unwrapped base layer."""
         from vllm.model_executor.models.utils import AutoWeightsLoader
 
         loader = AutoWeightsLoader(self.base_layer)
         return loader.load_weights(weights)
 
+    # Plain tensor attributes (not nn.Parameters or registered buffers)
+    # holding per-slot adapter state. Subclasses whose state lives under
+    # other names override this.
+    lora_state_attrs: tuple[str, ...] = ("lora_a_stacked", "lora_b_stacked")
+
     def zero_lora_state(self) -> None:
-        """Re-zero all unregistered GPU tensor attributes.
+        """Re-zero the LoRA stacked tensors after a weight reload.
 
-        LoRA stacked tensors (``lora_a_stacked``, ``lora_b_stacked``, etc.)
-        are plain attributes, not ``nn.Parameter`` or registered buffers.
-        After level-2 sleep the GPU memory backing them is discarded and
-        remapped with undefined contents.  ``reload_weights()`` restores
-        only parameters and buffers, so these tensors must be explicitly
-        re-zeroed to avoid adding garbage to the base-model output.
+        The stacked tensors are plain attributes, not ``nn.Parameter`` or
+        registered buffers. After level-2 sleep the GPU memory backing
+        them is discarded and remapped with undefined contents, and
+        ``reload_weights()`` restores only parameters and buffers — so
+        they must be explicitly re-zeroed to avoid adding garbage to the
+        base-model output. Adapters active before sleep must be re-loaded
+        afterwards.
         """
-        params = set(id(p) for p in self.parameters())
-        buffers = set(id(b) for b in self.buffers())
-        registered = params | buffers
-
-        for val in vars(self).values():
+        for name in self.lora_state_attrs:
+            val = getattr(self, name, None)
             if isinstance(val, torch.Tensor):
                 tensors: Iterable[torch.Tensor] = (val,)
             elif isinstance(val, (tuple, list)):
@@ -92,7 +87,7 @@ class BaseLayerWithLoRA(nn.Module):
                 continue
 
             for t in tensors:
-                if id(t) not in registered and t.device.type != "meta":
+                if t.device.type != "meta":
                     t.zero_()
 
     @overload
