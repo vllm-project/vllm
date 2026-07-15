@@ -1632,15 +1632,6 @@ class Scheduler(SchedulerInterface):
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
                 # skip failed or rescheduled requests from KV load failure
                 continue
-            if request is None or request.is_finished():
-                # The request is already finished. This can happen if the
-                # request is aborted while the model is executing it (e.g.,
-                # in pipeline parallelism or in async scheduling).
-                # NOTE(Kuntai): When delay_free_blocks=True (for async KV
-                # cache transfer in KV connector), the aborted request will not
-                # be set to None (in order to finish async KV transfer).
-                # In this case, we use is_finished() to check.
-                continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = (
@@ -1650,12 +1641,8 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
-            # Skip a stale frame still pending discard (async_tokens_to_discard
-            # > 0): its pre-reset rejection count would underflow the counters.
-            if (
-                scheduled_spec_token_ids
-                and (generated_token_ids or self.num_sampled_tokens_per_step == 0)
-                and request.async_tokens_to_discard == 0
+            if scheduled_spec_token_ids and (
+                generated_token_ids or self.num_sampled_tokens_per_step == 0
             ):
                 planned_num_draft_tokens = len(scheduled_spec_token_ids)
                 num_draft_tokens = planned_num_draft_tokens
@@ -1666,27 +1653,53 @@ class Scheduler(SchedulerInterface):
                     # of spec tokens, and we use the actual number of draft tokens
                     # **only for statistics**
                     num_draft_tokens = model_runner_output.num_draft_tokens[req_index]
+                num_invalid_draft_tokens = 0
+                if scheduler_output.num_invalid_spec_tokens:
+                    num_invalid_draft_tokens = (
+                        scheduler_output.num_invalid_spec_tokens.get(req_id, 0)
+                    )
+                elif request is not None and request.use_structured_output:
+                    num_invalid_draft_tokens = scheduled_spec_token_ids.count(-1)
+                if num_invalid_draft_tokens:
+                    num_draft_tokens = min(
+                        num_draft_tokens,
+                        planned_num_draft_tokens - num_invalid_draft_tokens,
+                    )
                 num_sampled = self.num_sampled_tokens_per_step
                 num_accepted = max(len(generated_token_ids) - num_sampled, 0)
-                num_rejected_from_plan = planned_num_draft_tokens - num_accepted
-                # num_computed_tokens represents the number of tokens
-                # processed in the current step, considering scheduled
-                # tokens and rejections. If some tokens are rejected,
-                # num_computed_tokens is decreased by the number of rejected
-                # tokens.
-                if request.num_computed_tokens > 0:
-                    request.num_computed_tokens -= num_rejected_from_plan
-                # If async scheduling, num_output_placeholders also includes
-                # the scheduled spec tokens count and so is similarly adjusted.
-                if request.num_output_placeholders > 0:
-                    request.num_output_placeholders -= num_rejected_from_plan
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
                     num_draft_tokens=num_draft_tokens,
                     num_accepted_tokens=num_accepted,
-                    num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
-                    request_id=req_id,
                 )
+
+                if (
+                    request is not None
+                    and not request.is_finished()
+                    and request.async_tokens_to_discard == 0
+                ):
+                    num_rejected_from_plan = planned_num_draft_tokens - num_accepted
+                    # num_computed_tokens represents the number of tokens
+                    # processed in the current step, considering scheduled
+                    # tokens and rejections. If some tokens are rejected,
+                    # num_computed_tokens is decreased by the number of rejected
+                    # tokens.
+                    if request.num_computed_tokens > 0:
+                        request.num_computed_tokens -= num_rejected_from_plan
+                    # If async scheduling, num_output_placeholders also includes
+                    # the scheduled spec tokens count and so is similarly adjusted.
+                    if request.num_output_placeholders > 0:
+                        request.num_output_placeholders -= num_rejected_from_plan
+
+            if request is None or request.is_finished():
+                # The request is already finished. This can happen if the
+                # request is aborted while the model is executing it (e.g.,
+                # in pipeline parallelism or in async scheduling).
+                # NOTE(Kuntai): When delay_free_blocks=True (for async KV
+                # cache transfer in KV connector), the aborted request will not
+                # be set to None (in order to finish async KV transfer).
+                # In this case, we use is_finished() to check.
+                continue
 
             # Free encoder inputs only after the step has actually executed.
             if request.has_encoder_inputs:
@@ -2041,8 +2054,13 @@ class Scheduler(SchedulerInterface):
 
             # Add newly generated spec token ids to the request.
             if self.structured_output_manager.should_advance(request):
+                num_spec_tokens = len(spec_token_ids)
                 metadata = request.structured_output_request
                 spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
+                if self.adaptive_verification:
+                    spec_token_ids.extend(
+                        [-1] * (num_spec_tokens - len(spec_token_ids))
+                    )
             request.spec_token_ids = spec_token_ids
 
     def update_draft_token_ids_in_output(
@@ -2416,15 +2434,11 @@ class Scheduler(SchedulerInterface):
         spec_decoding_stats: SpecDecodingStats | None,
         num_draft_tokens: int,
         num_accepted_tokens: int,
-        num_invalid_spec_tokens: dict[str, int] | None,
-        request_id: str,
     ) -> SpecDecodingStats | None:
-        if not self.log_stats or not num_draft_tokens:
+        if not self.log_stats:
             return None
         if spec_decoding_stats is None:
             spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
-        if num_invalid_spec_tokens:
-            num_draft_tokens -= num_invalid_spec_tokens.get(request_id, 0)
         spec_decoding_stats.observe_draft(
             num_draft_tokens=num_draft_tokens, num_accepted_tokens=num_accepted_tokens
         )

@@ -1040,21 +1040,87 @@ def test_reset_connector_cache_no_connector_is_no_op_success():
 
 # Note - these test cases mirror some of those in test_rejection_sampler.py
 @pytest.mark.parametrize(
-    "spec_tokens,output_tokens,expected",
+    (
+        "spec_tokens,output_tokens,actual_num_draft_tokens,"
+        "invalid_spec_tokens_per_req,missing_req_indices,expected"
+    ),
     [
-        ([[1, 2, 3]], [[1, 2, 3, 4]], (1, 3, 3, [1, 1, 1])),  # perfect match
-        ([[1, 2, 3]], [[1, 5]], (1, 3, 1, [1, 0, 0])),  # early mismatch
-        ([[1, 2], [3]], [[1, 2, 5], [3, 4]], (2, 3, 3, [2, 1])),  # multiple sequences
-        ([[1]], [[1, 2]], (1, 1, 1, [1])),  # single token sequence
-        ([[]], [[5]], (0, 0, 0, [0])),  # empty sequence
+        (
+            [[1, 2, 3]],
+            [[1, 2, 3, 4]],
+            None,
+            None,
+            None,
+            (1, 3, 3, [1, 1, 1]),
+        ),  # perfect match
+        (
+            [[1, 2, 3]],
+            [[1, 5]],
+            None,
+            None,
+            None,
+            (1, 3, 1, [1, 0, 0]),
+        ),  # early mismatch
+        (
+            [[1, 2], [3]],
+            [[1, 2, 5], [3, 4]],
+            None,
+            None,
+            None,
+            (2, 3, 3, [2, 1]),
+        ),  # multiple sequences
+        ([[1]], [[1, 2]], None, None, None, (1, 1, 1, [1])),  # single token
+        ([[]], [[5]], None, None, None, (0, 0, 0, [0])),  # empty sequence
         (
             [[1, 2, 3], [4, 5, 6]],
             [[1, 2, 7], [4, 8]],
+            None,
+            None,
+            None,
             (2, 6, 3, [2, 1, 0]),
         ),  # multiple mismatches
+        (
+            [list(range(7)), list(range(7)), list(range(7))],
+            [[10], [10], [10]],
+            [7, 0, 6],
+            None,
+            None,
+            (3, 13, 0, [0] * 7),
+        ),  # adaptive allocation including zero
+        (
+            [[-1] * 7] * 3,
+            [[10], [10], [10]],
+            [7, 0, 6],
+            None,
+            None,
+            (3, 13, 0, [0] * 7),
+        ),  # GPU-only adaptive draft placeholders
+        (
+            [[0, 1, 2, 3, 4, -1, -1]] * 3,
+            [[10], [10], [10]],
+            [3, 6, 0],
+            [2, 2, 2],
+            None,
+            (3, 8, 0, [0] * 7),
+        ),  # adaptive allocation with invalid suffixes
+        (
+            [[-1] * 7] * 3,
+            [[10], [10], [10]],
+            [1, 7, 7],
+            None,
+            [0],
+            (3, 15, 0, [0] * 7),
+        ),  # completed async request still counts
     ],
 )
-def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
+def test_schedule_spec_decoding_stats(
+    spec_tokens,
+    output_tokens,
+    actual_num_draft_tokens,
+    invalid_spec_tokens_per_req,
+    missing_req_indices,
+    expected,
+):
     """Test scheduling behavior with speculative decoding.
 
     This test verifies that:
@@ -1122,6 +1188,8 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
             )
         else:
             assert req_id not in output.scheduled_spec_decode_tokens
+    if invalid_spec_tokens_per_req is not None:
+        output.num_invalid_spec_tokens = dict(zip(req_ids, invalid_spec_tokens_per_req))
 
     model_runner_output = ModelRunnerOutput(
         req_ids=req_ids,
@@ -1130,7 +1198,11 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
+        num_draft_tokens=actual_num_draft_tokens,
     )
+    if missing_req_indices is not None:
+        for req_index in missing_req_indices:
+            del scheduler.requests[req_ids[req_index]]
     engine_core_outputs = scheduler.update_from_output(output, model_runner_output)
 
     scheduler_stats = (
