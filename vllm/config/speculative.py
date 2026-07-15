@@ -237,15 +237,11 @@ class SpeculativeConfig:
     verification when supported and otherwise falls back to masking;
     ``"mask"`` always masks pruned tokens and ``"none"``/``"off"`` disable it."""
 
-    dspark_sps_curve: Literal["auto"] | None = None
-    """Set to ``"auto"`` to time DSpark CUDA graphs after capture."""
-
     @property
     def use_confidence_based_verification(self) -> bool:
         return (
             self.method == "dspark"
             and self.dspark_enable_confidence_based_verification not in ("none", "off")
-            and self.dspark_sps_curve is not None
         )
 
     @staticmethod

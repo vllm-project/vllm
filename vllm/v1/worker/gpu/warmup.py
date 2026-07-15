@@ -310,9 +310,6 @@ def warmup_kernels(
         worker_execute_model(decode_output)
         worker_sample_tokens(None)
 
-        if model_runner.adaptive_verification is not None:
-            model_runner.adaptive_verification.warmup()
-
     # Clean up - process finish_req_ids.
     cleanup_output = SchedulerOutput.make_empty()
     cleanup_output.finished_req_ids = set(req_ids)

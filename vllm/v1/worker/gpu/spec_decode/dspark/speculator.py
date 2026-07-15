@@ -65,24 +65,22 @@ class DSparkSpeculator(DFlashSpeculator):
             self.num_speculative_steps, dtype=torch.int32, device=device
         )
 
+        self._anchor_idx = (
+            torch.arange(self.max_num_reqs, dtype=torch.int64, device=device)
+            * self.num_query_per_req
+        )
+
         # Reduced-vocab probabilistic drafting only; set in load_draft_model.
         self._d2t_scatter_index: torch.Tensor | None = None
         self._draft_scatter_buf: torch.Tensor | None = None
 
-        # Raw confidence-head logits consumed asynchronously by the manager.
-        self.draft_token_confidence_logits = torch.empty(
-            self.max_num_reqs,
-            self.num_speculative_steps,
-            dtype=torch.float32,
-            device=device,
+        self.draft_token_confidence_probs = torch.empty_like(
+            self.draft_tokens, dtype=torch.float32
         )
         self.use_confidence_based_verification = (
             self.speculative_config.use_confidence_based_verification
         )
-        self.time_graphs = (
-            self.use_confidence_based_verification
-            and self.speculative_config.dspark_sps_curve == "auto"
-        )
+        self.time_graphs = self.use_confidence_based_verification
 
     def load_draft_model(
         self,
@@ -90,14 +88,6 @@ class DSparkSpeculator(DFlashSpeculator):
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
         model = load_dspark_model(target_model, self.vllm_config)
-        if (
-            self.use_confidence_based_verification
-            and getattr(getattr(model, "model", None), "confidence_head", None) is None
-        ):
-            raise ValueError(
-                "Confidence-based verification requires a draft model with a "
-                f"confidence head; {type(model).__name__} has none."
-            )
         # Reduced draft vocab: probabilistic rejection sampling indexes draft
         # logits by target id, so precompute the draft->target column map and a
         # scratch buffer to scatter logits into target vocab before sampling.
@@ -122,20 +112,18 @@ class DSparkSpeculator(DFlashSpeculator):
         num_sample = num_reqs * n_spec
         # Per-(req, position) head hidden, ordered (req, step).
         sample_hidden = head_hidden[self.sample_indices[:num_sample]]
-        sample_hidden = sample_hidden.view(num_reqs, n_spec, -1)
         # Draft-vocab logits; sampled ids are remapped to target vocab below.
-        base_logits = self.model.compute_draft_logits(
-            sample_hidden.reshape(num_sample, -1)
-        ).view(num_reqs, n_spec, -1)
+        base_logits = self.model.compute_draft_logits(sample_hidden)
+        vocab_size = base_logits.shape[-1]
+        base_logits = base_logits.view(num_reqs, n_spec, vocab_size)
 
         idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
         sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
         confidence_markov_embeds = []
 
-        # Anchor (bonus) token per request = the input id at query offset 0.
-        prev = self.input_buffers.input_ids[
-            : num_reqs * self.num_query_per_req : self.num_query_per_req
-        ]
+        # Anchor (bonus) token per request = the input id at query offset 0,
+        # read via the precomputed persistent index (fixed buffer for capture).
+        prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
 
         for i in range(n_spec):
             # Sequential stage: Markov bias from the previously sampled token.
@@ -173,12 +161,12 @@ class DSparkSpeculator(DFlashSpeculator):
             prev = draft_sampled_i
 
         if self.use_confidence_based_verification:
-            markov_embeds = torch.stack(confidence_markov_embeds, dim=1)
-            self.draft_token_confidence_logits[:num_reqs].copy_(
+            torch.sigmoid(
                 self.model.compute_confidence(
-                    sample_hidden.flatten(0, 1),
-                    markov_embeds.flatten(0, 1),
-                ).view(num_reqs, n_spec)
+                    sample_hidden,
+                    torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
+                ).view(num_reqs, n_spec),
+                out=self.draft_token_confidence_probs[:num_reqs],
             )
 
     def _generate_draft(

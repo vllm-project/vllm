@@ -455,7 +455,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculative_config.dspark_enable_confidence_based_verification,
                 attn_cg_support,
                 self.req_states,
-                self.speculative_config,
                 self.input_buffers.query_start_loc,
                 self.model_state.num_new_sampled_tokens_per_step,
             )
@@ -827,6 +826,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_tokens=sampling_params.max_tokens if sampling_params else 1,  # type: ignore[arg-type]
             )
             req_index = self.req_states.req_id_to_index[req_id]
+            if self.adaptive_verification is not None:
+                self.adaptive_verification.add_request(req_index)
 
             if self.encoder_cache is not None:
                 self.encoder_cache.add_request(req_id, new_req_data.mm_features)
@@ -963,7 +964,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if (
             self.adaptive_verification is not None
             and self.adaptive_verification.varlen_spec_decode
-            and self.adaptive_verification.compact_batch
             and num_draft_tokens_per_req is not None
         ):
             cu_num_logits, query_start_loc, total_num_draft_tokens = (
@@ -1243,8 +1243,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 scheduler_output.scheduled_spec_decode_tokens,
                 scheduler_output.has_structured_output_requests,
             )
-            if self.adaptive_verification.compact_batch:
-                uniform_tok_count = None
+            uniform_tok_count = None
 
         batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
@@ -1576,7 +1575,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             if self.adaptive_verification is not None:
                 self.adaptive_verification.stage_confidences(
-                    self.speculator.draft_token_confidence_logits,
+                    self.speculator.draft_token_confidence_probs,
                     input_batch,
                 )
 
