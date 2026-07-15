@@ -3,7 +3,7 @@
 """FlashAttention backend for MLA prefill."""
 
 import functools
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -43,14 +43,6 @@ else:
 class FlashAttnPrefillBackend(MLAPrefillBackend):
     """FlashAttention backend for MLA prefill."""
 
-    supported_mla_dimensions: ClassVar[list[MLADimensions]] = [
-        MLADimensions(
-            qk_nope_head_dim=128,
-            qk_rope_head_dim=64,
-            v_head_dim=128,
-        ),
-    ]
-
     @staticmethod
     def get_name() -> str:
         return "FLASH_ATTN"
@@ -58,6 +50,24 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
     @classmethod
     def is_available(cls) -> bool:
         return is_flash_attn_varlen_func_available()
+
+    @classmethod
+    def supports_mla_dimensions(cls, mla_dimensions: MLADimensions) -> bool:
+        dims_deepseek = MLADimensions(
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+        )
+        dims_glm = MLADimensions(
+            qk_nope_head_dim=192,
+            qk_rope_head_dim=64,
+            v_head_dim=256,
+        )
+        fa_version = get_flash_attn_version()
+        if fa_version == 4:
+            return mla_dimensions == dims_deepseek
+        else:
+            return mla_dimensions in [dims_deepseek, dims_glm]
 
     def __init__(
         self,
