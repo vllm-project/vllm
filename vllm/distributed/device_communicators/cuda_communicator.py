@@ -123,9 +123,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 ),
             )
 
-        # AITER custom AG/RS for MoE DP-attention dispatch/combine (DP group only,
-        # world sizes {2,4,8}; the RS first-dim kernel has no fallback so 6 is
-        # excluded).
+        # AITER custom all-gather/reduce-scatter DP-attention dispatch/combine
         if (
             "dp" in unique_name
             and self.world_size in (2, 4, 8)
@@ -403,8 +401,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             # Convert negative dim to positive.
             dim += input_.dim()
 
-        # 'sizes' is not needed if all ranks have the same shape; collapsing to
-        # None lets the uniform-size fast paths (aiter RS, NCCL symm-mem) engage.
+        # 'sizes' is not needed if all inputs in the same group have the same
+        # shape
         if sizes is not None and all(s == sizes[0] for s in sizes):
             sizes = None
 
@@ -421,16 +419,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
             chunk_size = input_tensor.shape[0] // world_size
         output_shape = (chunk_size,) + input_tensor.shape[1:]
 
-        # AITER custom reduce-scatter (uniform-decode full-cudagraph). The kernel
-        # has no fallback and writes in-place, so should_custom_rs is authoritative.
-        if self._aiter_ag_rs_eligible(sizes):
-            aiter = self.aiter_ag_rs_comm
-            assert aiter is not None
-            if aiter.should_custom_rs(input_tensor, dim=0):
+        # AITER custom reduce-scatter
+        if self._can_use_aiter_ag_rs(sizes):
+            aiter_comm = self.aiter_ag_rs_comm
+            assert aiter_comm is not None
+            if aiter_comm.should_custom_rs(input_tensor, dim=0):
                 output = torch.empty(
                     output_shape, dtype=input_tensor.dtype, device=input_tensor.device
                 )
-                aiter.custom_reduce_scatter(input_tensor, output, dim=0)
+                aiter_comm.custom_reduce_scatter(input_tensor, output, dim=0)
                 return output.movedim(0, dim).contiguous()
 
         # Symmetric memory is only used when all ranks have uniform sizes.
@@ -583,11 +580,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.all2all_manager.destroy()
             self.all2all_manager = None  # type: ignore[assignment]
 
-    def _aiter_ag_rs_eligible(self, sizes: list[int] | None) -> bool:
+    def _can_use_aiter_ag_rs(self, sizes: list[int] | None) -> bool:
         """Whether the AITER custom AG/RS fast path may run for this collective.
 
-        Scoped to uniform-decode batches replayed under full CUDA graphs; every
-        other case falls through to pynccl.
+        Requires:
+        - uniform batches
+        - FULL CUDAgraphs
         """
         if self.aiter_ag_rs_comm is None or self.aiter_ag_rs_comm.disabled:
             return False
@@ -625,7 +623,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         # AITER custom all-gather (pure-decode full-cudagraph path). Uniform
         # shapes only; each tensor must clear aiter's own should_custom_ag gate.
-        if self._aiter_ag_rs_eligible(sizes):
+        if self._can_use_aiter_ag_rs(sizes):
             aiter = self.aiter_ag_rs_comm
             assert aiter is not None
             if isinstance(input_, torch.Tensor):
