@@ -119,18 +119,38 @@ def _copy_mamba_state_block(
         # SD conv: copy
         #   state[bt[src_col], token_bias:] ->
         #   state[bt[dst_col], :conv_width - token_bias]
+        # Per the vectorization invariant documented at the temporal path
+        # below, inner_size * elem_size is 8B-aligned for all state dtypes
+        # in use; token_bias shifts by whole token slices, so both start
+        # offset and copy_size are 8B-aligned. Small per-block bytes
+        # (~60-80 KiB) make tiling degenerate, so conv keeps a single-CTA
+        # copy body.
         src_block_id = tl.load(block_table_base + src_col).to(tl.int64)
         src_offset = token_bias.to(tl.int64) * state_inner_size * state_elem_size
         src_addr = state_base_addr + src_block_id * state_block_stride + src_offset
         num_elems_to_copy = (conv_width - token_bias).to(tl.int64) * state_inner_size
         copy_size = num_elems_to_copy * state_elem_size
+        copy_size_u64 = copy_size // 8
+
+        src_u64 = src_addr.to(tl.pointer_type(tl.uint64))
+        dst_u64 = dst_addr.to(tl.pointer_type(tl.uint64))
         offsets = tl.arange(0, COPY_BLOCK_SIZE)
-        for i in range(0, copy_size, COPY_BLOCK_SIZE):
-            mask = (i + offsets) < copy_size
-            curr_src = (src_addr + i + offsets).to(tl.pointer_type(tl.uint8))
-            curr_dst = (dst_addr + i + offsets).to(tl.pointer_type(tl.uint8))
-            data = tl.load(curr_src, mask=mask)
-            tl.store(curr_dst, data, mask=mask)
+        for i in range(0, copy_size_u64, COPY_BLOCK_SIZE):
+            mask = (i + offsets) < copy_size_u64
+            data = tl.load(src_u64 + i + offsets, mask=mask)
+            tl.store(dst_u64 + i + offsets, data, mask=mask)
+
+        # 0-7 byte tail for parity with the temporal path. copy_size is
+        # 8B-aligned for every state dtype in use today, so this is a
+        # masked no-op; kept for future sub-8B slices.
+        tail_start = copy_size_u64 * 8
+        tail_bytes = copy_size - tail_start
+        tail_off = tl.arange(0, 8)
+        tail_src = (src_addr + tail_start).to(tl.pointer_type(tl.uint8))
+        tail_dst = (dst_addr + tail_start).to(tl.pointer_type(tl.uint8))
+        tail_mask = tail_off < tail_bytes
+        tail_data = tl.load(tail_src + tail_off, mask=tail_mask)
+        tl.store(tail_dst + tail_off, tail_data, mask=tail_mask)
         return
 
     # Temporal state: copy state[bt[src_col + token_bias]] -> state[bt[dst_col]]
