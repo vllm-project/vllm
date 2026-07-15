@@ -22,6 +22,7 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     GenerationError,
+    build_per_request_timing_metrics,
     clamp_prompt_logprobs,
     format_token_id_placeholder,
 )
@@ -41,6 +42,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
     FunctionCall,
+    PerRequestTimingMetrics,
     PromptTokenUsageInfo,
     RequestResponseMetadata,
     ToolCall,
@@ -123,6 +125,7 @@ class OpenAIServingChat(GenerateBaseServing):
         enable_log_outputs: bool = False,
         enable_log_deltas: bool = True,
         default_chat_template_kwargs: dict[str, Any] | None = None,
+        enable_per_request_metrics: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -161,6 +164,7 @@ class OpenAIServingChat(GenerateBaseServing):
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
+        self.enable_per_request_metrics = enable_per_request_metrics
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config
         self.override_max_tokens = (
@@ -462,8 +466,10 @@ class OpenAIServingChat(GenerateBaseServing):
             stream_options, self.enable_force_include_usage
         )
 
+        last_res: RequestOutput | None = None
         try:
             async for res in result_generator:
+                last_res = res
                 if res.prompt_token_ids is not None:
                     num_prompt_tokens = len(res.prompt_token_ids)
                     if res.encoder_prompt_token_ids is not None:
@@ -563,13 +569,16 @@ class OpenAIServingChat(GenerateBaseServing):
                     if finish_reason_sent[i]:
                         continue
 
-                    if request.logprobs and request.top_logprobs is not None:
+                    if request.logprobs and (
+                        request.top_logprobs is not None or request.logprob_token_ids
+                    ):
                         assert output.logprobs is not None, "Did not output logprobs"
                         logprobs = self._create_chat_logprobs(
                             token_ids=output.token_ids,
                             top_logprobs=output.logprobs,
                             tokenizer=tokenizer,
                             num_output_top_logprobs=request.top_logprobs,
+                            logprob_token_ids=request.logprob_token_ids,
                             return_as_token_id=request.return_tokens_as_token_ids,
                         )
                     else:
@@ -595,19 +604,8 @@ class OpenAIServingChat(GenerateBaseServing):
                             prompt_token_ids=res.prompt_token_ids,
                             finished=output.finish_reason is not None,
                         )
-                        if delta_message is not None:
-                            if delta_message.tool_calls:
-                                tools_streamed[i] = True
-
-                            if (
-                                delta_message.reasoning
-                                and not request.include_reasoning
-                            ):
-                                delta_message.reasoning = None
-                                if not (
-                                    delta_message.content or delta_message.tool_calls
-                                ):
-                                    delta_message = None
+                        if delta_message is not None and delta_message.tool_calls:
+                            tools_streamed[i] = True
 
                     # handle streaming just a content delta (no parsers)
                     else:
@@ -622,13 +620,22 @@ class OpenAIServingChat(GenerateBaseServing):
                     # "control token" for tool calls or the parser otherwise
                     # wasn't ready to send a token, then
                     #   get the next token without streaming a chunk
+                    # When reasoning is hidden, suppress per-token
+                    # metadata (logprobs, token_ids) on every chunk to
+                    # prevent leaking reasoning tokens through decoded
+                    # token text in logprob entries or raw token IDs.
+                    hide_stream_metadata = (
+                        not request.include_reasoning and parser is not None
+                    )
+                    if hide_stream_metadata:
+                        logprobs = None
+
                     if delta_message is None:
                         # NOTE: If return_token_ids is enabled, we still need to
                         # send a chunk with token_ids even if delta_message is None
                         # to ensure all tokens are included in the response
-                        if (
-                            output.finish_reason is None
-                            and not request.return_token_ids
+                        if output.finish_reason is None and (
+                            not request.return_token_ids or hide_stream_metadata
                         ):
                             continue
                         delta_message = DeltaMessage()
@@ -661,6 +668,10 @@ class OpenAIServingChat(GenerateBaseServing):
                                 delta=True,
                             )
 
+                    include_token_ids = (
+                        request.return_token_ids and not hide_stream_metadata
+                    )
+
                     if output.finish_reason is None:
                         # Send token-by-token response for each request.n
                         choice_data = ChatCompletionResponseStreamChoice(
@@ -669,9 +680,7 @@ class OpenAIServingChat(GenerateBaseServing):
                             logprobs=logprobs,
                             finish_reason=None,
                             token_ids=(
-                                as_list(output.token_ids)
-                                if request.return_token_ids
-                                else None
+                                as_list(output.token_ids) if include_token_ids else None
                             ),
                         )
 
@@ -699,9 +708,7 @@ class OpenAIServingChat(GenerateBaseServing):
                             finish_reason=finish_reason_,
                             stop_reason=output.stop_reason,
                             token_ids=(
-                                as_list(output.token_ids)
-                                if request.return_token_ids
-                                else None
+                                as_list(output.token_ids) if include_token_ids else None
                             ),
                         )
 
@@ -753,6 +760,21 @@ class OpenAIServingChat(GenerateBaseServing):
                     mm_token_counts,
                 )
 
+                # In streaming, metrics ride on this final usage chunk, which is
+                # only emitted when usage reporting is enabled (i.e.
+                # ``stream_options.include_usage=true`` or
+                # ``--enable-force-include-usage``).
+                stream_per_request_metrics: PerRequestTimingMetrics | None = None
+                if (
+                    self.enable_per_request_metrics
+                    # See note in chat_completion_full_generator: suppress for n>1.
+                    and (request.n or 1) == 1
+                ):
+                    last_metrics = last_res.metrics if last_res is not None else None
+                    stream_per_request_metrics = build_per_request_timing_metrics(
+                        last_metrics, completion_tokens
+                    )
+
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
                     object=chunk_object_type,
@@ -761,6 +783,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     model=model_name,
                     usage=final_usage,
                     system_fingerprint=self.system_fingerprint,
+                    metrics=stream_per_request_metrics,
                 )
                 final_usage_data = final_usage_chunk.model_dump_json(
                     exclude_unset=True, exclude_none=True
@@ -843,12 +866,15 @@ class OpenAIServingChat(GenerateBaseServing):
             token_ids = output.token_ids
             out_logprobs = output.logprobs
 
-            if request.logprobs and request.top_logprobs is not None:
+            if request.logprobs and (
+                request.top_logprobs is not None or request.logprob_token_ids
+            ):
                 assert out_logprobs is not None, "Did not output logprobs"
                 logprobs = self._create_chat_logprobs(
                     token_ids=token_ids,
                     top_logprobs=out_logprobs,
                     num_output_top_logprobs=request.top_logprobs,
+                    logprob_token_ids=request.logprob_token_ids,
                     tokenizer=tokenizer,
                     return_as_token_id=request.return_tokens_as_token_ids,
                 )
@@ -862,12 +888,16 @@ class OpenAIServingChat(GenerateBaseServing):
                     enable_auto_tools=self.enable_auto_tools,
                     model_output_token_ids=token_ids,
                 )
+                suppress_metadata = not request.include_reasoning and parser is not None
                 if not request.include_reasoning:
                     reasoning = None
+                if suppress_metadata:
+                    logprobs = None
             else:
                 reasoning = None
                 content = output.text
                 tool_calls = []
+                suppress_metadata = False
 
             auto_tools_called = False
             is_named_tool_choice = (
@@ -961,7 +991,9 @@ class OpenAIServingChat(GenerateBaseServing):
                 else "stop",
                 stop_reason=output.stop_reason,
                 token_ids=(
-                    as_list(output.token_ids) if request.return_token_ids else None
+                    as_list(output.token_ids)
+                    if request.return_token_ids and not suppress_metadata
+                    else None
                 ),
                 routed_experts=routed_experts_b64,
             )
@@ -1004,6 +1036,18 @@ class OpenAIServingChat(GenerateBaseServing):
 
         request_metadata.final_usage_info = usage
 
+        per_request_metrics: PerRequestTimingMetrics | None = None
+        if (
+            self.enable_per_request_metrics
+            # Timing metrics describe a single generation stream. For n>1 the
+            # returned stats belong to only one of the n sequences, so they
+            # cannot be accurately attributed to the request; suppress instead.
+            and (request.n or 1) == 1
+        ):
+            per_request_metrics = build_per_request_timing_metrics(
+                final_res.metrics, num_generated_tokens
+            )
+
         # ``final_res.prompt`` is the rendered chat-templated prompt text
         prompt_text = final_res.prompt if request.return_prompt_text else None
 
@@ -1020,6 +1064,8 @@ class OpenAIServingChat(GenerateBaseServing):
             ),
             prompt_text=prompt_text,
             kv_transfer_params=final_res.kv_transfer_params,
+            ec_transfer_params=final_res.ec_transfer_params,
+            metrics=per_request_metrics,
         )
 
         # Log complete response if output logging is enabled
@@ -1062,6 +1108,7 @@ class OpenAIServingChat(GenerateBaseServing):
         top_logprobs: int | None,
         tokenizer: TokenizerLike | None,
         should_return_as_token_id: bool,
+        return_all: bool = False,
     ) -> list[ChatCompletionLogProb]:
         return [
             ChatCompletionLogProb(
@@ -1077,7 +1124,9 @@ class OpenAIServingChat(GenerateBaseServing):
                 bytes=list(token.encode("utf-8", errors="replace")),
             )
             for i, p in enumerate(logprobs.items())
-            if (top_logprobs and i < top_logprobs or top_logprobs == -1)
+            if return_all
+            or top_logprobs == -1
+            or (top_logprobs is not None and i < top_logprobs)
         ]
 
     def _create_chat_logprobs(
@@ -1086,6 +1135,7 @@ class OpenAIServingChat(GenerateBaseServing):
         top_logprobs: GenericSequence[dict[int, Logprob] | None],
         tokenizer: TokenizerLike | None,
         num_output_top_logprobs: int | None = None,
+        logprob_token_ids: list[int] | None = None,
         return_as_token_id: bool | None = None,
     ) -> ChatCompletionLogProbs:
         """Create OpenAI-style logprobs."""
@@ -1138,6 +1188,7 @@ class OpenAIServingChat(GenerateBaseServing):
                             num_output_top_logprobs,
                             tokenizer,
                             should_return_as_token_id,
+                            return_all=bool(logprob_token_ids),
                         ),
                     )
                 )
