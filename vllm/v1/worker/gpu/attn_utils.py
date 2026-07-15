@@ -292,6 +292,25 @@ def _reshape_kv_cache(
                 for ln in kv_tensor.shared_by:
                     layer_packing[ln] = (kv_tensor.offset, kv_tensor.block_stride)
 
+    # Co-location (concat) groups: a UniformTypeKVCacheSpecs group pairing a
+    # compressed MLA (compress_ratio>1, e.g. the kpool indexer) with a plain
+    # MLA. Allocated as one shared per-(indexer, MLA) tensor (indexer region at
+    # offset 0 + MLA region after it). Map gid -> (pair_page_bytes,
+    # indexer_page_bytes) to recover num_blocks and per-layer storage_offset.
+    concat_info: dict[int, tuple[int, int]] = {}
+    if kv_cache_config is not None:
+        for _gid, _g in enumerate(kv_cache_config.kv_cache_groups):
+            _spec = _g.kv_cache_spec
+            if isinstance(_spec, UniformTypeKVCacheSpecs):
+                _inner = _spec.kv_cache_specs.values()
+                _idx = [s for s in _inner if getattr(s, "compress_ratio", 1) > 1]
+                _plain = [s for s in _inner if getattr(s, "compress_ratio", 1) == 1]
+                if _idx and _plain:
+                    concat_info[_gid] = (
+                        _idx[0].page_size_bytes + _plain[0].page_size_bytes,
+                        _idx[0].page_size_bytes,
+                    )
+
     for group in attn_groups:
         if group.kv_cache_group_id >= len(kernel_block_sizes):
             continue
@@ -311,7 +330,15 @@ def _reshape_kv_cache(
 
             kv_raw_tensor = kv_cache_raw_tensors[layer_name]
             packing = layer_packing.get(layer_name)
-            if packing is not None:
+            _gid = group.kv_cache_group_id
+            _concat = _gid in concat_info
+            if _concat:
+                # Per-(indexer, MLA) pair tensor: num_blocks is over the pair
+                # page (indexer + MLA region), identical for both layers.
+                _pair_page_bytes = concat_info[_gid][0]
+                assert kv_raw_tensor.numel() % _pair_page_bytes == 0
+                num_blocks = kv_raw_tensor.numel() // _pair_page_bytes
+            elif packing is not None:
                 _, blk_stride = packing
                 num_blocks = kv_raw_tensor.numel() // blk_stride
             else:
@@ -350,6 +377,16 @@ def _reshape_kv_cache(
                 except (AttributeError, NotImplementedError):
                     kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
 
+                # Co-located (concat) layers view only their own region of the
+                # shared per-pair tensor: indexer at offset 0, MLA at offset =
+                # the indexer region bytes.
+                storage_offset = 0
+                if _concat:
+                    _dtype_size = get_dtype_size(kv_cache_spec.dtype)
+                    _is_indexer = getattr(kv_cache_spec, "compress_ratio", 1) > 1
+                    _idx_page_bytes = concat_info[_gid][1]
+                    _off_bytes = 0 if _is_indexer else (num_blocks * _idx_page_bytes)
+                    storage_offset = _off_bytes // _dtype_size
                 kv_caches[layer_name] = _reshape_attention_kv_cache(
                     kv_raw_tensor,
                     kv_cache_spec,
@@ -357,6 +394,7 @@ def _reshape_kv_cache(
                     kv_cache_stride_order,
                     kernel_num_blocks,
                     packing,
+                    storage_offset=storage_offset,
                 )
 
             elif isinstance(kv_cache_spec, MambaSpec):

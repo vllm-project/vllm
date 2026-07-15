@@ -742,7 +742,11 @@ def sparse_attn_indexer_kpool_fake(
 direct_register_custom_op(
     op_name="sparse_attn_indexer_kpool",
     op_func=sparse_attn_indexer_kpool,
-    mutates_args=["topk_indices_buffer"],
+    # The indexer writes the index-K cache in place (prefill k-cache insert +
+    # kpool decode write), so kv_cache must be declared as mutated — otherwise
+    # under full-graph compile dynamo assumes it is unchanged across the
+    # indexer→MLA boundary and the MLA reads stale/misaligned KV.
+    mutates_args=["topk_indices_buffer", "kv_cache"],
     fake_impl=sparse_attn_indexer_kpool_fake,
     dispatch_key=current_platform.dispatch_key,
 )
