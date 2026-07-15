@@ -165,6 +165,117 @@ def _full_block_hash_chain(
     return chain
 
 
+class _TrieNode:
+    """One node in the shared-prefix trie built by
+    ``_group_requests_by_shared_prefix``. ``block_hash``/``parent`` identify
+    the edge this node was reached by, so a winning node's full prefix can be
+    reconstructed by walking parents back to the root -- without needing
+    every node to carry its own path.
+    """
+
+    __slots__ = ("children", "request_ids", "parent", "block_hash")
+
+    def __init__(
+        self,
+        parent: _TrieNode | None = None,
+        block_hash: BlockHash | None = None,
+    ) -> None:
+        self.children: dict[BlockHash, _TrieNode] = {}
+        self.request_ids: list[str] = []
+        self.parent = parent
+        self.block_hash = block_hash
+
+
+def _path_to_node(node: _TrieNode) -> tuple[BlockHash, ...]:
+    path: list[BlockHash] = []
+    while node.parent is not None:
+        assert node.block_hash is not None
+        path.append(node.block_hash)
+        node = node.parent
+    path.reverse()
+    return tuple(path)
+
+
+def _group_requests_by_shared_prefix(
+    chains: dict[str, list[BlockHash]], top_k_groups: int
+) -> list[PrefixGroup]:
+    """Find the top-K largest shared hash-chain prefixes across requests.
+
+    Builds a trie over the chains in a single O(total blocks) pass -- each
+    chain step is one dict lookup/insert -- instead of materializing a
+    ``tuple(chain[:depth])`` key for every depth of every chain, which is
+    O(chain_length ** 2) per request. That quadratic cost lands hardest on
+    exactly the workload this tool exists to highlight: a long shared system
+    prompt or tool schema reused across many requests (e.g. an 8k-token
+    shared prefix at block_size=16 is ~512 blocks; at 10k requests the old
+    approach did on the order of 10_000 * 512**2 ~= 2.6B tuple-element
+    operations for grouping alone).
+
+    A winning group's actual ``shared_block_hashes`` tuple is only
+    reconstructed (via ``_path_to_node``) for the at-most-``top_k_groups``
+    nodes that survive selection, not for every trie node.
+    """
+    root = _TrieNode()
+    for request_id, chain in chains.items():
+        node = root
+        for block_hash in chain:
+            child = node.children.get(block_hash)
+            if child is None:
+                child = _TrieNode(parent=node, block_hash=block_hash)
+                node.children[block_hash] = child
+            node = child
+            node.request_ids.append(request_id)
+
+    # Depth is tracked as a plain counter alongside each stack entry, not by
+    # materializing a path, so this collection pass is O(total trie nodes)
+    # <= O(total blocks).
+    candidates: list[tuple[int, _TrieNode]] = []
+    stack: list[tuple[_TrieNode, int]] = [(root, 0)]
+    while stack:
+        node, depth = stack.pop()
+        # Each request_id is appended at most once per node (chains cannot
+        # revisit a node -- block hashes are chained forward-only), so
+        # request_ids is already duplicate-free here.
+        if depth > 0 and len(node.request_ids) > 1:
+            candidates.append((depth, node))
+        for child in node.children.values():
+            stack.append((child, depth + 1))
+
+    # Prefer longer shared prefixes first, then more requests sharing them.
+    # Ties (equal depth and count) are broken by the lexicographically
+    # smallest request_id in the group, so selection is a deterministic
+    # function of the input and doesn't depend on dict/stack iteration
+    # order -- two runs on the same input always report the same winners.
+    candidates.sort(
+        key=lambda c: (-c[0], -len(c[1].request_ids), min(c[1].request_ids))
+    )
+
+    # Deduplicate so a longer prefix's requests aren't also reported at
+    # every shorter prefix depth -- keep only maximal groups. This is a
+    # display-only reduction: a request set can legitimately appear in more
+    # than one *distinct* group (e.g. {a,b} at depth 5 and {a,b,c} at depth
+    # 2 are both real, different-membership sharing clusters), so this only
+    # collapses redundant same-membership entries at shorter depths.
+    top_groups: list[PrefixGroup] = []
+    covered: set[tuple[str, ...]] = set()
+    for depth, node in candidates:
+        request_ids = sorted(node.request_ids)
+        key = tuple(request_ids)
+        if key in covered:
+            continue
+        covered.add(key)
+        top_groups.append(
+            PrefixGroup(
+                shared_block_hashes=_path_to_node(node),
+                request_ids=request_ids,
+            )
+        )
+        if len(top_groups) >= top_k_groups:
+            break
+
+    return top_groups
+
+
 def _reusable_tokens_from_chains(
     chains: dict[str, list[BlockHash]], block_size: int
 ) -> int:
@@ -227,47 +338,7 @@ def analyze(
         total_full_block_tokens += len(chain) * block_size
         chains[record.request_id] = chain
 
-    # Group requests by their longest shared prefix of block hashes.
-    # A group key is the hash-chain prefix itself; every request that
-    # shares that exact prefix (or extends it) counts toward the group
-    # at that depth.
-    groups_by_prefix: dict[tuple[BlockHash, ...], list[str]] = defaultdict(list)
-    for request_id, chain in chains.items():
-        for depth in range(1, len(chain) + 1):
-            prefix = tuple(chain[:depth])
-            groups_by_prefix[prefix].append(request_id)
-
-    # Keep only prefixes shared by more than one request -- a prefix
-    # unique to a single request contributes nothing to reuse.
-    shared_groups = [
-        PrefixGroup(shared_block_hashes=prefix, request_ids=sorted(set(ids)))
-        for prefix, ids in groups_by_prefix.items()
-        if len(set(ids)) > 1
-    ]
-
-    # Prefer longer shared prefixes first, then more requests sharing them.
-    shared_groups.sort(
-        key=lambda g: (len(g.shared_block_hashes), len(g.request_ids)),
-        reverse=True,
-    )
-
-    # Deduplicate so a longer prefix's requests aren't also reported at
-    # every shorter prefix depth -- keep only maximal groups. This is a
-    # display-only reduction: a request set can legitimately appear in more
-    # than one *distinct* group (e.g. {a,b} at depth 5 and {a,b,c} at depth
-    # 2 are both real, different-membership sharing clusters), so this only
-    # collapses redundant same-membership entries at shorter depths.
-    top_groups: list[PrefixGroup] = []
-    covered: set[tuple[str, ...]] = set()
-    for group in shared_groups:
-        key = tuple(group.request_ids)
-        if key in covered:
-            continue
-        covered.add(key)
-        top_groups.append(group)
-        if len(top_groups) >= top_k_groups:
-            break
-
+    top_groups = _group_requests_by_shared_prefix(chains, top_k_groups)
     reusable_tokens = _reusable_tokens_from_chains(chains, block_size)
 
     return AnalysisReport(
