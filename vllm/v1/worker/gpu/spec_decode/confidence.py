@@ -191,16 +191,20 @@ def _mask_excess_draft_tokens_kernel(
     is_padding_ptr,
     input_ids_ptr,
     query_start_loc_ptr,
+    cu_num_logits_ptr,
     draft_capacity_ptr,
     num_bonus_tokens,
     BLOCK_SIZE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
-    start = tl.load(query_start_loc_ptr + req_idx)
     end = tl.load(query_start_loc_ptr + req_idx + 1)
+    num_logits = tl.load(cu_num_logits_ptr + req_idx + 1) - tl.load(
+        cu_num_logits_ptr + req_idx
+    )
+    logits_start = end - num_logits
     kept = tl.load(draft_capacity_ptr + req_idx)
     offsets = tl.arange(0, BLOCK_SIZE)
-    token_idx = start + num_bonus_tokens + kept + offsets
+    token_idx = logits_start + num_bonus_tokens + kept + offsets
     mask = token_idx < end
     tl.store(
         is_padding_ptr + token_idx,
@@ -854,6 +858,7 @@ class MaskedConfidenceManager(ConfidenceManager):
             input_batch.is_padding,
             input_batch.input_ids,
             input_batch.query_start_loc,
+            input_batch.cu_num_logits,
             capacities,
             self._get_num_bonus_tokens(input_batch),
             BLOCK_SIZE=triton.next_power_of_2(self.num_speculative_steps),

@@ -661,15 +661,15 @@ def test_masked_capacity_manager_marks_pruned_tokens_for_forward_and_sampler():
         expanded_local_pos=torch.tensor(
             [0, 1, 2, 3, 0, 1, 2, 3], dtype=torch.int32, device=device
         ),
-        num_scheduled_tokens=np.array([4, 4], dtype=np.int32),
-        num_tokens=8,
-        num_tokens_after_padding=10,
+        num_scheduled_tokens=np.array([6, 5], dtype=np.int32),
+        num_tokens=11,
+        num_tokens_after_padding=13,
         num_draft_tokens=6,
         num_draft_tokens_per_req=np.array([3, 3], dtype=np.int32),
-        query_start_loc=torch.tensor([0, 4, 8], dtype=torch.int32, device=device),
-        query_start_loc_np=np.array([0, 4, 8], dtype=np.int32),
-        seq_lens=torch.tensor([4, 4], dtype=torch.int32, device=device),
-        seq_lens_cpu_upper_bound=torch.tensor([4, 4], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 6, 11], dtype=torch.int32, device=device),
+        query_start_loc_np=np.array([0, 6, 11], dtype=np.int32),
+        seq_lens=torch.tensor([6, 5], dtype=torch.int32, device=device),
+        seq_lens_cpu_upper_bound=torch.tensor([6, 5], dtype=torch.int32),
         dcp_local_seq_lens=None,
         num_computed_tokens_np=np.array([0, 0], dtype=np.int32),
         prefill_len_np=np.array([0, 0], dtype=np.int32),
@@ -678,8 +678,10 @@ def test_masked_capacity_manager_marks_pruned_tokens_for_forward_and_sampler():
         max_seq_len_np=None,
         input_ids=input_ids,
         positions=torch.arange(16, dtype=torch.int64, device=device),
-        is_padding=torch.zeros(10, dtype=torch.bool, device=device),
-        logits_indices=torch.arange(8, dtype=torch.int64, device=device),
+        is_padding=torch.zeros(13, dtype=torch.bool, device=device),
+        logits_indices=torch.tensor(
+            [2, 3, 4, 5, 7, 8, 9, 10], dtype=torch.int64, device=device
+        ),
         cu_num_logits=torch.tensor([0, 4, 8], dtype=torch.int32, device=device),
         cu_num_logits_np=np.array([0, 4, 8], dtype=np.int32),
         has_structured_output_reqs=False,
@@ -696,13 +698,16 @@ def test_masked_capacity_manager_marks_pruned_tokens_for_forward_and_sampler():
     draft_sampled.masked_fill_(input_batch.is_padding[input_batch.logits_indices], -1)
 
     torch.accelerator.synchronize()
-    assert input_batch.num_scheduled_tokens.tolist() == [4, 4]
+    assert input_batch.num_scheduled_tokens.tolist() == [6, 5]
     assert input_batch.num_draft_tokens_per_req.tolist() == [3, 3]
     assert input_batch.is_padding.cpu().tolist() == [
         False,
         False,
+        False,
+        False,
         True,
         True,
+        False,
         False,
         False,
         False,
@@ -711,10 +716,10 @@ def test_masked_capacity_manager_marks_pruned_tokens_for_forward_and_sampler():
         False,
     ]
     assert slot_mappings.cpu().tolist() == [
-        [0, 1, -1, -1, 4, 5, 6, -1, 8, 9],
-        [10, 11, -1, -1, 14, 15, 16, -1, 18, 19],
+        [0, 1, 2, 3, -1, -1, 6, 7, 8, 9],
+        [10, 11, 12, 13, -1, -1, 16, 17, 18, 19],
     ]
-    assert draft_sampled.cpu().tolist() == [0, 1, -1, -1, 4, 5, 6, -1]
+    assert draft_sampled.cpu().tolist() == [2, 3, -1, -1, 7, 8, 9, -1]
 
 
 def test_capacity_cudagraph_dispatch_filters_by_max_query_len():
