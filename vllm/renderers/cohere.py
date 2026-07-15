@@ -41,9 +41,13 @@ accessible by the template"), so e.g.
 ``chat_template_kwargs={"reasoning_effort": "low"}`` resolves
 ``{{ reasoning_effort }}`` inside cmd3 / cmd4 templates.
 
-Citations produced by Cohere models are surfaced through the standard
-``ChatMessage.citations`` / ``DeltaMessage.citations`` fields (populated by
-the ``cohere2`` reasoning parser).
+Citations produced by Cohere models are surfaced through the Cohere-scoped
+``CohereChatMessage.citations`` / ``CohereDeltaMessage.citations`` fields
+(see :mod:`vllm.entrypoints.cohere.cohere_chat_message`), populated by the
+``cohere2`` reasoning parser. The base OpenAI ``ChatMessage`` /
+``DeltaMessage`` keep their declared schemas unchanged; the response
+envelope declares them as ``SerializeAsAny[...]`` so the subclass fields
+survive JSON serialization.
 """
 
 from __future__ import annotations

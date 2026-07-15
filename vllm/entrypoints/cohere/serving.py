@@ -12,8 +12,9 @@ vLLM's renderer pipeline (``vllm.renderers``):
 - For Cohere Command-family models, set ``--tokenizer-mode cohere`` and the
   :class:`vllm.renderers.cohere.CohereRenderer` will template the request
   via the ``cohere_melody`` library (``render_cmd3`` / ``render_cmd4``)
-  and surface citations through the standard ``ChatMessage.citations`` /
-  ``DeltaMessage.citations`` fields.
+  and surface citations through the Cohere-scoped
+  :class:`CohereChatMessage` / :class:`CohereDeltaMessage` subclasses
+  (see :mod:`vllm.entrypoints.cohere.cohere_chat_message`).
 - For any other model the default Jinja-based :class:`HfRenderer` is used,
   and the endpoint behaves as a plain v2-shaped wrapper around chat
   completions.
@@ -27,7 +28,7 @@ import time
 from collections.abc import AsyncGenerator
 from enum import Enum
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from cohere.types import (
     AssistantChatMessageV2,
@@ -44,6 +45,7 @@ from pydantic import BaseModel
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
+from vllm.entrypoints.cohere.cohere_chat_message import CohereChatMessage
 from vllm.entrypoints.cohere.protocol import (
     CitationEndEvent,
     CitationStartEvent,
@@ -68,6 +70,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponse,
     ChatCompletionStreamResponse,
     ChatCompletionToolsParam,
+    ChatMessage,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import (
@@ -78,6 +81,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.parser.abstract_parser import Parser
 
 if TYPE_CHECKING:
     from vllm.renderers.online_renderer import OnlineRenderer
@@ -161,9 +165,21 @@ class CohereServingChatV2(OpenAIServingChat):
     ``chat_template_kwargs``) and delegates to the underlying chat
     completion machinery. All Cohere-specific templating happens in the
     renderer (:class:`vllm.renderers.cohere.CohereRenderer`) when the
-    engine is started with ``--tokenizer-mode cohere``; citations are read
-    natively from the resulting :class:`ChatMessage` / :class:`DeltaMessage`.
+    engine is started with ``--tokenizer-mode cohere``.
+
+    Citations flow through ``CohereChatMessage`` / ``CohereDeltaMessage``
+    subclasses (see :mod:`vllm.entrypoints.cohere.cohere_chat_message`) so
+    the OpenAI-shared :class:`ChatMessage` / :class:`DeltaMessage` keep
+    their declared schemas unchanged. Non-streaming responses pick up
+    the subclass via the ``_chat_message_cls`` classvar; streaming
+    deltas are emitted directly by the Cohere reasoning parser.
     """
+
+    # Route the base class's ``ChatMessage(...)`` construction sites
+    # through the citation-carrying subclass so ``_finalize_response_message``
+    # below can safely stash citations on ``message.citations`` without
+    # relying on ``extra="allow"`` attribute injection.
+    _chat_message_cls = CohereChatMessage
 
     def __init__(
         self,
@@ -650,16 +666,51 @@ class CohereServingChatV2(OpenAIServingChat):
             kv_transfer_params=response.kv_transfer_params,
         )
 
+    def _finalize_response_message(
+        self,
+        message: ChatMessage,
+        *,
+        parser: Parser | None,
+    ) -> ChatMessage:
+        """Copy grounding citations off the reasoning parser onto the message.
+
+        The Cohere reasoning parser
+        (:mod:`vllm.reasoning.cohere_command_reasoning_parser`) caches the
+        citations produced by its most recent unary ``extract_reasoning``
+        call on ``last_unary_citations``. We surface them here on
+        :class:`CohereChatMessage` so downstream response conversion can
+        pick them up without the base :class:`OpenAIServingChat` having to
+        know about citations.
+        """
+        # ``_chat_message_cls`` above guarantees the concrete type at
+        # runtime. ``cast`` narrows the declared ``ChatMessage`` for
+        # mypy without adding a runtime check we don't need: even in the
+        # invariant-violated case (a subclass reset ``_chat_message_cls``
+        # back to plain ``ChatMessage``), ``OpenAIBaseModel``'s
+        # ``extra="allow"`` config lets the ``.citations`` write survive
+        # into ``model_dump`` via the extras bucket, so the wire is
+        # correct either way.
+        message = cast(CohereChatMessage, message)
+        citations = getattr(
+            getattr(parser, "reasoning_parser", None),
+            "last_unary_citations",
+            None,
+        )
+        if citations:
+            message.citations = citations
+        return message
+
     @staticmethod
     def _extract_citations_if_any(msg: Any) -> list[Citation] | None:
-        """Coerce ``ChatMessage.citations`` into the Cohere v2 wire shape.
+        """Coerce ``CohereChatMessage.citations`` into the Cohere v2 wire shape.
 
-        ``ChatMessage`` natively carries a ``citations: list[Citation] |
-        None`` field (see :mod:`vllm.entrypoints.openai.engine.protocol`).
-        Renderers / parsers (the ``cohere_command3`` and
-        ``cohere_command4`` reasoning parsers) populate it. We map each
-        :class:`vllm...Citation` into the SDK :class:`cohere.types.Citation`
-        wire model, preserving sources and span.
+        :class:`CohereChatMessage` carries a
+        ``citations: list[vllm...Citation] | None`` field populated by
+        :meth:`_finalize_response_message` (which reads it off the
+        reasoning parser's ``last_unary_citations`` cache). We map each
+        internal :class:`vllm...Citation` into the SDK
+        :class:`cohere.types.Citation` wire model, preserving sources
+        and span.
         """
         raw = getattr(msg, "citations", None)
         if not raw:
@@ -967,8 +1018,10 @@ class CohereServingChatV2(OpenAIServingChat):
     ) -> list[str]:
         """Emit ``citation-start`` / ``citation-end`` events for a delta.
 
-        The cohere renderer/parsers populate ``DeltaMessage.citations`` with
-        :class:`vllm.entrypoints.openai.engine.protocol.Citation` instances
+        The Cohere reasoning parser populates
+        :class:`CohereDeltaMessage.citations` (see
+        :mod:`vllm.entrypoints.cohere.cohere_chat_message`) with
+        :class:`vllm.entrypoints.cohere.cohere_chat_message.Citation` instances
         once a citation has fully resolved (start/end indices known). We
         emit a complete start+end pair for each citation in the delta so
         Cohere clients can attach the annotation to the surrounding text.

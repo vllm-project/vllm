@@ -20,13 +20,16 @@ except ImportError as e:
     ) from e
 
 
+from vllm.entrypoints.cohere.cohere_chat_message import (
+    Citation,
+    CitationSource,
+    CohereDeltaMessage,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
-    Citation,
-    CitationSource,
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -472,11 +475,11 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
         self.melody_unary = PyFilter(unary_opts)
         self.melody_streaming = PyFilter(streaming_opts)
         # Citations extracted by the most recent ``extract_reasoning`` call.
-        # The non-streaming chat-completion path reads this back from the
-        # parser instance (which is constructed per-request) and attaches
-        # the result to ``ChatMessage.citations`` so grounded surfaces
-        # (e.g. ``/cohere/v2/chat``) can surface them. ``None`` when the
-        # last parse produced no citations.
+        # Citation-aware handlers (e.g. :class:`CohereServingChatV2` via its
+        # ``_finalize_response_message`` hook) read this back from the
+        # parser instance (which is constructed per-request) and attach
+        # the result to :class:`CohereChatMessage.citations`. ``None`` when
+        # the last parse produced no citations.
         self.last_unary_citations: list[Citation] | None = None
 
     @property
@@ -505,7 +508,12 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
             and not citations
         ):
             return None
-        msg = DeltaMessage()
+        # Always emit CohereDeltaMessage so citations reach the wire via
+        # ``SerializeAsAny[DeltaMessage]`` on the streaming choice envelope.
+        # When ``citations`` is unset, ``CohereDeltaMessage._serialize``
+        # drops the field so the emitted shape matches plain
+        # :class:`DeltaMessage`
+        msg = CohereDeltaMessage()
         if r.content is not None:
             msg.content = r.content
         if r.reasoning is not None:
@@ -528,10 +536,10 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
         self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
     ) -> tuple[str | None, str | None]:
         result = self.melody_unary.process_full_text(model_output)
-        # Cache citations so the non-streaming chat-completion path can
-        # surface them on ``ChatMessage.citations`` (the ``parse`` return
-        # tuple is locked to ``(reasoning, content, tool_calls)`` across
-        # all parsers, so we ferry citations via parser-instance state --
+        # Cache citations so citation-aware handlers can surface them on
+        # :class:`CohereChatMessage.citations` (the ``parse`` return tuple
+        # is locked to ``(reasoning, content, tool_calls)`` across all
+        # parsers, so we ferry citations via parser-instance state --
         # safe because the parser is constructed per-request).
         self.last_unary_citations = _melody_citations_to_vllm(
             getattr(result, "citations", None)

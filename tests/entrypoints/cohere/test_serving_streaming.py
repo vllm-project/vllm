@@ -20,6 +20,12 @@ from typing import Any
 
 import pytest
 
+from vllm.entrypoints.cohere.cohere_chat_message import (
+    Citation as VLLMCitation,
+)
+from vllm.entrypoints.cohere.cohere_chat_message import (
+    CitationSource,
+)
 from vllm.entrypoints.cohere.protocol import (
     CohereChatV2Request,
     MessageStartEvent,
@@ -34,12 +40,6 @@ from vllm.entrypoints.cohere.serving import (
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionStreamResponse,
-)
-from vllm.entrypoints.openai.engine.protocol import (
-    Citation as VLLMCitation,
-)
-from vllm.entrypoints.openai.engine.protocol import (
-    CitationSource,
 )
 
 # ----------------------------------------------------------------------

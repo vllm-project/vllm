@@ -7,7 +7,7 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from http import HTTPStatus
-from typing import Any, Final, cast
+from typing import Any, ClassVar, Final, cast
 
 import numpy as np
 import pybase64 as base64
@@ -102,6 +102,13 @@ def _make_prompt_tokens_details(
 
 
 class OpenAIServingChat(OpenAIServing):
+    # Subclasses can override this to swap in a specialized
+    # :class:`ChatMessage` subclass. The full-generator constructs messages
+    # via ``self._chat_message_cls(...)`` so replacing this classvar
+    # routes every non-streaming response through the subclass without
+    # duplicating the branchy construction logic.
+    _chat_message_cls: ClassVar[type[ChatMessage]] = ChatMessage
+
     def __init__(
         self,
         engine_client: EngineClient,
@@ -400,6 +407,22 @@ class OpenAIServingChat(OpenAIServing):
         if request.add_generation_prompt:
             return self.response_role
         return request.messages[-1]["role"]
+
+    def _finalize_response_message(
+        self,
+        message: ChatMessage,
+        *,
+        parser: Parser | None,
+    ) -> ChatMessage:
+        """Subclass hook to enrich a fully-constructed :class:`ChatMessage`.
+
+        Default is a no-op. Subclasses that need to surface parser-side
+        extras (e.g. :class:`CohereServingChatV2` reading grounding
+        citations off the reasoning parser and populating
+        :class:`CohereChatMessage.citations`) override this to inspect
+        ``parser`` and mutate/replace ``message``.
+        """
+        return message
 
     async def chat_completion_stream_generator(
         self,
@@ -863,23 +886,10 @@ class OpenAIServingChat(OpenAIServing):
                 )
                 if not request.include_reasoning:
                     reasoning = None
-                # Reasoning parsers that extract grounding citations
-                # (Cohere Command family) cache them on the parser
-                # instance after ``parse``. We surface them here so
-                # grounded surfaces (e.g. /cohere/v2/chat) can attach
-                # them to the response message. Non-citation parsers
-                # leave the attribute absent and ``citations`` stays
-                # ``None`` so it round-trips out of the OpenAI envelope.
-                citations = getattr(
-                    getattr(parser, "reasoning_parser", None),
-                    "last_unary_citations",
-                    None,
-                )
             else:
                 reasoning = None
                 content = output.text
                 tool_calls = []
-                citations = None
 
             auto_tools_called = False
             is_named_tool_choice = (
@@ -888,13 +898,19 @@ class OpenAIServingChat(OpenAIServing):
             )
             is_required_tool_choice = request.tool_choice == "required"
 
+            # All six construction sites route through ``self._chat_message_cls``
+            # so subclasses can swap in a specialized :class:`ChatMessage`
+            # (e.g. the Cohere v2 handler's ``CohereChatMessage``) without
+            # having to duplicate this branch logic.
             if (not self.enable_auto_tools or not tool_parser_cls) and (
                 not is_named_tool_choice and not is_required_tool_choice
             ):
-                message = ChatMessage(role=role, reasoning=reasoning, content=content)
+                message = self._chat_message_cls(
+                    role=role, reasoning=reasoning, content=content
+                )
 
             elif is_named_tool_choice or is_required_tool_choice:
-                message = ChatMessage(
+                message = self._chat_message_cls(
                     role=role,
                     reasoning=reasoning,
                     content=content or "",
@@ -907,7 +923,9 @@ class OpenAIServingChat(OpenAIServing):
             # if the request doesn't use tool choice
             # OR specifies to not use a tool
             elif not request.tool_choice or request.tool_choice == "none":
-                message = ChatMessage(role=role, reasoning=reasoning, content=content)
+                message = self._chat_message_cls(
+                    role=role, reasoning=reasoning, content=content
+                )
 
             # handle when there are tools and tool choice is auto
             elif (
@@ -918,7 +936,7 @@ class OpenAIServingChat(OpenAIServing):
             ):
                 auto_tools_called = tool_calls is not None and len(tool_calls) > 0
                 if tool_calls:
-                    message = ChatMessage(
+                    message = self._chat_message_cls(
                         role=role,
                         reasoning=reasoning,
                         content=content,
@@ -929,7 +947,7 @@ class OpenAIServingChat(OpenAIServing):
                     )
 
                 else:
-                    message = ChatMessage(
+                    message = self._chat_message_cls(
                         role=role,
                         reasoning=reasoning,
                         content=content,
@@ -942,10 +960,16 @@ class OpenAIServingChat(OpenAIServing):
                     " if tools should be extracted. Returning a standard chat "
                     "completion."
                 )
-                message = ChatMessage(role=role, reasoning=reasoning, content=content)
+                message = self._chat_message_cls(
+                    role=role, reasoning=reasoning, content=content
+                )
 
-            if citations:
-                message.citations = citations
+            # Subclass hook: enrich the constructed message with any
+            # parser-side extras that don't fit through the plain
+            # ``(reasoning, content, tool_calls)`` tuple. Base is a no-op;
+            # citation-aware handlers use this to surface grounding
+            # metadata cached on the reasoning parser.
+            message = self._finalize_response_message(message, parser=parser)
 
             # In OpenAI's API, when a tool is called, the finish_reason is:
             # "tool_calls" for "auto" or "required" tool calls,

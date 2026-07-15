@@ -11,7 +11,13 @@ from openai.types.chat.chat_completion_audio import (
     ChatCompletionAudio as OpenAIChatCompletionAudio,
 )
 from openai.types.chat.chat_completion_message import Annotation as OpenAIAnnotation
-from pydantic import Field, PrivateAttr, model_serializer, model_validator
+from pydantic import (
+    Field,
+    PrivateAttr,
+    SerializeAsAny,
+    model_serializer,
+    model_validator,
+)
 
 from vllm.config import ModelConfig
 from vllm.config.utils import replace
@@ -21,7 +27,6 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
-    Citation,
     DeltaMessage,
     FunctionCall,
     FunctionDefinition,
@@ -66,11 +71,6 @@ class ChatMessage(OpenAIBaseModel):
 
     # vLLM-specific fields that are not in OpenAI spec
     reasoning: str | None = None
-    # Citations grounding the message content in source material. Populated
-    # by parsers/renderers for grounded models (e.g. Cohere Command). Left
-    # unset (and therefore omitted from JSON) for ungrounded models so
-    # OpenAI-compatible clients see the standard shape.
-    citations: list[Citation] | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
@@ -99,7 +99,12 @@ class ChatCompletionLogProbs(OpenAIBaseModel):
 
 class ChatCompletionResponseChoice(OpenAIBaseModel):
     index: int
-    message: ChatMessage
+    # ``SerializeAsAny`` lets pydantic honor subclasses of ``ChatMessage``
+    # (e.g. ``vllm.entrypoints.cohere.cohere_chat_message.CohereChatMessage``)
+    # so that added fields like ``citations`` survive JSON serialization
+    # instead of being stripped down to the base schema. Plain
+    # ``ChatMessage`` instances serialize identically to before.
+    message: SerializeAsAny[ChatMessage]
     logprobs: ChatCompletionLogProbs | None = None
     # per OpenAI spec this is the default
     finish_reason: str | None = "stop"
@@ -143,7 +148,11 @@ class ChatCompletionResponse(OpenAIBaseModel):
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
     index: int
-    delta: DeltaMessage
+    # ``SerializeAsAny`` lets pydantic honor subclasses of ``DeltaMessage``
+    # (e.g. ``vllm.entrypoints.cohere.cohere_chat_message.CohereDeltaMessage``)
+    # so streaming ``citations`` survive JSON serialization. Plain
+    # ``DeltaMessage`` instances serialize identically to before.
+    delta: SerializeAsAny[DeltaMessage]
     logprobs: ChatCompletionLogProbs | None = None
     finish_reason: str | None = None
     stop_reason: int | str | None = None
