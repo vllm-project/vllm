@@ -465,7 +465,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
         tl.store(o_ptrs, acc, mask=mask_1d)
 
 
-def _causal_conv1d_fn_cuda(
+def causal_conv1d_fn(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None,
@@ -1066,7 +1066,7 @@ def _causal_conv1d_update_kernel(
         tl.store(o_ptrs, acc, mask=mask_1d)
 
 
-def _causal_conv1d_update_cuda(
+def causal_conv1d_update(
     x: torch.Tensor,
     conv_state: torch.Tensor,
     weight: torch.Tensor,
@@ -1238,49 +1238,13 @@ def _causal_conv1d_update_cuda(
         out = out.squeeze(-1)
     return out.to(original_x_dtype)
 
-
-def causal_conv1d_fn(*args, **kwargs):
-    return _causal_conv1d_fn_cuda(*args, **kwargs)
-
-
-def causal_conv1d_update(
-    x,
-    conv_state,
-    weight,
-    bias=None,
-    activation=None,
-    conv_state_indices=None,
-    num_accepted_tokens=None,
-    query_start_loc=None,
-    max_query_len=-1,
-    null_block_id=NULL_BLOCK_ID,
-    block_idx_last_scheduled_token=None,
-    initial_state_idx=None,
-    validate_data=False,
-):
-    """Dispatch causal_conv1d_update to CPU C++ kernel or CUDA Triton kernel."""
-
-    return _causal_conv1d_update_cuda(
-        x,
-        conv_state,
-        weight,
-        bias=bias,
-        activation=activation,
-        conv_state_indices=conv_state_indices,
-        num_accepted_tokens=num_accepted_tokens,
-        query_start_loc=query_start_loc,
-        max_query_len=max_query_len,
-        null_block_id=null_block_id,
-        block_idx_last_scheduled_token=block_idx_last_scheduled_token,
-        initial_state_idx=initial_state_idx,
-        validate_data=validate_data,
-    )
-
-
-from vllm.platforms import current_platform  # noqa: E402
+from vllm.platforms import current_platform
 
 if current_platform.is_cpu():
-    import vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d as cpu_conv1d  # noqa: E402
+    from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
+        causal_conv1d_fn_cpu,
+        causal_conv1d_update_cpu,
+    )
 
-    causal_conv1d_fn = cpu_conv1d.causal_conv1d_fn_cpu  # type: ignore
-    causal_conv1d_update = cpu_conv1d.causal_conv1d_update_cpu  # type: ignore
+    causal_conv1d_fn = causal_conv1d_fn_cpu  # type: ignore
+    causal_conv1d_update = causal_conv1d_update_cpu  # type: ignore

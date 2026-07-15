@@ -226,9 +226,8 @@ cvt.rs.f16x2.f32 $0, $2, $1, $3;
 @triton.heuristics({"HAS_Z": lambda args: args["z_ptr"] is not None})
 @triton.heuristics(
     {
-        "HAS_STATE_BATCH_INDICES": lambda args: (
-            args["state_batch_indices_ptr"] is not None
-        )
+        "HAS_STATE_BATCH_INDICES": lambda args: args["state_batch_indices_ptr"]
+        is not None
     }
 )
 @triton.heuristics(
@@ -495,7 +494,7 @@ def _selective_scan_update_kernel(
         tl.store(dst_state_ptrs, state, mask=mask)
 
 
-def _selective_state_update_cuda(
+def selective_state_update(
     state,
     x,
     dt,
@@ -605,26 +604,6 @@ def _selective_state_update_cuda(
     assert out.shape == x.shape
     if num_accepted_tokens is not None:
         assert num_accepted_tokens.shape == (N,)
-
-    if not HAS_TRITON:
-        return ops.selective_state_update_cpu(
-            state,
-            x,
-            dt,
-            A,
-            B,
-            C,
-            D,
-            z,
-            dt_bias,
-            dt_softplus,
-            state_batch_indices,
-            dst_state_batch_indices,
-            null_block_id,
-            out,
-            num_accepted_tokens,
-            cu_seqlens,
-        )
 
     grid = lambda META: (triton.cdiv(dim, META["BLOCK_SIZE_M"]), N, nheads)
     z_strides = (z.stride(0), z.stride(1), z.stride(2)) if z is not None else (0, 0, 0)
@@ -867,57 +846,11 @@ def selective_scan_fn(
     else:
         return z  # output written inplace to z
 
-
-def selective_state_update(
-    state,
-    x,
-    dt,
-    A,
-    B,
-    C,
-    D=None,
-    z=None,
-    dt_bias=None,
-    dt_softplus=False,
-    state_batch_indices=None,
-    dst_state_batch_indices=None,
-    null_block_id=NULL_BLOCK_ID,
-    out=None,
-    num_accepted_tokens=None,
-    cu_seqlens=None,
-    is_blackwell=False,
-    enable_stochastic_rounding=False,
-    cache_philox_rounds=0,
-):
-    """Dispatch selective_state_update to CPU C++ kernel or CUDA Triton kernel."""
-    # Ensure out tensor exists
-    if out is None:
-        out = torch.empty_like(x if x.dim() == 2 else x)
-
-    return _selective_state_update_cuda(
-        state,
-        x,
-        dt,
-        A,
-        B,
-        C,
-        D=D,
-        z=z,
-        dt_bias=dt_bias,
-        dt_softplus=dt_softplus,
-        state_batch_indices=state_batch_indices,
-        dst_state_batch_indices=dst_state_batch_indices,
-        null_block_id=null_block_id,
-        out=out,
-        num_accepted_tokens=num_accepted_tokens,
-        cu_seqlens=cu_seqlens,
-        is_blackwell=is_blackwell,
-        enable_stochastic_rounding=enable_stochastic_rounding,
-        cache_philox_rounds=cache_philox_rounds,
-    )
-
+from vllm.platforms import current_platform
 
 if current_platform.is_cpu():
-    import vllm.model_executor.layers.mamba.ops.cpu.mamba_ssm as cpu_ssm  # noqa: E402
+    from vllm.model_executor.layers.mamba.ops.cpu.mamba_ssm import (
+        selective_state_update as selective_state_update_cpu,
+    )
 
-    selective_state_update = cpu_ssm.selective_state_update
+    selective_state_update = selective_state_update_cpu  # type: ignore

@@ -10,22 +10,21 @@ import torch
 from einops import rearrange
 from packaging import version
 
-from vllm.model_executor.custom_op import CustomOp
-from vllm.triton_utils import HAS_TRITON, triton
+from vllm.triton_utils import triton
 
 from .ssd_bmm import _bmm_chunk_fwd
 from .ssd_chunk_scan import _chunk_scan_fwd
 from .ssd_chunk_state import _chunk_cumsum_fwd, _chunk_state_fwd
 from .ssd_state_passing import _state_passing_fwd
 
-TRITON_22 = HAS_TRITON and version.parse(triton.__version__) >= version.parse("2.2.0")
+TRITON_22 = version.parse(triton.__version__) >= version.parse("2.2.0")
 
 
 def is_int_pow_2(n):
     return isinstance(n, int) and n > 0 and (n & (n - 1)) == 0
 
 
-def _mamba_chunk_scan_combined_fwd_cuda(
+def _mamba_chunk_scan_combined_fwd(
     x,
     dt,
     A,
@@ -155,35 +154,6 @@ def _mamba_chunk_scan_combined_fwd_cuda(
         return states[last_chunk_indices]
 
 
-@CustomOp.register("mamba_chunk_scan_combined_fwd")
-class MambaChunkScanCombinedFwdOp(CustomOp):
-    def __init__(self):
-        # Bypass dispatch_forward() / get_current_vllm_config() by directly
-        # selecting the forward method based on the platform.  This op may be
-        # instantiated during Mamba2 kernel warm-up, which happens before the
-        # vLLM compilation config is available.
-        super(CustomOp, self).__init__()  # nn.Module.__init__ only
-        from vllm.platforms import current_platform
-
-        if current_platform.is_rocm():
-            self._forward_method = self.forward_hip
-        else:
-            self._forward_method = self.forward_cuda
-
-    def forward_cuda(self, *args, **kwargs):
-        return _mamba_chunk_scan_combined_fwd_cuda(*args, **kwargs)
-
-
-_mamba_chunk_scan_combined_fwd_op: "MambaChunkScanCombinedFwdOp | None" = None
-
-
-def _mamba_chunk_scan_combined_fwd(*args, **kwargs):
-    global _mamba_chunk_scan_combined_fwd_op
-    if _mamba_chunk_scan_combined_fwd_op is None:
-        _mamba_chunk_scan_combined_fwd_op = MambaChunkScanCombinedFwdOp()
-    return _mamba_chunk_scan_combined_fwd_op(*args, **kwargs)
-
-
 def mamba_chunk_scan_combined_varlen(
     x,
     dt,
@@ -253,12 +223,11 @@ def mamba_chunk_scan_combined_varlen(
         dt_limit=dt_limit,
         state_dtype=state_dtype,
     )
+
     return varlen_states
 
-
-from vllm.platforms import current_platform  # noqa: E402
+from vllm.platforms import current_platform
 
 if current_platform.is_cpu():
-    import vllm.model_executor.layers.mamba.ops.cpu.mamba_ssm as cpu_ssm  # noqa: E402
-
-    _mamba_chunk_scan_combined_fwd = cpu_ssm._mamba_chunk_scan_combined_fwd_cpu
+    import vllm.model_executor.layers.mamba.ops.cpu.mamba_ssm as cpu_mamba_ssm
+    _mamba_chunk_scan_combined_fwd = cpu_mamba_ssm._mamba_chunk_scan_combined_fwd_cpu  # type: ignore
