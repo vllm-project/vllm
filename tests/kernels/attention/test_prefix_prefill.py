@@ -329,6 +329,222 @@ def test_contexted_kv_attention(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPES)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_contexted_kv_attention_cached_kv(
+    num_heads: int,
+    num_queries_per_kv: int,
+    head_size: int,
+    dtype: torch.dtype,
+    kv_cache_dtype: str,
+    device: str,
+    block_size: int = 32,
+) -> None:
+    # Exercises the KV_FROM_CACHE path of context_attention_fwd: the current
+    # chunk K/V are not passed as dense tensors (k=v=None); they are read back
+    # from the paged KV cache, as done by layers that re-attend an already
+    # cached sequence with the query only (e.g. IQuest LoopCoder's
+    # attn(q, None, None)). The whole sequence therefore lives in the cache and
+    # the result must still match a dense causal SDPA reference.
+    if "fp8" in kv_cache_dtype and not current_platform.has_device_capability(89):
+        pytest.skip(
+            "Triton limitation: fp8e4nv data type is not supported on CUDA arch < 89"
+        )
+
+    set_random_seed(0)
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+
+    MAX_SEQ_LEN = 1024
+    MAX_CTX_LEN = 1024
+    BS = 10
+    cache_size = 640
+    max_block_per_request = 64
+    query_lens = [random.randint(16, MAX_SEQ_LEN) for _ in range(BS)]
+    # ensure one sequence in batch is a decode
+    query_lens[-1] = 1
+    ctx_lens = [random.randint(16, MAX_CTX_LEN) for _ in range(BS)]
+    seq_lens = [a + b for a, b in zip(query_lens, ctx_lens)]
+    num_kv_heads = num_heads // num_queries_per_kv
+
+    num_tokens = sum(query_lens)
+    query = torch.empty(num_tokens, num_heads, head_size, dtype=dtype)
+    query.uniform_(-1e-3, 1e-3)
+    output = torch.empty(num_tokens, num_heads, head_size, dtype=dtype)
+
+    kv = torch.empty(sum(seq_lens), 2, num_kv_heads, head_size, dtype=dtype)
+    kv.uniform_(-1e-3, 1e-3)
+    key, value = kv.unbind(dim=1)
+
+    if kv_cache_dtype == "auto":
+        cache_dtype = dtype
+    else:
+        cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
+    k_cache = torch.zeros(
+        cache_size, block_size, num_kv_heads, head_size, dtype=cache_dtype
+    )
+    v_cache = torch.zeros(
+        cache_size, block_size, num_kv_heads, head_size, dtype=cache_dtype
+    )
+    values = torch.arange(0, cache_size, dtype=torch.int32)
+    values = values[torch.randperm(cache_size)]
+    block_table = values[: BS * max_block_per_request].view(BS, max_block_per_request)
+    b_seq_len = torch.tensor(seq_lens, dtype=torch.int32)
+    b_start_loc = torch.cumsum(torch.tensor([0] + query_lens), dim=0).to(torch.int32)
+    max_input_len = MAX_SEQ_LEN
+    b_seq_start_loc = torch.cumsum(torch.tensor([0] + seq_lens[:-1]), dim=0).to(
+        torch.int32
+    )
+    # Unlike the dense test, write the WHOLE sequence (context + current chunk)
+    # into the paged cache, since the current chunk is read back from the cache.
+    for i in range(BS):
+        cur = 0
+        block_id = 0
+        while cur < seq_lens[i]:
+            start_loc = b_seq_start_loc[i] + cur
+            if cur + block_size > seq_lens[i]:
+                end_loc = b_seq_start_loc[i] + seq_lens[i]
+            else:
+                end_loc = start_loc + block_size
+            start_slot = block_table[i, block_id] * block_size
+            end_slot = start_slot + end_loc - start_loc
+            k_cache.view(-1, num_kv_heads, head_size)[start_slot:end_slot].copy_(
+                key[start_loc:end_loc]
+            )
+            v_cache.view(-1, num_kv_heads, head_size)[start_slot:end_slot].copy_(
+                value[start_loc:end_loc]
+            )
+            cur += block_size
+            block_id += 1
+    # transpose to the paged cache layouts the kernel expects:
+    #   K_cache[num_blocks, num_kv_heads, head_size/8, block_size, 8]
+    #   V_cache[num_blocks, num_kv_heads, head_size, block_size]
+    k_cache = (
+        k_cache.view(-1, block_size, num_kv_heads, head_size // 8, 8)
+        .permute(0, 2, 3, 1, 4)
+        .contiguous()
+    )
+    v_cache = (
+        v_cache.view(-1, block_size, num_kv_heads, head_size)
+        .permute(0, 2, 3, 1)
+        .contiguous()
+    )
+    k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+
+    # Cached-K/V path: current-chunk k and v are None.
+    context_attention_fwd(
+        query,
+        None,
+        None,
+        output,
+        kv_cache_dtype,
+        k_cache,
+        v_cache,
+        block_table,
+        b_start_loc,
+        b_seq_len,
+        MAX_CTX_LEN,
+        max_input_len,
+        k_scale,
+        v_scale,
+        sliding_window=0,
+    )
+    torch.accelerator.synchronize()
+
+    scale = float(1.0 / (head_size**0.5))
+
+    query_sdpa = query.view(num_tokens, num_kv_heads, num_queries_per_kv, head_size)
+    query_sdpa = query_sdpa.permute(1, 2, 0, 3).reshape(
+        1, num_heads, num_tokens, head_size
+    )
+    key_sdpa = key[:, :, None, :].expand(
+        key.shape[0], num_kv_heads, num_queries_per_kv, key.shape[-1]
+    )
+    key_sdpa = key_sdpa.permute(1, 2, 0, 3).reshape(
+        1, num_heads, sum(seq_lens), head_size
+    )
+    value_sdpa = value[:, :, None, :].expand(
+        value.shape[0], num_kv_heads, num_queries_per_kv, value.shape[-1]
+    )
+    value_sdpa = value_sdpa.permute(1, 2, 0, 3).reshape(
+        1, num_heads, sum(seq_lens), head_size
+    )
+
+    attn_mask = create_causal_attention_mask_for_sdpa(
+        query_lens, seq_lens, 0, device=device, dtype=dtype
+    )
+    output_ref = F.scaled_dot_product_attention(
+        query_sdpa,
+        key_sdpa,
+        value_sdpa,
+        attn_mask=attn_mask,
+        dropout_p=0.0,
+        scale=scale,
+    )
+    output_ref = output_ref.view(num_heads, num_tokens, head_size)
+    output_ref = output_ref.permute(1, 0, 2).contiguous()
+    atol = 1e-3 if "fp8" in kv_cache_dtype else 1e-4
+    torch.testing.assert_close(output, output_ref, atol=atol, rtol=0)
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_contexted_kv_attention_cached_kv_alibi_unsupported(device: str) -> None:
+    # The cached-K/V (k=None) path is not supported together with ALiBi; the
+    # entry point must reject it up-front with a clear NotImplementedError
+    # rather than launching the kernel with an unsupported combination.
+    set_random_seed(0)
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+
+    num_heads = 4
+    num_kv_heads = 4
+    head_size = 16
+    x = 8
+    block_size = 16
+    num_blocks = 4
+    query_len = 8
+
+    query = torch.empty(query_len, num_heads, head_size, dtype=torch.float16)
+    query.uniform_(-1e-3, 1e-3)
+    output = torch.empty_like(query)
+    k_cache = torch.zeros(
+        num_blocks, num_kv_heads, head_size // x, block_size, x, dtype=torch.float16
+    )
+    v_cache = torch.zeros(
+        num_blocks, num_kv_heads, head_size, block_size, dtype=torch.float16
+    )
+    block_table = torch.arange(num_blocks, dtype=torch.int32).view(1, num_blocks)
+    b_seq_len = torch.tensor([query_len], dtype=torch.int32)
+    b_start_loc = torch.tensor([0, query_len], dtype=torch.int32)
+    k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+    alibi_slopes = torch.ones(num_heads, dtype=torch.float32, device=device)
+
+    with pytest.raises(NotImplementedError):
+        context_attention_fwd(
+            query,
+            None,
+            None,
+            output,
+            "auto",
+            k_cache,
+            v_cache,
+            block_table,
+            b_start_loc,
+            b_seq_len,
+            query_len,
+            query_len,
+            k_scale,
+            v_scale,
+            alibi_slopes=alibi_slopes,
+        )
+
+
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("num_queries_per_kv", NUM_QUERIES_PER_KV)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("op", OPS)
 @torch.inference_mode()
 def test_contexted_kv_attention_alibi(

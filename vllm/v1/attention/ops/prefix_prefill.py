@@ -354,12 +354,9 @@ def _fwd_kernel(
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
         if KV_FROM_CACHE:
-            # Current-chunk K/V live in the paged cache (written by an earlier
-            # call to this same layer). Read them back using paged addressing
-            # for the absolute sequence positions of these query tokens.
-            # Current-chunk K/V positions come right after the context, at
-            # absolute positions [ctx_len, ctx_len + query_len). Reuse the same
-            # paged-cache addressing as the context loop above.
+            # Current-chunk K/V are not passed densely; read them from the paged
+            # cache at their absolute positions [ctx_len, ctx_len + query_len),
+            # reusing the same addressing as the context loop above.
             cache_token_idx = cur_batch_ctx_len + start_n + offs_n
             off_k_cur, off_v_cur = _paged_kv_cache_offsets(
                 B_Loc,
