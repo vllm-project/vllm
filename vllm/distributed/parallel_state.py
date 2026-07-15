@@ -605,7 +605,8 @@ class GroupCoordinator:
         # only cuda uses this function,
         # so we don't abstract it into the base class
         maybe_ca_context = nullcontext()
-        maybe_aiter_context = nullcontext()
+        maybe_aiter_ar_context = nullcontext()
+        maybe_aiter_ag_rs_context = nullcontext()
         from vllm.distributed.device_communicators.cuda_communicator import (
             CudaCommunicator,
         )
@@ -622,12 +623,15 @@ class GroupCoordinator:
             if ca_comm is not None:
                 maybe_ca_context = ca_comm.capture()  # type: ignore
 
-            from vllm._aiter_ops import rocm_aiter_ops
+            aiter_ar_comm = getattr(self.device_communicator, "aiter_ar_comm", None)
+            if aiter_ar_comm is not None:
+                maybe_aiter_ar_context = aiter_ar_comm.capture()  # type: ignore
 
-            if rocm_aiter_ops.is_enabled():
-                aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
-                if aiter_ar is not None:
-                    maybe_aiter_context = aiter_ar.capture()  # type: ignore
+            aiter_ag_rs_comm = getattr(
+                self.device_communicator, "aiter_ag_rs_comm", None
+            )
+            if aiter_ag_rs_comm is not None:
+                maybe_aiter_ag_rs_context = aiter_ag_rs_comm.capture()  # type: ignore
 
         # ensure all initialization operations complete before attempting to
         # capture the graph on another stream
@@ -635,7 +639,12 @@ class GroupCoordinator:
         if curr_stream != stream:
             stream.wait_stream(curr_stream)
 
-        with torch.cuda.stream(stream), maybe_ca_context, maybe_aiter_context:
+        with (
+            torch.cuda.stream(stream),
+            maybe_ca_context,
+            maybe_aiter_ar_context,
+            maybe_aiter_ag_rs_context,
+        ):
             yield graph_capture_context
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
@@ -1442,21 +1451,10 @@ def graph_capture(device: torch.device):
     from other kernels possibly launched on background in the default stream.
     """
     context = GraphCaptureContext(torch.cuda.Stream(device=device))
-
-    # The DP-group AITER AG/RS comm captures separately from TP/PP: it lives on
-    # the DP group, and with tp_size=1 the TP group has no device communicator.
-    maybe_aiter_ag_rs_context = nullcontext()
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    if rocm_aiter_ops.is_enabled():
-        aiter_ag_rs = rocm_aiter_ops.get_aiter_ag_rs()
-        if aiter_ag_rs is not None:
-            maybe_aiter_ag_rs_context = aiter_ag_rs.capture()
-
     with (
-        maybe_aiter_ag_rs_context,
         get_tp_group().graph_capture(context),
         get_pp_group().graph_capture(context),
+        get_dp_group().graph_capture(context),
     ):
         yield context
 

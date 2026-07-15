@@ -1814,24 +1814,6 @@ class rocm_aiter_ops:
         )
 
     @classmethod
-    def get_aiter_ag_rs(cls):
-        """Return the DP device communicator's AITER all-gather/reduce-scatter
-        communicator if it has one, return None otherwise.
-        """
-        from vllm.distributed.device_communicators.aiter_custom_all_reduce import (
-            AiterCustomAllreduce,
-        )
-        from vllm.distributed.parallel_state import get_dp_group
-
-        device_comm = get_dp_group().device_communicator
-        aiter_ag_rs_comm = getattr(device_comm, "aiter_ag_rs_comm", None)
-        return (
-            aiter_ag_rs_comm
-            if isinstance(aiter_ag_rs_comm, AiterCustomAllreduce)
-            else None
-        )
-
-    @classmethod
     @if_aiter_supported
     def are_gdn_triton_kernels_available(cls) -> bool:
         """Check if AITER Triton kernels for GDN attention are importable.
