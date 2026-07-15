@@ -76,12 +76,11 @@ class DSparkSpeculator(DFlashSpeculator):
             dtype=torch.float32,
             device=device,
         )
-        sps_curve = self.speculative_config.dspark_sps_curve
         self.use_confidence_based_verification = (
             self.speculative_config.confidence_based_verification not in ("none", "off")
             and (
                 self.speculative_config.dspark_budget_frac < 1.0
-                or sps_curve is not None
+                or self.speculative_config.dspark_sps_curve == "auto"
             )
         )
 

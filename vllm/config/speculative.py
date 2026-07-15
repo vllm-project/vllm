@@ -246,9 +246,8 @@ class SpeculativeConfig:
     """Calibrate DSpark confidence logits online with Sequential Temperature
     Scaling."""
 
-    dspark_sps_curve: list[tuple[int, float]] | str | None = None
-    """DSpark ``(verification tokens, steps/sec)`` breakpoints, or ``"auto"``
-    to measure them during warmup."""
+    dspark_sps_curve: Literal["auto"] | None = None
+    """Set to ``"auto"`` to profile DSpark step costs during warmup."""
 
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
@@ -1216,31 +1215,6 @@ class SpeculativeConfig:
             raise ValueError(
                 f"dspark_budget_frac must be in (0, 1], got {self.dspark_budget_frac}."
             )
-        if isinstance(self.dspark_sps_curve, str):
-            if self.dspark_sps_curve != "auto":
-                raise ValueError(
-                    "dspark_sps_curve must be a list of (batch_num_tokens, "
-                    f'steps_per_sec) pairs or "auto", got '
-                    f"{self.dspark_sps_curve!r}."
-                )
-        elif self.dspark_sps_curve is not None:
-            self.dspark_sps_curve = [
-                (int(b), float(s)) for b, s in self.dspark_sps_curve
-            ]
-            batch_sizes = [b for b, _ in self.dspark_sps_curve]
-            if not self.dspark_sps_curve or any(
-                b <= 0 or s <= 0.0 for b, s in self.dspark_sps_curve
-            ):
-                raise ValueError(
-                    "dspark_sps_curve entries must have positive batch token "
-                    f"counts and rates, got {self.dspark_sps_curve}."
-                )
-            if batch_sizes != sorted(set(batch_sizes)):
-                raise ValueError(
-                    "dspark_sps_curve batch token counts must be strictly "
-                    f"increasing, got {batch_sizes}."
-                )
-
         if (
             self.method == "dspark"
             and self.confidence_based_verification in ("auto", "mask")

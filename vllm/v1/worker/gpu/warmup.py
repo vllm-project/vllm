@@ -313,16 +313,12 @@ def warmup_kernels(
         manager = model_runner.spec_decode_confidence_manager
         if manager is not None:
             manager.warmup(model_runner.input_buffers)
-            if manager.wants_auto_sps_curve:
-                manager.profile_sps_curve(
+            if manager.should_profile:
+                manager.profile_step_costs(
                     model_runner,
                     worker_execute_model,
                     worker_sample_tokens,
-                    req_ids,
-                    prompt_len,
-                    decode_query_len,
-                    num_spec_steps,
-                    num_kv_cache_groups,
+                    decode_output,
                 )
 
     # Clean up - process finish_req_ids.

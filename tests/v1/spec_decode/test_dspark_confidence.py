@@ -116,9 +116,8 @@ def test_masked_verification_does_not_auto_profile_sps():
         speculative_config=_spec_config(dspark_sps_curve="auto"),
     )
 
-    assert not manager.wants_auto_sps_curve
-    assert manager.draft_cost_ms is None
-    assert manager.verify_and_sample_cost_ms is None
+    assert not manager.should_profile
+    assert manager.cost_tables is None
 
 
 def test_prepare_pos_seq_lens_clears_active_padding():
@@ -243,8 +242,7 @@ def test_select_budget_uses_sps_argmax():
         num_batch_requests=2,
         num_sampling_requests=2,
         num_required_target_tokens=2,
-        draft_cost_ms=np.zeros(3),
-        verify_and_sample_cost_ms=1000.0 / rates,
+        cost_tables=(np.zeros(3), 1000.0 / rates),
     )
     assert budget == 2
 
@@ -259,8 +257,7 @@ def test_select_budget_counts_only_requests_that_sample():
         num_batch_requests=2,
         num_sampling_requests=1,
         num_required_target_tokens=4,
-        draft_cost_ms=np.zeros(3),
-        verify_and_sample_cost_ms=1000.0 / rates,
+        cost_tables=(np.zeros(3), 1000.0 / rates),
     )
 
     assert budget == 0
@@ -276,6 +273,74 @@ def test_cost_tables_keep_draft_and_verification_costs_separate():
 
     assert draft_cost_ms[1] + verify_and_sample_cost_ms[8] == pytest.approx(3.2)
     assert draft_cost_ms[8] + verify_and_sample_cost_ms[8] == pytest.approx(4.6)
+
+
+def test_profile_uses_rank_zero_cost_curves_on_every_tp_rank(monkeypatch):
+    canonical_curves = ([(1, 2.0)], [(1, 3.0), (2, 4.0)])
+    broadcasts = []
+
+    def broadcast_object(value, src=0):
+        broadcasts.append((value, src))
+        return canonical_curves
+
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.spec_decode.confidence.get_tp_group",
+        lambda: SimpleNamespace(broadcast_object=broadcast_object),
+    )
+
+    class FakeEvent:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def record(self):
+            pass
+
+        def synchronize(self):
+            pass
+
+        def elapsed_time(self, end):
+            return 15.0
+
+    monkeypatch.setattr(torch.cuda, "Event", FakeEvent)
+    manager = object.__new__(VarlenConfidenceManager)
+    manager.num_speculative_steps = 1
+    manager.req_states = SimpleNamespace(
+        max_num_reqs=1,
+        max_num_batched_tokens=2,
+    )
+    manager._profile_capacity = None
+    manager.online_sts = None
+    speculator = SimpleNamespace(
+        propose=lambda *args, **kwargs: None,
+        draft_tokens=torch.empty((1, 1), device="cuda"),
+    )
+    model_runner = SimpleNamespace(
+        max_num_reqs=1,
+        max_num_tokens=2,
+        decode_query_len=2,
+        sampler=None,
+        speculator=speculator,
+    )
+    cached_output = SimpleNamespace(
+        req_ids=["req0"],
+        num_computed_tokens=[1],
+        num_output_tokens=[1],
+        new_block_ids=[None],
+    )
+    decode_output = SimpleNamespace(scheduled_cached_reqs=cached_output)
+
+    manager.profile_step_costs(
+        model_runner,
+        worker_execute_model=lambda output: None,
+        worker_sample_tokens=lambda output: None,
+        decode_output=decode_output,
+    )
+
+    expected = build_cost_tables_from_curves(*canonical_curves, 1, 2)
+    assert broadcasts == [(([(1, 0.0)], [(1, 1.0), (2, 1.0)]), 0)]
+    assert manager.cost_tables is not None
+    assert np.array_equal(manager.cost_tables[0], expected[0])
+    assert np.array_equal(manager.cost_tables[1], expected[1])
 
 
 def test_select_budget_temperature_desaturates_zeros():
@@ -336,13 +401,44 @@ def test_online_sts_fits_order_preserving_temperatures():
     assert np.array_equal(sts.temperatures, np.ones(3))
 
 
-def test_capacity_manager_assigns_scalar_budget_from_gpu_scores(monkeypatch):
-    broadcasts = []
+def test_capacity_manager_plans_budget_without_tp_broadcast(monkeypatch):
+    def fail_broadcast(*args, **kwargs):
+        pytest.fail("budget planning must not broadcast")
+
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.spec_decode.confidence.get_tp_group",
+        lambda: SimpleNamespace(broadcast_object=fail_broadcast),
+    )
+    manager = object.__new__(VarlenConfidenceManager)
+    manager.num_speculative_steps = 2
+    manager.req_states = SimpleNamespace(
+        req_id_to_index={"req0": 0},
+        num_computed_tokens_np=np.array([0], dtype=np.int32),
+        prefill_len=SimpleNamespace(np=np.array([0], dtype=np.int32)),
+    )
+    manager._profile_capacity = None
+    manager._stale_confidences = None
+    manager.budget_frac = 0.5
+    manager.cost_tables = None
+
+    budget = manager._plan_draft_token_budget(
+        ["req0"],
+        num_required_target_tokens_per_req=np.array([1], dtype=np.int32),
+        valid_draft_tokens_per_req=np.array([2], dtype=np.int32),
+    )
+
+    assert budget == 1
+
+
+def test_capacity_manager_assigns_scalar_budget_on_every_tp_rank(monkeypatch):
+    def fail_broadcast(*args, **kwargs):
+        pytest.fail("capacity assignment must not broadcast")
+
     monkeypatch.setattr(
         "vllm.v1.worker.gpu.spec_decode.confidence.get_tp_group",
         lambda: SimpleNamespace(
-            rank_in_group=0,
-            broadcast=lambda tensor, src=0: broadcasts.append(tensor),
+            rank_in_group=1,
+            broadcast=fail_broadcast,
             broadcast_object=lambda value, src=0: value,
         ),
     )
@@ -389,8 +485,7 @@ def test_capacity_manager_assigns_scalar_budget_from_gpu_scores(monkeypatch):
             torch.tensor([2, 1], dtype=torch.int32, device=device),
             input_batch,
         )
-    assert handler._stale_survival is not None
-    assert len(broadcasts) == 1
+    assert handler._stale_confidences is not None
 
 
 def test_varlen_capacity_manager_compacts_verifier_batch():

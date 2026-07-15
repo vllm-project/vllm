@@ -136,8 +136,9 @@ def _compute_prefix_survival_kernel(
         logit = tl.load(
             confidence_logits_ptr + req_state_idx * confidence_logits_stride + step
         )
-        temperature = tl.load(temperatures_ptr + step)
-        survival *= tl.sigmoid(logit / temperature)
+        if temperatures_ptr is not None:
+            logit /= tl.load(temperatures_ptr + step)
+        survival *= tl.sigmoid(logit)
         tl.store(
             survival_ptr + req_idx * NUM_STEPS + step,
             survival,
@@ -222,8 +223,7 @@ def select_draft_token_budget(
     num_sampling_requests: int,
     num_required_target_tokens: int,
     budget_frac: float = 1.0,
-    draft_cost_ms: np.ndarray | None = None,
-    verify_and_sample_cost_ms: np.ndarray | None = None,
+    cost_tables: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> int:
     """Choose the scalar draft budget from stale prefix scores.
 
@@ -234,43 +234,29 @@ def select_draft_token_budget(
     scores = survival[np.isfinite(survival) & (survival > 0.0)]
     scores = np.sort(scores)[::-1]
     scores = scores[: math.ceil(scores.size * budget_frac)]
-    num_candidates = scores.size
-    if num_candidates == 0:
+    if scores.size == 0:
         return 0
 
-    if verify_and_sample_cost_ms is None:
-        assert draft_cost_ms is None
-        return num_candidates
+    if cost_tables is None:
+        return scores.size
 
-    assert draft_cost_ms is not None
-    num_candidates = min(
-        num_candidates,
-        verify_and_sample_cost_ms.size - num_required_target_tokens - 1,
-    )
-    if num_candidates <= 0:
+    draft_cost_ms, verify_and_sample_cost_ms = cost_tables
+    max_candidates = verify_and_sample_cost_ms.size - num_required_target_tokens - 1
+    if max_candidates <= 0:
         return 0
-    expected_useful_tokens = num_sampling_requests + np.cumsum(scores)
-    draft_ms = draft_cost_ms[num_batch_requests]
+    scores = scores[:max_candidates]
+    if scores.size == 0:
+        return 0
     verify_ms = verify_and_sample_cost_ms[
-        num_required_target_tokens + 1 : num_required_target_tokens + num_candidates + 1
+        num_required_target_tokens + 1 : num_required_target_tokens + 1 + scores.size
     ]
-    throughput = expected_useful_tokens[:num_candidates] / (draft_ms + verify_ms)
+    draft_ms = draft_cost_ms[num_batch_requests]
+    throughput = (num_sampling_requests + np.cumsum(scores)) / (draft_ms + verify_ms)
     best = int(np.argmax(throughput))
     baseline = num_sampling_requests / (
         draft_ms + verify_and_sample_cost_ms[num_required_target_tokens]
     )
     return 0 if baseline >= throughput[best] else best + 1
-
-
-def build_verify_and_sample_cost_table(
-    sps_curve: list[tuple[int, float]],
-    max_batch_tokens: int,
-) -> np.ndarray:
-    """Convert explicit SPS breakpoints to verifier step costs."""
-    xs = np.array([b for b, _ in sps_curve], dtype=np.float64)
-    ys = np.array([s for _, s in sps_curve], dtype=np.float64)
-    rates = np.interp(np.arange(max_batch_tokens + 1), xs, ys)
-    return 1000.0 / rates
 
 
 def build_cost_tables_from_curves(
@@ -309,21 +295,18 @@ class ConfidenceManager:
         self.req_states = req_states
         self.num_speculative_steps = req_states.num_speculative_steps
         device = req_states.device
-        self.copy_stream = torch.cuda.Stream(device)
+        self._copy_stream = torch.cuda.Stream(device)
 
-        self.capacity_budget_frac = speculative_config.dspark_budget_frac
-        sps_curve = speculative_config.dspark_sps_curve
-        self.wants_auto_sps_curve = sps_curve == "auto"
-        self.draft_cost_ms: np.ndarray | None = None
-        self.verify_and_sample_cost_ms: np.ndarray | None = None
-        if isinstance(sps_curve, list):
-            self.draft_cost_ms = np.zeros(req_states.max_num_reqs + 1)
-            self.verify_and_sample_cost_ms = build_verify_and_sample_cost_table(
-                sps_curve, req_states.max_num_batched_tokens
-            )
-        self.online_sts: DSparkOnlineSTS | None = None
-        if speculative_config.dspark_online_sts:
-            self.online_sts = DSparkOnlineSTS(self.num_speculative_steps)
+        self.budget_frac = speculative_config.dspark_budget_frac
+        self.should_profile = (
+            self.varlen_spec_decode and speculative_config.dspark_sps_curve == "auto"
+        )
+        self.cost_tables: tuple[np.ndarray, np.ndarray] | None = None
+        self.online_sts = (
+            DSparkOnlineSTS(self.num_speculative_steps)
+            if speculative_config.dspark_online_sts
+            else None
+        )
 
         max_num_reqs = req_states.max_num_reqs
         num_candidates = max_num_reqs * self.num_speculative_steps
@@ -337,11 +320,9 @@ class ConfidenceManager:
             dtype=torch.float32,
             device=device,
         )
-        self._sorted_survival = torch.empty(
-            num_candidates, dtype=torch.float32, device=device
-        )
-        self._sorted_indices = torch.empty(
-            num_candidates, dtype=torch.int64, device=device
+        self._sort_buffers = (
+            torch.empty(num_candidates, dtype=torch.float32, device=device),
+            torch.empty(num_candidates, dtype=torch.int64, device=device),
         )
         self._capacity_ones = torch.ones(
             num_candidates, dtype=torch.int32, device=device
@@ -355,243 +336,151 @@ class ConfidenceManager:
         self._valid_draft_tokens = torch.empty(
             max_num_reqs, dtype=torch.int32, device=device
         )
-        self._temperatures_cpu = torch.ones(
-            self.num_speculative_steps, dtype=torch.float32, pin_memory=True
-        )
-        self._temperatures = torch.ones(
-            self.num_speculative_steps, dtype=torch.float32, device=device
+        self._temperature_buffers = (
+            (
+                torch.empty(
+                    self.num_speculative_steps,
+                    dtype=torch.float32,
+                    pin_memory=True,
+                ),
+                torch.empty(
+                    self.num_speculative_steps,
+                    dtype=torch.float32,
+                    device=device,
+                ),
+            )
+            if self.online_sts is not None
+            else None
         )
 
         # Two D2H slots preserve stale inputs for budget selection and STS.
         shape = (2, req_states.max_num_reqs)
-        self._confidence_logits_cpu = torch.empty(
+        self._staged_logits = torch.empty(
             (*shape, self.num_speculative_steps),
             dtype=torch.float32,
             pin_memory=True,
         )
-        self._num_sampled_cpu = torch.empty(shape, dtype=torch.int32, pin_memory=True)
-        self._num_verified_cpu = torch.empty(shape, dtype=torch.int32, pin_memory=True)
-        self._num_verified_gpu = torch.empty(shape, dtype=torch.int32, device=device)
-        self._req_ids: list[list[str]] = [[], []]
-        self._num_bonus = [0, 0]
+        self._staged_outcomes = torch.empty(
+            (2, 2, max_num_reqs), dtype=torch.int32, pin_memory=True
+        )
+        self._outcomes = torch.empty(
+            (2, max_num_reqs), dtype=torch.int32, device=device
+        )
+        self._staged_req_ids: list[list[str]] = [[], []]
         self._copy_events = [torch.cuda.Event(blocking=True) for _ in range(2)]
         self._next_idx = 0
-        self._num_staged = 0
-        self._stale_req_ids: list[str] = []
-        self._stale_survival: np.ndarray | None = None
-        self._last_confidence_req_ids: list[str] = []
-        self._last_confidence_logits: np.ndarray | None = None
+        self._stale_confidences: tuple[list[str], np.ndarray] | None = None
+        self._previous_confidences: tuple[list[str], np.ndarray] | None = None
         self._profile_capacity: int | None = None
 
-    def set_cost_profile(
-        self,
-        draft_curve: list[tuple[int, float]],
-        verify_curve: list[tuple[int, float]],
-    ) -> None:
-        self.draft_cost_ms, self.verify_and_sample_cost_ms = (
-            build_cost_tables_from_curves(
-                draft_curve,
-                verify_curve,
-                self.req_states.max_num_reqs,
-                self.req_states.max_num_batched_tokens,
-            )
-        )
-
-    def profile_sps_curve(
+    def profile_step_costs(
         self,
         model_runner: "GPUModelRunner",
         worker_execute_model: Callable[[Any], Any],
         worker_sample_tokens: Callable[[Any], Any],
-        req_ids: list[str],
-        prompt_len: int,
-        decode_query_len: int,
-        num_spec_steps: int,
-        num_kv_cache_groups: int,
-        warmup_iters: int = 3,
-        timed_chunks: int = 5,
+        decode_output: Any,
     ) -> None:
         """Profile draft-by-request and verifier-by-token step costs."""
-        import time
-
         from vllm import SamplingParams
-        from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 
+        cached = decode_output.scheduled_cached_reqs
+        req_ids = list(cached.req_ids)
+        query_len = model_runner.decode_query_len
         max_reqs = min(
             model_runner.max_num_reqs,
-            model_runner.max_num_tokens // decode_query_len,
+            model_runner.max_num_tokens // query_len,
             len(req_ids),
         )
-        req_counts = []
-        count = 1
-        while count < max_reqs:
-            req_counts.append(count)
-            count *= 2
-        if count == max_reqs:
-            req_counts.append(max_reqs)
-        draft_counts = sorted(
-            {0, num_spec_steps // 3, (2 * num_spec_steps) // 3, num_spec_steps}
-        )
+        req_counts = sorted({1 << i for i in range(max_reqs.bit_length())} | {max_reqs})
+
         if model_runner.sampler is not None:
             params = SamplingParams()
             for req_id in req_ids:
                 model_runner.sampler.add_request(
                     model_runner.req_states.req_id_to_index[req_id],
-                    prompt_len,
+                    cached.num_computed_tokens[0],
                     params,
                 )
             model_runner.sampler.apply_staged_writes()
 
-        def time_steps(
-            step: Callable[[], None], after_warmup: Callable[[], None] | None = None
-        ) -> float:
-            for _ in range(warmup_iters):
-                step()
-            if after_warmup is not None:
-                after_warmup()
-            chunk_ms = []
-            for _ in range(timed_chunks):
-                torch.accelerator.synchronize()
-                start = time.perf_counter()
-                for _ in range(3):
-                    step()
-                torch.accelerator.synchronize()
-                chunk_ms.append((time.perf_counter() - start) * 1000.0 / 3)
-            return float(np.median(chunk_ms))
-
-        def make_step(num_reqs: int) -> Callable[[], None]:
-            cached = CachedRequestData.make_empty()
-            cached.req_ids = list(req_ids[:num_reqs])
-            cached.num_computed_tokens = [prompt_len] * num_reqs
-            cached.num_output_tokens = [1] * num_reqs
-            cached.new_block_ids = [None] * num_reqs
-            output = SchedulerOutput.make_empty()
-            output.scheduled_cached_reqs = cached
-            output.num_scheduled_tokens = {
-                req_id: decode_query_len for req_id in cached.req_ids
-            }
-            if num_spec_steps > 0:
-                output.scheduled_spec_decode_tokens = {
-                    req_id: [0] * num_spec_steps for req_id in cached.req_ids
-                }
-            output.total_num_scheduled_tokens = decode_query_len * num_reqs
-            output.num_common_prefix_blocks = [0] * num_kv_cache_groups
-
-            def step() -> None:
-                worker_execute_model(output)
+        def measure_step() -> float:
+            for _ in range(3):
+                worker_execute_model(decode_output)
                 worker_sample_tokens(None)
-
-            return step
-
-        speculator = model_runner.speculator
-        assert speculator is not None
-        original_propose = speculator.propose
-        proposal_events: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
-
-        def skip_propose(input_batch: Any, *args: Any, **kwargs: Any) -> torch.Tensor:
-            return speculator.draft_tokens[: input_batch.num_reqs]
-
-        def time_propose(*args: Any, **kwargs: Any) -> torch.Tensor:
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
             start.record()
-            result = original_propose(*args, **kwargs)
+            for _ in range(10):
+                worker_execute_model(decode_output)
+                worker_sample_tokens(None)
             end.record()
-            proposal_events.append((start, end))
-            return result
+            with gpu_sync_allowed():
+                end.synchronize()
+            return start.elapsed_time(end) / 10
+
+        def resize_batch(num_reqs: int) -> None:
+            selected_req_ids = req_ids[:num_reqs]
+            cached.req_ids = selected_req_ids
+            cached.num_computed_tokens = [cached.num_computed_tokens[0]] * num_reqs
+            cached.num_output_tokens = [1] * num_reqs
+            cached.new_block_ids = [None] * num_reqs
+            decode_output.num_scheduled_tokens = dict.fromkeys(
+                selected_req_ids, query_len
+            )
+            decode_output.scheduled_spec_decode_tokens = {
+                req_id: [0] * self.num_speculative_steps for req_id in selected_req_ids
+            }
+            decode_output.total_num_scheduled_tokens = query_len * num_reqs
+
+        speculator = model_runner.speculator
+        assert speculator is not None
+        propose = speculator.propose
+
+        def skip_draft(input_batch: Any, *args: Any, **kwargs: Any) -> torch.Tensor:
+            return speculator.draft_tokens[: input_batch.num_reqs]
 
         try:
-            observations = []
-            verify_ms = []
-            draft_ms = []
-            total_ms = []
+            draft_curve: list[tuple[int, float]] = []
+            verify_costs: dict[int, float] = {}
             for num_reqs in req_counts:
-                step = make_step(num_reqs)
-                for capacity in draft_counts:
+                resize_batch(num_reqs)
+                speculator.propose = skip_draft  # type: ignore[method-assign]
+                full_verify_ms = 0.0
+                for capacity in (0, self.num_speculative_steps):
                     self._profile_capacity = capacity
                     num_tokens = num_reqs * (1 + capacity)
-                    observations.append((num_reqs, num_tokens))
+                    verify_ms = measure_step()
+                    verify_costs.setdefault(num_tokens, verify_ms)
+                    full_verify_ms = verify_ms
 
-                    speculator.propose = skip_propose  # type: ignore[method-assign]
-                    verify_ms.append(time_steps(step))
-
-                    speculator.propose = time_propose  # type: ignore[method-assign]
-                    total_ms.append(time_steps(step, proposal_events.clear))
-                    draft_ms.append(
-                        float(
-                            np.median(
-                                [
-                                    start.elapsed_time(end)
-                                    for start, end in proposal_events
-                                ]
-                            )
-                        )
-                    )
+                self._profile_capacity = self.num_speculative_steps
+                speculator.propose = propose  # type: ignore[method-assign]
+                draft_curve.append(
+                    (num_reqs, max(measure_step() - full_verify_ms, 0.0))
+                )
         finally:
-            speculator.propose = original_propose  # type: ignore[method-assign]
+            speculator.propose = propose  # type: ignore[method-assign]
             self._profile_capacity = None
 
-        timings = torch.tensor(
-            verify_ms + draft_ms + total_ms,
-            dtype=torch.float64,
-            device=self.req_states.device,
+        verify_curve = sorted(verify_costs.items())
+        draft_curve, verify_curve = get_tp_group().broadcast_object(
+            (draft_curve, verify_curve), src=0
         )
-        tp_group = get_tp_group()
-        if tp_group.world_size > 1:
-            tp_group.broadcast(timings, src=0)
-        timings_np = timings.cpu().numpy()
-        num_observations = len(observations)
-        verify_ms = timings_np[:num_observations]
-        draft_ms = timings_np[num_observations : 2 * num_observations]
-        total_ms = timings_np[2 * num_observations :]
-
-        def collapse_samples(
-            xs: list[int], ys: np.ndarray
-        ) -> tuple[list[tuple[int, float]], float]:
-            grouped: dict[int, list[float]] = {}
-            for x, y in zip(xs, ys):
-                grouped.setdefault(x, []).append(float(y))
-            curve = [
-                (x, float(np.median(samples))) for x, samples in sorted(grouped.items())
-            ]
-            costs = dict(curve)
-            residuals = [
-                sample - costs[x]
-                for x, samples in grouped.items()
-                for sample in samples
-            ]
-            return curve, float(np.sqrt(np.mean(np.square(residuals))))
-
-        reqs, tokens = map(list, zip(*observations))
-        draft_curve, draft_rmse_ms = collapse_samples(reqs, draft_ms)
-        verify_curve, verify_rmse_ms = collapse_samples(tokens, verify_ms)
-        self.set_cost_profile(draft_curve, verify_curve)
-        assert self.draft_cost_ms is not None
-        assert self.verify_and_sample_cost_ms is not None
-        residuals = [
-            total
-            - self.draft_cost_ms[num_reqs]
-            - self.verify_and_sample_cost_ms[num_tokens]
-            for (num_reqs, num_tokens), total in zip(observations, total_ms)
-        ]
-        rmse_ms = float(np.sqrt(np.mean(np.square(residuals))))
+        self.cost_tables = build_cost_tables_from_curves(
+            draft_curve,
+            verify_curve,
+            self.req_states.max_num_reqs,
+            self.req_states.max_num_batched_tokens,
+        )
         if self.online_sts is not None:
             self.online_sts.reset()
-        logger.info(
+        logger.info_once(
             "DSpark auto-profiled draft cost (requests -> ms): %s",
-            [(r, round(ms, 3)) for r, ms in draft_curve],
+            tuple((r, round(ms, 3)) for r, ms in draft_curve),
         )
-        logger.info(
+        logger.info_once(
             "DSpark auto-profiled verifier + sampler cost (tokens -> ms): %s",
-            [(b, round(ms, 3)) for b, ms in verify_curve],
-        )
-        logger.info(
-            "DSpark component collapse RMSE (draft / verifier): %.3f / %.3f ms",
-            draft_rmse_ms,
-            verify_rmse_ms,
-        )
-        logger.info(
-            "DSpark direct-component SPS residual RMSE: %.3f ms",
-            rmse_ms,
+            tuple((b, round(ms, 3)) for b, ms in verify_curve),
         )
 
     def stage_confidences(
@@ -615,35 +504,29 @@ class ConfidenceManager:
 
         idx = self._next_idx
         self._next_idx ^= 1
-        if self._num_staged >= 2:
+        if self._staged_req_ids[idx]:
             with gpu_sync_allowed():
                 self._copy_events[idx].synchronize()
             self._update_staged_confidences(idx)
 
-        self._req_ids[idx] = list(input_batch.req_ids)
-        self._num_bonus[idx] = num_bonus
-        self._num_verified_gpu[idx, :num_reqs].copy_(
-            self._batch_draft_capacity[:num_reqs]
-        )
+        self._staged_req_ids[idx] = list(input_batch.req_ids)
+        accepted_gpu, verified_gpu = self._outcomes[:, :num_reqs]
+        accepted_gpu.copy_(num_sampled[:num_reqs]).sub_(num_bonus)
+        verified_gpu.copy_(self._batch_draft_capacity[:num_reqs])
         current_stream = torch.cuda.current_stream(self.req_states.device)
-        self.copy_stream.wait_stream(current_stream)
-        with stream(self.copy_stream, current_stream):
-            self._confidence_logits_cpu[idx, :num_reqs].copy_(
+        self._copy_stream.wait_stream(current_stream)
+        with stream(self._copy_stream, current_stream):
+            self._staged_logits[idx, :num_reqs].copy_(
                 confidence_logits[:num_reqs], non_blocking=True
             )
-            self._num_sampled_cpu[idx, :num_reqs].copy_(
-                num_sampled[:num_reqs], non_blocking=True
+            self._staged_outcomes[idx, :, :num_reqs].copy_(
+                self._outcomes[:, :num_reqs], non_blocking=True
             )
-            self._num_verified_cpu[idx, :num_reqs].copy_(
-                self._num_verified_gpu[idx, :num_reqs], non_blocking=True
-            )
-            num_sampled.record_stream(self.copy_stream)
             self._copy_events[idx].record()
-        self._num_staged += 1
 
     def wait_for_staged_copy(self) -> None:
         """Protect the persistent confidence buffer before its next replay."""
-        if self._num_staged:
+        if self._staged_req_ids[self._next_idx ^ 1]:
             torch.cuda.current_stream(self.req_states.device).wait_event(
                 self._copy_events[self._next_idx ^ 1]
             )
@@ -658,17 +541,13 @@ class ConfidenceManager:
 
     def _update_staged_confidences(self, idx: int) -> None:
         """Consume a two-step-old snapshot for calibration and budgeting."""
-        req_ids = self._req_ids[idx]
+        req_ids = self._staged_req_ids[idx]
         num_reqs = len(req_ids)
-        confidence_logits_np = self._confidence_logits_cpu[idx, :num_reqs].numpy()
-        accepted_np = (
-            self._num_sampled_cpu[idx, :num_reqs].numpy().astype(np.int64)
-            - self._num_bonus[idx]
-        )
-        if self.online_sts is not None and self._last_confidence_logits is not None:
-            prev_row = {
-                req_id: i for i, req_id in enumerate(self._last_confidence_req_ids)
-            }
+        confidence_logits_np = self._staged_logits[idx, :num_reqs].numpy()
+        accepted_np, verified_np = self._staged_outcomes[idx, :, :num_reqs].numpy()
+        if self.online_sts is not None and self._previous_confidences is not None:
+            previous_req_ids, previous_logits = self._previous_confidences
+            prev_row = {req_id: i for i, req_id in enumerate(previous_req_ids)}
             rows = np.array(
                 [prev_row.get(req_id, -1) for req_id in req_ids],
                 dtype=np.int64,
@@ -676,19 +555,19 @@ class ConfidenceManager:
             sel = rows >= 0
             if sel.any():
                 self.online_sts.update(
-                    self._last_confidence_logits[rows[sel]],
+                    previous_logits[rows[sel]],
                     accepted_np[sel],
-                    self._num_verified_cpu[idx, :num_reqs].numpy()[sel],
+                    verified_np[sel],
                 )
-        self._last_confidence_req_ids = list(req_ids)
-        self._last_confidence_logits = confidence_logits_np.copy()
+        if self.online_sts is not None:
+            self._previous_confidences = (req_ids, confidence_logits_np.copy())
 
         temperatures: np.ndarray | float = 1.0
         if self.online_sts is not None:
             temperatures = self.online_sts.temperatures
-        self._stale_req_ids = list(req_ids)
-        self._stale_survival = compute_prefix_survival(
-            confidence_logits_np, temperatures
+        self._stale_confidences = (
+            req_ids,
+            compute_prefix_survival(confidence_logits_np, temperatures),
         )
 
     def _plan_draft_token_budget(
@@ -706,12 +585,13 @@ class ConfidenceManager:
         survival = np.ones(
             (num_batch_requests, self.num_speculative_steps), dtype=np.float64
         )
-        if self._stale_survival is not None:
-            stale_rows = {req_id: i for i, req_id in enumerate(self._stale_req_ids)}
+        if self._stale_confidences is not None:
+            stale_req_ids, stale_survival = self._stale_confidences
+            stale_rows = {req_id: i for i, req_id in enumerate(stale_req_ids)}
             for row, req_id in enumerate(req_ids):
                 stale_row = stale_rows.get(req_id)
                 if stale_row is not None:
-                    survival[row] = self._stale_survival[stale_row]
+                    survival[row] = stale_survival[stale_row]
         steps = np.arange(self.num_speculative_steps)
         survival[steps[None, :] >= valid_draft_tokens_per_req[:, None]] = -np.inf
 
@@ -732,12 +612,11 @@ class ConfidenceManager:
             num_batch_requests=num_batch_requests,
             num_sampling_requests=num_sampling_requests,
             num_required_target_tokens=int(num_required_target_tokens_per_req.sum()),
-            budget_frac=self.capacity_budget_frac,
-            draft_cost_ms=self.draft_cost_ms,
-            verify_and_sample_cost_ms=self.verify_and_sample_cost_ms,
+            budget_frac=self.budget_frac,
+            cost_tables=self.cost_tables,
         )
         budget = min(budget, int(valid_draft_tokens_per_req.sum()))
-        return int(get_tp_group().broadcast_object(budget, src=0))
+        return budget
 
     def _assign_draft_token_budget(
         self,
@@ -758,47 +637,46 @@ class ConfidenceManager:
                 capacities.clamp_(max=self._profile_capacity)
             return capacities
 
-        tp_group = get_tp_group()
-        if tp_group.rank_in_group == 0:
-            temperatures: np.ndarray | float = 1.0
-            if self.online_sts is not None:
-                temperatures = self.online_sts.temperatures
-            self._temperatures_cpu.numpy()[:] = temperatures
-            self._temperatures.copy_(self._temperatures_cpu, non_blocking=True)
-            _compute_prefix_survival_kernel[(num_reqs,)](
-                self._confidence_logits,
-                self._confidence_logits.stride(0),
-                input_batch.idx_mapping,
-                self._valid_draft_tokens,
-                self._temperatures,
-                self._survival,
-                NUM_STEPS=self.num_speculative_steps,
+        temperatures = None
+        if self.online_sts is not None:
+            assert self._temperature_buffers is not None
+            temperatures_cpu, temperatures = self._temperature_buffers
+            temperatures_cpu.numpy()[:] = self.online_sts.temperatures
+            temperatures.copy_(temperatures_cpu, non_blocking=True)
+        _compute_prefix_survival_kernel[(num_reqs,)](
+            self._confidence_logits,
+            self._confidence_logits.stride(0),
+            input_batch.idx_mapping,
+            self._valid_draft_tokens,
+            temperatures,
+            self._survival,
+            NUM_STEPS=self.num_speculative_steps,
+        )
+        num_candidates = num_reqs * self.num_speculative_steps
+        sorted_survival, sorted_indices = self._sort_buffers
+        torch.sort(
+            self._survival[:num_reqs].flatten(),
+            descending=True,
+            stable=True,
+            out=(
+                sorted_survival[:num_candidates],
+                sorted_indices[:num_candidates],
+            ),
+        )
+        capacities.zero_()
+        if draft_token_budget > 0:
+            admitted = sorted_indices[:draft_token_budget]
+            torch.div(
+                admitted,
+                self.num_speculative_steps,
+                rounding_mode="floor",
+                out=admitted,
             )
-            num_candidates = num_reqs * self.num_speculative_steps
-            torch.sort(
-                self._survival[:num_reqs].flatten(),
-                descending=True,
-                stable=True,
-                out=(
-                    self._sorted_survival[:num_candidates],
-                    self._sorted_indices[:num_candidates],
-                ),
+            capacities.scatter_add_(
+                0,
+                admitted,
+                self._capacity_ones[:draft_token_budget],
             )
-            capacities.zero_()
-            if draft_token_budget > 0:
-                admitted = self._sorted_indices[:draft_token_budget]
-                torch.div(
-                    admitted,
-                    self.num_speculative_steps,
-                    rounding_mode="floor",
-                    out=admitted,
-                )
-                capacities.scatter_add_(
-                    0,
-                    admitted,
-                    self._capacity_ones[:draft_token_budget],
-                )
-        tp_group.broadcast(capacities, src=0)
         return capacities
 
     def warmup(self, input_buffers: "InputBuffers") -> None:
@@ -1089,17 +967,6 @@ class VarlenConfidenceManager(ConfidenceManager):
 
 
 class MaskedConfidenceManager(ConfidenceManager):
-    def __init__(self, *args: Any, **kwargs: Any):
-        super().__init__(*args, **kwargs)
-        if self.wants_auto_sps_curve:
-            logger.info_once(
-                "DSpark auto SPS profiling requires compact verification; "
-                "masked verification will use the configured budget."
-            )
-        self.wants_auto_sps_curve = False
-        self.draft_cost_ms = None
-        self.verify_and_sample_cost_ms = None
-
     def _prepare_forward_skip_mask(
         self,
         input_batch: "InputBatch",
