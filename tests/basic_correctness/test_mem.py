@@ -262,7 +262,7 @@ def _lora_logits_mapping_present(model) -> bool:
 
 
 @create_new_process_for_each_test()
-def test_deep_sleep_lora_tp2(num_gpus_available):
+def test_deep_sleep_lora_tp2(num_gpus_available, monkeypatch):
     """Level-2 sleep/wake/reload with enable_lora=True and TP=2.
 
     With TP > 1 the LoRA logits processor carries
@@ -274,6 +274,9 @@ def test_deep_sleep_lora_tp2(num_gpus_available):
     """
     if num_gpus_available < 2:
         pytest.skip("Requires at least 2 GPUs")
+
+    # Needed for apply_model to reach the multiproc TP workers below.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
     model = "hmellor/tiny-random-LlamaForCausalLM"
     llm = LLM(
