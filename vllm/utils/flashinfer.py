@@ -11,9 +11,11 @@ import importlib
 import importlib.util
 import os
 import shutil
+import subprocess
 from collections.abc import Callable
 from typing import Any, NoReturn
 
+import regex as re
 import requests
 import torch
 
@@ -278,6 +280,33 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
         if not mod or not hasattr(mod, attr_name):
             return False
     return True
+
+
+@functools.cache
+def has_flashinfer_cutlass_fused_moe_fp4() -> bool:
+    """Return whether the FlashInfer CUTLASS build contains FP4 kernels."""
+    if not has_flashinfer_cutlass_fused_moe():
+        return False
+    if importlib.util.find_spec("flashinfer_jit_cache") is not None:
+        return True
+
+    nvcc = shutil.which("nvcc")
+    if nvcc is None:
+        return False
+    try:
+        result = subprocess.run(
+            [nvcc, "--version"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    match = re.search(r"release (\d+)\.(\d+)", result.stdout)
+    if match is None:
+        return False
+    return (int(match.group(1)), int(match.group(2))) >= (12, 8)
 
 
 @functools.cache
@@ -1040,6 +1069,7 @@ __all__ = [
     "has_flashinfer_nvlink_two_sided",
     "has_flashinfer_nvlink_one_sided",
     "has_flashinfer_cutlass_fused_moe",
+    "has_flashinfer_cutlass_fused_moe_fp4",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
     "has_flashinfer_cutedsl_moe_nvfp4",
     "has_flashinfer_b12x_moe",
