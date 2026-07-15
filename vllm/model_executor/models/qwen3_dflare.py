@@ -18,7 +18,7 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
+    QKVParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
@@ -90,19 +90,14 @@ class DFlareQwen3Attention(DFlashQwen3Attention):
             prefix=prefix,
             attn_type=attn_type,
         )
-        self.k_proj_target = ColumnParallelLinear(
+        self.kv_target_proj = QKVParallelLinear(
             hidden_size,
-            self.total_num_kv_heads * self.head_dim,
+            self.head_dim,
+            0,  # Q section is 0
+            self.total_num_kv_heads,
             bias=attention_bias,
             quant_config=quant_config,
-            prefix=f"{prefix}.k_proj_target",
-        )
-        self.v_proj_target = ColumnParallelLinear(
-            hidden_size,
-            self.total_num_kv_heads * self.head_dim,
-            bias=attention_bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.v_proj_target",
+            prefix=f"{prefix}.kv_target_proj",
         )
 
 
@@ -277,14 +272,9 @@ class DFlareQwen3Model(nn.Module):
         """
         self._hidden_norm_weight = self.hidden_norm.weight.data
 
-        # Stack target KV projection weights: [D, out_features, in_features]
-        k_target = torch.stack([a.k_proj_target.weight for a in layers_attn])
-        v_target = torch.stack([a.v_proj_target.weight for a in layers_attn])
-        # self._k_target = k_target  # [D, kv_size, hidden_size]
-        # self._v_target = v_target  # [D, kv_size, hidden_size]
-
-        self._k_target = k_target.transpose(1, 2).contiguous()
-        self._v_target = v_target.transpose(1, 2).contiguous()
+        # Fused KV target weight: [D, 2*kv_size, H] → [D, H, 2*kv_size]
+        kv_target = torch.stack([a.kv_target_proj.weight for a in layers_attn])
+        self._kv_target = kv_target.transpose(1, 2).contiguous()
 
         # K-norm weights: [D, head_dim]
         self._k_norm_weights = torch.stack(
@@ -346,8 +336,8 @@ class DFlareQwen3Model(nn.Module):
             all_k, all_v: each [D, N, nkv, hd].
         """
 
-        all_k = context_states @ self._k_target
-        all_v = context_states @ self._v_target
+        all_kv = context_states @ self._kv_target  # [D,N,H] @ [D,H,2*kv] → [D,N,2*kv]
+        all_k, all_v = all_kv.chunk(2, dim=-1)
 
         all_k = all_k.view(num_layers, num_ctx, num_kv_heads, head_dim)
         all_v = all_v.view(num_layers, num_ctx, num_kv_heads, head_dim)
@@ -457,6 +447,8 @@ class DFlareQwen3Model(nn.Module):
             (".qkv_proj", ".q_proj", "q"),
             (".qkv_proj", ".k_proj", "k"),
             (".qkv_proj", ".v_proj", "v"),
+            (".kv_target_proj", ".k_proj_target", "k"),
+            (".kv_target_proj", ".v_proj_target", "v"),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
         ]
@@ -485,7 +477,8 @@ class DFlareQwen3Model(nn.Module):
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                if "_target" in name:
+                # k_proj_target / v_proj_target
+                if param_name == ".qkv_proj" and "_target" in name:
                     continue
                 name = name.replace(weight_name, param_name)
                 param = params_dict[name]
