@@ -256,6 +256,17 @@ class EngineClient(ABC):
         """Batched weight update for RL training."""
         raise NotImplementedError
 
-    async def finish_weight_update(self) -> None:
-        """Finish the current weight update."""
+    async def finish_weight_update(
+        self,
+        reset_encoder_cache: bool = True,
+        reset_prefix_cache: bool = False,
+    ) -> None:
+        """Finish the current weight update.
+
+        Args:
+            reset_encoder_cache: Invalidate the multimodal encoder cache so
+                stale vision embeddings from the old weights are not reused.
+            reset_prefix_cache: Invalidate the prefix cache (KV blocks from
+                the old weights). Off by default.
+        """
         raise NotImplementedError

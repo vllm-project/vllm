@@ -203,8 +203,22 @@ async def update_weights(raw_request: Request):
 
 
 @router.post("/finish_weight_update")
-async def finish_weight_update(raw_request: Request):
-    await engine_client(raw_request).finish_weight_update()
+async def finish_weight_update(
+    raw_request: Request,
+    reset_encoder_cache: Annotated[bool, Query()] = True,
+    reset_prefix_cache: Annotated[bool, Query()] = False,
+):
+    """Finish the current weight update.
+
+    By default the multimodal encoder cache is invalidated so stale vision
+    embeddings from the old weights are not reused. The prefix cache is left
+    intact unless ``reset_prefix_cache`` is set, so warm KV is not discarded
+    on every update.
+    """
+    await engine_client(raw_request).finish_weight_update(
+        reset_encoder_cache=reset_encoder_cache,
+        reset_prefix_cache=reset_prefix_cache,
+    )
     return JSONResponse(content={"message": "Weight update finished"})
 
 

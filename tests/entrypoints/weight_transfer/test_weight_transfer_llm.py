@@ -9,7 +9,7 @@ actual NCCL communication.
 
 import os
 from dataclasses import dataclass
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -301,6 +301,67 @@ def test_full_weight_transfer_flow():
             assert result["update_called"], "receive_weights should be called"
             assert result["init_param"] == "flow_test"
             assert result["update_names"] == ["test.weight"]
+
+
+@create_new_process_for_each_test()
+def test_finish_weight_update_invalidates_encoder_cache():
+    """finish_weight_update invalidates the encoder cache by default and
+    leaves the prefix cache untouched unless explicitly requested.
+
+    Guards the #45093/#44910 regression: after a weight update the multimodal
+    encoder cache (keyed only by mm_hash) must not keep serving embeddings
+    computed with the old weights.
+    """
+    if torch.accelerator.device_count() < 1:
+        pytest.skip("Need at least 1 GPU for this test")
+
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+
+    with patch(
+        "vllm.v1.worker.gpu_worker.WeightTransferEngineFactory.create_engine",
+        mock_create_engine,
+    ):
+        llm = LLM(
+            model=MODEL_NAME,
+            enforce_eager=True,
+            load_format="dummy",
+            tensor_parallel_size=1,
+            weight_transfer_config=WeightTransferConfig(backend="nccl"),
+        )
+
+        def run(**kwargs):
+            llm.init_weight_transfer_engine(
+                WeightTransferInitRequest(init_info={"test_param": "cache"})
+            )
+            llm.start_weight_update()
+            llm.update_weights(
+                WeightTransferUpdateRequest(
+                    update_info={
+                        "names": ["test.weight"],
+                        "dtype_names": ["bfloat16"],
+                        "shapes": [[8, 8]],
+                    }
+                )
+            )
+            enc = MagicMock()
+            pre = MagicMock()
+            with (
+                patch.object(llm.llm_engine, "reset_encoder_cache", enc),
+                patch.object(llm.llm_engine, "reset_prefix_cache", pre),
+            ):
+                llm.finish_weight_update(**kwargs)
+            return enc, pre
+
+        # Default: encoder cache invalidated, prefix cache left intact.
+        enc, pre = run()
+        enc.assert_called_once()
+        pre.assert_not_called()
+
+        # Opt out of encoder reset, opt in to prefix reset.
+        enc, pre = run(reset_encoder_cache=False, reset_prefix_cache=True)
+        enc.assert_not_called()
+        pre.assert_called_once()
 
 
 @create_new_process_for_each_test()

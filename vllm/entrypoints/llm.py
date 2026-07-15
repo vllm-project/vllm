@@ -896,9 +896,32 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             "update_weights", kwargs={"update_info": update_info_dict}
         )
 
-    def finish_weight_update(self) -> None:
-        """Finish the current weight update."""
+    def finish_weight_update(
+        self,
+        reset_encoder_cache: bool = True,
+        reset_prefix_cache: bool = False,
+    ) -> None:
+        """Finish the current weight update.
+
+        Caches populated with the old weights are stale once the update
+        commits. Callers are expected to invoke this at a quiesced point
+        (no in-flight requests), matching the weight-transfer contract.
+
+        Args:
+            reset_encoder_cache: Invalidate the multimodal encoder cache so
+                stale vision embeddings computed with the old weights are not
+                reused. On by default because the cache is keyed only by
+                ``mm_hash`` and is otherwise served stale after the update.
+            reset_prefix_cache: Invalidate the prefix cache (KV blocks
+                computed with the old weights). Off by default; leave this
+                decision to the caller so warm prefix cache is not discarded
+                on every update.
+        """
         self.llm_engine.collective_rpc("finish_weight_update")
+        if reset_encoder_cache:
+            self.llm_engine.reset_encoder_cache()
+        if reset_prefix_cache:
+            self.llm_engine.reset_prefix_cache()
 
     def __repr__(self) -> str:
         """Return a transformers-style hierarchical view of the model."""
