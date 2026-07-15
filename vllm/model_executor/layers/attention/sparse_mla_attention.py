@@ -1,28 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shared forward_mha implementation and metadata builder for sparse MLA backends."""
+"""Shared MHA implementation and metadata builder for sparse MLA backends."""
 
 from shutil import which
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, TypeVar, cast
 
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBaseImpl,
+    MLACommonMetadata,
     MLACommonPrefillMetadata,
     build_mla_chunked_context_metadata,
     get_mla_dims,
 )
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer
-from vllm.utils.torch_utils import np_to_pinned_tensor
-from vllm.v1.attention.backend import (
-    AttentionMetadata,
-    AttentionMetadataBuilder,
-)
+from vllm.utils.torch_utils import is_quantized_kv_cache, np_to_pinned_tensor
+from vllm.v1.attention.backend import AttentionMetadata, AttentionMetadataBuilder
+from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 
 if TYPE_CHECKING:
@@ -62,7 +63,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
         except AssertionError:
-            # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
@@ -77,8 +77,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         )
         workspace_rows = self.chunked_prefill_workspace_size
         if self.dcp_world_size > 1:
-            # DCP gathers each rank's local KV shard into the workspace, so it
-            # needs an extra 1/DCP rows beyond the TP allocation.
             assert self.chunked_prefill_workspace_size % self.dcp_world_size == 0
             workspace_rows += self.chunked_prefill_workspace_size // self.dcp_world_size
         self.chunked_prefill_workspace = torch.empty(
@@ -192,6 +190,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 block_table=common_attn_metadata.block_table_tensor[num_decodes:, ...],
                 query_start_loc=prefill_query_start_loc,
                 max_query_len=prefill_max_query_len,
+                query_lens_cpu=prefill_query_lens_cpu,
                 chunked_context=self._build_chunked_context_fields(
                     common_attn_metadata,
                     num_decodes,
@@ -229,11 +228,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         common_attn_metadata: "CommonAttentionMetadata",
         num_decodes: int,
         num_prefills: int,
-    ) -> tuple[
-        torch.Tensor | None,  # prefill_query_start_loc
-        int,  # prefill_max_query_len
-        torch.Tensor | None,  # prefill_query_lens_cpu
-    ]:
+    ) -> tuple[torch.Tensor | None, int, torch.Tensor | None]:
         if num_prefills == 0:
             return None, 0, None
 
@@ -246,17 +241,123 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         prefill_qsl_cpu = qsl_cpu[num_decodes:] - qsl_cpu[num_decodes]
         prefill_query_lens = prefill_qsl_cpu[1:] - prefill_qsl_cpu[:-1]
         prefill_max_query_len = int(prefill_query_lens.max().item())
+        return prefill_query_start_loc, prefill_max_query_len, prefill_query_lens
 
-        return (
-            prefill_query_start_loc,
-            prefill_max_query_len,
-            prefill_query_lens,
+
+@triton.jit
+def _scatter_topk_kernel(
+    mask_ptr,
+    topk_ptr,
+    cu_q_lens_ptr,
+    num_words: tl.constexpr,
+    num_topk: tl.constexpr,
+    topk_stride: tl.constexpr,
+    max_q_len: tl.constexpr,
+    BLOCK_TOPK: tl.constexpr,
+    NUM_REQS: tl.constexpr,
+):
+    row_idx = tl.program_id(0)
+    req_idx: tl.int32 = 0
+    for i in tl.static_range(NUM_REQS):
+        next_start = tl.load(cu_q_lens_ptr + i + 1)
+        req_idx += tl.where(next_start <= row_idx, 1, 0)
+
+    q_start = tl.load(cu_q_lens_ptr + req_idx)
+    q_local = row_idx - q_start
+    offsets = tl.arange(0, BLOCK_TOPK)
+    in_range = offsets < num_topk
+    indices = tl.load(
+        topk_ptr + row_idx * topk_stride + offsets,
+        mask=in_range,
+        other=-1,
+    )
+    valid = in_range & (indices >= 0)
+    word_indices = indices >> 5
+    bits = (1 << (indices & 31)).to(tl.int32)
+    mask_row_ptr = mask_ptr + (req_idx * max_q_len + q_local) * num_words
+    tl.atomic_or(mask_row_ptr + word_indices, bits, mask=valid)
+
+
+@triton.jit
+def _scatter_topk_single_req_kernel(
+    mask_ptr,
+    topk_ptr,
+    num_words: tl.constexpr,
+    num_topk: tl.constexpr,
+    topk_stride: tl.constexpr,
+    BLOCK_TOPK: tl.constexpr,
+):
+    row_idx = tl.program_id(0)
+    offsets = tl.arange(0, BLOCK_TOPK)
+    in_range = offsets < num_topk
+    indices = tl.load(
+        topk_ptr + row_idx * topk_stride + offsets,
+        mask=in_range,
+        other=-1,
+    )
+    valid = in_range & (indices >= 0)
+    word_indices = indices >> 5
+    bits = (1 << (indices & 31)).to(tl.int32)
+    tl.atomic_or(mask_ptr + row_idx * num_words + word_indices, bits, mask=valid)
+
+
+def _build_topk_mask(
+    topk_indices_per_req: list[torch.Tensor],
+    q_lens: list[int],
+    max_q_len: int,
+    max_seq_len: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Build a bit-packed ``[B, max_Q, ceil(max_S / 32)]`` top-k mask."""
+    batch_size = len(q_lens)
+    num_words = (max_seq_len + 31) // 32
+    mask = torch.zeros(
+        batch_size,
+        max_q_len,
+        num_words,
+        dtype=torch.int32,
+        device=device,
+    )
+    total_q = sum(q_lens)
+    if total_q == 0:
+        return mask
+
+    if batch_size == 1:
+        topk_packed = topk_indices_per_req[0]
+        num_topk = topk_packed.shape[1]
+        _scatter_topk_single_req_kernel[(total_q,)](
+            mask,
+            topk_packed,
+            num_words=num_words,
+            num_topk=num_topk,
+            topk_stride=topk_packed.stride(0),
+            BLOCK_TOPK=triton.next_power_of_2(num_topk),
         )
+        return mask
+
+    topk_packed = torch.cat(topk_indices_per_req, dim=0)
+    num_topk = topk_packed.shape[1]
+    q_lens_tensor = np_to_pinned_tensor(np.asarray(q_lens, dtype=np.int32)).to(
+        device, non_blocking=True
+    )
+    cu_q_lens = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
+    torch.cumsum(q_lens_tensor, dim=0, out=cu_q_lens[1:])
+    _scatter_topk_kernel[(total_q,)](
+        mask,
+        topk_packed,
+        cu_q_lens,
+        num_words=num_words,
+        num_topk=num_topk,
+        topk_stride=topk_packed.stride(0),
+        max_q_len=max_q_len,
+        BLOCK_TOPK=triton.next_power_of_2(num_topk),
+        NUM_REQS=batch_size,
+    )
+    return mask
 
 
 class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
-    """Sparse MLA base: shared dense-MHA prefill (from MLACommonBaseImpl) plus the
-    sparse top-k MQA decode path. Subclasses implement forward_mqa."""
+    """Sparse MLA base with dense and masked-MHA prefill paths."""
 
     is_sparse = True
 
@@ -272,7 +373,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         logits_soft_cap: float | None,
         attn_type: str,
         kv_sharing_target_layer_name: str | None,
-        # MLA-specific
         q_lora_rank: int | None,
         kv_lora_rank: int,
         qk_nope_head_dim: int,
@@ -297,20 +397,159 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             v_head_dim,
             kv_b_proj,
         )
-
-        # The indexer carries the shared buffer for normal layers and tests;
-        # the explicitly-passed buffer covers backbone skip layers, whose
-        # indexer is not constructed (see deepseek_v2.py).
         self.topk_indices_buffer: torch.Tensor | None = (
             indexer.topk_indices_buffer  # type: ignore[attr-defined]
             if indexer is not None
             else topk_indices_buffer
         )
-
         self._use_flashinfer_concat_mla_k = (
             has_flashinfer()
             and which("ninja") is not None
-            and (self.num_heads == 128)
-            and (self.qk_nope_head_dim == 128)
-            and (self.qk_rope_head_dim == 64)
+            and self.num_heads == 128
+            and self.qk_nope_head_dim == 128
+            and self.qk_rope_head_dim == 64
         )
+        fa_version = get_flash_attn_version(
+            head_size=qk_head_dim,
+            head_size_v=v_head_dim,
+        )
+        self.masked_mha_available = fa_version == 4 and not is_quantized_kv_cache(
+            kv_cache_dtype
+        )
+
+    @staticmethod
+    def _slice_topk_per_req(
+        topk_all: torch.Tensor,
+        q_lens: list[int],
+    ) -> list[torch.Tensor]:
+        topk_per_req = []
+        offset = 0
+        for q_len in q_lens:
+            topk_per_req.append(topk_all[offset : offset + q_len])
+            offset += q_len
+        return topk_per_req
+
+    def _run_masked_mha(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        prefill_metadata: MLACommonPrefillMetadata,
+        topk_per_req: list[torch.Tensor],
+        q_lens: list[int],
+    ) -> torch.Tensor:
+        from vllm.model_executor.layers.attention.sparse_mla_mask import (
+            dense_mask_mod,
+            dense_mask_to_block_sparse,
+        )
+        from vllm.vllm_flash_attn import flash_attn_varlen_func
+
+        max_seq_len = prefill_metadata.max_query_len
+        dense_mask = _build_topk_mask(
+            topk_per_req,
+            q_lens,
+            max_seq_len,
+            max_seq_len,
+            q.device,
+        )
+        kwargs = {
+            "q": q,
+            "k": k,
+            "v": v,
+            "cu_seqlens_q": prefill_metadata.query_start_loc,
+            "cu_seqlens_k": prefill_metadata.query_start_loc,
+            "max_seqlen_q": max_seq_len,
+            "max_seqlen_k": max_seq_len,
+            "softmax_scale": self.scale,
+            "return_softmax_lse": False,
+            "fa_version": 4,
+            "mask_mod": dense_mask_mod,
+            "aux_tensors": [dense_mask],
+            "aux_tensor_leading_dims": [2],
+        }
+
+        if envs.VLLM_SPARSE_MLA_USE_BLOCK_SPARSE:
+            tile_m = 128 if max_seq_len <= 128 else 256
+            mask_words_per_tile = 128 // 32
+            padded_mask_words = triton.cdiv(max_seq_len, 128) * mask_words_per_tile
+            if dense_mask.shape[2] < padded_mask_words:
+                dense_mask = torch.nn.functional.pad(
+                    dense_mask,
+                    (0, padded_mask_words - dense_mask.shape[2]),
+                )
+                kwargs["aux_tensors"] = [dense_mask]
+            kwargs["causal"] = False
+            kwargs["block_sparse_tensors"] = dense_mask_to_block_sparse(
+                dense_mask,
+                max_seqlen_q=max_seq_len,
+                max_seqlen_k=max_seq_len,
+                seq_lens_q=q_lens,
+                seq_lens_k=q_lens,
+                tile_m=tile_m,
+                tile_n=128,
+            )
+        else:
+            kwargs["causal"] = True
+
+        return flash_attn_varlen_func(**kwargs)
+
+    def forward_mha(  # type: ignore[override]
+        self,
+        q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: T,
+        k_scale: torch.Tensor,
+        output: torch.Tensor,
+        output_scale: torch.Tensor | None = None,
+    ) -> None:
+        prefill_max_seq_len = attn_metadata.prefill_max_seq_len  # type: ignore[attr-defined]
+        topk_tokens = attn_metadata.topk_tokens  # type: ignore[attr-defined]
+        force_dense = getattr(self, "_sparse_mla_force_dense_mha", False)
+        force_masked = getattr(self, "_sparse_mla_force_masked_mha", False)
+        if force_dense or (prefill_max_seq_len <= topk_tokens and not force_masked):
+            return super().forward_mha(
+                q,
+                kv_c_normed,
+                k_pe,
+                kv_c_and_k_pe_cache,
+                cast(MLACommonMetadata, attn_metadata),
+                k_scale,
+                output,
+                output_scale,
+            )
+
+        assert output_scale is None
+        assert self.masked_mha_available
+        prefill_metadata = attn_metadata.prefill  # type: ignore[attr-defined]
+        assert prefill_metadata is not None
+        assert prefill_metadata.chunked_context is None
+        assert prefill_metadata.query_lens_cpu is not None
+        assert self.topk_indices_buffer is not None
+
+        q_lens = prefill_metadata.query_lens_cpu.tolist()
+        num_decode_tokens = attn_metadata.num_decode_tokens  # type: ignore[attr-defined]
+        topk_all = self.topk_indices_buffer[
+            num_decode_tokens : num_decode_tokens + q.shape[0]
+        ]
+        topk_per_req = self._slice_topk_per_req(topk_all, q_lens)
+
+        kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
+            -1,
+            self.num_heads,
+            self.qk_nope_head_dim + self.v_head_dim,
+        )
+        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        k = self._concat_k_nope_k_pe(k_nope, k_pe)
+        attn_out = self._run_masked_mha(
+            q,
+            k,
+            v,
+            prefill_metadata,
+            topk_per_req,
+            q_lens,
+        )
+        if isinstance(attn_out, tuple):
+            attn_out = attn_out[0]
+        output.copy_(attn_out[..., : self.v_head_dim].flatten(start_dim=-2))

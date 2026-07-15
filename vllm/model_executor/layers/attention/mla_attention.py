@@ -717,10 +717,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         if self.impl.is_sparse and num_mha_tokens > 0:
             prefill_max_seq_len = attn_metadata.prefill_max_seq_len  # type: ignore[attr-defined]
-            use_mha = (
+            use_dense_mha = (
                 self.prefill_backend is not None
                 and prefill_max_seq_len <= attn_metadata.topk_tokens  # type: ignore[attr-defined]
-                and not self._vllm_config.attention_config.sparse_mla_force_mqa
+            )
+            prefill = attn_metadata.prefill
+            use_masked_mha = (
+                self.prefill_backend is not None
+                and self.impl.masked_mha_available  # type: ignore[attr-defined]
+                and prefill is not None
+                and prefill.chunked_context is None
+                and 256 <= prefill_max_seq_len <= 8192
+            )
+            use_mha = (use_dense_mha or use_masked_mha) and not (
+                self._vllm_config.attention_config.sparse_mla_force_mqa
             )
             if not use_mha:
                 num_mqa_tokens = q.size(0)
@@ -730,6 +740,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             quant_key is not None
             and self.prefill_backend is not None
             and self.prefill_backend.supports_quant_output(quant_key)
+            and (
+                not self.impl.is_sparse
+                or attn_metadata.prefill_max_seq_len  # type: ignore[attr-defined]
+                <= attn_metadata.topk_tokens  # type: ignore[attr-defined]
+            )
             and attn_metadata is not None
             and attn_metadata.prefill is not None
             and attn_metadata.prefill.chunked_context is None
@@ -1295,6 +1310,7 @@ class MLACommonPrefillMetadata:
     q_data_type: torch.dtype | None = None
     output_dtype: torch.dtype | None = None
     prefill_backend: MLAPrefillBackend | None = None
+    query_lens_cpu: torch.Tensor | None = None
 
 
 @dataclass
