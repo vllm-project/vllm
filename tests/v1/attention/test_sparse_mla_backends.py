@@ -42,10 +42,14 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseBackend,
     FlashMLASparseImpl,
     FlashMLASparseMetadata,
+    FlashMLASparseMetadataBuilder,
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.mla.indexer import split_indexer_prefill_chunks
-from vllm.v1.attention.backends.utils import split_prefill_chunks
+from vllm.v1.attention.backends.utils import (
+    split_decodes_and_prefills,
+    split_prefill_chunks,
+)
 from vllm.v1.attention.ops import flashmla
 
 SPARSE_BACKEND_BATCH_SPECS = {
@@ -1254,6 +1258,102 @@ def test_flashmla_cache_dtype_aliases_use_ds_layout():
             _canonicalize_sparse_mla_kv_cache_dtype(FlashMLASparseBackend, alias)
             == "fp8_ds_mla"
         )
+
+
+def test_flashmla_fp8_metadata_reuses_common_batch_split():
+    builder = SimpleNamespace(
+        device=torch.device(DEVICE_TYPE),
+        vllm_config=SimpleNamespace(model_config=SimpleNamespace(max_model_len=8)),
+    )
+    common_metadata = SimpleNamespace(
+        num_actual_tokens=1,
+        seq_lens_cpu_upper_bound=torch.tensor([1]),
+        query_start_loc_cpu=torch.tensor([0, 1]),
+        block_table_tensor=torch.zeros(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
+    )
+    metadata = FlashMLASparseMetadata(
+        num_reqs=1,
+        max_query_len=1,
+        max_seq_len=1,
+        num_actual_tokens=1,
+        query_start_loc=torch.tensor([0, 1], device=DEVICE_TYPE),
+        slot_mapping=torch.tensor([0], device=DEVICE_TYPE),
+        block_table=torch.zeros(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
+        req_id_per_token=torch.zeros(1, dtype=torch.int32, device=DEVICE_TYPE),
+        num_decodes=0,
+        num_prefills=1,
+        num_decode_tokens=0,
+    )
+
+    fp8_metadata = FlashMLASparseMetadataBuilder._build_fp8_separate_prefill_decode(
+        builder, common_metadata, metadata
+    )
+
+    assert fp8_metadata.num_decodes == 0
+    assert fp8_metadata.num_prefills == 1
+    assert fp8_metadata.num_decode_tokens == 0
+    assert fp8_metadata.num_prefill_tokens == 1
+
+
+def test_flashmla_common_metadata_requires_uniform_decodes():
+    common_metadata = SimpleNamespace(
+        max_query_len=3,
+        num_reqs=3,
+        num_actual_tokens=6,
+        query_start_loc_cpu=torch.tensor([0, 1, 3, 6]),
+        is_prefilling=None,
+    )
+
+    split = split_decodes_and_prefills(
+        common_metadata,
+        decode_threshold=128,
+        require_uniform=FlashMLASparseMetadataBuilder.require_uniform_decodes,
+    )
+
+    assert split == (1, 2, 1, 5)
+
+
+def test_flashmla_fp8_metadata_excludes_zero_token_decode_padding(monkeypatch):
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.flashmla_sparse.get_mla_metadata",
+        lambda: (object(), None),
+    )
+    builder = SimpleNamespace(
+        device=torch.device(DEVICE_TYPE),
+        dummy_block_table=torch.zeros(7, 1, device=DEVICE_TYPE),
+        max_model_len_tensor=torch.zeros(7, device=DEVICE_TYPE),
+    )
+    query_start_loc_cpu = torch.tensor([0, 110, 220, 330, 440, 550, 660, 660])
+    common_metadata = SimpleNamespace(
+        num_actual_tokens=660,
+        query_start_loc_cpu=query_start_loc_cpu,
+        seq_lens=torch.arange(7, device=DEVICE_TYPE),
+    )
+    metadata = FlashMLASparseMetadata(
+        num_reqs=7,
+        max_query_len=110,
+        max_seq_len=110,
+        num_actual_tokens=660,
+        query_start_loc=query_start_loc_cpu.to(DEVICE_TYPE),
+        slot_mapping=torch.arange(660, device=DEVICE_TYPE),
+        block_table=torch.zeros(7, 1, dtype=torch.int32, device=DEVICE_TYPE),
+        req_id_per_token=torch.zeros(660, dtype=torch.int32, device=DEVICE_TYPE),
+        num_decodes=7,
+        num_prefills=0,
+        num_decode_tokens=660,
+    )
+
+    fp8_metadata = FlashMLASparseMetadataBuilder._build_fp8_separate_prefill_decode(
+        builder, common_metadata, metadata
+    )
+
+    assert fp8_metadata.num_decodes == 6
+    assert fp8_metadata.num_decode_tokens == 660
+    assert fp8_metadata.decode is not None
+    assert fp8_metadata.decode.decode_query_len == 110
+    torch.testing.assert_close(
+        fp8_metadata.decode.seq_lens, torch.arange(6, device=DEVICE_TYPE)
+    )
 
 
 @pytest.mark.parametrize("use_mixed_batch", [False, True])
