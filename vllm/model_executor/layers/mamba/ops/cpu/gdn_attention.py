@@ -11,6 +11,8 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
     causal_conv1d_fn_cpu as causal_conv1d_torch,
+)
+from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
     causal_conv1d_update_cpu,
 )
 from vllm.utils.torch_utils import (
@@ -658,4 +660,3 @@ def register_cpu_gdn_attention_ops() -> None:
         fake_impl=cpu_gdn_attention_core_fake,
     )
     _CPU_GDN_ATTENTION_OPS_REGISTERED = True
-

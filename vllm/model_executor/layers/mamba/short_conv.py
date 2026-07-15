@@ -95,6 +95,8 @@ class ShortConv(MambaBase, CustomOp):
         # for causal conv can be plugged in here later.
         from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
             causal_conv1d_fn_cpu as causal_conv1d_torch,
+        )
+        from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
             causal_conv1d_update_cpu,
         )
 
@@ -164,7 +166,7 @@ class ShortConv(MambaBase, CustomOp):
         if has_decode:
             assert attn_metadata.state_indices_tensor_d is not None
             state_indices_d = attn_metadata.state_indices_tensor_d.flatten()
-            Bx_d = (B_d * x_d)  # (num_decodes, dim)
+            Bx_d = B_d * x_d  # (num_decodes, dim)
             out_d = causal_conv1d_update_cpu(
                 Bx_d,
                 conv_state,
@@ -341,4 +343,3 @@ direct_register_custom_op(
     mutates_args=["output"],
     fake_impl=short_conv_fake,
 )
-
