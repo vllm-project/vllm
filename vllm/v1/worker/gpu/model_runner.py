@@ -103,9 +103,9 @@ from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.shutdown import free_before_shutdown
 from vllm.v1.worker.gpu.spec_decode import init_speculator
-from vllm.v1.worker.gpu.spec_decode.confidence import (
-    ConfidenceManager,
-    make_confidence_manager,
+from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
+    AdaptiveVerificationManager,
+    make_adaptive_verification_manager,
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
@@ -222,7 +222,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             vocab_size=self.vocab_size,
             device=self.device,
         )
-        self.adaptive_verification: ConfidenceManager | None = None
+        self.adaptive_verification: AdaptiveVerificationManager | None = None
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
@@ -451,7 +451,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculative_config is not None
             and self.speculative_config.use_confidence_based_verification
         ):
-            self.adaptive_verification = make_confidence_manager(
+            self.adaptive_verification = make_adaptive_verification_manager(
                 self.speculative_config.dspark_enable_confidence_based_verification,
                 attn_cg_support,
                 self.req_states,
@@ -746,9 +746,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.speculator is not None:
                 self.speculator.capture()
             if self.adaptive_verification is not None:
-                self.adaptive_verification.set_graph_costs(
-                    self.cudagraph_manager, self.speculator
-                )
+                assert self.speculator is not None
+                draft_graphs = self.speculator.query_cudagraph_manager
+                if draft_graphs is not None:
+                    self.adaptive_verification.set_graph_costs(
+                        self.cudagraph_manager.graph_timings,
+                        draft_graphs.graph_timings,
+                    )
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
@@ -961,7 +965,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             and num_draft_tokens_per_req is not None
         ):
             cu_num_logits, query_start_loc, total_num_draft_tokens = (
-                self.adaptive_verification.allocate_draft_token_budget(idx_mapping)
+                self.adaptive_verification.allocate_draft_token_budget(
+                    req_ids, idx_mapping
+                )
             )
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
         if draft_tokens:
@@ -1081,7 +1087,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_tokens_per_req=batch_desc.max_num_tokens_per_req,
         )
         if self.adaptive_verification is not None:
-            self.adaptive_verification.mask_batch(input_batch, draft_tokens)
+            self.adaptive_verification.mask_batch(input_batch)
         return input_batch
 
     def prepare_attn(
@@ -1228,16 +1234,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if (
             self.adaptive_verification is not None
-            and self.adaptive_verification.varlen_spec_decode
             and bool(scheduler_output.scheduled_spec_decode_tokens)
             and not dummy_run
         ):
-            num_toks = self.adaptive_verification.get_num_tokens(
+            num_toks, uniform_tok_count = self.adaptive_verification.get_num_tokens(
                 scheduler_output.num_scheduled_tokens,
                 scheduler_output.scheduled_spec_decode_tokens,
                 scheduler_output.has_structured_output_requests,
+                uniform_tok_count,
             )
-            uniform_tok_count = None
 
         batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,

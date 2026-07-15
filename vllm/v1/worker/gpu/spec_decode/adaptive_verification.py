@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Confidence-based verification for DSpark speculative decoding."""
+"""Adaptive verification for DSpark speculative decoding."""
 
 from typing import TYPE_CHECKING, Any
 
@@ -106,7 +106,7 @@ def build_cost_tables_from_curves(
     return draft_table, verify_table
 
 
-class ConfidenceManager:
+class AdaptiveVerificationManager:
     varlen_spec_decode = False
 
     def __init__(
@@ -121,6 +121,7 @@ class ConfidenceManager:
 
         self.num_bonus_tokens = num_bonus_tokens
         self.cost_tables: tuple[np.ndarray, np.ndarray] | None = None
+        self._planned_batch: tuple[dict[str, tuple[int, int]], int] | None = None
         max_num_reqs = req_states.max_num_reqs
         self._confidence_probs = torch.empty(
             (max_num_reqs, self.num_speculative_steps),
@@ -147,22 +148,21 @@ class ConfidenceManager:
             for _ in range(2)
         ]
         self._copy_events = [torch.cuda.Event(blocking=True) for _ in range(2)]
-        self._pending_resets: list[list[int]] = [[], []]
+        self._pending_resets: list[int] = []
         self._stale_idx = 0
-        self._copy_idx: int | None = None
-        self._staged_probs[self._stale_idx].np.fill(1.0)
+        for staged_probs in self._staged_probs:
+            staged_probs.np.fill(1.0)
 
     def add_request(self, req_idx: int) -> None:
         self._staged_probs[self._stale_idx].np[req_idx].fill(1.0)
-        if self._copy_idx is not None:
-            self._pending_resets[self._copy_idx].append(req_idx)
+        self._pending_resets.append(req_idx)
         self._confidence_probs[req_idx].fill_(1.0)
 
-    def set_graph_costs(self, model_graphs: Any, speculator: Any) -> None:
-        draft_graphs = speculator.query_cudagraph_manager
-        if draft_graphs is None:
-            return
-
+    def set_graph_costs(
+        self,
+        model_graphs: dict[Any, float],
+        draft_graphs: dict[Any, float],
+    ) -> None:
         def collapse(timings: dict[Any, float], field: str) -> list[tuple[int, float]]:
             points: dict[int, float] = {}
             for desc, ms in timings.items():
@@ -172,8 +172,8 @@ class ConfidenceManager:
                     points[x] = max(points.get(x, 0.0), ms)
             return sorted(points.items())
 
-        draft_curve = collapse(draft_graphs.graph_timings, "num_reqs")
-        verify_curve = collapse(model_graphs.graph_timings, "num_tokens")
+        draft_curve = collapse(draft_graphs, "num_reqs")
+        verify_curve = collapse(model_graphs, "num_tokens")
         draft_curve, verify_curve = get_tp_group().broadcast_object(
             (draft_curve, verify_curve), src=0
         )
@@ -196,16 +196,13 @@ class ConfidenceManager:
         """Preserve current GPU scores and stage stale budget inputs."""
         num_reqs = input_batch.num_reqs
         write_idx = self._stale_idx ^ 1
-        if self._copy_idx is not None:
-            write_idx = self._stale_idx
-            copy_idx = self._copy_idx
-            with gpu_sync_allowed():
-                self._copy_events[copy_idx].synchronize()
-            reset_slots = self._pending_resets[copy_idx]
-            if reset_slots:
-                self._staged_probs[copy_idx].np[reset_slots] = 1.0
-                reset_slots.clear()
-            self._stale_idx = copy_idx
+        with gpu_sync_allowed():
+            self._copy_events[write_idx].synchronize()
+        if self._pending_resets:
+            self._staged_probs[write_idx].np[self._pending_resets] = 1.0
+            self._pending_resets.clear()
+        self._stale_idx = write_idx
+        write_idx ^= 1
 
         probs = confidence_probs[:num_reqs]
         self._confidence_probs[input_batch.idx_mapping] = probs
@@ -217,25 +214,41 @@ class ConfidenceManager:
         with stream(self._copy_stream, current_stream):
             staged_probs.copy_to_cpu()
             self._copy_events[write_idx].record()
-        self._copy_idx = write_idx
 
     def get_num_tokens(
         self,
         num_tokens_per_req: dict[str, int],
         draft_tokens: dict[str, list[int]],
         has_structured_output_requests: bool = False,
-    ) -> int:
-        raise NotImplementedError
+        uniform_tok_count: int | None = None,
+    ) -> tuple[int, int | None]:
+        plan, budget = self._plan_batch(
+            num_tokens_per_req,
+            draft_tokens,
+            has_structured_output_requests,
+        )
+        self._planned_batch = plan, budget
+        if self.varlen_spec_decode:
+            return sum(tokens for tokens, _ in plan.values()) + budget, None
+        return sum(num_tokens_per_req.values()), uniform_tok_count
 
     def _plan_batch(
         self,
-        req_ids: list[str],
-        scheduled_tokens: np.ndarray,
-        scheduled_drafts: np.ndarray,
+        num_tokens_per_req: dict[str, int],
         draft_tokens: dict[str, list[int]],
         has_structured_output: bool,
-    ) -> tuple[np.ndarray, np.ndarray, int]:
+    ) -> tuple[dict[str, tuple[int, int]], int]:
         assert self.cost_tables is not None
+        req_ids = list(num_tokens_per_req)
+        num_reqs = len(req_ids)
+        scheduled_tokens = np.fromiter(
+            num_tokens_per_req.values(), dtype=np.int32, count=num_reqs
+        )
+        scheduled_drafts = np.fromiter(
+            (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
+            dtype=np.int32,
+            count=num_reqs,
+        )
         valid_drafts = scheduled_drafts
         if has_structured_output:
             valid_drafts = np.fromiter(
@@ -277,26 +290,35 @@ class ConfidenceManager:
                 + 1
             ]
         )
-        return (
-            scheduled_non_draft_tokens,
-            valid_drafts,
-            int(np.argmax(num_tokens_to_estimated_accepted_tokens / costs)),
+        plan = dict(
+            zip(
+                req_ids,
+                zip(scheduled_non_draft_tokens, valid_drafts, strict=True),
+                strict=True,
+            )
         )
+        return plan, int(np.argmax(num_tokens_to_estimated_accepted_tokens / costs))
+
+    def _consume_plan(self, req_ids: list[str]) -> tuple[np.ndarray, np.ndarray, int]:
+        planned_batch = self._planned_batch
+        self._planned_batch = None
+        assert planned_batch is not None
+        plan, budget = planned_batch
+        scheduled_non_draft_tokens, valid_drafts = np.asarray(
+            [plan[req_id] for req_id in req_ids], dtype=np.int32
+        ).T
+        return scheduled_non_draft_tokens, valid_drafts, budget
 
     def allocate_draft_token_budget(
-        self, idx_mapping: torch.Tensor
+        self, req_ids: list[str], idx_mapping: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
         raise NotImplementedError
 
-    def mask_batch(
-        self,
-        input_batch: "InputBatch",
-        draft_tokens: dict[str, list[int]],
-    ) -> None:
+    def mask_batch(self, input_batch: "InputBatch") -> None:
         pass
 
 
-class VarlenConfidenceManager(ConfidenceManager):
+class VarlenAdaptiveVerificationManager(AdaptiveVerificationManager):
     varlen_spec_decode = True
 
     def __init__(
@@ -312,50 +334,11 @@ class VarlenConfidenceManager(ConfidenceManager):
         self.query_start_loc = query_start_loc
         self._scheduled_non_draft_tokens = torch.empty_like(query_start_loc[:-1])
         self._cu_num_logits = torch.empty_like(query_start_loc)
-        self._planned_batch: tuple[np.ndarray, np.ndarray, int] | None = None
-
-    def get_num_tokens(
-        self,
-        num_tokens_per_req: dict[str, int],
-        draft_tokens: dict[str, list[int]],
-        has_structured_output_requests: bool = False,
-    ) -> int:
-        num_reqs = len(num_tokens_per_req)
-        decode_query_len = 1 + self.num_speculative_steps
-        req_ids = sorted(
-            num_tokens_per_req,
-            key=lambda req_id: (
-                num_tokens_per_req[req_id] != decode_query_len,
-                num_tokens_per_req[req_id],
-            ),
-        )
-        num_scheduled_tokens = np.fromiter(
-            (num_tokens_per_req[req_id] for req_id in req_ids),
-            dtype=np.int32,
-            count=num_reqs,
-        )
-        num_draft_tokens_per_req = np.fromiter(
-            (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
-            dtype=np.int32,
-            count=num_reqs,
-        )
-        self._planned_batch = self._plan_batch(
-            req_ids,
-            num_scheduled_tokens,
-            num_draft_tokens_per_req,
-            draft_tokens,
-            has_structured_output_requests,
-        )
-        scheduled_non_draft_tokens, _, draft_token_budget = self._planned_batch
-        return int(scheduled_non_draft_tokens.sum()) + draft_token_budget
 
     def allocate_draft_token_budget(
-        self, idx_mapping: torch.Tensor
+        self, req_ids: list[str], idx_mapping: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
-        planned_batch = self._planned_batch
-        self._planned_batch = None
-        assert planned_batch is not None
-        scheduled_non_draft_tokens, valid_drafts, budget = planned_batch
+        scheduled_non_draft_tokens, valid_drafts, budget = self._consume_plan(req_ids)
         num_reqs = idx_mapping.shape[0]
         capacities = self._batch_draft_capacity[:num_reqs]
         if budget == 0:
@@ -403,23 +386,13 @@ class VarlenConfidenceManager(ConfidenceManager):
         )
 
 
-class MaskedConfidenceManager(ConfidenceManager):
-    def mask_batch(
-        self,
-        input_batch: "InputBatch",
-        draft_tokens: dict[str, list[int]],
-    ) -> None:
+class MaskedAdaptiveVerificationManager(AdaptiveVerificationManager):
+    def mask_batch(self, input_batch: "InputBatch") -> None:
         scheduled_drafts = input_batch.num_draft_tokens_per_req
         if scheduled_drafts is None:
             self._batch_draft_capacity[: input_batch.num_reqs].zero_()
             return
-        _, valid_drafts, budget = self._plan_batch(
-            input_batch.req_ids,
-            input_batch.num_scheduled_tokens,
-            scheduled_drafts,
-            draft_tokens,
-            input_batch.has_structured_output_reqs,
-        )
+        _, valid_drafts, budget = self._consume_plan(input_batch.req_ids)
         num_reqs = input_batch.num_reqs
         capacities = self._batch_draft_capacity[:num_reqs]
         if budget == 0:
@@ -453,13 +426,13 @@ class MaskedConfidenceManager(ConfidenceManager):
         )
 
 
-def make_confidence_manager(
+def make_adaptive_verification_manager(
     mode: str,
     attn_cg_support: "AttentionCGSupportInfo",
     req_states: "RequestState",
     query_start_loc: torch.Tensor,
     num_bonus_tokens: int,
-) -> ConfidenceManager:
+) -> AdaptiveVerificationManager:
     if mode == "auto":
         if attn_cg_support.min_cg_support == AttentionCGSupport.ALWAYS:
             mode = "varlen"
@@ -472,13 +445,13 @@ def make_confidence_manager(
             )
             mode = "mask"
     if mode == "varlen":
-        return VarlenConfidenceManager(
+        return VarlenAdaptiveVerificationManager(
             req_states,
             query_start_loc,
             num_bonus_tokens,
         )
     if mode == "mask":
-        return MaskedConfidenceManager(
+        return MaskedAdaptiveVerificationManager(
             req_states,
             num_bonus_tokens,
         )
