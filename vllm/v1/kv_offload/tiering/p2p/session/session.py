@@ -96,12 +96,14 @@ class P2PSession:
         local_id: str,
         transport: DataTransport,
         local_block_len: int,
+        local_hash_seed: str,
         conn: ControlConnection | None = None,
     ) -> None:
         self.peer_id = peer_id
         self._local_id = local_id
         self._transport = transport
         self._local_block_len = local_block_len
+        self._local_hash_seed = local_hash_seed
         self._conn: ControlConnection | None = None
 
         self._send_ready = False  # True after the peer acked our ConnectMsg
@@ -418,6 +420,12 @@ class P2PSession:
                     f"config fingerprint mismatch from {self.peer_id}: "
                     f"remote={remote_fp!r}, local={local_fp!r}"
                 )
+            if msg[ConnectMsg.HASH_SEED] != self._local_hash_seed:
+                raise ValueError(
+                    f"PYTHONHASHSEED mismatch from {self.peer_id}: "
+                    f"remote={msg[ConnectMsg.HASH_SEED]!r}, "
+                    f"local={self._local_hash_seed!r}"
+                )
             self._transport.add_remote_peer(
                 self.peer_id,
                 agent_metadata=msg[ConnectMsg.AGENT_METADATA],
@@ -467,6 +475,7 @@ class P2PSession:
                 ConnectMsg.NUM_BLOCKS: self._transport.num_blocks,
                 ConnectMsg.BLOCK_LEN: self._transport.block_len,
                 ConnectMsg.CONFIG_FINGERPRINT: self._transport.config_fingerprint,
+                ConnectMsg.HASH_SEED: self._local_hash_seed,
             }
         )
 

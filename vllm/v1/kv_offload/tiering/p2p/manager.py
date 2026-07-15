@@ -8,6 +8,7 @@ Owns transports and a single bidirectional P2PSession per remote peer.
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from collections.abc import Iterable, Sequence
@@ -179,6 +180,20 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             **kwargs: Reserved for future tier-specific options.
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
+        # Block hashes chain from NONE_HASH, seeded from PYTHONHASHSEED
+        # (see init_none_hash in v1/core/kv_cache_utils.py). Peers with
+        # different seeds compute different hashes for identical content, so
+        # lookups silently miss and no KV crosses the wire. Require it here so
+        # a misconfigured P2P instance fails at startup rather than degrading
+        # silently; the value is also verified against each peer on handshake.
+        hash_seed = os.getenv("PYTHONHASHSEED")
+        if hash_seed is None:
+            raise ValueError(
+                "PYTHONHASHSEED must be set for P2P KV offload so that block "
+                "hashes match across instances. Set it to a fixed value (e.g. "
+                "PYTHONHASHSEED=0) on every prefiller and decoder."
+            )
+        self._hash_seed = hash_seed
         if host is None:
             host = envs.VLLM_P2P_SIDE_CHANNEL_HOST
         if port is None:
@@ -565,6 +580,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             local_id=self._local_id,
             transport=self._data,
             local_block_len=self._data.block_len,
+            local_hash_seed=self._hash_seed,
             conn=conn,
         )
         self._sessions[peer_id] = session
@@ -586,6 +602,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                     local_id=self._local_id,
                     transport=self._data,
                     local_block_len=self._data.block_len,
+                    local_hash_seed=self._hash_seed,
                     conn=conn,
                 )
                 logger.info(

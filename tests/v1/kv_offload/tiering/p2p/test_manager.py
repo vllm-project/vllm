@@ -98,6 +98,7 @@ def _make_manager() -> P2PSecondaryTierManager:
     """Create a manager with stubbed __init__."""
     mgr = P2PSecondaryTierManager.__new__(P2PSecondaryTierManager)
     mgr._local_id = "127.0.0.1:7777"
+    mgr._hash_seed = "0"
     mgr._finished_jobs = []
     mgr._failed_req_ids = set()
     mgr._sessions = {}
@@ -105,6 +106,48 @@ def _make_manager() -> P2PSecondaryTierManager:
     mgr._unbound_stores = {}
     mgr._orphan_finish_ctxs = []
     return mgr
+
+
+def _init_offloading_spec() -> SimpleNamespace:
+    """Minimal offloading_spec for driving the real __init__."""
+    return SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(data_parallel_index=0)
+        ),
+        block_size_factor=1,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests for __init__ PYTHONHASHSEED assertion
+# ---------------------------------------------------------------------------
+
+
+class TestInitHashSeedAssertion:
+    def test_missing_pythonhashseed_raises(self, monkeypatch):
+        """P2P instance refuses to start when PYTHONHASHSEED is unset."""
+        monkeypatch.delenv("PYTHONHASHSEED", raising=False)
+        with pytest.raises(ValueError, match="PYTHONHASHSEED"):
+            P2PSecondaryTierManager(
+                offloading_spec=_init_offloading_spec(),
+                primary_kv_view=memoryview(bytearray(16)),
+            )
+
+    def test_pythonhashseed_set_succeeds(self, monkeypatch):
+        """With PYTHONHASHSEED set, __init__ records it for the handshake."""
+        monkeypatch.setenv("PYTHONHASHSEED", "12345")
+        monkeypatch.setattr(manager_module, "NixlTransport", lambda *a, **k: object())
+        monkeypatch.setattr(manager_module, "ZmqTransport", lambda *a, **k: object())
+        monkeypatch.setattr(
+            manager_module.FileMapper,
+            "from_offloading_spec",
+            lambda **k: SimpleNamespace(get_run_config=lambda: {}),
+        )
+        mgr = P2PSecondaryTierManager(
+            offloading_spec=_init_offloading_spec(),
+            primary_kv_view=memoryview(bytearray(16)),
+        )
+        assert mgr._hash_seed == "12345"
 
 
 # ---------------------------------------------------------------------------
@@ -1509,6 +1552,7 @@ class TestBindHostPortDefaults:
         identity (``host:port``) stays decoupled from the NIXL agent name
         (a uuid).
         """
+        monkeypatch.setenv("PYTHONHASHSEED", "0")
         monkeypatch.setattr(
             manager_module,
             "FileMapper",

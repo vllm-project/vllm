@@ -152,7 +152,7 @@ Object keys follow the same run-configuration digest scheme as the filesystem ti
 
 The P2P tier (`type: "p2p"`) shares completed KV blocks between vLLM instances over RDMA via NIXL. Each instance binds a control socket on `host:port` and exchanges blocks directly with peers — no shared filesystem required.
 
-PYTHONHASHSEED environment variable must be set to the same fixed value on all nodes.
+The `PYTHONHASHSEED` environment variable must be set to the same fixed value (e.g. `"0"`) on all nodes so that block content hashes match across instances (see [Cross-Process Sharing](#cross-process-sharing)). This is enforced: a P2P instance started without `PYTHONHASHSEED` set fails at startup, and each peer's value is verified during the connect handshake — a peer advertising a different `PYTHONHASHSEED` is rejected.
 
 | Key | Required | Default | Notes |
 | --- | --- | --- | --- |

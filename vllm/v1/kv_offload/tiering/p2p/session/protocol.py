@@ -127,6 +127,9 @@ class ConnectMsg:
         BLOCK_LEN: Size in bytes of each block (must match between peers).
         CONFIG_FINGERPRINT: SHA-256 prefix of the model configuration.
             Peers with different fingerprints are incompatible.
+        HASH_SEED: The peer's PYTHONHASHSEED. Block hashes chain from a seed
+            derived from it, so peers with different values compute different
+            hashes for identical content and must not exchange blocks.
     """
 
     TYPE = "connect"
@@ -136,6 +139,7 @@ class ConnectMsg:
     NUM_BLOCKS = "num_blocks"
     BLOCK_LEN = "block_len"
     CONFIG_FINGERPRINT = "config_fingerprint"
+    HASH_SEED = "hash_seed"
 
     @staticmethod
     def validate(msg: dict) -> None:
@@ -145,6 +149,7 @@ class ConnectMsg:
         _require_non_neg_int(msg, ConnectMsg.BASE_ADDR)
         _require_pos_int(msg, ConnectMsg.NUM_BLOCKS)
         _require_pos_int(msg, ConnectMsg.BLOCK_LEN)
+        _require(msg, ConnectMsg.HASH_SEED, str)
 
 
 class ConnectAckMsg:

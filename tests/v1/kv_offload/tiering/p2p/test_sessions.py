@@ -59,6 +59,11 @@ from vllm.v1.kv_offload.tiering.p2p.session.session import (
 # ---------------------------------------------------------------------------
 
 
+# Shared PYTHONHASHSEED used by the session under test and the fake peer's
+# ConnectMsg so the handshake succeeds unless a test overrides one side.
+_DEFAULT_HASH_SEED = "0"
+
+
 class FakeDataTransport:
     """Minimal fake DataTransport for testing sessions."""
 
@@ -184,6 +189,7 @@ def _peer_connect_msg(
     peer_id: str = "peer:8000",
     block_len: int = 4096,
     fingerprint: str | None = None,
+    hash_seed: str = _DEFAULT_HASH_SEED,
 ) -> dict:
     """Build a ConnectMsg as if the peer sent it."""
     msg = {
@@ -193,6 +199,7 @@ def _peer_connect_msg(
         ConnectMsg.BASE_ADDR: 0x2000,
         ConnectMsg.NUM_BLOCKS: 16,
         ConnectMsg.BLOCK_LEN: block_len,
+        ConnectMsg.HASH_SEED: hash_seed,
     }
     if fingerprint is not None:
         msg[ConnectMsg.CONFIG_FINGERPRINT] = fingerprint
@@ -267,6 +274,7 @@ def _make_session(
     transport: FakeDataTransport | None = None,
     peer_id: str = "peer:8000",
     local_id: str = "local:9000",
+    local_hash_seed: str = _DEFAULT_HASH_SEED,
 ) -> tuple[P2PSession, FakeConnection, FakeDataTransport]:
     if conn is None:
         conn = FakeConnection(peer_id=peer_id)
@@ -277,6 +285,7 @@ def _make_session(
         local_id=local_id,
         transport=transport,  # type: ignore[arg-type]
         local_block_len=transport.block_len,
+        local_hash_seed=local_hash_seed,
         conn=conn,  # type: ignore[arg-type]
     )
     return session, conn, transport
@@ -378,6 +387,29 @@ class TestConnectHandshake:
         conn.enqueue(_peer_connect_msg())  # no fingerprint
         session.poll()
         assert "peer:8000" in transport._remote_peers
+
+    def test_hash_seed_mismatch_marks_dead(self):
+        """Mismatched PYTHONHASHSEED rejects peer and marks connection dead."""
+        session, conn, transport = _make_session(local_hash_seed="0")
+        conn.enqueue(_peer_connect_msg(hash_seed="12345"))  # mismatch
+        session.poll()
+        assert "peer:8000" not in transport._remote_peers
+        assert not session.alive
+        assert not any(m[TYPE_KEY] == ConnectAckMsg.TYPE for m in conn._sent)
+
+    def test_hash_seed_match_succeeds(self):
+        """Matching PYTHONHASHSEED registers the peer and acks."""
+        session, conn, transport = _make_session(local_hash_seed="12345")
+        conn.enqueue(_peer_connect_msg(hash_seed="12345"))
+        session.poll()
+        assert "peer:8000" in transport._remote_peers
+        assert session.alive
+        assert any(m[TYPE_KEY] == ConnectAckMsg.TYPE for m in conn._sent)
+
+    def test_hash_seed_advertised_in_connect_msg(self):
+        """Session advertises its own PYTHONHASHSEED in the ConnectMsg."""
+        _, conn, _ = _make_session(local_hash_seed="777")
+        assert conn._sent[0][ConnectMsg.HASH_SEED] == "777"
 
 
 # ---------------------------------------------------------------------------
@@ -1826,6 +1858,7 @@ class TestPendingSession:
             local_id="local:9000",
             transport=transport,  # type: ignore[arg-type]
             local_block_len=4096,
+            local_hash_seed=_DEFAULT_HASH_SEED,
             conn=None,
         )
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
@@ -1845,6 +1878,7 @@ class TestPendingSession:
             local_id="local:9000",
             transport=transport,  # type: ignore[arg-type]
             local_block_len=4096,
+            local_hash_seed=_DEFAULT_HASH_SEED,
             conn=None,
         )
         conn = FakeConnection(peer_id="peer:8000")
@@ -1866,6 +1900,7 @@ class TestPendingSession:
             local_id="local:9000",
             transport=transport,  # type: ignore[arg-type]
             local_block_len=4096,
+            local_hash_seed=_DEFAULT_HASH_SEED,
             conn=None,
         )
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
@@ -2209,6 +2244,7 @@ class TestConnectMsgValidation:
             ConnectMsg.BASE_ADDR: 0x1000,
             ConnectMsg.NUM_BLOCKS: 8,
             ConnectMsg.BLOCK_LEN: 4096,
+            ConnectMsg.HASH_SEED: "0",
         }
 
     def test_valid_message_passes(self):
@@ -2248,6 +2284,18 @@ class TestConnectMsgValidation:
         msg = self._valid_msg()
         msg[ConnectMsg.BLOCK_LEN] = 0
         with pytest.raises(ValueError, match="block_len"):
+            ConnectMsg.validate(msg)
+
+    def test_missing_hash_seed(self):
+        msg = self._valid_msg()
+        del msg[ConnectMsg.HASH_SEED]
+        with pytest.raises(ValueError, match="hash_seed"):
+            ConnectMsg.validate(msg)
+
+    def test_hash_seed_wrong_type(self):
+        msg = self._valid_msg()
+        msg[ConnectMsg.HASH_SEED] = 12345  # int, not str
+        with pytest.raises(ValueError, match="hash_seed"):
             ConnectMsg.validate(msg)
 
 
