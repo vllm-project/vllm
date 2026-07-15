@@ -123,55 +123,71 @@ class TestGetMLAPrefillBackend:
             ):
                 get_mla_prefill_backend(vllm_config)
 
-    def test_auto_selection_on_hopper(self):
+    @pytest.mark.parametrize(
+        ("qk_nope_head_dim", "v_head_dim"),
+        [(128, 128), (192, 256)],
+        ids=["deepseek", "glm"],
+    )
+    def test_auto_selection_on_hopper(self, qk_nope_head_dim: int, v_head_dim: int):
         try:
             flash_attn_cls = MLAPrefillBackendEnum.FLASH_ATTN.get_class()
         except ImportError:
             pytest.skip("FLASH_ATTN backend not available")
             return
 
-        vllm_config = _make_vllm_config()
+        vllm_config = _make_vllm_config(
+            _make_mock_model_config(
+                qk_nope_head_dim=qk_nope_head_dim,
+                v_head_dim=v_head_dim,
+            )
+        )
 
-        with patch("vllm.platforms.current_platform") as mock_platform:
+        with (
+            patch("vllm.platforms.current_platform") as mock_platform,
+            patch.object(flash_attn_cls, "is_available", return_value=True),
+            patch(
+                "vllm.v1.attention.backends.mla.prefill.flash_attn."
+                "get_flash_attn_version",
+                return_value=3,
+            ),
+        ):
             mock_platform.get_device_capability.return_value = DeviceCapability(
                 major=9, minor=0
             )
+            mock_platform.is_rocm.return_value = False
 
-            with patch.object(
-                flash_attn_cls,
-                "validate_configuration",
-                return_value=[],
-            ):
-                backend = get_mla_prefill_backend(vllm_config)
-                assert backend.get_name() == "FLASH_ATTN"
+            backend = get_mla_prefill_backend(vllm_config)
+            assert backend.get_name() == "FLASH_ATTN"
 
 
 class TestAutoSelectMLAPrefillBackend:
     """Tests for fallback and error paths in auto-selection."""
 
-    def test_blackwell_falls_back_to_trtllm(self):
+    def test_blackwell_glm_dimensions_fall_back_to_trtllm(self):
         capability = DeviceCapability(major=10, minor=0)
         selector_config = MLAPrefillSelectorConfig(
             dtype=torch.bfloat16,
             mla_dimensions=MLADimensions(
-                qk_nope_head_dim=128,
+                qk_nope_head_dim=192,
                 qk_rope_head_dim=64,
-                v_head_dim=128,
+                v_head_dim=256,
             ),
         )
 
         try:
+            flash_attn_cls = MLAPrefillBackendEnum.FLASH_ATTN.get_class()
             trtllm_cls = MLAPrefillBackendEnum.TRTLLM_RAGGED.get_class()
         except ImportError:
-            pytest.skip("TRTLLM_RAGGED backend not available")
+            pytest.skip("MLA prefill backend not available")
             return
 
         with (
             patch("vllm.platforms.current_platform") as mock_platform,
-            patch.object(
-                MLAPrefillBackendEnum.FLASH_ATTN,
-                "get_class",
-                side_effect=ImportError("FLASH_ATTN not available"),
+            patch.object(flash_attn_cls, "is_available", return_value=True),
+            patch(
+                "vllm.v1.attention.backends.mla.prefill.flash_attn."
+                "get_flash_attn_version",
+                return_value=4,
             ),
             patch.object(trtllm_cls, "validate_configuration", return_value=[]),
         ):

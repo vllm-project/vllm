@@ -446,6 +446,119 @@ def parse_supported_mla_dimensions(node: ast.AST | None) -> list[str]:
     return supported_dimensions
 
 
+def _parse_mla_dimension_reference(
+    node: ast.AST,
+    named_dimensions: dict[str, str],
+) -> str | None:
+    if isinstance(node, ast.Name):
+        return named_dimensions.get(node.id)
+    return parse_mla_dimensions_call(node)
+
+
+def _parse_mla_dimensions_return(
+    statements: list[ast.stmt],
+    named_dimensions: dict[str, str],
+) -> list[str]:
+    for statement in statements:
+        if not isinstance(statement, ast.Return):
+            continue
+        value = statement.value
+        if not (
+            isinstance(value, ast.Compare)
+            and isinstance(value.left, ast.Name)
+            and value.left.id == "mla_dimensions"
+            and len(value.ops) == 1
+            and len(value.comparators) == 1
+        ):
+            continue
+
+        comparator = value.comparators[0]
+        if isinstance(value.ops[0], ast.Eq):
+            dimension = _parse_mla_dimension_reference(
+                comparator,
+                named_dimensions,
+            )
+            return [dimension] if dimension is not None else []
+        if isinstance(value.ops[0], ast.In) and isinstance(
+            comparator, ast.List | ast.Tuple | ast.Set
+        ):
+            dimensions = [
+                _parse_mla_dimension_reference(element, named_dimensions)
+                for element in comparator.elts
+            ]
+            return [dimension for dimension in dimensions if dimension is not None]
+    return []
+
+
+def _parse_fa_version_condition(node: ast.AST) -> int | None:
+    if not (
+        isinstance(node, ast.Compare)
+        and len(node.ops) == 1
+        and isinstance(node.ops[0], ast.Eq)
+        and len(node.comparators) == 1
+        and isinstance(node.comparators[0], ast.Constant)
+        and isinstance(node.comparators[0].value, int)
+    ):
+        return None
+
+    left = node.left
+    is_fa_version = isinstance(left, ast.Name) and left.id == "fa_version"
+    is_get_fa_version = (
+        isinstance(left, ast.Call)
+        and isinstance(left.func, ast.Name)
+        and left.func.id == "get_flash_attn_version"
+    )
+    if is_fa_version or is_get_fa_version:
+        return node.comparators[0].value
+    return None
+
+
+def parse_supports_mla_dimensions(
+    method: ast.FunctionDef | None,
+) -> tuple[list[str], dict[int | None, list[str]]]:
+    """Parse dimensions and FA-version branches from a support method."""
+    if method is None:
+        return [], {}
+
+    named_dimensions: dict[str, str] = {}
+    for statement in method.body:
+        if not (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+        ):
+            continue
+        dimension = parse_mla_dimensions_call(statement.value)
+        if dimension is not None:
+            named_dimensions[statement.targets[0].id] = dimension
+
+    support_by_version: dict[int | None, list[str]] = {}
+    for statement in method.body:
+        if isinstance(statement, ast.Return):
+            dimensions = _parse_mla_dimensions_return([statement], named_dimensions)
+            if dimensions:
+                support_by_version[None] = dimensions
+        elif isinstance(statement, ast.If):
+            fa_version = _parse_fa_version_condition(statement.test)
+            if fa_version is None:
+                continue
+            dimensions = _parse_mla_dimensions_return(statement.body, named_dimensions)
+            if dimensions:
+                support_by_version[fa_version] = dimensions
+            default_dimensions = _parse_mla_dimensions_return(
+                statement.orelse, named_dimensions
+            )
+            if default_dimensions:
+                support_by_version[None] = default_dimensions
+
+    supported_dimensions: list[str] = []
+    for dimensions in support_by_version.values():
+        for dimension in dimensions:
+            if dimension not in supported_dimensions:
+                supported_dimensions.append(dimension)
+    return supported_dimensions, support_by_version
+
+
 def parse_mla_prefill_backend_file(class_path: str) -> dict[str, Any] | None:
     """Parse a single MLA prefill backend file to extract its properties.
 
@@ -472,6 +585,7 @@ def parse_mla_prefill_backend_file(class_path: str) -> dict[str, Any] | None:
     info: dict[str, Any] = {
         "compute_capability": "Any",
         "supported_mla_dimensions": [],
+        "mla_dimension_support_by_fa_version": {},
         "dtypes": "fp16, bf16",  # Default from base class
     }
 
@@ -500,6 +614,13 @@ def parse_mla_prefill_backend_file(class_path: str) -> dict[str, Any] | None:
                     dtypes.append(dtype_map.get(elt.attr, elt.attr))
             if dtypes:
                 info["dtypes"] = ", ".join(dtypes)
+
+    dimensions, support_by_version = parse_supports_mla_dimensions(
+        find_method(class_node, "supports_mla_dimensions")
+    )
+    if dimensions:
+        info["supported_mla_dimensions"] = dimensions
+        info["mla_dimension_support_by_fa_version"] = support_by_version
 
     # Parse get_name static method
     get_name_method = find_method(class_node, "get_name")
@@ -580,6 +701,24 @@ def parse_mla_prefill_backends() -> list[dict[str, Any]]:
         supported_mla_dimensions = backend_info.get("supported_mla_dimensions", [])
         if supported_mla_dimensions:
             notes = " or ".join(supported_mla_dimensions) + " only"
+            support_by_version = backend_info.get(
+                "mla_dimension_support_by_fa_version", {}
+            )
+            if any(version is not None for version in support_by_version):
+                default_dimensions = support_by_version.get(None, [])
+                dimension_notes = []
+                for dimension in supported_mla_dimensions:
+                    versions = [
+                        f"FA{version}"
+                        for version in (2, 3, 4)
+                        if dimension
+                        in support_by_version.get(version, default_dimensions)
+                    ]
+                    version_limit = "" if len(versions) == 3 else " only"
+                    dimension_notes.append(
+                        f"{dimension} ({'/'.join(versions)}{version_limit})"
+                    )
+                notes = " or ".join(dimension_notes)
         elif backend_name == "FLASH_ATTN":
             notes = "FA4 on SM100+, FA3 on SM90, FA2 otherwise"
 
