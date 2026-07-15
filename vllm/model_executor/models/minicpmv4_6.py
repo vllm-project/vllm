@@ -956,6 +956,7 @@ class MiniCPMV4_6ForConditionalGeneration(
             "model.merger.": "merger.",
             "model.language_model.": "language_model.model.",
             "lm_head.": "language_model.lm_head.",
+            "model.": "language_model.model.",
         }
     )
 

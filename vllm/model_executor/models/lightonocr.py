@@ -137,6 +137,7 @@ class LightOnOCRForConditionalGeneration(Mistral3ForConditionalGeneration):
             "model.vision_projection.": "multi_modal_projector.",
             "lm_head.": "language_model.lm_head.",
             "model.language_model.": "language_model.model.",
+            "model.": "language_model.model.",
         }
     )
 

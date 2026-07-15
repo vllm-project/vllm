@@ -489,6 +489,7 @@ class Gemma3ForConditionalGeneration(
             "model.vision_tower.": "vision_tower.",
             "model.multi_modal_projector.": "multi_modal_projector.",
             "lm_head.": "language_model.lm_head.",
+            "model.": "language_model.model.",
         }
     )
 

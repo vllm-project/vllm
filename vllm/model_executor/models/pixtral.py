@@ -299,6 +299,7 @@ class PixtralForConditionalGeneration(
             "model.language_model.": "language_model.model.",
             "model.vision_tower.": "vision_encoder.",
             "model.multi_modal_projector.": "vision_language_adapter.",
+            "model.": "language_model.model.",
         },
         orig_to_new_substr={
             ".linear_1.": ".w_in.",
