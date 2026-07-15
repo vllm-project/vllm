@@ -2,24 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for FileMapper."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import torch
-
-from vllm.config import KVTransferConfig, ParallelConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
-    build_offloading_config,
+from vllm.v1.kv_offload.base import OffloadingSpec, make_offload_key
+from vllm.v1.kv_offload.config import (
+    OffloadingCacheConfig,
+    OffloadingConfig,
+    OffloadingGroupConfig,
+    OffloadingModelConfig,
+    OffloadingParallelConfig,
 )
-from vllm.platforms import current_platform
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    MLAAttentionSpec,
-    SlidingWindowSpec,
-)
-from vllm.v1.kv_offload.base import make_offload_key
-from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.kv_offload.file_mapper import FileMapper
 
 # ---------------------------------------------------------------------------
@@ -28,62 +20,43 @@ from vllm.v1.kv_offload.file_mapper import FileMapper
 
 
 def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
-    """Helper to create FileMapper with customizable mock config."""
-    # Create a copy of the mock config to avoid modifying the global one
-    mock_vllm_config = MagicMock()
-    mock_vllm_config.model_config.model = kwargs.get("model_name", "test-model")
-    mock_vllm_config.cache_config.block_size = kwargs.get("cache_block_size", 16)
-    mock_vllm_config.cache_config.cache_dtype = (
-        f"torch.{kwargs.get('dtype', 'float16')}"
-    )
-    mock_vllm_config.cache_config.enable_prefix_caching = True
-    mock_vllm_config.cache_config.prefix_match_unit = None
-    tp_size = kwargs.get("tp_size", 1)
-    pp_size = kwargs.get("pp_size", 1)
-    pcp_size = kwargs.get("pcp_size", 1)
-    world_size = tp_size * pp_size * pcp_size
-    with patch.object(current_platform, "device_count", return_value=world_size):
-        mock_vllm_config.parallel_config = ParallelConfig(
-            tensor_parallel_size=tp_size,
-            pipeline_parallel_size=pp_size,
-            prefill_context_parallel_size=pcp_size,
-            decode_context_parallel_size=kwargs.get("dcp_size", 1),
+    """Build a FileMapper from a mocked spec carrying a hand-built config."""
+    config = OffloadingConfig(
+        groups=tuple(
+            OffloadingGroupConfig(
+                tokens_per_block=tokens_per_block,
+                layer_names=(layer_name,),
+            )
+            for tokens_per_block, layer_name in kwargs.get("groups", ())
+        ),
+        worker_kv_bytes_per_block=0,
+        enable_kv_cache_events=False,
+        extra_config={},
+        engine_id="test-engine",
+        model=OffloadingModelConfig(
+            name=kwargs.get("model_name", "test-model"),
+            dtype=kwargs.get("dtype", "float16"),
+        ),
+        cache=OffloadingCacheConfig(
+            tokens_per_hash=kwargs.get("tokens_per_hash", 16),
+            blocks_per_chunk=kwargs.get("blocks_per_chunk", 1),
+        ),
+        parallel=OffloadingParallelConfig(
             rank=kwargs.get("rank", 0),
-        )
-    mock_vllm_config.use_v2_model_runner = kwargs.get("use_v2_model_runner", False)
-    mock_vllm_config.kv_events_config = None
-
-    kv_cache_groups = kwargs.get("kv_cache_groups", [])
-    block_size_factor = kwargs.get("block_size_factor", 1)
-    extra_config = {
-        "spec_name": "CPUOffloadingSpec",
-        "cpu_bytes_to_use": 1,
-    }
-    if block_size_factor != 1:
-        gpu_block_sizes = {
-            group.kv_cache_spec.block_size * kwargs.get("dcp_size", 1) * pcp_size
-            for group in kv_cache_groups
-        }
-        assert len(gpu_block_sizes) == 1
-        extra_config["block_size"] = gpu_block_sizes.pop() * block_size_factor
-    mock_vllm_config.kv_transfer_config = KVTransferConfig(
-        kv_connector="OffloadingConnector",
-        kv_role="kv_both",
-        kv_connector_extra_config=extra_config,
+            world_size=kwargs.get("world_size", 1),
+            tp_size=kwargs.get("tp_size", 1),
+            pp_size=kwargs.get("pp_size", 1),
+            pcp_size=kwargs.get("pcp_size", 1),
+            dcp_size=kwargs.get("dcp_size", 1),
+            is_parallelism_agnostic=kwargs.get("is_parallelism_agnostic", False),
+        ),
     )
-
-    kv_cache_config = KVCacheConfig(
-        num_blocks=0,
-        kv_cache_tensors=[],
-        kv_cache_groups=kv_cache_groups,
-    )
-    offloading_config = build_offloading_config(mock_vllm_config, kv_cache_config)
-    offloading_spec = OffloadingSpecFactory.create_spec(offloading_config)
-
+    spec = MagicMock(spec=OffloadingSpec)
+    spec.config = config
     return FileMapper.from_offloading_spec(
         root_dir=kwargs.get("root_dir", "/tmp/cache"),
-        offloading_spec=offloading_spec,
-        gpu_blocks_per_file=offloading_spec.block_size_factor,
+        offloading_spec=spec,
+        blocks_per_file=config.cache.blocks_per_chunk,
         parallel_agnostic=kwargs.get("parallel_agnostic", False),
     )
 
@@ -98,7 +71,7 @@ def test_get_file_name_full_structure():
     Path must match: <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
 
     Concretely:
-      - The segment immediately after base_path must end with `_r0`
+      - The segment immediately after base_path must end with `_r3`
       - The next segment is the first 3 hex chars of the block hash
       - The next segment is <2 hex chars>_g<group_idx>
       - The final segment is <full hash hex>.bin
@@ -111,7 +84,7 @@ def test_get_file_name_full_structure():
     path = fm.get_file_name(key)
 
     expected_path = (
-        "/tmp/cache/test-model_588656ebcc66_r3/000/10_g2/0001020304050607.bin"
+        "/tmp/cache/test-model_42b94bdc9933_r3/000/10_g2/0001020304050607.bin"
     )
     assert path == expected_path
 
@@ -124,16 +97,15 @@ def test_get_run_config_fields():
         pp_size=3,
         pcp_size=2,
         dcp_size=2,
-        kv_cache_groups=[_full_attention_group()],
-        block_size_factor=3,
+        groups=((64, "layer0"),),
+        tokens_per_hash=64,
+        blocks_per_chunk=3,
     )
     cfg = fm.get_run_config()
-    # hash_block_size is the resolved hash granularity and block_size is the
-    # context-parallel-scaled tokens_per_block (16 * dcp 2 * pcp 2 = 64).
     assert cfg == {
         "model_name": "my-model",
-        "hash_block_size": 64,
-        "gpu_blocks_per_file": 3,
+        "tokens_per_hash": 64,
+        "blocks_per_file": 3,
         "tp_size": 4,
         "pp_size": 3,
         "pcp_size": 2,
@@ -141,7 +113,7 @@ def test_get_run_config_fields():
         "dtype": "bfloat16",
         "kv_cache_groups": [
             {
-                "block_size": 64,
+                "tokens_per_block": 64,
                 "layer_names": ["layer0"],
             }
         ],
@@ -155,60 +127,35 @@ def test_get_config_file_path():
     assert config_path == f"{fm.base_path}/config.json"
 
 
+def test_hybrid_file_identity_uses_resolved_tokens_per_hash():
+    # For heterogeneous groups the namespace records the resolved hash
+    # granularity (GCD of the group block sizes), which is the actual
+    # granularity of the offload block hashes.
+    fm = make_mapper_from_offloading_spec(
+        groups=((12, "full_layer"), (16, "mla_layer")),
+        tokens_per_hash=4,
+    )
+    assert fm.fields["tokens_per_hash"] == 4
+    assert fm.fields["kv_cache_groups"] == [
+        {"tokens_per_block": 12, "layer_names": ["full_layer"]},
+        {"tokens_per_block": 16, "layer_names": ["mla_layer"]},
+    ]
+
+
 # ---------------------------------------------------------------------------
-# parallel_agnostic: honored only for a single non-MLA full-attention group
+# parallel_agnostic: opt-in honored only when the config marks the layout
+# parallelism-agnostic (predicate computation is covered in test_factory.py)
 # ---------------------------------------------------------------------------
 
 
-def _full_attention_group(
-    block_size: int = 16, layer_name: str = "layer0"
-) -> KVCacheGroupSpec:
-    return KVCacheGroupSpec(
-        layer_names=[layer_name],
-        kv_cache_spec=FullAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=4,
-            head_size=128,
-            dtype=torch.float32,
-        ),
-    )
-
-
-def _sliding_window_group() -> KVCacheGroupSpec:
-    return KVCacheGroupSpec(
-        layer_names=["layer0"],
-        kv_cache_spec=SlidingWindowSpec(
-            block_size=16,
-            num_kv_heads=4,
-            head_size=128,
-            dtype=torch.float32,
-            sliding_window=128,
-        ),
-    )
-
-
-def _mla_group(block_size: int = 16, layer_name: str = "layer0") -> KVCacheGroupSpec:
-    return KVCacheGroupSpec(
-        layer_names=[layer_name],
-        kv_cache_spec=MLAAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=576,
-            dtype=torch.float32,
-        ),
-    )
-
-
-def test_parallel_agnostic_enabled_for_single_full_attention():
-    # tp/rank are collapsed out of the namespace so the cache is shared
-    # across tensor-parallel sizes.
+def test_parallel_agnostic_collapses_namespace_when_config_allows():
     fm = make_mapper_from_offloading_spec(
         tp_size=4,
         pp_size=3,
         pcp_size=2,
         dcp_size=2,
         rank=1,
-        kv_cache_groups=[_full_attention_group()],
+        is_parallelism_agnostic=True,
         parallel_agnostic=True,
     )
     assert fm.fields["tp_size"] == 1
@@ -218,66 +165,23 @@ def test_parallel_agnostic_enabled_for_single_full_attention():
     assert fm.rank == 0
 
 
-def test_parallel_agnostic_disabled_for_multiple_groups():
-    # More than one KV-cache group (hybrid model) => keep per-layout namespacing.
-    fm = make_mapper_from_offloading_spec(
-        tp_size=2,
-        kv_cache_groups=[_full_attention_group(), _full_attention_group()],
-        parallel_agnostic=True,
-    )
-    assert fm.fields["tp_size"] == 2
-
-
-def test_hybrid_file_identity_uses_resolved_hash_block_size():
-    fm = make_mapper_from_offloading_spec(
-        cache_block_size=16,
-        kv_cache_groups=[
-            _full_attention_group(block_size=12, layer_name="full_layer"),
-            _mla_group(block_size=16, layer_name="mla_layer"),
-        ],
-    )
-
-    # For heterogeneous groups the namespace records the resolved hash block
-    # size (GCD of the group block sizes), which is the actual granularity of
-    # the offload block hashes.
-    assert fm.fields["hash_block_size"] == 4
-    assert fm.fields["kv_cache_groups"] == [
-        {"block_size": 12, "layer_names": ["full_layer"]},
-        {"block_size": 16, "layer_names": ["mla_layer"]},
-    ]
-
-
-def test_parallel_agnostic_disabled_for_non_full_attention():
-    # Single group but not full attention (sliding window) => keep namespacing.
-    fm = make_mapper_from_offloading_spec(
-        tp_size=2,
-        kv_cache_groups=[_sliding_window_group()],
-        parallel_agnostic=True,
-    )
-    assert fm.fields["tp_size"] == 2
-
-
-def test_parallel_agnostic_excludes_mla():
-    # MLA latent KV is replicated per rank, so its offloaded blocks are not
-    # parallelism-invariant: the opt-in must not collapse tp/rank.
+def test_parallel_agnostic_ignored_when_config_disallows():
     fm = make_mapper_from_offloading_spec(
         tp_size=2,
         rank=1,
-        kv_cache_groups=[_mla_group()],
+        is_parallelism_agnostic=False,
         parallel_agnostic=True,
     )
     assert fm.fields["tp_size"] == 2
     assert fm.rank == 1
 
 
-def test_parallel_agnostic_disabled_on_v2_model_runner():
-    # V2's KV layout is not known to be parallelism-invariant: don't collapse.
+def test_namespace_kept_without_parallel_agnostic_opt_in():
     fm = make_mapper_from_offloading_spec(
         tp_size=2,
         rank=1,
-        kv_cache_groups=[_full_attention_group()],
-        use_v2_model_runner=True,
-        parallel_agnostic=True,
+        is_parallelism_agnostic=True,
+        parallel_agnostic=False,
     )
     assert fm.fields["tp_size"] == 2
     assert fm.rank == 1

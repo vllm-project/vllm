@@ -131,7 +131,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 engine_id=self._engine_id,
                 num_blocks=self.num_blocks,
                 rank=None,
-                kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
+                kv_bytes_per_block=self.kv_bytes_per_chunk,
                 cpu_page_size=self.cpu_page_size_per_worker,
             )
             self._scheduler_mmap = scheduler_mmap
@@ -199,12 +199,12 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             engine_id=self._engine_id,
             num_blocks=self.num_blocks,
             rank=rank,
-            kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
+            kv_bytes_per_block=self.kv_bytes_per_chunk,
             cpu_page_size=self.cpu_page_size_per_worker,
         )
         return CPUOffloadingWorker(
             kv_caches=kv_caches,
-            block_size_factor=self.block_size_factor,
+            blocks_per_chunk=self.blocks_per_chunk,
             num_cpu_blocks=self.num_blocks,
             mmap_region=worker_mmap,
         )

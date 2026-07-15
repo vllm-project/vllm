@@ -27,9 +27,9 @@ class OffloadingModelConfig:
 @dataclass(frozen=True)
 class OffloadingCacheConfig:
     # Tokens per block hash.
-    hash_block_size: int
-    # Blocks per offload key.
-    blocks_per_key: int
+    tokens_per_hash: int
+    # Blocks coalesced into one offload chunk.
+    blocks_per_chunk: int
 
 
 @dataclass(frozen=True)

@@ -24,8 +24,8 @@ class FileMapper:
         self,
         root_dir: str,
         model_name: str,
-        hash_block_size: int,
-        gpu_blocks_per_file: int,
+        tokens_per_hash: int,
+        blocks_per_file: int,
         tp_size: int,
         pp_size: int,
         pcp_size: int,
@@ -48,8 +48,8 @@ class FileMapper:
         self.rank: int = rank
         self.fields: dict = {
             "model_name": model_name,
-            "hash_block_size": hash_block_size,
-            "gpu_blocks_per_file": gpu_blocks_per_file,
+            "tokens_per_hash": tokens_per_hash,
+            "blocks_per_file": blocks_per_file,
             "tp_size": tp_size,
             "pp_size": pp_size,
             "pcp_size": pcp_size,
@@ -65,7 +65,7 @@ class FileMapper:
         cls,
         root_dir: str,
         offloading_spec: OffloadingSpec,
-        gpu_blocks_per_file: int = 1,
+        blocks_per_file: int = 1,
         parallel_agnostic: bool = False,
     ) -> "FileMapper":
         """Build a FileMapper from an OffloadingSpec."""
@@ -81,8 +81,8 @@ class FileMapper:
         return cls(
             root_dir=root_dir,
             model_name=config.model.name,
-            hash_block_size=config.cache.hash_block_size,
-            gpu_blocks_per_file=gpu_blocks_per_file,
+            tokens_per_hash=config.cache.tokens_per_hash,
+            blocks_per_file=blocks_per_file,
             tp_size=parallel.tp_size,
             pp_size=parallel.pp_size,
             pcp_size=parallel.pcp_size,

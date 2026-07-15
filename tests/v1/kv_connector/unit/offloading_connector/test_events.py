@@ -73,14 +73,14 @@ def _group_config(
     *,
     group_idx: int = 0,
     block_size: int = 4,
-    block_size_factor: int = 1,
+    blocks_per_chunk: int = 1,
     sliding_window_size_in_blocks: int | None = None,
 ) -> GroupOffloadConfig:
     return GroupOffloadConfig(
         group_idx=group_idx,
         gpu_block_size=block_size,
-        offloaded_block_size=block_size * block_size_factor,
-        hash_block_size_factor=block_size_factor,
+        tokens_per_chunk=block_size * blocks_per_chunk,
+        hashes_per_chunk=blocks_per_chunk,
         sliding_window_size_in_blocks=sliding_window_size_in_blocks,
         kv_event_group_spec=_FULL_ATTENTION_EVENT_SPEC,
     )
@@ -93,7 +93,7 @@ def _record_chunks(
     num_chunks: int,
 ) -> list[OffloadKey]:
     keys: list[OffloadKey] = []
-    hbf = group_config.hash_block_size_factor
+    hbf = group_config.hashes_per_chunk
     for chunk_idx in range(num_chunks):
         tail_hash = req.block_hashes[(chunk_idx + 1) * hbf - 1]
         assert tail_hash is not None
@@ -152,14 +152,14 @@ def test_take_events_publishes_routable_block_stored():
 
 def test_take_events_factor_gt_1_chunk_store_and_remove():
     block_size = 4
-    block_size_factor = 3
+    blocks_per_chunk = 3
     tracker = _tracker()
     group_config = _group_config(
-        block_size=block_size, block_size_factor=block_size_factor
+        block_size=block_size, blocks_per_chunk=blocks_per_chunk
     )
     req = _request(
         block_hashes=[_hash(i) for i in range(6)],
-        token_count=block_size * block_size_factor * 2,
+        token_count=block_size * blocks_per_chunk * 2,
     )
     keys = _record_chunks(tracker, req, group_config, num_chunks=2)
 
@@ -172,17 +172,17 @@ def test_take_events_factor_gt_1_chunk_store_and_remove():
         expected_chunk_hashes = [
             _wire_hash(_hash(i))
             for i in range(
-                chunk_idx * block_size_factor,
-                (chunk_idx + 1) * block_size_factor,
+                chunk_idx * blocks_per_chunk,
+                (chunk_idx + 1) * blocks_per_chunk,
             )
         ]
         assert event.block_hashes == expected_chunk_hashes
         assert event.block_size == block_size
-        assert len(event.token_ids) == block_size * block_size_factor
+        assert len(event.token_ids) == block_size * blocks_per_chunk
         if chunk_idx == 0:
             assert event.parent_block_hash is None
         else:
-            assert event.parent_block_hash == _wire_hash(_hash(block_size_factor - 1))
+            assert event.parent_block_hash == _wire_hash(_hash(blocks_per_chunk - 1))
         expected_hashes.extend(expected_chunk_hashes)
 
     assert len(tracker._pending_event_metadata) == 2
@@ -197,12 +197,12 @@ def test_take_events_factor_gt_1_chunk_store_and_remove():
 
 
 def test_take_events_factor_gt_1_store_is_order_independent():
-    block_size_factor = 3
+    blocks_per_chunk = 3
     tracker = _tracker()
-    group_config = _group_config(block_size_factor=block_size_factor)
+    group_config = _group_config(blocks_per_chunk=blocks_per_chunk)
     req = _request(
         block_hashes=[_hash(i) for i in range(6)],
-        token_count=4 * block_size_factor * 2,
+        token_count=4 * blocks_per_chunk * 2,
     )
     keys = _record_chunks(tracker, req, group_config, num_chunks=2)
     unknown_key = make_offload_key(_hash(12345), 0)
@@ -261,8 +261,8 @@ def test_record_store_skips_sliding_window_group():
 
 def test_take_events_groups_removed_hashes_by_kv_group():
     tracker = _tracker()
-    group0_config = _group_config(group_idx=0, block_size_factor=2)
-    group1_config = _group_config(group_idx=1, block_size_factor=2)
+    group0_config = _group_config(group_idx=0, blocks_per_chunk=2)
+    group1_config = _group_config(group_idx=1, blocks_per_chunk=2)
     req0 = _request(block_hashes=[_hash(0), _hash(1)], token_count=8)
     req1 = _request(block_hashes=[_hash(10), _hash(11)], token_count=8)
     key0 = _record_chunks(tracker, req0, group0_config, num_chunks=1)[0]
@@ -296,7 +296,7 @@ def test_take_events_supports_restore_after_eviction():
     assert not tracker._pending_event_metadata
 
     req.all_token_ids = [5, 6, 7, 8]
-    tracker.record_store(req, group_config, offload_block_idx=0, offload_key=key)
+    tracker.record_store(req, group_config, chunk_idx=0, offload_key=key)
 
     second_store = list(tracker.take_events([_stored_event([key])]))
     assert len(second_store) == 1

@@ -28,6 +28,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheTensor,
     MLAAttentionSpec,
+    SlidingWindowSpec,
 )
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
@@ -314,7 +315,7 @@ def test_create_cpu_offloading_spec_end_to_end():
 
     Verifies:
     - cpu_bytes_to_use validation and num_blocks calculation
-    - block_size % hash_block_size assertion
+    - block_size % tokens_per_hash assertion
     - spec instance is CPUOffloadingSpec
     """
     config = _make_vllm_config(cpu_bytes_to_use=65536)
@@ -338,7 +339,7 @@ def test_cpu_spec_sizing_preserves_tensor_layout(packed: bool):
 
     assert isinstance(spec, CPUOffloadingSpec)
     assert spec.cpu_page_size_per_worker == 32
-    assert spec.kv_bytes_per_offloaded_block == 192
+    assert spec.kv_bytes_per_chunk == 192
     assert spec.num_blocks == cpu_bytes_to_use // 192
 
 
@@ -361,7 +362,7 @@ def test_cpu_spec_zero_blocks_skips_tensor_layout_validation():
 
     assert isinstance(spec, CPUOffloadingSpec)
     assert spec.cpu_page_size_per_worker == 0
-    assert spec.kv_bytes_per_offloaded_block == 0
+    assert spec.kv_bytes_per_chunk == 0
     assert spec.num_blocks == 0
 
 
@@ -380,7 +381,7 @@ def test_tiering_spec_aligns_row_size():
 
     assert isinstance(spec, TieringOffloadingSpec)
     assert spec.cpu_page_size_per_worker == 32
-    assert spec.kv_bytes_per_offloaded_block == alignment
+    assert spec.kv_bytes_per_chunk == alignment
     assert spec.num_blocks == cpu_bytes_to_use // alignment
 
 
@@ -393,9 +394,9 @@ def test_offloading_spec_resolves_prefill_context_parallel_block_sizes():
 
     spec = _create_spec(config, _make_kv_cache_config())
 
-    assert spec.gpu_block_size == (32,)
-    assert spec.hash_block_size == 32
-    assert spec.block_size_factor == 2
+    assert spec.tokens_per_block == (32,)
+    assert spec.tokens_per_hash == 32
+    assert spec.blocks_per_chunk == 2
 
 
 def test_offloading_spec_resolves_heterogeneous_hybrid_block_sizes():
@@ -404,9 +405,76 @@ def test_offloading_spec_resolves_heterogeneous_hybrid_block_sizes():
 
     spec = _create_spec(config, _make_hybrid_kv_cache_config())
 
-    assert spec.gpu_block_size == (12, 16)
-    assert spec.hash_block_size == 4
-    assert spec.block_size_factor == 1
+    assert spec.tokens_per_block == (12, 16)
+    assert spec.tokens_per_hash == 4
+    assert spec.blocks_per_chunk == 1
+
+
+def _full_attention_spec(block_size: int = 16) -> FullAttentionSpec:
+    return FullAttentionSpec(
+        block_size=block_size, num_kv_heads=4, head_size=128, dtype=torch.float32
+    )
+
+
+def _parallelism_agnostic(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
+    config = _make_layout_vllm_config()
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0, kv_cache_tensors=[], kv_cache_groups=kv_cache_groups
+    )
+    offloading_config = build_offloading_config(config, kv_cache_config)
+    return offloading_config.parallel.is_parallelism_agnostic
+
+
+def test_parallelism_agnostic_for_single_full_attention_group():
+    assert _parallelism_agnostic([KVCacheGroupSpec(["l0"], _full_attention_spec())])
+
+
+@pytest.mark.parametrize(
+    "kv_cache_groups",
+    [
+        # MLA latent KV is replicated per rank, never head-sharded.
+        [
+            KVCacheGroupSpec(
+                ["l0"],
+                MLAAttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=576, dtype=torch.float32
+                ),
+            )
+        ],
+        # Sliding window is not full attention.
+        [
+            KVCacheGroupSpec(
+                ["l0"],
+                SlidingWindowSpec(
+                    block_size=16,
+                    num_kv_heads=4,
+                    head_size=128,
+                    dtype=torch.float32,
+                    sliding_window=128,
+                ),
+            )
+        ],
+        # Hybrid model: more than one KV cache group.
+        [
+            KVCacheGroupSpec(["l0"], _full_attention_spec()),
+            KVCacheGroupSpec(["l1"], _full_attention_spec()),
+        ],
+    ],
+)
+def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
+    assert not _parallelism_agnostic(kv_cache_groups)
+
+
+def test_parallelism_agnostic_disabled_on_v2_model_runner():
+    config = _make_layout_vllm_config()
+    config.use_v2_model_runner = True
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["l0"], _full_attention_spec())],
+    )
+    offloading_config = build_offloading_config(config, kv_cache_config)
+    assert not offloading_config.parallel.is_parallelism_agnostic
 
 
 def test_create_dynamic_spec_receives_translated_config():

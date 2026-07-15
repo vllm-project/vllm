@@ -59,7 +59,7 @@ def _make_offloading_spec(enable_kv_cache_events: bool) -> MagicMock:
         extra_config={},
         engine_id="test-engine",
         model=OffloadingModelConfig(name="test-model", dtype="float32"),
-        cache=OffloadingCacheConfig(hash_block_size=16, blocks_per_key=1),
+        cache=OffloadingCacheConfig(tokens_per_hash=16, blocks_per_chunk=1),
         parallel=OffloadingParallelConfig(
             rank=0,
             world_size=1,
@@ -70,7 +70,7 @@ def _make_offloading_spec(enable_kv_cache_events: bool) -> MagicMock:
             is_parallelism_agnostic=False,
         ),
     )
-    spec.block_size_factor = 1
+    spec.blocks_per_chunk = 1
     spec.kv_events_config = OffloadingKVEventsConfig(
         enable_kv_cache_events=enable_kv_cache_events,
         self_describing_kv_events=False,

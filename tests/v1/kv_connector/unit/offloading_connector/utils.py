@@ -175,17 +175,17 @@ class RequestRunner:
         self,
         block_size: int,
         num_gpu_blocks: int,
-        block_size_factor: int = 1,
+        blocks_per_chunk: int = 1,
         async_scheduling: bool = True,
         kv_cache_groups: list[KVCacheGroupSpec] | None = None,
         extra_config_overrides: dict[str, Any] | None = None,
     ):
-        assert block_size_factor == 1 or kv_cache_groups is None, (
-            "block_size_factor > 1 requires all groups to have the same "
+        assert blocks_per_chunk == 1 or kv_cache_groups is None, (
+            "blocks_per_chunk > 1 requires all groups to have the same "
             "block size, so kv_cache_groups must be None (use default group)"
         )
 
-        self.block_size_factor: int = block_size_factor
+        self.blocks_per_chunk: int = blocks_per_chunk
         self.block_size: int = block_size
         self.num_gpu_blocks: int = num_gpu_blocks
         self.async_scheduling: bool = async_scheduling
@@ -208,8 +208,8 @@ class RequestRunner:
             # opt-out tests override this to cover the legacy placeholders.
             "self_describing_kv_events": True,
         }
-        if block_size_factor > 1:
-            extra_config["block_size"] = block_size * block_size_factor
+        if blocks_per_chunk > 1:
+            extra_config["block_size"] = block_size * blocks_per_chunk
         if extra_config_overrides:
             extra_config.update(extra_config_overrides)
 
@@ -315,9 +315,7 @@ class RequestRunner:
         ):
             gpu_block_size = kv_cache_group.kv_cache_spec.block_size
             assert group_config.gpu_block_size == gpu_block_size
-            assert (
-                group_config.offloaded_block_size == gpu_block_size * block_size_factor
-            )
+            assert group_config.tokens_per_chunk == gpu_block_size * blocks_per_chunk
 
         # extract OffloadingSpec of worker_connector
         connector_worker = self.worker_connector.connector_worker
@@ -389,7 +387,7 @@ class RequestRunner:
                 for block_id in dst_spec.block_ids:
                     self.flushed_gpu_blocks.add(self.gpu_blocks[block_id.item()])
 
-        block_size_factor = self.block_size_factor
+        blocks_per_chunk = self.blocks_per_chunk
 
         for src_spec, dst_spec in self.offloading_spec.get_completed_transfers():
             if isinstance(src_spec, GPULoadStoreSpec):
@@ -412,7 +410,7 @@ class RequestRunner:
             # list of (offload_key, sub_block_offset)
             offload_addresses: list[Any] = []
             for offload_key in offload_spec.offload_keys:
-                for sub_block_idx in range(block_size_factor):
+                for sub_block_idx in range(blocks_per_chunk):
                     offload_addresses.append((offload_key, sub_block_idx))
 
             assert gpu_spec.block_indices is not None
@@ -426,7 +424,7 @@ class RequestRunner:
                 gpu_block_end_offset = gpu_block_offset + group_size
                 assert gpu_block_end_offset <= len(gpu_blocks)
 
-                offload_addresses_to_skip = logical_offset % block_size_factor
+                offload_addresses_to_skip = logical_offset % blocks_per_chunk
                 offload_addresses_end_offset = (
                     offload_address_offset + offload_addresses_to_skip + group_size
                 )
@@ -651,14 +649,14 @@ def request_runner():
         block_size,
         num_gpu_blocks,
         async_scheduling,
-        block_size_factor=1,
+        blocks_per_chunk=1,
         kv_cache_groups=None,
         extra_config_overrides=None,
     ):
         runner = RequestRunner(
             block_size=block_size,
             num_gpu_blocks=num_gpu_blocks,
-            block_size_factor=block_size_factor,
+            blocks_per_chunk=blocks_per_chunk,
             async_scheduling=async_scheduling,
             kv_cache_groups=kv_cache_groups,
             extra_config_overrides=extra_config_overrides,

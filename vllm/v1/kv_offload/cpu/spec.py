@@ -69,28 +69,26 @@ class CPUOffloadingSpec(OffloadingSpec):
 
         world_size = config.parallel.world_size
         self.num_blocks = 0
-        self.kv_bytes_per_offloaded_block = 0
+        self.kv_bytes_per_chunk = 0
         self.cpu_page_size_per_worker = 0
         if config.worker_kv_bytes_per_block > 0 and world_size > 0:
             kv_bytes_per_block = config.worker_kv_bytes_per_block * world_size
-            kv_bytes_per_offloaded_block = kv_bytes_per_block * self.block_size_factor
+            kv_bytes_per_chunk = kv_bytes_per_block * self.blocks_per_chunk
 
             # calculate cpu_page_size_per_worker
-            self.cpu_page_size_per_worker = kv_bytes_per_offloaded_block // world_size
+            self.cpu_page_size_per_worker = kv_bytes_per_chunk // world_size
 
             # calculate num_blocks
-            aligned_kv_bytes_per_offloaded_block = round_up(
-                kv_bytes_per_offloaded_block, self.BLOCK_SIZE_ALIGNMENT
+            aligned_kv_bytes_per_chunk = round_up(
+                kv_bytes_per_chunk, self.BLOCK_SIZE_ALIGNMENT
             )
-            self.num_blocks = (
-                int(cpu_bytes_to_use) // aligned_kv_bytes_per_offloaded_block
-            )
+            self.num_blocks = int(cpu_bytes_to_use) // aligned_kv_bytes_per_chunk
 
-            # Expose aligned_kv_bytes_per_offloaded_block as
-            # kv_bytes_per_offloaded_block. Note that this might contain
+            # Expose aligned_kv_bytes_per_chunk as
+            # kv_bytes_per_chunk. Note that this might contain
             # some padding. i.e. each offloaded block is of the form,
             # |--- W0-B0---|---- W1-B0---| ... |---- Wn-B0---| *** maybe-pad *** |
-            self.kv_bytes_per_offloaded_block = aligned_kv_bytes_per_offloaded_block
+            self.kv_bytes_per_chunk = aligned_kv_bytes_per_chunk
 
         # scheduler-side
         self._manager: OffloadingManager | None = None
@@ -123,7 +121,7 @@ class CPUOffloadingSpec(OffloadingSpec):
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         return CPUOffloadingWorker(
             kv_caches=kv_caches,
-            block_size_factor=self.block_size_factor,
+            blocks_per_chunk=self.blocks_per_chunk,
             num_cpu_blocks=self.num_blocks,
         )
 

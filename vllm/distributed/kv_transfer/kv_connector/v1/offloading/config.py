@@ -48,19 +48,19 @@ def build_offloading_config(
         for group in kv_cache_config.kv_cache_groups
     )
 
-    _, hash_block_size = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+    _, tokens_per_hash = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
     for group in groups:
-        assert group.tokens_per_block % hash_block_size == 0, (
+        assert group.tokens_per_block % tokens_per_hash == 0, (
             f"tokens_per_block={group.tokens_per_block} not divisible by "
-            f"hash_block_size={hash_block_size}. "
+            f"tokens_per_hash={tokens_per_hash}. "
             f"Hybrid models (e.g. Mamba+Attention) need "
             f"--enable-prefix-caching to align block sizes."
         )
 
-    blocks_per_key = 1
-    offloaded_block_size = extra_config.get("block_size")
-    if offloaded_block_size is not None:
-        offloaded_block_size_int = int(offloaded_block_size)
+    blocks_per_chunk = 1
+    tokens_per_chunk = extra_config.get("block_size")
+    if tokens_per_chunk is not None:
+        tokens_per_chunk_int = int(tokens_per_chunk)
         unique_tokens_per_block = {group.tokens_per_block for group in groups}
         assert len(unique_tokens_per_block) == 1, (
             "If 'block_size' is specified in kv_connector_extra_config, "
@@ -68,8 +68,8 @@ def build_offloading_config(
             "and all groups must have the same block size."
         )
         tokens_per_block = unique_tokens_per_block.pop()
-        assert offloaded_block_size_int % tokens_per_block == 0
-        blocks_per_key = offloaded_block_size_int // tokens_per_block
+        assert tokens_per_chunk_int % tokens_per_block == 0
+        blocks_per_chunk = tokens_per_chunk_int // tokens_per_block
 
     worker_kv_bytes_per_block = 0
     if kv_cache_config.num_blocks > 0:
@@ -115,8 +115,8 @@ def build_offloading_config(
             dtype=str(vllm_config.cache_config.cache_dtype).replace("torch.", ""),
         ),
         cache=OffloadingCacheConfig(
-            hash_block_size=hash_block_size,
-            blocks_per_key=blocks_per_key,
+            tokens_per_hash=tokens_per_hash,
+            blocks_per_chunk=blocks_per_chunk,
         ),
         parallel=OffloadingParallelConfig(
             rank=parallel_config.rank,

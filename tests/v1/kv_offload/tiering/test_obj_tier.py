@@ -48,7 +48,7 @@ def _make_offloading_config(enable_kv_cache_events: bool) -> OffloadingConfig:
         extra_config={},
         engine_id="test-engine",
         model=OffloadingModelConfig(name="test/model", dtype="float16"),
-        cache=OffloadingCacheConfig(hash_block_size=16, blocks_per_key=1),
+        cache=OffloadingCacheConfig(tokens_per_hash=16, blocks_per_chunk=1),
         parallel=OffloadingParallelConfig(
             rank=0,
             world_size=1,

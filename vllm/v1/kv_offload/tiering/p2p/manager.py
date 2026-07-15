@@ -151,7 +151,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         config_fields = FileMapper.from_offloading_spec(
             root_dir="",
             offloading_spec=offloading_spec,
-            gpu_blocks_per_file=offloading_spec.block_size_factor,
+            blocks_per_file=offloading_spec.blocks_per_chunk,
             parallel_agnostic=True,
         ).get_run_config()
         self._data: DataTransport = NixlTransport(

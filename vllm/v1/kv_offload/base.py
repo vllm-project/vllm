@@ -504,8 +504,8 @@ class OffloadingSpec(ABC):
         )
 
         self.tokens_per_block = tuple(group.tokens_per_block for group in config.groups)
-        self.hash_block_size = config.cache.hash_block_size
-        self.block_size_factor = config.cache.blocks_per_key
+        self.tokens_per_hash = config.cache.tokens_per_hash
+        self.blocks_per_chunk = config.cache.blocks_per_chunk
 
     @abstractmethod
     def get_manager(self) -> OffloadingManager:

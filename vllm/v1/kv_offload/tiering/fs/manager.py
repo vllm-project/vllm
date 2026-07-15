@@ -114,7 +114,7 @@ class FileSystemTierManager(SecondaryTierManager):
         """
         Args:
             offloading_spec: Contains normalized offloading configuration and
-                block_size_factor.
+                blocks_per_chunk.
             primary_kv_view: Memoryview of the primary tier's CPU KV cache.
             tier_type: Tier type identifier, set by SecondaryTierFactory.
             root_dir: Root directory for block files.
@@ -150,7 +150,7 @@ class FileSystemTierManager(SecondaryTierManager):
         self.file_mapper = FileMapper.from_offloading_spec(
             root_dir=root_dir,
             offloading_spec=offloading_spec,
-            gpu_blocks_per_file=offloading_spec.block_size_factor,
+            blocks_per_file=offloading_spec.blocks_per_chunk,
             parallel_agnostic=True,
         )
 
