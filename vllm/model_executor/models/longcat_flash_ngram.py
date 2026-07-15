@@ -24,7 +24,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.states import RequestState
@@ -36,6 +35,42 @@ from .utils import AutoWeightsLoader, PPMissingLayer, maybe_prefix
 
 def uses_ngram_embedding(config: FlashConfig) -> bool:
     return getattr(config, "ngram_vocab_size_ratio", None) is not None
+
+
+def compute_eos_position_ngram_ids(
+    ngram: "NgramEmbedding",
+    eos_id: int,
+    table: torch.Tensor,
+    tok_req: torch.Tensor,
+    col: torch.Tensor,
+    eos_tok: torch.Tensor,
+) -> torch.Tensor:
+    """Hash ids for positions whose current token is EOS.
+
+    The ``ngram_compute_n_gram_ids`` kernel stops the n-gram walk at a negated
+    (EOS) table entry even at delta 0, but per the reference semantics an EOS
+    *current* token hashes normally with its full look-back; only later
+    positions' look-back stops at it. This recomputes those (rare) ids,
+    mirroring the kernel's per-config walk with delta 0 forced to the
+    un-negated EOS id.
+    """
+    device = table.device
+    n, k = ngram.n, ngram.k
+    num_emb = ngram.num_embedders
+    deltas = torch.arange(n, device=device)
+    back = table[tok_req[eos_tok, None], col[eos_tok, None] - deltas]  # [E, n]
+    back[:, 0] = eos_id
+    valid = (back >= 0).cumprod(dim=1).bool()
+    toks = torch.where(valid, back, 0).to(torch.int64)  # [E, n]
+
+    w = ngram.ne_weights.view(num_emb, n).to(torch.int64)  # [cfg, n]
+    m = ngram.ne_mods.view(num_emb).to(torch.int64)  # [cfg]
+    # Config i*k+j is an (i+2)-gram: only deltas < i+2 participate.
+    cfg_n = torch.arange(num_emb, device=device) // k + 2
+    dmask = deltas[None, :] < cfg_n[:, None]  # [cfg, n]
+    terms = (toks[:, None, :] * w[None]) % m[None, :, None] * dmask[None]
+    h = terms.sum(-1) % m[None]
+    return (h + ngram.exclusive_sizes[:-1].to(torch.int64)).to(torch.int32)
 
 
 def _config_dtype(config: FlashConfig) -> torch.dtype:
@@ -190,11 +225,11 @@ class FlashNgramModel(FlashModel):
         loaded: set[str] = set()
         rest: list[tuple[str, torch.Tensor]] = []
         for name, w in weights:
-            if self.ngram_embeddings is not None and (
-                "ngram_embeddings.embedders." in name
-                or "ngram_embeddings.post_projs." in name
-            ):
-                loaded.add(self.ngram_embeddings.load_weight(name, w))
+            if "ngram_embeddings." in name:
+                # Drop the checkpoint's n-gram tables when the module is
+                # disabled (e.g. ngram_vocab_size_ratio overridden to None).
+                if self.ngram_embeddings is not None:
+                    loaded.add(self.ngram_embeddings.load_weight(name, w))
             else:
                 rest.append((name, w))
         loaded |= super().load_weights(rest)
@@ -273,12 +308,14 @@ class LongcatFlashNgramForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
 
 class LongcatNgramModelState(DefaultModelState):
-    """Per-request n-gram token history for LongCat-Flash-Lite.
+    """n-gram input embedding state for LongCat-Flash models.
 
-    Maintains a small CPU-side per-slot context (last ``n-1`` processed tokens)
-    and a persistent ``inputs_embeds`` buffer. ``prepare_inputs`` computes the
-    fused n-gram embedding per request into the buffer, handed to the model
-    forward as ``inputs_embeds``.
+    ``prepare_inputs`` computes the fused n-gram embedding for the batch into
+    a persistent ``inputs_embeds`` buffer handed to the model forward. Each
+    position's left-context is gathered from the runner's authoritative
+    ``all_token_ids`` history, which keeps it correct under chunked prefill,
+    request resumption, and speculative decoding (rejected draft tokens never
+    enter the history).
     """
 
     def __init__(self, vllm_config, model, encoder_cache, device) -> None:
@@ -288,39 +325,13 @@ class LongcatNgramModelState(DefaultModelState):
         self.n = int(config.emb_neighbor_num)
         self.ctx_len = self.n - 1
         self.eos_id = int(config.eos_token_id)
-
-        # Per-slot left-context: last ``n-1`` processed tokens, EOS negated. A
-        # negative entry (incl. the -1 fill) marks a context boundary that stops
-        # the n-gram walk (matches the kernel's EOS break / fresh-request start).
-        self.token_context = torch.full(
-            (self.max_num_reqs, self.ctx_len), -1, dtype=torch.int32, device=device
-        )
+        self.device = device
 
         self._inputs_embeds_buf = torch.zeros(
             self.max_num_tokens,
             config.hidden_size,
             dtype=self.dtype,
             device=device,
-        )
-
-    def _neg_eos(self, toks: list[int]) -> list[int]:
-        return [-t if t == self.eos_id else t for t in toks]
-
-    def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
-        super().add_request(req_index, new_req_data)  # rope positions
-        # Fresh request -> no left-context (-1 fill). On resume, seed from the
-        # already-processed token tail. Use prefill_token_ids (full processed
-        # sequence incl. generated tokens on v2 resume), like DefaultModelState;
-        # the prompt alone would be too short when resuming after decode.
-        ctx = [-1] * self.ctx_len
-        ncomp = new_req_data.num_computed_tokens
-        toks_src = new_req_data.prefill_token_ids or new_req_data.prompt_token_ids
-        if ncomp > 0 and toks_src is not None:
-            lo = max(0, ncomp - self.ctx_len)
-            toks = self._neg_eos(list(toks_src[lo:ncomp]))
-            ctx[self.ctx_len - len(toks) :] = toks
-        self.token_context[req_index] = torch.tensor(
-            ctx, dtype=torch.int32, device=self.token_context.device
         )
 
     def prepare_inputs(
@@ -332,7 +343,7 @@ class LongcatNgramModelState(DefaultModelState):
         input_ids = input_batch.input_ids[:num_tokens]
         embeds = self._inputs_embeds_buf[:num_padded]
 
-        oe_ids = self._compute_oe_ids(input_batch)
+        oe_ids = self._compute_oe_ids(input_batch, req_states)
         embeds[:num_tokens].copy_(self.ngram.embed_batched(input_ids, oe_ids))
         model_inputs["inputs_embeds"] = embeds
         return model_inputs
@@ -345,14 +356,18 @@ class LongcatNgramModelState(DefaultModelState):
         model_inputs["inputs_embeds"] = self._inputs_embeds_buf[:num_tokens]
         return model_inputs
 
-    def _compute_oe_ids(self, input_batch: InputBatch) -> torch.Tensor:
+    def _compute_oe_ids(
+        self, input_batch: InputBatch, req_states: RequestState
+    ) -> torch.Tensor:
         """Batched global n-gram ids ``[num_tokens, num_embedders]``.
 
         Assembles an ephemeral per-request token table (``[n-1] context ++
         current tokens``, EOS-negated) and runs the ``ngram_compute_n_gram_ids``
-        CUDA kernel for the whole batch, then rolls each slot's context forward.
+        CUDA kernel for the whole batch. The left-context is gathered from the
+        authoritative ``all_token_ids`` history each step (rather than rolled
+        incrementally) so rejected speculative-draft tokens never pollute it.
         """
-        device = self.token_context.device
+        device = self.device
         num_tokens = input_batch.num_tokens
         num_reqs = input_batch.num_reqs
         ctx_len = self.ctx_len
@@ -365,9 +380,20 @@ class LongcatNgramModelState(DefaultModelState):
         max_len = int(req_lens.max().item())
         width = ctx_len + max_len
 
+        # Left-context: the ctx_len accepted tokens preceding this batch's
+        # first position, EOS-negated; -1 marks the sequence start.
+        p0 = req_states.num_computed_tokens.gpu[idx_mapping].long()  # [R]
+        ctx_pos = p0[:, None] + torch.arange(-ctx_len, 0, device=device)  # [R, C]
+        in_range = ctx_pos >= 0
+        ctx = req_states.all_token_ids.gpu[
+            idx_mapping[:, None], ctx_pos.clamp_min(0)
+        ].to(torch.int32)
+        ctx = torch.where(ctx == self.eos_id, -ctx, ctx)
+        ctx = torch.where(in_range, ctx, ctx.new_full((), -1))
+
         # table[r] = [context(n-1) | current tokens | pad(-1)]
         table = torch.full((num_reqs, width), -1, dtype=torch.int32, device=device)
-        table[:, :ctx_len] = self.token_context[idx_mapping]
+        table[:, :ctx_len] = ctx
         tok_req = torch.repeat_interleave(
             torch.arange(num_reqs, device=device), req_lens.long()
         )
@@ -396,10 +422,14 @@ class LongcatNgramModelState(DefaultModelState):
             n_gram_ids,
         )
 
-        # Roll context: new context = last n-1 of [context | current] per slot.
-        gather = req_lens.long().unsqueeze(1) + torch.arange(
-            ctx_len, device=device
-        ).unsqueeze(0)
-        rows = torch.arange(num_reqs, device=device).unsqueeze(1)
-        self.token_context[idx_mapping] = table[rows, gather]
+        # The kernel stops the n-gram walk at a negated (EOS) table entry even
+        # at delta 0, but per the reference semantics an EOS *current* token
+        # hashes normally with its full look-back; only later positions'
+        # look-back stops at it. Recompute the (rare) EOS-position ids here.
+        eos_tok = (cur == self.eos_id).nonzero(as_tuple=True)[0]
+        if eos_tok.numel():
+            n_gram_ids[eos_tok] = compute_eos_position_ngram_ids(
+                self.ngram, self.eos_id, table, tok_req, col, eos_tok
+            )
+
         return n_gram_ids.long()

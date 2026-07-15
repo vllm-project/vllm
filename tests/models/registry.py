@@ -389,6 +389,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         # so the dummy-weight init test fits in CI memory.
         hf_overrides={"ngram_vocab_size_ratio": 1},
     ),
+    "LongcatCausalLM": _HfExamplesInfo(
+        "meituan-longcat/LongCat-2.0-FP8",
+        # Shrink the huge n-gram tables (~264M rows at the checkpoint's
+        # oe_vocab_size_ratio=100.567) so dummy-weight init fits in CI memory.
+        hf_overrides={"ngram_vocab_size_ratio": 1},
+    ),
     "MambaForCausalLM": _HfExamplesInfo("state-spaces/mamba-130m-hf"),
     "Mamba2ForCausalLM": _HfExamplesInfo(
         "mistralai/Mamba-Codestral-7B-v0.1",

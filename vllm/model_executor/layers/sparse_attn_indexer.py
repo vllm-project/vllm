@@ -250,6 +250,40 @@ def fused_indexer_q_rope_quant(
     return q_fp8, weights_out
 
 
+def _mask_init_and_local_tokens(
+    logits: torch.Tensor,
+    row_starts: torch.Tensor | None,
+    row_ends: torch.Tensor,
+    num_init_tokens: int,
+    num_local_tokens: int,
+) -> None:
+    """Force streaming tokens into the top-k set (streaming-aware indexing):
+    scatter +inf into the first ``num_init_tokens`` and last
+    ``num_local_tokens`` columns of each row's valid range
+    ``[row_starts, row_ends)``. Out-of-range writes are clamped into
+    ``[row_starts, row_ends)`` so they never leak into other rows' ranges.
+    """
+    device = logits.device
+    ends = row_ends.to(device=device, dtype=torch.int64).reshape(-1)
+    if row_starts is None:
+        starts = torch.zeros_like(ends)
+    else:
+        starts = row_starts.to(device=device, dtype=torch.int64).reshape(-1)
+    last = (ends - 1).clamp_max_(logits.shape[1] - 1).clamp_min_(starts)
+    if num_init_tokens > 0:
+        init_idx = starts[:, None] + torch.arange(
+            num_init_tokens, dtype=torch.int64, device=device
+        )
+        init_idx = torch.minimum(init_idx, last[:, None])
+        logits.scatter_(1, init_idx, float("inf"))
+    if num_local_tokens > 0:
+        local_idx = last[:, None] - torch.arange(
+            num_local_tokens, dtype=torch.int64, device=device
+        )
+        local_idx = torch.maximum(local_idx, starts[:, None])
+        logits.scatter_(1, local_idx, float("inf"))
+
+
 def _gather_workspace_shapes(
     total_seq_lens: int,
     head_dim: int,
@@ -313,6 +347,8 @@ def sparse_attn_indexer(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     skip_topk_buffer_clear: bool = False,
+    num_init_tokens: int = 0,
+    num_local_tokens: int = 0,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -471,6 +507,14 @@ def sparse_attn_indexer(
                         cu_seqlen_ke,
                         clean_logits=False,
                     )
+                if num_init_tokens > 0 or num_local_tokens > 0:
+                    _mask_init_and_local_tokens(
+                        logits,
+                        cu_seqlen_ks,
+                        cu_seqlen_ke,
+                        num_init_tokens,
+                        num_local_tokens,
+                    )
                 num_rows = logits.shape[0]
                 ops.top_k_per_row_prefill(
                     logits,
@@ -572,6 +616,17 @@ def sparse_attn_indexer(
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
+        if num_init_tokens > 0 or num_local_tokens > 0:
+            # seq_lens is (B, next_n) whenever next_n > 1, so flattening
+            # yields the per-row context length.
+            _mask_init_and_local_tokens(
+                logits,
+                None,
+                seq_lens.reshape(-1)[:num_rows],
+                num_init_tokens,
+                num_local_tokens,
+            )
+
         use_cooperative_topk = (
             current_platform.is_cuda()
             and topk_tokens in (512, 1024, 2048)
@@ -668,6 +723,8 @@ def sparse_attn_indexer_fake(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     skip_topk_buffer_clear: bool = False,
+    num_init_tokens: int = 0,
+    num_local_tokens: int = 0,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -706,6 +763,8 @@ class SparseAttnIndexer(CustomOp):
         topk_indices_buffer: torch.Tensor,
         skip_k_cache_insert: bool = False,
         use_fp4_cache: bool = False,
+        num_init_tokens: int = 0,
+        num_local_tokens: int = 0,
     ):
         super().__init__()
         self.k_cache = k_cache
@@ -718,6 +777,8 @@ class SparseAttnIndexer(CustomOp):
         self.topk_indices_buffer = topk_indices_buffer
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
+        self.num_init_tokens = num_init_tokens
+        self.num_local_tokens = num_local_tokens
         # DCP scalars are constant for the run; resolve them here (config is set
         # during model construction) and pass them into the custom op, rather
         # than threading them through per-step metadata.
@@ -781,6 +842,8 @@ class SparseAttnIndexer(CustomOp):
             self.dcp_rank,
             self.dcp_world_size,
             self.cp_kv_cache_interleave_size,
+            num_init_tokens=self.num_init_tokens,
+            num_local_tokens=self.num_local_tokens,
         )
 
     def forward_xpu(
@@ -802,6 +865,10 @@ class SparseAttnIndexer(CustomOp):
         assert not self.use_fp4_cache, "AMD platform doesn't support fp4 cache yet"
         assert isinstance(q_quant, torch.Tensor), (
             "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
+        )
+        assert self.num_init_tokens == 0 and self.num_local_tokens == 0, (
+            "Streaming-aware indexing (index_init_tokens/index_local_tokens) is "
+            "not supported on the ROCm sparse_attn_indexer path yet"
         )
         if rocm_aiter_ops.is_enabled():
             return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
