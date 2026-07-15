@@ -40,7 +40,11 @@ def _collect_group_backends(worker) -> list[tuple[str, str]]:
         {"full_attention": "TRITON_ATTN", "sliding_window": "FLASH_ATTN"},
     ],
 )
-def test_backend_per_kind_splits_groups(backend_per_kind):
+def test_backend_per_kind_splits_groups(backend_per_kind, monkeypatch):
+    # collective_rpc ships the callable to the EngineCore subprocess; the
+    # secure msgpack encoder can't serialize functions, so opt into the
+    # pickle fallback (same pattern as test_pooling_chunked_prefill).
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     llm = LLM(
         model=MODEL,
         attention_config=AttentionConfig(backend_per_kind=backend_per_kind),
@@ -66,9 +70,10 @@ def test_backend_per_kind_splits_groups(backend_per_kind):
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="backend names are CUDA-specific"
 )
-def test_backend_per_kind_overrides_global_backend():
+def test_backend_per_kind_overrides_global_backend(monkeypatch):
     """A per-kind entry wins over the global ``backend`` for its kind; other
     kinds fall back to the global backend."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     llm = LLM(
         model=MODEL,
         attention_config=AttentionConfig(
