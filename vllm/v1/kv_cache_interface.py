@@ -554,22 +554,18 @@ class SlidingWindowSpec(AttentionSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
-        # Mirror ``FullAttentionSpec.real_page_size_bytes`` for NVFP4 KV cache.
+        # Mirror ``FullAttentionSpec.real_page_size_bytes`` for NVFP4 and
+        # INT4_PER_TOKEN_HEAD KV caches.
         if self.kv_quant_mode.is_nvfp4:
             last_dim = nvfp4_kv_cache_full_dim(
                 self.head_size
             ) + nvfp4_kv_cache_full_dim(self.head_size_v)
-            return (
-                self.block_size
-                * self.num_kv_heads
-                * last_dim
-                * get_dtype_size(self.dtype)
-            )
+        elif self.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            last_dim = self.head_size // 2 + self.head_size_v // 2
+        else:
+            last_dim = self.head_size + self.head_size_v
         return (
-            self.block_size
-            * self.num_kv_heads
-            * (self.head_size + self.head_size_v)
-            * get_dtype_size(self.dtype)
+            self.block_size * self.num_kv_heads * last_dim * get_dtype_size(self.dtype)
         )
 
     def max_admission_blocks_per_request(
