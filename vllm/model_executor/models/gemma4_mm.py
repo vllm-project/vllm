@@ -1585,6 +1585,9 @@ class Gemma4ForConditionalGeneration(
             return "video"
         raise ValueError("Unsupported modality in mm_kwargs")
 
+    def get_max_frames_per_video(self) -> int:
+        return _VIDEO_MAX_FRAMES
+
     def get_encoder_cudagraph_item_specs(
         self,
         mm_kwargs: dict[str, Any],
@@ -1710,16 +1713,19 @@ class Gemma4ForConditionalGeneration(
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,
-        token_budget: int,
-        max_batch_size: int,
-        max_frames_per_batch: int,
-        device: torch.device,
-        dtype: torch.dtype,
+        token_budget: int = 256,
+        max_batch_size: int = 4,
+        max_frames_per_batch: int = 1,
+        device: torch.device | str = "cpu",
+        dtype: torch.dtype | None = None,
         path: str = "default",
+        **kwargs: Any,
     ) -> "EncoderCudaGraphCaptureInputs":
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
         )
+
+        dtype = dtype or torch.float32
 
         max_size = max(max_batch_size, max_frames_per_batch)
 
@@ -1763,9 +1769,10 @@ class Gemma4ForConditionalGeneration(
     def prepare_encoder_cudagraph_replay_buffers(
         self,
         mm_kwargs: dict[str, Any],
-        max_batch_size: int,
-        max_frames_per_batch: int,
+        max_batch_size: int = 4,
+        max_frames_per_batch: int = 1,
         path: str = "default",
+        **kwargs: Any,
     ) -> "EncoderCudaGraphReplayBuffers":
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphReplayBuffers,
@@ -1872,6 +1879,7 @@ class Gemma4ForConditionalGeneration(
         self,
         inputs: dict[str, torch.Tensor],
         path: str = "default",
+        **kwargs: Any,
     ) -> torch.Tensor:
         pixel_values = inputs["pixel_values"]
         pixel_position_ids = inputs["pixel_position_ids"]
@@ -1920,6 +1928,7 @@ class Gemma4ForConditionalGeneration(
         self,
         mm_kwargs: dict[str, Any],
         path: str = "default",
+        **kwargs: Any,
     ) -> torch.Tensor:
         modality = self.get_input_modality(mm_kwargs)
         if modality == "image":
