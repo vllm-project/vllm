@@ -515,7 +515,14 @@ class EngineCore:
             iteration_details = compute_iteration_details(scheduler_output)
             is_dummy = False
         before = time.monotonic()
-        yield
+        timing: dict[str, float] = {}
+        yield timing
+        result_wait_time = timing.get("result_wait_time")
+        result_wait_detail = (
+            f", result wait time: {result_wait_time * 1000:.2f} ms"
+            if result_wait_time is not None
+            else ""
+        )
         logger.info(
             "".join(
                 [
@@ -532,6 +539,7 @@ class EngineCore:
                     " generation tokens, iteration elapsed time: ",
                     format((time.monotonic() - before) * 1000, ".2f"),
                     " ms",
+                    result_wait_detail,
                     " (dummy)" if is_dummy else "",
                 ]
             )
@@ -559,9 +567,12 @@ class EngineCore:
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
             self.log_error_detail(scheduler_output),
-            self.log_iteration_details(scheduler_output),
+            self.log_iteration_details(scheduler_output) as timing,
         ):
+            result_wait_start = time.monotonic() if timing is not None else 0.0
             model_output = future.result()
+            if timing is not None:
+                timing["result_wait_time"] = time.monotonic() - result_wait_start
             if model_output is None:
                 model_output = self.model_executor.sample_tokens(grammar_output)
 
@@ -657,9 +668,12 @@ class EngineCore:
         future, scheduler_output, exec_model_fut = batch_queue.pop()
         with (
             self.log_error_detail(scheduler_output),
-            self.log_iteration_details(scheduler_output),
+            self.log_iteration_details(scheduler_output) as timing,
         ):
+            result_wait_start = time.monotonic() if timing is not None else 0.0
             model_output = future.result()
+            if timing is not None:
+                timing["result_wait_time"] = time.monotonic() - result_wait_start
             if model_output is None:
                 # None from sample_tokens() implies that the original execute_model()
                 # call failed - raise that exception.
