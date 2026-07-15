@@ -1135,7 +1135,20 @@ def is_kv_cache_type_attention_free(kv_cache_spec: dict[str, KVCacheSpec]) -> bo
     return not kv_cache_spec
 
 
+def _warn_padding_layers(num_layers: int, group_size: int) -> None:
+    """Warn about wasted KV cache memory when a layer type does not divide
+    evenly into ``group_size`` and must be padded to fill the last group."""
+    num_padding_layers = group_size - num_layers % group_size
+    if num_padding_layers != group_size:
+        logger.warning(
+            "Add %d padding layers, may waste at most %.2f%% KV cache memory",  # noqa
+            num_padding_layers,
+            num_padding_layers / num_layers * 100,
+        )
+
+
 def _get_kv_cache_groups_uniform_page_size(
+    vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec]:
     """
@@ -1200,12 +1213,40 @@ def _get_kv_cache_groups_uniform_page_size(
     Returns:
         The generated KVCacheGroupSpecs
     """
-    # Group all layers by kv_cache_spec.
+
+    # --- Eagle draft layer placement --------------------------------------
+    # Eagle speculative-decoding draft layers must all end up in a single KV
+    # cache group (the proposer shares one AttentionMetadata across them). How
+    # we place them depends on the number of draft layers (D) and the
+    # pipeline-parallel size (P):
+    #   * D <= 1           -> "default": let the lone draft layer flow through
+    #     the normal per-spec grouping (legacy behavior). A single layer never
+    #     scatters and can reuse an existing group.
+    #   * D > 1 and P == 1 -> "fold": pack the draft layers into one existing
+    #     same-spec target group so they stay together without adding an extra
+    #     block-churn stream (an extra stream collapses prefix-cache hit rate).
+    #   * D > 1 and P > 1  -> "separate": give the draft its own group. Folding
+    #     breaks the layers[i::n] PP stage-balancing below, and >1 draft layers
+    #     would otherwise scatter across the strided groups.
+    draft_layer_group = [
+        layer_name for layer_name in kv_cache_spec if "eagle" in layer_name
+    ]
+    num_draft = len(draft_layer_group)
+    pp_size = vllm_config.parallel_config.pipeline_parallel_size
+    multi_draft = num_draft > 1
+    fold_draft = multi_draft and pp_size == 1
+    separate_draft = multi_draft and pp_size > 1
+
+    # Group the target (non-draft) layers by kv_cache_spec. Draft layers are
+    # always excluded here so group_size is derived purely from the target
+    # model; a default (D <= 1) draft layer is re-added after group_size is
+    # computed so it cannot perturb it.
     # E.g., 2 full attention layers and 3 sliding window attention layers,
     # -> (full.0, full.1), (sw.0, sw.1, sw.2).
     same_type_layers: dict[KVCacheSpec, list[str]] = defaultdict(list)
     for layer_name, layer_spec in kv_cache_spec.items():
-        same_type_layers[layer_spec].append(layer_name)
+        if "eagle" not in layer_name:
+            same_type_layers[layer_spec].append(layer_name)
 
     # Split each group into smaller groups, to make the number of layers in each
     # group identical. Add padding to the last group of each type if necessary.
@@ -1232,14 +1273,46 @@ def _get_kv_cache_groups_uniform_page_size(
         # extra layers to one attention type.
         group_size = max_num_layers
     grouped_layers = []
-    for layers in same_type_layers.values():
-        num_padding_layers = group_size - len(layers) % group_size
-        if num_padding_layers != group_size:
-            logger.warning(
-                "Add %d padding layers, may waste at most %.2f%% KV cache memory",  # noqa
-                num_padding_layers,
-                num_padding_layers / len(layers) * 100,
-            )
+
+    draft_spec = kv_cache_spec[draft_layer_group[0]] if draft_layer_group else None
+
+    if multi_draft:
+        # Fold and separate both place all draft layers into one group, so they
+        # must fit within a single group (there are only group_size layer slots).
+        assert num_draft <= group_size, (
+            f"Number of eagle draft layers ({num_draft}) must be <= group_size "
+            f"({group_size}) so all draft layers fit in one group."
+        )
+
+    if fold_draft and draft_spec not in same_type_layers:
+        # Folding needs a target group with an identical spec, otherwise
+        # create_kv_cache_group_specs' merge() would fail. Fall back to a
+        # separate draft group.
+        logger.warning(
+            "No target layer shares the draft KV spec; "
+            "falling back to a separate draft group."
+        )
+        fold_draft = False
+        separate_draft = True
+
+    if num_draft == 1:
+        # Default: re-add the single draft layer to its matching target spec
+        # (or, if none matches, it forms its own single-layer group) so it is
+        # split into a group below alongside the target layers. Done after
+        # group_size is computed so the draft cannot perturb it.
+        same_type_layers[draft_spec].append(draft_layer_group[0])
+
+    for spec, layers in same_type_layers.items():
+        if fold_draft and spec == draft_spec:
+            # Fold: build one group of exactly group_size layers, made of
+            # (group_size - num_draft) target layers plus all draft layers; the
+            # remaining target layers of this spec fall through to the split.
+            _warn_padding_layers(len(layers) + num_draft, group_size)
+            reserved = max(group_size - num_draft, 0)
+            grouped_layers.append(layers[:reserved] + draft_layer_group)
+            layers = layers[reserved:]
+        else:
+            _warn_padding_layers(len(layers), group_size)
         num_groups = cdiv(len(layers), group_size)
         # In PP case, say if we have
         # - stage 0: full.0, sw.0, sw.1
@@ -1254,6 +1327,18 @@ def _get_kv_cache_groups_uniform_page_size(
         # instead of layers[i * group_size: (i + 1) * group_size]
         for i in range(num_groups):
             grouped_layers.append(layers[i::num_groups])
+
+    if separate_draft:
+        # Insert the standalone draft group adjacent to the same-type target
+        # groups so group ids of each attention type stay contiguous (required
+        # by HybridKVCacheCoordinator's non-interleaving check).
+        draft_spec_type = type(kv_cache_spec[draft_layer_group[0]])
+        insert_idx = 0
+        for idx, group in enumerate(grouped_layers):
+            if isinstance(kv_cache_spec[group[0]], draft_spec_type):
+                insert_idx = idx + 1
+        grouped_layers.insert(insert_idx, draft_layer_group)
+
     return create_kv_cache_group_specs(kv_cache_spec, grouped_layers)
 
 
@@ -1781,7 +1866,7 @@ def get_kv_cache_groups(
     # the page size of the layers. For cases cannot be unified, this function
     # will raise an error.
     filtered_spec = unify_kv_cache_spec_page_size(filtered_spec)
-    groups = _get_kv_cache_groups_uniform_page_size(filtered_spec)
+    groups = _get_kv_cache_groups_uniform_page_size(vllm_config, filtered_spec)
 
     # Add hidden-state layers back with page aligned to the common page.
     if hidden_specs:

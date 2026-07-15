@@ -146,9 +146,13 @@ class EagleCohereForCausalLM(CohereForCausalLM):
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config
         )
+
+        # Name the eagle draft model so it can be 
+        # distinguished from the target model 
+        # in the KV cache groups.
         self.model = CohereEagleModel(
             vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
+            prefix=maybe_prefix(prefix, "eagle"),
             start_layer_id=target_layer_num,
         )
 

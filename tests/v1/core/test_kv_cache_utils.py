@@ -3,6 +3,7 @@
 import hashlib
 import importlib
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -2731,3 +2732,124 @@ def test_resolve_block_hashes_rejects_mismatched_view():
     mismatched = BlockHashListWithBlockSize(raw, 2, 8)
     with pytest.raises(AssertionError):
         resolve_block_hashes(mismatched, 2, 4)
+
+
+# ---------------------------------------------------------------------------
+# Eagle draft KV cache grouping (multi_draft / fold_draft / separate_draft).
+# These tests exercise _get_kv_cache_groups_uniform_page_size directly with
+# synthetic specs so they never load real model weights.
+# ---------------------------------------------------------------------------
+
+
+def _build_eagle_specs(
+    num_full: int,
+    num_sw: int,
+    num_draft_layers: int,
+    draft_matches: bool = True,
+) -> dict[str, KVCacheSpec]:
+    """Build a synthetic kv_cache_spec with target full + sliding-window layers
+    and ``num_draft_layers`` eagle draft layers.
+
+    When ``draft_matches`` is True the draft layers share the target
+    sliding-window spec (so they can be folded); otherwise they use a unique
+    spec (different sliding window) that no target layer matches.
+    """
+    spec: dict[str, KVCacheSpec] = {}
+    for i in range(num_full):
+        spec[f"target.full.{i}"] = new_kv_cache_spec()
+    for i in range(num_sw):
+        spec[f"target.sw.{i}"] = new_sliding_window_spec(sliding_window=1)
+    draft_window = 1 if draft_matches else 999
+    for i in range(num_draft_layers):
+        spec[f"eagle_draft.sw.{i}"] = new_sliding_window_spec(
+            sliding_window=draft_window
+        )
+    return spec
+
+
+def _fake_vllm_config(pp_size: int) -> Any:
+    # The grouping routine only reads parallel_config.pipeline_parallel_size,
+    # so a lightweight stand-in avoids building a full (GPU-bound) VllmConfig.
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size)
+    )
+
+
+def _draft_names(spec: dict[str, KVCacheSpec]) -> set[str]:
+    return {ln for ln in spec if "eagle" in ln}
+
+
+@pytest.mark.parametrize(
+    "num_draft_layers,pp_size,draft_matches,expected_mode",
+    [
+        # D <= 1: default grouping, regardless of PP.
+        (1, 1, True, "default"),
+        (1, 2, True, "default"),
+        # D > 1, P == 1: fold into a same-spec target group.
+        (3, 1, True, "fold"),
+        # D > 1, P > 1: standalone (separate) group.
+        (3, 2, True, "separate"),
+        # D > 1, P == 1 but no matching target spec: fall back to separate.
+        (3, 1, False, "separate"),
+    ],
+)
+def test_eagle_draft_kv_cache_grouping(
+    num_draft_layers, pp_size, draft_matches, expected_mode
+):
+    spec = _build_eagle_specs(
+        num_full=4, num_sw=13, num_draft_layers=num_draft_layers, draft_matches=draft_matches
+    )
+    groups = kv_cache_utils._get_kv_cache_groups_uniform_page_size(
+        _fake_vllm_config(pp_size), spec
+    )
+
+    # Every layer must appear in exactly one group. This is the key regression
+    # guard: the previous logic could process draft layers twice (folded AND
+    # inserted as a separate group), duplicating them here.
+    all_layers = [ln for g in groups for ln in g.layer_names]
+    assert sorted(all_layers) == sorted(spec.keys())
+
+    draft_names = _draft_names(spec)
+    draft_groups = [g for g in groups if any("eagle" in ln for ln in g.layer_names)]
+    # All draft layers must live in exactly one group.
+    assert len(draft_groups) == 1
+    draft_group = set(draft_groups[0].layer_names)
+    assert draft_names <= draft_group
+
+    if expected_mode == "separate":
+        # Standalone group containing exactly the draft layers.
+        assert draft_group == draft_names
+    else:
+        # default / fold: the draft shares its group with target layers.
+        assert draft_group > draft_names
+        if expected_mode == "fold":
+            # The folded group holds exactly group_size (== 4) layers:
+            # (group_size - num_draft_layers) target layers + all draft layers.
+            assert len(draft_group) == 4
+
+
+def test_eagle_default_group_size_uses_target_only():
+    # Target: 3 full + 3 sliding -> target-only group_size == 3. If the single
+    # default draft layer were counted when computing group_size, the
+    # sliding type would have 4 layers and the 1.5x heuristic would bump
+    # group_size to 4. Verify the draft does NOT perturb group_size.
+    spec = _build_eagle_specs(num_full=3, num_sw=3, num_draft_layers=1)
+    groups = kv_cache_utils._get_kv_cache_groups_uniform_page_size(
+        _fake_vllm_config(1), spec
+    )
+    all_layers = [ln for g in groups for ln in g.layer_names]
+    assert sorted(all_layers) == sorted(spec.keys())
+    # No group exceeds the target-only group_size of 3 real layers.
+    assert max(len(g.layer_names) for g in groups) == 3
+
+
+def test_eagle_no_draft_grouping_unaffected():
+    # Sanity check: with no eagle draft layers the grouping is the plain
+    # hybrid split (one full group + one sliding group here).
+    spec = _build_eagle_specs(num_full=4, num_sw=4, num_draft_layers=0)
+    groups = kv_cache_utils._get_kv_cache_groups_uniform_page_size(
+        _fake_vllm_config(1), spec
+    )
+    all_layers = [ln for g in groups for ln in g.layer_names]
+    assert sorted(all_layers) == sorted(spec.keys())
+    assert not any("eagle" in ln for ln in all_layers)
