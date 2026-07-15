@@ -106,7 +106,7 @@ def test_adaptive_verification_caps_irregular_draft_windows(
             3,
         ),
         ({"a": 5, "b": 7}, {"a": [1, 2, 3, 4]}, {"b"}, 9),
-        ({"a": 5}, {"a": [1, 2, -1, -1]}, set(), 3),
+        ({"a": 5}, {"a": [1, 2, -1, -1]}, set(), 4),
     ],
 )
 def test_adaptive_drafting_manager(
@@ -145,6 +145,7 @@ def test_adaptive_drafting_manager_builds_mixed_prefill_layout():
     num_draft_tokens, cu_num_logits, query_start_loc_np = (
         drafting_manager.prepare_verification_layout(
             scheduler_output,
+            ["decode", "prefill"],
             torch.tensor([0, 1], dtype=torch.int32),
             draft_token_budget=1,
             query_start_loc=query_start_loc,
@@ -162,6 +163,41 @@ def test_adaptive_drafting_manager_builds_mixed_prefill_layout():
     ]
 
 
+def test_adaptive_drafting_manager_uses_worker_request_order():
+    req_states = _make_req_states(["long", "short"])
+    speculator = MagicMock()
+    drafting_manager = _make_drafting_manager(
+        [(1, 2, 2)],
+        max_num_reqs=2,
+        max_num_spec_tokens=4,
+        req_states=req_states,
+        speculator=speculator,
+    )
+    scheduler_output = _make_scheduler_output(
+        {"long": 5, "short": 2},
+        {"long": [1, 2, 3, 4], "short": [-1]},
+    )
+    speculator.allocate_draft_token_budget.return_value = torch.tensor(
+        [1, 2], dtype=torch.int32
+    )
+    query_start_loc = torch.empty(3, dtype=torch.int32)
+
+    drafting_manager.prepare_verification_layout(
+        scheduler_output,
+        ["short", "long"],
+        torch.tensor([1, 0], dtype=torch.int32),
+        draft_token_budget=3,
+        query_start_loc=query_start_loc,
+        num_reqs_padded=2,
+    )
+
+    assert speculator.allocate_draft_token_budget.call_args.args[2].tolist() == [
+        1,
+        4,
+    ]
+    assert query_start_loc.tolist() == [0, 2, 5]
+
+
 def test_adaptive_verification_allocator_respects_draft_caps():
     confidence_logits = torch.zeros((2, 3))
 
@@ -174,22 +210,19 @@ def test_adaptive_verification_allocator_respects_draft_caps():
     assert allocated.tolist() == [1, 2]
 
 
-def test_adaptive_drafting_manager_caps_invalid_draft_suffixes():
+def test_adaptive_drafting_manager_treats_async_placeholders_as_drafts():
     drafting_manager = _make_drafting_manager(
-        [(1, 2, 2), (3, 3, 1)],
-        max_num_reqs=3,
+        [(1, 1, 2)],
+        max_num_reqs=1,
         max_num_spec_tokens=4,
-        req_states=_make_req_states(["decode", "prefill"], {"prefill"}),
+        req_states=_make_req_states(["decode"]),
     )
     scheduler_output = _make_scheduler_output(
-        {"decode": 5, "prefill": 5},
-        {
-            "decode": [1, 2, -1, -1],
-            "prefill": [1, 2, 3, 4],
-        },
+        {"decode": 5},
+        {"decode": [-1, -1, -1, -1]},
     )
 
-    assert drafting_manager.plan_batch(scheduler_output) == (3, 1)
+    assert drafting_manager.plan_batch(scheduler_output) == (3, 2)
 
 
 def _make_scheduler_output(scheduled_tokens, draft_tokens):

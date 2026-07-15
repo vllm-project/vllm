@@ -29,6 +29,7 @@ class AdaptiveDraftingManager(ABC):
     def prepare_verification_layout(
         self,
         scheduler_output: SchedulerOutput,
+        req_ids: Sequence[str],
         idx_mapping: torch.Tensor,
         draft_token_budget: int,
         query_start_loc: torch.Tensor,
@@ -84,12 +85,12 @@ class DynamicSDDraftingManager(AdaptiveDraftingManager):
     def prepare_verification_layout(
         self,
         scheduler_output: SchedulerOutput,
+        req_ids: Sequence[str],
         idx_mapping: torch.Tensor,
         draft_token_budget: int,
         query_start_loc: torch.Tensor,
         num_reqs_padded: int,
     ) -> tuple[torch.Tensor, torch.Tensor, np.ndarray]:
-        req_ids = tuple(scheduler_output.num_scheduled_tokens)
         draft_caps, base_query_counts, is_prefill = self._get_request_layout(
             scheduler_output, req_ids
         )
@@ -166,9 +167,7 @@ class DynamicSDDraftingManager(AdaptiveDraftingManager):
                     f"Request {req_id} has more draft tokens than scheduled tokens."
                 )
             is_prefill[index] = self._is_prefill(req_id)
-            draft_caps[index] = (
-                0 if is_prefill[index] else self._count_valid_prefix(token_ids)
-            )
+            draft_caps[index] = 0 if is_prefill[index] else len(token_ids)
         return draft_caps, base_query_counts, is_prefill
 
     def _copy_to_device(
@@ -177,13 +176,6 @@ class DynamicSDDraftingManager(AdaptiveDraftingManager):
         if destination.device.type == "cpu":
             return destination.copy_(torch.from_numpy(source))
         return async_copy_to_gpu(source, out=destination)
-
-    @staticmethod
-    def _count_valid_prefix(token_ids: Sequence[int]) -> int:
-        return next(
-            (index for index, token_id in enumerate(token_ids) if token_id == -1),
-            len(token_ids),
-        )
 
     def _is_prefill(self, req_id: str) -> bool:
         req_index = self._req_states.req_id_to_index.get(req_id)

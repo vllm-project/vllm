@@ -986,6 +986,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 query_start_loc_np,
             ) = drafting_manager.prepare_verification_layout(
                 scheduler_output,
+                req_ids,
                 idx_mapping,
                 draft_token_budget,
                 self.input_buffers.query_start_loc,
