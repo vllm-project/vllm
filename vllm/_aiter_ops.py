@@ -2637,7 +2637,8 @@ class rocm_aiter_ops:
 
         Args:
             tensor: The input weight tensor to be shuffled.
-            layout: The block layout to use, defaults to (16, 4).
+            nLane: Number of lanes in the shuffle layout.
+            gate_up: Whether the weight is for w13 (True) or w2 (False).
 
         Returns:
             torch.Tensor: The shuffled tensor.
@@ -2875,7 +2876,6 @@ class rocm_aiter_ops:
             hc_sinkhorn_eps: sinkhorn epsilon
             hc_post_mult_value: post-mix multiplier value
             sinkhorn_repeat: number of sinkhorn iterations
-            n_splits: split-k factor;
 
         Returns:
             post_mix: shape (..., hc_mult), dtype torch.float32
