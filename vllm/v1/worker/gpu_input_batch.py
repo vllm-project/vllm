@@ -972,8 +972,11 @@ class InputBatch:
         prompt_token_ids[:] = self.token_ids_cpu[:num_reqs, :max_prompt_len]
         # Use the value of vocab_size as a pad since we don't have a
         # token_id of this value.
-        for i in range(num_reqs):
-            prompt_token_ids[i, self.num_prompt_tokens[i] :] = self.vocab_size
+        prompt_lens = self.num_prompt_tokens_cpu_tensor[:num_reqs]
+        padding = (
+            torch.arange(max_prompt_len).expand(num_reqs, -1) >= (prompt_lens[:, None])
+        )
+        prompt_token_ids_cpu_tensor.masked_fill_(padding, self.vocab_size)
         return prompt_token_ids_cpu_tensor
 
     def make_lora_inputs(

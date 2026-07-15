@@ -517,3 +517,45 @@ def test_pooling_metadata_token_id_buffers(
         assert metadata.get_prompt_token_ids_cpu()[0].tolist() == req.prompt_token_ids
     else:
         assert metadata.prompt_token_ids_cpu is None
+
+
+def test_pooling_metadata_cpu_token_ids_pad_without_per_request_loop():
+    from vllm.pooling_params import PoolingParams
+
+    input_batch = InputBatch(
+        max_num_reqs=3,
+        max_model_len=MAX_PROMPT_SIZE + NUM_OUTPUT_TOKENS,
+        max_num_batched_tokens=3 * (MAX_PROMPT_SIZE + NUM_OUTPUT_TOKENS),
+        device=torch.device("cpu"),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[16],
+        kernel_block_sizes=[16],
+        max_num_blocks_per_req=[64],
+        is_pooling_model=True,
+    )
+    requests = [
+        CachedRequestState(
+            req_id=f"pool_req_{i}",
+            prompt_token_ids=list(range(2 + i)),
+            sampling_params=None,
+            pooling_params=PoolingParams(task="classify", requires_token_ids=True),
+            mm_features=[],
+            block_ids=([],),
+            generator=None,
+            num_computed_tokens=0,
+            output_token_ids=[],
+        )
+        for i in range(3)
+    ]
+    for request in requests:
+        input_batch.add_request(request)
+    input_batch.refresh_metadata()
+
+    prompt_token_ids = input_batch.get_pooling_metadata().prompt_token_ids_cpu
+
+    assert prompt_token_ids is not None
+    assert prompt_token_ids.tolist() == [
+        [0, 1, VOCAB_SIZE, VOCAB_SIZE],
+        [0, 1, 2, VOCAB_SIZE],
+        [0, 1, 2, 3],
+    ]
