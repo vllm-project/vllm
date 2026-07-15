@@ -6,6 +6,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from vllm._custom_ops import causal_conv1d_update_cpu_vec
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 
@@ -96,117 +97,13 @@ def causal_conv1d_update_cpu(
     if isinstance(activation, bool):
         activation = "silu" if activation else None
 
-    original_x_dtype = x.dtype
-    x = x.to(conv_state.dtype)
-    _, width = weight.shape
-    state_len = width - 1
-
-    if query_start_loc is None and x.dim() == 2:
-        x = x.unsqueeze(-1)
-        unsqueeze = True
-    else:
-        unsqueeze = False
-
-    if query_start_loc is None:
-        batch, dim, seqlen = x.shape
-
-        if conv_state_indices is not None:
-            cache_idxs = conv_state_indices.flatten()
-            valid_mask = cache_idxs != pad_slot_id
-        else:
-            cache_idxs = torch.arange(batch, device=x.device)
-            valid_mask = torch.ones(batch, dtype=torch.bool, device=x.device)
-
-        for t in range(seqlen):
-            x_t = x[:, :, t].clone()
-
-            states = conv_state[cache_idxs]
-
-            windows = torch.cat([states, x_t.unsqueeze(-1)], dim=-1)
-
-            val = (windows * weight.unsqueeze(0)).sum(dim=-1)
-            if bias is not None:
-                val = val + bias.unsqueeze(0)
-
-            if activation in ["silu", "swish"]:
-                val = val * torch.sigmoid(val)
-
-            val = val * valid_mask.unsqueeze(-1).to(val.dtype)
-            x[:, :, t] = val
-
-            new_state = torch.cat([states[:, :, 1:], x_t.unsqueeze(-1)], dim=-1)
-            conv_state[cache_idxs[valid_mask]] = new_state[valid_mask]
-
-        out = x
-        if unsqueeze:
-            out = out.squeeze(-1)
-        return out.to(original_x_dtype)
-
-    assert conv_state_indices is not None
-    assert query_start_loc is not None
-    batch = conv_state_indices.size(0)
-    out = x.clone()
-
-    for b in range(batch):
-        cache_idx = conv_state_indices[b].item()
-        if cache_idx == pad_slot_id:
-            continue
-
-        seq_start = query_start_loc[b].item()
-        seq_end = query_start_loc[b + 1].item()
-        seqlen_b = seq_end - seq_start
-
-        if seqlen_b == 0:
-            continue
-
-        local_state = conv_state[cache_idx].clone()
-
-        for t in range(seqlen_b):
-            x_t = x[seq_start + t, :]
-
-            window = torch.cat([local_state, x_t.unsqueeze(-1)], dim=-1)
-            val = (window * weight).sum(dim=-1)
-            if bias is not None:
-                val = val + bias
-            if activation in ["silu", "swish"]:
-                val = val * torch.sigmoid(val)
-
-            out[seq_start + t, :] = val
-
-            if state_len > 1:
-                local_state[:, :-1] = local_state[:, 1:].clone()
-            local_state[:, -1] = x_t
-
-        conv_state[cache_idx] = local_state
-
-    return out.to(original_x_dtype)
-
-
-
-
-
-def causal_conv1d_update_torch(
-    x: torch.Tensor,
-    conv_state: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor | None = None,
-    activation: str | None = None,
-) -> torch.Tensor:
-    assert activation in {None, "silu", "swish"}
-
-    _, dim, seq_len = x.shape
-    state_len = conv_state.shape[-1]
-
-    x_new = torch.cat([conv_state, x], dim=-1).to(weight.dtype)
-    conv_state.copy_(x_new[:, :, -state_len:])
-
-    out = F.conv1d(
-        x_new,
-        weight.unsqueeze(1),
+    return causal_conv1d_update_cpu_vec(
+        x,
+        conv_state,
+        weight,
         bias,
-        padding=0,
-        groups=dim,
-    )[:, :, -seq_len:]
-    if activation in ("silu", "swish"):
-        out = F.silu(out)
-    return out
+        activation,
+        conv_state_indices,
+        query_start_loc,
+        pad_slot_id,
+    )
