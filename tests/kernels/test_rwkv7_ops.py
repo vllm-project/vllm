@@ -110,6 +110,30 @@ def _rwkv7_import_or_skip() -> None:
     import vllm._custom_ops  # noqa: F401
 
 
+def _assert_repeatable(
+    run: Callable[[], tuple[torch.Tensor, torch.Tensor]], repeats: int = 200
+) -> None:
+    expected = run()
+    torch.cuda.synchronize()
+    for _ in range(repeats - 1):
+        actual = run()
+        torch.cuda.synchronize()
+        for got, want in zip(actual, expected, strict=True):
+            assert torch.equal(got, want)
+
+
+def _mix_reference(
+    x: torch.Tensor, shift_state: torch.Tensor, *weights: torch.Tensor
+) -> list[torch.Tensor]:
+    x_float = x.float()
+    prev = torch.cat((shift_state[:, None], x[:, :-1]), dim=1).float()
+    outputs = [
+        (x_float + (prev - x_float) * weight.float()).half() for weight in weights
+    ]
+    shift_state.copy_(x[:, -1])
+    return outputs
+
+
 def _op(name: str):
     namespace, op_name = name.split("::", 1)
     return getattr(getattr(torch.ops, namespace), op_name)
@@ -453,6 +477,134 @@ def test_rwkv7_linear_op_honors_fp16_accumulation() -> None:
     assert fp16_relative_l2 < 5e-3
     assert fp16_cosine > 0.99999
     assert torch.count_nonzero(fp16_accumulation != fp32_accumulation) > 0
+
+
+@pytest.mark.parametrize("kind", ["tmix", "cmix"])
+def test_rwkv7_3d_mix_matches_recurrence(kind: str) -> None:
+    torch.manual_seed(20260714)
+    B, T, C = 2, 3, 4096
+    x = torch.randn((B, T, C), device="cuda", dtype=torch.float16)
+    shift = torch.randn((B, C), device="cuda", dtype=torch.float16)
+    weights = [torch.randn((C,), device="cuda", dtype=torch.float16)]
+    if kind == "tmix":
+        weights *= 6
+        actual = torch.ops.rwkv7_fast_ops_fp16.tmix_mix6(
+            B, T, C, x, shift, *weights
+        )
+    else:
+        actual = [
+            torch.ops.rwkv7_fast_ops_fp16.cmix_mix(
+                B, T, C, x, shift, weights[0]
+            )
+        ]
+    expected = _mix_reference(x, shift.clone(), *weights)
+    torch.testing.assert_close(actual, expected, atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.parametrize("kind", ["tmix", "cmix"])
+def test_rwkv7_3d_mix_slot_matches_recurrence(kind: str) -> None:
+    torch.manual_seed(20260715)
+    B, T, C, slots = 2, 3, 4096, 5
+    slot_indices = torch.tensor([3, 0], device="cuda", dtype=torch.int32)
+    x = torch.randn((B, T, C), device="cuda", dtype=torch.float16)
+    initial = torch.randn((slots, C), device="cuda", dtype=torch.float16)
+    weights = [torch.randn((C,), device="cuda", dtype=torch.float16)]
+    state = initial.clone()
+    if kind == "tmix":
+        actual = torch.ops.rwkv7_fast_ops_fp16.tmix_mix6_slot(
+            B, T, C, x, state, slot_indices, *(weights * 6)
+        )
+    else:
+        actual = [
+            torch.ops.rwkv7_fast_ops_fp16.cmix_mix_slot(
+                B, T, C, x, state, slot_indices, weights[0]
+            )
+        ]
+    reference = _mix_reference(
+        x, initial[slot_indices.long()].clone(), *weights
+    )
+    torch.testing.assert_close(actual, reference, atol=1e-3, rtol=1e-3)
+    expected_state = initial.clone()
+    expected_state[slot_indices.long()] = x[:, -1]
+    torch.testing.assert_close(state, expected_state, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("batch,time", [(3, 1), (2, 2), (1, 8)])
+def test_rwkv7_wkv_fp16_is_repeatable(batch: int, time: int) -> None:
+    torch.manual_seed(20260714 + batch * 10 + time)
+    C = H = 64
+    state = torch.randn((batch, H, 64, 64), device="cuda", dtype=torch.float16)
+    payload = [
+        torch.randn((batch, time, C), device="cuda", dtype=torch.float16)
+        for _ in range(6)
+    ]
+    w0 = torch.randn((C,), device="cuda", dtype=torch.float16)
+    elapsed = torch.arange(batch, device="cuda", dtype=torch.int32)
+    op = torch.ops.rwkv7_wkv_fp16_v2.wkv_seq_w0
+
+    def run() -> tuple[torch.Tensor, torch.Tensor]:
+        current_state = state.clone()
+        y = torch.empty((batch, time, C), device="cuda", dtype=torch.float16)
+        op(
+            batch,
+            time,
+            C,
+            H,
+            current_state,
+            payload[0],
+            payload[1],
+            w0,
+            payload[2],
+            payload[3],
+            payload[4],
+            payload[5],
+            y,
+            elapsed,
+        )
+        return y, current_state
+
+    _assert_repeatable(run)
+
+
+def test_rwkv7_wkv_fp16_varlen_is_repeatable() -> None:
+    torch.manual_seed(20260714)
+    B, total_tokens, max_t, C, H = 2, 5, 3, 64, 1
+    query_start_loc = torch.tensor([0, 2, 5], device="cuda", dtype=torch.int32)
+    slot_indices = torch.tensor([3, 0], device="cuda", dtype=torch.int32)
+    state = torch.randn((5, H, 64, 64), device="cuda", dtype=torch.float16)
+    payload = [
+        torch.randn((total_tokens, C), device="cuda", dtype=torch.float16)
+        for _ in range(6)
+    ]
+    w0 = torch.randn((C,), device="cuda", dtype=torch.float16)
+    elapsed = torch.arange(5, device="cuda", dtype=torch.int32)
+    op = torch.ops.rwkv7_wkv_fp16_v2.wkv_seq_w0_varlen
+
+    def run() -> tuple[torch.Tensor, torch.Tensor]:
+        current_state = state.clone()
+        y = torch.empty((total_tokens, C), device="cuda", dtype=torch.float16)
+        op(
+            B,
+            total_tokens,
+            max_t,
+            C,
+            H,
+            query_start_loc,
+            slot_indices,
+            current_state,
+            payload[0],
+            payload[1],
+            w0,
+            payload[2],
+            payload[3],
+            payload[4],
+            payload[5],
+            y,
+            elapsed,
+        )
+        return y, current_state
+
+    _assert_repeatable(run)
 
 
 @pytest.mark.parametrize("case", RETURNING_CASES, ids=lambda c: c.name)
