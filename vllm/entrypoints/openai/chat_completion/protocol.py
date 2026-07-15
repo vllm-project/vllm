@@ -147,6 +147,7 @@ class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
     logprobs: ChatCompletionLogProbs | None = None
     finish_reason: str | None = None
     stop_reason: int | str | None = None
+    usage: UsageInfo | None = None
     # not part of the OpenAI spec but for tracing the tokens
     token_ids: list[int] | None = None
 
@@ -778,6 +779,17 @@ class ChatCompletionRequest(OpenAIBaseModel):
             raise VLLMValidationError(
                 "Stream options can only be defined when `stream=True`.",
                 parameter="stream_options",
+            )
+
+        stream_options = data.get("stream_options")
+        if (
+            envs.NOVITA_ENABLE_KIMI_VALIDATIONS
+            and isinstance(stream_options, dict)
+            and stream_options.get("include_internal_content")
+        ):
+            raise VLLMValidationError(
+                "`stream_options.include_internal_content` is not supported.",
+                parameter="stream_options.include_internal_content",
             )
 
         return data

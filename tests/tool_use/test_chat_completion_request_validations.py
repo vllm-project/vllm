@@ -122,6 +122,58 @@ def test_top_level_thinking_is_ignored_without_kimi_validations(
     assert request.thinking == {"type": "disabled"}
 
 
+def test_internal_content_rejected_with_kimi_validations(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", True, raising=False)
+
+    with pytest.raises(ValueError, match="include_internal_content.*not supported"):
+        ChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "Hello"}],
+                "model": "facebook/opt-125m",
+                "stream": True,
+                "stream_options": {"include_internal_content": True},
+            }
+        )
+
+
+def test_internal_content_false_accepted_with_kimi_validations(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", True, raising=False)
+
+    request = ChatCompletionRequest.model_validate(
+        {
+            "messages": [{"role": "user", "content": "Hello"}],
+            "model": "facebook/opt-125m",
+            "stream": True,
+            "stream_options": {"include_internal_content": False},
+        }
+    )
+
+    assert request.stream_options is not None
+    assert request.stream_options.include_internal_content is False
+
+
+def test_internal_content_preserved_without_kimi_validations(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", False, raising=False)
+
+    request = ChatCompletionRequest.model_validate(
+        {
+            "messages": [{"role": "user", "content": "Hello"}],
+            "model": "facebook/opt-125m",
+            "stream": True,
+            "stream_options": {"include_internal_content": True},
+        }
+    )
+
+    assert request.stream_options is not None
+    assert request.stream_options.include_internal_content is True
+
+
 @pytest.mark.parametrize("tool_choice", ["auto", "required"])
 def test_chat_completion_request_with_tool_choice_but_no_tools(tool_choice):
     with pytest.raises(

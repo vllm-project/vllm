@@ -108,11 +108,16 @@ class PromptTokenUsageInfo(OpenAIBaseModel):
     request has no multimodal input."""
 
 
+class CompletionTokenUsageInfo(OpenAIBaseModel):
+    reasoning_tokens: int = 0
+
+
 class UsageInfo(OpenAIBaseModel):
     prompt_tokens: int = 0
     total_tokens: int = 0
     completion_tokens: int | None = 0
     prompt_tokens_details: PromptTokenUsageInfo | None = None
+    completion_tokens_details: CompletionTokenUsageInfo | None = None
 
 
 class PerRequestTimingMetrics(OpenAIBaseModel):
@@ -249,6 +254,7 @@ def validate_structured_outputs_structural_tag(
 class StreamOptions(OpenAIBaseModel):
     include_usage: bool | None = False
     continuous_usage_stats: bool | None = False
+    include_internal_content: bool | None = False
 
 
 class FunctionDefinition(OpenAIBaseModel):

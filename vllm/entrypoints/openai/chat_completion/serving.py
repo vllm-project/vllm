@@ -40,7 +40,10 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatMessage,
 )
 from vllm.entrypoints.openai.engine.protocol import (
+    CompletionTokenUsageInfo,
+    DeltaFunctionCall,
     DeltaMessage,
+    DeltaToolCall,
     ErrorResponse,
     FunctionCall,
     PerRequestTimingMetrics,
@@ -432,6 +435,7 @@ class OpenAIServingChat(GenerateBaseServing):
         # Send response for each token for each request.n (index)
         num_choices = 1 if request.n is None else request.n
         previous_num_tokens = [0] * num_choices
+        output_token_ids: list[list[int]] = [[] for _ in range(num_choices)]
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
         num_cached_tokens = None
@@ -475,6 +479,89 @@ class OpenAIServingChat(GenerateBaseServing):
         include_usage, include_continuous_usage = should_include_usage(
             stream_options, self.enable_force_include_usage
         )
+
+        tool_calls_started: list[set[int]] = [set() for _ in range(num_choices)]
+
+        def make_kimi_usage(
+            completion_tokens: int, choice_index: int | None = None
+        ) -> UsageInfo:
+            usage = UsageInfo(
+                prompt_tokens=num_prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=num_prompt_tokens + completion_tokens,
+            )
+            prompt_token_ids = (
+                last_res.prompt_token_ids
+                if last_res is not None and last_res.prompt_token_ids is not None
+                else []
+            )
+            if choice_index is None:
+                parser_token_ids = zip(parsers, output_token_ids)
+            else:
+                parser_token_ids = [
+                    (parsers[choice_index], output_token_ids[choice_index])
+                ]
+            reasoning_tokens = 0
+            for parser_for_choice, token_ids in parser_token_ids:
+                count_reasoning_tokens = getattr(
+                    parser_for_choice, "count_reasoning_tokens", None
+                )
+                if count_reasoning_tokens is not None:
+                    reasoning_tokens += count_reasoning_tokens(
+                        [*prompt_token_ids, *token_ids]
+                    )
+            usage.completion_tokens_details = CompletionTokenUsageInfo(
+                reasoning_tokens=reasoning_tokens,
+            )
+            prompt_details = PromptTokenUsageInfo(cached_tokens=num_cached_tokens or 0)
+            if mm_token_counts:
+                prompt_details.multimodal_tokens = mm_token_counts
+            usage.prompt_tokens_details = prompt_details
+            return usage
+
+        def split_kimi_tool_delta(
+            delta_message: DeltaMessage, choice_index: int
+        ) -> tuple[DeltaMessage, list[DeltaToolCall]]:
+            continuation_calls: list[DeltaToolCall] = []
+            rewritten_calls: list[DeltaToolCall] = []
+            for tool_call in delta_message.tool_calls:
+                function = tool_call.function
+                has_metadata = (
+                    tool_call.id is not None
+                    or tool_call.type is not None
+                    or (function is not None and function.name is not None)
+                )
+                if (
+                    tool_call.index not in tool_calls_started[choice_index]
+                    and has_metadata
+                ):
+                    tool_calls_started[choice_index].add(tool_call.index)
+                    arguments = function.arguments if function is not None else None
+                    rewritten_calls.append(
+                        tool_call.model_copy(
+                            update={
+                                "function": DeltaFunctionCall(
+                                    name=(
+                                        function.name if function is not None else None
+                                    ),
+                                    arguments="",
+                                )
+                            }
+                        )
+                    )
+                    if arguments:
+                        continuation_calls.append(
+                            DeltaToolCall(
+                                index=tool_call.index,
+                                function=DeltaFunctionCall(arguments=arguments),
+                            )
+                        )
+                else:
+                    rewritten_calls.append(tool_call)
+            return (
+                delta_message.model_copy(update={"tool_calls": rewritten_calls}),
+                continuation_calls,
+            )
 
         last_res: RequestOutput | None = None
         try:
@@ -527,10 +614,14 @@ class OpenAIServingChat(GenerateBaseServing):
 
                         # if continuous usage stats are requested, add it
                         if include_continuous_usage:
-                            chunk.usage = UsageInfo(
-                                prompt_tokens=num_prompt_tokens,
-                                completion_tokens=0,
-                                total_tokens=num_prompt_tokens,
+                            chunk.usage = (
+                                make_kimi_usage(0, i)
+                                if envs.NOVITA_ENABLE_KIMI_VALIDATIONS
+                                else UsageInfo(
+                                    prompt_tokens=num_prompt_tokens,
+                                    completion_tokens=0,
+                                    total_tokens=num_prompt_tokens,
+                                )
                             )
 
                         data = chunk.model_dump_json(exclude_unset=True)
@@ -563,10 +654,14 @@ class OpenAIServingChat(GenerateBaseServing):
                                     model=model_name,
                                 )
                                 if include_continuous_usage:
-                                    chunk.usage = UsageInfo(
-                                        prompt_tokens=num_prompt_tokens,
-                                        completion_tokens=0,
-                                        total_tokens=num_prompt_tokens,
+                                    chunk.usage = (
+                                        make_kimi_usage(0, i)
+                                        if envs.NOVITA_ENABLE_KIMI_VALIDATIONS
+                                        else UsageInfo(
+                                            prompt_tokens=num_prompt_tokens,
+                                            completion_tokens=0,
+                                            total_tokens=num_prompt_tokens,
+                                        )
                                     )
 
                                 data = chunk.model_dump_json(exclude_unset=True)
@@ -622,6 +717,7 @@ class OpenAIServingChat(GenerateBaseServing):
 
                     # set the previous values for the next iteration
                     previous_num_tokens[i] += len(output.token_ids)
+                    output_token_ids[i].extend(as_list(output.token_ids))
 
                     # if the message delta is None (e.g. because it was a
                     # "control token" for tool calls or the parser otherwise
@@ -646,6 +742,12 @@ class OpenAIServingChat(GenerateBaseServing):
                         ):
                             continue
                         delta_message = DeltaMessage()
+
+                    tool_call_continuation: list[DeltaToolCall] = []
+                    if envs.NOVITA_ENABLE_KIMI_VALIDATIONS and delta_message.tool_calls:
+                        delta_message, tool_call_continuation = split_kimi_tool_delta(
+                            delta_message, i
+                        )
 
                     # Log streaming delta if output logging is enabled
                     if self.enable_log_outputs and self.request_logger:
@@ -715,6 +817,86 @@ class OpenAIServingChat(GenerateBaseServing):
                             finish_reason_ = (
                                 output.finish_reason if output.finish_reason else "stop"
                             )
+                        if envs.NOVITA_ENABLE_KIMI_VALIDATIONS and (
+                            delta_message.role is not None
+                            or delta_message.content is not None
+                            or delta_message.reasoning is not None
+                            or delta_message.tool_calls
+                        ):
+                            delta_choice = ChatCompletionResponseStreamChoice(
+                                index=i,
+                                delta=delta_message,
+                                logprobs=logprobs,
+                                finish_reason=None,
+                                token_ids=(
+                                    as_list(output.token_ids)
+                                    if include_token_ids
+                                    else None
+                                ),
+                            )
+                            delta_chunk = ChatCompletionStreamResponse(
+                                id=request_id,
+                                object=chunk_object_type,
+                                created=created_time,
+                                choices=[delta_choice],
+                                model=model_name,
+                            )
+                            if include_continuous_usage:
+                                delta_chunk.usage = (
+                                    make_kimi_usage(previous_num_tokens[i], i)
+                                    if envs.NOVITA_ENABLE_KIMI_VALIDATIONS
+                                    else UsageInfo(
+                                        prompt_tokens=num_prompt_tokens,
+                                        completion_tokens=previous_num_tokens[i],
+                                        total_tokens=(
+                                            num_prompt_tokens + previous_num_tokens[i]
+                                        ),
+                                    )
+                                )
+                            delta_data = delta_chunk.model_dump_json(exclude_unset=True)
+                            yield f"data: {delta_data}\n\n"
+                            if tool_call_continuation:
+                                continuation_choice = maybe_filter_parallel_tool_calls(
+                                    ChatCompletionResponseStreamChoice(
+                                        index=i,
+                                        delta=DeltaMessage(
+                                            tool_calls=tool_call_continuation
+                                        ),
+                                        logprobs=None,
+                                        finish_reason=None,
+                                    ),
+                                    request,
+                                )
+                                continuation_chunk = ChatCompletionStreamResponse(
+                                    id=request_id,
+                                    object=chunk_object_type,
+                                    created=created_time,
+                                    choices=[continuation_choice],
+                                    model=model_name,
+                                )
+                                if include_continuous_usage:
+                                    continuation_chunk.usage = make_kimi_usage(
+                                        previous_num_tokens[i], i
+                                    )
+                                continuation_data = continuation_chunk.model_dump_json(
+                                    exclude_unset=True
+                                )
+                                yield f"data: {continuation_data}\n\n"
+                                tool_call_continuation = []
+                            delta_message = DeltaMessage()
+                            logprobs = None
+                            include_token_ids = False
+
+                        completion_tokens = previous_num_tokens[i]
+                        terminal_usage = (
+                            make_kimi_usage(completion_tokens, i)
+                            if envs.NOVITA_ENABLE_KIMI_VALIDATIONS
+                            else UsageInfo(
+                                prompt_tokens=num_prompt_tokens,
+                                completion_tokens=completion_tokens,
+                                total_tokens=num_prompt_tokens + completion_tokens,
+                            )
+                        )
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
                             delta=delta_message,
@@ -723,6 +905,11 @@ class OpenAIServingChat(GenerateBaseServing):
                             stop_reason=output.stop_reason,
                             token_ids=(
                                 as_list(output.token_ids) if include_token_ids else None
+                            ),
+                            **(
+                                {"usage": terminal_usage}
+                                if envs.NOVITA_ENABLE_KIMI_VALIDATIONS
+                                else {}
                             ),
                         )
 
@@ -750,29 +937,61 @@ class OpenAIServingChat(GenerateBaseServing):
                     # handle usage stats if requested & if continuous
                     if include_continuous_usage:
                         completion_tokens = previous_num_tokens[i]
-                        chunk.usage = UsageInfo(
-                            prompt_tokens=num_prompt_tokens,
-                            completion_tokens=completion_tokens,
-                            total_tokens=num_prompt_tokens + completion_tokens,
+                        chunk.usage = (
+                            make_kimi_usage(completion_tokens, i)
+                            if envs.NOVITA_ENABLE_KIMI_VALIDATIONS
+                            else UsageInfo(
+                                prompt_tokens=num_prompt_tokens,
+                                completion_tokens=completion_tokens,
+                                total_tokens=num_prompt_tokens + completion_tokens,
+                            )
                         )
 
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
+                    if tool_call_continuation:
+                        continuation_choice = maybe_filter_parallel_tool_calls(
+                            ChatCompletionResponseStreamChoice(
+                                index=i,
+                                delta=DeltaMessage(tool_calls=tool_call_continuation),
+                                logprobs=None,
+                                finish_reason=None,
+                            ),
+                            request,
+                        )
+                        continuation_chunk = ChatCompletionStreamResponse(
+                            id=request_id,
+                            object=chunk_object_type,
+                            created=created_time,
+                            choices=[continuation_choice],
+                            model=model_name,
+                        )
+                        if include_continuous_usage:
+                            continuation_chunk.usage = make_kimi_usage(
+                                previous_num_tokens[i], i
+                            )
+                        continuation_data = continuation_chunk.model_dump_json(
+                            exclude_unset=True
+                        )
+                        yield f"data: {continuation_data}\n\n"
 
             # once the final token is handled, if stream_options.include_usage
             # is sent, send the usage
             if include_usage:
                 completion_tokens = sum(previous_num_tokens)
-                final_usage = UsageInfo(
-                    prompt_tokens=num_prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    total_tokens=num_prompt_tokens + completion_tokens,
-                )
-                final_usage.prompt_tokens_details = _make_prompt_tokens_details(
-                    self.enable_prompt_tokens_details,
-                    num_cached_tokens,
-                    mm_token_counts,
-                )
+                if envs.NOVITA_ENABLE_KIMI_VALIDATIONS:
+                    final_usage = make_kimi_usage(completion_tokens)
+                else:
+                    final_usage = UsageInfo(
+                        prompt_tokens=num_prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        total_tokens=num_prompt_tokens + completion_tokens,
+                    )
+                    final_usage.prompt_tokens_details = _make_prompt_tokens_details(
+                        self.enable_prompt_tokens_details,
+                        num_cached_tokens,
+                        mm_token_counts,
+                    )
 
                 # In streaming, metrics ride on this final usage chunk, which is
                 # only emitted when usage reporting is enabled (i.e.
@@ -806,10 +1025,14 @@ class OpenAIServingChat(GenerateBaseServing):
 
             # report to FastAPI middleware aggregate usage across all choices
             num_completion_tokens = sum(previous_num_tokens)
-            request_metadata.final_usage_info = UsageInfo(
-                prompt_tokens=num_prompt_tokens,
-                completion_tokens=num_completion_tokens,
-                total_tokens=num_prompt_tokens + num_completion_tokens,
+            request_metadata.final_usage_info = (
+                make_kimi_usage(num_completion_tokens)
+                if envs.NOVITA_ENABLE_KIMI_VALIDATIONS
+                else UsageInfo(
+                    prompt_tokens=num_prompt_tokens,
+                    completion_tokens=num_completion_tokens,
+                    total_tokens=num_prompt_tokens + num_completion_tokens,
+                )
             )
 
             # Log complete streaming response if output logging is enabled

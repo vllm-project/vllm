@@ -32,6 +32,9 @@ from vllm.entrypoints.openai.chat_completion.serving import (
     _make_prompt_tokens_details,
 )
 from vllm.entrypoints.openai.engine.protocol import (
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
     ErrorResponse,
     FunctionCall,
     RequestResponseMetadata,
@@ -819,6 +822,26 @@ def _make_metrics_request_output(
     )
 
 
+def _make_tool_stream_request_output() -> RequestOutput:
+    return RequestOutput(
+        request_id="test-id",
+        prompt="Test prompt",
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text="tool",
+                token_ids=[100, 101],
+                cumulative_logprob=None,
+                logprobs=None,
+                finish_reason="stop",
+            )
+        ],
+        finished=True,
+    )
+
+
 async def _single_request_output(
     request_output: RequestOutput,
 ) -> AsyncIterator[RequestOutput]:
@@ -828,11 +851,12 @@ async def _single_request_output(
 async def _collect_metrics_stream_chunks(
     serving: OpenAIServingChat,
     request: ChatCompletionRequest,
+    request_output: RequestOutput | None = None,
 ) -> list[dict[str, Any]]:
     chunks: list[dict[str, Any]] = []
     async for line in serving.chat_completion_stream_generator(
         request,
-        _single_request_output(_make_metrics_request_output()),
+        _single_request_output(request_output or _make_metrics_request_output()),
         "chatcmpl-test-id",
         "test-model",
         conversation=[{"role": "user", "content": "Test"}],
@@ -846,6 +870,259 @@ async def _collect_metrics_stream_chunks(
         if payload != "[DONE]":
             chunks.append(json.loads(payload))
     return chunks
+
+
+@pytest.mark.asyncio
+async def test_kimi_streaming_terminal_usage_uses_separate_empty_delta(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", True, raising=False)
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    chunks = await _collect_metrics_stream_chunks(
+        serving,
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Test prompt"}],
+            max_tokens=10,
+            stream=True,
+        ),
+    )
+
+    terminal = next(
+        chunk["choices"][0]
+        for chunk in chunks
+        if chunk.get("choices") and chunk["choices"][0]["finish_reason"] is not None
+    )
+    assert terminal["delta"] == {}
+    assert terminal["usage"] == {
+        "prompt_tokens": 3,
+        "completion_tokens": 2,
+        "total_tokens": 5,
+        "prompt_tokens_details": {"cached_tokens": 0},
+        "completion_tokens_details": {"reasoning_tokens": 0},
+    }
+    assert any(
+        chunk["choices"][0].get("delta", {}).get("content") == "Hello"
+        and chunk["choices"][0]["finish_reason"] is None
+        for chunk in chunks
+        if chunk.get("choices")
+    )
+
+
+@pytest.mark.asyncio
+async def test_kimi_streaming_usage_summary_includes_required_details(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", True, raising=False)
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    chunks = await _collect_metrics_stream_chunks(
+        serving,
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Test prompt"}],
+            max_tokens=10,
+            stream=True,
+            stream_options={"include_usage": True},
+        ),
+    )
+
+    summary = next(chunk for chunk in chunks if chunk.get("choices") == [])
+    assert summary["usage"] == {
+        "prompt_tokens": 3,
+        "completion_tokens": 2,
+        "total_tokens": 5,
+        "prompt_tokens_details": {
+            "cached_tokens": 0,
+        },
+        "completion_tokens_details": {"reasoning_tokens": 0},
+    }
+
+
+@pytest.mark.asyncio
+async def test_kimi_streaming_usage_counts_reasoning_from_prompt_and_output_ids(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", True, raising=False)
+
+    class CountingParser:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def parse_delta(self, *, delta_text, **kwargs):
+            return DeltaMessage(content=delta_text)
+
+        def count_reasoning_tokens(self, token_ids):
+            assert token_ids == [1, 2, 3, 100, 101]
+            return 1
+
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.parser_cls = CountingParser
+    serving.model_config = MagicMock()
+    serving.enable_structured_outputs_in_reasoning = False
+    chunks = await _collect_metrics_stream_chunks(
+        serving,
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Test prompt"}],
+            max_tokens=10,
+            stream=True,
+            stream_options={"include_usage": True},
+        ),
+    )
+
+    summary = next(chunk for chunk in chunks if chunk.get("choices") == [])
+    assert summary["usage"]["completion_tokens_details"] == {"reasoning_tokens": 1}
+
+
+@pytest.mark.asyncio
+async def test_upstream_streaming_terminal_usage_shape_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", False, raising=False)
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    chunks = await _collect_metrics_stream_chunks(
+        serving,
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Test prompt"}],
+            max_tokens=10,
+            stream=True,
+        ),
+    )
+
+    terminal = next(
+        chunk["choices"][0]
+        for chunk in chunks
+        if chunk.get("choices") and chunk["choices"][0]["finish_reason"] is not None
+    )
+    assert "usage" not in terminal
+    assert terminal["delta"]["content"] == "Hello"
+
+
+@pytest.mark.asyncio
+async def test_kimi_streaming_tool_delta_starts_with_empty_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", True, raising=False)
+
+    class ToolParser:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def parse_delta(self, *, delta_text, **kwargs):
+            return DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        id="call_0",
+                        type="function",
+                        index=0,
+                        function=DeltaFunctionCall(
+                            name="get_weather", arguments='{"city":"Beijing"}'
+                        ),
+                    )
+                ]
+            )
+
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.parser_cls = ToolParser
+    serving.model_config = MagicMock()
+    serving.enable_structured_outputs_in_reasoning = False
+    chunks = await _collect_metrics_stream_chunks(
+        serving,
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "What is the weather?"}],
+            max_tokens=10,
+            stream=True,
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ],
+        ),
+        request_output=_make_tool_stream_request_output(),
+    )
+
+    tool_chunks = [
+        chunk["choices"][0]
+        for chunk in chunks
+        if chunk.get("choices") and chunk["choices"][0]["delta"].get("tool_calls")
+    ]
+    assert len(tool_chunks) == 2
+    assert tool_chunks[0]["delta"]["tool_calls"][0] == {
+        "id": "call_0",
+        "type": "function",
+        "function": {"name": "get_weather", "arguments": ""},
+        "index": 0,
+    }
+    assert tool_chunks[1]["delta"]["tool_calls"][0] == {
+        "function": {"arguments": '{"city":"Beijing"}'},
+        "index": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_upstream_streaming_tool_delta_shape_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "NOVITA_ENABLE_KIMI_VALIDATIONS", False, raising=False)
+
+    class ToolParser:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def parse_delta(self, *, delta_text, **kwargs):
+            return DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        id="call_0",
+                        type="function",
+                        index=0,
+                        function=DeltaFunctionCall(
+                            name="get_weather", arguments='{"city":"Beijing"}'
+                        ),
+                    )
+                ]
+            )
+
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.parser_cls = ToolParser
+    serving.model_config = MagicMock()
+    serving.enable_structured_outputs_in_reasoning = False
+    chunks = await _collect_metrics_stream_chunks(
+        serving,
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "What is the weather?"}],
+            max_tokens=10,
+            stream=True,
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ],
+        ),
+        request_output=_make_tool_stream_request_output(),
+    )
+
+    tool_chunks = [
+        chunk["choices"][0]
+        for chunk in chunks
+        if chunk.get("choices") and chunk["choices"][0]["delta"].get("tool_calls")
+    ]
+    assert len(tool_chunks) == 1
+    assert tool_chunks[0]["delta"]["tool_calls"][0]["function"] == {
+        "name": "get_weather",
+        "arguments": '{"city":"Beijing"}',
+    }
 
 
 def test_build_per_request_timing_metrics_valid_timestamps():
