@@ -1084,6 +1084,10 @@ class AsyncLLM(EngineClient):
         """Start a new weight update."""
         await self.collective_rpc("start_weight_update")
 
+    async def start_draft_weight_update(self) -> None:
+        """Start a new weight update targeting the speculative draft model."""
+        await self.collective_rpc("start_draft_weight_update")
+
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
         """
         Batched weight update for RL training.

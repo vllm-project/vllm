@@ -16,10 +16,12 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
+    from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
     from vllm.v1.request import Request
 else:
     ECConnectorMetadata = object
     KVConnectorMetadata = object
+    KVCacheBlockCopy = object
     LoRARequest = object
     MultiModalFeatureSpec = object
     PoolingParams = object
@@ -240,8 +242,11 @@ class SchedulerOutput:
     # preventing stale NaN/data from corrupting attention or SSM computation.
     new_block_ids_to_zero: list[int] | None = None
 
+    # CoW copies to apply after zeroing new blocks and before forward.
+    kv_cache_block_copies: list[KVCacheBlockCopy] | None = None
+
     # Aggregate draft-token budget selected for this worker step.
-    # Adaptive verification divides budget this dynamically among the requests.
+    # Adaptive verification divides the budget dynamically among requests.
     # Non-adaptive drafting converts it back to a uniform per-request width.
     num_spec_tokens_to_schedule: int = 0
 

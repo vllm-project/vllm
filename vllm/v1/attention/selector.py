@@ -33,6 +33,7 @@ class AttentionSelectorConfig(NamedTuple):
     use_mm_prefix: bool = False
     use_per_head_quant_scales: bool = False
     attn_type: str = AttentionType.DECODER
+    has_sliding_window: bool = False
     use_non_causal: bool = False
     use_batch_invariant: bool = False
     use_kv_connector: bool = False
@@ -50,6 +51,7 @@ class AttentionSelectorConfig(NamedTuple):
             f"use_mm_prefix={self.use_mm_prefix}, "
             f"use_per_head_quant_scales={self.use_per_head_quant_scales}, "
             f"attn_type={self.attn_type}, "
+            f"has_sliding_window={self.has_sliding_window}, "
             f"use_non_causal={self.use_non_causal}, "
             f"use_batch_invariant={self.use_batch_invariant}, "
             f"use_kv_connector={self.use_kv_connector}, "
@@ -68,6 +70,7 @@ def get_attn_backend(
     use_per_head_quant_scales: bool = False,
     attn_type: str | None = None,
     num_heads: int | None = None,
+    has_sliding_window: bool = False,
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
 
@@ -83,6 +86,7 @@ def get_attn_backend(
     vllm_config = get_current_vllm_config()
 
     cache_config = vllm_config.cache_config
+    block_size: int | None
     if cache_config is not None and cache_config.user_specified_block_size:
         block_size = cache_config.block_size
     else:
@@ -113,6 +117,7 @@ def get_attn_backend(
         use_mm_prefix=use_mm_prefix,
         use_per_head_quant_scales=use_per_head_quant_scales,
         attn_type=attn_type or AttentionType.DECODER,
+        has_sliding_window=has_sliding_window,
         use_non_causal=vllm_config.attention_config.use_non_causal,
         use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
         use_kv_connector=use_kv_connector,

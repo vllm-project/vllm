@@ -44,11 +44,6 @@ class AttentionState(NamedTuple):
     slot_mappings: dict[str, torch.Tensor]
 
 
-class AttentionStatePair(NamedTuple):
-    warmup: AttentionState
-    captured: AttentionState
-
-
 @dataclass(frozen=True)
 class BatchExecutionDescriptor:
     """Describes the shape of the batch and CG mode to run; this is used to make shape
@@ -64,15 +59,15 @@ class BatchExecutionDescriptor:
 
 
 class CreateForwardFn(Protocol):
-    """Factory that prepares inputs (OUTSIDE the graph) and returns a tuple of
-    (forward_fn, attn_state). Called with warmup=True for the warmup pass and
-    warmup=False for the captured pass."""
+    """Factory that prepares inputs (OUTSIDE the graph) and returns a
+    forward_fn. Called with warmup=True for the warmup pass and warmup=False
+    for the captured pass."""
 
     def __call__(
         self,
         desc: BatchExecutionDescriptor,
         warmup: bool,
-    ) -> tuple[Callable[[CUDAGraphMode], None], AttentionState]: ...
+    ) -> Callable[[CUDAGraphMode], None]: ...
 
 
 def _is_compatible(
@@ -318,19 +313,18 @@ class CudaGraphManager:
         self,
         create_forward_fn: CreateForwardFn,
         progress_bar_desc: str = "Capturing CUDA graphs",
-    ) -> dict[BatchExecutionDescriptor, AttentionStatePair]:
+    ) -> None:
         """Capture CUDA graphs.
 
         Args:
             create_forward_fn: Factory that prepares inputs (OUTSIDE graph) and
-                returns a tuple of (forward_fn, attn_state). For FULL cudagraph
-                mode, it is invoked once with warmup=True for the warmup pass,
-                and again with warmup=False for the captured pass. For attention
-                backends that perform lazy metadata initialization (e.g. FlashMLA),
-                FULL cudagraph capture requires distinct metadatas for warmup and
-                capture.
+                returns a forward_fn. For FULL cudagraph mode, it is invoked
+                once with warmup=True for the warmup pass, and again with
+                warmup=False for the captured pass. For attention backends
+                that perform lazy metadata initialization (e.g. FlashMLA),
+                FULL cudagraph capture requires distinct metadatas for warmup
+                and capture.
         """
-        attn_states: dict[BatchExecutionDescriptor, AttentionStatePair] = {}
         with graph_capture(device=self.device):
             # Capture in order: PIECEWISE first, then FULL. PIECEWISE has larger
             # activations so FULL activations should fit in already allocated
@@ -344,7 +338,7 @@ class CudaGraphManager:
                     descs = tqdm(descs, desc=f"{progress_bar_desc} ({mode.name})")
                 for desc in descs:
                     # Prepare inputs and get forward function
-                    forward_fn, warmup_attn_state = create_forward_fn(desc, warmup=True)
+                    forward_fn = create_forward_fn(desc, warmup=True)
 
                     # Warmup
                     forward_fn(CUDAGraphMode.NONE)
@@ -354,18 +348,10 @@ class CudaGraphManager:
                         "CG Capture: mode=%s, batch_desc=%s", desc.cg_mode.name, desc
                     )
                     if desc.cg_mode == CUDAGraphMode.PIECEWISE:
-                        attn_states[desc] = AttentionStatePair(
-                            warmup_attn_state, warmup_attn_state
-                        )
                         forward_fn(CUDAGraphMode.PIECEWISE)
                     else:
                         # Capture with fresh attention state.
-                        forward_fn, capture_attn_state = create_forward_fn(
-                            desc, warmup=False
-                        )
-                        attn_states[desc] = AttentionStatePair(
-                            warmup_attn_state, capture_attn_state
-                        )
+                        forward_fn = create_forward_fn(desc, warmup=False)
                         assert desc not in self.graphs, (
                             f"Graph already captured for {desc}"
                         )
@@ -383,7 +369,6 @@ class CudaGraphManager:
                         self.graphs[desc] = graph
                         compilation_counter.num_cudagraph_captured += 1
         self._graphs_captured = True
-        return attn_states
 
     def dispatch(
         self,
@@ -480,7 +465,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         use_aux_hidden_state_outputs: bool = False,
         lora_capture_hook: Callable[[int, int, int], None] | None = None,
         progress_bar_desc: str = "Capturing CUDA graphs",
-    ) -> dict[BatchExecutionDescriptor, AttentionStatePair]:
+    ) -> None:
         """Capture CUDA graphs for model forward pass."""
         self.use_aux_hidden_state_outputs = use_aux_hidden_state_outputs
         if self.use_breakable_cg:
@@ -489,10 +474,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
             warmup: bool,
-        ) -> tuple[
-            Callable[[CUDAGraphMode], None],
-            AttentionState,
-        ]:
+        ) -> Callable[[CUDAGraphMode], None]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
 
@@ -591,9 +573,9 @@ class ModelCudaGraphManager(CudaGraphManager):
                     for k, v in intermediate_tensors.tensors.items():
                         self.intermediate_tensors[k][:num_tokens] = v
 
-            return forward_fn, AttentionState(attn_metadata, slot_mappings)
+            return forward_fn
 
-        return super().capture(create_forward_fn, progress_bar_desc)
+        super().capture(create_forward_fn, progress_bar_desc)
 
     def run_fullgraph(
         self, desc: BatchExecutionDescriptor
