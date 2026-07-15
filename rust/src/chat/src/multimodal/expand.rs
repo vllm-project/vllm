@@ -418,6 +418,67 @@ mod tests {
         assert_bool_mask(&video_ranges[0], &[true, true, true, true]);
     }
 
+    const QWEN3_AUDIO_PAD_ID: u32 = 151_676;
+
+    fn qwen3_audio_prepared(replacements: Vec<PromptReplacement>) -> PreparedMedia {
+        prepared_media(
+            Modality::Audio,
+            "<|audio_pad|>",
+            QWEN3_AUDIO_PAD_ID,
+            QWEN3_AUDIO_PAD_ID,
+            replacements,
+        )
+    }
+
+    fn qwen3_audio_replacement(tokens: usize) -> PromptReplacement {
+        PromptReplacement::repeated(
+            Modality::Audio,
+            "<|audio_pad|>",
+            QWEN3_AUDIO_PAD_ID as TokenId,
+            tokens,
+        )
+    }
+
+    #[test]
+    fn expand_prompt_tokens_interleaves_audio_and_image_prepared_media() {
+        // Audio marker precedes the image marker: the image range offset must
+        // account for the earlier audio expansion growth.
+        let mut prompt_token_ids = vec![1, QWEN3_AUDIO_PAD_ID, 2, LLAMA4_IMAGE_ID, 3];
+        let prepared = vec![
+            llama4_prepared(vec![llama4_single_tile_replacement()]),
+            qwen3_audio_prepared(vec![qwen3_audio_replacement(3)]),
+        ];
+
+        let ranges = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap();
+
+        assert_eq!(
+            prompt_token_ids,
+            vec![
+                1,
+                QWEN3_AUDIO_PAD_ID,
+                QWEN3_AUDIO_PAD_ID,
+                QWEN3_AUDIO_PAD_ID,
+                2,
+                LLAMA4_IMAGE_START_ID,
+                LLAMA4_IMAGE_ID,
+                LLAMA4_PATCH_ID,
+                LLAMA4_PATCH_ID,
+                LLAMA4_IMAGE_END_ID,
+                3,
+            ]
+        );
+
+        let audio_ranges = &ranges[&Modality::Audio];
+        assert_eq!(audio_ranges[0].offset, 1);
+        assert_eq!(audio_ranges[0].length, 3);
+        assert_bool_mask(&audio_ranges[0], &[true, true, true]);
+
+        let image_ranges = &ranges[&Modality::Image];
+        assert_eq!(image_ranges[0].offset, 5);
+        assert_eq!(image_ranges[0].length, 5);
+        assert_bool_mask(&image_ranges[0], &[false, false, true, true, false]);
+    }
+
     #[test]
     fn expand_prompt_tokens_error_names_modality_with_leftover_replacements() {
         let mut prompt_token_ids = vec![1, QWEN3_IMAGE_PAD_ID, 2];
