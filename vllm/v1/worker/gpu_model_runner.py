@@ -3821,7 +3821,7 @@ class GPUModelRunner(
                 if input_fits_in_drafter:
                     propose_draft_token_ids(sampled_token_ids)
                 elif self.valid_sampled_token_count_event is not None:
-                    assert spec_decode_common_attn_metadata is not None
+                    assert spec_decode_common_attn_metadata is not None 
                     next_token_ids, valid_sampled_tokens_count = (
                         self.drafter.prepare_next_token_ids_padded(
                             spec_decode_common_attn_metadata,
@@ -4082,6 +4082,11 @@ class GPUModelRunner(
         elif spec_config.method == "medusa":
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, MedusaProposer)
+            #print('weishu debug: sample_hidden_states', sample_hidden_states.shape)
+            #print('weishu debug: sampled_token_ids', len(sampled_token_ids), sampled_token_ids)
+            #print('weishu debug: self.inputs_embeds.gpu.shape', self.inputs_embeds.gpu.shape)
+            #print('weishu debug: num_scheduled_tokens', num_scheduled_tokens)
+            #print('weishu debug: spec_decode_metadata', spec_decode_metadata)
 
             if sample_hidden_states.shape[0] == len(sampled_token_ids):
                 # The input to the target model does not include draft tokens.
@@ -4099,12 +4104,17 @@ class GPUModelRunner(
                     offset += num_draft + 1
                 indices = torch.tensor(indices, device=self.device)
                 hidden_states = sample_hidden_states[indices]
+            block_token = 151678 #248077
+            input_ids_for_draft = torch.tensor([sampled_token_id[-1] if len(sampled_token_id) else block_token for sampled_token_id in sampled_token_ids ], device=self.device)
 
             draft_token_ids = self.drafter.propose(
                 target_hidden_states=hidden_states,
+                inputs_embeds=None,
+                input_ids=input_ids_for_draft,
                 sampling_metadata=sampling_metadata,
                 slot_mappings=slot_mappings,
             )
+            # print('weishu debug: draft_token_ids', draft_token_ids)
         elif spec_config.uses_extract_hidden_states():
             assert isinstance(self.drafter, ExtractHiddenStatesProposer)
             assert isinstance(sampled_token_ids, torch.Tensor), (
@@ -5580,7 +5590,7 @@ class GPUModelRunner(
             or self.speculative_config.uses_draft_model()
         ):
             assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
-            self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
+            self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes) 
 
     def _check_and_update_cudagraph_mode(
         self,

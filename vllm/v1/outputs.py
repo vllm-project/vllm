@@ -206,6 +206,21 @@ class ECConnectorOutput:
     finished_recving: set[str] | None = None
 
 
+@dataclass
+class ForkInfo:
+    """Information about a fork request triggered by FORK_TOKEN detection."""
+    # The parent request ID that triggered the fork
+    parent_request_id: str
+    # The token position where fork occurred
+    fork_position: int
+    # The prefix token IDs for the child request (prompt + branch content)
+    prefix_token_ids: list[int]
+    # Index of this fork (for generating unique child request ID)
+    fork_idx: int
+    # The block start position in parent for KV cache sharing
+    block_start_position: int = 0
+
+
 # ModelRunnerOutput is serialized and sent to the scheduler process.
 # This is expensive for torch.Tensor so prefer to use list instead.
 @dataclass
@@ -246,6 +261,10 @@ class ModelRunnerOutput:
 
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
+
+    # Fork information for dynamic fork inference
+    # Contains info about requests that need to fork due to FORK_TOKEN detection
+    fork_infos: list[ForkInfo] | None = None
 
 
 # ModelRunnerOutput wrapper for async scheduling.

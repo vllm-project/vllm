@@ -385,6 +385,37 @@ class KVCacheManager:
         """
         self.coordinator.free(request.request_id)
 
+    def free_partial(self, request: Request,
+                     num_tokens_to_keep: int) -> int:
+        """Free tail blocks for a request, keeping blocks that cover
+        num_tokens_to_keep tokens. The kept token count is aligned down
+        to the block boundary.
+
+        Args:
+            request: The request to partially free.
+            num_tokens_to_keep: Desired number of prefix tokens to retain.
+
+        Returns:
+            The actual number of tokens retained (block-aligned).
+        """
+        if num_tokens_to_keep <= 0:
+            self.coordinator.free(request.request_id)
+            return 0
+
+        # Use the first manager's block_size for alignment
+        # (all managers cover the same token positions)
+        first_manager = self.coordinator.single_type_managers[0]
+        block_size = first_manager.block_size
+        num_blocks_to_keep = num_tokens_to_keep // block_size
+
+        if num_blocks_to_keep <= 0:
+            self.coordinator.free(request.request_id)
+            return 0
+
+        self.coordinator.free_tail_blocks(
+            request.request_id, num_tokens_to_keep)
+        return num_blocks_to_keep * block_size
+
     def remove_skipped_blocks(
         self, request_id: str, total_computed_tokens: int
     ) -> None:
@@ -499,3 +530,69 @@ class KVCacheManager:
     def new_step_starts(self) -> None:
         """Called when a new step is started."""
         self.coordinator.new_step_starts()
+
+    def fork_kv_cache(
+        self,
+        parent_request_id: str,
+        child_request_id: str,
+        fork_position: int,
+        block_size: int,  # Add block_size parameter
+    ) -> KVCacheBlocks:
+        """Fork KV cache from parent request to child request.
+        
+        This method shares ONLY the fully filled blocks from parent to child.
+        The last partial block is NOT shared to avoid KV cache corruption when
+        parent and child write to the same block position with different KV values.
+        
+        Args:
+            parent_request_id: The parent request ID to fork from.
+            child_request_id: The child request ID to fork to.
+            fork_position: The token position where fork occurred (exclusive).
+                           This is the position of the FORK/CHILD token.
+            block_size: The block size to use for calculating number of blocks.
+            
+        Returns:
+            KVCacheBlocks: The shared blocks for the child request.
+        """
+        debug = False
+        # IMPORTANT: Only share FULLY FILLED blocks
+        # If fork_position = 2117 and block_size = 16:
+        #   - num_full_blocks = 2117 // 16 = 132 (blocks 0-131 are fully filled)
+        #   - Block 132 has positions 2112-2117 (6 tokens), NOT fully filled
+        #   - We only share blocks 0-131, NOT block 132
+        # 
+        # This prevents the bug where:
+        #   - Parent writes FORK token KV at block 132, position 5
+        #   - Child writes CHILD token KV at block 132, position 5
+        #   - They overwrite each other's KV!
+        num_full_blocks = fork_position // block_size
+        if debug:
+            logger.info(
+                "Fork KV cache: parent=%s, child=%s, fork_position=%d, "
+                "block_size=%d, num_full_blocks_to_share=%d",
+                parent_request_id, child_request_id, fork_position,
+                block_size, num_full_blocks
+            )
+        
+        if num_full_blocks == 0:
+            # No full blocks to share, child will compute everything from scratch
+            if debug:
+                logger.info("No full blocks to share, child will recompute all KV")
+            return self.empty_kv_cache_blocks
+        
+        # Use coordinator to share ONLY the full blocks between parent and child
+        shared_blocks = self.coordinator.fork_blocks(
+            parent_request_id=parent_request_id,
+            child_request_id=child_request_id,
+            num_blocks_to_share=num_full_blocks,  # Only full blocks!
+        )
+        if debug:
+            logger.info(
+                "Forked KV cache from %s to %s at position %d, "
+                "shared %d full blocks (tokens 0-%d are shared, tokens %d+ will be recomputed)",
+                parent_request_id, child_request_id, fork_position,
+                num_full_blocks, num_full_blocks * block_size - 1,
+                num_full_blocks * block_size
+            )
+        
+        return self.create_kv_cache_blocks(shared_blocks)

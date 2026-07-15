@@ -299,16 +299,16 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["ExaoneMoeMTP"]}
             )
 
-        if hf_config.model_type in ("qwen3_5", "qwen3_5_moe"):
-            is_moe = hf_config.model_type == "qwen3_5_moe"
-            hf_config.model_type = "qwen3_5_mtp"
-            n_predict = getattr(hf_config, "mtp_num_hidden_layers", None)
-            hf_config.update(
-                {
-                    "n_predict": n_predict,
-                    "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
-                }
-            )
+        # if hf_config.model_type in ("qwen3_5", "qwen3_5_moe"):
+        #     is_moe = hf_config.model_type == "qwen3_5_moe"
+        #     hf_config.model_type = "qwen3_5_mtp"
+        #     n_predict = getattr(hf_config, "mtp_num_hidden_layers", None)
+        #     hf_config.update(
+        #         {
+        #             "n_predict": n_predict,
+        #             "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
+        #         }
+        #     )
         if hf_config.model_type == "longcat_flash":
             hf_config.model_type = "longcat_flash_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
@@ -347,7 +347,7 @@ class SpeculativeConfig:
                 "method `%s` is deprecated and replaced with mtp.", self.method
             )
             self.method = "mtp"
-
+ 
         if self.model is None and self.num_speculative_tokens is not None:
             if self.method == "mtp":
                 if self.target_model_config is None:
@@ -465,7 +465,7 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
-                if self.method in ("eagle", "eagle3"):
+                if self.method in ("eagle", "eagle3", 'medusa'):
                     pass
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
@@ -589,6 +589,7 @@ class SpeculativeConfig:
                         self.target_parallel_config, self.draft_tensor_parallel_size
                     )
                 )
+        self.method = "medusa"
         return self
 
     def _validate_suffix_decoding(self):

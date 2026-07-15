@@ -17,7 +17,7 @@ import torch.nn as nn
 import torchvision.transforms as T
 from PIL import Image
 from transformers import BatchFeature, PretrainedConfig, TensorType
-
+import os
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -60,6 +60,8 @@ from .interfaces import (
 )
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
+MAX_PATCHES_WITH_RESIZE = os.environ.get("MAX_PATCHES_WITH_RESIZE", "0").lower() in ("1", "true", "yes")
+print("MAX_PATCHES_WITH_RESIZE: {}".format(MAX_PATCHES_WITH_RESIZE))
 IMG_START = "<img>"
 IMG_END = "</img>"
 IMG_CONTEXT = "<IMG_CONTEXT>"
@@ -167,6 +169,46 @@ def find_closest_aspect_ratio(
                 best_ratio = ratio
     return best_ratio
 
+def _find_closest_aspect_ratio_optim(aspect_ratio, target_ratios, width, height, image_size,
+                              top_k=3, ar_threshold=0.2):
+    """
+    先按面积接近程度选 top_k 个候选，再从中选长宽比最接近的。
+
+    Args:
+        ar_threshold: 可选，长宽比差异阈值。若设置，则只有与原图长宽比差异
+                      不超过该阈值的 ratio 才能进入候选列表。
+    """
+    area = width * height
+    # 1. 按面积差异排序，可选地过滤长宽比差异过大的 ratio
+    candidates = []
+    for ratio in target_ratios:
+        target_ar = ratio[0] / ratio[1]
+        ar_diff = abs(aspect_ratio - target_ar)
+        
+        if ar_threshold is not None and ar_diff > ar_threshold:
+            continue
+       
+        target_area = image_size * image_size * ratio[0] * ratio[1]
+        area_diff = abs(area - target_area)
+        candidates.append((ratio, area_diff, ar_diff))
+   
+    # 如果阈值过滤后没有候选，回退到不过滤
+    if not candidates:
+        for ratio in target_ratios:
+            target_ar = ratio[0] / ratio[1]
+            ar_diff = abs(aspect_ratio - target_ar)
+            target_area = image_size * image_size * ratio[0] * ratio[1]
+            area_diff = abs(area - target_area)
+            candidates.append((ratio, area_diff, ar_diff))
+
+    # 2. 按面积差异排序，取 top_k
+    candidates.sort(key=lambda x: x[1])
+    top_candidates = candidates[:top_k]
+
+    # 3. 从 top_k 中选长宽比最接近的
+    top_candidates.sort(key=lambda x: x[2])
+    return top_candidates[0][0]#, top_candidates[0][-1]
+
 
 def resolve_internvl_min_max_num(
     *,
@@ -209,19 +251,29 @@ def calculate_internvl_targets(
     aspect_ratio = orig_width / orig_height
 
     # find the closest aspect ratio to the target
-    target_aspect_ratio = find_closest_aspect_ratio(
+    
+    # print(MAX_PATCHES_WITH_RESIZE)
+    if MAX_PATCHES_WITH_RESIZE:
+        target_aspect_ratio = _find_closest_aspect_ratio_optim(
         aspect_ratio,
         target_ratios,
         width=orig_width,
         height=orig_height,
         image_size=image_size,
     )
+    else:
+        target_aspect_ratio = find_closest_aspect_ratio(
+            aspect_ratio,
+            target_ratios,
+            width=orig_width,
+            height=orig_height,
+            image_size=image_size,
+        )
 
     # calculate the target width and height
     target_width = image_size * target_aspect_ratio[0]
     target_height = image_size * target_aspect_ratio[1]
     blocks = target_aspect_ratio[0] * target_aspect_ratio[1]
-
     # add thumbnail image if num_blocks != 1
     if use_thumbnail and blocks != 1:
         blocks += 1
@@ -249,6 +301,7 @@ def dynamic_preprocess_internvl(
     )
 
     # resize the image
+    
     resized_img = image.resize((target_width, target_height))
     processed_images = []
     for i in range(blocks):
@@ -262,11 +315,14 @@ def dynamic_preprocess_internvl(
         split_img = resized_img.crop(box)
         processed_images.append(split_img)
 
+
     assert len(processed_images) == blocks
 
     if use_thumbnail and len(processed_images) != 1:
         thumbnail_img = image.resize((image_size, image_size))
         processed_images.append(thumbnail_img)
+    #for i in range(len(processed_images)):
+    #    processed_images[i].save("tmp/debug_tile_{}.png".format(i))
 
     return processed_images
 
@@ -362,6 +418,7 @@ class BaseInternVLProcessor(ABC):
         self.num_image_token = int(
             (image_size // patch_size) ** 2 * (config.downsample_ratio**2)
         )
+        
         self.image_size = image_size
         self.min_dynamic_patch = min_dynamic_patch
         self.max_dynamic_patch = max_dynamic_patch
@@ -482,6 +539,7 @@ class BaseInternVLProcessor(ABC):
         if len(images) == 0:
             image_inputs = {}
         else:
+    
             pixel_values_lst = self._images_to_pixel_values_lst(
                 images,
                 min_dynamic_patch=min_dynamic_patch,
@@ -494,11 +552,13 @@ class BaseInternVLProcessor(ABC):
                     [len(item) for item in pixel_values_lst]
                 ),
             }
+            #print(max_dynamic_patch, min_dynamic_patch)
+            #print(images[0].size, image_inputs['pixel_values_flat'].shape, image_inputs['image_num_patches']) # torch.Size([49, 3, 448, 448]) tensor([49])
 
             for pixel_values in pixel_values_lst:
                 num_patches = pixel_values.shape[0]
                 feature_size = num_patches * self.num_image_token
-
+               
                 image_repl = self.get_image_repl(feature_size, num_patches)
                 text = [t.replace("<image>", image_repl.full, 1) for t in text]
         return text, image_inputs
@@ -520,7 +580,6 @@ class BaseInternVLProcessor(ABC):
         return_tensors: str | TensorType | None = None,
     ) -> BatchFeature:
         text, images = [self._make_batch_input(x) for x in (text, images)]
-
         text, image_inputs = self._preprocess_image(
             text=text,
             images=images,

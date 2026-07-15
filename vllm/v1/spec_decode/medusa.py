@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
 import torch
 import torch.nn as nn
 
@@ -39,20 +40,29 @@ class MedusaProposer:
     def propose(
         self,
         target_hidden_states: torch.Tensor,
+        input_ids: torch.Tensor,
+        inputs_embeds: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         slot_mappings: dict[str, torch.Tensor]
         | list[dict[str, torch.Tensor]]
         | None = None,  # unused
     ) -> torch.Tensor:
         # Generate blocks and compute logits
-        blocks = self.model(target_hidden_states)
-        logits = self.model.compute_logits(blocks)
+        # blocks = self.model(hidden_states=target_hidden_states, inputs_embeds=inputs_embeds)
+        # logits = self.model.compute_logits(blocks)
 
         # Compute argmax for each Medusa head and stack into a single tensor
         # Shape: [batch_size, num_heads]
-        draft_tokens = torch.stack([logit.argmax(dim=-1) for logit in logits], dim=1)
+        # draft_tokens = torch.stack([logit.argmax(dim=-1) for logit in logits], dim=1)
 
+        # t0 = time.time()
+        draft_tokens = self.model(hidden_states=target_hidden_states, inputs_embeds=inputs_embeds, input_ids=input_ids)
+        # print('proposed times:', time.time() - t0)
         return draft_tokens
+
+        # draft_tokens = self.model(hidden_states=target_hidden_states, inputs_embeds=inputs_embeds)
+        # draft_tokens = [logit.argmax(dim=-1).tolist() for logit in logits]
+        # return [list(row) for row in zip(*draft_tokens)]
 
     def load_model(self, target_model: nn.Module) -> None:
         from vllm.compilation.backends import set_model_tag
@@ -69,10 +79,12 @@ class MedusaProposer:
 
     @torch.inference_mode()
     def dummy_run(self, num_tokens: int) -> None:
-        hidden_states = torch.zeros(
-            (self.max_num_tokens, self.hidden_size),
-            dtype=self.dtype,
-            device=self.device,
-        )
-        with set_forward_context(None, self.vllm_config, num_tokens=num_tokens):
-            self.model(hidden_states)
+        hidden_states = torch.zeros((self.max_num_tokens, self.hidden_size),
+                                    dtype=self.dtype,
+                                    device=self.device)
+        inputs_embeds = torch.zeros((self.max_num_tokens, self.hidden_size),
+                                      dtype=self.dtype,
+                                      device=self.device)
+        with set_forward_context(None, self.vllm_config,
+                                 num_tokens=num_tokens):
+            self.model(hidden_states, inputs_embeds)

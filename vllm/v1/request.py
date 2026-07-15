@@ -74,6 +74,9 @@ class Request:
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
         resumable: bool = False,
         reasoning_ended: bool | None = None,
+        # Fork-related fields
+        parent_request_id: str | None = None,
+        is_fork_child: bool = False,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -91,6 +94,12 @@ class Request:
         self.status = RequestStatus.WAITING
         self.events: list[EngineCoreEvent] = []
         self.stop_reason: int | str | None = None
+
+        # Fork-related fields
+        self.parent_request_id = parent_request_id
+        self.is_fork_child = is_fork_child
+        self.child_request_ids: list[str] = []  # Track forked children
+        self.fork_count = 0  # Counter for generating unique child IDs
 
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None
@@ -302,6 +311,105 @@ class Request:
         if self.request_id != other.request_id:
             return self.request_id < other.request_id
         return id(self) < id(other)
+
+    def fork_request(
+        self,
+        child_token_id: int,
+        block_hasher=None,
+    ) -> "Request":
+        """
+        Create a forked child request from the current request.
+        
+        The child request inherits:
+        - All prompt tokens + output tokens so far
+        - Replaces the last token (FORK) with child_token_id (CHILD)
+        - Same sampling params, mm_features, etc.
+        
+        Args:
+            child_token_id: The token ID to use instead of FORK (typically CHILD token)
+            block_hasher: Optional block hasher for prefix caching.
+                          If None, will inherit from parent's _block_hasher.
+            
+        Returns:
+            A new Request object representing the forked child
+        """
+        import copy
+        
+        debug = False
+        self.fork_count += 1
+        child_request_id = f"{self.request_id}_fork_{self.fork_count}"
+        
+        # Build child's token sequence:
+        # prompt_tokens + output_tokens (before FORK) + [child_token_id]
+        # Note: FORK token is NOT in _output_token_ids yet when this is called
+        child_prompt_tokens = self.prompt_token_ids.copy()
+        
+        # DEBUG: Log the construction of child prompt
+        if debug:
+            print(f"[FORK DEBUG] Parent request_id={self.request_id}")
+            print(f"[FORK DEBUG] Parent prompt_token_ids length={len(self.prompt_token_ids)}")
+            print(f"[FORK DEBUG] Parent _output_token_ids length={len(self._output_token_ids)}")
+            print(f"[FORK DEBUG] Parent _output_token_ids={self._output_token_ids}")
+            print(f"[FORK DEBUG] child_token_id={child_token_id}")
+        
+        if self._output_token_ids:
+            # Include all current output tokens (FORK not included yet)
+            # These are tokens BEFORE the FORK was generated
+            child_prompt_tokens.extend(self._output_token_ids)
+        # Add CHILD token as the new last token (this replaces FORK)
+        child_prompt_tokens.append(child_token_id)
+        if debug:
+            print(f"[FORK DEBUG] Final child_prompt_tokens length={len(child_prompt_tokens)}")
+            print(f"[FORK DEBUG] Final child_prompt_tokens[-10:]={child_prompt_tokens[-10:]}")
+        
+        # Deep copy sampling params to avoid sharing state
+        child_sampling_params = copy.deepcopy(self.sampling_params) if self.sampling_params else None
+        
+        # IMPORTANT: Inherit parent's block_hasher if not specified
+        # This is required for prefix caching to work correctly.
+        # Without block_hasher, block_hashes will be empty, causing:
+        # AssertionError: len(request.block_hashes) >= num_full_blocks
+        effective_block_hasher = block_hasher if block_hasher is not None else self._block_hasher
+        
+        child_request = Request(
+            request_id=child_request_id,
+            prompt_token_ids=child_prompt_tokens,
+            sampling_params=child_sampling_params,
+            pooling_params=self.pooling_params,
+            client_index=self.client_index,
+            arrival_time=time.time(),
+            mm_features=self.mm_features,  # Share mm_features (read-only)
+            lora_request=self.lora_request,
+            cache_salt=self.cache_salt,
+            priority=self.priority,
+            trace_headers=self.trace_headers,
+            block_hasher=effective_block_hasher,
+            parent_request_id=self.request_id,
+            is_fork_child=True,
+        )
+        
+        # NOTE: Do NOT copy parent's block_hashes to child!
+        # 
+        # The block_hasher function uses len(block_hashes) * block_size as the
+        # start_token_idx to determine which blocks need to be hashed.
+        # If we copy parent's block_hashes, the hasher will think those blocks
+        # are already hashed and skip them. But when child generates new tokens
+        # and the scheduler calls cache_blocks(), it expects block_hashes to
+        # include all full blocks up to num_computed_tokens.
+        #
+        # By NOT copying block_hashes, the Request.__init__ will call
+        # update_block_hashes() which computes block_hashes for the child's
+        # entire token sequence (prompt_tokens + inherited output_tokens).
+        # This ensures block_hashes is always consistent with the child's tokens.
+        #
+        # The child still shares parent's KV cache blocks via fork_kv_cache(),
+        # but block_hashes are computed independently based on token content.
+        
+        # Track the child in parent
+        self.child_request_ids.append(child_request_id)
+        
+        return child_request
+
 
 
 class RequestStatus(enum.IntEnum):

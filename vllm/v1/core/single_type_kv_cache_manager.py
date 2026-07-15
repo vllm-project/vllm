@@ -290,6 +290,47 @@ class SingleTypeKVCacheManager(ABC):
         self.block_pool.free_blocks(ordered_blocks)
         self.num_cached_block.pop(request_id, None)
 
+    def free_tail_blocks(self, request_id: str,
+                         num_blocks_to_keep: int) -> int:
+        """Free tail blocks for a request, keeping the first
+        num_blocks_to_keep blocks allocated.
+
+        Args:
+            request_id: The request ID.
+            num_blocks_to_keep: Number of prefix blocks to retain.
+
+        Returns:
+            The number of blocks actually kept.
+        """
+        req_blocks = self.req_to_blocks.get(request_id, [])
+        if not req_blocks:
+            return 0
+
+        # Clamp to actual block count
+        num_blocks_to_keep = max(0, min(num_blocks_to_keep, len(req_blocks)))
+        if num_blocks_to_keep >= len(req_blocks):
+            # Nothing to free
+            return len(req_blocks)
+
+        # Free tail blocks in reverse order (tail-first for LRU ordering)
+        blocks_to_free = req_blocks[num_blocks_to_keep:]
+        self.block_pool.free_blocks(reversed(blocks_to_free))
+
+        # Keep only prefix blocks
+        self.req_to_blocks[request_id] = req_blocks[:num_blocks_to_keep]
+        # Update num_cached_block to reflect the kept blocks that already
+        # have block_hash set. Clearing it entirely causes cache_blocks()
+        # to re-cache blocks from position 0, hitting the assertion
+        # `assert blk.block_hash is None` for blocks that already have hashes.
+        old_cached = self.num_cached_block.get(request_id, 0)
+        if num_blocks_to_keep > 0:
+            self.num_cached_block[request_id] = min(
+                num_blocks_to_keep, old_cached)
+        else:
+            self.num_cached_block.pop(request_id, None)
+
+        return num_blocks_to_keep
+
     @abstractmethod
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """

@@ -45,13 +45,17 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
-from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
+from vllm.v1.core.sched.request_queue import (
+    FCFSRequestQueue,
+    SchedulingPolicy,
+    create_request_queue,
+)
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
-from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, ForkInfo, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
@@ -88,6 +92,58 @@ class Scheduler(SchedulerInterface):
         self.structured_output_manager = structured_output_manager
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
 
+        # Fork-related configuration
+        # Read from HuggingFace config (config.json), not vLLM's ModelConfig
+        hf_config = getattr(vllm_config.model_config, 'hf_config', None)
+        if hf_config is not None:
+            self.fork_token_id: int | None = getattr(hf_config, 'fork_token_id', None)
+            self.child_token_id: int | None = getattr(hf_config, 'child_token_id', None)
+        else:
+            self.fork_token_id = None
+            self.child_token_id = None
+        
+
+        self.enable_dynamic_fork = (self.fork_token_id is not None and 
+                                     self.child_token_id is not None)
+        # self.enable_dynamic_fork = False
+        # Fork debug switch - controlled by environment variable VLLM_FORK_DEBUG
+        import os
+        self.fork_debug = os.environ.get("VLLM_FORK_DEBUG", "0").lower() in ("1", "true", "yes")
+        
+        if self.enable_dynamic_fork:
+            logger.info(f"Dynamic fork enabled: fork_token_id={self.fork_token_id}, "
+                       f"child_token_id={self.child_token_id}, debug={self.fork_debug}")
+            # Only load tokenizer when debug is enabled (performance optimization)
+            if self.fork_debug:
+                from transformers import AutoTokenizer
+                model_path = vllm_config.model_config.model
+                self.fork_tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+                logger.info(f"Loaded tokenizer from {model_path} for fork debugging")
+            else:
+                self.fork_tokenizer = None
+        else:
+            self.fork_tokenizer = None
+        
+        # Track parent-child relationships for result aggregation
+        self.fork_relationships: dict[str, list[str]] = {}  # parent_id -> [child_ids]
+        self.pending_fork_requests: list[Request] = []  # Requests to add after current step
+        
+        # Fork output aggregation
+        # Stores accumulated token IDs for each fork branch
+        self.fork_outputs: dict[str, dict[str, list[int]]] = {}  # parent_id -> {req_id: [token_ids]}
+        # Tracks which branches have finished
+        self.fork_finished: dict[str, set[str]] = {}  # parent_id -> set of finished req_ids
+        # Stores the original parent request's client_index for returning aggregated results
+        self.fork_client_index: dict[str, int] = {}  # parent_id -> client_index
+        
+        # Track fork child->parent mapping for Mamba state copy
+        # This is populated in _process_pending_fork_requests and cleared after each schedule step
+        self.fork_child_to_parent_this_step: dict[str, str] = {}  # child_id -> parent_id
+        
+        # Dirty flag for incremental waiting queue sorting:
+        # Only re-sort when fork events actually change the queue composition.
+        self._fork_queue_dirty: bool = False
+
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
         # by update_from_outputs(). This is currently used in the multi-engine
@@ -104,6 +160,7 @@ class Scheduler(SchedulerInterface):
             if self.scheduler_config.max_num_scheduled_tokens
             else self.scheduler_config.max_num_batched_tokens
         )
+        print(self.max_num_scheduled_tokens)
         self.max_model_len = vllm_config.model_config.max_model_len
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
@@ -264,6 +321,149 @@ class Scheduler(SchedulerInterface):
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
+        # Fork-aware scheduling configuration
+        # KV cache usage threshold above which parent requests are not admitted
+        import os
+        self.fork_parent_kv_cache_threshold = float(
+            os.environ.get("VLLM_FORK_PARENT_KV_CACHE_THRESHOLD", "0.2"))
+        # Allow up to N fork-children to be admitted to running beyond
+        # max_num_running_reqs. This guarantees that a freshly-created child
+        # can be co-batched with its parent in the very next forward pass,
+        # preserving APAR's weight-load amortization benefit (Option A).
+        # Children share most of the parent's KV via fork_kv_cache so they
+        # only consume <=1 partial block + spec slots of new KV.
+        self.fork_child_running_overflow = int(
+            os.environ.get("VLLM_FORK_CHILD_RUNNING_OVERFLOW", "0"))
+        if self.enable_dynamic_fork:
+            logger.info(
+                "Fork-aware scheduling enabled: "
+                "parent KV cache admission threshold=%.2f, "
+                "child running overflow slots=%d",
+                self.fork_parent_kv_cache_threshold,
+                self.fork_child_running_overflow)
+
+    def _get_fork_waiting_priority(
+        self,
+        request: Request,
+        family_waiting_count: dict[str, int],
+        family_running_count: dict[str, int],
+    ) -> tuple:
+        """Compute a sort key for fork-aware waiting queue ordering.
+
+        Priority rules (FCFS-by-family):
+        - Child requests always have higher priority than parent requests.
+        - Among children: families whose parent arrived earlier get higher
+          priority (FCFS by family). Within the same family, more siblings
+          already running/finished = higher priority.
+        - Among parents/non-fork: earlier arrival = higher priority (FCFS).
+
+        Returns a tuple for sorting (lower = higher priority):
+            (type_order, ..., arrival_time, request_id)
+        """
+        if request.is_fork_child:
+            # Child request: type_order=0 (higher priority than parents)
+            # Primary sub-key: parent's arrival time (earlier parent = higher priority)
+            # Secondary sub-key: prefer families closer to completion
+            parent_id = request.parent_request_id
+            total_children = len(self.fork_relationships.get(parent_id, []))
+            waiting = family_waiting_count.get(parent_id, 0)
+            progress = total_children - waiting  # running + finished siblings
+
+            parent_req = self.requests.get(parent_id)
+            parent_arrival = parent_req.arrival_time if parent_req else request.arrival_time
+
+            return (0, parent_arrival, -progress, request.arrival_time, request.request_id)
+        else:
+            # Parent request (or non-fork request): type_order=1 (lower priority)
+            # Pure FCFS: earlier arrival = higher priority
+            return (1, request.arrival_time, request.request_id)
+
+    def _sort_waiting_queue_for_fork(self) -> None:
+        """Re-sort the waiting queue using fork-aware priority rules.
+
+        Called at the beginning of schedule() when dynamic fork is enabled.
+        Uses a dirty flag to skip re-sorting when no fork events have occurred
+        since the last sort, reducing CPU overhead from O(n log n) to O(1) for
+        the common case where the queue composition hasn't changed.
+
+        The dirty flag is set by:
+        - _process_pending_fork_requests: new child requests added to waiting
+        - _collect_fork_output: a branch finished, changing family statistics
+        """
+        if not self.waiting or not self._fork_queue_dirty:
+            return
+
+        # Pre-compute family counts in O(n) instead of O(n²)
+        family_waiting_count: dict[str, int] = defaultdict(int)
+        for r in self.waiting:
+            if r.is_fork_child:
+                family_waiting_count[r.parent_request_id] += 1
+
+        family_running_count: dict[str, int] = defaultdict(int)
+        for r in self.running:
+            if r.is_fork_child:
+                family_running_count[r.parent_request_id] += 1
+
+        # Extract all requests, sort by fork-aware priority, rebuild queue
+        all_requests = list(self.waiting)
+        # Clear the existing queue
+        if isinstance(self.waiting, FCFSRequestQueue):
+            self.waiting.clear()
+        else:
+            # For PriorityRequestQueue
+            self.waiting._heap.clear()
+
+        all_requests.sort(
+            key=lambda r: self._get_fork_waiting_priority(
+                r, family_waiting_count, family_running_count))
+        for req in all_requests:
+            if isinstance(self.waiting, FCFSRequestQueue):
+                self.waiting.append(req)
+            else:
+                self.waiting.add_request(req)
+
+        self._fork_queue_dirty = False
+
+    def _select_preempt_request_for_fork(self) -> Request:
+        """Select a request to preempt from the running queue using fork-aware rules.
+
+        Preemption rules (FCFS-by-family, consistent with scheduling priority):
+        - Always prefer to preempt parent requests over child requests.
+        - Among parents: later arrival = preempted first (FCFS protection).
+        - Among non-fork requests: later arrival = preempted first.
+        - Among children (only if no parents/others): later parent arrival =
+          preempted first; ties broken by default priority/arrival_time.
+
+        Returns the request to preempt.
+        """
+        # Separate parents and children in running queue
+        parent_requests = []
+        child_requests = []
+        other_requests = []
+
+        for req in self.running:
+            if req.is_fork_child:
+                child_requests.append(req)
+            elif req.fork_count > 0:
+                # This is a parent that has produced children
+                parent_requests.append(req)
+            else:
+                other_requests.append(req)
+
+        if parent_requests:
+            # Preempt the parent that arrived latest (FCFS: earlier = protected)
+            return max(parent_requests, key=lambda r: r.arrival_time)
+        elif other_requests:
+            # Non-fork requests: preempt latest arrival
+            return max(other_requests, key=lambda r: r.arrival_time)
+        else:
+            # Only children remain: preempt children from later-arriving families first
+            def _child_preempt_key(r):
+                parent_req = self.requests.get(r.parent_request_id)
+                parent_arrival = parent_req.arrival_time if parent_req else r.arrival_time
+                return (-parent_arrival, r.priority, r.arrival_time)
+            return max(child_requests, key=_child_preempt_key)
+
     def _mamba_block_aligned_split(
         self,
         request: Request,
@@ -348,6 +548,10 @@ class Scheduler(SchedulerInterface):
         scheduled_timestamp = time.monotonic()
 
         self.kv_cache_manager.new_step_starts()
+
+        # Fork-aware: re-sort waiting queue before scheduling
+        if self.enable_dynamic_fork:
+            self._sort_waiting_queue_for_fork()
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -438,10 +642,43 @@ class Scheduler(SchedulerInterface):
                     if new_blocks is not None:
                         # The request can be scheduled.
                         break
-
+                    logger.info("preempt triggered: req=%s, kv_usage=%.3f",
+                        request.request_id, self.kv_cache_manager.usage)
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
-                    if self.policy == SchedulingPolicy.PRIORITY:
+                    # P0: preserve already-scheduled draft (spec) tokens of the
+                    # preempted request so the MTP investment is not wasted.
+                    # We re-attach them to `spec_token_ids` AFTER
+                    # `_preempt_request` (which clears that field), so the
+                    # next schedule step can verify them again.
+                    preempted_spec_token_ids: list[int] | None = None
+                    if self.enable_dynamic_fork:
+                        # Fork-aware preemption: prefer parents over children
+                        preempted_req = self._select_preempt_request_for_fork()
+                        self.running.remove(preempted_req)
+                        if preempted_req in scheduled_running_reqs:
+                            preempted_req_id = preempted_req.request_id
+                            scheduled_running_reqs.remove(preempted_req)
+                            token_budget += num_scheduled_tokens.pop(preempted_req_id)
+                            req_to_new_blocks.pop(preempted_req_id)
+                            preempted_spec_token_ids = (
+                                scheduled_spec_decode_tokens.pop(
+                                    preempted_req_id, None
+                                )
+                            )
+                            logger.info("popped spec_tokens for %s: %s",
+                                preempted_req_id, preempted_spec_token_ids)
+                            preempted_encoder_inputs = scheduled_encoder_inputs.pop(
+                                preempted_req_id, None
+                            )
+                            if preempted_encoder_inputs:
+                                num_embeds_to_restore = sum(
+                                    preempted_req.get_num_encoder_embeds(i)
+                                    for i in preempted_encoder_inputs
+                                )
+                                encoder_compute_budget += num_embeds_to_restore
+                            req_index -= 1
+                    elif self.policy == SchedulingPolicy.PRIORITY:
                         preempted_req = max(
                             self.running,
                             key=lambda r: (r.priority, r.arrival_time),
@@ -452,7 +689,11 @@ class Scheduler(SchedulerInterface):
                             scheduled_running_reqs.remove(preempted_req)
                             token_budget += num_scheduled_tokens.pop(preempted_req_id)
                             req_to_new_blocks.pop(preempted_req_id)
-                            scheduled_spec_decode_tokens.pop(preempted_req_id, None)
+                            preempted_spec_token_ids = (
+                                scheduled_spec_decode_tokens.pop(
+                                    preempted_req_id, None
+                                )
+                            )
                             preempted_encoder_inputs = scheduled_encoder_inputs.pop(
                                 preempted_req_id, None
                             )
@@ -469,6 +710,15 @@ class Scheduler(SchedulerInterface):
                         preempted_req = self.running.pop()
 
                     self._preempt_request(preempted_req, scheduled_timestamp)
+                    # Restore the preserved draft tokens AFTER _preempt_request
+                    # (which clears `spec_token_ids` internally). They remain
+                    # valid as next-token predictions because preemption keeps
+                    # the request's output tokens; only KV is recomputed.
+                    '''if preempted_spec_token_ids:
+                        print("preempted_spec_token_ids: ", preempted_spec_token_ids)
+                        preempted_req.spec_token_ids = list(
+                            preempted_spec_token_ids
+                        )'''
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
                         # No more request to preempt. Cannot schedule this request.
@@ -528,17 +778,62 @@ class Scheduler(SchedulerInterface):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
+        # Fork-aware (Option A): even if preemption happened during the running
+        # loop, still allow fork-children to be admitted so that parent and
+        # child stay co-batched in the same forward pass. Non-child requests
+        # remain gated by the original `not preempted_reqs` rule.
+        fork_only_admission = (
+            self.enable_dynamic_fork
+            and bool(preempted_reqs)
+        )
+        if (
+            (not preempted_reqs or fork_only_admission)
+            and self._pause_state == PauseState.UNPAUSED
+        ):
             # Use a temporary RequestQueue to collect requests that need to be
             # skipped and put back at the head of the waiting queue later
             skipped_waiting_requests = create_request_queue(self.policy)
 
+            # Fork-aware effective running cap: children may overflow up to
+            # `fork_child_running_overflow` slots above max_num_running_reqs.
+            # Non-children must still respect max_num_running_reqs.
+            effective_max_running = self.max_num_running_reqs
+            if self.enable_dynamic_fork:
+                effective_max_running += self.fork_child_running_overflow
+
             while self.waiting and token_budget > 0:
-                if len(self.running) == self.max_num_running_reqs:
+                if len(self.running) >= effective_max_running:
                     break
 
                 request = self.waiting.peek_request()
                 request_id = request.request_id
+
+                # Fork-only admission mode: skip non-child requests (they will
+                # be retried next step when preemption pressure has cleared).
+                if fork_only_admission and not request.is_fork_child:
+                    self.waiting.pop_request()
+                    skipped_waiting_requests.prepend_request(request)
+                    continue
+
+                # Respect the original max_num_running_reqs cap for non-children
+                # even when overflow is enabled. Only children may use the
+                # overflow slots.
+                if (
+                    not request.is_fork_child
+                    and len(self.running) >= self.max_num_running_reqs
+                ):
+                    self.waiting.pop_request()
+                    skipped_waiting_requests.prepend_request(request)
+                    continue
+
+                # Fork-aware: block parent requests when KV cache usage is high
+                if (self.enable_dynamic_fork
+                        and not request.is_fork_child
+                        and self.kv_cache_manager.usage
+                        > self.fork_parent_kv_cache_threshold):
+                    self.waiting.pop_request()
+                    skipped_waiting_requests.prepend_request(request)
+                    continue
 
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -632,8 +927,11 @@ class Scheduler(SchedulerInterface):
                         num_new_local_computed_tokens + num_external_computed_tokens
                     )
                 else:
-                    # KVTransfer: WAITING reqs have num_computed_tokens > 0
-                    # after async KV recvs are completed.
+                    # num_computed_tokens > 0 for two cases:
+                    # 1. KVTransfer: async KV recvs completed.
+                    # 2. Partial preemption: prompt blocks still allocated.
+                    # In both cases, blocks are already in req_to_blocks,
+                    # so we only need to allocate the remaining tokens.
                     new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
@@ -651,7 +949,24 @@ class Scheduler(SchedulerInterface):
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
+                    
                     num_new_tokens = request.num_tokens - num_computed_tokens
+                    if num_new_tokens <= 0:
+                        # 必须保留 ≥1 个 token 重算，否则没有 logits 给采样
+                        block_size = self.block_size
+                        # 把 cached 长度对齐到上一个完整块边界，确保严格 < num_tokens
+                        capped = ((request.num_tokens - 1) // block_size) * block_size
+                        # 同步退还多出来的整块（关键！）
+                        excess_blocks = (num_new_local_computed_tokens - capped) // block_size
+                        if excess_blocks > 0:
+                            # 具体 API 看你的 KVCacheBlocks 实现，常见的是切片或 .pop_last()
+                            new_computed_blocks = new_computed_blocks[:-excess_blocks] \
+                                if hasattr(new_computed_blocks, '__getitem__') \
+                                else new_computed_blocks.truncate(len(new_computed_blocks) - excess_blocks)
+                        num_new_local_computed_tokens = capped
+                        num_computed_tokens = capped
+                        num_new_tokens = request.num_tokens - num_computed_tokens
+                        
                     threshold = self.scheduler_config.long_prefill_token_threshold
                     if 0 < threshold < num_new_tokens:
                         num_new_tokens = threshold
@@ -815,7 +1130,12 @@ class Scheduler(SchedulerInterface):
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
 
         assert token_budget >= 0
-        assert len(self.running) <= self.max_num_running_reqs
+        # Fork-aware: children may overflow up to fork_child_running_overflow
+        # beyond max_num_running_reqs (Option A co-batch guarantee).
+        effective_running_cap = self.max_num_running_reqs
+        if self.enable_dynamic_fork:
+            effective_running_cap += self.fork_child_running_overflow
+        assert len(self.running) <= effective_running_cap
         # Since some requests in the RUNNING queue may not be scheduled in
         # this step, the total number of scheduled requests can be smaller than
         # len(self.running).
@@ -888,7 +1208,12 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
+            # Fork information for Mamba state copy
+            fork_child_to_parent=self.fork_child_to_parent_this_step.copy() if self.fork_child_to_parent_this_step else None,
         )
+        
+        # Clear fork mapping after building scheduler output
+        self.fork_child_to_parent_this_step.clear()
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
@@ -914,16 +1239,111 @@ class Scheduler(SchedulerInterface):
     def _preempt_request(self, request: Request, timestamp: float) -> None:
         """Preempt a request and put it back to the waiting queue.
 
+        When dynamic fork is enabled, uses partial preemption: keeps the
+        prompt's KV cache blocks allocated and only frees output blocks.
+        This avoids expensive prompt re-computation on reschedule.
+
         NOTE: The request should be popped from the running queue outside of this
         method.
         """
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
         )
-        self.kv_cache_manager.free(request)
-        self.encoder_cache_manager.free(request)
+
+        # Ensure that if this request was scheduled in the previous step,
+        # we no longer treat it as such. Otherwise, when the same step both
+        # preempts and resumes the request (e.g., fork-aware admission), the
+        # resumed-path assertion in `_make_cached_request_data` will fail.
+        self.prev_step_scheduled_req_ids.discard(request.request_id)
+        
+        # Partial preemption keeps the prompt-aligned KV cache prefix (and,
+        # for multimodal requests, also keeps the encoder cache reference so
+        # the GPU-side encoder outputs are not evicted), advancing
+        # num_computed_tokens to that boundary. This avoids expensive prompt
+        # re-computation on resume — including image encoder re-runs.
+        #
+        # Why partial preempt is now safe for multimodal + fork-child:
+        #   - The kept KV prefix [0, tokens_kept) is a strict subset of
+        #     [0, request.num_computed_tokens) at preempt time, whose KV is
+        #     correctly populated.
+        #   - For fork-child: the resume path goes through
+        #     waiting.prepend_request and does NOT touch
+        #     _process_pending_fork_requests (only fed by FORK-token emission
+        #     into pending_fork_requests), so no double fork_kv_cache call /
+        #     refcount corruption occurs on resume.
+        #   - For multimodal: by NOT calling encoder_cache_manager.free here,
+        #     the request keeps its reference on cached encoder outputs
+        #     (mm_hash stays in `cached`, not in `freeable`), so they cannot
+        #     be evicted by other requests' `can_allocate` while preempted.
+        #     On resume, `check_and_update_cache` returns True for those
+        #     mm_hashes, encoder is not rescheduled, and
+        #     `_gather_mm_embeddings` finds the cached encoder outputs —
+        #     avoiding the previously fatal `Encoder cache miss` assertion.
+        #
+        # Cap the keep target at num_computed_tokens to handle the rare case
+        # of preemption mid-prefill, where the request's allocated blocks may
+        # not yet cover the full num_prompt_tokens.
+        use_partial_preempt = self.enable_dynamic_fork
+
+        if use_partial_preempt:
+            # Partial preemption: keep prompt KV blocks (or as many as are
+            # actually computed) and keep encoder cache references alive.
+            block_size = self.block_size
+            tokens_to_keep = min(
+                request.num_prompt_tokens,
+                request.num_computed_tokens,
+            )
+            # Block-align down so this scheduler-side computation matches
+            # what kv_cache_manager.free_partial will actually keep.
+            tokens_to_keep = (tokens_to_keep // block_size) * block_size
+
+            # Critical: tokens_to_keep MUST NOT split a multimodal item.
+            # If [image_start, image_start+image_len) straddles
+            # tokens_to_keep (image_start < tokens_to_keep < image_end),
+            # then on resume the scheduler decides the image is not yet in
+            # KV (line ~1469), goes to check_and_update_cache, finds it in
+            # `cached` (since we don't call free here) → skips rescheduling
+            # encoding → but the worker's `encoder_cache` may have already
+            # evicted that tensor (it was made freeable when the request
+            # passed the image earlier, and another request's can_allocate
+            # could have evicted it before this preempt). The worker would
+            # then hit `assert encoder_output is not None` (Encoder cache
+            # miss). Pulling tokens_to_keep down to image_start makes the
+            # image "not started" on resume, which forces a clean re-encode
+            # path through can_allocate/allocate.
+            if request.has_encoder_inputs and request.mm_features:
+                while tokens_to_keep > 0:
+                    straddler_start: int | None = None
+                    for mm_feature in request.mm_features:
+                        s = mm_feature.mm_position.offset
+                        e = s + mm_feature.mm_position.length
+                        if s < tokens_to_keep < e:
+                            if straddler_start is None or s < straddler_start:
+                                straddler_start = s
+                    if straddler_start is None:
+                        break
+                    tokens_to_keep = (straddler_start // block_size) * block_size
+
+            if tokens_to_keep <= 0:
+                # Nothing safe to keep — fall back to full preempt.
+                self.kv_cache_manager.free(request)
+                request.num_computed_tokens = 0
+                self.encoder_cache_manager.free(request)
+            else:
+                tokens_kept = self.kv_cache_manager.free_partial(
+                    request, tokens_to_keep)
+                request.num_computed_tokens = tokens_kept
+                # NOTE: deliberately do NOT call
+                # self.encoder_cache_manager.free here — see docstring
+                # above.
+        else:
+            # Full preemption (original behavior, used when dynamic fork is
+            # disabled). Frees both KV cache and encoder cache references.
+            self.kv_cache_manager.free(request)
+            request.num_computed_tokens = 0
+            self.encoder_cache_manager.free(request)
+
         request.status = RequestStatus.PREEMPTED
-        request.num_computed_tokens = 0
         if request.spec_token_ids:
             request.spec_token_ids = []
         request.num_preemptions += 1
@@ -1354,8 +1774,10 @@ class Scheduler(SchedulerInterface):
             status_before_stop = request.status
 
             # Check for stop and update request status.
+            # Also check for FORK tokens and create child requests.
+            forked = False
             if new_token_ids:
-                new_token_ids, stopped = self._update_request_with_output(
+                new_token_ids, stopped, forked = self._update_request_with_output(
                     request, new_token_ids
                 )
             elif request.pooling_params and pooler_output is not None:
@@ -1366,6 +1788,14 @@ class Scheduler(SchedulerInterface):
             routed_experts = None
             finish_reason = None
             if stopped:
+                # Check if this request is part of a fork family
+                parent_id = self._get_fork_parent_id(req_id)
+                if parent_id is not None:
+                    # This is a fork-related request
+                    # Let it stop normally, but track for aggregation
+                    if self.fork_debug:
+                        logger.info(f"[FORK] Branch {req_id} stopped, waiting for aggregation")
+                
                 routed_experts = self._get_routed_experts(request)
 
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
@@ -1405,31 +1835,63 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
+            
+            # Check if this request is part of a fork family
+            parent_id = self._get_fork_parent_id(req_id)
+            is_fork_request = parent_id is not None
+            
             if (
                 new_token_ids
                 or pooler_output is not None
                 or kv_transfer_params
                 or stopped
             ):
-                # Add EngineCoreOutput for this Request.
-                outputs[request.client_index].append(
-                    EngineCoreOutput(
-                        request_id=req_id,
-                        new_token_ids=new_token_ids,
-                        finish_reason=finish_reason,
-                        new_logprobs=new_logprobs,
-                        new_prompt_logprobs_tensors=prompt_logprobs_tensors,
-                        pooling_output=pooler_output,
-                        stop_reason=request.stop_reason,
-                        events=request.take_events(),
-                        kv_transfer_params=kv_transfer_params,
-                        trace_headers=request.trace_headers,
-                        num_cached_tokens=request.num_cached_tokens,
-                        num_external_computed_tokens=request.num_external_computed_tokens,
-                        routed_experts=routed_experts,
-                        num_nans_in_logits=request.num_nans_in_logits,
+                if is_fork_request:
+                    # This is a fork-related request, collect output for aggregation
+                    self._collect_fork_output(parent_id, req_id, new_token_ids, stopped)
+                    
+                    # Check if all branches are finished
+                    if self._all_fork_branches_finished(parent_id):
+                        # Aggregate and return the final output
+                        aggregated_output = self._aggregate_fork_outputs(parent_id)
+                        client_idx = self.fork_client_index[parent_id]
+                        outputs[client_idx].append(
+                            EngineCoreOutput(
+                                request_id=parent_id,  # Use parent's request_id
+                                new_token_ids=aggregated_output,
+                                finish_reason=finish_reason,
+                                new_logprobs=None,  # Logprobs not supported for aggregated output
+                                new_prompt_logprobs_tensors=None,
+                                pooling_output=pooler_output,
+                                stop_reason=request.stop_reason,
+                                events=request.take_events(),
+                                kv_transfer_params=kv_transfer_params,
+                                trace_headers=request.trace_headers,
+                                num_cached_tokens=request.num_cached_tokens,
+                            ))
+                        # Clean up fork tracking data
+                        self._cleanup_fork_data(parent_id)
+                else:
+                    # Normal request, add output directly
+                    # Add EngineCoreOutput for this Request.
+                    outputs[request.client_index].append(
+                        EngineCoreOutput(
+                            request_id=req_id,
+                            new_token_ids=new_token_ids,
+                            finish_reason=finish_reason,
+                            new_logprobs=new_logprobs,
+                            new_prompt_logprobs_tensors=prompt_logprobs_tensors,
+                            pooling_output=pooler_output,
+                            stop_reason=request.stop_reason,
+                            events=request.take_events(),
+                            kv_transfer_params=kv_transfer_params,
+                            trace_headers=request.trace_headers,
+                            num_cached_tokens=request.num_cached_tokens,
+                            num_external_computed_tokens=request.num_external_computed_tokens,
+                            routed_experts=routed_experts,
+                            num_nans_in_logits=request.num_nans_in_logits,
+                        )
                     )
-                )
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
@@ -1459,6 +1921,9 @@ class Scheduler(SchedulerInterface):
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
             self._update_from_kv_xfer_finished(kv_connector_output)
+
+        # Process any pending fork requests created during this step
+        self._process_pending_fork_requests()
 
         # collect KV cache events from KV cache manager
         events = self.kv_cache_manager.take_events()
@@ -1556,21 +2021,131 @@ class Scheduler(SchedulerInterface):
 
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int]
-    ) -> tuple[list[int], bool]:
+    ) -> tuple[list[int], bool, bool]:
+        """
+        Update request with new output tokens.
+        
+        Returns:
+            tuple: (new_token_ids, stopped, forked)
+            - new_token_ids: The token IDs to include in output
+            - stopped: Whether the request should stop
+            - forked: Whether a fork was detected and child request created
+        """
+
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
         # to return empty token ids for the request.
         stopped = False
-        for num_new, output_token_id in enumerate(new_token_ids, 1):
+        forked = False
+        # Convert to list if needed so we can modify it
+        new_token_ids = list(new_token_ids)
+        # Track which indices had FORK tokens (for output replacement later)
+        fork_indices = []
+        
+        for idx, output_token_id in enumerate(new_token_ids):
+            # Check for FORK token before appending
+            is_fork_token = (self.enable_dynamic_fork and 
+                             output_token_id == self.fork_token_id)
+
+            # Prevent child branches from forking again (check if "_fork_" in request_id)
+            # If a child request tries to fork again, end its prediction early.
+            if is_fork_token and "_fork_" in request.request_id:
+                logger.info(f"[FORK] Child request {request.request_id} cannot fork again, "
+                           f"ending prediction early at token index {idx}")
+                request.status = RequestStatus.FINISHED_STOPPED
+                stopped = True
+                # Drop this fork token and anything after it from the output
+                new_token_ids = new_token_ids[:idx+1]
+                fork_indices = [i for i in fork_indices if i < idx]
+                break
+            
+            if is_fork_token:
+                # Debug logging for fork (only decode when debug=True)
+                if self.fork_debug:
+                    output_tokens = list(request.output_token_ids) if request.output_token_ids else []
+                    output_text = ""
+                    if self.fork_tokenizer is not None and output_tokens:
+                        try:
+                            output_text = self.fork_tokenizer.decode(output_tokens, skip_special_tokens=False)
+                        except Exception as e:
+                            output_text = f"[decode error: {e}]"
+                    is_child = getattr(request, 'is_fork_child', False)
+                    logger.info(f"[FORK] request_id={request.request_id}, "
+                           f"is_fork_child={is_child}, "
+                           f"output_token_ids={output_tokens}, "
+                           f"output_text={output_text}")
+                # time.sleep(10)
+                # Create a forked child request
+                # Note: Don't pass block_hasher=None - let it inherit from parent
+                # The parent's _block_hasher will be used for computing block_hashes
+                forked = True
+                child_request = request.fork_request(
+                    child_token_id=self.child_token_id,
+                    # block_hasher will be inherited from parent's _block_hasher
+                )
+                #child_request.sampling_params.max_tokens = 8000
+                #child_request.max_tokens = 8000
+                
+                # Debug logging for child (only decode when debug=True)
+                if self.fork_debug:
+                    child_prompt_text = ""
+                    if self.fork_tokenizer is not None:
+                        try:
+                            child_prompt_text = self.fork_tokenizer.decode(
+                                child_request.prompt_token_ids, skip_special_tokens=False
+                            )
+                        except Exception as e:
+                            child_prompt_text = f"[decode error: {e}]"
+                    logger.info(f"[FORK] Child created: request_id={child_request.request_id}, "
+                           f"num_prompt_tokens={child_request.num_prompt_tokens}, "
+                           f"prompt_token_ids[-20:]={child_request.prompt_token_ids[-20:] if len(child_request.prompt_token_ids) > 20 else child_request.prompt_token_ids}, "
+                           f"prompt_text_suffix={child_prompt_text[-200:] if len(child_prompt_text) > 200 else child_prompt_text}")
+              
+                # Queue the child request to be added after current step
+                self.pending_fork_requests.append(child_request)
+                # Track parent-child relationship
+                if request.request_id not in self.fork_relationships:
+                    self.fork_relationships[request.request_id] = []
+                    # Initialize fork output aggregation for this parent
+                    self.fork_outputs[request.request_id] = {request.request_id: []}
+                    self.fork_finished[request.request_id] = set()
+                    self.fork_client_index[request.request_id] = request.client_index
+                self.fork_relationships[request.request_id].append(
+                    child_request.request_id)
+                # Initialize output storage for child
+                self.fork_outputs[request.request_id][child_request.request_id] = []
+                # IMPORTANT: Keep FORK in parent's output_token_ids to maintain model context
+                # Only replace in the returned new_token_ids for display purposes
+                fork_indices.append(idx)
+            
             request.append_output_token_ids(output_token_id)
 
             # Check for stop and update request state.
             # This must be called before we make the EngineCoreOutput.
-            stopped = check_stop(request, self.max_model_len)
-            if stopped:
-                del new_token_ids[num_new:]  # Trim new tokens if needed.
-                break
-        return new_token_ids, stopped
+            # IMPORTANT: Skip stop check for FORK tokens to ensure parent continues
+            # generating more FORK tokens for other branches
+            if is_fork_token:
+                # For FORK tokens, only check length limits, not stop tokens
+                if (request.num_tokens >= self.max_model_len or
+                    request.num_output_tokens >= request.max_tokens):
+                    request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+                    stopped = True
+                    new_token_ids = new_token_ids[:idx+1]
+                    fork_indices = [i for i in fork_indices if i <= idx]
+                    break
+            else:
+                stopped = check_stop(request, self.max_model_len)
+                if stopped:
+                    new_token_ids = new_token_ids[:idx+1]
+                    # Update fork_indices to match trimmed list
+                    fork_indices = [i for i in fork_indices if i <= idx]
+                    break
+        
+        # Replace FORK with CHILD in the returned tokens (for display only)
+        for idx in fork_indices:
+            new_token_ids[idx] = self.child_token_id
+        
+        return new_token_ids, stopped, forked
 
     def _free_encoder_inputs(self, request: Request) -> None:
         cached_encoder_input_ids = self.encoder_cache_manager.get_cached_input_ids(
@@ -1605,7 +2180,7 @@ class Scheduler(SchedulerInterface):
             if request is None or request.is_finished():
                 # The request may have been finished. Skip.
                 continue
-
+           
             if request.is_prefill_chunk:
                 # Ignore draft tokens for prefill chunks.
                 if request.spec_token_ids:
@@ -1763,9 +2338,279 @@ class Scheduler(SchedulerInterface):
         return kv_xfer_params
 
     def _free_blocks(self, request: Request):
+
         assert request.is_finished()
+        request_id = request.request_id
+        
+        # If this is a fork child request, notify parent
+        if "_fork_" in request_id:
+            parent_id = request_id.rsplit("_fork_", 1)[0]
+            if parent_id in self.fork_relationships:
+                child_list = self.fork_relationships[parent_id]
+                if request_id in child_list:
+                    child_list.remove(request_id)
+                    if self.fork_debug:
+                        logger.info(f"[Fork] Removed child {request_id} from parent's fork_relationships")
+        
         self.kv_cache_manager.free(request)
-        del self.requests[request.request_id]
+        del self.requests[request_id]
+
+    # =========================================================================
+    # Fork-related helper methods
+    # =========================================================================
+    
+    def _get_fork_parent_id(self, req_id: str) -> str | None:
+        """Get the root parent request ID if this request is part of a fork family.
+        
+        For nested forks like chatcmpl-xxx_fork_1_fork_1, this returns chatcmpl-xxx
+        (the original parent), not chatcmpl-xxx_fork_1.
+        """
+        # Check if this is a parent request itself
+        if req_id in self.fork_outputs:
+            return req_id
+        
+        # Check if this is a child request (format: parent_id_fork_N or nested)
+        if "_fork_" not in req_id:
+            return None
+        
+        # For nested forks, we need to find the root parent
+        # chatcmpl-xxx_fork_1_fork_1 -> chatcmpl-xxx (split on first _fork_)
+        root_parent_id = req_id.split("_fork_", 1)[0]
+        if root_parent_id in self.fork_outputs:
+            return root_parent_id
+        
+        # Also check immediate parent (for compatibility with existing nested fork tracking)
+        immediate_parent_id = req_id.rsplit("_fork_", 1)[0]
+        if immediate_parent_id in self.fork_outputs:
+            return immediate_parent_id
+        
+        return None
+
+    def _collect_fork_output(self, parent_id: str, req_id: str, 
+                             new_token_ids: list[int], stopped: bool) -> None:
+        """Collect output tokens from a fork branch."""
+        if parent_id not in self.fork_outputs:
+            return
+
+        # Ensure this request has an output list
+        if req_id not in self.fork_outputs[parent_id]:
+            self.fork_outputs[parent_id][req_id] = []
+        
+        # Append new tokens
+        self.fork_outputs[parent_id][req_id].extend(new_token_ids)
+        
+        # Mark as finished if stopped
+        if stopped:
+            self.fork_finished[parent_id].add(req_id)
+            # Family statistics changed — remaining siblings' priority may shift
+            self._fork_queue_dirty = True
+            if self.fork_debug:
+                logger.info(f"[FORK] Branch {req_id} finished, "
+                       f"total tokens: {len(self.fork_outputs[parent_id][req_id])}")
+
+    def _all_fork_branches_finished(self, parent_id: str) -> bool:
+        """Check if all fork branches (parent + children) have finished."""
+        if parent_id not in self.fork_outputs:
+            return False
+        
+        # Get all branch IDs (parent + children)
+        all_branch_ids = set(self.fork_outputs[parent_id].keys())
+        finished_ids = self.fork_finished.get(parent_id, set())
+        
+        all_finished = all_branch_ids == finished_ids
+        if all_finished:
+            logger.info(f"[FORK] All {len(all_branch_ids)} branches finished for parent {parent_id}")
+        
+        return all_finished
+
+    def _aggregate_fork_outputs(self, parent_id: str) -> list[int]:
+        """Aggregate outputs from all fork branches into a single output.
+        
+        The aggregation logic:
+        1. Iterate through parent's tokens
+        2. When encountering a CHILD token, insert the corresponding child branch's output after it
+        3. Child branches are matched by their fork number (_fork_1, _fork_2, ...)
+        
+        Result format: <BLOCK>...<CHILD>[child_1_content]<BLOCK>...<CHILD>[child_2_content]...
+        """
+
+        if parent_id not in self.fork_outputs:
+            return []
+        
+        branch_outputs = self.fork_outputs[parent_id]
+        parent_tokens = branch_outputs.get(parent_id, [])
+        
+        # Get child branches sorted by fork number
+        # Format: parent_id_fork_1, parent_id_fork_2, ...
+        child_branches = [(bid, branch_outputs[bid]) 
+                          for bid in branch_outputs.keys() 
+                          if bid != parent_id]
+        # Sort by fork number (extract the number after "_fork_")
+        child_branches.sort(key=lambda x: int(x[0].rsplit("_fork_", 1)[1]))
+        
+        logger.info(f"[FORK] Aggregating: parent has {len(parent_tokens)} tokens, "
+                   f"{len(child_branches)} child branches")
+        
+        # Interleave parent tokens with child outputs
+        aggregated: list[int] = []
+        child_idx = 0
+        
+        for token in parent_tokens:
+            aggregated.append(token)
+            # When we see a CHILD token, insert the corresponding child's output after it
+            if token == self.child_token_id and child_idx < len(child_branches):
+                child_id, child_tokens = child_branches[child_idx]
+                aggregated.extend(child_tokens)
+                if self.fork_debug:
+                    logger.info(f"[FORK] Inserted child {child_idx + 1} ({child_id}): "
+                           f"{len(child_tokens)} tokens after CHILD token")
+                child_idx += 1
+        
+        # Log warning if not all children were inserted
+        if child_idx < len(child_branches):
+            if self.fork_debug:
+                logger.warning(f"[FORK] Not all children inserted! "
+                          f"Expected {len(child_branches)}, inserted {child_idx}")
+        if self.fork_debug:
+            logger.info(f"[FORK] Total aggregated output: {len(aggregated)} tokens")
+        return aggregated
+
+    def _cleanup_fork_data(self, parent_id: str) -> None:
+        """Clean up fork tracking data after aggregation.
+        
+        Also handles nested fork cleanup - if parent_id itself contains '_fork_',
+        it means this is a nested fork family that also needs cleanup.
+        """
+
+        # Clean up the direct fork data
+        if parent_id in self.fork_outputs:
+            del self.fork_outputs[parent_id]
+        if parent_id in self.fork_finished:
+            del self.fork_finished[parent_id]
+        if parent_id in self.fork_client_index:
+            del self.fork_client_index[parent_id]
+        if parent_id in self.fork_relationships:
+            del self.fork_relationships[parent_id]
+        
+        # Also clean up any nested fork data that may have been created
+        # by child requests that also generated FORK tokens
+        nested_ids_to_clean = []
+        for fork_parent in list(self.fork_outputs.keys()):
+            if fork_parent.startswith(parent_id + "_fork_"):
+                nested_ids_to_clean.append(fork_parent)
+        
+        for nested_id in nested_ids_to_clean:
+            if nested_id in self.fork_outputs:
+                del self.fork_outputs[nested_id]
+            if nested_id in self.fork_finished:
+                del self.fork_finished[nested_id]
+            if nested_id in self.fork_client_index:
+                del self.fork_client_index[nested_id]
+            if nested_id in self.fork_relationships:
+                del self.fork_relationships[nested_id]
+            if self.fork_debug:
+                logger.info(f"[FORK] Cleaned up nested fork data for {nested_id}")
+        if self.fork_debug:
+            logger.info(f"[FORK] Cleaned up fork data for parent {parent_id}")
+
+    def _process_pending_fork_requests(self) -> None:
+        """Add pending fork requests to the scheduler."""
+        if not self.pending_fork_requests:
+            return
+
+        if self.fork_debug:
+            logger.info(f"[FORK] Processing {len(self.pending_fork_requests)} pending fork requests")
+
+        # Get block_size for calculating num_computed_tokens
+        # IMPORTANT: Use the actual KV cache block size from kv_cache_config, NOT self.block_size
+        # self.block_size is max_model_len (e.g., 16000), but the actual KV cache block size
+        # is from kv_cache_spec (e.g., 544). Using the wrong block_size causes:
+        # - num_full_blocks = fork_position // 16000 = 0 (no blocks shared)
+        # - Child branches don't inherit any KV cache, causing garbled output
+        kv_cache_groups = self.kv_cache_config.kv_cache_groups
+        if kv_cache_groups:
+            block_size = kv_cache_groups[0].kv_cache_spec.block_size
+        else:
+            block_size = self.block_size
+
+        for child_request in self.pending_fork_requests:
+            # DEBUG: Print detailed info
+            if self.fork_debug:
+                print(f"[FORK PROCESS DEBUG] child_request.request_id={child_request.request_id}")
+                print(f"[FORK PROCESS DEBUG] child_request.num_prompt_tokens={child_request.num_prompt_tokens}")
+                print(f"[FORK PROCESS DEBUG] child_request.num_output_tokens={child_request.num_output_tokens}")
+                print(f"[FORK PROCESS DEBUG] child_request.num_tokens={child_request.num_tokens}")
+                print(f"[FORK PROCESS DEBUG] len(prompt_token_ids)={len(child_request.prompt_token_ids) if child_request.prompt_token_ids else 0}")
+                print(f"[FORK PROCESS DEBUG] block_size={block_size}")
+                
+            # In method B: child inherits parent's output_token_ids
+            # fork_position = child's total tokens = prompt + inherited output (including CHILD token)
+            # This is the total sequence length that needs KV cache
+            fork_position = child_request.num_tokens  # = num_prompt_tokens + num_output_tokens
+
+            # Initialize num_shared_tokens to 0 (will be updated based on actual shared blocks)
+            num_shared_tokens = 0
+
+            if child_request.parent_request_id:
+                # Try to fork KV cache (share parent's FULL blocks only)
+                try:
+                    shared_blocks = self.kv_cache_manager.fork_kv_cache(
+                        parent_request_id=child_request.parent_request_id,
+                        child_request_id=child_request.request_id,
+                        fork_position=fork_position - 1,  # Position before CHILD token
+                        block_size=block_size,  # Pass scheduler's block_size
+                    )
+                    # IMPORTANT: For hybrid models (Attention + Mamba), we need to find
+                    # the first non-empty block group. blocks[0] might be MambaManager's
+                    # empty list, while blocks[1] is AttentionManager's shared blocks.
+                    num_shared_blocks = 0
+                    if shared_blocks.blocks:
+                        for block_group in shared_blocks.blocks:
+                            if block_group:  # Find first non-empty block group
+                                num_shared_blocks = len(block_group)
+                                break
+                    # IMPORTANT: Calculate num_shared_tokens based on ACTUAL shared blocks
+                    # Use the block_size from kv_cache_manager, not scheduler
+                    if num_shared_blocks > 0:
+                        num_shared_tokens = num_shared_blocks * block_size
+                    else:
+                        num_shared_tokens = 0  # No blocks shared, recompute everything
+                    if self.fork_debug:
+                        logger.info(f"[FORK] Shared {num_shared_blocks} full blocks from parent "
+                               f"({num_shared_tokens} tokens are shared)")
+                except Exception as e:
+                    logger.warning(f"Failed to fork KV cache: {e}")
+                    num_shared_tokens = 0  # Fallback: recompute everything
+
+            # Set num_computed_tokens = number of tokens covered by shared FULL blocks
+            # Child will recompute tokens from num_shared_tokens to fork_position
+            # This includes the partial block tokens AND the CHILD token
+            #child_request.num_computed_tokens = num_shared_tokens
+            child_request.num_computed_tokens = min(num_shared_tokens, child_request.num_tokens - 1)
+
+            if self.fork_debug:
+                logger.info(f"[FORK] Child {child_request.request_id}: "
+                       f"num_prompt_tokens={child_request.num_prompt_tokens}, "
+                       f"num_output_tokens={child_request.num_output_tokens}, "
+                       f"fork_position={fork_position}, "
+                       f"num_shared_tokens={num_shared_tokens}, "
+                       f"num_computed_tokens={child_request.num_computed_tokens}, "
+                       f"tokens_to_recompute={fork_position - num_shared_tokens}")
+
+            # Add the child request to the scheduler
+            self.add_request(child_request)
+            if self.fork_debug:
+                logger.info(f"[FORK] Added child request {child_request.request_id} to scheduler")
+            
+            # Track fork child->parent mapping for Mamba state copy
+            # This will be used by GPU model runner to copy Mamba state from parent
+            if child_request.parent_request_id:
+                self.fork_child_to_parent_this_step[child_request.request_id] = child_request.parent_request_id
+
+        # Mark waiting queue dirty so next schedule() re-sorts with new children
+        self._fork_queue_dirty = True
+        # Clear the pending list
+        self.pending_fork_requests.clear()
 
     @property
     def pause_state(self) -> PauseState:

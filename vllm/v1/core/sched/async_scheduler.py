@@ -36,15 +36,15 @@ class AsyncScheduler(Scheduler):
 
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int]
-    ) -> tuple[list[int], bool]:
+    ) -> tuple[list[int], bool, bool]:
         if request.discard_latest_async_tokens:
             # If the request is force preempted in reset_prefix_cache, we
             # should discard the latest async token.
             request.discard_latest_async_tokens = False
-            return [], False
+            return [], False, False
 
         status_before_update = request.status
-        new_token_ids, stopped = super()._update_request_with_output(
+        new_token_ids, stopped, forked = super()._update_request_with_output(
             request, new_token_ids
         )
 
@@ -57,4 +57,4 @@ class AsyncScheduler(Scheduler):
             self.kv_cache_manager.cache_blocks(
                 request, request.num_computed_tokens - request.num_output_placeholders
             )
-        return new_token_ids, stopped
+        return new_token_ids, stopped, forked

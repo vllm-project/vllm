@@ -14,6 +14,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
+    MambaManager,
     SingleTypeKVCacheManager,
     get_manager_for_kv_cache_spec,
 )
@@ -198,6 +199,19 @@ class KVCacheCoordinator(ABC):
         for manager in self.single_type_managers:
             manager.free(request_id)
 
+    def free_tail_blocks(self, request_id: str,
+                         num_tokens_to_keep: int) -> None:
+        """Free tail blocks for a request across all KV cache groups,
+        keeping blocks that cover at least num_tokens_to_keep tokens.
+
+        Args:
+            request_id: The request ID.
+            num_tokens_to_keep: Number of prefix tokens to retain.
+        """
+        for manager in self.single_type_managers:
+            num_blocks_to_keep = num_tokens_to_keep // manager.block_size
+            manager.free_tail_blocks(request_id, num_blocks_to_keep)
+
     def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
         """
         Get the number of common prefix blocks for all requests with allocated
@@ -238,6 +252,73 @@ class KVCacheCoordinator(ABC):
             manager.req_to_blocks.get(request_id) or []
             for manager in self.single_type_managers
         )
+
+    def fork_blocks(
+        self,
+        parent_request_id: str,
+        child_request_id: str,
+        num_blocks_to_share: int,
+    ) -> tuple[list[KVCacheBlock], ...]:
+        """
+        Fork blocks from parent request to child request.
+        
+        For Attention layers: shares the parent's blocks with the child by 
+        increasing reference counts, avoiding actual data copy.
+        
+        For Mamba layers: does NOT share blocks because Mamba state is cumulative
+        and would cause pollution between parent and child branches. The child
+        will allocate new blocks and the Mamba state will be copied separately
+        at runtime via mamba_state_copy_func.
+        
+        Args:
+            parent_request_id: The parent request ID.
+            child_request_id: The child request ID.
+            num_blocks_to_share: Number of blocks to share from parent.
+            
+        Returns:
+            The shared blocks for the child request (empty for Mamba managers).
+        """
+        shared_blocks_per_group: list[list[KVCacheBlock]] = []
+        
+        for manager in self.single_type_managers:
+            # IMPORTANT: Skip sharing for MambaManager
+            # Mamba state is cumulative/stateful, so parent and child would
+            # pollute each other's state if they shared the same blocks.
+            # The child will get new blocks allocated during scheduling,
+            # and the Mamba state copy will happen at GPU model runner level.
+            if isinstance(manager, MambaManager):
+                shared_blocks_per_group.append([])
+                # Initialize empty block list for child so it gets fresh blocks
+                # NOTE: Do NOT set num_cached_block here! The child request is not
+                # "running" yet - it will go through the normal scheduling path
+                # which may find prefix cache hits (new_computed_blocks).
+                # Setting num_cached_block would make get_num_blocks_to_allocate()
+                # think this is a running request and assert new_computed_blocks == 0.
+                manager.req_to_blocks[child_request_id] = []
+                continue
+            
+            parent_blocks = manager.req_to_blocks.get(parent_request_id)
+            if parent_blocks is None:
+                shared_blocks_per_group.append([])
+                continue
+            
+            # Share blocks up to num_blocks_to_share
+            blocks_to_share = parent_blocks[:num_blocks_to_share]
+            shared_blocks: list[KVCacheBlock] = []
+            
+            for block in blocks_to_share:
+                # Increase reference count for shared block
+                block.ref_cnt += 1
+                shared_blocks.append(block)
+            
+            # Register the shared blocks for the child request
+            manager.req_to_blocks[child_request_id] = shared_blocks.copy()
+            # IMPORTANT: Also set num_cached_block to avoid assertion error
+            # in save_new_computed_blocks when the child is scheduled
+            manager.num_cached_block[child_request_id] = len(shared_blocks)
+            shared_blocks_per_group.append(shared_blocks)
+        
+        return tuple(shared_blocks_per_group)
 
     @abstractmethod
     def find_longest_cache_hit(

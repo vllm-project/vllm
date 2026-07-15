@@ -238,6 +238,12 @@ class SchedulerOutput:
     # preventing stale NaN/data from corrupting attention or SSM computation.
     new_block_ids_to_zero: list[int] | None = None
 
+    # Fork information: child_req_id -> parent_req_id
+    # Used to copy Mamba state from parent to forked child requests.
+    # When a child request is scheduled for the first time, its Mamba state
+    # needs to be initialized from the parent's Mamba state.
+    fork_child_to_parent: dict[str, str] | None = None
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(

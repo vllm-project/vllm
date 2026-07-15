@@ -140,6 +140,20 @@ def do_mamba_copy_block(copy_bufs: MambaCopyBuffers):
     )
 
 
+def _get_parent_req_id_from_fork_id(req_id: str) -> str | None:
+    """
+    Extract parent request ID from fork child request ID.
+    Fork child request ID format: parent_id_fork_N (e.g., "chatcmpl-xxx_fork_1")
+    
+    FIX for Issue 1: This allows us to get parent_req_id even if fork_child_to_parent
+    mapping was cleared before the child was scheduled.
+    """
+    if "_fork_" not in req_id:
+        return None
+    # Get immediate parent (for nested forks like parent_fork_1_fork_2, returns parent_fork_1)
+    return req_id.rsplit("_fork_", 1)[0]
+
+
 def preprocess_mamba(
     scheduler_output: SchedulerOutput,
     kv_cache_config: KVCacheConfig,
@@ -154,6 +168,9 @@ def preprocess_mamba(
     """
     Copy the mamba state of previous step to the last
     (1 + num_speculative_blocks) block.
+    
+    For forked child requests, copy Mamba state from parent request instead
+    of using the child's own (uninitialized) state.
     """
     mamba_group_ids, mamba_spec = get_mamba_groups(kv_cache_config)
     num_speculative_blocks = mamba_spec.num_speculative_blocks
@@ -171,10 +188,71 @@ def preprocess_mamba(
     for req_id in itertools.chain(finished_req_ids, preempted_req_ids, resumed_req_ids):
         mamba_state_idx.pop(req_id, None)
 
+    # Get fork information: child_req_id -> parent_req_id
+    fork_child_to_parent = scheduler_output.fork_child_to_parent or {}
+
     copy_bufs.offset = 0
     for i, req_id in enumerate(input_batch.req_ids):
         req_state = requests[req_id]
         prev_state_idx = mamba_state_idx.get(req_id)
+        
+        # Check if this is a forked child request that needs to copy from parent
+        # FIX Issue 1: Try fork_child_to_parent first, then fallback to parsing request_id
+        # This handles the case where fork_child_to_parent mapping was cleared before
+        # the child was actually scheduled (delayed scheduling).
+        parent_req_id = fork_child_to_parent.get(req_id)
+        if parent_req_id is None and prev_state_idx is None:
+            # Fallback: try to extract parent_req_id from request_id string
+            parent_req_id = _get_parent_req_id_from_fork_id(req_id)
+        
+        if parent_req_id is not None and prev_state_idx is None:
+            # This is a NEW fork child request - need to copy from parent's Mamba state
+            if parent_req_id in requests:
+                parent_req_state = requests[parent_req_id]
+                
+                # FIX Issue 2: Calculate CORRECT source state position
+                # Child starts from num_computed_tokens, so we need the Mamba state
+                # at that position, NOT the parent's current position.
+                # 
+                # Example: parent at token 100, child num_computed_tokens = 96 (shared blocks)
+                # - Child needs state from block covering position 95 (last token before 96)
+                # - This is block index = (96 - 1) // block_size = 95 // block_size
+                # - NOT parent's current state which might be at token 100
+                child_start_position = req_state.num_computed_tokens
+                if child_start_position > 0:
+                    # The correct source state is the block that contains position (child_start_position - 1)
+                    # This is the Mamba state BEFORE the child starts computing
+                    correct_source_state_idx = (child_start_position - 1) // block_size
+                else:
+                    correct_source_state_idx = -1
+                
+                # Calculate child's destination state index
+                num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+                child_num_blocks: int = (
+                    cdiv(req_state.num_computed_tokens + num_scheduled_tokens, block_size)
+                    + num_speculative_blocks
+                )
+                child_state_idx = child_num_blocks - 1 - num_speculative_blocks
+                mamba_state_idx[req_id] = child_state_idx
+                
+                # Only copy if we have a valid source state
+                if correct_source_state_idx >= 0:
+                    # Collect copy metadata from parent to child
+                    # Use CORRECT source position, not parent's current position
+                    collect_mamba_copy_meta_cross_request(
+                        copy_bufs,
+                        kv_cache_config,
+                        mamba_state_copy_funcs,
+                        mamba_group_ids,
+                        correct_source_state_idx,  # FIX: Use correct source position
+                        child_state_idx,
+                        parent_req_state,
+                        req_state,
+                        forward_context,
+                    )
+                input_batch.num_accepted_tokens_cpu[i] = 1
+                continue
+        
         if prev_state_idx is None:
             # new / resumed request, no previous state
             # if num_computed_tokens is 0, prev_state_idx will be -1
@@ -212,6 +290,48 @@ def preprocess_mamba(
             )
             input_batch.num_accepted_tokens_cpu[i] = 1
     do_mamba_copy_block(copy_bufs)
+
+
+def collect_mamba_copy_meta_cross_request(
+    copy_bufs: MambaCopyBuffers,
+    kv_cache_config: KVCacheConfig,
+    mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
+    mamba_group_ids: list[int],
+    src_block_idx: int,
+    dest_block_idx: int,
+    src_req_state: CachedRequestState,
+    dest_req_state: CachedRequestState,
+    forward_context: dict[str, Any],
+) -> None:
+    """
+    Collect Mamba state copy metadata for cross-request copy (e.g., from parent to forked child).
+    This is similar to collect_mamba_copy_meta but uses different request states for source and dest.
+    """
+    src_ptrs_np = copy_bufs.src_ptrs.np
+    dst_ptrs_np = copy_bufs.dst_ptrs.np
+    sizes_np = copy_bufs.sizes.np
+    offset = copy_bufs.offset
+
+    for mamba_group_id in mamba_group_ids:
+        src_block_ids = src_req_state.block_ids[mamba_group_id]
+        dest_block_ids = dest_req_state.block_ids[mamba_group_id]
+        dest_block_id = dest_block_ids[dest_block_idx]
+        layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
+        for layer_name in layer_names:
+            attention = forward_context[layer_name]
+            kv_caches: list[torch.Tensor] = attention.kv_cache[0]
+            for state, state_copy_func in zip(kv_caches, mamba_state_copy_funcs):
+                # Get source pointer from parent's block
+                copy_spec = state_copy_func(
+                    state, src_block_ids, src_block_idx, 1  # accept_token_bias + 1 = 1 for fresh copy
+                )
+
+                src_ptrs_np[offset] = copy_spec.start_addr
+                dst_ptrs_np[offset] = state[dest_block_id].data_ptr()
+                sizes_np[offset] = copy_spec.num_elements * state.element_size()
+                offset += 1
+
+    copy_bufs.offset = offset
 
 
 def postprocess_mamba(

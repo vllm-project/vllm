@@ -227,7 +227,7 @@ class InputProcessor:
     ) -> EngineCoreRequest:
         self._validate_params(params, supported_tasks)
         self._validate_lora(lora_request)
-
+       
         parallel_config = self.vllm_config.parallel_config
         dp_size = parallel_config.data_parallel_size
         dp_local_size = parallel_config.data_parallel_size_local
@@ -248,7 +248,13 @@ class InputProcessor:
 
             if arrival_time is None:
                 arrival_time = prompt.get("arrival_time", time.time())  # type: ignore[assignment]
-
+            # <|im_start|>user\ndocument parsing.<image>\n<|im_end|>\n<|im_start|>assistant\n<BLOCK>text [36, 77, 272, 134]<CHILD><|im_end|>\n<|im_start|>assistant\n
+            # 151644 (<|im_start|>) 151645 (<|im_end|>)
+            if prompt['prompt_token_ids'].count(151645) >= 2:
+                prompt['prompt_token_ids'] = prompt['prompt_token_ids'][:-5]
+            elif prompt['prompt_token_ids'].count(248046) >= 2:
+                prompt['prompt_token_ids'] = prompt['prompt_token_ids'][:-9]
+            # print(prompt)
             processed_inputs: ProcessorInputs = prompt  # type: ignore[assignment]
         else:
             logger.warning_once(
@@ -306,6 +312,24 @@ class InputProcessor:
             decoder_mm_inputs = decoder_inputs["mm_kwargs"]
             decoder_mm_positions = decoder_inputs["mm_placeholders"]
             decoder_mm_hashes = decoder_inputs["mm_hashes"]
+
+            # Print image token count
+            '''prompt_len = len(prompt_token_ids) if prompt_token_ids else 0
+            for modality, mm_positions in decoder_mm_positions.items():
+                num_images = len(mm_positions)
+                image_tokens = sum(p.get_num_embeds() for p in mm_positions)
+                tokens_per_tile = 256  # (image_size/patch_size)^2 * downsample_ratio^2
+                num_tiles = image_tokens // tokens_per_tile if tokens_per_tile else 0
+                text_tokens = prompt_len - image_tokens
+                logger.info(
+                    "request_id=%s modality=%s images=%d tiles=%d "
+                    "image_tokens=%d text_tokens=%d prompt_total=%d "
+                    "image_ratio=%.1f%%",
+                    request_id, modality, num_images, num_tiles,
+                    image_tokens, text_tokens, prompt_len,
+                    image_tokens / prompt_len * 100 if prompt_len else 0,
+                )
+            '''
 
             if not all(
                 isinstance(leaf, str) for leaf in json_iter_leaves(decoder_mm_hashes)
