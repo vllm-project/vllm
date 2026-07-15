@@ -1,11 +1,13 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Adapter that combines reasoning and tool parsers.
 
 use vllm_tokenizer::DynTokenizer;
 
+use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput};
 use crate::reasoning::ReasoningParser;
 use crate::tool::{StructuralTagModel, Tool, ToolParser, ToolParserOutput};
-
-use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput};
 
 /// Unified parser that composes existing reasoning and tool parsers.
 pub struct CombinedParser {
