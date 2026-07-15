@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # TurboQuant decode GQA-6 sibling (FlyDSL) — MI355X / gfx950 / CDNA4
 #
 # Decode-only paged attention over a TurboQuant SoA KV cache.
@@ -87,12 +88,12 @@ DATA_BYTES_PER_SLOT = KEY_DATA_BYTES + VAL_DATA_BYTES
 MFMA_M = MFMA_N = 16
 MFMA_K_BF16_QK = 32  # CDNA4 wide-K (mfma_f32_16x16x32_bf16)
 MFMA_K_BF16_PV = 16  # PV's K = token tile = 16
-QK_K_CHUNKS = HEAD_SIZE // MFMA_K_BF16_QK  # 4 (down from 8)
+QK_K_CHUNKS = HEAD_SIZE // MFMA_K_BF16_QK  # 4
 PV_N_CHUNKS = HEAD_SIZE // MFMA_N  # 8
 
 # LDS regions
-# Bisect: use full QG=16 footprint (4096 B) for Q region to test if the
-# 2048-vs-4096 boundary is the source of the multi-shape JIT NaN bug.
+# Q region uses the full 16-row footprint (4096 B) rather than a tight
+# QG=6 sizing, keeping the LDS layout identical to the canonical kernel.
 CENTROID_LDS_BYTES = N_CENTROIDS * 4  # 64
 Q_LDS_BYTES = 16 * HEAD_SIZE * 2  # 4096
 KV_TILE_LDS_BYTES = TILE_SIZE * HEAD_SIZE * 2  # 4096
@@ -279,7 +280,7 @@ def build_tq_decode_gqa6_module(
         # padding read then touches unmapped pages and the kernel dies
         # with "Memory access fault by GPU node" the moment the
         # surrounding allocator state leaves the next page unmapped
-        # (allocator-pattern-dependent → reproduces as a heisenbug).
+        # (allocator-pattern-dependent → nondeterministic fault).
         #
         # Fix: redirect OOB lanes (``row >= QG``) to load Q[0,0,col_elem]
         # — a byte offset that is always inside the actual Q tensor.
@@ -423,7 +424,7 @@ def build_tq_decode_gqa6_module(
 
         # ===== STEP E: Sequence-len + partition base ====================
         seq_len = buffer_ops.buffer_load(sl_rsrc, seq, vec_width=1, dtype=T.i32)
-        # ── Option A: bounded num_partitions + internal looping ─────────
+        # ── Bounded num_partitions + internal looping ───────────────────
         # Mirrors the canonical tq_decode kernel: each CTA owns
         # ``PARTITION_EXTENT_TOKENS = TGPP * KV_COMPUTE_BLOCK`` contiguous
         # tokens of the seq, processed as TGPP groups of 16 K-tiles each.
@@ -463,7 +464,7 @@ def build_tq_decode_gqa6_module(
         # ``stride_cache_block`` and the subsequent kv_cache read jumps
         # into unmapped pages, killing the whole launch with a
         # "Memory access fault by GPU node" exactly as the OOB Q load
-        # used to (same allocator-pattern-dependent heisenbug; B=4 makes
+        # used to (same allocator-pattern-dependent fault; B=4 makes
         # it deterministic by adding more colliding CTAs).
         #
         # Fix: when the tile starts at or past ``seq_len`` (so its
@@ -474,13 +475,12 @@ def build_tq_decode_gqa6_module(
         # preserved without changing the kernel's iteration count.
         #
         # The canonical Qwen kernel reads the same tiles and is also
-        # exposed to this issue in principle; in practice the bug bites
-        # GQA-6 first because the surrounding allocator state happens
-        # to differ (extra Q-tail allocation) and shifts the page maps
-        # so the bt overflow lands on unmapped pages. Applying the same
-        # redirect to canonical is a follow-up; for this branch we keep
-        # the canonical kernel byte-identical to its release behavior.
-        # ===== Option A': scf.ForOp w/ iter_args (HIP-style) =========
+        # exposed to this issue in principle; in practice it surfaces on
+        # GQA-6 first because the surrounding allocator state differs
+        # (extra Q-tail allocation) and shifts the page maps so the bt
+        # overflow lands on unmapped pages. Applying the same redirect to
+        # the canonical kernel is a possible follow-up.
+        # ===== Runtime-adaptive scf.ForOp w/ iter_args =========
         # Runtime-adaptive outer loop: trip count derives from
         # actual seq_len, NOT TGPP_max. At cudagraph-capture warmup
         # (seq_len=1) only 1 iteration runs; at 32K production
@@ -775,7 +775,7 @@ def build_tq_decode_gqa6_module(
                     # cross-lane forwarding, so it can sink the next iteration's
                     # ds_read ahead of these ds_write_b128 ops in the schedule.
                     #
-                    # Two-part fence (mirrors mla_fwd_decode_m16x8_fp8_fp8.py):
+                    # Two-part fence:
                     #   1. sched_barrier(0): MachineScheduler reorder barrier
                     #      (mask=0 → no instruction class may cross). Pure hint,
                     #      generates no runtime instruction. Use the simple
@@ -793,9 +793,10 @@ def build_tq_decode_gqa6_module(
                     # the per-lane same-address waitcnt the compiler emits is
                     # correct.
                     #
-                    # Empirical: targets the -3.3pp GSM8K regression on
-                    # Qwen3-32B (padded num_partitions=64, ~16 K-tiles each)
-                    # while leaving Qwen2.5-72B (16 partitions) unchanged.
+                    # Without this fence the reordered ds_read produces
+                    # wrong results on high-partition-count configs (large
+                    # padded num_partitions); low-partition configs are
+                    # unaffected.
                     rocdl.sched_barrier(0)
                     # encode_waitcnt(vmcnt=63, expcnt=7, lgkmcnt=0)
                     #   = 0xF | (7<<4) | (0<<8) | (3<<14) = 0xC07F

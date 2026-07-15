@@ -84,7 +84,7 @@ _CONTINUATION_DECODE_THRESHOLD = 128
 #    * SoA Triton store (write)                                               #
 #    * FlyDSL decode (GQA in {6, 8, 16}; gfx950) — GQA-6 = MiniMax sibling #
 #    * SoA-aware continuation/dequant for chunked prefill                     #
-#    * SoA Triton v3 fallback for FlyDSL-ineligible layers                    #
+#    * SoA Triton decode fallback for FlyDSL-ineligible layers               #
 #  The FlyDSL framework is a separate runtime dependency; if it is unavailable #
 #  while opted in, init raises. Per-layer ineligible cases use the SoA path.   #
 # --------------------------------------------------------------------------- #
@@ -108,7 +108,7 @@ if _USE_TQ_FLYDSL:
 
 
 def _soa_imports():
-    """Lazy import of the HIP-free SoA Triton subset (store / dequant / v3).
+    """Lazy import of the HIP-free SoA Triton subset (store / dequant / decode).
 
     Kept lazy so the default (FlyDSL-off) path never imports these modules.
     """
@@ -119,10 +119,10 @@ def _soa_imports():
         triton_turboquant_store as soa_store,
     )
     from vllm.v1.attention.ops.turboquant_soa.triton_turboquant_unified_attention import (  # noqa: E501
-        triton_turboquant_decode_attention_v3 as soa_v3,
+        triton_turboquant_decode_attention_soa as soa_decode,
     )
 
-    return soa_store, soa_dequant, soa_v3
+    return soa_store, soa_dequant, soa_decode
 
 
 def _build_hadamard(d: int, device_str: str) -> torch.Tensor:
@@ -872,7 +872,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                         # (APC) request. Continuation stays on the Triton SoA
                         # path even when FlyDSL is the main decode kernel
                         # (FlyDSL is decode-batch only).
-                        out = self._dispatch_decode_v3(
+                        out = self._dispatch_decode_soa(
                             query=q_seq,
                             kv_cache=kv_cache,
                             block_table=synth_bt,
@@ -1155,7 +1155,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         if _USE_TQ_FLYDSL:
             # FlyDSL decode (MI355X/gfx950, MSE-key, HEAD_SIZE=128,
             # GQA in {6, 8, 16}). GQA-6 routes to the MiniMax sibling kernel.
-            # Ineligible layers / missing FlyDSL fall back to SoA Triton v3.
+            # Ineligible layers / missing FlyDSL fall back to SoA Triton decode.
             _gqa = self.num_kv_groups
             flydsl_gqa_ok = (_gqa in (8, 16)) or (
                 _gqa == 6 and _flydsl_gqa6_available()
@@ -1195,7 +1195,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 )
             logger.warning_once(
                 "TurboQuant FlyDSL ineligible (key_fp8=%s mse_bits=%s vqb=%s "
-                "head_size=%s num_kv_groups=%s sinks=%s) -> SoA Triton v3",
+                "head_size=%s num_kv_groups=%s sinks=%s) -> SoA Triton decode",
                 self.tq_config.key_fp8,
                 self.tq_config.key_mse_bits,
                 self.tq_config.effective_value_quant_bits,
@@ -1203,7 +1203,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 self.num_kv_groups,
                 self.sinks is not None,
             )
-            return self._dispatch_decode_v3(
+            return self._dispatch_decode_soa(
                 query=query,
                 kv_cache=kv_cache,
                 block_table=attn_metadata.block_table,
@@ -1250,20 +1250,20 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         )
         return result
 
-    def _dispatch_decode_v3(self, **kwargs):
-        """SoA-aware Triton v3 decode — fallback for FlyDSL-ineligible layers.
+    def _dispatch_decode_soa(self, **kwargs):
+        """SoA-aware Triton decode — fallback for FlyDSL-ineligible layers.
 
-        The SoA v3 launcher accepts a subset of the FlyDSL kwargs; filter to the
-        params it accepts and raise if a *meaningful* (non-None) kwarg would
+        The SoA decode launcher accepts a subset of the FlyDSL kwargs; filter to
+        the params it accepts and raise if a *meaningful* (non-None) kwarg would
         be silently dropped (so we never mask a real feature gap).
         """
         import inspect
 
-        _, _, soa_v3 = _soa_imports()
-        accepted = set(inspect.signature(soa_v3).parameters)
+        _, _, soa_decode = _soa_imports()
+        accepted = set(inspect.signature(soa_decode).parameters)
         dropped = [k for k, v in kwargs.items() if k not in accepted and v is not None]
         if dropped:
             raise NotImplementedError(
-                f"SoA v3 decode does not support kwargs {sorted(dropped)}"
+                f"SoA decode does not support kwargs {sorted(dropped)}"
             )
-        return soa_v3(**{k: v for k, v in kwargs.items() if k in accepted})
+        return soa_decode(**{k: v for k, v in kwargs.items() if k in accepted})

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # TurboQuant decode (FlyDSL) — MI355X / gfx950 / CDNA4
 #
 # Decode-only paged attention over a TurboQuant SoA KV cache.
@@ -71,7 +72,7 @@ DATA_BYTES_PER_SLOT = KEY_DATA_BYTES + VAL_DATA_BYTES
 MFMA_M = MFMA_N = 16
 MFMA_K_BF16_QK = 32  # CDNA4 wide-K (mfma_f32_16x16x32_bf16)
 MFMA_K_BF16_PV = 16  # PV's K = token tile = 16
-QK_K_CHUNKS = HEAD_SIZE // MFMA_K_BF16_QK  # 4 (down from 8)
+QK_K_CHUNKS = HEAD_SIZE // MFMA_K_BF16_QK  # 4
 PV_N_CHUNKS = HEAD_SIZE // MFMA_N  # 8
 
 # LDS regions
@@ -125,8 +126,7 @@ def build_tq_decode_module(
     per lane, then read back into the MFMA A operand via the hardware
     ``ds_read_tr16_b64`` transpose. This eliminates ~28 ds_write
     instructions per lane per K-tile (32 -> 4) and 8 strided ds_read_b64
-    per PV chunk (replaces them with 1 hw-transpose read each). Pattern
-    derived from ``flash_attn_func.py`` (USE_HW_TR=True path).
+    per PV chunk (replaces them with 1 hw-transpose read each).
 
     ``tile_groups_per_partition`` (default 1) controls the FA-2 split-K
     granularity. With value G each partition processes ``G * 16`` K-tiles
@@ -135,14 +135,15 @@ def build_tq_decode_module(
     ``num_partitions`` (e.g. cap at 32) for long context: at 32K /
     block_size=32 / num_partitions=32, G=5 covers 32*5*256 = 40 960
     tokens of worst-case context with grid.z=32 instead of 256.
-    Behavior at G=1 is bit-identical to the pre-Option-A kernel.
+    Behavior at G=1 is bit-identical to the single-partition kernel.
 
     ``use_wht_butterfly`` (default False) replaces the STEP B HBM load of
     the externally-rotated ``q_rot`` tensor with an in-register 7-stage
     Walsh-Hadamard butterfly that computes ``H @ q`` directly (H = the
     normalised Hadamard matrix = PiT for TurboQuant).  The launcher must
     pass the raw ``query`` tensor instead of ``q_rot`` when this is True.
-    Gate: ``VLLM_TQ_FLYDSL_WHT_BUTTERFLY=1``.
+    Currently never enabled by the launcher (kept for future use); see
+    ``_wht_butterfly_enabled`` in ``flydsl_turboquant_decode.py``.
     """
     assert query_group_size in (8, 16), (
         f"query_group_size must be 8 or 16; got {query_group_size}"
@@ -412,7 +413,7 @@ def build_tq_decode_module(
 
         # ===== STEP E: Sequence-len + partition base ====================
         seq_len = buffer_ops.buffer_load(sl_rsrc, seq, vec_width=1, dtype=T.i32)
-        # ── Option A: bounded num_partitions + internal looping ─────────
+        # ── Bounded num_partitions + internal looping ───────────────────
         # With TGPP > 1 this CTA owns a contiguous slice of length
         # ``PARTITION_EXTENT_TOKENS`` that is iterated as ``TGPP`` groups
         # of 16 K-tiles each. ``partition_start`` is recomputed per
@@ -464,7 +465,7 @@ def build_tq_decode_module(
         # ``bt[seq, 0]`` — always in bounds. The redundant phys_block
         # decode + kv_cache read is wasted work, but correctness is
         # preserved without changing the kernel's iteration count.
-        # ===== Option A': scf.ForOp w/ iter_args (HIP-style) =========
+        # ===== Runtime-adaptive scf.ForOp w/ iter_args =========
         # Runtime-adaptive outer loop: trip count derives from
         # actual seq_len, NOT TGPP_max. At cudagraph-capture warmup
         # (seq_len=1) only 1 iteration runs; at 32K production
@@ -755,7 +756,7 @@ def build_tq_decode_module(
                     # cross-lane forwarding, so it can sink the next iteration's
                     # ds_read ahead of these ds_write_b128 ops in the schedule.
                     #
-                    # Two-part fence (mirrors mla_fwd_decode_m16x8_fp8_fp8.py):
+                    # Two-part fence:
                     #   1. sched_barrier(0): MachineScheduler reorder barrier
                     #      (mask=0 → no instruction class may cross). Pure hint,
                     #      generates no runtime instruction. Use the simple
@@ -773,9 +774,10 @@ def build_tq_decode_module(
                     # the per-lane same-address waitcnt the compiler emits is
                     # correct.
                     #
-                    # Empirical: targets the -3.3pp GSM8K regression on
-                    # Qwen3-32B (padded num_partitions=64, ~16 K-tiles each)
-                    # while leaving Qwen2.5-72B (16 partitions) unchanged.
+                    # Without this fence the reordered ds_read produces
+                    # wrong results on high-partition-count configs (large
+                    # padded num_partitions); low-partition configs are
+                    # unaffected.
                     rocdl.sched_barrier(0)
                     # encode_waitcnt(vmcnt=63, expcnt=7, lgkmcnt=0)
                     #   = 0xF | (7<<4) | (0<<8) | (3<<14) = 0xC07F
