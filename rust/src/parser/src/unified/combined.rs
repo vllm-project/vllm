@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Adapter that combines reasoning and tool parsers.
 
 use vllm_tokenizer::DynTokenizer;
