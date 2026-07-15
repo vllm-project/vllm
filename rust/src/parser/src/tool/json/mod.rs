@@ -317,7 +317,7 @@ fn tool_call_close_event(
     input: &mut JsonToolInput<'_>,
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {
-    let _ = literal("}").parse_next(input)?;
+    seq!(_: ws0, _: literal("}")).parse_next(input)?;
 
     match config.delimiter {
         Some(delimiter) => alt((
@@ -404,6 +404,34 @@ mod tests {
         }
         output.append(parser.finish().unwrap());
         output.coalesce()
+    }
+
+    #[test]
+    fn json_tool_call_tolerates_whitespace_before_outer_brace() {
+        // Pretty-printed JSON puts whitespace between the arguments object's `}`
+        // and the outer object's `}`; it must still parse (json.loads parity).
+        let mut whole = JsonToolCallParser::new(DELIMITED_CONFIG);
+        let whole_output = collect_chunks(
+            &mut whole,
+            &[r#"<tool_calls>{"function":"f","parameters":{"x":1} }</tool_calls>"#],
+        );
+        assert_eq!(whole_output.calls().len(), 1);
+        assert_eq!(whole_output.calls()[0].name.as_deref(), Some("f"));
+        assert_eq!(whole_output.calls()[0].arguments, r#"{"x":1}"#);
+
+        // Same input, but the whitespace before the outer `}` is split across a
+        // chunk boundary (exercises `ws0` returning Incomplete on `Partial`).
+        let mut chunked = JsonToolCallParser::new(DELIMITED_CONFIG);
+        let chunked_output = collect_chunks(
+            &mut chunked,
+            &[
+                r#"<tool_calls>{"function":"f","parameters":{"x":1}"#,
+                " ",
+                "}</tool_calls>",
+            ],
+        );
+        assert_eq!(chunked_output.calls().len(), 1);
+        assert_eq!(chunked_output.calls()[0].arguments, r#"{"x":1}"#);
     }
 
     #[test]
