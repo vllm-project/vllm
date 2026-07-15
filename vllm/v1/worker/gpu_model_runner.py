@@ -5527,14 +5527,15 @@ class GPUModelRunner(
                 param.copy_(loaded_weight)
                 loaded_weights.add(name)
 
-        # Zero LoRA stacked tensors (lora_a_stacked, lora_b_stacked, etc.)
-        # which are plain attributes not restored by the reload machinery.
-        # After level-2 sleep their GPU memory is discarded and remapped
-        # with undefined contents; this ensures they are in a known-zero
-        # state. This also runs on non-sleep reload paths (e.g. base
-        # weight hot-swap), which is acceptable since LoRA adapters
-        # trained on the old base weights are invalid after a base weight
-        # change and must be re-loaded separately.
+        # Re-initialize LoRA state tensors (lora_a_stacked, etc.) which are
+        # plain attributes not restored by the reload machinery. After
+        # level-2 sleep their GPU memory is discarded and remapped with
+        # undefined contents; this re-zeros adapter weights and rebuilds
+        # non-disposable state (e.g. the TP>1 logits index mapping). This
+        # also runs on non-sleep reload paths (e.g. base weight hot-swap),
+        # which is acceptable since LoRA adapters trained on the old base
+        # weights are invalid after a base weight change and must be
+        # re-loaded separately.
         if self.lora_config:
             from vllm.lora.layers.base import BaseLayerWithLoRA
             for module in model.modules():
