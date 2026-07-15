@@ -13,6 +13,8 @@ from vllm.models.deepseek_v4.nvidia.model import (
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.platforms import current_platform
 
+DEVICE_TYPE = current_platform.device_type
+
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda(),
     reason="DeepSeek V4 MegaMoE requires CUDA",
@@ -111,10 +113,11 @@ def test_deepseek_v4_mega_moe_weight_loader_uses_ep_expert_ownership():
     not torch.cuda.is_available(),
     reason="DeepSeek V4 MegaMoE fused input staging requires CUDA.",
 )
+@pytest.mark.device_type(DEVICE_TYPE)
 def test_deepseek_v4_mega_moe_fused_input_staging_is_bitwise_exact():
     from vllm.third_party.deep_gemm.utils import per_token_cast_to_fp8
 
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     num_tokens = 7
     hidden_size = 256
     top_k = 8
