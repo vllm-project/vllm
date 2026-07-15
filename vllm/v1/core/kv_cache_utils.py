@@ -972,8 +972,7 @@ def _groups_have_mixed_page_sizes(
     not apply, so each group contributes independently.
     """
     if any(
-        isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs)
-        for g in kv_cache_groups
+        isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs) for g in kv_cache_groups
     ):
         return True
     return len({g.kv_cache_spec.page_size_bytes for g in kv_cache_groups}) > 1

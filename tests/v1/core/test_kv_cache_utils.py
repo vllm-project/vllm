@@ -2241,9 +2241,7 @@ def test_get_kv_cache_capacity_after_scheduler_unwrap():
     expected_max_mem = kv_cache_utils._max_memory_usage_bytes_from_groups(
         vllm_config, unwrapped_groups
     )
-    expected_pool = kv_cache_utils._pool_bytes_per_block(
-        vllm_config, unwrapped_groups
-    )
+    expected_pool = kv_cache_utils._pool_bytes_per_block(vllm_config, unwrapped_groups)
     expected_blocks_per_request = (
         expected_max_mem + expected_pool - 1
     ) // expected_pool
