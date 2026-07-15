@@ -1572,35 +1572,6 @@ def test_draft_sample_method_gumbel_is_rejected():
         )
 
 
-def test_dspark_confidence_config_validation():
-    config = SpeculativeConfig(
-        method="ngram",
-        num_speculative_tokens=1,
-        dspark_budget_frac=0.5,
-        dspark_enable_confidence_based_verification="mask",
-    )
-    assert config.dspark_budget_frac == 0.5
-    assert config.dspark_enable_confidence_based_verification == "mask"
-    with pytest.raises(
-        ValidationError, match="dspark_enable_confidence_based_verification"
-    ):
-        SpeculativeConfig(
-            method="ngram",
-            num_speculative_tokens=1,
-            dspark_enable_confidence_based_verification="compact",
-        )
-
-
-@pytest.mark.parametrize("value", [0.0, 1.1])
-def test_dspark_confidence_config_rejects_invalid_ranges(value):
-    with pytest.raises(ValueError, match="dspark_budget_frac"):
-        SpeculativeConfig(
-            method="ngram",
-            num_speculative_tokens=1,
-            dspark_budget_frac=value,
-        )
-
-
 def test_ir_op_priority_default():
     """Test that IR op priority defaults are set correctly."""
     from vllm.config.kernel import IrOpPriorityConfig

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Confidence-based verification for DSpark speculative decoding."""
 
-import math
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -130,7 +129,6 @@ class ConfidenceManager:
         device = req_states.device
         self._copy_stream = torch.cuda.Stream(device)
 
-        self.budget_frac = speculative_config.dspark_budget_frac
         self.time_graphs = (
             self.varlen_spec_decode and speculative_config.dspark_sps_curve == "auto"
         )
@@ -244,19 +242,14 @@ class ConfidenceManager:
             compute_prefix_survival(confidence_logits_np),
         )
 
-    def _plan_draft_token_budget(
+    def _compute_draft_budget(
         self,
         req_ids: list[str],
         num_required_target_tokens_per_req: np.ndarray,
         valid_draft_tokens_per_req: np.ndarray,
     ) -> int:
-        num_batch_requests = len(req_ids)
-        if self.cost_tables is None and self.budget_frac >= 1.0:
-            return int(valid_draft_tokens_per_req.sum())
-
-        survival = np.ones(
-            (num_batch_requests, self.num_speculative_steps), dtype=np.float64
-        )
+        num_reqs = len(req_ids)
+        survival = np.ones((num_reqs, self.num_speculative_steps), dtype=np.float64)
         if self._stale_confidences is not None:
             stale_req_ids, stale_survival = self._stale_confidences
             stale_rows = {req_id: i for i, req_id in enumerate(stale_req_ids)}
@@ -265,67 +258,41 @@ class ConfidenceManager:
                 if stale_row is not None:
                     survival[row] = stale_survival[stale_row]
         steps = np.arange(self.num_speculative_steps)
-        survival[steps[None, :] >= valid_draft_tokens_per_req[:, None]] = -np.inf
-
-        scores = survival[survival > 0.0]
-        scores = np.sort(scores)[::-1]
-        scores = scores[: math.ceil(scores.size * self.budget_frac)]
+        valid = steps[None, :] < valid_draft_tokens_per_req[:, None]
+        scores = np.sort(survival[valid & (survival > 0.0)])[::-1]
         if scores.size == 0 or self.cost_tables is None:
             return scores.size
 
         num_required_target_tokens = int(num_required_target_tokens_per_req.sum())
         draft_cost_ms, verify_cost_ms = self.cost_tables
-        max_candidates = verify_cost_ms.size - num_required_target_tokens - 1
-        if max_candidates <= 0:
+        max_budget = min(
+            scores.size,
+            verify_cost_ms.size - num_required_target_tokens - 1,
+        )
+        if max_budget <= 0:
             return 0
-        scores = scores[:max_candidates]
-        if scores.size == 0:
-            return 0
+        scores = scores[:max_budget]
 
         slots = np.fromiter(
             (self.req_states.req_id_to_index[req_id] for req_id in req_ids),
             dtype=np.int32,
-            count=num_batch_requests,
+            count=num_reqs,
         )
         num_sampling_requests = np.count_nonzero(
             self.req_states.num_computed_tokens_np[slots]
             + num_required_target_tokens_per_req
             >= self.req_states.prefill_len.np[slots]
         )
-        verify_ms = verify_cost_ms[
-            num_required_target_tokens + 1 : num_required_target_tokens
-            + 1
-            + scores.size
-        ]
-        draft_ms = draft_cost_ms[num_batch_requests]
-        throughput = (num_sampling_requests + np.cumsum(scores)) / (
-            draft_ms + verify_ms
+        accepted_tokens = np.concatenate(
+            ([num_sampling_requests], num_sampling_requests + np.cumsum(scores))
         )
-        best = int(np.argmax(throughput))
-        baseline = num_sampling_requests / (
-            draft_ms + verify_cost_ms[num_required_target_tokens]
+        costs = (
+            draft_cost_ms[num_reqs]
+            + verify_cost_ms[
+                num_required_target_tokens : num_required_target_tokens + max_budget + 1
+            ]
         )
-        return 0 if baseline >= throughput[best] else best + 1
-
-    def _assign_draft_token_budget_gpu(
-        self,
-        idx_mapping: torch.Tensor,
-        capacities: torch.Tensor,
-        num_reqs: int,
-        draft_token_budget: int,
-    ) -> None:
-        block_size = triton.next_power_of_2(num_reqs * self.num_speculative_steps)
-        _assign_draft_token_budget_kernel[(1,)](
-            self._confidence_logits,
-            self._confidence_logits.stride(0),
-            idx_mapping,
-            capacities,
-            num_reqs,
-            draft_token_budget,
-            NUM_STEPS=self.num_speculative_steps,
-            BLOCK_SIZE=block_size,
-            num_warps=4 if block_size <= 256 else 8,
-        )
+        return int(np.argmax(accepted_tokens / costs))
 
     def _assign_draft_token_budget(
         self,
@@ -342,11 +309,17 @@ class ConfidenceManager:
         if draft_token_budget == int(valid_draft_tokens_per_req.sum()):
             return capacities
 
-        self._assign_draft_token_budget_gpu(
+        block_size = triton.next_power_of_2(num_reqs * self.num_speculative_steps)
+        _assign_draft_token_budget_kernel[(1,)](
+            self._confidence_logits,
+            self._confidence_logits.stride(0),
             idx_mapping,
             capacities,
             num_reqs,
             draft_token_budget,
+            NUM_STEPS=self.num_speculative_steps,
+            BLOCK_SIZE=block_size,
+            num_warps=4 if block_size <= 256 else 8,
         )
         return capacities
 
@@ -356,6 +329,7 @@ class ConfidenceManager:
         idx_mapping = torch.arange(
             max_num_reqs, dtype=torch.int32, device=self.req_states.device
         )
+        valid_drafts = np.full(max_num_reqs, self.num_speculative_steps, dtype=np.int32)
         block_size = triton.next_power_of_2(self.num_speculative_steps)
         max_block_size = triton.next_power_of_2(
             max_num_reqs * self.num_speculative_steps
@@ -363,11 +337,9 @@ class ConfidenceManager:
         while block_size <= max_block_size:
             num_reqs = min(max_num_reqs, block_size // self.num_speculative_steps)
             draft_token_budget = max(1, num_reqs * self.num_speculative_steps // 2)
-            self._batch_draft_capacity.fill_(self.num_speculative_steps)
-            self._assign_draft_token_budget_gpu(
-                idx_mapping,
-                self._batch_draft_capacity,
-                num_reqs,
+            self._assign_draft_token_budget(
+                idx_mapping[:num_reqs],
+                valid_drafts[:num_reqs],
                 draft_token_budget,
             )
             block_size *= 2
@@ -398,7 +370,7 @@ class ConfidenceManager:
         return (
             required_targets,
             valid_drafts,
-            self._plan_draft_token_budget(req_ids, required_targets, valid_drafts),
+            self._compute_draft_budget(req_ids, required_targets, valid_drafts),
         )
 
     def allocate_draft_token_budget(

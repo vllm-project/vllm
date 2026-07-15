@@ -232,10 +232,6 @@ class SpeculativeConfig:
     synthetic_acceptance_rates. Only valid when rejection_sample_method is 'synthetic'.
     Mutually exclusive with synthetic_acceptance_rates."""
 
-    dspark_budget_frac: float = Field(default=1.0, gt=0.0, le=1.0)
-    """Fraction of the full per-request draft-token budget available to the
-    DSpark global prefix allocator."""
-
     dspark_enable_confidence_based_verification: ConfidenceBasedVerification = "auto"
     """Confidence-based verification mode. ``"auto"`` uses compact
     verification when supported and otherwise falls back to masking;
@@ -249,7 +245,7 @@ class SpeculativeConfig:
         return (
             self.method == "dspark"
             and self.dspark_enable_confidence_based_verification not in ("none", "off")
-            and (self.dspark_budget_frac < 1.0 or self.dspark_sps_curve is not None)
+            and self.dspark_sps_curve is not None
         )
 
     @staticmethod
