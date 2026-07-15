@@ -22,10 +22,12 @@ from vllm.tracing import instrument
 from vllm.utils.math_utils import cdiv
 
 # Auto-warmup token sizes. TileLang mHC kernels treat ``num_tokens`` as a
-# dynamic dimension, but the underlying split-k / small-FMA / block-M paths
-# have breakpoints at small powers of two. A sparse power-of-2 grid covers
-# those distinct kernel configurations without warming up every integer up to
-# ``max_num_batched_tokens``.
+# dynamic dimension. The small-FMA and block-M branches switch at small
+# powers of two, so a sparse power-of-2 grid covers them without warming up
+# every integer up to ``max_num_batched_tokens``. Split-k breakpoints track
+# ``cdiv(num_tokens, 64)`` and so are not power-of-two aligned; they are
+# enumerated separately by ``_mhc_split_bucket_sizes`` and merged in
+# ``deepseek_v4_mhc_warmup``.
 _AUTO_WARMUP_MAX_TOKENS = 16_384
 _DEFAULT_TOKEN_SIZE_CANDIDATES = (
     1,
