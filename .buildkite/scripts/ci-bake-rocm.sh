@@ -299,7 +299,7 @@ filter_content_hash_arg_names() {
     awk '$0 != "VLLM_BRANCH" && $0 != "VLLM_REPO"'
 }
 
-compute_ci_base_content_hash() {
+compute_ci_base_content_hash_once() {
     local -a content_paths=()
     local -a content_args=()
     local dockerfile="${CI_BASE_DOCKERFILE:-}"
@@ -316,7 +316,8 @@ compute_ci_base_content_hash() {
         if [[ -n "${dockerfile}" ]]; then
             printf 'dockerfile:%s\n' "${dockerfile}"
             printf 'resolved-build-args:\n'
-            hash_dockerfile_arg_values "${dockerfile}" "${content_args[@]}"
+            hash_dockerfile_arg_values "${dockerfile}" "${content_args[@]}" \
+                || return 1
             if [[ -n "${stages}" ]]; then
                 printf 'dockerfile-stages:%s\n' "${stages}"
                 if [[ -f "${dockerfile}" ]]; then
@@ -327,6 +328,53 @@ compute_ci_base_content_hash() {
             fi
         fi
     } | sha256sum | cut -d' ' -f1
+}
+
+compute_ci_base_content_hash() {
+    local attempts="${CI_BASE_HASH_ATTEMPTS:-3}"
+    local delay_secs="${CI_BASE_HASH_RETRY_DELAY:-5}"
+    local attempt=0
+    local hash=""
+    local failed=0
+    local -a hashes=()
+
+    if [[ ! "${attempts}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Invalid CI_BASE_HASH_ATTEMPTS: ${attempts}" >&2
+        return 1
+    fi
+    if [[ ! "${delay_secs}" =~ ^[0-9]+$ ]]; then
+        echo "Invalid CI_BASE_HASH_RETRY_DELAY: ${delay_secs}" >&2
+        return 1
+    fi
+
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        if ! hash=$(compute_ci_base_content_hash_once); then
+            echo "ci_base content hash calculation ${attempt}/${attempts} failed" >&2
+            failed=1
+        else
+            hashes+=("${hash}")
+            echo "ci_base content hash calculation ${attempt}/${attempts}: ${hash}" >&2
+        fi
+
+        if ((attempt < attempts)); then
+            sleep "${delay_secs}"
+        fi
+    done
+
+    if ((failed)) || ((${#hashes[@]} != attempts)); then
+        echo "Could not calculate a reliable ci_base content hash" >&2
+        return 1
+    fi
+
+    for hash in "${hashes[@]:1}"; do
+        if [[ "${hash}" != "${hashes[0]}" ]]; then
+            echo "ci_base content hash changed between calculations" >&2
+            printf '  observed: %s\n' "${hashes[@]}" >&2
+            return 1
+        fi
+    done
+
+    printf '%s\n' "${hashes[0]}"
 }
 
 extract_dockerfile_arg_default() {
@@ -394,7 +442,11 @@ hash_dockerfile_arg_values() {
         printf 'arg:%s=%s\n' "${arg_name}" "${arg_value:-<empty>}"
         if [[ "${arg_name}" == "BASE_IMAGE" && -n "${arg_value}" ]]; then
             digest=$(resolve_image_digest "${arg_value}")
-            printf 'arg:%s.digest=%s\n' "${arg_name}" "${digest:-unknown}"
+            if [[ -z "${digest}" ]]; then
+                echo "Failed to resolve digest for BASE_IMAGE=${arg_value}" >&2
+                return 1
+            fi
+            printf 'arg:%s.digest=%s\n' "${arg_name}" "${digest}"
         fi
     done
 }
@@ -1969,8 +2021,8 @@ confirm_remote_image_push() {
         fi
 
         if [[ -z "${remote_revision}" \
-              && ${IMAGE_EXISTED_BEFORE_BUILD} -eq 0 \
-              && image_tag_is_commit_scoped ]]; then
+              && ${IMAGE_EXISTED_BEFORE_BUILD} -eq 0 ]] \
+            && image_tag_is_commit_scoped; then
             echo "Remote image exists under a commit-scoped tag; accepting push despite missing revision label."
             return 0
         fi
@@ -2100,36 +2152,57 @@ upload_wheel_artifacts_if_present() {
     local wheel_dir="./wheel-export"
     local artifact_dir="artifacts/vllm-rocm-install"
     local archive_name="vllm-rocm-install.tar.gz"
+    local metadata_dir="${wheel_dir}/.vllm-ci-artifact"
+    local native_base_image=""
     local whl=""
     local whl_name=""
+    local -a wheels=()
 
     if ! should_upload_wheel_artifacts; then
         return 0
     fi
 
-    if [[ ! -d "${wheel_dir}" ]] || ! ls "${wheel_dir}"/*.whl >/dev/null 2>&1; then
-        echo "No ROCm wheel artifacts found in ${wheel_dir}"
-        return 0
+    if [[ -d "${wheel_dir}" ]]; then
+        mapfile -t wheels < <(find "${wheel_dir}" -maxdepth 1 -type f -name '*.whl' -print)
+    fi
+    if [[ ${#wheels[@]} -ne 1 ]]; then
+        echo "Expected exactly one ROCm wheel in ${wheel_dir}; found ${#wheels[@]}" >&2
+        return 1
+    fi
+    whl="${wheels[0]}"
+    whl_name=$(basename "${whl}")
+    native_base_image="${CI_BASE_IMAGE_TAG_COMMIT_REF:-${CI_BASE_IMAGE:-}}"
+    if [[ -z "${native_base_image}" ]]; then
+        echo "Native ROCm artifact requires a ci_base image reference" >&2
+        return 1
     fi
 
     echo "--- :package: Uploading ROCm vLLM install artifact"
-    mkdir -p "${artifact_dir}"
+    rm -rf "${artifact_dir}" "${metadata_dir}"
+    mkdir -p "${artifact_dir}" "${metadata_dir}"
+
+    printf '%s\n' "${BUILDKITE_COMMIT:-local}" > "${metadata_dir}/commit.txt"
+    printf '%s\n' "${native_base_image}" > "${metadata_dir}/native-base-image.txt"
+    printf '%s\n' "${CI_BASE_IMAGE:-}" > "${metadata_dir}/ci-base-image.txt"
+    printf '%s\n' "${IMAGE_TAG:-}" > "${metadata_dir}/fallback-image.txt"
+    printf '%s\n' "${whl_name}" > "${metadata_dir}/wheel-filename.txt"
 
     tar -C "${wheel_dir}" -czf "${artifact_dir}/${archive_name}" .
+    (
+        cd "${artifact_dir}"
+        sha256sum "${archive_name}" > "${archive_name}.sha256"
+    )
     echo "Created ${archive_name}: $(du -sh "${artifact_dir}/${archive_name}" | cut -f1)"
-    printf '%s\n' "${CI_BASE_IMAGE:-}" > "${artifact_dir}/ci-base-image.txt"
-    printf '%s\n' "${IMAGE_TAG:-}" > "${artifact_dir}/fallback-image.txt"
-
-    for whl in "${wheel_dir}"/*.whl; do
-        [[ -f "${whl}" ]] || continue
-        whl_name=$(basename "${whl}")
-        cp "${whl}" "${artifact_dir}/${whl_name}"
-        echo "Copied ${whl_name}: $(du -sh "${artifact_dir}/${whl_name}" | cut -f1)"
-    done
+    cp "${metadata_dir}"/*.txt "${artifact_dir}/"
+    cp "${whl}" "${artifact_dir}/${whl_name}"
+    echo "Copied ${whl_name}: $(du -sh "${artifact_dir}/${whl_name}" | cut -f1)"
 
     if command -v buildkite-agent >/dev/null 2>&1; then
-        buildkite-agent artifact upload "${artifact_dir}/*"
+        buildkite-agent artifact upload "${artifact_dir}/*" || return 1
         echo "ROCm vLLM install artifacts uploaded to ${artifact_dir}/"
+    elif [[ "${BUILDKITE:-false}" == "true" ]]; then
+        echo "buildkite-agent not found; cannot upload required ROCm artifacts" >&2
+        return 1
     else
         echo "Not in Buildkite, skipping artifact upload"
     fi
@@ -2167,6 +2240,11 @@ main() {
     if [[ "${BAKE_PRINT_ONLY:-0}" == "1" ]]; then
         echo "BAKE_PRINT_ONLY=1 set; skipping build"
         return 0
+    fi
+    if should_upload_wheel_artifacts; then
+        # wheel-export is an output directory, not a BuildKit cache. Starting
+        # clean prevents a failed/retried export from packaging a stale wheel.
+        rm -rf ./wheel-export
     fi
     seed_dependency_caches_if_needed
     run_bake

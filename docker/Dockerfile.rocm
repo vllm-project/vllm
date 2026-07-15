@@ -654,6 +654,7 @@ RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
     libibverbs1 \
     ibverbs-providers \
     ibverbs-utils \
+    util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 # Update rdma-core to support latest rocshmem.
