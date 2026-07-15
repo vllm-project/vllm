@@ -94,8 +94,8 @@ class ShortConv(MambaBase, CustomOp):
         # Reference torch causal conv1d; runs on all CPU platforms. AMX kernels
         # for causal conv can be plugged in here later.
         from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
-            causal_conv1d_torch,
-            causal_conv1d_update_torch,
+            causal_conv1d_fn_cpu as causal_conv1d_torch,
+            causal_conv1d_update_cpu,
         )
 
         forward_context = get_forward_context()
@@ -164,17 +164,15 @@ class ShortConv(MambaBase, CustomOp):
         if has_decode:
             assert attn_metadata.state_indices_tensor_d is not None
             state_indices_d = attn_metadata.state_indices_tensor_d.flatten()
-            Bx_d = (B_d * x_d).unsqueeze(-1)  # (num_decodes, dim, 1)
-            # Advanced indexing returns a copy; update in-place then scatter back
-            gathered = conv_state[state_indices_d]  # (num_decodes, dim, state_len)
-            out_d = causal_conv1d_update_torch(
+            Bx_d = (B_d * x_d)  # (num_decodes, dim)
+            out_d = causal_conv1d_update_cpu(
                 Bx_d,
-                gathered,
+                conv_state,
                 conv_weights,
                 self.conv.bias,
                 activation=None,
-            ).squeeze(-1)  # (num_decodes, dim)
-            conv_state[state_indices_d] = gathered
+                conv_state_indices=state_indices_d,
+            )
             conv_output_list.insert(0, C_d * out_d)
 
         hidden_states_out = torch.vstack(conv_output_list)
@@ -343,3 +341,4 @@ direct_register_custom_op(
     mutates_args=["output"],
     fake_impl=short_conv_fake,
 )
+
