@@ -5,6 +5,8 @@
 // https://github.com/BlinkDL/Albatross/tree/5e941fb1eeb7f735a562fb5bbb30fad19adc825b/faster3a_2605/cuda
 // Upstream license: Apache-2.0
 // (https://github.com/BlinkDL/Albatross/blob/5e941fb1eeb7f735a562fb5bbb30fad19adc825b/LICENSE).
+// Dense 3D mix layout follows faster3a_2607 at commit
+// 63c53f4abf2cd891dd3a18c8f44f5b2cccc8c64b.
 
 #include <assert.h>
 
@@ -25,8 +27,15 @@ constexpr float KK_NORMALIZE_EPS = 1.0e-12f;
 constexpr float TMIX_LN_X_EPS = 64.0e-5f;
 constexpr int FFN_SPMV_THREADS = 128;
 constexpr int FFN_TILE = 128;
+constexpr int MIX_3D_C = 4096;
+constexpr int MIX_3D_MAX_GRID = 65535;
 
 inline int64_t ceil_div(int64_t n, int64_t d) { return (n + d - 1) / d; }
+
+bool use_3d_mix(int B, int T, int C) {
+  return C == MIX_3D_C && B <= MIX_3D_MAX_GRID && T <= MIX_3D_MAX_GRID &&
+         (B >= 2 || T == 2 || T == 4 || T == 16 || T == 64 || T == 512);
+}
 
 __device__ inline __half2 load_h2(const dtype* ptr) {
   return *reinterpret_cast<const __half2*>(ptr);
@@ -56,7 +65,7 @@ __device__ inline float sigmoid_fast(float x) {
   return 1.0f / (1.0f + __expf(-x));
 }
 
-template <bool UpdateShift>
+template <bool UpdateShift, bool Grid3D = false>
 __global__ void tmix_mix6_kernel(
     int T, int C, const dtype* __restrict__ x, dtype* __restrict__ shift_state,
     const int* __restrict__ slot_indices, const dtype* __restrict__ x_r,
@@ -66,19 +75,33 @@ __global__ void tmix_mix6_kernel(
     dtype* __restrict__ out_w, dtype* __restrict__ out_k,
     dtype* __restrict__ out_v, dtype* __restrict__ out_a,
     dtype* __restrict__ out_g, int64_t total_pairs) {
-  const int64_t pair_idx =
-      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (pair_idx >= total_pairs) {
-    return;
-  }
-
   const int c_pairs = C >> 1;
-  const int64_t bt = pair_idx / c_pairs;
-  const int c = static_cast<int>(pair_idx - bt * c_pairs) << 1;
-  const int b = static_cast<int>(bt / T);
-  const int t = static_cast<int>(bt - static_cast<int64_t>(b) * T);
+  int64_t idx;
+  int c;
+  int b;
+  int t;
+  if constexpr (Grid3D) {
+    const int c_pair = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (c_pair >= c_pairs) {
+      return;
+    }
+    b = static_cast<int>(blockIdx.z);
+    t = static_cast<int>(blockIdx.y);
+    c = c_pair << 1;
+    idx = (static_cast<int64_t>(b) * T + t) * C + c;
+  } else {
+    const int64_t pair_idx =
+        static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (pair_idx >= total_pairs) {
+      return;
+    }
+    const int64_t bt = pair_idx / c_pairs;
+    c = static_cast<int>(pair_idx - bt * c_pairs) << 1;
+    b = static_cast<int>(bt / T);
+    t = static_cast<int>(bt - static_cast<int64_t>(b) * T);
+    idx = bt * C + c;
+  }
   const int state_b = slot_indices == nullptr ? b : slot_indices[b];
-  const int64_t idx = bt * C + c;
 
   const __half2 cur2 = load_h2(x + idx);
   __half2 prev2;
@@ -330,25 +353,39 @@ __global__ void zero_vec4_kernel(dtype* __restrict__ out, int64_t n_vec4) {
   }
 }
 
-template <bool UpdateShift>
+template <bool UpdateShift, bool Grid3D = false>
 __global__ void cmix_mix_kernel(int T, int C, const dtype* __restrict__ x,
                                 dtype* __restrict__ shift_state,
                                 const int* __restrict__ slot_indices,
                                 const dtype* __restrict__ x_k,
                                 dtype* __restrict__ out, int64_t total_pairs) {
-  const int64_t pair_idx =
-      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (pair_idx >= total_pairs) {
-    return;
-  }
-
   const int c_pairs = C >> 1;
-  const int64_t bt = pair_idx / c_pairs;
-  const int c = static_cast<int>(pair_idx - bt * c_pairs) << 1;
-  const int b = static_cast<int>(bt / T);
-  const int t = static_cast<int>(bt - static_cast<int64_t>(b) * T);
+  int64_t idx;
+  int c;
+  int b;
+  int t;
+  if constexpr (Grid3D) {
+    const int c_pair = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (c_pair >= c_pairs) {
+      return;
+    }
+    b = static_cast<int>(blockIdx.z);
+    t = static_cast<int>(blockIdx.y);
+    c = c_pair << 1;
+    idx = (static_cast<int64_t>(b) * T + t) * C + c;
+  } else {
+    const int64_t pair_idx =
+        static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (pair_idx >= total_pairs) {
+      return;
+    }
+    const int64_t bt = pair_idx / c_pairs;
+    c = static_cast<int>(pair_idx - bt * c_pairs) << 1;
+    b = static_cast<int>(bt / T);
+    t = static_cast<int>(bt - static_cast<int64_t>(b) * T);
+    idx = bt * C + c;
+  }
   const int state_b = slot_indices == nullptr ? b : slot_indices[b];
-  const int64_t idx = bt * C + c;
 
   const __half2 cur2 = load_h2(x + idx);
   const __half2 prev2 =
@@ -720,6 +757,34 @@ std::vector<at::Tensor> tmix_mix6_slot_cuda(int B, int T, int C, at::Tensor x,
   const int* slot_ptr = slot_indices.defined() && slot_indices.numel() > 0
                             ? slot_indices.data_ptr<int>()
                             : nullptr;
+  if (use_3d_mix(B, T, C)) {
+    const dim3 grid(static_cast<unsigned int>(ceil_div(C / 2, threads)),
+                    static_cast<unsigned int>(T), static_cast<unsigned int>(B));
+    const int64_t state_pairs = static_cast<int64_t>(B) * (C / 2);
+    if (T == 1) {
+      tmix_mix6_kernel<true, true><<<grid, threads, 0, stream>>>(
+          T, C, x.data_ptr<dtype>(), shift_state.data_ptr<dtype>(), slot_ptr,
+          x_r.data_ptr<dtype>(), x_w.data_ptr<dtype>(), x_k.data_ptr<dtype>(),
+          x_v.data_ptr<dtype>(), x_a.data_ptr<dtype>(), x_g.data_ptr<dtype>(),
+          out_r.data_ptr<dtype>(), out_w.data_ptr<dtype>(), out_k.data_ptr<dtype>(),
+          out_v.data_ptr<dtype>(), out_a.data_ptr<dtype>(), out_g.data_ptr<dtype>(),
+          0);
+    } else {
+      tmix_mix6_kernel<false, true><<<grid, threads, 0, stream>>>(
+          T, C, x.data_ptr<dtype>(), shift_state.data_ptr<dtype>(), slot_ptr,
+          x_r.data_ptr<dtype>(), x_w.data_ptr<dtype>(), x_k.data_ptr<dtype>(),
+          x_v.data_ptr<dtype>(), x_a.data_ptr<dtype>(), x_g.data_ptr<dtype>(),
+          out_r.data_ptr<dtype>(), out_w.data_ptr<dtype>(), out_k.data_ptr<dtype>(),
+          out_v.data_ptr<dtype>(), out_a.data_ptr<dtype>(), out_g.data_ptr<dtype>(),
+          0);
+      update_shift_state_last_kernel<<<
+          static_cast<int>(ceil_div(state_pairs, threads)), threads, 0, stream>>>(
+          T, C, x.data_ptr<dtype>(), shift_state.data_ptr<dtype>(), slot_ptr,
+          state_pairs);
+    }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return {out_r, out_w, out_k, out_v, out_a, out_g};
+  }
   if (T == 1) {
     tmix_mix6_kernel<true><<<static_cast<int>(ceil_div(total_pairs, threads)),
                              threads, 0, stream>>>(
@@ -904,6 +969,26 @@ at::Tensor cmix_mix_slot_cuda(int B, int T, int C, at::Tensor x,
   const int* slot_ptr = slot_indices.defined() && slot_indices.numel() > 0
                             ? slot_indices.data_ptr<int>()
                             : nullptr;
+  if (use_3d_mix(B, T, C)) {
+    const dim3 grid(static_cast<unsigned int>(ceil_div(C / 2, threads)),
+                    static_cast<unsigned int>(T), static_cast<unsigned int>(B));
+    const int64_t state_pairs = static_cast<int64_t>(B) * (C / 2);
+    if (T == 1) {
+      cmix_mix_kernel<true, true><<<grid, threads, 0, stream>>>(
+          T, C, x.data_ptr<dtype>(), shift_state.data_ptr<dtype>(), slot_ptr,
+          x_k.data_ptr<dtype>(), out.data_ptr<dtype>(), 0);
+    } else {
+      cmix_mix_kernel<false, true><<<grid, threads, 0, stream>>>(
+          T, C, x.data_ptr<dtype>(), shift_state.data_ptr<dtype>(), slot_ptr,
+          x_k.data_ptr<dtype>(), out.data_ptr<dtype>(), 0);
+      update_shift_state_last_kernel<<<
+          static_cast<int>(ceil_div(state_pairs, threads)), threads, 0, stream>>>(
+          T, C, x.data_ptr<dtype>(), shift_state.data_ptr<dtype>(), slot_ptr,
+          state_pairs);
+    }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+  }
   if (T == 1) {
     cmix_mix_kernel<true><<<static_cast<int>(ceil_div(total_pairs, threads)),
                             threads, 0, stream>>>(

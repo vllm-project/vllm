@@ -134,13 +134,24 @@ void check_varlen_metadata(const torch::Tensor& query_start_loc,
               "req_id must have shape [total_tokens]");
 }
 
-}  // namespace
+void check_dense_mix(const torch::Tensor& x, const torch::Tensor& shift_state,
+                     const torch::Tensor& x_k, int64_t B, int64_t T,
+                     int64_t C) {
+  TORCH_CHECK((C % 2) == 0, "C must be even");
+  check_3d(x, B, T, C, "x");
+  check_half_cuda_contig(shift_state, "shift_state");
+  TORCH_CHECK(shift_state.dim() == 2 && shift_state.size(0) == B &&
+                  shift_state.size(1) == C,
+              "shift_state must have shape [B,C]");
+  check_vec(x_k, C, "x_k");
+}
 
-std::vector<torch::Tensor> tmix_mix6(int64_t B, int64_t T, int64_t C,
-                                     torch::Tensor x, torch::Tensor shift_state,
-                                     torch::Tensor x_r, torch::Tensor x_w,
-                                     torch::Tensor x_k, torch::Tensor x_v,
-                                     torch::Tensor x_a, torch::Tensor x_g) {
+void check_tmix_mix6_dense(const torch::Tensor& x,
+                           const torch::Tensor& shift_state,
+                           const torch::Tensor& x_r, const torch::Tensor& x_w,
+                           const torch::Tensor& x_k, const torch::Tensor& x_v,
+                           const torch::Tensor& x_a, const torch::Tensor& x_g,
+                           int64_t B, int64_t T, int64_t C) {
   TORCH_CHECK((C % 2) == 0, "C must be even");
   check_3d(x, B, T, C, "x");
   check_half_cuda_contig(shift_state, "shift_state");
@@ -153,6 +164,17 @@ std::vector<torch::Tensor> tmix_mix6(int64_t B, int64_t T, int64_t C,
   check_vec(x_v, C, "x_v");
   check_vec(x_a, C, "x_a");
   check_vec(x_g, C, "x_g");
+}
+
+}  // namespace
+
+std::vector<torch::Tensor> tmix_mix6(int64_t B, int64_t T, int64_t C,
+                                     torch::Tensor x, torch::Tensor shift_state,
+                                     torch::Tensor x_r, torch::Tensor x_w,
+                                     torch::Tensor x_k, torch::Tensor x_v,
+                                     torch::Tensor x_a, torch::Tensor x_g) {
+  check_tmix_mix6_dense(x, shift_state, x_r, x_w, x_k, x_v, x_a, x_g, B, T,
+                        C);
   return tmix_mix6_cuda(checked_int_arg(B, "B"), checked_int_arg(T, "T"),
                         checked_int_arg(C, "C"), x, shift_state, x_r, x_w, x_k,
                         x_v, x_a, x_g);
@@ -294,13 +316,7 @@ torch::Tensor cmix_sparse_down_relu_rows_t512(int64_t B, int64_t T, int64_t C,
 
 torch::Tensor cmix_mix(int64_t B, int64_t T, int64_t C, torch::Tensor x,
                        torch::Tensor shift_state, torch::Tensor x_k) {
-  TORCH_CHECK((C % 2) == 0, "C must be even");
-  check_3d(x, B, T, C, "x");
-  check_half_cuda_contig(shift_state, "shift_state");
-  TORCH_CHECK(shift_state.dim() == 2 && shift_state.size(0) == B &&
-                  shift_state.size(1) == C,
-              "shift_state must have shape [B,C]");
-  check_vec(x_k, C, "x_k");
+  check_dense_mix(x, shift_state, x_k, B, T, C);
   return cmix_mix_cuda(checked_int_arg(B, "B"), checked_int_arg(T, "T"),
                        checked_int_arg(C, "C"), x, shift_state, x_k);
 }

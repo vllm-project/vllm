@@ -30,8 +30,10 @@ if str(REPO_ROOT) not in sys.path:
 SCHEMA_VERSION = 1
 BENCHMARK_NAME = "rwkv7_faster3a"
 ALBATROSS_REPO = "https://github.com/BlinkDL/Albatross"
-ALBATROSS_COMMIT = "5e941fb1eeb7f735a562fb5bbb30fad19adc825b"
-ALBATROSS_IMPL = "faster3a_2605"
+ALBATROSS_COMMIT = "6af325aba3ee477bc1f59ef506375da550c2ef74"
+ALBATROSS_RACE_FIX = "ff144b6b11e01ac984ed05ca7f7af4dfdca97180"
+ALBATROSS_2607_COMMIT = "63c53f4abf2cd891dd3a18c8f44f5b2cccc8c64b"
+ALBATROSS_IMPL = "faster3a_2607"
 RUNNER_FP16_THROUGHPUT_REQUIREMENTS = {
     "VLLM_RWKV7_WKV_MODE": "fp16",
     "VLLM_RWKV7_ALLOW_FP16_ACCUMULATION": "1",
@@ -177,6 +179,10 @@ def _source_metadata(config: BenchmarkConfig) -> dict[str, Any]:
     return {
         "albatross_repo": ALBATROSS_REPO,
         "albatross_commit": ALBATROSS_COMMIT,
+        "albatross_changes": {
+            "wkv_fp16_race_fix": ALBATROSS_RACE_FIX,
+            "faster3a_2607": ALBATROSS_2607_COMMIT,
+        },
         "contracts": [
             {
                 "source_path": entry.source_path,
