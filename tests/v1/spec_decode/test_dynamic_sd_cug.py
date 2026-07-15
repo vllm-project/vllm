@@ -15,9 +15,218 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
+from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadataBuilder
+from vllm.v1.spec_decode.dynamic.drafting_manager import (
+    AdaptiveDraftingManager,
+    DynamicSDDraftingManager,
+)
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
+from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
+    allocate_draft_token_budget_from_confidence,
+)
 
 pytestmark = pytest.mark.cpu_test
+
+
+@pytest.fixture(autouse=True)
+def _mock_cudagraph_runtime(monkeypatch):
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform,
+        "get_global_graph_pool",
+        lambda: None,
+    )
+
+
+def test_flash_attention_supports_variable_length_decode_cudagraphs():
+    """FA2 and FA3 must both meet adaptive verification's target requirement."""
+    assert (
+        FlashAttentionMetadataBuilder._cudagraph_support.value
+        >= AttentionCGSupport.VARLEN_BATCH.value
+    )
+
+
+def test_adaptive_verification_supports_structured_outputs():
+    """Structured decode batches can use device-side adaptive lengths."""
+    req_states = _make_req_states(["req"])
+    drafting_manager = _make_drafting_manager(
+        [(1, 1, 2)],
+        max_num_reqs=1,
+        max_num_spec_tokens=2,
+        req_states=req_states,
+    )
+    scheduler_output = _make_scheduler_output({"req": 3}, {"req": [1, 2]})
+
+    assert isinstance(drafting_manager, AdaptiveDraftingManager)
+    assert drafting_manager.plan_batch(scheduler_output) == (
+        3,
+        2,
+    )
+
+
+@pytest.mark.parametrize(
+    ("scheduled_tokens_b", "draft_tokens_b"),
+    ((3, [5, 6]), (5, [5, 6, -1, -1])),
+)
+def test_adaptive_verification_caps_irregular_draft_windows(
+    scheduled_tokens_b,
+    draft_tokens_b,
+):
+    drafting_manager = _make_drafting_manager(
+        [(1, 2, 2)],
+        max_num_reqs=2,
+        max_num_spec_tokens=4,
+        req_states=_make_req_states(["a", "b"]),
+    )
+    scheduler_output = _make_scheduler_output(
+        {"a": 5, "b": scheduled_tokens_b},
+        {
+            "a": [1, 2, 3, 4],
+            "b": draft_tokens_b,
+        },
+    )
+
+    num_tokens, draft_token_budget = drafting_manager.plan_batch(scheduler_output)
+    assert (num_tokens, draft_token_budget) == (6, 4)
+
+
+@pytest.mark.parametrize(
+    ("scheduled_tokens", "draft_tokens", "prefill_req_ids", "expected_num_tokens"),
+    [
+        (
+            {"a": 5, "b": 5},
+            {"a": [1, 2, 3, 4], "b": [5, 6, 7, 8]},
+            set(),
+            6,
+        ),
+        (
+            {"a": 5, "b": 5},
+            {"a": [1, 2, 3, 4], "b": [-1, -1, -1, -1]},
+            {"b"},
+            3,
+        ),
+        ({"a": 5, "b": 7}, {"a": [1, 2, 3, 4]}, {"b"}, 9),
+        ({"a": 5}, {"a": [1, 2, -1, -1]}, set(), 3),
+    ],
+)
+def test_adaptive_drafting_manager(
+    scheduled_tokens, draft_tokens, prefill_req_ids, expected_num_tokens
+):
+    drafting_manager = _make_drafting_manager(
+        [(1, 1, 3), (2, 2, 2), (3, 3, 1)],
+        max_num_reqs=3,
+        max_num_spec_tokens=4,
+        req_states=_make_req_states(scheduled_tokens, prefill_req_ids),
+    )
+    scheduler_output = _make_scheduler_output(scheduled_tokens, draft_tokens)
+    num_tokens, _ = drafting_manager.plan_batch(scheduler_output)
+    assert num_tokens == expected_num_tokens
+
+
+def test_adaptive_drafting_manager_builds_mixed_prefill_layout():
+    req_states = _make_req_states(["decode", "prefill"], {"prefill"})
+    speculator = MagicMock()
+    drafting_manager = _make_drafting_manager(
+        [(1, 2, 2), (3, 3, 1)],
+        max_num_reqs=3,
+        max_num_spec_tokens=4,
+        req_states=req_states,
+        speculator=speculator,
+    )
+    scheduler_output = _make_scheduler_output(
+        {"decode": 5, "prefill": 4},
+        {"decode": [1, 2, 3, 4]},
+    )
+    speculator.allocate_draft_token_budget.return_value = torch.tensor(
+        [1, 0], dtype=torch.int32
+    )
+    query_start_loc = torch.empty(4, dtype=torch.int32)
+
+    num_draft_tokens, cu_num_logits, query_start_loc_np = (
+        drafting_manager.prepare_verification_layout(
+            scheduler_output,
+            torch.tensor([0, 1], dtype=torch.int32),
+            draft_token_budget=1,
+            query_start_loc=query_start_loc,
+            num_reqs_padded=2,
+        )
+    )
+
+    assert num_draft_tokens.tolist() == [1, 0]
+    assert query_start_loc.tolist() == [0, 2, 6, 6]
+    assert query_start_loc_np.tolist() == [0, 2, 6]
+    assert cu_num_logits.tolist() == [0, 2, 3]
+    assert speculator.allocate_draft_token_budget.call_args.args[2].tolist() == [
+        4,
+        0,
+    ]
+
+
+def test_adaptive_verification_allocator_respects_draft_caps():
+    confidence_logits = torch.zeros((2, 3))
+
+    allocated = allocate_draft_token_budget_from_confidence(
+        confidence_logits,
+        draft_token_budget=3,
+        draft_token_caps=torch.tensor([1, 3], dtype=torch.int32),
+    )
+
+    assert allocated.tolist() == [1, 2]
+
+
+def test_adaptive_drafting_manager_caps_invalid_draft_suffixes():
+    drafting_manager = _make_drafting_manager(
+        [(1, 2, 2), (3, 3, 1)],
+        max_num_reqs=3,
+        max_num_spec_tokens=4,
+        req_states=_make_req_states(["decode", "prefill"], {"prefill"}),
+    )
+    scheduler_output = _make_scheduler_output(
+        {"decode": 5, "prefill": 5},
+        {
+            "decode": [1, 2, -1, -1],
+            "prefill": [1, 2, 3, 4],
+        },
+    )
+
+    assert drafting_manager.plan_batch(scheduler_output) == (3, 1)
+
+
+def _make_scheduler_output(scheduled_tokens, draft_tokens):
+    return SimpleNamespace(
+        num_scheduled_tokens=scheduled_tokens,
+        scheduled_spec_decode_tokens=draft_tokens,
+        total_num_scheduled_tokens=sum(scheduled_tokens.values()),
+    )
+
+
+def _make_req_states(req_ids, prefill_req_ids=()):
+    req_ids = list(req_ids)
+    prefill_req_ids = set(prefill_req_ids)
+    return SimpleNamespace(
+        req_id_to_index={req_id: index for index, req_id in enumerate(req_ids)},
+        num_computed_prefill_tokens=[
+            0 if req_id in prefill_req_ids else 1 for req_id in req_ids
+        ],
+        prefill_len=SimpleNamespace(np=[1] * len(req_ids)),
+    )
+
+
+def _make_drafting_manager(
+    schedule,
+    max_num_reqs,
+    max_num_spec_tokens,
+    req_states,
+    speculator=None,
+):
+    return DynamicSDDraftingManager(
+        schedule,
+        max_num_reqs=max_num_reqs,
+        max_num_spec_tokens=max_num_spec_tokens,
+        device=torch.device("cpu"),
+        speculator=speculator if speculator is not None else MagicMock(),
+        req_states=req_states,
+    )
 
 
 def _create_vllm_config_for_dsd(

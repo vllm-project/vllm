@@ -19,18 +19,10 @@ class AsyncScheduler(Scheduler):
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         super()._update_after_schedule(scheduler_output)
         spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
-        num_scheduled_reqs = len(scheduler_output.num_scheduled_tokens)
-        speculative_config = self.vllm_config.speculative_config
-        if speculative_config is not None and speculative_config.adaptive_verification:
-            # Adaptive verification always produces the same number of draft tokens
-            num_spec_tokens_per_req = self.num_spec_tokens
-        else:
-            num_spec_tokens_per_req = (
-                scheduler_output.num_spec_tokens_to_schedule // num_scheduled_reqs
-                if num_scheduled_reqs > 0
-                else 0
-            )
-        self._spec_token_placeholders = [-1] * num_spec_tokens_per_req
+        # Use the latest num of scheduled draft tokens in next step as placeholder.
+        self._spec_token_placeholders = [
+            -1
+        ] * scheduler_output.num_spec_tokens_to_schedule
         for req_id in scheduler_output.num_scheduled_tokens:
             request = self.requests[req_id]
             if request.is_prefill_chunk:

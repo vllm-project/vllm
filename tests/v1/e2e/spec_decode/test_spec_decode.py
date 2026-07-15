@@ -1434,6 +1434,7 @@ def dspark_config():
             "attention_backend": "FLASH_ATTN",
             "draft_sample_method": "probabilistic",
         },
+        gpu_memory_utilization=0.8,
         max_model_len=4096,
         disable_log_stats=False,
     )

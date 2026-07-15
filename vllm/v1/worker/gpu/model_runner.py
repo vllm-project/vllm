@@ -52,6 +52,10 @@ from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.spec_decode.dynamic.drafting_manager import (
+    AdaptiveDraftingManager,
+    DynamicSDDraftingManager,
+)
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu.async_utils import AsyncOutput, AsyncPoolingOutput
 from vllm.v1.worker.gpu.attn_utils import (
@@ -194,7 +198,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculative_config is not None
             and self.speculative_config.adaptive_verification
         )
+        self.adaptive_drafting_manager: AdaptiveDraftingManager | None = None
         if self.adaptive_verification:
+            assert self.speculative_config is not None
             if self.dp_size != 1 or self.dcp_size != 1 or self.use_pp:
                 raise NotImplementedError(
                     "adaptive_verification currently requires DP=1, DCP=1, and PP=1."
@@ -238,6 +244,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
+        if self.adaptive_verification:
+            assert self.speculative_config is not None
+            assert self.speculator is not None
+            self.adaptive_drafting_manager = DynamicSDDraftingManager(
+                self.speculative_config.num_speculative_tokens_per_batch_size,
+                max_num_reqs=self.max_num_reqs,
+                max_num_spec_tokens=self.num_speculative_steps,
+                device=self.device,
+                speculator=self.speculator,
+                req_states=self.req_states,
+            )
         if self.use_pp:
             self.pp_handler = PPHandler(
                 max_num_reqs=self.max_num_reqs,
@@ -361,6 +378,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_num_logits=self.max_num_reqs * self.decode_query_len,
                 vocab_size=self.vocab_size,
                 device=self.device,
+                mask_stride=self.decode_query_len,
             )
 
         if self.is_pooling_model and self.is_last_pp_rank:
@@ -883,21 +901,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 scheduler_output.kv_cache_block_copies,
             )
 
-    def _use_adaptive_verification(self, scheduler_output: SchedulerOutput) -> bool:
-        if not self.adaptive_verification:
-            return False
-        # Adaptive verification is only used for decode-only batches.
-        draft_tokens = scheduler_output.scheduled_spec_decode_tokens
-        return len(draft_tokens) == len(scheduler_output.num_scheduled_tokens) and all(
-            len(draft_tokens.get(req_id, ())) == self.num_speculative_steps
-            for req_id in scheduler_output.num_scheduled_tokens
-        )
-
     def prepare_inputs(
         self,
         scheduler_output: SchedulerOutput,
         batch_desc: BatchExecutionDescriptor,
         num_tokens: int,
+        draft_token_budget: int | None,
     ) -> InputBatch:
         num_tokens_after_padding = batch_desc.num_tokens
         assert num_tokens > 0
@@ -919,46 +928,42 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         idx_mapping_iter = map(self.req_states.req_id_to_index.get, req_ids)
         idx_mapping_np = np.fromiter(idx_mapping_iter, dtype=np.int32, count=num_reqs)
         idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
-        use_adaptive_verification = self._use_adaptive_verification(scheduler_output)
 
         # Get the number of draft tokens for each request.
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
-        num_draft_tokens_per_req = None
-        num_draft_tokens_per_req_gpu = None
-        if not draft_tokens:
-            # No draft token scheduled (common case).
-            total_num_draft_tokens = 0
-            total_num_logits = num_reqs
-            cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
-            cu_num_logits = torch.arange(
-                num_reqs + 1, device=self.device, dtype=torch.int32
-            )
-        else:
-            num_draft_tokens_per_req = np.fromiter(
+        num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
+        num_draft_tokens_per_req = (
+            np.fromiter(
                 (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
                 dtype=np.int32,
                 count=num_reqs,
             )
-            num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
-            total_num_draft_tokens = int(num_draft_tokens_per_req.sum())
-            if use_adaptive_verification:
-                total_num_draft_tokens = scheduler_output.num_spec_tokens_to_schedule
-            total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
+            if draft_tokens
+            else None
+        )
+        planned_num_draft_tokens = (
+            0
+            if num_draft_tokens_per_req is None
+            else int(num_draft_tokens_per_req.sum())
+        )
+        total_num_draft_tokens = (
+            planned_num_draft_tokens
+            if draft_token_budget is None
+            else draft_token_budget
+        )
+        total_num_logits = (
+            num_reqs
+            if num_draft_tokens_per_req is None
+            else num_reqs * num_bonus_tokens + total_num_draft_tokens
+        )
+
+        if num_draft_tokens_per_req is None:
+            cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
+        else:
             num_logits = num_draft_tokens_per_req + num_bonus_tokens
             cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
             cu_num_logits_np[0] = 0
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
-            if use_adaptive_verification:
-                assert self.speculator is not None
-                assert num_bonus_tokens == 1
-                num_draft_tokens_per_req_gpu = (
-                    self.speculator.allocate_draft_token_budget(
-                        idx_mapping,
-                        total_num_draft_tokens,
-                    )
-                )
-            else:
-                cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
 
         # Get query_start_loc.
         # num_reqs_padded is None for PIECEWISE graphs (no request padding needed)
@@ -969,21 +974,37 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Pad for full CUDA graph mode.
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np[num_reqs + 1 :] = query_start_loc_np[num_reqs]
-        async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
-        # Compact the device layout to the selected per-request prefix lengths.
-        if use_adaptive_verification:
-            assert num_draft_tokens_per_req_gpu is not None
-            self.input_buffers.query_start_loc[:1].zero_()
-            torch.cumsum(
-                num_draft_tokens_per_req_gpu + 1,
-                dim=0,
-                out=self.input_buffers.query_start_loc[1 : num_reqs + 1],
+
+        num_draft_tokens_per_req_gpu = None
+        drafting_manager = self.adaptive_drafting_manager
+        if drafting_manager is not None:
+            assert draft_token_budget is not None
+            assert num_bonus_tokens == 1
+            (
+                num_draft_tokens_per_req_gpu,
+                cu_num_logits,
+                query_start_loc_np,
+            ) = drafting_manager.prepare_verification_layout(
+                scheduler_output,
+                idx_mapping,
+                draft_token_budget,
+                self.input_buffers.query_start_loc,
+                num_reqs_padded,
             )
-            self.input_buffers.query_start_loc[num_reqs + 1 :].fill_(num_tokens)
+        else:
+            async_copy_to_gpu(
+                query_start_loc_np,
+                out=self.input_buffers.query_start_loc,
+            )
+            if num_draft_tokens_per_req is None:
+                cu_num_logits = torch.arange(
+                    num_reqs + 1, device=self.device, dtype=torch.int32
+                )
+            else:
+                cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
+
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs_padded + 1]
-        if use_adaptive_verification:
-            cu_num_logits = query_start_loc[: num_reqs + 1]
 
         if draft_tokens:
             expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
@@ -1149,7 +1170,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 grammar_output.structured_output_request_ids,
                 grammar_output.grammar_bitmask,
-                grammar_output.grammar_mask_stride,
             )
 
         if input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
@@ -1223,14 +1243,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Get batch descriptor and sync across DP ranks.
         num_reqs = len(scheduler_output.num_scheduled_tokens)
-        num_toks = scheduler_output.total_num_scheduled_tokens
+        drafting_manager = self.adaptive_drafting_manager
+        if drafting_manager is None:
+            num_toks = scheduler_output.total_num_scheduled_tokens
+            draft_token_budget = None
+        else:
+            num_toks, draft_token_budget = drafting_manager.plan_batch(scheduler_output)
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
-        use_adaptive_verification = self._use_adaptive_verification(scheduler_output)
-        if use_adaptive_verification:
-            num_toks = (
-                scheduler_output.num_spec_tokens_to_schedule
-                + num_reqs * self.model_state.num_new_sampled_tokens_per_step
-            )
         uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
 
         num_active_loras = 0
@@ -1256,7 +1275,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.dp_rank,
             need_eager=is_profile or skip_compiled,
             num_active_loras=num_active_loras,
-            max_query_len=max_query_len if use_adaptive_verification else None,
+            max_query_len=max_query_len if drafting_manager is not None else None,
         )
 
         if batch_desc.num_tokens == 0:
@@ -1267,7 +1286,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not dummy_run:
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
-            input_batch = self.prepare_inputs(scheduler_output, batch_desc, num_toks)
+            input_batch = self.prepare_inputs(
+                scheduler_output,
+                batch_desc,
+                num_toks,
+                draft_token_budget,
+            )
             block_tables, slot_mappings = self.prepare_attn(input_batch)
             # Mamba "align" pre-copy: migrate recurrent state across block
             # boundaries before the forward. Runs only on real batches, and
@@ -1442,7 +1466,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states=hidden_states,
             aux_hidden_states=aux_hidden_states,
             finished_req_ids=finished_req_ids,
-            draft_token_budget=scheduler_output.num_spec_tokens_to_schedule,
+            num_spec_tokens_to_schedule=scheduler_output.num_spec_tokens_to_schedule,
         )
 
         if not self.is_last_pp_rank:
@@ -1465,7 +1489,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states = self.execute_model_state.hidden_states
         aux_hidden_states = self.execute_model_state.aux_hidden_states
         finished_req_ids = self.execute_model_state.finished_req_ids
-        draft_token_budget = self.execute_model_state.draft_token_budget
+        num_spec_tokens_to_schedule = (
+            self.execute_model_state.num_spec_tokens_to_schedule
+        )
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -1584,11 +1610,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.draft_tokens_handler.set_draft_tokens(
                 input_batch,
                 self.req_states.draft_tokens[input_batch.idx_mapping],
-                (
-                    None
-                    if self.adaptive_verification
-                    else draft_token_budget // input_batch.num_reqs
-                ),
+                (None if self.adaptive_verification else num_spec_tokens_to_schedule),
             )
 
         # Post-step KV connector related operations.
@@ -1710,7 +1732,7 @@ class ExecuteModelState(NamedTuple):
     hidden_states: torch.Tensor | None
     aux_hidden_states: list[torch.Tensor] | None
     finished_req_ids: set[str]
-    draft_token_budget: int
+    num_spec_tokens_to_schedule: int
 
 
 def sort_batch_req_ids(

@@ -37,6 +37,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 def allocate_draft_token_budget_from_confidence(
     confidence_logits: torch.Tensor,
     draft_token_budget: int,
+    draft_token_caps: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Allocate exactly ``draft_token_budget`` prefix tokens on device.
 
@@ -53,7 +54,7 @@ def allocate_draft_token_budget_from_confidence(
         )
     if draft_token_budget == 0:
         return torch.zeros(num_reqs, dtype=torch.int32, device=confidence_logits.device)
-    if draft_token_budget == max_budget:
+    if draft_token_budget == max_budget and draft_token_caps is None:
         return torch.full(
             (num_reqs,),
             num_speculative_steps,
@@ -62,6 +63,12 @@ def allocate_draft_token_budget_from_confidence(
         )
 
     survival_probs = confidence_logits.float().sigmoid().cumprod(dim=1)
+    if draft_token_caps is not None:
+        valid_positions = (
+            torch.arange(num_speculative_steps, device=confidence_logits.device)
+            < draft_token_caps[:, None]
+        )
+        survival_probs = survival_probs.masked_fill(~valid_positions, float("-inf"))
     ranked_indices = torch.argsort(
         survival_probs.flatten(), descending=True, stable=True
     )
@@ -158,14 +165,17 @@ class DSparkSpeculator(DFlashSpeculator):
         self,
         req_state_indices: torch.Tensor,
         draft_token_budget: int,
+        draft_token_caps: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if not self.adaptive_verification:
             return super().allocate_draft_token_budget(
-                req_state_indices, draft_token_budget
+                req_state_indices, draft_token_budget, draft_token_caps
             )
         confidence_logits = self.draft_token_confidence_logits[req_state_indices]
         return allocate_draft_token_budget_from_confidence(
-            confidence_logits, draft_token_budget
+            confidence_logits,
+            draft_token_budget,
+            draft_token_caps,
         )
 
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:

@@ -10,7 +10,13 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
 class StructuredOutputsWorker:
-    def __init__(self, max_num_logits: int, vocab_size: int, device: torch.device):
+    def __init__(
+        self,
+        max_num_logits: int,
+        vocab_size: int,
+        device: torch.device,
+        mask_stride: int,
+    ):
         self.logits_indices = torch.zeros(
             max_num_logits, dtype=torch.int32, device=device
         )
@@ -19,6 +25,7 @@ class StructuredOutputsWorker:
         )
         self.device = device
         self.copy_stream = torch.cuda.Stream()
+        self.mask_stride = mask_stride
 
     def apply_grammar_bitmask(
         self,
@@ -26,7 +33,6 @@ class StructuredOutputsWorker:
         input_batch: InputBatch,
         grammar_req_ids: list[str],
         grammar_bitmask: np.ndarray,
-        grammar_mask_stride: int = 1,
     ) -> None:
         if not grammar_req_ids:
             return
@@ -47,7 +53,7 @@ class StructuredOutputsWorker:
             logits_start_idx = cu_num_logits[req_idx]
             logits_end_idx = cu_num_logits[req_idx + 1]
             mapping.extend(
-                req_idx * grammar_mask_stride + position
+                req_idx * self.mask_stride + position
                 for position in range(logits_end_idx - logits_start_idx)
             )
 
@@ -76,7 +82,7 @@ class StructuredOutputsWorker:
             bitmask,
             bitmask.stride(0),
             vocab_size,
-            MASK_STRIDE=grammar_mask_stride,
+            MASK_STRIDE=self.mask_stride,
             BLOCK_SIZE=BLOCK_SIZE,
         )
 

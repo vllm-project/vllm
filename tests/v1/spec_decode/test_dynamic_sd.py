@@ -150,7 +150,7 @@ def test_scheduler_initializes_dynamic_sd_lookup_from_speculative_config():
     assert scheduler.num_spec_tokens == 3
 
 
-def test_scheduler_uses_aggregate_dsd_budget_for_scheduled_requests():
+def test_scheduler_uses_dsd_k_based_on_number_of_scheduled_requests():
     test_cases = [
         (4, 3),
         (64, 2),
@@ -167,10 +167,10 @@ def test_scheduler_uses_aggregate_dsd_budget_for_scheduled_requests():
         output = _add_requests_and_schedule(scheduler, num_requests)
 
         assert len(output.num_scheduled_tokens) == num_requests
-        assert output.num_spec_tokens_to_schedule == num_requests * expected_k
+        assert output.num_spec_tokens_to_schedule == expected_k
 
 
-def test_v2_scheduler_selects_aggregate_dynamic_sd_budget():
+def test_v2_scheduler_selects_dynamic_sd_k():
     scheduler = _make_scheduler_with_dynamic_sd(
         [(1, 1, 4), (2, 2, 2)],
         max_num_seqs=2,
@@ -182,11 +182,24 @@ def test_v2_scheduler_selects_aggregate_dynamic_sd_budget():
     output = _add_requests_and_schedule(scheduler, 2)
 
     assert len(output.num_scheduled_tokens) == 2
-    assert output.num_spec_tokens_to_schedule == 4
+    assert output.num_spec_tokens_to_schedule == 2
+
+
+def test_scheduler_clamps_dsd_k_to_runtime_num_speculative_tokens():
+    scheduler = _make_scheduler_with_dynamic_sd(
+        [(1, 256, 5)],
+        max_num_seqs=16,
+        max_num_batched_tokens=160,
+        runtime_num_speculative_tokens=3,
+    )
+    output = _add_requests_and_schedule(scheduler, 16)
+
+    assert len(output.num_scheduled_tokens) == 16
+    assert output.num_spec_tokens_to_schedule == 3
 
 
 @pytest.mark.parametrize("optimal_k", [0, 2])
-def test_adaptive_scheduler_caps_fallback_decodes_at_dynamic_k(optimal_k: int):
+def test_adaptive_scheduler_ignores_dynamic_schedule_for_mixed_batch(optimal_k: int):
     scheduler = _make_scheduler_with_dynamic_sd(
         [(1, 2, optimal_k)],
         max_num_seqs=2,
@@ -215,19 +228,20 @@ def test_adaptive_scheduler_caps_fallback_decodes_at_dynamic_k(optimal_k: int):
     scheduler.add_request(prefill_req)
     output = scheduler.schedule()
 
-    expected_draft_tokens = [10, 11, 12, 13][:optimal_k]
-    assert output.scheduled_spec_decode_tokens == (
-        {decode_req.request_id: expected_draft_tokens} if expected_draft_tokens else {}
-    )
-    assert output.num_scheduled_tokens == {
-        decode_req.request_id: 1 + optimal_k,
-        prefill_req.request_id: 1,
+    assert scheduler.dynamic_sd_lookup is None
+    assert output.scheduled_spec_decode_tokens == {
+        decode_req.request_id: [10, 11, 12, 13],
+        prefill_req.request_id: [-1, -1, -1, -1],
     }
-    assert output.total_num_scheduled_tokens == 2 + optimal_k
-    assert output.num_spec_tokens_to_schedule == 2 * optimal_k
+    assert output.num_scheduled_tokens == {
+        decode_req.request_id: 5,
+        prefill_req.request_id: 5,
+    }
+    assert output.total_num_scheduled_tokens == 10
+    assert output.num_spec_tokens_to_schedule == 4
 
 
-def test_adaptive_scheduler_preserves_full_windows_for_worker_allocation():
+def test_adaptive_scheduler_uses_fixed_k_max():
     scheduler = _make_scheduler_with_dynamic_sd(
         [(1, 2, 2)],
         max_num_seqs=2,
@@ -273,26 +287,11 @@ def test_adaptive_scheduler_preserves_full_windows_for_worker_allocation():
     assert output.num_spec_tokens_to_schedule == 4
 
 
-@pytest.mark.parametrize(
-    ("adaptive_verification", "expected_spec_token_ids"),
-    [
-        (False, [10, 11, 12]),
-        (True, [10, 11, 12, -1]),
-    ],
-)
-def test_scheduler_preserves_grammar_mask_window(
-    adaptive_verification: bool,
-    expected_spec_token_ids: list[int],
-):
+def test_scheduler_uses_valid_structured_output_draft_prefix():
     scheduler = create_scheduler(
         num_speculative_tokens=4,
         use_v2_model_runner=True,
     )
-    speculative_config = scheduler.vllm_config.speculative_config
-    assert speculative_config is not None
-    speculative_config.adaptive_verification = adaptive_verification
-    scheduler.adaptive_verification = adaptive_verification
-
     request = create_requests(num_requests=1, num_tokens=1)[0]
     scheduler.add_request(request)
     prefill_output = scheduler.schedule()
@@ -318,6 +317,7 @@ def test_scheduler_preserves_grammar_mask_window(
         )
     )
 
+    expected_spec_token_ids = [10, 11, 12]
     assert request.spec_token_ids == expected_spec_token_ids
     grammar.validate_tokens.assert_called_once_with([10, 11, 12, 13])
 
@@ -332,7 +332,6 @@ def test_scheduler_preserves_grammar_mask_window(
     grammar_output = scheduler.get_grammar_bitmask(output)
 
     assert grammar_output is not None
-    assert grammar_output.grammar_mask_stride == 5
     assert grammar_output.grammar_bitmask is bitmask
     assert scheduler.structured_output_manager.grammar_bitmask.call_args.args[2] == {
         request.request_id: expected_spec_token_ids
@@ -369,7 +368,7 @@ def test_scheduler_falls_back_to_static_k_when_dsd_not_configured():
     output = _add_requests_and_schedule(scheduler, 4)
 
     assert scheduler.dynamic_sd_lookup is None
-    assert output.num_spec_tokens_to_schedule == 12
+    assert output.num_spec_tokens_to_schedule == 3
 
 
 def test_dynamic_sd_is_disabled_with_data_parallel(caplog_vllm):
@@ -396,10 +395,10 @@ def test_dynamic_sd_is_disabled_with_data_parallel(caplog_vllm):
 
     output = _add_requests_and_schedule(scheduler, 256)
     assert len(output.num_scheduled_tokens) == 256
-    assert output.num_spec_tokens_to_schedule == 768
+    assert output.num_spec_tokens_to_schedule == 3
 
 
-def test_scheduler_uses_zero_budget_when_no_requests_are_scheduled():
+def test_scheduler_uses_static_k_when_no_requests_are_scheduled():
     scheduler = _make_scheduler_with_dynamic_sd(
         [(1, 16, 3), (64, 128, 2), (256, 4096, 0)],
         runtime_num_speculative_tokens=3,
@@ -407,7 +406,7 @@ def test_scheduler_uses_zero_budget_when_no_requests_are_scheduled():
     output = scheduler.schedule()
 
     assert len(output.num_scheduled_tokens) == 0
-    assert output.num_spec_tokens_to_schedule == 0
+    assert output.num_spec_tokens_to_schedule == 3
 
 
 def test_scheduler_rejects_bad_dsd_config_at_construction():
@@ -427,4 +426,4 @@ def test_scheduler_passes_max_num_seqs_as_dsd_runtime_batch_limit():
     assert scheduler.dynamic_sd_lookup is not None
     assert len(scheduler.dynamic_sd_lookup) == 17
     assert len(output.num_scheduled_tokens) == 16
-    assert output.num_spec_tokens_to_schedule == 48
+    assert output.num_spec_tokens_to_schedule == 3

@@ -38,7 +38,7 @@ implies that:
 
 Adaptive verification is supported with the Model Runner V2 DSpark implementation. Enable it by setting `adaptive_verification` to `true` in the speculative config.
 
-In this mode, `num_speculative_tokens` is the maximum per-request draft length. The drafter returns `num_speculative_tokens` tokens per request, and the scheduler reserves KV-cache capacity for that full window. For `N` scheduled requests, Dynamic SD maps this through the `num_speculative_tokens_per_batch_size` table to calculate the total verification budget of `N * optimal_K`. The worker distributes that budget across the draft prefixes using the DSpark confidence head, so individual requests can verify different numbers of draft tokens while the batch total remains fixed. Only the allocated draft positions, plus one bonus position per request, run through the target model.
+In this mode, `num_speculative_tokens` is the maximum per-request draft length. The drafter returns `num_speculative_tokens` tokens per request, and the scheduler behaves like ordinary fixed-length speculative decoding, including reserving KV-cache capacity for that full window. The worker uses `num_speculative_tokens_per_batch_size` as a cost model. For `N` decode requests, it selects a total verification budget of `N * optimal_K` and distributes that budget across draft prefixes using the DSpark confidence head. Only the allocated draft positions, plus one bonus position per request, run through the target model. Batches containing prefills use the largest-batch schedule entry as a conservative fixed-K fallback.
 
 ## Online Examples
 
@@ -104,4 +104,4 @@ VLLM_USE_V2_MODEL_RUNNER=0 vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 * Tested with Eagle, Eagle-3, and DFlash. Other SD methods may or may not work out of the box
 * Full Cudagraph only works with Model Runner V2. MRv1 only supports piece-wise cuda graph with this feature
-* Not compatible with data parallelism (`--data-parallel-size > 1`). Each DP rank schedules independently, so ranks can pick different K values, causing DP collective divergence and deadlocks. When DP is enabled, vLLM automatically disables `num_speculative_tokens_per_batch_size` and falls back to the static `num_speculative_tokens` value.
+* Dynamic SD is not compatible with data parallelism (`--data-parallel-size > 1`). vLLM disables its batch-size schedule and falls back to `num_speculative_tokens`. Adaptive verification instead requires DP, DCP, and PP sizes of one.

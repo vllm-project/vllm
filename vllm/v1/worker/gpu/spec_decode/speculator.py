@@ -31,6 +31,7 @@ class BaseSpeculator(ABC):
         self,
         req_state_indices: torch.Tensor,
         draft_token_budget: int,
+        draft_token_caps: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Allocate a batch-wide draft-token budget across request prefixes."""
         raise NotImplementedError
