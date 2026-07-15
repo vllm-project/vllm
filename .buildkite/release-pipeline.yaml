@@ -113,7 +113,7 @@ steps:
           - 'mv artifacts/reassembled/wheel "artifacts/dist/$$wheel_name"'
           - "aws sts get-caller-identity"
           - "VLLM_WHEEL_PLATFORM=macos bash .buildkite/scripts/upload-nightly-wheels.sh"
-          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "s3://vllm-wheels/$$BUILDKITE_COMMIT/$(cd artifacts/dist && echo *.whl)"'
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "s3://vllm-wheels/$$BUILDKITE_COMMIT/$(cd artifacts/dist && echo *.whl)" release-wheels'
         plugins:
           - aws-assume-role-with-web-identity#v1.6.0:
               role-arn: arn:aws:iam::936637512419:role/vllm-release-macos-wheel-uploader
