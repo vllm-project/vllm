@@ -42,31 +42,29 @@ def test_project_batch_sequential_projector_fp32_weights(input_dtype):
 
 
 @pytest.mark.parametrize("input_dtype", [torch.float16, torch.bfloat16])
-def test_project_batch_linear_projector_fp32_weights(input_dtype):
-    """Linear projector at fp32 — uses the optimized weight-cast path.
-    Result must match the slow upcast path bit-exactly.
+@pytest.mark.parametrize("wrap_sequential", [False, True])
+def test_project_batch_matches_forward_chunk_numerics(input_dtype,
+                                                      wrap_sequential):
+    """project_batch must project at head_dtype exactly like forward_chunk
+    (PR #40337 review, point 1): queries (chunk path) and documents (batch
+    path) must use identical projection precision. Bit-exact — the batch
+    path performs the same upcast-then-project pipeline, so no tolerance
+    is needed or allowed.
     """
     hidden_dim, embed_dim = 32, 8
     linear = nn.Linear(hidden_dim, embed_dim)
-    head_linear = TokenEmbeddingPoolerHead(
-        head_dtype=torch.float32, projector=linear, activation=_l2_normalize
-    )
-
-    sequential = nn.Sequential(nn.Linear(hidden_dim, embed_dim))
-    sequential[0].load_state_dict(linear.state_dict())
-    head_seq = TokenEmbeddingPoolerHead(
-        head_dtype=torch.float32, projector=sequential, activation=_l2_normalize
+    projector = nn.Sequential(linear) if wrap_sequential else linear
+    head = TokenEmbeddingPoolerHead(
+        head_dtype=torch.float32, projector=projector, activation=_l2_normalize
     )
 
     hidden_states = torch.randn(4, hidden_dim, dtype=input_dtype)
-    out_linear = head_linear.project_batch(hidden_states)
-    out_seq = head_seq.project_batch(hidden_states)
+    # forward_chunk numerics: upcast to head_dtype, then project, then act.
+    ref = _l2_normalize(linear(hidden_states.to(torch.float32)))
 
-    # Optimized path (downcast weight) and reference path (upcast input)
-    # may differ within fp16/bf16 ulp.  bf16 has only 7 mantissa bits so
-    # relative tolerance must be looser than fp16's 11.
-    rtol = 2e-2 if input_dtype is torch.bfloat16 else 5e-3
-    torch.testing.assert_close(out_linear, out_seq, atol=1e-3, rtol=rtol)
+    out = head.project_batch(hidden_states)
+    assert out.dtype == torch.float32
+    torch.testing.assert_close(out, ref, atol=0.0, rtol=0.0)
 
 
 def test_project_batch_no_projector():

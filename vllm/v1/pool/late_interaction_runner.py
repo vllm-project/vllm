@@ -46,6 +46,10 @@ class LateInteractionRunner:
         has a late-interaction pooler (see gpu_model_runner.load_model)."""
         if not self._has_flash_maxsim_rerank or not torch.cuda.is_available():
             return
+        if os.environ.get("VLLM_DISABLE_ZEROCOPY"):
+            # User opted out of the zero-copy path entirely — don't pay
+            # the autotune cost at model load either.
+            return
         try:
             from vllm.v1.pool.flash_maxsim import flash_maxsim_rerank_direct
 
@@ -138,14 +142,18 @@ class LateInteractionRunner:
             and self._has_flash_maxsim_rerank
         )
 
-        # Single GPU->CPU sync for offsets/lengths (avoids per-request
-        # .item() calls which each trigger a sync).
+        # Offsets/lengths from the CPU-side scheduled-token metadata —
+        # no GPU->CPU synchronization on the hot path.
         firsts_cpu: list[int] = []
         lasts_cpu: list[int] = []
         if use_zerocopy:
             assert pooling_cursor is not None  # narrowed by use_zerocopy
-            firsts_cpu = pooling_cursor.first_token_indices_gpu.tolist()
-            lasts_cpu = pooling_cursor.last_token_indices_gpu.tolist()
+            if pooling_cursor.first_token_indices_cpu is not None:
+                firsts_cpu = pooling_cursor.first_token_indices_cpu.tolist()
+                lasts_cpu = pooling_cursor.last_token_indices_cpu.tolist()
+            else:  # fallback: single sync (older cursor producers)
+                firsts_cpu = pooling_cursor.first_token_indices_gpu.tolist()
+                lasts_cpu = pooling_cursor.last_token_indices_gpu.tolist()
 
         outputs: list[torch.Tensor | None] = list(raw_pooler_output)
         score_indices: list[int] = []
@@ -207,12 +215,31 @@ class LateInteractionRunner:
         if score_indices:
             if use_zerocopy:
                 assert projected_batch is not None  # narrowed by use_zerocopy
-                score_values = self._score_zerocopy(
-                    score_queries,
-                    projected_batch,
-                    score_doc_offsets,
-                    score_doc_lengths,
-                )
+                try:
+                    score_values = self._score_zerocopy(
+                        score_queries,
+                        projected_batch,
+                        score_doc_offsets,
+                        score_doc_lengths,
+                    )
+                except Exception as exc:
+                    # A persistent Triton compile/launch failure must not
+                    # take down requests: disable the kernel path for the
+                    # rest of the process and serve this batch through the
+                    # vanilla scorer using views into the projected batch.
+                    self._has_flash_maxsim_rerank = False
+                    logger.warning(
+                        "flash-maxsim zero-copy scoring failed (%s); "
+                        "falling back to the vanilla MaxSim path and "
+                        "disabling the kernel for this process.", exc)
+                    score_docs = [
+                        projected_batch[o:o + n]
+                        for o, n in zip(score_doc_offsets, score_doc_lengths)
+                    ]
+                    score_values = compute_maxsim_score_batched(
+                        score_queries,
+                        score_docs,
+                    )
             else:
                 score_values = compute_maxsim_score_batched(
                     score_queries,
@@ -242,6 +269,15 @@ class LateInteractionRunner:
         from vllm.v1.pool.flash_maxsim import flash_maxsim_rerank_direct
 
         device = projected_batch.device
+
+        # fp16 models: the kernel reads projected_batch in place — true
+        # zero-copy. Other dtypes (e.g. BF16 heads): cast ONCE here for the
+        # whole step; without this hoist the per-query-group kernel wrapper
+        # would re-cast the full batch tensor once per unique query.
+        if projected_batch.dtype != torch.float16:
+            projected_batch = projected_batch.half()
+        if not projected_batch.is_contiguous():
+            projected_batch = projected_batch.contiguous()
 
         # Group by query identity (same cached tensor = same data_ptr)
         groups: dict[int, tuple[torch.Tensor, list[int], list[int], list[int]]] = {}
