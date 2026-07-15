@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -50,6 +51,25 @@ def _pynvvideocodec_decoder_budget(api_process_count: int = 1) -> int:
         PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES * PYNVVIDEOCODEC_MAX_RETAINED_DECODERS
         + PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES
     )
+
+
+@pytest.mark.parametrize("enable_cumem_allocator", [False, True])
+def test_load_allocator_settings_context(enable_cumem_allocator: bool):
+    worker = object.__new__(Worker)
+    worker.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(enable_cumem_allocator=enable_cumem_allocator)
+    )
+    scoped_context = nullcontext()
+    worker._scoped_allocator_max_split = MagicMock(return_value=scoped_context)
+
+    context = worker._get_load_allocator_settings_context()
+
+    if enable_cumem_allocator:
+        assert context is not scoped_context
+        worker._scoped_allocator_max_split.assert_not_called()
+    else:
+        assert context is scoped_context
+        worker._scoped_allocator_max_split.assert_called_once_with(max_split_size_mb=20)
 
 
 @pytest.mark.parametrize("video_backend", [None, "opencv"])

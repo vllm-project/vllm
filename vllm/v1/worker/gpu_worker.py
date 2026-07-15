@@ -293,6 +293,22 @@ class Worker(WorkerBase):
             restore = original_value if original_value else str(_SIZE_MAX_MB)
             torch._C._accelerator_setAllocatorSettings(f"max_split_size_mb:{restore}")
 
+    def _get_load_allocator_settings_context(self) -> AbstractContextManager:
+        """Return allocator settings appropriate for model loading.
+
+        Limiting ``max_split_size_mb`` prevents large cached blocks from being
+        split in the default caching allocator, where unused segments can be
+        reclaimed under pressure. A live CUDA ``MemPool`` cannot perform that
+        reclaim (pytorch/pytorch#159674), so applying the same limit there can
+        strand every differently-sized weight-conversion buffer until the pool
+        context exits. Preserve the user's/default split policy for CuMem
+        loading so the pool can reuse those blocks instead.
+        """
+        if self.vllm_config.model_config.enable_cumem_allocator:
+            return nullcontext()
+        # 20 MiB is the minimum PyTorch allows for max_split_size_mb.
+        return self._scoped_allocator_max_split(max_split_size_mb=20)
+
     @instrument(span_name="Init device")
     def init_device(self):
         if self.device_config.device_type == "cuda":
@@ -425,8 +441,7 @@ class Worker(WorkerBase):
         with (
             self._maybe_get_memory_pool_context(tag="weights"),
             set_current_vllm_config(self.vllm_config),
-            # 20 MiB is the minimum PyTorch allows for max_split_size_mb.
-            self._scoped_allocator_max_split(max_split_size_mb=20),
+            self._get_load_allocator_settings_context(),
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
