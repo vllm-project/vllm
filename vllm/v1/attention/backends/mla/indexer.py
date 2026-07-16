@@ -109,7 +109,7 @@ def split_indexer_prefill_chunks(
             end += 1
 
         req_slice = slice(start + request_offset, end + request_offset)
-        max_q = max(1, max_logits_elems // chunk_n) if chunk_n > 0 else chunk_m
+        max_q = max(1, max_logits_elems // chunk_n) if chunk_n > 0 else max(1, chunk_m)
         for q_off in range(0, chunk_m, max_q):
             sub_m = min(max_q, chunk_m - q_off)
             chunks.append((req_slice, slice(q_off, q_off + sub_m)))
