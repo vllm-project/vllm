@@ -5,6 +5,10 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm._custom_ops import fusedQuantizeNv
+from vllm.model_executor.kernels.linear import (
+    _LINEAR_BACKEND_KERNEL_MAP,
+    NvFp4LinearKernel,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsScheme,
     CompressedTensorsW4A4Fp4,
@@ -19,10 +23,6 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
 )
 from vllm.utils.flashinfer import (
     flashinfer_scaled_fp4_mm,
-)
-from vllm.model_executor.kernels.linear import (
-    _LINEAR_BACKEND_KERNEL_MAP,
-    NvFp4LinearKernel,
 )
 
 __all__ = ["is_qutlass_fp4_scheme", "QutlassNvFP4LinearMethod"]
