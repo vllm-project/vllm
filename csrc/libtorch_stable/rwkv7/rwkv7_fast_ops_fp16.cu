@@ -758,34 +758,6 @@ std::vector<at::Tensor> tmix_mix6_slot_cuda(int B, int T, int C, at::Tensor x,
   const int* slot_ptr = slot_indices.defined() && slot_indices.numel() > 0
                             ? slot_indices.data_ptr<int>()
                             : nullptr;
-  if (use_3d_mix(B, T, C)) {
-    const dim3 grid(static_cast<unsigned int>(ceil_div(C / 2, threads)),
-                    static_cast<unsigned int>(T), static_cast<unsigned int>(B));
-    const int64_t state_pairs = static_cast<int64_t>(B) * (C / 2);
-    if (T == 1) {
-      tmix_mix6_kernel<true, true><<<grid, threads, 0, stream>>>(
-          T, C, x.data_ptr<dtype>(), shift_state.data_ptr<dtype>(), slot_ptr,
-          x_r.data_ptr<dtype>(), x_w.data_ptr<dtype>(), x_k.data_ptr<dtype>(),
-          x_v.data_ptr<dtype>(), x_a.data_ptr<dtype>(), x_g.data_ptr<dtype>(),
-          out_r.data_ptr<dtype>(), out_w.data_ptr<dtype>(), out_k.data_ptr<dtype>(),
-          out_v.data_ptr<dtype>(), out_a.data_ptr<dtype>(), out_g.data_ptr<dtype>(),
-          0);
-    } else {
-      tmix_mix6_kernel<false, true><<<grid, threads, 0, stream>>>(
-          T, C, x.data_ptr<dtype>(), shift_state.data_ptr<dtype>(), slot_ptr,
-          x_r.data_ptr<dtype>(), x_w.data_ptr<dtype>(), x_k.data_ptr<dtype>(),
-          x_v.data_ptr<dtype>(), x_a.data_ptr<dtype>(), x_g.data_ptr<dtype>(),
-          out_r.data_ptr<dtype>(), out_w.data_ptr<dtype>(), out_k.data_ptr<dtype>(),
-          out_v.data_ptr<dtype>(), out_a.data_ptr<dtype>(), out_g.data_ptr<dtype>(),
-          0);
-      update_shift_state_last_kernel<<<
-          static_cast<int>(ceil_div(state_pairs, threads)), threads, 0, stream>>>(
-          T, C, x.data_ptr<dtype>(), shift_state.data_ptr<dtype>(), slot_ptr,
-          state_pairs);
-    }
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-    return {out_r, out_w, out_k, out_v, out_a, out_g};
-  }
   if (T == 1) {
     tmix_mix6_kernel<true><<<static_cast<int>(ceil_div(total_pairs, threads)),
                              threads, 0, stream>>>(
@@ -796,14 +768,27 @@ std::vector<at::Tensor> tmix_mix6_slot_cuda(int B, int T, int C, at::Tensor x,
         out_k.data_ptr<dtype>(), out_v.data_ptr<dtype>(),
         out_a.data_ptr<dtype>(), out_g.data_ptr<dtype>(), total_pairs);
   } else {
-    tmix_mix6_kernel<false><<<static_cast<int>(ceil_div(total_pairs, threads)),
-                              threads, 0, stream>>>(
-        T, C, x.data_ptr<dtype>(), shift_state.data_ptr<dtype>(), slot_ptr,
-        x_r.data_ptr<dtype>(), x_w.data_ptr<dtype>(), x_k.data_ptr<dtype>(),
-        x_v.data_ptr<dtype>(), x_a.data_ptr<dtype>(), x_g.data_ptr<dtype>(),
-        out_r.data_ptr<dtype>(), out_w.data_ptr<dtype>(),
-        out_k.data_ptr<dtype>(), out_v.data_ptr<dtype>(),
-        out_a.data_ptr<dtype>(), out_g.data_ptr<dtype>(), total_pairs);
+    if (use_3d_mix(B, T, C)) {
+      const dim3 grid(static_cast<unsigned int>(ceil_div(C / 2, threads)),
+                      static_cast<unsigned int>(T),
+                      static_cast<unsigned int>(B));
+      tmix_mix6_kernel<false, true><<<grid, threads, 0, stream>>>(
+          T, C, x.data_ptr<dtype>(), shift_state.data_ptr<dtype>(), slot_ptr,
+          x_r.data_ptr<dtype>(), x_w.data_ptr<dtype>(), x_k.data_ptr<dtype>(),
+          x_v.data_ptr<dtype>(), x_a.data_ptr<dtype>(), x_g.data_ptr<dtype>(),
+          out_r.data_ptr<dtype>(), out_w.data_ptr<dtype>(), out_k.data_ptr<dtype>(),
+          out_v.data_ptr<dtype>(), out_a.data_ptr<dtype>(), out_g.data_ptr<dtype>(),
+          0);
+    } else {
+      tmix_mix6_kernel<false><<<static_cast<int>(ceil_div(total_pairs, threads)),
+                                threads, 0, stream>>>(
+          T, C, x.data_ptr<dtype>(), shift_state.data_ptr<dtype>(), slot_ptr,
+          x_r.data_ptr<dtype>(), x_w.data_ptr<dtype>(), x_k.data_ptr<dtype>(),
+          x_v.data_ptr<dtype>(), x_a.data_ptr<dtype>(), x_g.data_ptr<dtype>(),
+          out_r.data_ptr<dtype>(), out_w.data_ptr<dtype>(),
+          out_k.data_ptr<dtype>(), out_v.data_ptr<dtype>(),
+          out_a.data_ptr<dtype>(), out_g.data_ptr<dtype>(), total_pairs);
+    }
     const int64_t state_pairs = static_cast<int64_t>(B) * (C / 2);
     update_shift_state_last_kernel<<<
         static_cast<int>(ceil_div(state_pairs, threads)), threads, 0, stream>>>(
@@ -970,36 +955,25 @@ at::Tensor cmix_mix_slot_cuda(int B, int T, int C, at::Tensor x,
   const int* slot_ptr = slot_indices.defined() && slot_indices.numel() > 0
                             ? slot_indices.data_ptr<int>()
                             : nullptr;
-  if (use_3d_mix(B, T, C)) {
-    const dim3 grid(static_cast<unsigned int>(ceil_div(C / 2, threads)),
-                    static_cast<unsigned int>(T), static_cast<unsigned int>(B));
-    const int64_t state_pairs = static_cast<int64_t>(B) * (C / 2);
-    if (T == 1) {
-      cmix_mix_kernel<true, true><<<grid, threads, 0, stream>>>(
-          T, C, x.data_ptr<dtype>(), shift_state.data_ptr<dtype>(), slot_ptr,
-          x_k.data_ptr<dtype>(), out.data_ptr<dtype>(), 0);
-    } else {
-      cmix_mix_kernel<false, true><<<grid, threads, 0, stream>>>(
-          T, C, x.data_ptr<dtype>(), shift_state.data_ptr<dtype>(), slot_ptr,
-          x_k.data_ptr<dtype>(), out.data_ptr<dtype>(), 0);
-      update_shift_state_last_kernel<<<
-          static_cast<int>(ceil_div(state_pairs, threads)), threads, 0, stream>>>(
-          T, C, x.data_ptr<dtype>(), shift_state.data_ptr<dtype>(), slot_ptr,
-          state_pairs);
-    }
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-    return out;
-  }
   if (T == 1) {
     cmix_mix_kernel<true><<<static_cast<int>(ceil_div(total_pairs, threads)),
                             threads, 0, stream>>>(
         T, C, x.data_ptr<dtype>(), shift_state.data_ptr<dtype>(), slot_ptr,
         x_k.data_ptr<dtype>(), out.data_ptr<dtype>(), total_pairs);
   } else {
-    cmix_mix_kernel<false><<<static_cast<int>(ceil_div(total_pairs, threads)),
-                             threads, 0, stream>>>(
-        T, C, x.data_ptr<dtype>(), shift_state.data_ptr<dtype>(), slot_ptr,
-        x_k.data_ptr<dtype>(), out.data_ptr<dtype>(), total_pairs);
+    if (use_3d_mix(B, T, C)) {
+      const dim3 grid(static_cast<unsigned int>(ceil_div(C / 2, threads)),
+                      static_cast<unsigned int>(T),
+                      static_cast<unsigned int>(B));
+      cmix_mix_kernel<false, true><<<grid, threads, 0, stream>>>(
+          T, C, x.data_ptr<dtype>(), shift_state.data_ptr<dtype>(), slot_ptr,
+          x_k.data_ptr<dtype>(), out.data_ptr<dtype>(), 0);
+    } else {
+      cmix_mix_kernel<false><<<static_cast<int>(ceil_div(total_pairs, threads)),
+                               threads, 0, stream>>>(
+          T, C, x.data_ptr<dtype>(), shift_state.data_ptr<dtype>(), slot_ptr,
+          x_k.data_ptr<dtype>(), out.data_ptr<dtype>(), total_pairs);
+    }
     const int64_t state_pairs = static_cast<int64_t>(B) * (C / 2);
     update_shift_state_last_kernel<<<
         static_cast<int>(ceil_div(state_pairs, threads)), threads, 0, stream>>>(
