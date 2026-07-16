@@ -98,10 +98,6 @@ Would you like to know more?""",
                 "test_streaming_reconstruction": "Phi4 Mini streaming not implemented",
             },
             xfail_nonstreaming={
-                "test_various_data_types": (
-                    "Phi4MiniJsonToolParser regex has nesting limitations "
-                    "with nested objects"
-                ),
                 "test_malformed_input": (
                     "Phi4MiniJsonToolParser incorrectly sets "
                     "tools_called=True on empty array"

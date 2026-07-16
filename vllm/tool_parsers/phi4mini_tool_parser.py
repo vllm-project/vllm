@@ -5,7 +5,6 @@ import json
 from collections.abc import Sequence
 from typing import Any
 
-import regex as re
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
@@ -60,10 +59,9 @@ class Phi4MiniJsonToolParser(ToolParser):
         """
         logger.debug("Model output: %s", model_output)
 
-        pattern = r"functools\[(.*?)\]"
-        matches = re.search(pattern, model_output, re.DOTALL)
+        bot_idx = model_output.find(self.bot_token)
 
-        if not matches:
+        if bot_idx == -1:
             logger.debug("No function calls found")
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
@@ -72,9 +70,14 @@ class Phi4MiniJsonToolParser(ToolParser):
         try:
             function_call_arr: list[dict[str, Any]] = []
             try:
-                json_content = "[" + matches.group(1) + "]"
-
-                function_call_arr = json.loads(json_content)
+                # Decode the JSON array directly after the `functools` marker.
+                # A `functools\[(.*?)\]` regex stops at the first `]`, which
+                # truncates any tool call whose arguments contain a nested
+                # list (e.g. `{"tags": ["a", "b"]}`); raw_decode handles
+                # arbitrary nesting and ignores any trailing text.
+                function_call_arr, _ = json.JSONDecoder().raw_decode(
+                    model_output, bot_idx + len(self.bot_token)
+                )
                 logger.debug(
                     "Successfully extracted %d function calls", len(function_call_arr)
                 )
