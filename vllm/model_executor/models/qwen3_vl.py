@@ -33,7 +33,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import BatchFeature
+from transformers import BatchFeature, ProcessorMixin
 from transformers.models.qwen2_vl import Qwen2VLImageProcessor
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
     smart_resize as image_smart_resize,
@@ -67,7 +67,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.evs import (
@@ -518,6 +517,14 @@ class Qwen3_VisionPatchMerger(nn.Module):
 
 
 class Qwen3_VisionTransformer(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            "attn.q.": ("attn.qkv.", "q"),
+            "attn.k.": ("attn.qkv.", "k"),
+            "attn.v.": ("attn.qkv.", "v"),
+        }
+    )
+
     def __init__(
         self,
         vision_config: Qwen3VLVisionConfig,
@@ -834,31 +841,8 @@ class Qwen3_VisionTransformer(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("attn.qkv.", "attn.q.", "q"),
-            ("attn.qkv.", "attn.k.", "k"),
-            ("attn.qkv.", "attn.v.", "v"),
-        ]
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
@@ -1207,34 +1191,31 @@ def _replace_video_token_placeholders(
     target: list[int],
     replacements: list[list[int]],
 ) -> list[int]:
-    """Replace each 3-token video placeholder with its expanded sequence.
+    """Replace each video placeholder with its expanded sequence.
 
     Args:
         prompt_ids: Token IDs of the original (unexpanded) prompt.
-        target: 3-element list ``[vision_start_id, video_pad_id,
-            vision_end_id]`` to search for.
+        target: Token-ID sequence to search for. New-style
+            (transformers>=5.10) processors expand only the bare
+            `[video_pad_id]`; older ones expand the full
+            `[vision_start_id, video_pad_id, vision_end_id]` triplet.
         replacements: Per-video expanded token sequences, in prompt order.
 
     Returns:
-        Token IDs with every placeholder triplet replaced.
+        Token IDs with every placeholder replaced.
     """
     result: list[int] = []
     repl_idx = 0
     i = 0
     n = len(prompt_ids)
-    t0, t1, t2 = target
+    k = len(target)
     num_repl = len(replacements)
 
     while i < n:
-        if (
-            i + 2 < n
-            and prompt_ids[i] == t0
-            and prompt_ids[i + 1] == t1
-            and prompt_ids[i + 2] == t2
-        ):
+        if prompt_ids[i : i + k] == target:
             result.extend(replacements[repl_idx])
             repl_idx += 1
-            i += 3
+            i += k
         else:
             result.append(prompt_ids[i])
             i += 1
@@ -1246,6 +1227,15 @@ def _replace_video_token_placeholders(
 
 
 class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]):
+    @staticmethod
+    def _expands_only_video_token(hf_processor: ProcessorMixin) -> bool:
+        """Transformers>=5.10 processors override `replace_video_token`
+        to expand only the bare video token, keeping the prompt's outer
+        `<|vision_start|>`/`<|vision_end|>` markers."""
+        mixin_impl = getattr(ProcessorMixin, "replace_video_token", None)
+        proc_impl = getattr(type(hf_processor), "replace_video_token", None)
+        return proc_impl is not None and proc_impl is not mixin_impl
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -1381,14 +1371,17 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             tok_kwargs=tok_kwargs,
         )
 
-        # Replace each placeholder triplet with pre-computed video tokens.
+        # Replace each placeholder with pre-computed video tokens.
         if video_input_ids_lst:
             hf_config = self.info.get_hf_config()
-            video_target = [
-                hf_config.vision_start_token_id,
-                hf_config.video_token_id,
-                hf_config.vision_end_token_id,
-            ]
+            if self._expands_only_video_token(self.info.get_hf_processor()):
+                video_target = [hf_config.video_token_id]
+            else:
+                video_target = [
+                    hf_config.vision_start_token_id,
+                    hf_config.video_token_id,
+                    hf_config.vision_end_token_id,
+                ]
             input_ids = processed_outputs.pop("input_ids")
             if not isinstance(input_ids, list):
                 input_ids = input_ids.tolist()
@@ -1480,17 +1473,24 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 select_token_id=select_token_id,
             )
 
+        if self._expands_only_video_token(hf_processor):
+            # transformers>=5.10 expands only the bare video_token
+            video_target = hf_processor.video_token
+        else:
+            # Old-style processors expand the full placeholder
+            # NOTE: We match string on purpose since searching sequence of
+            # token ids takes more time.
+            video_target = "<|vision_start|><|video_pad|><|vision_end|>"
+
         return [
             PromptReplacement(
                 modality="image",
                 target=hf_processor.image_token,
                 replacement=get_image_replacement_qwen3vl,
             ),
-            # NOTE: We match string on purpose since searching sequence of
-            # token ids takes more time.
             PromptReplacement(
                 modality="video",
-                target="<|vision_start|><|video_pad|><|vision_end|>",
+                target=video_target,
                 replacement=get_video_replacement_qwen3vl,
             ),
         ]
@@ -2657,11 +2657,11 @@ class Qwen3VLForConditionalGeneration(
 
     def recompute_mrope_positions(
         self,
-        input_ids: list[int],
-        multimodal_embeddings: MultiModalEmbeddings,
+        input_ids: list[int] | torch.Tensor,
+        multimodal_embeddings: Sequence[torch.Tensor],
         mrope_positions: torch.LongTensor,
         num_computed_tokens: int,
-    ) -> tuple[MultiModalEmbeddings, torch.Tensor, int]:
+    ) -> tuple[Sequence[torch.Tensor], torch.Tensor, int]:
         """
         Update part of input mrope positions (starting with
         num_computed_tokens index). Original mrope_positions are computed
@@ -2672,7 +2672,7 @@ class Qwen3VLForConditionalGeneration(
         Args:
             input_ids: (N,) All input tokens of the prompt containing
                 entire sequence.
-            multimodal_embeddings: Tuple of multimodal embeddings that
+            multimodal_embeddings: Sequence of multimodal embeddings that
                 fits into the prefill chunk that is being processed.
             mrope_positions: Existing mrope positions (3, N) for entire
                 sequence
@@ -2694,14 +2694,14 @@ class Qwen3VLForConditionalGeneration(
 
     @staticmethod
     def _recompute_mrope_positions(
-        input_ids: list[int],
-        multimodal_embeddings: MultiModalEmbeddings,
+        input_ids: list[int] | torch.Tensor,
+        multimodal_embeddings: Sequence[torch.Tensor],
         mrope_positions: torch.LongTensor,
         num_computed_tokens: int,
         vision_start_token_id: int,
         image_token_id: int,
         video_token_id: int,
-    ) -> tuple[MultiModalEmbeddings, torch.Tensor, int]:
+    ) -> tuple[Sequence[torch.Tensor], torch.Tensor, int]:
         # Device
         device = (
             multimodal_embeddings[0].device
@@ -2709,8 +2709,12 @@ class Qwen3VLForConditionalGeneration(
             else mrope_positions.device
         )
 
-        # Tensors
-        input_ids_t = async_tensor_h2d(input_ids, device=device, dtype=torch.long)
+        # Tensors. input_ids may already be a (device-side) tensor.
+        if isinstance(input_ids, torch.Tensor):
+            assert input_ids.device == device
+            input_ids_t = input_ids.to(dtype=torch.long)
+        else:
+            input_ids_t = async_tensor_h2d(input_ids, device=device, dtype=torch.long)
 
         mm_embeddings_out = []
         mm_embeddings_pos = []
@@ -2738,7 +2742,7 @@ class Qwen3VLForConditionalGeneration(
             video_token_id,
         )
 
-        return tuple(mm_embeddings_out), positions, mrope_positions_delta
+        return mm_embeddings_out, positions, mrope_positions_delta
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)

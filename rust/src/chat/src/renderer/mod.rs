@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -9,11 +12,17 @@ use crate::request::{ChatRequest, ReasoningEffort};
 
 pub mod deepseek_v32;
 pub mod deepseek_v4;
+pub mod harmony;
 pub mod hf;
+mod inkling;
 mod selection;
+#[cfg(test)]
+mod test_utils;
 
 pub use deepseek_v4::DeepSeekV4ChatRenderer;
 pub use deepseek_v32::DeepSeekV32ChatRenderer;
+pub use harmony::HarmonyChatRenderer;
+pub use inkling::InklingChatRenderer;
 pub use selection::RendererSelection;
 
 /// Rendered chat prompt submitted to the text backend.

@@ -71,6 +71,12 @@ PoolingRequestT = TypeVar("PoolingRequestT", bound=AnyPoolingRequest)
 
 
 @dataclass(kw_only=True)
+class ChunkedEmbeddingMetadata:
+    prompt_index: int
+    chunk_index: int
+
+
+@dataclass(kw_only=True)
 class PoolingServeContext(Generic[PoolingRequestT]):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -91,6 +97,7 @@ class PoolingServeContext(Generic[PoolingRequestT]):
 
     ## for Long Text Embedding with Chunked Processing
     original_engine_inputs: Sequence[EngineInput] | None = None
+    chunked_embedding_metadata: list[ChunkedEmbeddingMetadata] | None = None
 
     ## for bi-encoder & late-interaction
     n_queries: int | None = None

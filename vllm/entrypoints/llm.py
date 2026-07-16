@@ -221,17 +221,6 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
     ) -> None:
         """LLM constructor."""
 
-        if "swap_space" in kwargs:
-            kwargs.pop("swap_space")
-            import warnings
-
-            warnings.warn(
-                "The 'swap_space' parameter is deprecated and ignored. "
-                "It will be removed in a future version.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
 
@@ -873,12 +862,13 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
         )
 
-    def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
+    def start_weight_update(self) -> None:
         """Start a new weight update."""
-        self.llm_engine.collective_rpc(
-            "start_weight_update",
-            kwargs={"is_checkpoint_format": is_checkpoint_format},
-        )
+        self.llm_engine.collective_rpc("start_weight_update")
+
+    def start_draft_weight_update(self) -> None:
+        """Start a new weight update targeting the speculative draft model."""
+        self.llm_engine.collective_rpc("start_draft_weight_update")
 
     def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
         """

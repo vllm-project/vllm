@@ -1,6 +1,9 @@
-use vllm_tool_parser::Result;
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use super::{ToolParser, ToolParserFactory, ToolParserOutput, names};
+use vllm_parser::tool::{Result, ToolParserOutput};
+
+use super::{ToolParser, ToolParserFactory, names};
 use crate::Error;
 use crate::request::ChatTool;
 

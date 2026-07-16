@@ -27,12 +27,21 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.models.minimax_m3.common.ops.index_topk import (
-    minimax_m3_index_decode,
-    minimax_m3_index_score,
-    minimax_m3_index_topk,
-)
 from vllm.platforms import current_platform
+
+if current_platform.is_rocm():
+    from vllm.models.minimax_m3.amd.ops.index_topk import (
+        minimax_m3_index_decode,
+        minimax_m3_index_score,
+        minimax_m3_index_topk,
+    )
+else:
+    from vllm.models.minimax_m3.common.ops.index_topk import (
+        minimax_m3_index_decode,
+        minimax_m3_index_score,
+        minimax_m3_index_topk,
+    )
+
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -243,6 +252,13 @@ class MiniMaxM3IndexerMetadataBuilder(
 
         # Stable context-length buffer for decode cudagraph replays.
         self.context_len_buffer = torch.empty(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            dtype=torch.int32,
+            device=device,
+        )
+        # Stable per-token causal page-count buffer for decode cudagraph replays
+        # (consumed by the MSA top-k path's sparse_topk_select num_valid_pages).
+        self.num_valid_pages_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
             dtype=torch.int32,
             device=device,
