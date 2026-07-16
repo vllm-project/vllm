@@ -4,6 +4,10 @@
 from unittest.mock import patch
 
 import pytest
+from openai.types.responses import (
+    ResponseCustomToolCall,
+    ResponseCustomToolCallOutputItem,
+)
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
@@ -173,6 +177,44 @@ class TestResponsesUtils:
         assert (
             message["tool_calls"][0]["function"]["arguments"] == '{"code": "123+456"}'
         )
+
+    def test_construct_input_messages_with_custom_tool_history(self):
+        messages = construct_input_messages(
+            request_input=[
+                ResponseCustomToolCall(
+                    call_id="call_exec",
+                    input='text("done")',
+                    name="exec",
+                    type="custom_tool_call",
+                ),
+                ResponseCustomToolCallOutputItem(
+                    call_id="call_exec",
+                    id="output_exec",
+                    output="done",
+                    status="completed",
+                    type="custom_tool_call_output",
+                ),
+                {"role": "user", "content": "Continue"},
+            ]
+        )
+
+        assert messages == [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_exec",
+                        "type": "custom",
+                        "custom": {
+                            "name": "exec",
+                            "input": 'text("done")',
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "content": "done", "tool_call_id": "call_exec"},
+            {"role": "user", "content": "Continue"},
+        ]
 
     def test_construct_chat_messages_preserves_single_item_conversions(self):
         item = ResponseReasoningItem(

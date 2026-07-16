@@ -6,13 +6,19 @@ from typing import Any
 
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
+    ChatCompletionMessageCustomToolCallParam,
     ChatCompletionMessageToolCallParam,
     ChatCompletionToolMessageParam,
+)
+from openai.types.chat.chat_completion_message_custom_tool_call_param import (
+    Custom as CustomToolCall,
 )
 from openai.types.chat.chat_completion_message_tool_call_param import (
     Function as FunctionCallTool,
 )
 from openai.types.responses import (
+    ResponseCustomToolCall,
+    ResponseCustomToolCallOutputItem,
     ResponseFunctionToolCall,
     ResponseOutputItem,
     ResponseOutputMessage,
@@ -230,6 +236,11 @@ def _construct_message_from_response_item(
         prev_msg if prev_msg and prev_msg.get("role") == "assistant" else None
     )
 
+    tool_call: (
+        ChatCompletionMessageToolCallParam
+        | ChatCompletionMessageCustomToolCallParam
+        | None
+    ) = None
     if isinstance(item, ResponseFunctionToolCall):
         tool_name = item.name
         if item.namespace:
@@ -242,6 +253,14 @@ def _construct_message_from_response_item(
             ),
             type="function",
         )
+    elif isinstance(item, ResponseCustomToolCall):
+        tool_call = ChatCompletionMessageCustomToolCallParam(
+            id=item.call_id,
+            custom=CustomToolCall(name=item.name, input=item.input),
+            type="custom",
+        )
+
+    if tool_call is not None:
         if prev_assistant_msg:
             tool_calls = prev_assistant_msg.get("tool_calls")
             if tool_calls is None:
@@ -267,7 +286,7 @@ def _construct_message_from_response_item(
             role="assistant",
             tool_calls=[tool_call],
         )
-    elif isinstance(item, ResponseReasoningItem):
+    if isinstance(item, ResponseReasoningItem):
         reasoning = ""
         if item.encrypted_content:
             raise ValueError("Encrypted content is not supported.")
@@ -302,7 +321,10 @@ def _construct_message_from_response_item(
             "role": "assistant",
             "content": output_text,
         }
-    elif isinstance(item, ResponseFunctionToolCallOutputItem):
+    elif isinstance(
+        item,
+        (ResponseFunctionToolCallOutputItem, ResponseCustomToolCallOutputItem),
+    ):
         return ChatCompletionToolMessageParam(
             role="tool",
             content=item.output,
