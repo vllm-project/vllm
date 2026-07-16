@@ -546,10 +546,13 @@ class FlashInferBackend(AttentionBackend):
 
     @classmethod
     def supports_mm_prefix(cls) -> bool:
-        # Text-mode is fully correct (no image spans to mask). Span-level
-        # bidirectional masking for image inputs is the separate mm-prefix
-        # concern; for NVFP4-KV text serving this gate must not reject FA2.
-        return True
+        """mm-prefix LMs (Gemma 3 / Gemma 4 multimodal: image-token spans
+        attend bidirectionally) are served via FA2 packed custom masks on
+        the FI-native prefill path. Decode is untouched: spans live in the
+        prompt, so decode queries are strictly causal. Knob-gated and
+        default-on; set VLLM_FLASHINFER_MM_PREFIX=0 to route mm-prefix
+        models away from FlashInfer instead (e.g. for debugging)."""
+        return envs.VLLM_FLASHINFER_MM_PREFIX
 
     @classmethod
     def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
@@ -562,10 +565,35 @@ class FlashInferBackend(AttentionBackend):
 
 
 @dataclass
+class FIPrefillMMGroup:
+    """One partition of an mm-prefix prefill batch (Gemma 3 / Gemma 4
+    multimodal: requests whose image-token span intersects the current
+    query window need span-level bidirectional masking; plain requests
+    stay causal)."""
+
+    wrapper: BatchPrefillWithPagedKVCacheWrapper
+    """Planned for exactly this group's requests: causal=True for the
+    plain group, packed custom mask ((causal AND sliding-window) OR
+    span-bidirectional) for the mm group."""
+
+    token_indices: torch.Tensor
+    """Rows of the prefill query/output owned by this group: GPU int64,
+    the concatenation of per-request token ranges from query_start_loc.
+    Needed because the groups may interleave within the batch."""
+
+    num_tokens: int
+
+
+@dataclass
 class FIPrefill:
     """Metadata for the native FlashInfer prefill pathway (non-TRTLLM)."""
 
     wrapper: BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper
+
+    mm_groups: list[FIPrefillMMGroup] | None = None
+    """mm-prefix wrapper grouping when image-token spans intersect the
+    query window of at least one prefill request; None on the scalar
+    causal fast path (no mm requests => byte-identical legacy path)."""
 
 
 @dataclass
@@ -700,6 +728,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._noncausal_prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper | None = (
             None  # Wrapper for non-causal prefill (DFlash)
         )
+        # Second prefill wrapper for mm-prefix custom-mask requests
+        # (Gemma 3 / Gemma 4 multimodal image spans); lazily created.
+        self._mm_prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper | None = None
         self._decode_wrapper = None  # Wrapper for decode (general shape)
 
         if envs.VLLM_BATCH_INVARIANT:
@@ -931,6 +962,39 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.kv_cache_dtype,
             arch,
         )
+
+        # mm-prefix (PrefixLM) span-level bidirectional masking for this
+        # layer group. Gemma4 with use_bidirectional_attention='vision'
+        # applies bidirectional image spans ONLY to sliding_attention
+        # layers (full-attention layers stay plain causal: the static
+        # equivalent of gemma4_mm._clear_mm_prefix_for_full_attn_layers,
+        # decided here at build time because FlashInfer bakes masks into
+        # wrapper plans). Gemma3 applies the spans to all layers.
+        self.mm_prefix_enabled = (
+            envs.VLLM_FLASHINFER_MM_PREFIX
+            and self.model_config is not None
+            and self.model_config.is_mm_prefix_lm
+        )
+        if self.mm_prefix_enabled:
+            bidi_mode = getattr(
+                self.model_config.hf_text_config,
+                "use_bidirectional_attention",
+                None,
+            )
+            if bidi_mode == "vision" and self.window_left < 0:
+                self.mm_prefix_enabled = False
+            if self.use_dcp:
+                raise NotImplementedError(
+                    "FlashInfer mm-prefix custom masks are not wired for "
+                    "DCP; unset VLLM_FLASHINFER_MM_PREFIX or disable DCP."
+                )
+        if self.mm_prefix_enabled:
+            logger.info_once(
+                "FlashInfer mm-prefix: image-token spans of multimodal "
+                "requests run with FA2 packed custom masks on a second "
+                "prefill wrapper (layer group window_left=%d).",
+                self.window_left,
+            )
         # Preparing persistent buffers
         # Since we do not have explicit synchronization in ModelRunnerV2, we do not pin
         # reused CPU buffers to avoid a race condition between step N async copies to
@@ -1120,6 +1184,25 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         assert self._prefill_wrapper is not None
         return self._prefill_wrapper
 
+    def _get_mm_prefill_wrapper(self) -> BatchPrefillWithPagedKVCacheWrapper:
+        # Second paged prefill wrapper for the mm-prefix custom-mask group.
+        # Built the same way as the plain prefill wrapper (the VO split and
+        # NVFP4 jit module are applied at plan()/run() time, not here);
+        # only reachable on the mm-prefix path, which rejects DCP.
+        if self._mm_prefill_wrapper is None:
+            if self.use_fa2_nvfp4_kv:
+                backend = "fa2"
+            elif self.is_kvcache_nvfp4:
+                backend = "trtllm-gen"
+            else:
+                backend = "auto"
+            self._mm_prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                self._get_workspace_buffer(),
+                get_kv_cache_layout(),
+                backend=backend,
+            )
+        return self._mm_prefill_wrapper
+
     def _get_decode_wrapper(self, batch_size: int, use_cudagraph: bool = False):
         if use_cudagraph:
             decode_wrapper = self._decode_wrappers_cudagraph.get(batch_size, None)
@@ -1229,6 +1312,192 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )
         return paged_kv_indices
 
+    def _mm_prefix_prefill_spans(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        num_decodes: int,
+        num_prefills: int,
+    ) -> list[list[tuple[int, int]]] | None:
+        """Per-prefill-request image spans that intersect the query window.
+
+        Spans are document positions, inclusive [start, end] (the
+        mm_req_doc_ranges convention shared with the Triton/FlexAttention
+        mm-prefix paths; valid iff start < end). A span fully inside the
+        computed context needs nothing: K/V projections are mask-independent
+        and the in-window queries are text, i.e. causal. vLLM forces
+        --disable-chunked-mm-input for mm-prefix models, so spans do not
+        straddle the window boundary in practice; partial overlaps are
+        still handled correctly by the absolute-position mask.
+
+        Returns None when no prefill request has an intersecting span
+        (the scalar-causal fast path stays byte-identical).
+        """
+        mm_ranges = common_attn_metadata.mm_req_doc_ranges
+        if not mm_ranges:
+            return None
+        qo_indptr_cpu = common_attn_metadata.query_start_loc_cpu
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+        span_lists: list[list[tuple[int, int]]] = []
+        any_spans = False
+        for j in range(num_prefills):
+            req_idx = num_decodes + j
+            kv_len = int(seq_lens_cpu[req_idx])
+            qo_len = int(qo_indptr_cpu[req_idx + 1] - qo_indptr_cpu[req_idx])
+            context_len = kv_len - qo_len
+            spans = [
+                (int(s), int(e))
+                for s, e in mm_ranges.get(req_idx, [])
+                if s < e and e >= context_len and s < kv_len
+            ]
+            any_spans = any_spans or bool(spans)
+            span_lists.append(spans)
+        return span_lists if any_spans else None
+
+    def _build_mm_prefix_custom_mask(
+        self,
+        qo_lens: list[int],
+        kv_lens: list[int],
+        span_lists: list[list[tuple[int, int]]],
+    ) -> torch.Tensor:
+        """Boolean (qo_len x kv_len)-per-request mask, flattened row-major
+        and concatenated in group order; FlashInfer's plan() bit-packs it
+        per request (segment_packbits). Composition matches the Triton /
+        FlexAttention mm-prefix contract:
+        (causal AND sliding-window) OR (q in span AND kv in span),
+        with query rows end-aligned to the KV sequence. The mm wrapper is
+        planned with window_left=-1 because the mask already carries the
+        sliding window; spans must OVERRIDE it (FlashInfer's in-kernel SW
+        would AND it instead)."""
+        masks = []
+        for qo_len, kv_len, spans in zip(qo_lens, kv_lens, span_lists):
+            q_abs = torch.arange(
+                kv_len - qo_len, kv_len, device=self.device, dtype=torch.int32
+            )
+            k_abs = torch.arange(kv_len, device=self.device, dtype=torch.int32)
+            mask = k_abs[None, :] <= q_abs[:, None]
+            if self.window_left >= 0:
+                mask &= (q_abs[:, None] - k_abs[None, :]) <= self.window_left
+            for start, end in spans:
+                q_in = (q_abs >= start) & (q_abs <= end)
+                k_in = (k_abs >= start) & (k_abs <= end)
+                mask |= q_in[:, None] & k_in[None, :]
+            masks.append(mask.reshape(-1))
+        return torch.cat(masks)
+
+    def _plan_prefill_mm_groups(
+        self,
+        prefill_mm_spans: list[list[tuple[int, int]]],
+        qo_indptr_prefill_cpu: torch.Tensor,
+        paged_kv_indptr_prefill_cpu: torch.Tensor,
+        paged_kv_last_page_len_prefill_cpu: torch.Tensor,
+        paged_kv_indices: torch.Tensor,
+        seq_lens_prefill_cpu: torch.Tensor,
+        o_dtype: torch.dtype,
+    ) -> list[FIPrefillMMGroup]:
+        """Plan one prefill wrapper per partition of an mm-prefix batch:
+        requests with image spans intersecting the query window run on a
+        custom-mask wrapper; the rest stay on the fast causal wrapper.
+
+        Each request's tokens and KV pages are contiguous ranges of the
+        batch-level arrays, so a group is fully described by per-request
+        deltas of the indptr arrays plus gathered index subranges
+        (indptr/last_page_len slicing on CPU, paged_kv_indices on GPU).
+        plan(custom_mask=...) requires the FlashInfer-side mask_indptr
+        device fix because the mask lives on GPU while the indptr arrays
+        stay on CPU.
+        """
+        is_mm = torch.tensor([bool(s) for s in prefill_mm_spans])
+        qo_lens_cpu = qo_indptr_prefill_cpu[1:] - qo_indptr_prefill_cpu[:-1]
+        # paged_kv_indptr is NOT rebased to 0 (its offsets index the full
+        # paged_kv_indices array), so deltas are taken before regrouping.
+        kv_page_counts_cpu = (
+            paged_kv_indptr_prefill_cpu[1:] - paged_kv_indptr_prefill_cpu[:-1]
+        )
+        groups: list[FIPrefillMMGroup] = []
+        for group_mm in (False, True):
+            req_indices = (is_mm if group_mm else ~is_mm).nonzero(as_tuple=True)[0]
+            if req_indices.numel() == 0:
+                continue
+            group_qo_indptr = torch.zeros(req_indices.numel() + 1, dtype=torch.int32)
+            torch.cumsum(qo_lens_cpu[req_indices], dim=0, out=group_qo_indptr[1:])
+            group_kv_indptr = torch.zeros(req_indices.numel() + 1, dtype=torch.int32)
+            torch.cumsum(
+                kv_page_counts_cpu[req_indices], dim=0, out=group_kv_indptr[1:]
+            )
+            token_indices_cpu = torch.cat(
+                [
+                    torch.arange(
+                        int(qo_indptr_prefill_cpu[i]),
+                        int(qo_indptr_prefill_cpu[i + 1]),
+                        dtype=torch.int64,
+                    )
+                    for i in req_indices.tolist()
+                ]
+            )
+            page_gather_cpu = torch.cat(
+                [
+                    torch.arange(
+                        int(paged_kv_indptr_prefill_cpu[i]),
+                        int(paged_kv_indptr_prefill_cpu[i + 1]),
+                        dtype=torch.int64,
+                    )
+                    for i in req_indices.tolist()
+                ]
+            )
+            group_kv_indices = torch.index_select(
+                paged_kv_indices, 0, page_gather_cpu.to(self.device)
+            )
+            if group_mm:
+                wrapper = self._get_mm_prefill_wrapper()
+                custom_mask = self._build_mm_prefix_custom_mask(
+                    [int(qo_lens_cpu[i]) for i in req_indices.tolist()],
+                    [int(seq_lens_prefill_cpu[i]) for i in req_indices.tolist()],
+                    [prefill_mm_spans[i] for i in req_indices.tolist()],
+                )
+                # The mask carries causal/SW/span composition wholesale.
+                group_causal = False
+                group_window_left = -1
+            else:
+                maybe_wrapper = self._get_prefill_wrapper()
+                assert isinstance(maybe_wrapper, BatchPrefillWithPagedKVCacheWrapper)
+                wrapper = maybe_wrapper
+                custom_mask = None
+                group_causal = True
+                group_window_left = self.window_left
+            wrapper.plan(
+                qo_indptr=group_qo_indptr,
+                paged_kv_indptr=group_kv_indptr,
+                paged_kv_indices=group_kv_indices,
+                paged_kv_last_page_len=paged_kv_last_page_len_prefill_cpu[req_indices],
+                num_qo_heads=self.num_qo_heads,
+                num_kv_heads=self.num_kv_heads,
+                head_dim_qk=self.head_dim,
+                # == head_dim_qk unless the VO split is active; then the
+                # impl runs each group's wrapper once per V slice.
+                head_dim_vo=self.head_dim // self.vo_split,
+                page_size=self.page_size,
+                causal=group_causal,
+                custom_mask=custom_mask,
+                sm_scale=self.sm_scale,
+                window_left=group_window_left,
+                logits_soft_cap=self.logits_soft_cap,
+                q_data_type=self.q_data_type_prefill,
+                kv_data_type=self.kv_cache_dtype,
+                o_data_type=o_dtype,
+                fixed_split_size=self.prefill_fixed_split_size,
+                disable_split_kv=self.disable_split_kv,
+            )
+            wrapper.vllm_prefill_fixed_split_size = self.prefill_fixed_split_size
+            wrapper.vllm_disable_split_kv = self.disable_split_kv
+            groups.append(
+                FIPrefillMMGroup(
+                    wrapper=wrapper,
+                    token_indices=token_indices_cpu.to(self.device),
+                    num_tokens=int(token_indices_cpu.numel()),
+                )
+            )
+        return groups
+
     def build(
         self,
         common_prefix_len: int,
@@ -1295,6 +1564,17 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 "Using FlashInfer for draft model non-causal attention; TRTLLM "
                 "can still be used for target model causal attention."
             )
+        # mm-prefix: prefill requests whose image span intersects the
+        # query window need the FI-native custom-mask path (TRTLLM has no
+        # custom masks). Decode stays causal: spans live in the prompt.
+        prefill_mm_spans: list[list[tuple[int, int]]] | None = None
+        if self.mm_prefix_enabled and num_prefills > 0:
+            prefill_mm_spans = self._mm_prefix_prefill_spans(
+                common_attn_metadata, num_decodes, num_prefills
+            )
+            if prefill_mm_spans is not None:
+                prefill_use_trtllm = False
+
         all_uses_trtllm = causal and (
             (num_prefills == 0 or prefill_use_trtllm)
             and (num_decodes == 0 or decode_with_flashinfer_trtllm_api)
@@ -1513,6 +1793,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     prefill_start : num_reqs + 1
                 ]
                 assert paged_kv_indptr_prefill_cpu.shape[0] == num_prefills + 1
+                mm_groups: list[FIPrefillMMGroup] | None = None
                 if self.use_dcp:
                     assert isinstance(prefill_wrapper, BatchDCPPrefillWrapper)
                     prefill_wrapper.plan(
@@ -1546,31 +1827,49 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         if (self.is_kvcache_nvfp4 and not self.use_fa2_nvfp4_kv)
                         else self.model_config.dtype
                     )
-                    prefill_wrapper.plan(
-                        qo_indptr=qo_indptr_prefill_cpu,
-                        paged_kv_indptr=paged_kv_indptr_prefill_cpu,
-                        paged_kv_indices=paged_kv_indices,
-                        paged_kv_last_page_len=paged_kv_last_page_len_prefill_cpu,
-                        num_qo_heads=self.num_qo_heads,
-                        num_kv_heads=self.num_kv_heads,
-                        head_dim_qk=self.head_dim,
-                        # == head_dim_qk unless the VO split is active; then
-                        # each pass plans head_dim_vo=head_size//vo_split (256
-                        # for Gemma 4 512-wide heads) and the impl runs the
-                        # wrapper once per V slice (_run_vo_split_prefill).
-                        head_dim_vo=self.head_dim // self.vo_split,
-                        page_size=self.page_size,
-                        causal=attn_metadata.causal,
-                        sm_scale=self.sm_scale,
-                        window_left=self.window_left,
-                        logits_soft_cap=self.logits_soft_cap,
-                        q_data_type=self.q_data_type_prefill,
-                        kv_data_type=self.kv_cache_dtype,
-                        o_data_type=o_dtype,
-                        fixed_split_size=self.prefill_fixed_split_size,
-                        disable_split_kv=self.disable_split_kv,
-                    )
-                attn_metadata.prefill = FIPrefill(wrapper=prefill_wrapper)
+                    if prefill_mm_spans is not None:
+                        assert seq_lens_cpu is not None
+                        mm_groups = self._plan_prefill_mm_groups(
+                            prefill_mm_spans,
+                            qo_indptr_prefill_cpu,
+                            paged_kv_indptr_prefill_cpu,
+                            paged_kv_last_page_len_prefill_cpu,
+                            paged_kv_indices,
+                            seq_lens_cpu[prefill_start:num_reqs],
+                            o_dtype,
+                        )
+                        # The impl's forward dispatches on mm_groups; this
+                        # field only feeds its isinstance/identity asserts.
+                        prefill_wrapper = mm_groups[0].wrapper
+                    else:
+                        prefill_wrapper.plan(
+                            qo_indptr=qo_indptr_prefill_cpu,
+                            paged_kv_indptr=paged_kv_indptr_prefill_cpu,
+                            paged_kv_indices=paged_kv_indices,
+                            paged_kv_last_page_len=paged_kv_last_page_len_prefill_cpu,
+                            num_qo_heads=self.num_qo_heads,
+                            num_kv_heads=self.num_kv_heads,
+                            head_dim_qk=self.head_dim,
+                            # == head_dim_qk unless the VO split is active;
+                            # then each pass plans head_dim_vo=head_size//
+                            # vo_split (256 for Gemma 4 512-wide heads) and
+                            # the impl runs the wrapper once per V slice
+                            # (_run_vo_split_prefill).
+                            head_dim_vo=self.head_dim // self.vo_split,
+                            page_size=self.page_size,
+                            causal=attn_metadata.causal,
+                            sm_scale=self.sm_scale,
+                            window_left=self.window_left,
+                            logits_soft_cap=self.logits_soft_cap,
+                            q_data_type=self.q_data_type_prefill,
+                            kv_data_type=self.kv_cache_dtype,
+                            o_data_type=o_dtype,
+                            fixed_split_size=self.prefill_fixed_split_size,
+                            disable_split_kv=self.disable_split_kv,
+                        )
+                attn_metadata.prefill = FIPrefill(
+                    wrapper=prefill_wrapper, mm_groups=mm_groups
+                )
 
         ## DECODE PATHWAY
         if num_decodes > 0:
@@ -2086,12 +2385,26 @@ class FlashInferImpl(AttentionImpl):
                     assert isinstance(
                         prefill_wrapper, BatchPrefillWithPagedKVCacheWrapper
                     )
-                    assert prefill_wrapper._window_left == self.window_left
+                    mm_groups = attn_metadata.prefill.mm_groups
                     assert prefill_wrapper._logits_soft_cap == (
                         self.logits_soft_cap or 0.0
                     )
                     assert prefill_wrapper._sm_scale == self.scale
-                    assert prefill_wrapper._causal == attn_metadata.causal
+                    if mm_groups is None:
+                        assert prefill_wrapper._window_left == self.window_left
+                        assert prefill_wrapper._causal == attn_metadata.causal
+                    else:
+                        # The mm group's wrapper carries the sliding window
+                        # and causality inside its packed custom mask
+                        # (planned non-causal, window_left=-1); the plain
+                        # group keeps the scalar-causal plan.
+                        for group in mm_groups:
+                            if group.wrapper._custom_mask_buf is None:
+                                assert group.wrapper._causal
+                                assert group.wrapper._window_left == self.window_left
+                            else:
+                                assert not group.wrapper._causal
+                                assert group.wrapper._window_left == -1
 
                     if self.is_kvcache_nvfp4:
                         kv_cache_for_fi = nvfp4_kv_data
@@ -2114,7 +2427,47 @@ class FlashInferImpl(AttentionImpl):
                     else:
                         out_prefill = output[num_decode_tokens:]
 
-                    if self.vo_split > 1:
+                    if mm_groups is not None:
+                        # mm-prefix grouping: each partition runs its own
+                        # planned wrapper (plain causal vs packed custom
+                        # mask) over a gathered copy of its query rows,
+                        # then scatters back. Gather/scatter is by token
+                        # index because the groups may interleave within
+                        # the batch.
+                        if self.is_kvcache_nvfp4:
+                            assert isinstance(kv_cache_for_fi, tuple)
+                        for group in mm_groups:
+                            group_query = torch.index_select(
+                                prefill_query, 0, group.token_indices
+                            )
+                            group_out = torch.empty(
+                                (group.num_tokens, *out_prefill.shape[1:]),
+                                dtype=out_prefill.dtype,
+                                device=out_prefill.device,
+                            )
+                            if self.vo_split > 1:
+                                self._run_vo_split_prefill(
+                                    group.wrapper,
+                                    group_query,
+                                    kv_cache_for_fi,
+                                    kv_cache_sf,
+                                    group_out,
+                                    q_scale=layer._q_scale_float,
+                                    k_scale=layer._k_scale_float,
+                                    v_scale=layer._v_scale_float,
+                                )
+                            else:
+                                group.wrapper.run(
+                                    group_query,
+                                    kv_cache_for_fi,
+                                    q_scale=layer._q_scale_float,
+                                    k_scale=layer._k_scale_float,
+                                    v_scale=layer._v_scale_float,
+                                    out=group_out,
+                                    kv_cache_sf=kv_cache_sf,
+                                )
+                            out_prefill.index_copy_(0, group.token_indices, group_out)
+                    elif self.vo_split > 1:
                         # head_size > 256: run ceil(head_size/256) passes,
                         # each over a head-dim slice of the 512-wide V cache,
                         # and concatenate the per-pass outputs. The wrapper is
