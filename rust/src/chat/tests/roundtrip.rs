@@ -266,12 +266,11 @@ impl RoundtripCase {
 
     /// Inkling typed content blocks with native token-id rendering.
     fn inkling() -> Self {
-        let parser = ParserSelection::Explicit("inkling".to_string());
         Self {
-            model_id: "thinkingmachineslabinc/tml-model-share",
+            model_id: "thinkingmachines/Inkling",
             assistant_stop_suffix: "",
-            tool_call_parser: parser.clone(),
-            reasoning_parser: parser,
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: true,
@@ -314,10 +313,7 @@ roundtrip_tests! {
     gemma4 => [tool_call_mix], // Gemma4 strips reasoning in history if there's no tool call
     kimi_k25 => [tool_call_mix], // Kimi K2.5 strips reasoning in history
     gpt_oss => [tool_call_mix], // Harmony strips reasoning in history if there's no tool call
-    inkling => #[ignore = "requires local Inkling model files"] [
-        reasoning_and_content,
-        tool_call_mix,
-    ],
+    inkling => [reasoning_and_content, tool_call_mix],
 }
 
 /// Run the fixed reasoning+content fixture for one model/parser case.
