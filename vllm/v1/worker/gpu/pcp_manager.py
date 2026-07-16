@@ -160,10 +160,43 @@ class PCPManager:
         if vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
             raise NotImplementedError("MRV2 PCP supports PIECEWISE CUDA graphs only.")
 
+    @staticmethod
+    def _reorder_segments(
+        segments: list[RankSegment],
+        num_computed_tokens: np.ndarray,
+        is_prefilling: np.ndarray,
+        query_start_loc_np: np.ndarray,
+    ) -> list[RankSegment]:
+        """Move pure prefills last to match the batch ordering expected by
+        attention backends like MLA and sparse MLA.
+        """
+
+        def is_pure_prefill(segment: RankSegment) -> bool:
+            req_idx = segment.global_batch_req_idx
+            start_pos = (
+                num_computed_tokens[req_idx]
+                + segment.global_batch_slice.start
+                - query_start_loc_np[req_idx]
+            )
+            return is_prefilling[req_idx] and start_pos == 0
+
+        segments.sort(key=is_pure_prefill)
+        rank_offset = 0
+        for index, segment in enumerate(segments):
+            segments[index] = replace(
+                segment,
+                rank_local_batch_slice=slice(
+                    rank_offset, rank_offset + segment.num_tokens
+                ),
+            )
+            rank_offset += segment.num_tokens
+        return segments
+
     def _get_rank_segments(
         self,
         rank: int,
         num_scheduled_tokens: np.ndarray,
+        num_computed_tokens: np.ndarray,
         is_prefilling: np.ndarray,
         query_start_loc_np: np.ndarray,
     ) -> list[RankSegment]:
@@ -209,11 +242,17 @@ class PCPManager:
                     )
                 )
                 rank_offset += chunk_len
-        return rank_segments
+        return self._reorder_segments(
+            rank_segments,
+            num_computed_tokens,
+            is_prefilling,
+            query_start_loc_np,
+        )
 
     def _build_batch_layout(
         self,
         num_scheduled_tokens: np.ndarray,
+        num_computed_tokens: np.ndarray,
         is_prefilling: np.ndarray,
         query_start_loc_np: np.ndarray,
     ) -> tuple[list[list[RankSegment]], list[int]]:
@@ -223,6 +262,7 @@ class PCPManager:
             segments = self._get_rank_segments(
                 rank,
                 num_scheduled_tokens,
+                num_computed_tokens,
                 is_prefilling,
                 query_start_loc_np,
             )
@@ -293,6 +333,7 @@ class PCPManager:
 
         segments_by_rank, per_rank_num_tokens = self._build_batch_layout(
             num_scheduled_tokens,
+            num_computed_tokens,
             is_prefilling,
             global_batch.query_start_loc_np,
         )
