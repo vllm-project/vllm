@@ -127,8 +127,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         configuration reference.
 
         Args:
-            offloading_spec: Owning ``OffloadingSpec`` (provides
-                ``vllm_config`` and the offloaded block layout).
+            offloading_spec: Owning ``OffloadingSpec`` (provides normalized
+                model, parallel, and cache layout configuration).
             primary_kv_view: Memoryview over the CPU primary tier; the
                 NIXL agent registers this region for RDMA transfers.
             tier_type: Tier identifier (defaults to ``"p2p"``).
@@ -164,7 +164,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # One control socket per DP replica: offset the base by the global
         # data-parallel index so replicas on a host don't collide (mirrors
         # NIXL). For DP=1 the index is 0, leaving the base port unchanged.
-        dp_index = offloading_spec.vllm_config.parallel_config.data_parallel_index
+        dp_index = offloading_spec.config.parallel.data_parallel_index
         port = int(port) + dp_index
         # Two decoupled identities:
         #   _local_id (``host:port``): the ZMQ control identity that peers
@@ -181,7 +181,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         config_fields = FileMapper.from_offloading_spec(
             root_dir="",
             offloading_spec=offloading_spec,
-            gpu_blocks_per_file=offloading_spec.block_size_factor,
+            blocks_per_file=offloading_spec.blocks_per_chunk,
             parallel_agnostic=True,
         ).get_run_config()
         self._data: DataTransport = NixlTransport(
