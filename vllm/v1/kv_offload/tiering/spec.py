@@ -11,6 +11,9 @@ Configuration via kv_connector_extra_config:
   - block_size: (optional) Block size for offloaded blocks (default: GPU block size)
   - eviction_policy: (optional) Primary tier eviction policy: "lru" or
     "arc" (default: "lru")
+  - default_prompt_cache_retention: (optional) Policy for requests that omit
+    prompt_cache_retention. "in_memory" disables secondary-tier writes and
+    "24h" enables them. Omit to preserve legacy behavior.
   - secondary_tiers: (optional) List of secondary tier configurations
     Each secondary tier config is a dict with:
       - type: (required) Type of secondary tier (e.g., "example", "storage", "network")
@@ -43,6 +46,7 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     OffloadingManager,
     OffloadingMetricMetadata,
+    PromptCacheRetentionPolicy,
 )
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
@@ -104,6 +108,16 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         self.secondary_tier_configs = self.extra_config.get("secondary_tiers", [])
         if not isinstance(self.secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")
+
+        default_retention = self.extra_config.get("default_prompt_cache_retention")
+        try:
+            self.default_prompt_cache_retention = (
+                PromptCacheRetentionPolicy.from_request_value(default_retention)
+            )
+        except ValueError as e:
+            raise ValueError(
+                "default_prompt_cache_retention must be 'in_memory' or '24h'"
+            ) from e
 
         # Scheduler-side mmap (rank=None); kept for cleanup
         self._scheduler_mmap: SharedOffloadRegion | None = None
@@ -175,6 +189,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             tiering_manager = TieringOffloadingManager(
                 primary_tier=primary_tier,
                 secondary_tiers=secondary_tiers,
+                default_prompt_cache_retention=(self.default_prompt_cache_retention),
             )
             if int(self.extra_config.get("store_threshold", 0)) >= 2:
                 raise ValueError(

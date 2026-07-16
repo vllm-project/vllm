@@ -21,7 +21,11 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheTensor,
 )
-from vllm.v1.kv_offload.base import OffloadingHistogramMetadata, OffloadingSpec
+from vllm.v1.kv_offload.base import (
+    OffloadingHistogramMetadata,
+    OffloadingSpec,
+    PromptCacheRetentionPolicy,
+)
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
@@ -184,6 +188,43 @@ def test_create_cpu_offloading_spec_end_to_end():
     spec = OffloadingSpecFactory.create_spec(config, kv_cache_config)
     assert isinstance(spec, CPUOffloadingSpec)
     assert spec.num_blocks > 0
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("in_memory", PromptCacheRetentionPolicy.IN_MEMORY),
+        ("24h", PromptCacheRetentionPolicy.EXTENDED),
+    ],
+)
+def test_tiering_spec_parses_default_prompt_cache_retention(value, expected):
+    config = _make_vllm_config(
+        spec_name="TieringOffloadingSpec",
+        cpu_bytes_to_use=65536,
+        extra_config={
+            "default_prompt_cache_retention": value,
+            "secondary_tiers": [],
+        },
+    )
+
+    spec = OffloadingSpecFactory.create_spec(config, _make_kv_cache_config())
+
+    assert isinstance(spec, TieringOffloadingSpec)
+    assert spec.default_prompt_cache_retention is expected
+
+
+def test_tiering_spec_rejects_invalid_default_prompt_cache_retention():
+    config = _make_vllm_config(
+        spec_name="TieringOffloadingSpec",
+        cpu_bytes_to_use=65536,
+        extra_config={
+            "default_prompt_cache_retention": "forever",
+            "secondary_tiers": [],
+        },
+    )
+
+    with pytest.raises(ValueError, match="default_prompt_cache_retention"):
+        OffloadingSpecFactory.create_spec(config, _make_kv_cache_config())
 
 
 # ---------------------------------------------------------------------------
