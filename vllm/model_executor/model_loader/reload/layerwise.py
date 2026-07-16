@@ -109,6 +109,8 @@ def initialize_layerwise_reload(model: torch.nn.Module):
 
         # Save current tensors for later copying
         info.kernel_tensors = get_layer_params_buffers(layer)
+        # snapshot now: restore_layer_on_meta drops alias buffers from the live set
+        info.kernel_non_persistent_buffers = set(layer._non_persistent_buffers_set)
 
         # Restore layer parameters/buffers onto meta device
         restore_layer_on_meta(layer, info)
@@ -259,10 +261,12 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
                 _layerwise_process(layer, info)
                 continue
 
-            # reloading: place kernel tensors back as a fallback
-            elif info.load_numel_total > 0:  # type: ignore[operator]
+            # reloading: place kernel tensors back as a fallback. Always place, even
+            # when nothing is loadable (load_numel_total == 0), so parameter-alias
+            # buffers on such layers are restored rather than left deleted.
+            if info.load_numel_total > 0:  # type: ignore[operator]
                 logger.warning("%s: Failed to load weights", layer.__class__.__name__)
-                _place_kernel_tensors(layer, info)
+            _place_kernel_tensors(layer, info)
 
         # Process non-attention layers which did not load all elements. This can happen
         # if the created weight has extra padding elements which are not loaded
@@ -388,10 +392,14 @@ def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadin
     kernel tensor references on the layer. Preserves cudagraph references."""
     assert info.kernel_tensors is not None
     parameters, buffers = info.kernel_tensors
+    non_persistent = info.kernel_non_persistent_buffers
+    loaded_tensor_names = {name for name, _ in info.loaded_weights}
     for name, param in parameters.items():
         param.data.copy_(getattr(layer, name))
     for name, buffer in buffers.items():
         if name not in layer._buffers:
+            continue
+        if name in non_persistent and name not in loaded_tensor_names:
             continue
         buffer.data.copy_(getattr(layer, name))
 
@@ -404,7 +412,8 @@ def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
 
     assert info.kernel_tensors is not None
     parameters, buffers = info.kernel_tensors
+    non_persistent = info.kernel_non_persistent_buffers
     for name, param in parameters.items():
         layer.register_parameter(name, param)
     for name, buffer in buffers.items():
-        layer.register_buffer(name, buffer)
+        layer.register_buffer(name, buffer, persistent=name not in non_persistent)

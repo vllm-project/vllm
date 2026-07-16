@@ -123,7 +123,11 @@ class QkNormRopePattern:
             cos_sin_cache: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             # split qkv -> q,k,v
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            try:
+                q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            except ValueError as e:
+                # register_replacement treats RuntimeError as a trace mismatch.
+                raise RuntimeError from e
 
             # Q path: view -> RMS -> view back to q.shape
             q_by_head = q.view(
@@ -194,6 +198,7 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="qk_norm_rope_fusion_pass"
         )
+        self._attention_geometries: tuple[tuple[int, int, int], ...] = ()
 
         dtype = config.model_config.dtype
         if dtype not in (torch.bfloat16, torch.float16):
@@ -202,7 +207,6 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
             )
             return
 
-        # use one attn layer to get meta (such as head_dim) for QkNormRopePattern
         attn_layers: dict[str, Attention] = get_layers_from_vllm_config(
             config, Attention
         )
@@ -211,28 +215,31 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
                 "QK Norm+RoPE fusion enabled, but no Attention layers were discovered."
             )
             return
-        layer = next(iter(attn_layers.values()))
 
-        for epsilon in [1e-5, 1e-6]:
-            for neox in [True, False]:
-                if RotaryEmbedding.enabled():
-                    for rope_flashinfer in [False, True]:
+        self._attention_geometries = tuple(
+            sorted(
+                {
+                    (layer.head_size, layer.num_heads, layer.num_kv_heads)
+                    for layer in attn_layers.values()
+                }
+            )
+        )
+
+        rope_flashinfer_options = (
+            [False, True] if RotaryEmbedding.enabled() else [False]
+        )
+        for head_dim, num_heads, num_kv_heads in self._attention_geometries:
+            for epsilon in [1e-5, 1e-6]:
+                for neox in [True, False]:
+                    for rope_flashinfer in rope_flashinfer_options:
                         QkNormRopePattern(
-                            head_dim=layer.head_size,
-                            num_heads=layer.num_heads,
-                            num_kv_heads=layer.num_kv_heads,
+                            head_dim=head_dim,
+                            num_heads=num_heads,
+                            num_kv_heads=num_kv_heads,
                             eps=epsilon,
                             is_neox=neox,
                             rope_flashinfer=rope_flashinfer,
                         ).register(self.patterns)
-                else:
-                    QkNormRopePattern(
-                        head_dim=layer.head_size,
-                        num_heads=layer.num_heads,
-                        num_kv_heads=layer.num_kv_heads,
-                        eps=epsilon,
-                        is_neox=neox,
-                    ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 
@@ -242,4 +249,6 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
         logger.debug("Fused QK Norm+RoPE on %s sites", self.matched_count)
 
     def uuid(self) -> str:
-        return VllmInductorPass.hash_source(self, QkNormRopePattern)
+        return VllmInductorPass.hash_source(
+            self, QkNormRopePattern, repr(self._attention_geometries)
+        )

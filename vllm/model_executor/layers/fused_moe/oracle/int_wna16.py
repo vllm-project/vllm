@@ -51,6 +51,7 @@ class WNA16MoEBackend(Enum):
     CPU = "CPU"
     FLASHINFER_TRTLLM = "FLASHINFER_TRTLLM"
     XPU = "XPU"
+    EMULATION = "EMULATION"
 
 
 def backend_to_kernel_cls(
@@ -87,6 +88,12 @@ def backend_to_kernel_cls(
         )
 
         return [CPUExpertsInt4]
+    elif backend == WNA16MoEBackend.EMULATION:
+        from vllm.model_executor.layers.fused_moe.experts.int4_emulation_moe import (
+            Int4EmulationTritonExperts,
+        )
+
+        return [Int4EmulationTritonExperts]
     else:
         raise ValueError(f"Unknown WNA16 MoE backend: {backend.value}")
 
@@ -105,6 +112,7 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
         WNA16MoEBackend.HUMMING,
+        WNA16MoEBackend.EMULATION,
     ]
     return _AVAILABLE_BACKENDS
 
@@ -115,6 +123,7 @@ def map_wna16_backend(runner_backend: MoEBackend) -> WNA16MoEBackend:
         "marlin": WNA16MoEBackend.MARLIN,
         "humming": WNA16MoEBackend.HUMMING,
         "flashinfer_trtllm": WNA16MoEBackend.FLASHINFER_TRTLLM,
+        "emulation": WNA16MoEBackend.EMULATION,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -215,6 +224,9 @@ def make_wna16_moe_quant_config(
     w2_bias: torch.Tensor | None = None,
     a1_gscale: torch.Tensor | None = None,
     a2_gscale: torch.Tensor | None = None,
+    gemm1_clamp_limit: float | None = None,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
 ) -> FusedMoEQuantConfig:
     """Create the FusedMoEQuantConfig for 4 or 8-bit WNA16 MoE."""
     if num_bits == 4:
@@ -228,6 +240,9 @@ def make_wna16_moe_quant_config(
             block_shape=[0, group_size],
             a1_gscale=a1_gscale,
             a2_gscale=a2_gscale,
+            gemm1_clamp_limit=gemm1_clamp_limit,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
         )
     else:
         assert num_bits == 8
@@ -241,6 +256,9 @@ def make_wna16_moe_quant_config(
             block_shape=[0, group_size],
             a1_gscale=a1_gscale,
             a2_gscale=a2_gscale,
+            gemm1_clamp_limit=gemm1_clamp_limit,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
         )
 
 
@@ -263,19 +281,23 @@ def make_wna16_moe_kernel(
     from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
         CPUExpertsInt4,
     )
+    from vllm.model_executor.layers.fused_moe.experts.int4_emulation_moe import (
+        Int4EmulationTritonExperts,
+    )
     from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
         XPUExpertsWNA16,
     )
 
     # Currently, we only support TrtLlmMxint4ExpertsMonolithic, MarlinExperts,
-    # BatchedMarlinExperts, XPUExpertsWNA16, CPUExpertsInt4, and the Humming
-    # grouped/indexed experts.
+    # BatchedMarlinExperts, XPUExpertsWNA16, CPUExpertsInt4, the Humming
+    # grouped/indexed experts, and Int4EmulationTritonExperts
     allowed_experts: tuple[type[mk.FusedMoEExperts], ...] = (
         MarlinExperts,
         BatchedMarlinExperts,
         TrtLlmMxint4ExpertsMonolithic,
         XPUExpertsWNA16,
         CPUExpertsInt4,
+        Int4EmulationTritonExperts,
     )
     if backend == WNA16MoEBackend.HUMMING:
         allowed_experts += tuple(backend_to_kernel_cls(WNA16MoEBackend.HUMMING))
@@ -1017,6 +1039,243 @@ def _humming_wna16_weight_schema(
     )
 
 
+def _unpack_and_dequant_int4_gptq(
+    w_int32: torch.Tensor,
+    scale: torch.Tensor,
+    qzeros: torch.Tensor | None,
+    transpose_output: bool,
+    output_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Unpack GPTQ-packed int4 weights and dequantize to output_dtype.
+
+    Args:
+        w_int32: packed weights, shape [E, K_packed, N] where K_packed = K//8
+                 (8 nibbles per int32, LSB-first in the K dimension).
+        scale:   per-group scales, shape [E, K//group_size, N], float16.
+        qzeros:  optional asymmetric zero-points, shape [E, K//gs, N//8], int32.
+                 None for symmetric (uint4b8 with implicit bias 8).
+        transpose_output: if True return [E, N, K]; if False return [E, K, N].
+        output_dtype: target floating-point dtype (bfloat16 or float16).
+
+    Returns:
+        Dequantized weight tensor in the requested layout.
+    """
+    E, K_packed, N = w_int32.shape
+    K = K_packed * 8
+
+    # Unpack: [E, K_packed, N] -> [E, K_packed, N, 8] via bit-shifts.
+    # The nibble index (last dim) enumerates K rows within each packed column,
+    # so we must fuse K_packed and the nibble dim, not N and the nibble dim.
+    # Permute to [E, K_packed, 8, N] before reshaping to [E, K, N].
+    shifts = torch.arange(8, device=w_int32.device, dtype=torch.int32) * 4
+    nibbles = (w_int32.unsqueeze(-1) >> shifts) & 0xF  # [E, K_packed, N, 8]
+
+    # Reshape to [E, K, N]: fuse K_packed and nibble index (dim 1 and 3)
+    w = nibbles.permute(0, 1, 3, 2).reshape(E, K, N).to(torch.int16)
+
+    if qzeros is None:
+        # Symmetric uint4b8: subtract bias so the range is [-8, 7]
+        w = w - 8
+    else:
+        # Asymmetric: unpack zero-points (same 8-nibble packing) and subtract
+        # qzeros shape: [E, K//gs, N//8] int32
+        gs = K // scale.shape[1]
+        n_gs = scale.shape[1]
+        zp_shifts = torch.arange(8, device=qzeros.device, dtype=torch.int32) * 4
+        zp_nibbles = (qzeros.unsqueeze(-1) >> zp_shifts) & 0xF  # [E, n_gs, N//8, 8]
+        zp = zp_nibbles.reshape(E, n_gs, N).to(torch.int16)  # [E, n_gs, N]
+        zp = zp.repeat_interleave(gs, dim=1)  # [E, K, N]
+        w = w - zp
+
+    # Broadcast scale [E, K//gs, N] -> [E, K, N]
+    gs = K // scale.shape[1]
+    scale_broadcast = scale.repeat_interleave(gs, dim=1).to(output_dtype)
+
+    w_dequant = w.to(output_dtype) * scale_broadcast  # [E, K, N]
+
+    if transpose_output:
+        return w_dequant.permute(0, 2, 1).contiguous()  # [E, N, K]
+    return w_dequant.contiguous()  # [E, K, N]
+
+
+def _unpack_and_dequant_int4_awq(
+    w_int32: torch.Tensor,
+    scale: torch.Tensor,
+    qzeros: torch.Tensor | None,
+    transpose_output: bool,
+    output_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Unpack AWQ-packed int4 weights and dequantize to output_dtype.
+
+    AWQ packs along the N (column) dimension with an interleave permutation
+    [0,2,4,6,1,3,5,7] applied before packing, so unpacking must undo that.
+
+    Args:
+        w_int32: packed weights, shape [E, K, N_packed] where N_packed = N//8
+                 (8 nibbles per int32, packed along N with AWQ interleaving).
+        scale:   per-group scales, shape [E, K//group_size, N], float16.
+        qzeros:  asymmetric zero-points, shape [E, K//gs, N_packed], int32.
+                 None for symmetric (uint4b8 with implicit bias 8).
+        transpose_output: if True return [E, N, K]; if False return [E, K, N].
+        output_dtype: target floating-point dtype (bfloat16 or float16).
+
+    Returns:
+        Dequantized weight tensor in the requested layout.
+    """
+    E, K, N_packed = w_int32.shape
+    N = N_packed * 8
+
+    # Unpack 8 nibbles per int32 along the N dimension (LSB-first)
+    shifts = torch.arange(8, device=w_int32.device, dtype=torch.int32) * 4
+    # [E, K, N_packed, 8] -> [E, K, N_packed*8] = [E, K, N_interleaved]
+    nibbles = (w_int32.unsqueeze(-1) >> shifts) & 0xF
+    w_interleaved = nibbles.reshape(E, K, N)  # [E, K, N] but column-interleaved
+
+    # Undo AWQ interleave: packed order is [0,2,4,6,1,3,5,7] within each group
+    # of 8. Inverse: position i in packed -> original column interleave[i].
+    # To reverse: we need the inverse permutation so that
+    # w[:, :, inv_interleave] = w_interleaved gives the natural column order.
+    interleave = torch.tensor([0, 2, 4, 6, 1, 3, 5, 7], device=w_int32.device)
+    inv_interleave = torch.empty_like(interleave)
+    inv_interleave[interleave] = torch.arange(8, device=w_int32.device)
+
+    # Apply inverse interleave within each group of 8 columns
+    w_reshaped = w_interleaved.reshape(E, K, N // 8, 8)  # [E, K, groups, 8]
+    w_reordered = w_reshaped[:, :, :, inv_interleave]  # undo interleave
+    w = w_reordered.reshape(E, K, N).to(torch.int16)  # [E, K, N]
+
+    if qzeros is None:
+        w = w - 8
+    else:
+        # qzeros: [E, K//gs, N_packed] int32, same AWQ column packing
+        gs = K // scale.shape[1]
+        n_gs = scale.shape[1]
+        zp_nibbles = (qzeros.unsqueeze(-1) >> shifts) & 0xF  # [E, n_gs, N_packed, 8]
+        zp_interleaved = zp_nibbles.reshape(E, n_gs, N)
+        zp_reshaped = zp_interleaved.reshape(E, n_gs, N // 8, 8)
+        zp_reordered = zp_reshaped[:, :, :, inv_interleave]
+        zp = zp_reordered.reshape(E, n_gs, N).to(torch.int16)  # [E, n_gs, N]
+        zp = zp.repeat_interleave(gs, dim=1)  # [E, K, N]
+        w = w - zp
+
+    gs = K // scale.shape[1]
+    scale_broadcast = scale.repeat_interleave(gs, dim=1).to(output_dtype)  # [E, K, N]
+
+    w_dequant = w.to(output_dtype) * scale_broadcast  # [E, K, N]
+
+    if transpose_output:
+        return w_dequant.permute(0, 2, 1).contiguous()  # [E, N, K]
+    return w_dequant.contiguous()  # [E, K, N]
+
+
+def _process_weights_emulation_gptq(
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_qzeros: torch.Tensor | None,
+    w2_qzeros: torch.Tensor | None,
+) -> tuple:
+    """Dequantize int4 weights to BF16 for the emulation backend.
+
+    Inputs are in GPTQ packed format:
+        w13: [E, K//8, 2*N]   int32  (gate+up proj stacked on dim 2)
+        w2:  [E, N//8, K]     int32
+        w13_scale: [E, K//gs, 2*N]  float16
+        w2_scale:  [E, N//gs, K]    float16
+
+    Outputs (what TritonExperts expects):
+        w13_out: [E, 2*N, K]  bfloat16
+        w2_out:  [E, K, N]    bfloat16
+    """
+    # w13: packed along K (dim 1), output cols are 2*N (dim 2)
+    # transpose_output=True yields [E, 2*N, K]
+    w13_bf16 = _unpack_and_dequant_int4_gptq(
+        w13, w13_scale, w13_qzeros, transpose_output=True
+    )
+
+    # w2: packed along N (dim 1 is N//8), output cols are K (dim 2)
+    # After unpacking we get [E, N, K]; we want [E, K, N] for TritonExperts
+    # transpose_output=False gives [E, N, K], then we permute once more
+    w2_unpacked = _unpack_and_dequant_int4_gptq(
+        w2, w2_scale, w2_qzeros, transpose_output=False
+    )  # [E, N, K]
+    w2_bf16 = w2_unpacked.permute(0, 2, 1).contiguous()  # [E, K, N]
+
+    dummy = torch.ones(1, dtype=torch.float16, device=w13.device)
+    return (
+        w13_bf16,  # w13_qweight  (now bf16, not int32)
+        w2_bf16,  # w2_qweight   (now bf16, not int32)
+        dummy,  # w13_scales   (unused; nulled out in Int4EmulationTritonExperts)
+        dummy,  # w2_scales    (unused)
+        None,  # w13_g_idx
+        None,  # w2_g_idx
+        None,  # w13_g_idx_sort_indices
+        None,  # w2_g_idx_sort_indices
+        None,  # w13_qzeros
+        None,  # w2_qzeros
+        None,  # w13_input_global_scale
+        None,  # w2_input_global_scale
+        None,  # w13_bias
+        None,  # w2_bias
+    )
+
+
+def _process_weights_emulation_awq(
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_qzeros: torch.Tensor | None,
+    w2_qzeros: torch.Tensor | None,
+) -> tuple:
+    """Dequantize AWQ int4 weights to BF16 for the emulation backend.
+
+    AWQ inputs:
+        w13: [E, K, 2*N//8]       int32  (packed along N, gate+up on dim 2)
+        w2:  [E, N, K//8]         int32  (packed along K)
+        w13_scale: [E, K//gs, 2*N]  float16
+        w2_scale:  [E, N//gs, K]    float16
+
+    Outputs (what TritonExperts expects):
+        w13_out: [E, 2*N, K]  bfloat16
+        w2_out:  [E, K, N]    bfloat16
+    """
+    # w13: AWQ-packed along N (dim 2), K is unpacked in dim 1
+    # _unpack_and_dequant_int4_awq with transpose_output=True yields [E, 2*N, K]
+    w13_bf16 = _unpack_and_dequant_int4_awq(
+        w13, w13_scale, w13_qzeros, transpose_output=True
+    )
+
+    # w2: AWQ packs along K (dim 2 is K//8), N is unpacked in dim 1.
+    # AWQ w2 is [E, N, K//8] — same column-pack format applied to the K dim.
+    # _unpack_and_dequant_int4_awq expects [E, rows, N_packed] where the
+    # packed dim is columns. Treat dim 1 as rows and dim 2 as N_packed:
+    # unpacking gives [E, N, K]. Then permute to [E, K, N].
+    w2_unpacked = _unpack_and_dequant_int4_awq(
+        w2, w2_scale, w2_qzeros, transpose_output=False
+    )  # [E, N, K]
+    w2_bf16 = w2_unpacked.permute(0, 2, 1).contiguous()  # [E, K, N]
+
+    dummy = torch.ones(1, dtype=torch.float16, device=w13.device)
+    return (
+        w13_bf16,
+        w2_bf16,
+        dummy,
+        dummy,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+
 def convert_to_wna16_moe_kernel_format(
     backend: WNA16MoEBackend,
     layer: torch.nn.Module,
@@ -1202,6 +1461,26 @@ def convert_to_wna16_moe_kernel_format(
             None,  # w2_input_global_scale
             w13_bias_out,
             w2_bias_out,
+        )
+    elif backend == WNA16MoEBackend.EMULATION:
+        from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+
+        if isinstance(quant_config, AutoAWQConfig):
+            return _process_weights_emulation_awq(
+                w13,
+                w2,
+                w13_scale,
+                w2_scale,
+                w13_qzeros,
+                w2_qzeros,
+            )
+        return _process_weights_emulation_gptq(
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            w13_qzeros,
+            w2_qzeros,
         )
     else:
         raise ValueError(f"Unsupported wna16 MoE backend: {backend.value}")
