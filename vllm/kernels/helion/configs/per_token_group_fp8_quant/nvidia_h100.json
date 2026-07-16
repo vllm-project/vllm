@@ -1841,8 +1841,7 @@
       ],
       "atomic_indexing": [],
       "pid_type": "persistent_interleaved",
-      "num_sm_multiplier": 128,
-      "maxnreg": 256
+      "num_sm_multiplier": 128
     }
   },
   {

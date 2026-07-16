@@ -6,6 +6,7 @@ This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
 
+import contextlib
 from typing import TYPE_CHECKING
 
 import torch
@@ -68,6 +69,21 @@ def _warmup_ll_bf16_router_gemm() -> None:
     )
 
 
+def _collect_fp8_linear_input_dims(model: torch.nn.Module) -> list[int]:
+    """Collect input widths of FP8 linear weights used by the loaded model."""
+    fp8_dtype = current_platform.fp8_dtype()
+    hidden_sizes: set[int] = set()
+    for module in model.modules():
+        weight = getattr(module, "weight", None)
+        if (
+            isinstance(weight, torch.Tensor)
+            and weight.ndim == 2
+            and weight.dtype == fp8_dtype
+        ):
+            hidden_sizes.add(int(weight.shape[1]))
+    return sorted(hidden_sizes)
+
+
 def kernel_warmup(worker: "Worker"):
     from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
         minimax_m3_msa_warmup,
@@ -121,6 +137,22 @@ def kernel_warmup(worker: "Worker"):
 
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm()
+
+    if envs.VLLM_USE_HELION_KERNELS:
+        from vllm.kernels.helion import warmup_registered_kernels
+
+        warmup_hidden_sizes = None
+        with contextlib.suppress(Exception):
+            warmup_hidden_sizes = _collect_fp8_linear_input_dims(worker.get_model())
+        warmed_helion_kernels = warmup_registered_kernels(
+            max_num_batched_tokens=worker.scheduler_config.max_num_batched_tokens,
+            hidden_sizes=warmup_hidden_sizes,
+        )
+        if warmed_helion_kernels:
+            logger.info(
+                "Warmed up %d Helion eager kernel input variants.",
+                warmed_helion_kernels,
+            )
 
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups

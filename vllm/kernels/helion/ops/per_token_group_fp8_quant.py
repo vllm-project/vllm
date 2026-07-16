@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterable
 from itertools import product
 from typing import Any
 
@@ -77,6 +78,97 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
         )
 
     return inputs
+
+
+def generate_warmup_inputs(
+    config_keys: list[CaseKey],
+    max_num_batched_tokens: int | None,
+    hidden_sizes: list[int] | None,
+) -> Iterable[tuple[Any, ...]]:
+    """Yield eager warmup inputs for every tuned PTG bucket in active configs."""
+
+    in_dtype: torch.dtype = torch.bfloat16
+    out_dtype: torch.dtype = current_platform.fp8_dtype()
+    scale_dtype: torch.dtype = torch.float32
+    fp8_min, fp8_max = get_fp8_min_max()
+    eps = 1e-10
+
+    group_num_tokens: dict[int, set[int]] = {}
+    for key in config_keys:
+        if key.is_default():
+            continue
+        group_num_tokens.setdefault(key["group_size"], set()).add(key["num_tokens"])
+
+    if hidden_sizes:
+        target_hidden_sizes = sorted(set(hidden_sizes))
+    else:
+        target_hidden_sizes = sorted(
+            {key["hidden_size"] for key in config_keys if not key.is_default()}
+        )
+
+    small_decode_limit = 32
+    if max_num_batched_tokens is not None:
+        small_decode_limit = min(small_decode_limit, max_num_batched_tokens)
+    small_decode_num_tokens = set(range(1, small_decode_limit + 1))
+
+    for hidden_size in target_hidden_sizes:
+        for group_size, num_tokens_set in sorted(group_num_tokens.items()):
+            if hidden_size % group_size != 0:
+                continue
+            groups_per_row = hidden_size // group_size
+            warm_num_tokens = set(num_tokens_set)
+            warm_num_tokens.update(small_decode_num_tokens)
+            # The column-major scale path builds tensor descriptors over
+            # output_s (stride (1, num_tokens)), so it specializes on whether
+            # num_tokens keeps that stride 16-byte aligned, i.e. on
+            # num_tokens % 4 == 0. Tuned buckets are all aligned, so without an
+            # unaligned representative the first (typically unaligned) prefill
+            # batch pays a JIT compile at request time. Prime an unaligned
+            # sibling for each aligned value so both classes are warm.
+            warm_num_tokens.update(
+                num_tokens - 1
+                for num_tokens in list(warm_num_tokens)
+                if num_tokens % 4 == 0 and num_tokens - 1 >= 1
+            )
+            if max_num_batched_tokens is not None:
+                warm_num_tokens = {
+                    num_tokens
+                    for num_tokens in warm_num_tokens
+                    if num_tokens <= max_num_batched_tokens
+                }
+            for selected_num_tokens in sorted(warm_num_tokens):
+                input = torch.randn(
+                    selected_num_tokens, hidden_size, device="cuda", dtype=in_dtype
+                )
+
+                for column_major_scales in (False, True):
+                    output_q = torch.empty(
+                        input.shape, device=input.device, dtype=out_dtype
+                    )
+                    if column_major_scales:
+                        output_s = torch.empty(
+                            (groups_per_row, selected_num_tokens),
+                            device=input.device,
+                            dtype=scale_dtype,
+                        ).permute(1, 0)
+                    else:
+                        output_s = torch.empty(
+                            (selected_num_tokens, groups_per_row),
+                            device=input.device,
+                            dtype=scale_dtype,
+                        )
+                    yield (
+                        input,
+                        output_q,
+                        output_s,
+                        group_size,
+                        eps,
+                        fp8_min,
+                        fp8_max,
+                        False,
+                        column_major_scales,
+                        False,
+                    )
 
 
 _pick_cache: dict[tuple[int, int, int], CaseKey | None] = {}
@@ -181,9 +273,12 @@ def baseline(
     mutates_args=["output_q", "output_s"],
     config_picker=pick_config,
     input_generator=generate_inputs,
+    warmup_input_generator=generate_warmup_inputs,
     fake_impl=fake_impl,
     helion_settings=helion.Settings(
         autotune_baseline_fn=baseline,
+        ignore_warnings=[helion.exc.ProcessGroupNameNotFound],
+        triton_do_not_specialize_nonunit_strides=True,
     ),
 )  # type: ignore[misc]
 def per_token_group_fp8_quant(
