@@ -13,7 +13,7 @@ pub struct Olmo3ReasoningParser {
     /// True until the first response text is classified. Only this position may
     /// drop a response-leading `<think>` prefix.
     at_response_start: bool,
-    /// Holds an initial prefix like `<thi` while it may still complete into the
+    /// Holds an initial prefix like `<th` while it may still complete into the
     /// leading opener on a later chunk.
     leading_start_buffer: String,
 }
