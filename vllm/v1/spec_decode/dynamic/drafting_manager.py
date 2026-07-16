@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 class AdaptiveDraftingManager(ABC):
     @abstractmethod
     def plan_batch(self, scheduler_output: SchedulerOutput) -> tuple[int, int]:
-        """Return the target token count and aggregate draft-token budget."""
+        """Choose the target token count and aggregate draft-token budget."""
         raise NotImplementedError
 
     @abstractmethod
@@ -35,7 +35,7 @@ class AdaptiveDraftingManager(ABC):
         query_start_loc: torch.Tensor,
         num_reqs_padded: int,
     ) -> tuple[torch.Tensor, torch.Tensor, np.ndarray]:
-        """Allocate the draft budget and build query and logit layouts."""
+        """Allocate drafts per request and build query and logit layouts."""
         raise NotImplementedError
 
 
@@ -49,6 +49,7 @@ class DynamicSDDraftingManager(AdaptiveDraftingManager):
         speculator: BaseSpeculator,
         req_states: RequestState,
     ) -> None:
+        """Build the batch-size lookup and reusable device-side layout buffers."""
         self._speculator = speculator
         self._req_states = req_states
         self._num_spec_tokens_by_batch_size = build_dynamic_sd_schedule_lookup(
@@ -65,6 +66,10 @@ class DynamicSDDraftingManager(AdaptiveDraftingManager):
         )
 
     def plan_batch(self, scheduler_output: SchedulerOutput) -> tuple[int, int]:
+        """Apply the schedule to the request mix and cap it by available drafts.
+
+        Prefills receive no draft budget and select the schedule's largest bucket.
+        """
         req_ids = tuple(scheduler_output.num_scheduled_tokens)
         if not req_ids:
             return 0, 0
@@ -117,7 +122,7 @@ class DynamicSDDraftingManager(AdaptiveDraftingManager):
         query_start_loc[num_reqs + 1 :].fill_(num_tokens)
 
         cu_num_logits = self._cu_num_logits[: num_reqs + 1]
-        cu_num_logits[:1].zero_()
+        cu_num_logits[:1].zero_()  #  Non-blocking way to zero the first element
         torch.cumsum(
             num_draft_tokens_per_req + 1,
             dim=0,
@@ -152,6 +157,7 @@ class DynamicSDDraftingManager(AdaptiveDraftingManager):
         scheduler_output: SchedulerOutput,
         req_ids: Sequence[str],
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Derive draft caps, base query counts, and prefill flags in worker order."""
         num_reqs = len(req_ids)
         draft_caps = np.empty(num_reqs, dtype=np.int32)
         base_query_counts = np.empty(num_reqs, dtype=np.int32)
