@@ -58,6 +58,8 @@ class TransferEntry(NamedTuple):
     xfer_handle: "nixl_xfer_handle"
     files_desc: object
     obj_handle: "nixl_prepped_dlist_handle"
+    transfer_size: int
+    submitted_at: float
 
 
 class ObjAsyncLookupManager(AsyncLookupManager):
@@ -267,7 +269,13 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             self._pending_results.append(JobResult(job_id=job_id, success=False))
             return
 
-        self._transfers[job_id] = TransferEntry(xfer_handle, files_desc, obj_handle)
+        self._transfers[job_id] = TransferEntry(
+            xfer_handle=xfer_handle,
+            files_desc=files_desc,
+            obj_handle=obj_handle,
+            transfer_size=len(block_ids_list) * self._block_size_bytes,
+            submitted_at=time.monotonic(),
+        )
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         result = self._lookup_manager.lookup(key, req_context)
@@ -341,7 +349,14 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                 logger.warning("deregister_memory failed for job %d: %s", job_id, exc)
 
             del self._transfers[job_id]
-            self._pending_results.append(JobResult(job_id=job_id, success=success))
+            self._pending_results.append(
+                JobResult(
+                    job_id=job_id,
+                    success=success,
+                    transfer_size=entry.transfer_size,
+                    transfer_time=time.monotonic() - entry.submitted_at,
+                )
+            )
 
     def get_finished_jobs(self) -> Iterable[JobResult]:
         """Poll transfers; a failed promotion marks its cached verdicts False
