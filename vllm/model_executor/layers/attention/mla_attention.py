@@ -1753,6 +1753,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.compilation_config = vllm_config.compilation_config
         self.vllm_config = vllm_config
         self.device = device
+        self.use_pcp = parallel_config.prefill_context_parallel_size > 1
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
@@ -1882,6 +1883,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 common_attn_metadata,
                 decode_threshold=self.reorder_batch_threshold,
                 require_uniform=(self.query_len_support != QueryLenSupport.VARLEN),
+                treat_short_extends_as_decodes=not self.use_pcp,
             )
         )
 

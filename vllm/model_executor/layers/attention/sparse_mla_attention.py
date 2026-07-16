@@ -58,6 +58,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             device=device,
         )
         parallel_config = vllm_config.parallel_config
+        self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         try:
             self.dcp_world_size = get_dcp_group().world_size
         except AssertionError:
@@ -171,6 +172,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=self.reorder_batch_threshold or 1,
+            treat_short_extends_as_decodes=not self.use_pcp,
         )
         (
             prefill_query_start_loc,
