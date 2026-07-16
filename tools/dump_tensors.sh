@@ -6,4 +6,5 @@ python dump_layer_outputs.py \
     --backend metax_flagplugin \
     --prompt "hello?" \
     --max-tokens 3 \
+    --dump-mode fine \
     --output-dir ./layer_dumps
