@@ -160,7 +160,7 @@ class NixlBaseConnectorWorker:
     def _build_local_splits_from_plan(
         self,
         plan: TPMapping,
-        src_blocks_data: list[tuple[int, int, int]],
+        src_blocks_data: np.ndarray,
         num_fa_descs: int,
     ) -> Iterator[list[tuple[int, int, int]]]:
         """Build split handle data for P_TP > D_TP scenario.
@@ -188,12 +188,13 @@ class NixlBaseConnectorWorker:
 
         # Per-FA-descriptor replicate flag, in _build_fa_local emission order.
         fa_desc_replicated = self._fa_desc_replicated(num_fa_descs)
+        src_blocks_list = src_blocks_data.tolist()
 
         for p_idx, p_rank in enumerate(plan.all_source_ranks):
             fa_slot = plan.rank_to_attention_slot.get(p_rank, 0)
 
             handle: list[tuple[int, int, int]] = []
-            for j, (addr, local_len, dev) in enumerate(src_blocks_data):
+            for j, (addr, local_len, dev) in enumerate(src_blocks_list):
                 if j < num_fa_descs:
                     if fa_desc_replicated[j]:
                         # REPLICATE (MLA): whole block written on every rank.
@@ -265,6 +266,12 @@ class NixlBaseConnectorWorker:
         )
         # NOTE (NickLucche): For now we use a hardcoded value for a simpler interface.
         self._lease_extension = kv_lease_duration * 2 // 3
+
+        self._bidirectional_kv_xfer_enabled: bool = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "bidirectional_kv_xfer", False
+            )
+        )
 
         self._is_hma_required = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
@@ -340,6 +347,8 @@ class NixlBaseConnectorWorker:
         self._remote_agents: dict[EngineId, dict[tuple[int, int], str]] = defaultdict(
             dict
         )
+        # Map of engine_id -> clock offset.
+        self._engine_clock_offset: dict[EngineId, float] = {}
 
         # Metadata.
         self.engine_id: EngineId = engine_id
@@ -470,7 +479,9 @@ class NixlBaseConnectorWorker:
             thread_name_prefix="vllm-nixl-handshake-initiator",
         )
         self._ready_requests = queue.Queue[tuple[ReqId, ReqMeta]]()
-        self._handshake_futures: dict[EngineId, Future[dict[tuple[int, int], str]]] = {}
+        self._handshake_futures: dict[
+            EngineId, Future[tuple[dict[tuple[int, int], str], float]]
+        ] = {}
         # Protects _handshake_futures and _remote_agents.
         self._handshake_lock = threading.RLock()
 
@@ -559,7 +570,7 @@ class NixlBaseConnectorWorker:
         expected_engine_id: str,
         remote_pp_size: int = 1,
         notif_agents_only: bool = False,
-    ) -> dict[tuple[int, int], str]:
+    ) -> tuple[dict[tuple[int, int], str], float]:
         """Do a NIXL handshake with a remote instance."""
 
         # the first time we connect to a remote agent.
@@ -583,6 +594,11 @@ class NixlBaseConnectorWorker:
         p_remote_ranks = self.transfer_topo.handshake_target_ranks(remote_tp_size)
         remote_rank_to_agent_name: dict[tuple[int, int], str] = {}
         path = make_zmq_path("tcp", host, port)
+        # Clock offset to the peer, estimated from the handshake round-trip.
+        # Keep the lowest-RTT sample: hop cost is ~uniform across ranks, so a
+        # higher RTT is just noise that skews the midpoint estimate.
+        best_rtt = float("inf")
+        best_offset: float | None = None
 
         with zmq_ctx(zmq.REQ, path) as sock:
             for remote_pp_rank, remote_rank in itertools.product(
@@ -595,15 +611,24 @@ class NixlBaseConnectorWorker:
                     remote_rank,
                 )
 
-                start_time = time.perf_counter()
                 # Send query for the request.
                 msg = msgspec.msgpack.encode(
                     (GET_META_MSG, remote_pp_rank, remote_rank)
                 )
                 # Set receive timeout to 5 seconds to avoid hanging on dead server
                 sock.setsockopt(zmq.RCVTIMEO, 5000)  # milliseconds
+                start_time = time.perf_counter()
                 sock.send(msg)
-                handshake_bytes = sock.recv()
+                reply_parts = sock.recv_multipart()
+                recv_time = time.perf_counter()
+                assert len(reply_parts) == 2
+                handshake_bytes = reply_parts[0]
+
+                remote_perf = msgspec.msgpack.decode(reply_parts[1])
+                rtt = recv_time - start_time
+                if rtt < best_rtt:
+                    best_rtt = rtt
+                    best_offset = remote_perf - (start_time + recv_time) / 2
 
                 # Decode handshake payload to get compatibility hash
                 handshake_decoder = msgspec.msgpack.Decoder(NixlHandshakePayload)
@@ -681,7 +706,9 @@ class NixlBaseConnectorWorker:
                 )
                 remote_ranks = (remote_pp_rank, remote_rank)
                 remote_rank_to_agent_name[remote_ranks] = remote_agent_name
-        return remote_rank_to_agent_name
+
+        assert best_offset is not None
+        return remote_rank_to_agent_name, best_offset
 
     def _add_notif_only_remote_agent(
         self, metadata: NixlAgentMetadata, remote_tp_size: int
@@ -818,7 +845,7 @@ class NixlBaseConnectorWorker:
         tp_size: int,
         pp_size: int = 1,
         notif_agents_only: bool = False,
-    ) -> Future[dict[tuple[int, int], str]] | None:
+    ) -> Future[tuple[dict[tuple[int, int], str], float]] | None:
         """
         Ensure a handshake is in-flight (or already done) for *engine_id*.
 
@@ -846,11 +873,16 @@ class NixlBaseConnectorWorker:
             )
             self._handshake_futures[engine_id] = fut
 
-            def done_callback(f: Future[dict[tuple[int, int], str]], eid=engine_id):
+            def done_callback(
+                f: Future[tuple[dict[tuple[int, int], str], float]],
+                eid=engine_id,
+            ):
                 with self._handshake_lock:
                     del self._handshake_futures[eid]
                     try:
-                        self._remote_agents[eid] = f.result()
+                        remote_agents, clock_offset = f.result()
+                        self._remote_agents[eid] = remote_agents
+                        self._engine_clock_offset[eid] = clock_offset
                         self._engine_last_active[eid] = time.perf_counter()
                     except Exception as e:
                         self._log_failure(
@@ -1138,7 +1170,12 @@ class NixlBaseConnectorWorker:
                         "All non-MLA kv cache tensors must have the same size"
                     )
 
-                if cache.shape[0] != num_blocks:
+                # When there's a mismatch between kbs<>bs, we rely on HMA to ensure
+                # caches are either [NB, PS] or [NB*r, PS/r] where r is bs/kbs.
+                if (
+                    self._physical_blocks_per_logical_kv_block == 1
+                    and cache.shape[0] != num_blocks
+                ):
                     raise AssertionError(
                         "All kv cache tensors must have the same number of "
                         f"blocks; layer={layer_name}, "
@@ -1241,51 +1278,48 @@ class NixlBaseConnectorWorker:
         self,
         base_addresses: list[int],
         block_size_ratio: int,
-    ) -> list[tuple[int, int, int]]:
+    ) -> np.ndarray:
         """Build desc regions (conv sub-projections + ssm) per layer for
-        local mamba blocks with DS conv layout."""
+        local mamba blocks with DS conv layout, as an Nx3 uint64 array."""
         assert block_size_ratio == 1, (
             "Mamba 3-read transfer with block_size_ratio != 1 is not tested. "
             f"Got block_size_ratio={block_size_ratio}."
         )
+        assert base_addresses, "Local KV cache base addresses must not be empty."
         assert self._conv_decomp is not None
         conv_offsets = self._conv_decomp.local_conv_offsets
         conv_size, ssm_size = self._mamba_ssm_size
         num_blocks = self._logical_num_blocks * block_size_ratio
         physical_per_logical = self._physical_blocks_per_logical_kv_block
+        device_id = self.device_id
+        block_arange = np.arange(num_blocks, dtype=np.uint64)
 
-        result: list[tuple[int, int, int]] = []
+        parts: list[np.ndarray] = []
         for i, base_addr in enumerate(base_addresses):
             # Jump one page_size, but ssm page_size may be bigger when kernel
             # locks block size to a specific value (physical_per_logical scale).
             page_stride = (
                 self.block_len_per_layer[i] // block_size_ratio * physical_per_logical
             )
+            blk_addrs = base_addr + block_arange * page_stride
             for off, sz in conv_offsets:
-                for blk in range(num_blocks):
-                    result.append(
-                        (base_addr + blk * page_stride + off, sz, self.device_id)
-                    )
+                parts.append(self._stack_descs(blk_addrs + off, sz, device_id))
             # SSM temporal state follows the conv state.
-            for blk in range(num_blocks):
-                result.append(
-                    (
-                        base_addr + blk * page_stride + conv_size,
-                        ssm_size,
-                        self.device_id,
-                    )
-                )
-        return result
+            parts.append(self._stack_descs(blk_addrs + conv_size, ssm_size, device_id))
+        return np.concatenate(parts)
 
     def _build_mamba_remote(
         self,
         nixl_agent_meta: NixlAgentMetadata,
         tp_ratio: int,
         transfer_info: EngineTransferInfo,
-    ) -> list[tuple[int, int, int]]:
+    ) -> np.ndarray:
         """Build remote desc regions (conv sub-projections + ssm) per layer.
         For hetero-TP, each D rank reads only its sub-projection slice from
-        the P rank."""
+        the P rank. Returns an Nx3 uint64 array."""
+        assert nixl_agent_meta.kv_caches_base_addr, (
+            "Remote KV cache base addresses must not be empty."
+        )
         assert self._conv_decomp is not None
         effective_ratio = max(tp_ratio, 1)
         # Mamba conv state is always TP-sharded, even when attention KV
@@ -1302,35 +1336,41 @@ class NixlBaseConnectorWorker:
         remote_physical_per_logical = transfer_info.remote_physical_blocks_per_logical
         num_blocks = nixl_agent_meta.num_blocks // remote_physical_per_logical
         device_id = nixl_agent_meta.device_id
+        block_arange = np.arange(num_blocks, dtype=np.uint64)
 
-        result: list[tuple[int, int, int]] = []
+        parts: list[np.ndarray] = []
         # NOTE (ZhanqiuHu): use per-layer block_lens[i], not [0], in case
         # block lengths vary across layers (e.g. MLA).
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
             page_stride = nixl_agent_meta.block_lens[i] * remote_physical_per_logical
+            blk_addrs = base_addr + block_arange * page_stride
             for off, sz in conv_offsets:
-                for blk in range(num_blocks):
-                    result.append((base_addr + blk * page_stride + off, sz, device_id))
+                parts.append(self._stack_descs(blk_addrs + off, sz, device_id))
             # SSM temporal state is also TP-sharded on the heads dimension.
-            for blk in range(num_blocks):
-                ssm_addr = (
-                    base_addr
-                    + blk * page_stride
-                    + conv_size_remote
-                    + local_offset * ssm_read_size
-                )
-                result.append((ssm_addr, ssm_read_size, device_id))
-        return result
+            ssm_addrs = blk_addrs + conv_size_remote + local_offset * ssm_read_size
+            parts.append(self._stack_descs(ssm_addrs, ssm_read_size, device_id))
+        return np.concatenate(parts)
+
+    @staticmethod
+    def _stack_descs(addrs: np.ndarray, length: int, device_id: int) -> np.ndarray:
+        out = np.empty((addrs.shape[0], 3), dtype=np.uint64)
+        out[:, 0] = addrs
+        out[:, 1] = length
+        out[:, 2] = device_id
+        return out
 
     def _build_fa_local(
         self,
         base_addresses: list[int],
         block_size_ratio: int,
-    ) -> list[tuple[int, int, int]]:
-        """Build local FA descriptors for all layers."""
+    ) -> np.ndarray:
+        """Build local FA descriptors for all layers as an Nx3 uint64 array."""
         assert self.transfer_topo is not None
+        assert base_addresses, "Local KV cache base addresses must not be empty."
         num_blocks = self.num_blocks * block_size_ratio
-        result: list[tuple[int, int, int]] = []
+        device_id = self.device_id
+        block_arange = np.arange(num_blocks, dtype=np.uint64)
+        parts: list[np.ndarray] = []
         for i, base_addr in enumerate(base_addresses):
             kv_block_len = (
                 self.get_backend_aware_kv_block_len(
@@ -1339,20 +1379,21 @@ class NixlBaseConnectorWorker:
                 // block_size_ratio
             )
             page_stride = self.block_len_per_layer[i] // block_size_ratio
-            for block_id in range(num_blocks):
-                block_offset = block_id * page_stride
-                addr = base_addr + block_offset
-                result.append((addr, kv_block_len, self.device_id))
-        return result
+            addrs = base_addr + block_arange * page_stride
+            parts.append(self._stack_descs(addrs, kv_block_len, device_id))
+        return np.concatenate(parts)
 
     def _build_fa_remote(
         self,
         plan: TPMapping,
         nixl_agent_meta: NixlAgentMetadata,
         block_size_ratio: int,
-    ) -> list[tuple[int, int, int]]:
-        """Build remote FA descriptors for all layers."""
+    ) -> np.ndarray:
+        """Build remote FA descriptors for all layers as an Nx3 uint64 array."""
         assert self.transfer_topo is not None
+        assert nixl_agent_meta.kv_caches_base_addr, (
+            "Remote KV cache base addresses must not be empty."
+        )
         fa_group_idx = next(
             i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
         )
@@ -1360,7 +1401,9 @@ class NixlBaseConnectorWorker:
         # per-rank offset; REPLICATE regions read the whole block once.
         split_reads = len(plan.source_ranks_per_group[fa_group_idx])
         num_blocks = nixl_agent_meta.num_blocks
-        result: list[tuple[int, int, int]] = []
+        device_id = nixl_agent_meta.device_id
+        block_arange = np.arange(num_blocks, dtype=np.uint64)
+        parts: list[np.ndarray] = []
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
             replicated = self._is_region_replicated(i)
             # Read our whole local region size from remote..
@@ -1381,18 +1424,14 @@ class NixlBaseConnectorWorker:
             local_block_len = local_block_len // num_reads
 
             page_size = nixl_agent_meta.block_lens[i]
-            for block_id in range(num_blocks):
-                block_offset = block_id * page_size
-                # For each block, grab the kv heads chunk belonging to current local
-                # tp rank of size local_block_len.
-                addr = base_addr + block_offset + rank_offset
-                result.append((addr, local_block_len, nixl_agent_meta.device_id))
-        return result
+            addrs = base_addr + rank_offset + block_arange * page_size
+            parts.append(self._stack_descs(addrs, local_block_len, device_id))
+        return np.concatenate(parts)
 
     def register_local_xfer_handler(
         self,
         block_size: int,
-    ) -> tuple[int, list[tuple[int, int, int]]]:
+    ) -> tuple[int, np.ndarray]:
         """
         Function used for register local xfer handler with local block_size or
         Remote block_size.
@@ -1425,9 +1464,8 @@ class NixlBaseConnectorWorker:
             # remote has been seen.  Currently we always register 4 regions
             # because local descs are created before knowing the remote TP.
             logger.debug("Registering local Mamba descriptors (4 regions/layer)")
-            blocks_data.extend(
-                self._build_mamba_local(local_base_addresses, block_size_ratio)
-            )
+            mamba = self._build_mamba_local(local_base_addresses, block_size_ratio)
+            blocks_data = np.concatenate([blocks_data, mamba])
 
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
         # NIXL_INIT_AGENT to be used for preparations of local descs.
@@ -1614,13 +1652,8 @@ class NixlBaseConnectorWorker:
                 engine_id,
                 remote_tp_rank,
             )
-            blocks_data.extend(
-                self._build_mamba_remote(
-                    nixl_agent_meta,
-                    tp_ratio,
-                    transfer_info,
-                )
-            )
+            mamba = self._build_mamba_remote(nixl_agent_meta, tp_ratio, transfer_info)
+            blocks_data = np.concatenate([blocks_data, mamba])
 
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
@@ -2421,6 +2454,8 @@ class NixlBaseConnectorWorker:
         if self.transfer_topo is not None:
             self.transfer_topo.unregister_remote_engine(engine_id)
 
+        # Drop the cached clock offset; it is re-measured on the next handshake.
+        self._engine_clock_offset.pop(engine_id, None)
         # Push P-side engines are tracked in _remote_agents but not in
         # _engine_last_active (they don't participate in stale eviction), so
         # tolerate a missing entry.
