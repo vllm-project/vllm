@@ -16,7 +16,7 @@ import numpy as np
 import torch
 import zmq
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -194,8 +194,10 @@ class MoRIIOConnector(KVConnectorBase_V1):
         # captured in a FULL CUDA graph -- it would be skipped during replay, so
         # attention runs before the remote KV lands (high-concurrency "salad").
         # Require PIECEWISE so Python executes between graph pieces and the
-        # barrier actually fires.
-        return True
+        # barrier actually fires. WRITE mode has no per-layer barrier and
+        # keeps FULL graphs.
+        kv_transfer_config = KVTransferConfig(kv_connector_extra_config=extra_config)
+        return get_moriio_mode(kv_transfer_config) == MoRIIOMode.READ
 
     def __init__(
         self,
