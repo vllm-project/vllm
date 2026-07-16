@@ -528,8 +528,8 @@ class OfflineInferenceMixin:
         lora_requests: Sequence[LoRARequest | None] | None = None,
         priorities: Sequence[int] | None = None,
     ) -> list[str]:
-
         added_request_ids: list[str] = []
+
         try:
             for i, prompt in enumerate(prompts):
                 request_id = self._add_request(
