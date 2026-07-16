@@ -760,6 +760,42 @@ class TestAudioChunking:
         assert chunks[0][0] == audio[0]
         assert chunks[-1][-1] == audio[-1]
 
+    def test_find_split_point_nan_input(self):
+        """find_split_point must not return 0 for all-NaN input."""
+        from vllm.multimodal.audio import find_split_point
+
+        nan_audio = np.full(32000, float("nan"), dtype=np.float32)
+        start_idx = 16000
+        end_idx = 32000
+
+        split_idx = find_split_point(
+            wav=nan_audio,
+            start_idx=start_idx,
+            end_idx=end_idx,
+            min_energy_window=1600,
+        )
+
+        # Must return start_idx (the safe fallback), not 0
+        assert split_idx == start_idx
+
+    def test_split_audio_nan_input_terminates(self):
+        """split_audio must terminate on all-NaN audio (no infinite loop)."""
+        # 31 seconds of NaN at 16kHz — longer than max_clip_duration_s
+        nan_audio = np.full(16000 * 31, float("nan"), dtype=np.float32)
+
+        chunks = split_audio(
+            audio_data=nan_audio,
+            sample_rate=16000,
+            max_clip_duration_s=30.0,
+            overlap_duration_s=1.0,
+            min_energy_window_size=1600,
+        )
+
+        # Must produce at least 2 chunks and cover all samples
+        assert len(chunks) >= 2
+        total_samples = sum(c.shape[-1] for c in chunks)
+        assert total_samples == nan_audio.shape[-1]
+
     def test_split_audio_with_different_sample_rates(self):
         """Test chunking works with different sample rates."""
 

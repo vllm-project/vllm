@@ -91,6 +91,7 @@ def test_base_router_capture_with_eplb_enabled():
     eplb_state.logical_to_physical_map = torch.arange(32).view(32, 1)
     eplb_state.logical_replica_count = torch.ones(32, dtype=torch.int64)
     eplb_state.should_record_tensor = torch.ones((), dtype=torch.bool)
+    eplb_state.num_unpadded_tokens_tensors = [torch.tensor(0, dtype=torch.int32)]
     router = _make_router(eplb_state=eplb_state)
 
     captured = []
@@ -137,9 +138,7 @@ def test_gpu_model_runner_binds_router_capture(monkeypatch):
     monkeypatch.setattr(fused_moe_layer, "MoERunner", DummyFusedMoE)
 
     dummy_self = types.SimpleNamespace(
-        compilation_config=types.SimpleNamespace(
-            static_forward_context={"dummy": dummy_module}
-        )
+        model=types.SimpleNamespace(modules=lambda: [dummy_module])
     )
 
     capturer = DummyCapturer()
@@ -176,9 +175,7 @@ def test_gpu_model_runner_binding_stage(monkeypatch):
     monkeypatch.setattr(fused_moe_layer, "MoERunner", DummyFusedMoE)
 
     dummy_self = types.SimpleNamespace(
-        compilation_config=types.SimpleNamespace(
-            static_forward_context={"dummy": dummy_module}
-        )
+        model=types.SimpleNamespace(modules=lambda: [dummy_module])
     )
 
     # Before binding, no capture hook.
@@ -191,6 +188,38 @@ def test_gpu_model_runner_binding_stage(monkeypatch):
     assert callable(dummy_module.router.capture_fn)
     dummy_module.router.capture_fn(torch.tensor([[9, 10]]))
     assert len(capturer.calls) == 1
+
+
+def test_gpu_model_runner_does_not_bind_draft_router_capture(monkeypatch):
+    from vllm.v1.worker import gpu_model_runner as gmr
+
+    class DummyFusedMoE:
+        def __init__(self, layer_id):
+            self.layer_id = layer_id
+            self.router = _make_router()
+
+    target_module = DummyFusedMoE(layer_id=7)
+    draft_module = DummyFusedMoE(layer_id=0)
+
+    import vllm.model_executor.layers.fused_moe.layer as fused_moe_layer
+
+    monkeypatch.setattr(fused_moe_layer, "MoERunner", DummyFusedMoE)
+
+    dummy_self = types.SimpleNamespace(
+        model=types.SimpleNamespace(modules=lambda: [target_module]),
+        compilation_config=types.SimpleNamespace(
+            static_forward_context={
+                "model.layers.7.mlp.experts": target_module,
+                "mtp.layers.0.mlp.experts": draft_module,
+            }
+        ),
+    )
+
+    capturer = types.SimpleNamespace(capture=lambda *_: None)
+    gmr.GPUModelRunner._bind_routed_experts_capturer(dummy_self, capturer)
+
+    assert target_module.router.capture_fn is not None
+    assert draft_module.router.capture_fn is None
 
 
 def test_routed_experts_capturer_single_dp_no_metadata():

@@ -12,6 +12,7 @@ import pytest
 import vllm
 from vllm.assets.audio import AudioAsset
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 
 from ..utils import create_new_process_for_each_test
 
@@ -29,6 +30,7 @@ def create_whisper_llm(
     model: str,
     enable_lora: bool = True,
     max_loras: int = 2,
+    attn_backend: str | None = None,
 ):
     """Create a Whisper LLM instance with optional LoRA support."""
     return vllm.LLM(
@@ -39,6 +41,7 @@ def create_whisper_llm(
         max_model_len=448,
         dtype="half",
         enforce_eager=True,  # For stability in tests
+        attention_config={"backend": attn_backend},
     )
 
 
@@ -108,7 +111,12 @@ def test_whisper_multi_lora(whisper_model_files, whisper_lora_files):
     This test verifies that the same LoRA adapter can be loaded with
     different IDs and produce consistent results.
     """
-    llm = create_whisper_llm(whisper_model_files, enable_lora=True, max_loras=4)
+    llm = create_whisper_llm(
+        whisper_model_files,
+        enable_lora=True,
+        max_loras=4,
+        attn_backend="TRITON_ATTN" if current_platform.is_rocm() else None,
+    )
 
     # Test with different LoRA IDs using the same adapter
     outputs_lora1 = run_whisper_inference(llm, lora_path=whisper_lora_files, lora_id=1)

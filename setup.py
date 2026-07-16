@@ -445,6 +445,17 @@ class cmake_build_ext(build_ext):
                     dirs_exist_ok=True,
                 )
 
+            tml_fa4_build = os.path.join(
+                self.build_lib, "vllm", "third_party", "tml_fa4"
+            )
+            if os.path.exists(tml_fa4_build):
+                print(f"Copying {tml_fa4_build} to vllm/third_party/tml_fa4")
+                shutil.copytree(
+                    tml_fa4_build,
+                    "vllm/third_party/tml_fa4",
+                    dirs_exist_ok=True,
+                )
+
 
 class precompiled_build_ext(build_ext):
     """Disables extension building when using precompiled binaries."""
@@ -777,6 +788,7 @@ class precompiled_wheel_utils:
                             "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                             "vllm/cumem_allocator.abi3.so",
                             "vllm/spinloop.abi3.so",
+                            "vllm/fs_io_C.abi3.so",
                             # ROCm-specific libraries
                             "vllm/_rocm_C.abi3.so",
                         }
@@ -802,6 +814,7 @@ class precompiled_wheel_utils:
                 # DeepGEMM: extract all files (.py, .so, .cuh, .h, .hpp, etc.)
                 deep_gemm_regex = re.compile(r"vllm/third_party/deep_gemm/.*")
                 fmha_sm100_regex = re.compile(r"vllm/third_party/fmha_sm100/.*")
+                tml_fa4_regex = re.compile(r"vllm/third_party/tml_fa4/.*")
                 file_members = []
                 for member in wheel.filelist:
                     if member.filename in exact_members:
@@ -827,6 +840,7 @@ class precompiled_wheel_utils:
                         or triton_kernels_regex.match(member.filename)
                         or flashmla_regex.match(member.filename)
                         or deep_gemm_regex.match(member.filename)
+                        or tml_fa4_regex.match(member.filename)
                         or fmha_sm100_regex.match(member.filename)
                     ):
                         file_members.append(member)
@@ -1074,6 +1088,11 @@ def get_requirements() -> list[str]:
                 # vllm-flash-attn is built only for CUDA 12.x.
                 # Skip for other versions.
                 continue
+            if "flashinfer-cubin" in req:
+                # Not on PyPI since 0.6.14 (only https://flashinfer.ai/whl), so
+                # it cannot be a wheel dependency; flashinfer falls back to
+                # fetching cubins at runtime when the package is absent.
+                continue
             if "nvidia-cutlass-dsl[cu13]" in req and cuda_major == "12":
                 # [cu13] extra is the default; strip it on CUDA 12 builds.
                 req = req.replace("nvidia-cutlass-dsl[cu13]", "nvidia-cutlass-dsl")
@@ -1104,6 +1123,7 @@ if _is_cuda() or _is_hip():
 
 if sys.version_info >= (3, 11):
     ext_modules.append(CMakeExtension(name="vllm.spinloop"))
+    ext_modules.append(CMakeExtension(name="vllm.fs_io_C"))
 
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
@@ -1139,6 +1159,8 @@ if _is_cuda():
         ext_modules.append(CMakeExtension(name="vllm._qutlass_C", optional=True))
     # fmha_sm100 is a Python/CuTe-DSL package installed into vllm.third_party.
     ext_modules.append(CMakeExtension(name="vllm.fmha_sm100", optional=True))
+    # tml-fa4 is copied into an isolated vllm.third_party package.
+    ext_modules.append(CMakeExtension(name="vllm.tml_fa4", optional=True))
 
 if _is_cpu():
     import platform
@@ -1171,7 +1193,15 @@ package_data = {
         "third_party/deep_gemm/include/**/*.h",
         "third_party/deep_gemm/include/**/*.hpp",
         # fmha_sm100 sparse CuTe-DSL helper kernels (vendored via cmake)
+        "third_party/fmha_sm100/csrc/**/*.cu",
+        "third_party/fmha_sm100/csrc/**/*.h",
+        "third_party/fmha_sm100/csrc/**/*.jinja",
+        "third_party/fmha_sm100/csrc/**/*.cu.jinja",
         "third_party/fmha_sm100/cute/**/*.cu",
+        "third_party/fmha_sm100/cutlass/include/**/*.h",
+        "third_party/fmha_sm100/cutlass/include/**/*.hpp",
+        "third_party/fmha_sm100/cutlass/tools/util/include/**/*.h",
+        "third_party/fmha_sm100/cutlass/tools/util/include/**/*.hpp",
     ]
 }
 
@@ -1247,6 +1277,9 @@ setup(
             "mistral_common[audio]",
         ],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
+        # NVIDIA DeepStream (NVDEC) GPU video-decode backend. Linux x86-64
+        # only; also needs system GStreamer + libv4l (see docs).
+        "deepstream": ["nvidia-deepstream-videodecode-cu13>=9.0.2"],
         "flashinfer": [],  # Kept for backwards compatibility
         # Optional deps for Helion kernel development
         # NOTE: When updating helion version, also update CI files:

@@ -119,8 +119,10 @@ def _hermes_config() -> ParserEngineConfig:
 def _make_engine(
     config: ParserEngineConfig | None = None,
     tools: list | None = None,
+    vocab: dict[str, int] | None = None,
+    special_tokens: list[str] | None = None,
 ) -> ParserEngine:
-    tokenizer = make_mock_tokenizer(_VOCAB)
+    tokenizer = make_mock_tokenizer(vocab or _VOCAB, special_tokens=special_tokens)
     cfg = config or _combined_config()
     return ParserEngine(
         tokenizer,
@@ -843,6 +845,7 @@ class TestParseTokenIdPassthrough:
 
         assert content is not None
         assert "<tool_call>" in content
+        assert content == "Use <tool_call> to call tools."
         assert tool_calls is not None
         assert len(tool_calls) == 1
         assert tool_calls[0].name == "f"
@@ -893,6 +896,7 @@ def _make_delegating_request():
     req = MagicMock(spec=ChatCompletionRequest)
     req.tools = []
     req.tool_choice = "auto"
+    req.include_reasoning = True
     return req
 
 
@@ -1339,6 +1343,42 @@ class TestArgDeltaWithConverter:
         assert parsed == {"count": 5, "name": "test"}
         assert isinstance(parsed["count"], int)
 
+    def test_streamable_string_keys_cached_after_name_delta(self, monkeypatch):
+        tool = _make_tool(
+            "f",
+            {
+                "name": {"type": "string"},
+                "count": {"type": "integer"},
+            },
+        )
+        engine = _make_engine(_converter_config(), tools=[tool])
+
+        original = ParserEngine._streamable_string_keys
+        calls: list[dict] = []
+
+        def wrapped(properties: dict) -> set[str] | None:
+            calls.append(properties)
+            return original(properties)
+
+        monkeypatch.setattr(
+            ParserEngine,
+            "_streamable_string_keys",
+            staticmethod(wrapped),
+        )
+
+        _run_streaming_tool(
+            engine,
+            "f",
+            ["name=alice ", "count=4", "2"],
+        )
+
+        assert calls == [
+            {
+                "name": {"type": "string"},
+                "count": {"type": "integer"},
+            }
+        ]
+
 
 # ── TestSafeArgPrefix ────────────────────────────────────────────
 
@@ -1351,7 +1391,7 @@ class TestSafeArgPrefix:
         [
             ('{"a": 1}', '{"a": '),
             ('{"a": 1, "b": 2}', '{"a": 1, "b": '),
-            ('{"a": "hello", "b": "world"}', '{"a": "hello", "b": '),
+            ('{"a": "hello", "b": "world"}', '{"a": "hello", "b": "world'),
             ('{"obj": {"x": 1}, "b": 2}', '{"obj": {"x": 1}, "b": '),
             ('{"url": "http://x:80", "b": 1}', '{"url": "http://x:80", "b": '),
             ('{"a": 1', '{"a": '),
@@ -1360,6 +1400,9 @@ class TestSafeArgPrefix:
             ("", ""),
             ('{"k":1}', '{"k":'),
             ('{"k": 1, "v":2}', '{"k": 1, "v":'),
+            ('{"k":"value"}', '{"k":"value'),
+            ('{"k":"unterminated', '{"k":"unterminated'),
+            (r'{"k":"escaped \" quote"}', r'{"k":"escaped \" quote'),
         ],
     )
     def test_safe_arg_prefix(self, json_str, expected):
@@ -1451,3 +1494,181 @@ class TestCoercionInstabilityRegression:
         assert parsed["val"] == "4e"
         assert isinstance(parsed["val"], str)
         assert parsed["extra"] == "ok"
+
+
+_DROP_VOCAB: dict[str, int] = {
+    **_VOCAB,
+    "<bos>": 204,
+    "<eos>": 205,
+}
+
+
+class TestDropSpecialTokens:
+    """Special token dropping via the __DROP__ terminal mechanism."""
+
+    def test_drops_special_token_by_id_from_content(self):
+        """A special token (not a configured terminal) is dropped when
+        it arrives as its actual token ID."""
+        config = ParserEngineConfig(
+            name="drop_content_test",
+            terminals={},
+            token_id_terminals={},
+            transitions={},
+            initial_state=ParserState.CONTENT,
+            content_events={ParserState.CONTENT: EventType.TEXT_CHUNK},
+        )
+        engine = _make_engine(
+            config=config,
+            vocab=_DROP_VOCAB,
+            special_tokens=list(_DROP_VOCAB.keys()),
+        )
+        engine._engine.reset()
+        events = engine._engine.feed("hello<bos>world", [72, 204, 73])
+        delta = engine._events_to_delta(events)
+        assert delta is not None
+        assert "<bos>" not in delta.content
+        assert delta.content == "helloworld"
+
+    def test_drops_special_token_by_id_from_reasoning(self):
+        engine = _make_engine(
+            vocab=_DROP_VOCAB,
+            special_tokens=list(_DROP_VOCAB.keys()),
+        )
+        engine._engine.reset()
+        events = engine._engine.feed("thinking<eos>more", [72, 205, 73])
+        delta = engine._events_to_delta(events)
+        assert delta is not None
+        assert "<eos>" not in delta.reasoning
+        assert delta.reasoning == "thinkingmore"
+
+    def test_drops_via_text_fallback_when_no_token_ids(self):
+        """When no token IDs are provided, text-based lexer catches
+        drop tokens as a fallback."""
+        engine = _make_engine(
+            vocab=_DROP_VOCAB,
+            special_tokens=list(_DROP_VOCAB.keys()),
+        )
+        engine._engine.reset()
+        events = engine._engine.feed("hello<bos>world", [])
+        delta = engine._events_to_delta(events)
+        assert delta is not None
+        assert "<bos>" not in delta.reasoning
+
+    def test_regular_tokens_spelling_special_survive(self):
+        """Regular tokens that spell out a drop-token string survive
+        when token IDs prove they are not the special token."""
+        vocab = {**_DROP_VOCAB, "h": 72, "<": 73, "bos": 74, ">": 75, "w": 76}
+        engine = _make_engine(
+            vocab=vocab,
+            special_tokens=list(_DROP_VOCAB.keys()),
+        )
+        engine._engine.reset()
+        # Feed regular token IDs (73, 74, 75) that spell <bos>,
+        # not the special token ID 204.
+        events = engine._engine.feed("h<bos>w", [72, 73, 74, 75, 76])
+        delta = engine._events_to_delta(events)
+        assert delta is not None
+        assert "<bos>" in delta.reasoning
+
+    def test_configured_terminal_not_treated_as_drop(self):
+        """Tokens already in config.terminals (like <think>) are handled
+        by the state machine, not the drop mechanism."""
+        engine = _make_engine(
+            vocab=_DROP_VOCAB,
+            special_tokens=list(_DROP_VOCAB.keys()),
+        )
+        # Start from CONTENT so <think> triggers REASONING_START
+        engine._engine.reset(initial_state=ParserState.CONTENT)
+        events = engine._engine.feed("<think>", [200])
+        has_reasoning_start = any(e.type == EventType.REASONING_START for e in events)
+        assert has_reasoning_start
+
+    def test_tool_name_not_affected_by_drops(self):
+        engine = _make_engine(
+            vocab=_DROP_VOCAB,
+            special_tokens=list(_DROP_VOCAB.keys()),
+        )
+        engine._engine.reset()
+        events = [
+            SemanticEvent(EventType.TOOL_CALL_START, tool_index=0),
+            SemanticEvent(EventType.TOOL_NAME, "get_weather", tool_index=0),
+            SemanticEvent(EventType.ARG_VALUE_CHUNK, '{"city": "NYC"}', tool_index=0),
+            SemanticEvent(EventType.TOOL_CALL_END, tool_index=0),
+        ]
+        delta = engine._events_to_delta(events)
+        assert delta is not None
+        assert delta.tool_calls is not None
+        names = [
+            tc.function.name
+            for tc in delta.tool_calls
+            if tc.function and tc.function.name
+        ]
+        assert "get_weather" in names
+
+    def test_adjacent_drop_tokens_by_id(self):
+        engine = _make_engine(
+            vocab=_DROP_VOCAB,
+            special_tokens=list(_DROP_VOCAB.keys()),
+        )
+        engine._engine.reset()
+        events = engine._engine.feed("<bos><eos>", [204, 205])
+        delta = engine._events_to_delta(events)
+        assert delta is None
+
+    def test_no_special_tokens_means_no_drops(self):
+        """Engine with no special tokens passes all text through."""
+        engine = _make_engine(special_tokens=[])
+        engine._engine.reset()
+        events = engine._engine.feed("hello<bos>world", [])
+        delta = engine._events_to_delta(events)
+        assert delta is not None
+        assert "<bos>" in delta.reasoning
+
+    def test_drops_suppressed_with_skip_tool_parsing(self):
+        """When skip_tool_parsing is active, drop tokens are preserved
+        as content so a later tool-call pass can see them."""
+        engine = _make_engine(
+            vocab=_DROP_VOCAB,
+            special_tokens=list(_DROP_VOCAB.keys()),
+        )
+        engine._engine.skip_tool_parsing = True
+        engine._engine.reset()
+        events = engine._engine.feed("hello<bos>world", [72, 204, 73])
+        delta = engine._events_to_delta(events)
+        assert delta is not None
+        assert "<bos>" in delta.reasoning
+
+    def test_drops_in_tool_args_state(self):
+        """Drop tokens in TOOL_ARGS state are silently discarded."""
+        vocab = {**_DROP_VOCAB, '{"a":1}': 300}
+        engine = _make_engine(
+            vocab=vocab,
+            special_tokens=list(_DROP_VOCAB.keys()),
+        )
+        engine._engine.reset(initial_state=ParserState.CONTENT)
+        events = engine._engine.feed(
+            '<tool_call>{"a":1}<bos></tool_call>',
+            [202, 300, 204, 203],
+        )
+        arg_chunks = [e.value for e in events if e.type == EventType.ARG_VALUE_CHUNK]
+        combined = "".join(arg_chunks)
+        assert "<bos>" not in combined
+        assert '{"a":1}' in combined
+
+    def test_mixed_configured_and_drop_terminals(self):
+        """Configured terminals trigger transitions while drop terminals
+        are silently removed in the same stream."""
+        engine = _make_engine(
+            vocab=_DROP_VOCAB,
+            special_tokens=list(_DROP_VOCAB.keys()),
+        )
+        engine._engine.reset()
+        events = engine._engine.feed("thought<bos></think>answer", [72, 204, 201, 73])
+        types = [e.type for e in events]
+        assert EventType.REASONING_CHUNK in types
+        assert EventType.REASONING_END in types
+        assert EventType.TEXT_CHUNK in types
+        reasoning_text = "".join(
+            e.value for e in events if e.type == EventType.REASONING_CHUNK
+        )
+        assert "<bos>" not in reasoning_text
