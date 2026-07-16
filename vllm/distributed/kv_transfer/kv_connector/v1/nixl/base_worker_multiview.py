@@ -307,24 +307,28 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
         view: torch.Tensor,
         base_addr: int,
         device_id: int,
-    ) -> list[tuple[int, int, int]]:
-        """Extract NIXL (addr, len, device_id) descriptors from a 4D meta."""
+    ) -> np.ndarray:
+        """Extract NIXL (addr, len, device_id) descriptors from a 4D meta.
+
+        Returns an Nx3 uint64 array matching the vectorized base class format.
+        """
         elem = view.element_size()
         block_stride = view.stride(_DIM4_B) * elem
         payload = prod(view.shape[1:]) * elem
         offset = view.storage_offset() * elem
-        return [
-            (base_addr + offset + block_idx * block_stride, payload, device_id)
-            for block_idx in range(view.shape[_DIM4_B])
-        ]
+        num_blocks = view.shape[_DIM4_B]
+        addrs = (
+            base_addr + offset + np.arange(num_blocks, dtype=np.uint64) * block_stride
+        )
+        return NixlBaseConnectorWorker._stack_descs(addrs, payload, device_id)
 
     def _build_view_local(
         self,
         view: DescriptorView,
         base_addresses: list[int],
         block_size_ratio: int,
-    ) -> list[tuple[int, int, int]]:
-        """Build local descriptors for one view."""
+    ) -> np.ndarray:
+        """Build local descriptors for one view as an Nx3 uint64 array."""
         if isinstance(view.spec, MambaSpec):
             assert block_size_ratio == 1, (
                 "Mamba 3-read transfer with block_size_ratio != 1 "
@@ -332,7 +336,7 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
             )
 
         num_blocks = view.num_blocks * block_size_ratio
-        result: list[tuple[int, int, int]] = []
+        parts: list[np.ndarray] = []
 
         for region_pos, region_idx in enumerate(view.region_indices):
             meta = build_region_meta(
@@ -351,17 +355,18 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
                 self.model_config,
             )
             for slice_view in slices:
-                descs = self._view_to_descriptors(
-                    slice_view, base_addresses[region_idx], self.device_id
+                parts.append(
+                    self._view_to_descriptors(
+                        slice_view, base_addresses[region_idx], self.device_id
+                    )
                 )
-                result.extend(descs)
 
-        return result
+        return np.concatenate(parts)
 
     def register_local_xfer_handler(
         self,
         block_size: int,
-    ) -> tuple[int, list[tuple[int, int, int]]]:
+    ) -> tuple[int, np.ndarray]:
         """Register local xfer handler using multi-view descriptors."""
         if self._is_packed_kv:
             return super().register_local_xfer_handler(block_size)
@@ -369,12 +374,12 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
         block_size_ratio = self.block_size // block_size
         local_base_addresses = self.kv_caches_base_addr[self.engine_id][self.tp_rank]
 
-        blocks_data: list[tuple[int, int, int]] = []
+        parts: list[np.ndarray] = []
         for view in self._views:
-            view_descs = self._build_view_local(
-                view, local_base_addresses, block_size_ratio
+            parts.append(
+                self._build_view_local(view, local_base_addresses, block_size_ratio)
             )
-            blocks_data.extend(view_descs)
+        blocks_data = np.concatenate(parts)
 
         expected_descs = sum(v.num_descs() for v in self._views) * block_size_ratio
         assert len(blocks_data) == expected_descs, (
@@ -397,13 +402,13 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
         remote_physical_per_logical: int,
         remote_tp_rank: int,
         remote_tp_size: int,
-    ) -> list[tuple[int, int, int]]:
-        """Build remote descriptors for one view."""
+    ) -> np.ndarray:
+        """Build remote descriptors for one view as an Nx3 uint64 array."""
         assert self.transfer_topo is not None
         num_blocks = view.remote_num_blocks(
             nixl_agent_meta.num_blocks, remote_physical_per_logical
         )
-        result: list[tuple[int, int, int]] = []
+        parts: list[np.ndarray] = []
 
         for region_pos, region_idx in enumerate(view.region_indices):
             meta = build_region_meta(
@@ -428,14 +433,15 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
                 self.model_config,
             )
             for slice_view in slices:
-                descs = self._view_to_descriptors(
-                    slice_view,
-                    nixl_agent_meta.kv_caches_base_addr[region_idx],
-                    nixl_agent_meta.device_id,
+                parts.append(
+                    self._view_to_descriptors(
+                        slice_view,
+                        nixl_agent_meta.kv_caches_base_addr[region_idx],
+                        nixl_agent_meta.device_id,
+                    )
                 )
-                result.extend(descs)
 
-        return result
+        return np.concatenate(parts)
 
     # ------------------------------------------------------------------
     # Remote descriptor building override
@@ -451,7 +457,7 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
         physical_blocks_per_logical: int,
         remote_tp_rank: int,
         remote_tp_size: int,
-    ) -> list[tuple[int, int, int]]:
+    ) -> np.ndarray:
         """Build remote descriptors using multi-view layout."""
         if self._is_packed_kv:
             return super()._build_all_remote_descs(
@@ -465,9 +471,9 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
                 remote_tp_size,
             )
 
-        blocks_data: list[tuple[int, int, int]] = []
+        parts: list[np.ndarray] = []
         for view in self._views:
-            blocks_data.extend(
+            parts.append(
                 self._build_view_remote(
                     view,
                     nixl_agent_meta,
@@ -476,7 +482,7 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
                     remote_tp_size=remote_tp_size,
                 )
             )
-        return blocks_data
+        return np.concatenate(parts)
 
     # ------------------------------------------------------------------
     # _build_local_splits_from_plan override
@@ -485,7 +491,7 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
     def _build_local_splits_from_plan(
         self,
         plan: TPMapping,
-        src_blocks_data: list[tuple[int, int, int]],
+        src_blocks_data: np.ndarray,
         num_fa_descs: int | None = None,
     ) -> Iterator[list[tuple[int, int, int]]]:
         """Build split handle data for P_TP > D_TP using view layout.
@@ -501,6 +507,8 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
                 num_fa_descs if num_fa_descs is not None else 0,
             )
             return
+
+        src_blocks_list = src_blocks_data.tolist()
 
         # Per-view: (start, end, num_splits, rank_to_slot).
         view_info: list[tuple[int, int, int, dict[int, int]]] = []
@@ -540,7 +548,7 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
             for start, end, num_splits, rank_to_slot in view_info:
                 slot = rank_to_slot[source_rank]
                 for j in range(start, end):
-                    addr, local_len, dev = src_blocks_data[j]
+                    addr, local_len, dev = src_blocks_list[j]
                     chunk = local_len // num_splits
                     handle.append((addr + slot * chunk, chunk, dev))
             yield handle
