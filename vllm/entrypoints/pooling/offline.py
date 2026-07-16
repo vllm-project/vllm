@@ -25,6 +25,7 @@ from .factories import init_pooling_io_processors
 from .scoring.io_processor import ScoringIOProcessor
 from .scoring.typing import ScoreInput
 from .typing import (
+    ALLOfflineInputsContext,
     OfflineEncodeInputsContext,
     OfflineOutputsContext,
     OfflinePluginInputsContext,
@@ -103,10 +104,11 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
 
         io_processor = self.pooling_io_processors[pooling_task]
 
+        ctx: ALLOfflineInputsContext
         if isinstance(prompts, dict) and "data" in prompts:
             ctx = OfflinePluginInputsContext(
                 pooling_task=pooling_task,
-                prompts=prompts,
+                prompts=prompts,  # type: ignore[arg-type]
                 tokenization_kwargs=tokenization_kwargs,
                 pooling_params=pooling_params,
                 lora_request=lora_request,
