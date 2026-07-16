@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import inspect
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -54,6 +56,11 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
             hidden_size=self.hidden_size,
             dispatch_dtype_bytes_per_elem=dispatch_dtype_bytes_per_elem,
             dispatch_scale_bytes_per_token=dispatch_scale_bytes_per_token,
+        )
+        moe_alltoall = self.all2all_manager.moe_alltoall  # type: ignore[attr-defined]
+        assert moe_alltoall is not None
+        self._combine_supports_output = (
+            "output" in inspect.signature(moe_alltoall.combine).parameters
         )
 
     @property
@@ -161,8 +168,15 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
             ep_size, self.runtime_max_tokens_per_rank, hidden_size
         )
 
-        self.all2all_manager.moe_alltoall.combine(  # type: ignore[attr-defined]
-            payload=fused_expert_output,
-            runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
-            output=output,
-        )
+        if self._combine_supports_output:
+            self.all2all_manager.moe_alltoall.combine(  # type: ignore[attr-defined]
+                payload=fused_expert_output,
+                runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
+                output=output,
+            )
+        else:
+            combined_output = self.all2all_manager.moe_alltoall.combine(  # type: ignore[attr-defined]
+                payload=fused_expert_output,
+                runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
+            )
+            output.copy_(combined_output)
