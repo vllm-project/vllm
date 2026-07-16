@@ -262,7 +262,6 @@ def _pack_seq_kernel(
     x_ptr,  # [N, D]
     out_ptr,  # [B, Lmax, D]
     lengths_ptr,  # *i32, [B]
-    N: tl.constexpr,
     D: tl.constexpr,
     Lmax: tl.constexpr,
     PAD_VALUE: tl.constexpr,
@@ -366,7 +365,6 @@ def pack_seq_triton(
         x_reshaped,
         out,
         lengths.int(),
-        N,
         D,
         Lmax,
         PAD_VALUE=pad_constexpr,
@@ -388,7 +386,6 @@ def _unpack_seq_triton_kernel(
     packed_ptr,  # [B, Lmax, D]
     out_ptr,  # [N, D]
     lengths_ptr,  # *i32, [B]
-    B: tl.constexpr,
     Lmax: tl.constexpr,
     D: tl.constexpr,
     BLOCK_T: tl.constexpr,  # timesteps per program
@@ -466,7 +463,6 @@ def unpack_seq_triton(
         packed_reshaped,
         out,
         lengths.int(),
-        B,
         Lmax,
         D,
         BLOCK_T=block_t,
