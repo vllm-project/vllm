@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility methods for model layers."""
 
+import functools
 from collections.abc import Callable
 
 import torch
@@ -11,6 +12,10 @@ from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.utils.flashinfer import (
+    flashinfer_bf16_mm_impl,
+    is_flashinfer_bf16_gemm_supported,
+)
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -96,6 +101,75 @@ def default_unquantized_gemm(
     bias: torch.Tensor | None = None,
 ):
     return torch.nn.functional.linear(x, weight, bias)
+
+
+def cuda_flashinfer_bf16_gemm_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    pdl: bool = False,
+) -> torch.Tensor:
+    """Route an unquantized BF16 matmul through FlashInfer's ``mm_bf16``.
+
+    Unsupported dtype/device combinations fail explicitly instead of silently
+    mixing model backends.
+    """
+    if x.dim() == 0 or weight.dim() != 2:
+        return torch.nn.functional.linear(x, weight, bias)
+
+    K = x.shape[-1]
+    M = x.numel() // K if K > 0 else 0
+    N = weight.shape[0]
+    bias_ok = bias is None or (
+        bias.dtype == torch.bfloat16
+        and bias.is_cuda
+        and bias.device == x.device
+        and bias.dim() == 1
+        and bias.shape[0] == N
+    )
+    if (
+        x.dtype != torch.bfloat16
+        or weight.dtype != torch.bfloat16
+        or not x.is_cuda
+        or not weight.is_cuda
+        or weight.device != x.device
+        or M == 0
+        or N == 0
+        or K == 0
+        or not bias_ok
+    ):
+        logger.warning_once("Using default unquantized gemm (torch).")
+        return torch.nn.functional.linear(x, weight, bias)
+
+    x_2d = x.reshape(M, K)
+    out_2d = flashinfer_bf16_mm_impl(x_2d, weight.t(), bias, pdl)
+    return out_2d.reshape(*x.shape[:-1], N)
+
+
+def cuda_flashinfer_bf16_gemm_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    pdl: bool = False,
+) -> torch.Tensor:
+    return x.new_empty((*x.shape[:-1], weight.shape[0]), dtype=torch.bfloat16)
+
+
+def cuda_flashinfer_bf16_gemm(
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    pdl: bool = False,
+) -> torch.Tensor:
+    return torch.ops.vllm.cuda_flashinfer_bf16_gemm(x, weight, bias, pdl)
+
+
+direct_register_custom_op(
+    op_name="cuda_flashinfer_bf16_gemm",
+    op_func=cuda_flashinfer_bf16_gemm_impl,
+    fake_impl=cuda_flashinfer_bf16_gemm_fake,
+)
 
 
 def use_aiter_triton_gemm(n, m, k, dtype):
@@ -335,10 +409,58 @@ def cpu_unquantized_gemm(
     return layer.cpu_linear(x, weight, bias)
 
 
-def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
+def _get_bf16_linear_config() -> tuple[str, bool]:
+    """Read the BF16 linear settings from the active VllmConfig.
+
+    Returns the Torch backend with PDL disabled when there is no active
+    VllmConfig, e.g. during unit tests that don't set up an engine.
+    """
+    try:
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+
+    except (AssertionError, AttributeError, ImportError):
+        return "torch", False
+
+    if vllm_config is None or vllm_config.kernel_config is None:
+        return "torch", False
+
+    kernel_config = vllm_config.kernel_config
+    backend = kernel_config.bf16_linear_backend
+    if backend == "torch":
+        return "torch", False
+
+    if not is_flashinfer_bf16_gemm_supported():
+        logger.warning_once(
+            "FlashInfer mm_bf16 is unavailable or unsupported; falling back to torch."
+        )
+        return "torch", False
+
+    return backend, kernel_config.enable_bf16_pdl
+
+
+def select_unquantized_gemm_impl() -> Callable[..., torch.Tensor]:
     if current_platform.is_rocm():
-        return rocm_unquantized_gemm
+        gemm_impl = rocm_unquantized_gemm
+        gemm_name = "rocm_unquantized_gemm"
     elif current_platform.is_cpu():
-        return cpu_unquantized_gemm
+        gemm_impl = cpu_unquantized_gemm
+        gemm_name = "cpu_unquantized_gemm"
     else:
-        return default_unquantized_gemm
+        bf16_linear_backend, enable_bf16_pdl = _get_bf16_linear_config()
+        if bf16_linear_backend == "torch":
+            gemm_impl = default_unquantized_gemm
+            gemm_name = "torch_linear"
+        else:
+            gemm_impl = functools.partial(
+                cuda_flashinfer_bf16_gemm,
+                pdl=enable_bf16_pdl,
+            )
+            gemm_name = f"flashinfer_bf16_gemm(pdl={enable_bf16_pdl})"
+
+    logger.info_once(
+        "Bound %s for unquantized GEMMs.",
+        gemm_name,
+    )
+    return gemm_impl

@@ -162,6 +162,12 @@ LinearBackend = Literal[
 ]
 
 
+BF16LinearBackend = Literal[
+    "torch",
+    "flashinfer",
+]
+
+
 @config
 class KernelConfig:
     """Configuration for kernel selection and warmup behavior."""
@@ -177,6 +183,16 @@ class KernelConfig:
 
     enable_cutedsl_warmup: bool = True
     """If True, run CuTeDSL compile warmup during kernel warmup."""
+
+    bf16_linear_backend: BF16LinearBackend = "torch"
+    """Backend for unquantized BF16 GEMMs
+    Available options:
+    - "torch": Use torch.nn.functional.linear
+    - "flashinfer": Use FlashInfer mm_bf16 with autotuned backend selection
+    """
+
+    enable_bf16_pdl: bool = False
+    """Whether to enable Programmatic Dependent Launch for FlashInfer BF16 GEMMs."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
@@ -235,6 +251,13 @@ class KernelConfig:
     @field_validator("linear_backend", mode="before")
     @classmethod
     def _normalize_linear_backend(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.lower().replace("-", "_")
+        return value
+
+    @field_validator("bf16_linear_backend", mode="before")
+    @classmethod
+    def _normalize_bf16_linear_backend(cls, value: Any) -> Any:
         if isinstance(value, str):
             return value.lower().replace("-", "_")
         return value

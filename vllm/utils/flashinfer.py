@@ -24,6 +24,31 @@ from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
+
+def flashinfer_bf16_mm_impl(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    bias: torch.Tensor | None,
+    pdl: bool = False,
+) -> torch.Tensor:
+    """Execute BF16 GEMM without entering another Torch custom op.
+
+    The model-level ``cuda_flashinfer_bf16_gemm`` op calls this implementation
+    directly. Keeping exactly one custom-op boundary matches the FP4 path and
+    avoids a second dispatcher invocation for every linear layer.
+    """
+    from flashinfer import mm_bf16
+
+    return mm_bf16(
+        A,
+        B,
+        bias=bias,
+        pdl=pdl,
+        out_dtype=torch.bfloat16,
+        backend="auto",
+    )
+
+
 # This is the storage path for the cubins, it can be replaced
 # with a local path for testing.
 # Referenced from https://github.com/flashinfer-ai/flashinfer/blob/0c9a92c3d9a7e043ab6f3f7b2273269caf6ab044/flashinfer/jit/cubin_loader.py#L35  # noqa: E501
@@ -278,6 +303,41 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
         if not mod or not hasattr(mod, attr_name):
             return False
     return True
+
+
+@functools.cache
+def has_flashinfer_bf16_gemm() -> bool:
+    """Return `True` if FlashInfer BF16 dense GEMM is available."""
+    if not has_flashinfer():
+        return False
+
+    mod = _get_submodule("flashinfer")
+    return callable(getattr(mod, "mm_bf16", None)) if mod else False
+
+
+@functools.cache
+def is_flashinfer_bf16_gemm_supported(
+    compute_capability: int | None = None,
+) -> bool:
+    """Return whether FlashInfer BF16 GEMM auto backend is usable."""
+    if not current_platform.is_cuda() or not has_flashinfer_bf16_gemm():
+        return False
+
+    mod = _get_submodule("flashinfer")
+    mm_bf16 = getattr(mod, "mm_bf16", None) if mod else None
+    if mm_bf16 is None or not hasattr(mm_bf16, "is_compute_capability_supported"):
+        return False
+
+    if compute_capability is None:
+        device_capability = current_platform.get_device_capability()
+        if device_capability is None:
+            return False
+        compute_capability = device_capability.to_int()
+
+    try:
+        return mm_bf16.is_compute_capability_supported(compute_capability)
+    except Exception:
+        return False
 
 
 @functools.cache
@@ -741,6 +801,31 @@ if has_flashinfer():
         return torch.empty(A.shape[0], B.shape[1], dtype=out_dtype, device=A.device)
 
 
+def flashinfer_bf16_mm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    pdl: bool = False,
+) -> torch.Tensor:
+    """Dense BF16 MM helper for FlashInfer kernels.
+
+    `a` is expected to be row-major [M, K] and `b` column-major [K, N].
+    FlashInfer's autotuner selects the concrete backend internally.
+    """
+    assert a.ndim == 2 and b.ndim == 2
+    assert a.shape[1] == b.shape[0]
+    assert a.dtype == torch.bfloat16 and b.dtype == torch.bfloat16
+    assert a.device.type == "cuda" and b.device.type == "cuda"
+    assert a.device == b.device
+    assert a.stride(-1) == 1 and b.stride(0) == 1
+    if bias is not None:
+        assert bias.shape == (b.shape[1],)
+        assert bias.dtype == torch.bfloat16
+        assert bias.device == a.device
+
+    return flashinfer_bf16_mm_impl(a, b, bias, pdl)
+
+
 def flashinfer_mm_mxfp8(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -1049,6 +1134,9 @@ __all__ = [
     "supports_trtllm_attention",
     "can_use_trtllm_attention",
     "use_trtllm_attention",
+    "has_flashinfer_bf16_gemm",
+    "is_flashinfer_bf16_gemm_supported",
+    "flashinfer_bf16_mm",
     "flashinfer_mxfp4_quantize",
     "flashinfer_scaled_fp4_mm",
     "flashinfer_scaled_fp4_mm_out",
