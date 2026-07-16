@@ -88,7 +88,15 @@ def load_reward_outputs(filename: "StrPath") -> list[list[float]]:
     [
         pytest.param(
             "Qwen/Qwen2.5-Math-PRM-7B",
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+            marks=[
+                pytest.mark.core_model,
+                pytest.mark.cpu_model,
+                pytest.mark.skipif(
+                    current_platform.is_zen_cpu(),
+                    reason="Qwen2.5-Math-PRM-7B is currently not supported on\
+                        AMD Zen CPUs due to lack of support for float16 compute.",
+                )
+            ],
         ),
     ],
 )
@@ -131,7 +139,15 @@ def test_prm_models(
     [
         pytest.param(
             "Qwen/Qwen2.5-Math-PRM-7B",
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+            marks=[
+                pytest.mark.core_model,
+                pytest.mark.cpu_model,
+                pytest.mark.skipif(
+                    current_platform.is_zen_cpu(),
+                    reason="Qwen2.5-Math-PRM-7B is currently not supported on\
+                        AMD Zen CPUs due to lack of support for float16 compute.",
+                )
+            ],
         ),
     ],
 )
