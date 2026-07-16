@@ -656,7 +656,11 @@ class SamplingParams(
                     eos_ids.update(self.stop_token_ids)
                     self.stop_token_ids = list(eos_ids)
 
-    def update_from_tokenizer(self, tokenizer: TokenizerLike) -> None:
+    def update_from_tokenizer(
+        self,
+        tokenizer: TokenizerLike,
+        model_config: ModelConfig | None = None,
+    ) -> None:
         if not self.bad_words:
             return
         self._bad_words_token_ids = []
@@ -680,19 +684,30 @@ class SamplingParams(
                 ):
                     self._bad_words_token_ids.append(prompt_token_ids)
 
+        # Validate against the model's output vocabulary (logits width) when
+        # available; fall back to the tokenizer vocabulary otherwise.
+        # Multimodal tokenizers can contain input-only placeholder tokens
+        # (e.g. <|audio|>) whose IDs fall outside the generation logits.
+        if model_config is not None:
+            vocab_size = model_config.get_vocab_size()
+            max_valid_id = vocab_size - 1
+        else:
+            vocab_size = tokenizer.max_token_id + 1
+            max_valid_id = tokenizer.max_token_id
+
         invalid_token_ids = [
             token_id
             for bad_words_token_ids in self._bad_words_token_ids
             for token_id in bad_words_token_ids
-            if token_id < 0 or token_id > tokenizer.max_token_id
+            if token_id < 0 or token_id > max_valid_id
         ]
         if len(invalid_token_ids) > 0:
             raise VLLMValidationError(
-                f"The model vocabulary size is {tokenizer.max_token_id + 1},"
+                f"The model vocabulary size is {vocab_size},"
                 f" but the following tokens"
                 f" were specified as bad: {invalid_token_ids}."
                 f" All token id values should be integers satisfying:"
-                f" 0 <= token_id <= {tokenizer.max_token_id}.",
+                f" 0 <= token_id <= {max_valid_id}.",
                 parameter="bad_words",
                 value=self.bad_words,
             )

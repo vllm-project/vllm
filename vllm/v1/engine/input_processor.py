@@ -325,7 +325,7 @@ class InputProcessor:
                 self.renderer.get_eos_token_id(),
             )
             if self.tokenizer is not None:
-                sampling_params.update_from_tokenizer(self.tokenizer)
+                sampling_params.update_from_tokenizer(self.tokenizer, self.model_config)
         else:
             pooling_params = params.clone()
 
