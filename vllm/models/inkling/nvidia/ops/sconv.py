@@ -19,10 +19,10 @@ why this needs no decode-vs-prefill split and is valid for prefill / decode /
 spec alike.
 
 All kernels address the cache purely by ``(slot, absolute_position)`` and
-  allocate nothing inside the captured region; their grids depend only on the
-  token count (``fused_sconv`` on a fixed token/channel tiling), so the same
- decode path replays correctly under a full CUDA graph without any
- data-dependent shape or branch.
+allocate nothing inside the captured region; their grids depend only on the
+token count (``fused_sconv`` on a fixed token/channel tiling), so the same
+decode path replays correctly under a full CUDA graph without any
+data-dependent shape or branch.
 """
 
 from __future__ import annotations

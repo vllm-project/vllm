@@ -24,7 +24,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
-    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
 )
@@ -124,7 +123,6 @@ class InklingDecoderLayer(nn.Module):
         quant_config: QuantizationConfig | None,
         prefix: str,
         nvfp4_config: InklingNvfp4Config | None = None,
-        force_dense_mlp: bool = False,
     ) -> None:
         super().__init__()
         # Per-layer owner of the conv state as a paged SWA cache. The 4 sconv
@@ -163,7 +161,7 @@ class InklingDecoderLayer(nn.Module):
             conv_owner=self.conv_state,
         )
         self.mlp_norm = InklingRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        if force_dense_mlp or layer_id < config.dense_mlp_idx:
+        if layer_id < config.dense_mlp_idx:
             self.mlp: nn.Module = InklingDenseMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.dense_intermediate_size,
@@ -201,12 +199,9 @@ class InklingDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         pending: tuple[torch.Tensor | None, InklingShortConv] | None = None,
-        defer_mlp_add: bool = False,
         attn_in: torch.Tensor | None = None,
         log_scaling: torch.Tensor | None = None,
-    ) -> (
-        torch.Tensor | tuple[torch.Tensor, tuple[torch.Tensor | None, InklingShortConv]]
-    ):
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, InklingShortConv]]:
         # The previous sublayer's (pre-reduce, pre-sconv) delta is folded in
         # fused with its RS/sconv/AG and this layer's pre-attention rmsnorm.
         # A None delta means the partials sit in the NVLS symm buffer.
@@ -224,26 +219,19 @@ class InklingDecoderLayer(nn.Module):
             attn_output, hidden_states, self.attn_sconv, self.mlp_norm, positions
         )
         mlp_output = self.mlp(mlp_in)
-        if defer_mlp_add:
-            # Caller folds mlp_output (pre-reduce, pre-sconv) into the next
-            # fused sconv+add+rmsnorm.
-            return hidden_states, (mlp_output, self.mlp_sconv)
-        # Standalone (MTP) tail: finish the sublayer without a norm.
-        return _sconv_add_norm(
-            mlp_output, hidden_states, self.mlp_sconv, None, positions
-        )[1]
+        # The caller folds mlp_output (pre-reduce, pre-sconv) into the next
+        # fused sconv+add+rmsnorm.
+        return hidden_states, (mlp_output, self.mlp_sconv)
 
 
 class InklingReplicatedEmbedding(nn.Module):
     """Full-vocab embedding table replicated on every TP rank.
 
     Trades the full table per rank (~2.3 GiB at V=201k / H=6144 bf16, vs a
-    1/tp shard) for no masked lookup and no per-lookup TP all-reduce — one
-    all-reduce per MTP draft step plus one per verify pass — and keeps the
-    full table on-rank for the fused gather+norm kernels (``embed_rmsnorm``,
-    ``embed_dual_rmsnorm_cat``). Bit-exact vs vocab-parallel: the all-reduce
-    there only ever summed one real row against exact zeros. The LM head
-    stays vocab-sharded.
+    1/tp shard) for no masked lookup or per-lookup TP all-reduce, and keeps the
+    full table on-rank for the fused gather+norm kernel. Bit-exact vs
+    vocab-parallel: the all-reduce there only ever summed one real row against
+    exact zeros. The LM head stays vocab-sharded.
     """
 
     def __init__(self, num_embeddings: int, embedding_dim: int) -> None:
@@ -342,7 +330,6 @@ class InklingModel(nn.Module):
                 positions,
                 hidden_states,
                 pending=pending,
-                defer_mlp_add=True,
                 attn_in=attn_in0,
                 log_scaling=log_scaling,
             )
@@ -364,7 +351,7 @@ class InklingModel(nn.Module):
         return self.norm(hidden_states)
 
 
-class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
+class _TmlForCausalLMBase(nn.Module, SupportsPP):
     """Shared text-backbone causal-LM scaffolding for both entry classes."""
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -384,12 +371,6 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
             "model.llm.embed": "model.embed_tokens",
             "model.llm.norm": "model.norm",
             "model.llm.unembed": "lm_head",
-            # LoRA adapter keys use the `language_model.` backbone prefix;
-            # map them to the vLLM module paths so the adapter's tensors match
-            # the wrapped modules (otherwise the whole adapter is silently
-            # dropped — keys never match `model.*`).
-            "language_model.layers.": "model.layers.",
-            "language_model.lm_head.": "lm_head.",
         },
         orig_to_new_suffix={
             # NVFP4 scale
@@ -399,18 +380,6 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
             ".w2_weight.scale2": ".w2_weight_scale_2",
         },
     )
-    # The checkpoint's four attention projections are fused into `qkvr`
-    # (MergedColumnParallelLinear, 4 slices); the adapter keeps them split.
-    # `qkvr`: the 4 fused attention projections. `w13`: the sink experts'
-    # MergedColumnParallelLinear (gate|up), packed from the adapter's
-    # `shared_experts.w1` (gate) + `shared_experts.w3` (up).
-    packed_modules_mapping = {
-        "qkvr": ["wq_du", "wk_dv", "wv_dv", "wr_du"],
-        "w13": ["w1", "w3"],
-    }
-    embedding_modules = {
-        "lm_head": "output_embeddings",
-    }
 
     def _build(
         self,
@@ -633,8 +602,7 @@ class InklingForConditionalGeneration(_TmlForCausalLMBase, SupportsMultiModal):
     def get_language_model(self) -> nn.Module:
         # This class IS the causal LM (the towers are side branches), so the
         # language model is self — callers expect a module exposing ``.model``
-        # / ``.lm_head`` (e.g. the MTP/eagle loader shares embeddings via
-        # ``get_language_model().model.embed_tokens``).
+        # and ``.lm_head``.
         return self
 
 

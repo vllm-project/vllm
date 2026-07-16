@@ -55,8 +55,6 @@ class InklingDenseMLP(nn.Module):
         from .ops import silu_and_mul_triton
 
         gate_up, _ = self.gate_up_proj(x)
-        # Keep both projections on their module forward paths so LoRA wrappers
-        # contribute their deltas.
         x = silu_and_mul_triton(gate_up)
         x, _ = self.down_proj(x)
         if self.global_scale is not None:
