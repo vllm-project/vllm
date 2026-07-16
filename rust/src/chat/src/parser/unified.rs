@@ -42,7 +42,8 @@ impl UnifiedParserFactory {
 
         factory
             .register_pattern("gemma-4", names::GEMMA4)
-            .register_pattern("gemma4", names::GEMMA4);
+            .register_pattern("gemma4", names::GEMMA4)
+            .register_pattern("inkling", names::INKLING);
 
         factory
     }
@@ -90,6 +91,13 @@ mod tests {
             .with_regular_token("<channel|>", 257)
     }
 
+    fn inkling_tokenizer() -> TestTokenizer {
+        TestTokenizer::new()
+            .with_regular_token("<|message_model|>", 200001)
+            .with_regular_token("<|content_text|>", 200004)
+            .with_regular_token("<|content_thinking|>", 200008)
+    }
+
     #[test]
     fn factory_registers_gemma4() {
         let factory = UnifiedParserFactory::new();
@@ -100,5 +108,17 @@ mod tests {
             Some(names::GEMMA4)
         );
         factory.create(names::GEMMA4, &[], Arc::new(tokenizer())).unwrap();
+    }
+
+    #[test]
+    fn factory_registers_inkling() {
+        let factory = UnifiedParserFactory::new();
+
+        assert!(factory.contains(names::INKLING));
+        assert_eq!(
+            factory.resolve_name_for_model("thinkingmachines/Inkling"),
+            Some(names::INKLING)
+        );
+        factory.create(names::INKLING, &[], Arc::new(inkling_tokenizer())).unwrap();
     }
 }
