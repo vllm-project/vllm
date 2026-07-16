@@ -55,8 +55,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         # the anchor as the bonus token (only mask tokens predict); DSpark samples from
         # the anchor and the N-1 mask token positions. See _prepare_dflash_inputs_kernel
         dflash_config = (
-            getattr(self.draft_model_config.hf_config, "dflash_config", None)
-            or {}
+            getattr(self.draft_model_config.hf_config, "dflash_config", None) or {}
         )
         if dflash_config.get("sample_from_anchor", False):
             raise ValueError(
