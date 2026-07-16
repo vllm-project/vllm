@@ -12,7 +12,6 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.async_utils import stream
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
@@ -20,7 +19,6 @@ from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.attn_utils import AttentionCGSupportInfo
     from vllm.v1.worker.gpu.input_batch import InputBatch
     from vllm.v1.worker.gpu.states import RequestState
 
@@ -108,11 +106,10 @@ def build_cost_tables_from_curves(
 
 
 class AdaptiveVerificationManager:
-    varlen_spec_decode = False
-
     def __init__(
         self,
         req_states: "RequestState",
+        query_start_loc: torch.Tensor,
         num_bonus_tokens: int,
     ):
         self.req_states = req_states
@@ -121,6 +118,7 @@ class AdaptiveVerificationManager:
         self._copy_stream = torch.cuda.Stream(device)
 
         self.num_bonus_tokens = num_bonus_tokens
+        self.query_start_loc = query_start_loc
         self.cost_tables: tuple[np.ndarray, np.ndarray] | None = None
         self._batch_budget: tuple[dict[str, int], dict[str, int], int] | None = None
         max_num_reqs = req_states.max_num_reqs
@@ -132,11 +130,8 @@ class AdaptiveVerificationManager:
         self._batch_draft_capacity = torch.empty(
             max_num_reqs, dtype=torch.int32, device=device
         )
-        self._draft_steps_arange = torch.arange(
-            self.num_speculative_steps,
-            dtype=torch.int64,
-            device=device,
-        )
+        self._num_non_draft_tokens = torch.empty_like(query_start_loc[:-1])
+        self._cu_num_logits = torch.empty_like(query_start_loc)
 
         # Two D2H slots preserve stale inputs for budget selection.
         self._staged_probs = [
@@ -233,9 +228,7 @@ class AdaptiveVerificationManager:
             has_structured_output_requests,
         )
         _, num_non_draft_tokens_per_req, draft_budget = self._batch_budget
-        if self.varlen_spec_decode:
-            return sum(num_non_draft_tokens_per_req.values()) + draft_budget, None
-        return sum(num_tokens_per_req.values()), uniform_tok_count
+        return sum(num_non_draft_tokens_per_req.values()) + draft_budget, None
 
     def _compute_budget(
         self,
@@ -347,39 +340,39 @@ class AdaptiveVerificationManager:
         return capacities, num_non_draft_tokens, draft_budget
 
     def compact_batch(
-        self, req_ids: list[str], idx_mapping: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, int]:
-        raise NotImplementedError
-
-    def mask_batch(self, input_batch: "InputBatch") -> None:
-        pass
-
-
-class VarlenAdaptiveVerificationManager(AdaptiveVerificationManager):
-    varlen_spec_decode = True
-
-    def __init__(
         self,
-        req_states: "RequestState",
-        query_start_loc: torch.Tensor,
-        num_bonus_tokens: int,
-    ):
-        super().__init__(
-            req_states,
-            num_bonus_tokens,
-        )
-        self.query_start_loc = query_start_loc
-        self._num_non_draft_tokens = torch.empty_like(query_start_loc[:-1])
-        self._cu_num_logits = torch.empty_like(query_start_loc)
+        num_draft_tokens_per_req: np.ndarray,
+        num_scheduled_tokens: np.ndarray,
+    ) -> np.ndarray:
+        batch_budget = self._batch_budget
+        assert batch_budget is not None
+        _, _, draft_budget = batch_budget
+        num_drafts = int(num_draft_tokens_per_req.sum())
+        if draft_budget == num_drafts:
+            return num_scheduled_tokens
 
-    def compact_batch(
+        num_non_draft_tokens = num_scheduled_tokens - num_draft_tokens_per_req
+        is_verification_request = num_draft_tokens_per_req > 0
+        num_verification_reqs = int(is_verification_request.sum())
+        # sort_batch_req_ids keeps verification requests at the front.
+        assert np.all(is_verification_request[:num_verification_reqs])
+        # for the CPU side buffer we distribute draft tokens evenly
+        draft_lens_cpu = np.zeros_like(num_non_draft_tokens)
+        draft_lens_cpu[:num_verification_reqs] = draft_budget // num_verification_reqs
+        draft_lens_cpu[: draft_budget % num_verification_reqs] += 1
+        return num_non_draft_tokens + draft_lens_cpu
+
+    def reallocate_drafts(
         self, req_ids: list[str], idx_mapping: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
         capacities, num_non_draft_tokens, draft_budget = (
             self.allocate_draft_token_budget(req_ids, idx_mapping)
         )
+
         num_reqs = idx_mapping.shape[0]
-        num_tokens = int(num_non_draft_tokens.sum()) + draft_budget
+        num_non_draft_tokens_total = int(num_non_draft_tokens.sum())
+        num_tokens = num_non_draft_tokens_total + draft_budget
+
         num_non_draft_tokens_gpu = self._num_non_draft_tokens[:num_reqs]
         async_copy_to_gpu(
             num_non_draft_tokens,
@@ -405,54 +398,16 @@ class VarlenAdaptiveVerificationManager(AdaptiveVerificationManager):
         )
 
 
-class MaskedAdaptiveVerificationManager(AdaptiveVerificationManager):
-    def mask_batch(self, input_batch: "InputBatch") -> None:
-        scheduled_drafts = input_batch.num_draft_tokens_per_req
-        if scheduled_drafts is None:
-            self._batch_draft_capacity[: input_batch.num_reqs].zero_()
-            return
-        capacities, _, _ = self.allocate_draft_token_budget(
-            input_batch.req_ids, input_batch.idx_mapping
-        )
-        query_ends = input_batch.query_start_loc[1 : input_batch.num_reqs + 1]
-        num_logits = input_batch.cu_num_logits[1:] - input_batch.cu_num_logits[:-1]
-        prune_starts = query_ends - num_logits + self.num_bonus_tokens + capacities
-        token_indices = prune_starts[:, None] + self._draft_steps_arange
-        pruned = token_indices < query_ends[:, None]
-        token_indices.masked_fill_(~pruned, 0)
-        input_batch.is_padding.scatter_(0, token_indices.flatten(), pruned.flatten())
-        input_batch.input_ids[: input_batch.is_padding.shape[0]].masked_fill_(
-            input_batch.is_padding, 0
-        )
-
-
 def make_adaptive_verification_manager(
     mode: str,
-    attn_cg_support: "AttentionCGSupportInfo",
     req_states: "RequestState",
     query_start_loc: torch.Tensor,
     num_bonus_tokens: int,
 ) -> AdaptiveVerificationManager:
     if mode == "auto":
-        if attn_cg_support.min_cg_support == AttentionCGSupport.ALWAYS:
-            mode = "varlen"
-        else:
-            logger.info_once(
-                "Using masked confidence-based verification because %s "
-                "reports CUDA graph support %s.",
-                attn_cg_support.min_cg_attn_backend,
-                attn_cg_support.min_cg_support.name,
-            )
-            mode = "mask"
-    if mode == "varlen":
-        return VarlenAdaptiveVerificationManager(
+        return AdaptiveVerificationManager(
             req_states,
             query_start_loc,
-            num_bonus_tokens,
-        )
-    if mode == "mask":
-        return MaskedAdaptiveVerificationManager(
-            req_states,
             num_bonus_tokens,
         )
     raise ValueError(f"Unknown confidence-based verification mode: {mode}")

@@ -3,7 +3,6 @@
 
 import copy
 import functools
-import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
@@ -75,7 +74,7 @@ SpeculativeMethod = Literal[
 ]
 RejectionSampleMethod = Literal["standard", "synthetic", "block"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
-ConfidenceBasedVerification = Literal["none", "off", "auto", "mask"]
+ConfidenceBasedVerification = Literal["none", "off", "auto"]
 
 
 @config
@@ -233,9 +232,8 @@ class SpeculativeConfig:
     Mutually exclusive with synthetic_acceptance_rates."""
 
     dspark_enable_confidence_based_verification: ConfidenceBasedVerification = "auto"
-    """Confidence-based verification mode. ``"auto"`` uses compact
-    verification when supported and otherwise falls back to masking;
-    ``"mask"`` always masks pruned tokens and ``"none"``/``"off"`` disable it."""
+    """Confidence-based verification mode. ``"auto"`` enables compact
+    verification and ``"none"``/``"off"`` disable it."""
 
     @property
     def use_confidence_based_verification(self) -> bool:
@@ -1205,18 +1203,6 @@ class SpeculativeConfig:
                 "synthetic_acceptance_rates / synthetic_acceptance_length "
                 "are only valid with rejection_sample_method='synthetic'."
             )
-
-        if (
-            self.use_confidence_based_verification
-            and "VLLM_MOE_SKIP_PADDING" not in os.environ
-        ):
-            # Set before spawning workers so masked rows can skip MoE work.
-            logger.info(
-                "Confidence-based verification: defaulting "
-                "VLLM_MOE_SKIP_PADDING=1 so MoE kernels can skip masked "
-                "verification rows."
-            )
-            os.environ["VLLM_MOE_SKIP_PADDING"] = "1"
 
         if self.draft_model_config:
             self.draft_model_config.verify_with_parallel_config(

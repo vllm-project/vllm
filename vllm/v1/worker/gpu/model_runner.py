@@ -453,7 +453,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ):
             self.adaptive_verification = make_adaptive_verification_manager(
                 self.speculative_config.dspark_enable_confidence_based_verification,
-                attn_cg_support,
                 self.req_states,
                 self.input_buffers.query_start_loc,
                 self.model_state.num_new_sampled_tokens_per_step,
@@ -472,6 +471,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config, self.kv_cache_config
         )
+        if self.adaptive_verification is not None:
+            self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
         cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
             attn_cg_support.min_cg_support,
             attn_cg_support.min_cg_attn_backend,
@@ -487,10 +488,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cudagraph_mode,
             decode_query_len=self.decode_query_len,
             lora_capture_cases=self.lora_capture_cases,
-            adaptive_verification=(
-                self.adaptive_verification is not None
-                and self.adaptive_verification.varlen_spec_decode
-            ),
+            adaptive_verification=self.adaptive_verification is not None,
             time_graphs=self.adaptive_verification is not None,
         )
         if self.speculator is not None:
@@ -896,10 +894,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> InputBatch:
         num_tokens_after_padding = batch_desc.num_tokens
         assert num_tokens > 0
-        uses_padding_mask = envs.VLLM_MOE_SKIP_PADDING or (
-            self.adaptive_verification is not None
-            and not self.adaptive_verification.varlen_spec_decode
-        )
+        uses_padding_mask = envs.VLLM_MOE_SKIP_PADDING
         if uses_padding_mask or self.num_speculative_steps > 0:
             self.input_buffers.is_padding[:num_tokens].fill_(False)
         if uses_padding_mask:
@@ -910,7 +905,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_reqs = len(num_tokens_per_req)
 
         # batch_idx -> req_id
-        req_ids = sort_batch_req_ids(num_tokens_per_req, self.decode_query_len)
+        draft_tokens = scheduler_output.scheduled_spec_decode_tokens
+        num_drafts_per_req = {
+            req_id: len(tokens) for req_id, tokens in draft_tokens.items()
+        }
+        req_ids = sort_batch_req_ids(
+            num_tokens_per_req, num_drafts_per_req, self.decode_query_len
+        )
         numtoks_iter = map(num_tokens_per_req.get, req_ids)
         num_scheduled_tokens = np.fromiter(numtoks_iter, dtype=np.int32, count=num_reqs)
 
@@ -919,7 +920,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
 
         # Get the number of draft tokens for each request.
-        draft_tokens = scheduler_output.scheduled_spec_decode_tokens
         num_draft_tokens_per_req = None
         if not draft_tokens:
             # No draft token scheduled (common case).
@@ -935,7 +935,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
         else:
             num_draft_tokens_per_req = np.fromiter(
-                (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
+                (num_drafts_per_req.get(req_id, 0) for req_id in req_ids),
                 dtype=np.int32,
                 count=num_reqs,
             )
@@ -947,6 +947,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits_np[0] = 0
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
             cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
+
+        if (
+            self.adaptive_verification is not None
+            and num_draft_tokens_per_req is not None
+        ):
+            num_scheduled_tokens = self.adaptive_verification.compact_batch(
+                num_draft_tokens_per_req,
+                num_scheduled_tokens,
+            )
 
         # Get query_start_loc.
         # num_reqs_padded is None for PIECEWISE graphs (no request padding needed)
@@ -961,11 +970,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
         if (
             self.adaptive_verification is not None
-            and self.adaptive_verification.varlen_spec_decode
             and num_draft_tokens_per_req is not None
         ):
             cu_num_logits, query_start_loc, total_num_draft_tokens = (
-                self.adaptive_verification.compact_batch(req_ids, idx_mapping)
+                self.adaptive_verification.reallocate_drafts(req_ids, idx_mapping)
             )
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
         if draft_tokens:
@@ -1083,8 +1091,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             has_structured_output_reqs=scheduler_output.has_structured_output_requests,
             prompt_lens=prompt_lens,
         )
-        if self.adaptive_verification is not None:
-            self.adaptive_verification.mask_batch(input_batch)
         return input_batch
 
     def prepare_attn(
@@ -1102,13 +1108,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
             input_batch.positions,
             num_tokens_padded=input_batch.num_tokens_after_padding,
-            is_padding=input_batch.is_padding
-            if envs.VLLM_MOE_SKIP_PADDING
-            or (
-                self.adaptive_verification is not None
-                and not self.adaptive_verification.varlen_spec_decode
-            )
-            else None,
+            is_padding=input_batch.is_padding if envs.VLLM_MOE_SKIP_PADDING else None,
         )
         return block_tables, slot_mappings
 
@@ -1702,9 +1702,15 @@ class ExecuteModelState(NamedTuple):
 
 
 def sort_batch_req_ids(
-    num_tokens_per_req: dict[str, int], decode_query_len: int
+    num_tokens_per_req: dict[str, int],
+    num_drafts_per_req: dict[str, int],
+    decode_query_len: int,
 ) -> list[str]:
-    # Order decode -> short_extend -> prefill; split_decodes_and_prefills
-    # relies on uniform decodes (query_len == decode_query_len) leading.
-    key = lambda r: ((num := num_tokens_per_req[r]) != decode_query_len, num)
+    # Order verification/decode -> short_extend -> prefill;
+    # split_decodes_and_prefills relies on decode-like requests leading.
+    key = lambda r: (
+        not bool(num_drafts_per_req.get(r, 0)),
+        (num := num_tokens_per_req[r]) != decode_query_len,
+        num,
+    )
     return sorted(num_tokens_per_req, key=key)
