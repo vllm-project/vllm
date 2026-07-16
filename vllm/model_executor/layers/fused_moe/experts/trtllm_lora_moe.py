@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
 from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
     LoRAExpertsMixin,
 )
@@ -249,6 +250,27 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         intermediate_size = self.intermediate_size_per_partition
         K = output.size(1)
 
+        # Routing is computed outside the MoE; pack it into the
+        # (eid<<16)|w.bf16 format the routed API expects.
+        packed_topk_ids = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
+
+        # ---- Base-model fast path ----
+        # When no token in the batch selects a LoRA adapter, skip the LoRA machinery
+        # and run the plain base MoE with do_finalize=True, which writes the finalized
+        # result straight into `output`.
+        if self._batch_has_no_lora(lora_context):
+            self.invoke_routed_moe(
+                hidden_states=hidden_states,
+                w1=w1,
+                w2=w2,
+                packed_topk_ids=packed_topk_ids,
+                gemm1_lora_delta=None,  # without LoRA, no delta
+                global_num_experts=global_num_experts,
+                a1q_scale=a1q_scale,
+                output=output,
+            )
+            return
+
         # The LoRA tile-config heuristic (try_get_optimal_moe_config) unpacks
         # w1/w2 as standard 3D MoE weights, but flashinfer stores shuffled
         # 4D BlockMajorK weights. add_lora_w13/add_lora_w2 only read .shape
@@ -265,10 +287,6 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             device="meta",
             dtype=torch.bfloat16,
         )
-
-        # Routing is computed outside the MoE; pack it into the
-        # (eid<<16)|w.bf16 format the routed API expects.
-        packed_topk_ids = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
 
         # ---- 1) W13 LoRA delta -> gemm1_lora_delta (bf16, [T, top_k, 2I]) ----
         gemm1_lora_delta = None
@@ -384,6 +402,23 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         )
 
     @staticmethod
+    def _batch_has_no_lora(lora_context: MoELoRAContext) -> bool:
+        """True when no token in the batch selects a LoRA adapter.
+
+        Mirrors the no-lora fast path in
+        ``PunicaWrapperGPU.add_lora_fused_moe``: the punica kernel metadata
+        carries a CPU ``no_lora_flag`` computed once per forward from the
+        token->LoRA mapping. Reading it is a host-only check (no device sync),
+        and under CUDA graphs the branch is frozen at capture time against the
+        graph's ``has_lora`` dispatch key, so it stays correct on replay.
+        """
+        meta = getattr(lora_context.punica_wrapper, "token_mapping_meta", None)
+        if meta is None:
+            return False
+        flag = meta.no_lora_flag_cpu
+        return bool(flag.numel() == 1 and flag.item())
+
+    @staticmethod
     def _unpermute_activation(
         act_permuted: torch.Tensor,
         idx_map: torch.Tensor,
@@ -491,8 +526,8 @@ class TrtLlmBf16LoRAExperts(_TrtLlmLoRAExpertsBase):
         # With gemm1_lora_delta set (the LoRA path) run do_finalize=False and
         # return the unfinalized permuted base output so apply() can fuse the
         # finalize with the W2 LoRA reduction (see _finalize_with_w2_lora).
-        # Without a delta, keep do_finalize=True and copy the finalized tensor
-        # into the caller's buffer (trtllm_bf16_routed_moe has no `output=`).
+        # Without a delta (base path), run do_finalize=True and hand flashinfer
+        # the caller's buffer via output= so it finalizes in place -- no copy.
         do_finalize = gemm1_lora_delta is None
         ret = flashinfer.fused_moe.trtllm_bf16_routed_moe(
             topk_ids=packed_topk_ids,
@@ -510,12 +545,10 @@ class TrtLlmBf16LoRAExperts(_TrtLlmLoRAExpertsBase):
             routed_scaling_factor=None,
             routing_method_type=self.routing_method_type,
             do_finalize=do_finalize,
+            output=output if do_finalize else None,
         )
         if not do_finalize:
             # [gemm2_output, expert_weights, expanded_idx, gemm1_activation]
             return list(ret)
-        if isinstance(ret, (list, tuple)):
-            output.copy_(ret[0])
-            return list(ret)
-        output.copy_(ret)
+        # do_finalize=True finalized directly into `output`.
         return [output]
