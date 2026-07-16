@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
+from collections.abc import Mapping, Sequence
+from numbers import Real
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -50,6 +53,19 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.attention import MLAAttention
 
 logger = init_logger(__name__)
+
+_QWEN_VL_FP8_E5M2_UNSAFE_ARCHITECTURES = frozenset(
+    {
+        "Qwen2VLForConditionalGeneration",
+        "Qwen2_5_VLForConditionalGeneration",
+    }
+)
+_QWEN_VL_FP8_E5M2_UNSAFE_MODEL_TYPES = frozenset(
+    {
+        "qwen2_vl",
+        "qwen2_5_vl",
+    }
+)
 
 
 def validate_kv_sharing_target(
@@ -119,6 +135,92 @@ def _largest_kernel_block_within(
         return smallest
     fitting = [b for b in candidates if b * per_token_bytes <= page_budget]
     return max(fitting) if fitting else smallest
+
+
+def _config_value(config: Any, name: str) -> Any:
+    if isinstance(config, Mapping):
+        return config.get(name)
+    return getattr(config, name, None)
+
+
+def _config_architectures(config: Any) -> tuple[str, ...]:
+    architecture = _config_value(config, "architecture")
+    architectures = _config_value(config, "architectures")
+    result = (architecture,) if isinstance(architecture, str) else ()
+    if isinstance(architectures, str):
+        return (*result, architectures)
+    if isinstance(architectures, Sequence):
+        return (*result, *(arch for arch in architectures if isinstance(arch, str)))
+    return result
+
+
+def _is_qwen_vl_model_config(model_config: Any | None) -> bool:
+    """Recognize Qwen-VL across ModelConfig and nested HF config forms."""
+    pending = [model_config]
+    seen: set[int] = set()
+    while pending:
+        config = pending.pop()
+        if config is None or id(config) in seen:
+            continue
+        seen.add(id(config))
+
+        if any(
+            arch in _QWEN_VL_FP8_E5M2_UNSAFE_ARCHITECTURES
+            for arch in _config_architectures(config)
+        ):
+            return True
+
+        model_type = _config_value(config, "model_type")
+        if (
+            isinstance(model_type, str)
+            and model_type.lower() in _QWEN_VL_FP8_E5M2_UNSAFE_MODEL_TYPES
+        ):
+            return True
+
+        # ModelConfig exposes both the outer multimodal HF config and its
+        # inner text config. Dict-backed remote configs use the same names.
+        for name in ("hf_config", "hf_text_config", "model_arch_config", "text_config"):
+            nested = _config_value(config, name)
+            if nested is not None:
+                pending.append(nested)
+
+    return False
+
+
+def _positive_finite_scalar(scale: Any) -> float | None:
+    if isinstance(scale, torch.Tensor):
+        if scale.numel() != 1:
+            return None
+        scale = scale.detach().item()
+    if isinstance(scale, bool) or not isinstance(scale, Real):
+        return None
+    value = float(scale)
+    return value if value > 0.0 and math.isfinite(value) else None
+
+
+def _validate_qwen_vl_fp8_e5m2_kv_cache_scales(layer: nn.Module) -> None:
+    if not getattr(layer, "_is_qwen_vl_model", False):
+        return
+
+    if layer.kv_cache_dtype != "fp8_e5m2" or layer.calculate_kv_scales:
+        return
+
+    k_scale = _positive_finite_scalar(getattr(layer, "_k_scale_float", None))
+    v_scale = _positive_finite_scalar(getattr(layer, "_v_scale_float", None))
+    if k_scale is None or v_scale is None:
+        raise ValueError(
+            'kv_cache_dtype="fp8_e5m2" requires finalized, positive, finite '
+            "per-tensor k_scale and v_scale values for Qwen2-VL and Qwen2.5-VL "
+            "models when calculate_kv_scales=False."
+        )
+    if k_scale == 1.0 and v_scale == 1.0:
+        raise ValueError(
+            'kv_cache_dtype="fp8_e5m2" with default KV cache scales '
+            "(k_scale=v_scale=1.0) is known to produce incorrect outputs "
+            "for Qwen2-VL and Qwen2.5-VL models. Use "
+            'kv_cache_dtype="fp8_e4m3", set calculate_kv_scales=True, '
+            "or provide calibrated k_scale/v_scale values in the checkpoint."
+        )
 
 
 def set_default_quant_scales(layer: nn.Module, register_buffer: bool = False) -> None:
@@ -340,6 +442,7 @@ class Attention(nn.Module, AttentionLayerBase):
 
         # NOTE: model_config may be None during certain tests
         model_config = vllm_config.model_config
+        self._is_qwen_vl_model = _is_qwen_vl_model_config(model_config)
         self.use_mm_prefix = model_config is not None and model_config.is_mm_prefix_lm
 
         # During model initialization, the default dtype is set as the model
@@ -610,6 +713,7 @@ class Attention(nn.Module, AttentionLayerBase):
         )
         if not should_load_quant_weights(quant_method):
             set_default_quant_scales(self, register_buffer=False)
+        _validate_qwen_vl_fp8_e5m2_kv_cache_scales(self)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
