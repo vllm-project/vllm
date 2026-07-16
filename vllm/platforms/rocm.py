@@ -232,7 +232,7 @@ _ON_GFX942 = "gfx942" in _GCN_ARCH
 _ON_GFX950 = "gfx950" in _GCN_ARCH
 _ON_GFX1250 = "gfx1250" in _GCN_ARCH
 
-_ON_CDNA = any(arch in _GCN_ARCH for arch in ["gfx9, gfx1250"])
+_ON_CDNA = any(arch in _GCN_ARCH for arch in ["gfx9", "gfx1250"])
 _ON_RDNA = any(
     arch
     for arch in _GCN_ARCH
