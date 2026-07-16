@@ -5,7 +5,7 @@
 
 use std::sync::LazyLock;
 
-pub use vllm_parser::unified::{Gemma4UnifiedParser, UnifiedParser};
+pub use vllm_parser::unified::{Gemma4UnifiedParser, InklingUnifiedParser, UnifiedParser};
 use vllm_tokenizer::DynTokenizer;
 
 use crate::parser::ParserFactory;
@@ -14,6 +14,7 @@ use crate::request::ChatTool;
 /// Canonical public names for registered unified parsers.
 pub mod names {
     pub const GEMMA4: &str = "gemma4";
+    pub const INKLING: &str = "inkling";
 }
 
 /// Constructor signature for one registered unified parser implementation.
@@ -37,6 +38,7 @@ impl UnifiedParserFactory {
         let mut factory = Self::default();
 
         factory.register_parser::<Gemma4UnifiedParser>(names::GEMMA4);
+        factory.register_parser::<InklingUnifiedParser>(names::INKLING);
 
         factory
             .register_pattern("gemma-4", names::GEMMA4)
