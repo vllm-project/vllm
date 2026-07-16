@@ -24,10 +24,10 @@ from vllm.tool_parsers import ToolParser
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from ..typing import (
+    ALLOfflineInputsContext,
     EncodeChatRenderParams,
     EncodeCMPLRenderParams,
     OfflineInputsContext,
-    OfflineInputsScoringContext,
     OfflineOutputsContext,
     PoolingChatLikeRequest,
     PoolingCompletionLikeRequest,
@@ -109,7 +109,7 @@ class PoolingIOProcessor:
     # offline APIs
 
     def get_request_factory_offline(
-        self, ctx: OfflineInputsScoringContext | OfflineInputsContext
+        self, ctx: ALLOfflineInputsContext
     ) -> tuple[RequestFactory, int]:
         assert isinstance(ctx, OfflineInputsContext)
 

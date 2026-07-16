@@ -10,9 +10,8 @@ from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 
 from ..base.io_processor import PoolingIOProcessor
 from ..typing import (
-    OfflineInputsContext,
-    OfflineInputsScoringContext,
     OfflineOutputsContext,
+    OfflinePluginInputsContext,
     PoolingServeContext,
     RequestFactory,
 )
@@ -113,9 +112,9 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
     # offline APIs
 
     def get_request_factory_offline(
-        self, ctx: OfflineInputsScoringContext | OfflineInputsContext
+        self, ctx: OfflinePluginInputsContext
     ) -> tuple[RequestFactory, int]:
-        assert isinstance(ctx, OfflineInputsContext)
+        assert isinstance(ctx, OfflinePluginInputsContext)
         assert isinstance(ctx.prompts, dict) and "data" in ctx.prompts
 
         # Validate the request data is valid for the loaded plugin

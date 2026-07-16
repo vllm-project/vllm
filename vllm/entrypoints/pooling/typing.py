@@ -115,24 +115,37 @@ class PoolingServeContext(Generic[PoolingRequestT]):
 
 @dataclass
 class OfflineInputsContext:
-    pooling_task: PoolingTask
-    prompts: PromptType | Sequence[PromptType] | DataPrompt
-
-    pooling_params: PoolingParams | Sequence[PoolingParams] | None
-    tokenization_kwargs: dict[str, Any] | None = None
-    lora_request: Sequence[LoRARequest | None] | None = None
-    priorities: Sequence[int] | None = None
+    tokenization_kwargs: dict[str, Any] | None
+    lora_request: Sequence[LoRARequest | None] | None
+    priorities: Sequence[int] | None
 
 
 @dataclass
-class OfflineInputsScoringContext:
+class OfflineEncodeInputsContext(OfflineInputsContext):
+    pooling_task: PoolingTask
+    prompts: PromptType | Sequence[PromptType]
+    pooling_params: PoolingParams | Sequence[PoolingParams] | None
+
+
+@dataclass
+class OfflineScoringInputsContext(OfflineInputsContext):
     scoring_data: ScoringData
     chat_template: str | None
-
     pooling_params: PoolingParams
-    tokenization_kwargs: dict[str, Any] | None = None
-    lora_request: Sequence[LoRARequest | None] | None = None
-    priorities: Sequence[int] | None = None
+
+
+@dataclass
+class OfflinePluginInputsContext(OfflineInputsContext):
+    pooling_task: PoolingTask
+    prompts: DataPrompt
+    pooling_params: PoolingParams | Sequence[PoolingParams] | None
+
+
+ALLOfflineInputsContext: TypeAlias = (
+    OfflineEncodeInputsContext
+    | OfflineScoringInputsContext
+    | OfflinePluginInputsContext
+)
 
 
 @dataclass

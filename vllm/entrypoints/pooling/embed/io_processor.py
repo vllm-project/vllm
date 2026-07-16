@@ -28,9 +28,9 @@ from vllm.utils.mistral import is_mistral_tokenizer
 from ..base.io_processor import PoolingIOProcessor
 from ..scoring.io_processor import JinaRankingIOProcessorMixin
 from ..typing import (
+    ALLOfflineInputsContext,
     ChunkedEmbeddingMetadata,
     OfflineInputsContext,
-    OfflineInputsScoringContext,
     PoolingChatLikeRequest,
     PoolingCompletionLikeRequest,
     PoolingServeContext,
@@ -668,7 +668,7 @@ class JinaRankingTokenEmbedIOProcessor(
         ctx.engine_inputs = engine_inputs
 
     def get_request_factory_offline(
-        self, ctx: OfflineInputsScoringContext | OfflineInputsContext
+        self, ctx: ALLOfflineInputsContext
     ) -> tuple[RequestFactory, int]:
         assert isinstance(ctx, OfflineInputsContext)
         if not isinstance(ctx.prompts, Sequence) or len(ctx.prompts) < 2:

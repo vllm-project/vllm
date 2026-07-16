@@ -21,11 +21,12 @@ from vllm.utils.mistral import is_mistral_tokenizer
 from ...chat_utils import ChatTemplateResolutionError
 from ..base.io_processor import PoolingIOProcessor
 from ..typing import (
+    ALLOfflineInputsContext,
     EncodeChatRenderParams,
     EncodeCMPLRenderParams,
     OfflineInputsContext,
-    OfflineInputsScoringContext,
     OfflineOutputsContext,
+    OfflineScoringInputsContext,
     PoolingEngineInput,
     PoolingServeContext,
     RequestFactory,
@@ -225,12 +226,12 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
     # offline APIs
 
     def get_request_factory_offline(
-        self, ctx: OfflineInputsScoringContext | OfflineInputsContext
+        self, ctx: ALLOfflineInputsContext
     ) -> tuple[RequestFactory, int]:
-        assert isinstance(ctx, OfflineInputsScoringContext)
+        assert isinstance(ctx, OfflineScoringInputsContext)
 
         max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
-            pooling_params=pooling_params
+            pooling_params=ctx.pooling_params
         )
 
         scoring_data = ctx.scoring_data
@@ -473,9 +474,11 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
     # offline APIs
 
     def get_request_factory_offline(
-        self, ctx: OfflineInputsScoringContext | OfflineInputsContext
+        self, ctx: ALLOfflineInputsContext
     ) -> tuple[RequestFactory, int]:
-        assert isinstance(ctx, OfflineInputsScoringContext)
+        assert isinstance(
+            ctx,
+        )
 
         data_1 = ctx.scoring_data.data_1
         data_2 = ctx.scoring_data.data_2
@@ -836,9 +839,9 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
     pooling_task: PoolingTask = "token_embed"
 
     def get_request_factory_offline(
-        self, ctx: OfflineInputsScoringContext | OfflineInputsContext
+        self, ctx: ALLOfflineInputsContext
     ) -> tuple[RequestFactory, int]:
-        assert isinstance(ctx, OfflineInputsScoringContext)
+        assert isinstance(ctx, OfflineScoringInputsContext)
 
         scoring_data = ctx.scoring_data
         prompt_extras = ctx.pooling_params.extra_kwargs
