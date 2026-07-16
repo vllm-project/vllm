@@ -559,6 +559,27 @@ class FlashInferBackend(AttentionBackend):
         capability = current_platform.get_device_capability()
         if capability is not None and capability.major == 10:
             return "HND"
+        # NVFP4 KV on consumer Blackwell (sm120/sm121, FA2 path): each K/V
+        # side of the cache packs [data | scale] regions carved out of the
+        # side's byte range (reshape_and_cache_nvfp4 writes the scales at
+        # side_base + num_heads * block_size * data_dim;
+        # nvfp4_split_data_scale reads them back with derived strides).
+        # That carve is only byte-coherent when each side's heads own one
+        # contiguous region per page, i.e. under the head-major HND layout.
+        # Under NHD the K and V head rows interleave within each token and
+        # the side-region offsets land inside the other side's data ->
+        # silent KV corruption. This hook has no dtype parameter, so read
+        # the ambient vllm config (same pattern as
+        # get_kv_connector_cache_layout); if the layout hook grows a
+        # dtype-aware signature, this decision moves into it.
+        if capability is not None and capability.major == 12:
+            vllm_config = get_current_vllm_config_or_none()
+            if (
+                vllm_config is not None
+                and vllm_config.cache_config is not None
+                and vllm_config.cache_config.cache_dtype == "nvfp4"
+            ):
+                return "HND"
         return None
 
     forward_includes_kv_cache_update: bool = False
@@ -845,6 +866,17 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.use_fa2_nvfp4_kv = False
             assert self.kv_cache_spec.dtype == self.model_config.dtype
             self.kv_cache_dtype = self.kv_cache_spec.dtype
+
+        if self.is_kvcache_nvfp4 and get_kv_cache_layout() != "HND":
+            # The NVFP4 per-side [data | scale] carve is only byte-coherent
+            # under the head-major HND layout (see
+            # FlashInferBackend.get_required_kv_cache_layout). NHD would
+            # silently corrupt the cache, so fail at init instead.
+            raise ValueError(
+                "NVFP4 KV cache requires the HND KV cache layout; resolved "
+                f"layout is {get_kv_cache_layout()!r}. Unset "
+                "VLLM_KV_CACHE_LAYOUT or set it to 'HND'."
+            )
 
         # Compute per-phase Q dtype.  On SM90 (XQA decode), the prefill and
         # decode phases require different Q dtypes when the KV cache is FP8
