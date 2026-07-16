@@ -14,3 +14,21 @@ steps:
     - tests/tools/test_docker_build_metadata_args.py
   commands:
     - pytest -v -s tools/test_docker_build_metadata_args.py
+  mirror:
+    amd:
+      device: mi250_1
+      no_gpu: true
+      timeout_in_minutes: 180
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - .buildkite/scripts/docker-build-metadata-args.sh
+      - .buildkite/scripts/ci-bake-rocm.sh
+      - docker/Dockerfile
+      - docker/Dockerfile.cpu
+      - docker/Dockerfile.rocm
+      - docker/Dockerfile.rocm_base
+      - docker/ci-rocm.hcl
+      - docker/docker-bake.hcl
+      - docker/docker-bake-rocm.hcl
+      - tests/tools/test_docker_build_metadata_args.py
