@@ -275,8 +275,6 @@ class XPUPlatform(Platform):
         if compilation_config.compile_sizes is None:
             compilation_config.compile_sizes = []
 
-        attention_config = vllm_config.attention_config
-
         # lazy import to avoid circular import
         from vllm.utils.torch_utils import supports_xpu_graph
 
