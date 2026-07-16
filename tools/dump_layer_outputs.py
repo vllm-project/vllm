@@ -287,6 +287,7 @@ def main():
     llm_kwargs = dict(
         model=args.model,
         enforce_eager=True,
+        enable_chunked_prefill=False,
         seed=args.seed,
         tensor_parallel_size=args.tp_size,
         dtype=args.dtype,
