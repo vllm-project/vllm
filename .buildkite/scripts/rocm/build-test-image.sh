@@ -13,6 +13,18 @@ metadata_get() {
     fi
 }
 
+use_ci_base_if_present() {
+    local ci_base_image=""
+
+    ci_base_image="$(metadata_get rocm-ci-base-image)"
+    if [[ -z "${ci_base_image}" ]]; then
+        return 1
+    fi
+
+    export CI_BASE_IMAGE="${ci_base_image}"
+    echo "Using ROCm ci_base image selected by the preceding build step: ${CI_BASE_IMAGE}"
+}
+
 use_refreshed_base_if_present() {
     local base_refreshed=""
 
@@ -22,15 +34,12 @@ use_refreshed_base_if_present() {
     fi
 
     export BASE_IMAGE
-    export CI_BASE_IMAGE
     export IMAGE_TAG_LATEST
 
     BASE_IMAGE="$(metadata_get rocm-base-image)"
-    CI_BASE_IMAGE="$(metadata_get rocm-ci-base-image)"
     IMAGE_TAG_LATEST="$(metadata_get rocm-ci-image-descriptive)"
 
     echo "Using refreshed ROCm base image for test image: ${BASE_IMAGE}"
-    echo "Using refreshed ROCm ci_base image for test image: ${CI_BASE_IMAGE}"
     if [[ -n "${IMAGE_TAG_LATEST}" ]]; then
         echo "Also tagging full ROCm CI image as: ${IMAGE_TAG_LATEST}"
     fi
@@ -40,6 +49,8 @@ use_refreshed_base_if_present() {
 
 main() {
     local base_refreshed=0
+
+    use_ci_base_if_present || true
 
     if use_refreshed_base_if_present; then
         base_refreshed=1
