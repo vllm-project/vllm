@@ -175,6 +175,64 @@ class OffloadingKVEventsConfig:
 
 
 class OffloadingManager(ABC):
+    def update_device_pressure(
+        self,
+        usage: float,
+        *,
+        preempted: bool = False,
+    ) -> None:
+        """Update the manager with the scheduler's KV block-pool pressure.
+
+        ``usage`` is the fraction of allocated KV cache blocks, rather than
+        physical device-memory usage. Implementations may use this signal to
+        enable or disable device-to-host stores with hysteresis.
+        """
+        return
+
+    def should_store(
+        self,
+        req_context: ReqContext,
+        num_blocks: int = 0,
+    ) -> bool:
+        """Whether newly computed blocks should be submitted for offload.
+
+        Returning false leaves the request's store cursor unchanged, allowing
+        the same blocks to be reconsidered if pressure rises later.
+        """
+        return True
+
+    def get_store_budget(
+        self,
+        req_context: ReqContext,
+        requested_blocks: int,
+        *,
+        is_decode_phase: bool,
+    ) -> int:
+        """Return how many pending block keys may be considered this step.
+
+        The scheduler selects a contiguous prefix of pending keys and advances
+        its store cursor only across that selected prefix. Implementations can
+        use this hook for per-step, per-request, pressure-episode, heat, and
+        in-flight transfer limits.
+        """
+        return requested_blocks
+
+    def record_store_submission(
+        self,
+        req_context: ReqContext,
+        submitted_blocks: int,
+    ) -> None:
+        """Account for blocks actually submitted by prepare_store()."""
+        return
+
+    def should_reclaim_device_cache(self, req_context: ReqContext) -> bool:
+        """Whether a completed store should evict its source cache entries.
+
+        Eviction removes the local prefix-cache mapping. Blocks still owned by
+        an active request remain allocated until the request releases them.
+        """
+        return False
+
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         """

@@ -68,6 +68,7 @@ class TransferJobStatus:
     # Store src block IDs that may be freed before the request finishes.
     # Registered in _block_id_to_pending_jobs at store creation time.
     sliding_window_block_ids: list[int] | None = None
+    reclaim_device_cache: bool = False
 
 
 class GroupOffloadConfig(NamedTuple):
@@ -232,6 +233,22 @@ class RequestGroupState:
     num_hit_blocks: int = 0
 
 
+def _select_store_candidates(
+    candidate_entries: list[tuple[int, int, OffloadKey]],
+    start_frontiers: list[int],
+    budget: int,
+) -> tuple[list[tuple[int, int, OffloadKey]], list[int]]:
+    """Select a fair logical prefix and compute per-group cursor frontiers."""
+    candidate_entries.sort(key=lambda entry: (entry[1], entry[0]))
+    selected_entries = candidate_entries[: max(0, budget)]
+    selected_frontiers = start_frontiers.copy()
+    for group_idx, block_idx, _ in selected_entries:
+        selected_frontiers[group_idx] = max(
+            selected_frontiers[group_idx], block_idx + 1
+        )
+    return selected_entries, selected_frontiers
+
+
 @dataclass(slots=True)
 class RequestOffloadState:
     config: SchedulerOffloadConfig
@@ -326,6 +343,7 @@ class OffloadingConnectorScheduler:
         self.config = SchedulerOffloadConfig.from_spec(spec)
         self.manager: OffloadingManager = spec.get_manager()
         self._connector_stats: OffloadingConnectorStats | None = None
+        self._reclaimable_block_ids: set[int] = set()
 
         full_attention_groups: list[int] = []
         sliding_window_groups: list[int] = []
@@ -870,11 +888,18 @@ class OffloadingConnectorScheduler:
                     num_offloadable_tokens, req.num_prompt_tokens
                 )
 
+            # Pressure-aware managers can reject the request before the
+            # potentially large offload-key backlog is materialized. The
+            # cursor remains unchanged so the blocks can be reconsidered when
+            # pressure rises.
+            if not self.manager.should_store(req_status.req_context):
+                continue
+
             # Filter out blocks skipped due to sliding window attention / SSM
             # or unreachable by the load path's alignment constraints.
-            new_offload_keys: list[OffloadKey] = []
-            for group_config, group_state in zip(
-                self.config.kv_group_configs, req_status.group_states
+            candidate_entries: list[tuple[int, int, OffloadKey]] = []
+            for group_idx, (group_config, group_state) in enumerate(
+                zip(self.config.kv_group_configs, req_status.group_states)
             ):
                 num_blocks = num_offloadable_tokens // group_config.offloaded_block_size
                 if group_config.is_eagle_group:
@@ -915,21 +940,58 @@ class OffloadingConnectorScheduler:
                         pos_in_segment = abs_block_idx % alignment_block_count
                         if pos_in_segment < alignment_block_count - tail:
                             continue
-                    new_offload_keys.append(offload_key)
+                    candidate_entries.append(
+                        (group_idx, start_block_idx + key_idx, offload_key)
+                    )
 
-            if not new_offload_keys:
+            if not candidate_entries:
                 req_status.advance_stored_idx(num_offloadable_tokens)
                 continue
 
+            if not self.manager.should_store(
+                req_status.req_context,
+                len(candidate_entries),
+            ):
+                continue
+
+            # Interleave groups by logical block index so a limited budget
+            # advances all KV groups together instead of letting the first
+            # group consume the whole pressure-step allowance.
+            is_decode_phase = num_tokens_after_batch > req.num_prompt_tokens
+            store_budget = self.manager.get_store_budget(
+                req_status.req_context,
+                len(candidate_entries),
+                is_decode_phase=is_decode_phase,
+            )
+            if store_budget <= 0:
+                continue
+            selected_entries, selected_frontiers = _select_store_candidates(
+                candidate_entries,
+                [
+                    group_state.next_stored_block_idx
+                    for group_state in req_status.group_states
+                ],
+                store_budget,
+            )
+            selected_keys = [entry[2] for entry in selected_entries]
+
             store_output = self.manager.prepare_store(
-                new_offload_keys, req_status.req_context
+                selected_keys, req_status.req_context
             )
             if store_output is None:
                 logger.warning("Request %s: cannot store blocks", req_id)
                 continue
 
+            self.manager.record_store_submission(
+                req_status.req_context,
+                len(store_output.keys_to_store),
+            )
+
             if not store_output.keys_to_store:
-                req_status.advance_stored_idx(num_offloadable_tokens)
+                for group_state, frontier in zip(
+                    req_status.group_states, selected_frontiers
+                ):
+                    group_state.next_stored_block_idx = frontier
                 continue
 
             self._touch(req_status)
@@ -941,13 +1003,13 @@ class OffloadingConnectorScheduler:
             src_block_ids: list[int] = []
             sliding_window_block_ids: list[int] = []
             non_sliding_window_block_ids: list[int] = []
-            for group_config, group_state in zip(
-                self.config.kv_group_configs, req_status.group_states
+            for group_idx, (group_config, group_state) in enumerate(
+                zip(self.config.kv_group_configs, req_status.group_states)
             ):
                 is_sliding_window = (
                     group_config.sliding_window_size_in_blocks is not None
                 )
-                num_blocks = num_offloadable_tokens // group_config.offloaded_block_size
+                num_blocks = selected_frontiers[group_idx]
                 start_block_idx = group_state.next_stored_block_idx
                 block_ids = group_state.block_ids
                 num_group_blocks = 0
@@ -980,7 +1042,7 @@ class OffloadingConnectorScheduler:
 
                 group_sizes.append(num_group_blocks)
                 block_indices.append(start_gpu_block_idx or 0)
-                group_state.next_stored_block_idx = num_blocks
+                group_state.next_stored_block_idx = selected_frontiers[group_idx]
 
             src_spec = GPULoadStoreSpec(
                 src_block_ids, group_sizes=group_sizes, block_indices=block_indices
@@ -1008,6 +1070,9 @@ class OffloadingConnectorScheduler:
                 is_store=True,
                 non_sliding_window_block_ids=non_sliding_window_block_ids,
                 sliding_window_block_ids=sliding_window_block_ids or None,
+                reclaim_device_cache=self.manager.should_reclaim_device_cache(
+                    req_status.req_context
+                ),
             )
 
             store_jobs[job_id] = TransferJob(
@@ -1028,6 +1093,10 @@ class OffloadingConnectorScheduler:
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         self._update_req_states(scheduler_output)
+        self.manager.update_device_pressure(
+            scheduler_output.kv_cache_usage,
+            preempted=bool(scheduler_output.preempted_req_ids),
+        )
         schedule_end_context = ScheduleEndContext(
             new_req_ids=[req.req_id for req in scheduler_output.scheduled_new_reqs],
             preempted_req_ids=scheduler_output.preempted_req_ids or (),
@@ -1138,6 +1207,13 @@ class OffloadingConnectorScheduler:
             req_status = self._req_status[job_status.req_id]
             if job_status.is_store:
                 self.manager.complete_store(job_status.keys, req_status.req_context)
+                if job_status.reclaim_device_cache:
+                    self._reclaimable_block_ids.update(
+                        job_status.non_sliding_window_block_ids or ()
+                    )
+                    self._reclaimable_block_ids.update(
+                        job_status.sliding_window_block_ids or ()
+                    )
             else:
                 self.manager.complete_load(job_status.keys, req_status.req_context)
                 if self._blocks_being_loaded:
@@ -1157,6 +1233,11 @@ class OffloadingConnectorScheduler:
             req_status.transfer_jobs.remove(job_id)
             if not req_status.transfer_jobs and req_status.req.is_finished():
                 del self._req_status[job_status.req_id]
+
+    def take_reclaimable_block_ids(self) -> set[int]:
+        block_ids = self._reclaimable_block_ids
+        self._reclaimable_block_ids = set()
+        return block_ids
 
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats = self._connector_stats

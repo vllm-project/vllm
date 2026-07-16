@@ -187,6 +187,20 @@ def test_store_creates_file_and_lookup_succeeds(fs_tier):
     assert os.path.exists(dest), f"Expected file at {dest}"
 
 
+def test_delete_removes_existing_blocks_and_ignores_missing(fs_tier):
+    tier, _ = fs_tier
+    existing = key(1)
+    missing = key(2)
+    tier.submit_store(make_job(1, [existing], [0]))
+    assert all(result.success for result in drain(tier))
+
+    result = tier.delete([existing, missing])
+
+    assert result.removed_keys == {existing, missing}
+    assert result.deleted_count == 1
+    assert not os.path.exists(tier.file_mapper.get_file_name(existing))
+
+
 def test_store_then_load_roundtrip(fs_tier):
     tier, _ = fs_tier
     job_s = make_job(1, [key(1), key(2)], [0, 1])

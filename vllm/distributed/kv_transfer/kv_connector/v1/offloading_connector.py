@@ -158,6 +158,10 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.update_connector_output(connector_output)
 
+    def take_reclaimable_block_ids(self) -> set[int]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.take_reclaimable_block_ids()
+
     def request_finished(
         self,
         request: "Request",

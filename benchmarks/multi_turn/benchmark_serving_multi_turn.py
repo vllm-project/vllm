@@ -66,6 +66,7 @@ class RequestArgs(NamedTuple):
     limit_max_tokens: int  # Use negative value for no limit
     timeout_sec: int
     send_conversation_id: bool
+    send_kv_transfer_session_id: bool
     headers: dict[str, str]
 
 
@@ -244,6 +245,7 @@ async def send_request(
     max_tokens: int | None = None,
     timeout_sec: int = 120,
     conversation_id: str | None = None,
+    kv_transfer_session_id: str | None = None,
     headers: dict[str, str] | None = None,
 ) -> ServerResponse:
     payload = {
@@ -253,13 +255,17 @@ async def send_request(
 
     if conversation_id is not None:
         payload["conversation_id"] = conversation_id
+    if kv_transfer_session_id is not None:
+        payload["kv_transfer_params"] = {
+            "session_id": kv_transfer_session_id,
+        }
 
     if stream:
         payload["stream"] = True
         payload["stream_options"] = {"include_usage": False}
 
-    # if min_tokens is not None:
-    #     payload["min_tokens"] = min_tokens
+    if min_tokens is not None:
+        payload["min_tokens"] = min_tokens
 
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
@@ -289,6 +295,7 @@ async def send_request(
     latency: float | None = None
     first_chunk = ""
     generated_text = ""
+    finish_reason: str | None = None
 
     start_time: int = time.perf_counter_ns()
     most_recent_timestamp: int = start_time
@@ -315,6 +322,7 @@ async def send_request(
                 else:
                     timestamp: int = time.perf_counter_ns()
                     data = json.loads(chunk)
+                    finish_reason = data["choices"][0].get("finish_reason")
 
                     # Delta is the new content/text/data
                     delta = data["choices"][0]["delta"]
@@ -348,6 +356,11 @@ async def send_request(
     if ttft is None:
         if stream:
             valid_response = False
+            logger.warning(
+                "Streaming response contained no text token "
+                "(finish_reason=%s)",
+                finish_reason,
+            )
         # The response was a single chunk
         ttft = latency
 
@@ -455,6 +468,9 @@ async def send_turn(
         max_tokens,
         req_args.timeout_sec,
         conversation_id=conv_id if req_args.send_conversation_id else None,
+        kv_transfer_session_id=(
+            conv_id if req_args.send_kv_transfer_session_id else None
+        ),
         headers=req_args.headers,
     )
 
@@ -914,6 +930,7 @@ def get_client_config(
         limit_max_tokens=args.limit_max_tokens,
         timeout_sec=args.request_timeout_sec,
         send_conversation_id=args.send_conversation_id,
+        send_kv_transfer_session_id=args.send_kv_transfer_session_id,
         headers=headers,
     )
 
@@ -1501,6 +1518,17 @@ async def main() -> None:
             "Leave disabled (default) when targeting strict "
             "OpenAI-compatible endpoints; enable when benchmarking the "
             "disaggregated proxy."
+        ),
+    )
+    parser.add_argument(
+        "--send-kv-transfer-session-id",
+        default=False,
+        action="store_true",
+        help=(
+            "Inject each conversation ID as "
+            "`kv_transfer_params.session_id`. Use this when benchmarking "
+            "vLLM KV offloading lifecycle and cross-turn KV reuse directly "
+            "against a vLLM OpenAI endpoint."
         ),
     )
 

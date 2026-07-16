@@ -50,6 +50,12 @@ vllm serve <model> \
       "cpu_bytes_to_use": 10737418240,
       "block_size": 16,
       "eviction_policy": "lru",
+      "tiering_hbm_high_watermark": 0.70,
+      "tiering_hbm_low_watermark": 0.50,
+      "tiering_min_session_requests_for_offload": 2,
+      "tiering_max_device_store_blocks_per_step": 16,
+      "lifecycle_cpu_high_watermark": 0.90,
+      "lifecycle_cpu_low_watermark": 0.70,
       "secondary_tiers": [
         {
           "type": "fs",
@@ -73,6 +79,23 @@ vllm serve <model> \
 | `store_threshold` | no | `0` | single-tier | Min lookups before a block is offloaded. Values ≥ 2 are rejected by `TieringOffloadingSpec`. |
 | `max_tracker_size` | no | `64000` | single-tier | Max entries in the lookup tracker. |
 | `secondary_tiers` | no | `[]` | multi-tier | List of secondary tier configs (see below). |
+| `tiering_hbm_pressure_aware` | no | `true` | multi-tier | Store device KV blocks in CPU only while the scheduler-managed KV block pool is above its pressure watermark. |
+| `tiering_hbm_high_watermark` | no | `0.70` | multi-tier | Device KV block usage that activates Device→CPU stores. |
+| `tiering_hbm_low_watermark` | no | `0.50` | multi-tier | Device KV block usage that clears Device→CPU stores. |
+| `tiering_secondary_pressure_aware` | no | `true` | multi-tier | Write CPU blocks to the first secondary tier only when CPU pressure or idle demotion requires it. |
+| `tiering_bypass_unknown_secondary_when_relaxed` | no | `true` | multi-tier | Skip unknown secondary-tier lookups while device pressure is low; known in-process CPU/secondary residents remain loadable. |
+| `tiering_min_session_requests_for_offload` | no | `2` | multi-tier | Only automatically store sessions that have returned at least this many times. |
+| `tiering_min_reuse_probability` | no | `0.5` | multi-tier | Minimum empirical session-return probability required for automatic stores. |
+| `tiering_store_during_decode_only` | no | `true` | multi-tier | Defer normal stores until decode so the asynchronous copy can overlap later token computation; preemption pressure bypasses this gate. |
+| `tiering_max_device_store_blocks_per_step` | no | `16` | multi-tier | Global Device→CPU block budget per scheduler step; `0` is unlimited. |
+| `tiering_max_device_store_blocks_per_request` | no | `64` | multi-tier | Device→CPU block budget per request; `0` is unlimited. |
+| `tiering_max_device_store_blocks_per_pressure_episode` | no | `128` | multi-tier | Global block budget until HBM pressure falls below the low watermark; `0` is unlimited. |
+| `tiering_max_device_store_blocks_per_session_episode` | no | `64` | multi-tier | Per-session block budget during one HBM pressure episode; `0` is unlimited. |
+| `tiering_max_inflight_device_store_jobs` | no | `2` | multi-tier | Maximum concurrent Device→CPU store jobs; `0` is unlimited. |
+| `tiering_reclaim_device_cache_after_store` | no | `true` | multi-tier | Evict local prefix-cache mappings after a pressure-driven CPU store completes. Active-request blocks remain allocated until their request releases them. |
+| `tiering_use_pinned_cpu_primary` | no | automatic | multi-tier | Use page-locked CPU tensors for faster device transfers when `secondary_tiers` is empty. Defaults to `true` for CPU-only tiering and `false` when a shared secondary-tier memoryview is required. |
+| `lifecycle_cpu_high_watermark` | no | `0.90` | multi-tier | CPU resident-block ratio that triggers secondary demotion. |
+| `lifecycle_cpu_low_watermark` | no | `0.70` | multi-tier | CPU resident-block target after pressure demotion. |
 | `offload_prompt_only` | no | `true` | both | If `true`, only prompt (prefill) blocks are offloaded; decode blocks are skipped. |
 | `self_describing_kv_events` | no | `false` | single-tier | Opt-in. When `true` *and* KV cache events are enabled (`--kv-events-config` with `enable_kv_cache_events`), the connector emits self-describing block-granular `BlockStored`/`BlockRemoved` payloads (constituent block hashes, whole-chunk `token_ids`, per-block `block_size`, parent hash, LoRA + group/cache-spec metadata) instead of the placeholder fallback, so external KV-event consumers can index offloaded blocks. Inert unless events are enabled. Currently rejected by `TieringOffloadingSpec`. Full-attention groups only; sliding-window/SSM groups keep the placeholder fallback. In chunk mode (`block_size` > GPU block size), overlapping chunks re-announce shared per-block hashes, so consumers must reference-count (deduplicate) repeated store/remove announcements. |
 | `spec_module_path` | no | — | both | Python import path for a custom `OffloadingSpec` not in the built-in registry. Required only when `spec_name` is not built-in (advanced). |

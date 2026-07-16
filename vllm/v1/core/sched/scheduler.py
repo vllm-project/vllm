@@ -1125,6 +1125,7 @@ class Scheduler(SchedulerInterface):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
+            kv_cache_usage=self.kv_cache_manager.usage,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -2514,6 +2515,9 @@ class Scheduler(SchedulerInterface):
 
         if self.connector is not None:
             self.connector.update_connector_output(kv_connector_output)
+            reclaimable_block_ids = self.connector.take_reclaimable_block_ids()
+            if reclaimable_block_ids:
+                self.kv_cache_manager.evict_blocks(reclaimable_block_ids)
 
         # KV Connector:: update recv and send status from last step.
         for req_id in kv_connector_output.finished_recving or ():

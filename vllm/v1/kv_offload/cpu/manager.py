@@ -80,6 +80,14 @@ class CPUOffloadingManager(OffloadingManager):
     def _get_num_free_blocks(self) -> int:
         return len(self._free_list) + self._num_blocks - self._num_allocated_blocks
 
+    @property
+    def capacity_blocks(self) -> int:
+        return self._num_blocks
+
+    @property
+    def resident_blocks(self) -> int:
+        return self._num_allocated_blocks - len(self._free_list)
+
     def _allocate_blocks(self, keys: list[OffloadKey]) -> list[BlockStatus]:
         num_fresh = min(len(keys), self._num_blocks - self._num_allocated_blocks)
         num_reused = len(keys) - num_fresh
@@ -268,6 +276,29 @@ class CPUOffloadingManager(OffloadingManager):
                     removed=False,
                 )
             )
+
+    def evict_keys(self, keys: Collection[OffloadKey]) -> list[OffloadKey]:
+        """Explicitly evict ready, unreferenced blocks from the CPU tier."""
+        evicted: list[OffloadKey] = []
+        for key in keys:
+            block = self._policy.get(key)
+            if block is None or not block.is_ready or block.ref_cnt != 0:
+                continue
+            self._policy.remove(key)
+            self._free_block(block)
+            self._num_evictable_cache_blocks -= 1
+            assert self._num_evictable_cache_blocks >= 0
+            evicted.append(key)
+
+        if evicted and self.events is not None:
+            self.events.append(
+                OffloadingEvent(
+                    keys=evicted,
+                    medium=self.medium,
+                    removed=True,
+                )
+            )
+        return evicted
 
     @override
     def reset_cache(self) -> None:

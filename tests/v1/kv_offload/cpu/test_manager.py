@@ -819,3 +819,26 @@ def test_evictable_cache_block_count():
     manager.complete_store(to_keys([14, 15]), _EMPTY_REQ_CTX)
     # cache state [10, 11, 14, 15] <- all blocks idle
     assert manager._num_evictable_cache_blocks == 4
+
+
+def test_explicit_evict_keys_skips_pinned_and_inflight_blocks():
+    manager = make_cpu_manager(num_blocks=4, enable_events=True)
+    keys = to_keys([1, 2, 3])
+
+    manager.prepare_store(keys[:2], _EMPTY_REQ_CTX)
+    manager.complete_store(keys[:2], _EMPTY_REQ_CTX)
+    list(manager.take_events())
+    manager.prepare_load(keys[:1], _EMPTY_REQ_CTX)
+    manager.prepare_store(keys[2:], _EMPTY_REQ_CTX)
+
+    assert manager.evict_keys(keys) == [keys[1]]
+    assert manager.lookup(keys[0], _EMPTY_REQ_CTX) is LookupResult.HIT
+    assert manager.lookup(keys[1], _EMPTY_REQ_CTX) is LookupResult.MISS
+    assert manager.lookup(keys[2], _EMPTY_REQ_CTX) is LookupResult.HIT_PENDING
+    assert manager.resident_blocks == 2
+    verify_events(manager.take_events(), expected_evictions=({2},))
+
+    manager.complete_load(keys[:1], _EMPTY_REQ_CTX)
+    manager.complete_store(keys[2:], _EMPTY_REQ_CTX, success=False)
+    assert manager.evict_keys(keys) == [keys[0]]
+    assert manager.resident_blocks == 0

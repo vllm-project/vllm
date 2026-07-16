@@ -4,6 +4,7 @@
 Abstract interfaces and data types for the secondary tiering layer.
 """
 
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass
@@ -39,6 +40,13 @@ class JobMetadata:
     block_ids: np.ndarray
     is_promotion: bool
     req_context: ReqContext
+    evict_primary_on_success: bool = False
+    reclaim_reason: str | None = None
+    started_at: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.started_at == 0.0:
+            self.started_at = time.monotonic()
 
 
 @dataclass
@@ -47,6 +55,14 @@ class JobResult:
 
     job_id: JobId
     success: bool
+
+
+@dataclass
+class TierDeleteResult:
+    """Result of explicit durable-copy deletion from a secondary tier."""
+
+    removed_keys: set[OffloadKey]
+    deleted_count: int = 0
 
 
 class SecondaryTierManager(ABC):
@@ -209,6 +225,14 @@ class SecondaryTierManager(ABC):
             req_context: per-request context.
         """
         return
+
+    def delete(self, keys: Collection[OffloadKey]) -> TierDeleteResult:
+        """Delete durable block copies owned by this tier.
+
+        Tiers that do not support explicit deletion retain their data and
+        return zero. Implementations must ignore missing keys.
+        """
+        return TierDeleteResult(removed_keys=set())
 
     def on_schedule_end(self, context: ScheduleEndContext) -> None:
         """Called once at the end of each scheduler step.

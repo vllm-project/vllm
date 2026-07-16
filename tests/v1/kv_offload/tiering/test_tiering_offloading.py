@@ -37,10 +37,13 @@ from vllm.v1.kv_offload.tiering.base import (
 )
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
+from vllm.v1.kv_offload.tiering.lifecycle import LifecycleConfig
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
+    TieringPolicyConfig,
 )
+from vllm.v1.kv_offload.tiering.residency import TieringMetrics
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
 _CTX = ReqContext(req_id="test")
@@ -132,6 +135,8 @@ def test_tiering_spec_collects_secondary_metric_definitions(monkeypatch):
     metadata = metrics[MetricsSecondaryTierManager.MY_TIER_METRIC]
     assert metadata.documentation == "Number of bytes served by the test tier."
     assert metadata.labelnames == ("tier",)
+    assert TieringMetrics.RESIDENT_BLOCKS in metrics
+    assert TieringMetrics.MIGRATION_BYTES in metrics
 
 
 def test_tiering_manager_aggregates_secondary_stats():
@@ -170,6 +175,360 @@ def test_tiering_manager_aggregates_secondary_stats():
     second_stats = manager.get_stats()
     assert second_stats is not None
     assert MetricsSecondaryTierManager.MY_TIER_METRIC not in second_stats.data["data"]
+
+
+def test_hbm_pressure_hysteresis_controls_device_store_decisions():
+    mock_region = _mock_mmap_region(5)
+    manager = TieringOffloadingManager(
+        primary_tier=CPUPrimaryTierOffloadingManager(
+            num_blocks=5, mmap_region=mock_region
+        ),
+        policy_config=TieringPolicyConfig(
+            hbm_pressure_aware=True,
+            hbm_high_watermark=0.8,
+            hbm_low_watermark=0.5,
+        ),
+    )
+
+    manager.update_device_pressure(0.2)
+    assert not manager.should_store(_CTX, 2)
+
+    manager.update_device_pressure(0.85)
+    assert manager.should_store(_CTX, 2)
+
+    # Hysteresis keeps stores enabled until usage falls below the low mark.
+    manager.update_device_pressure(0.6)
+    assert manager.should_store(_CTX, 2)
+    manager.update_device_pressure(0.5)
+    assert not manager.should_store(_CTX, 2)
+    manager.shutdown()
+
+
+def test_hbm_pressure_controls_device_cache_reclaim():
+    manager = TieringOffloadingManager(
+        primary_tier=CPUPrimaryTierOffloadingManager(
+            num_blocks=5, mmap_region=None
+        ),
+        policy_config=TieringPolicyConfig(
+            hbm_pressure_aware=True,
+            hbm_high_watermark=0.8,
+            hbm_low_watermark=0.5,
+            reclaim_device_cache_after_store=True,
+        ),
+    )
+
+    manager.update_device_pressure(0.9)
+    assert manager.should_reclaim_device_cache(_CTX)
+    manager.update_device_pressure(0.5)
+    assert not manager.should_reclaim_device_cache(_CTX)
+    manager.shutdown()
+
+
+def test_pinned_primary_does_not_require_shared_memoryview():
+    primary = CPUPrimaryTierOffloadingManager(
+        num_blocks=5, mmap_region=None, block_size_bytes=4096
+    )
+
+    with pytest.raises(RuntimeError, match="does not expose"):
+        primary.get_kv_memoryview()
+    assert primary.block_size_bytes == 4096
+
+    primary.shutdown()
+
+
+def test_reuse_aware_budget_limits_pressure_store_bursts():
+    mock_region = _mock_mmap_region(16)
+    manager = TieringOffloadingManager(
+        primary_tier=CPUPrimaryTierOffloadingManager(
+            num_blocks=16, mmap_region=mock_region
+        ),
+        policy_config=TieringPolicyConfig(
+            hbm_pressure_aware=True,
+            hbm_high_watermark=0.8,
+            hbm_low_watermark=0.5,
+            min_session_requests_for_offload=2,
+            min_reuse_probability=0.5,
+            store_during_decode_only=True,
+            max_device_store_blocks_per_step=3,
+            max_device_store_blocks_per_request=5,
+            max_device_store_blocks_per_pressure_episode=7,
+            max_device_store_blocks_per_session_episode=5,
+            max_inflight_device_store_jobs=1,
+        ),
+    )
+    first = ReqContext(req_id="r1", kv_transfer_params={"session_id": "s1"})
+    second = ReqContext(req_id="r2", kv_transfer_params={"session_id": "s1"})
+
+    manager.update_device_pressure(0.9)
+    manager.on_new_request(first)
+    assert manager.get_store_budget(first, 20, is_decode_phase=True) == 0
+    manager.on_request_finished(first)
+
+    manager.on_new_request(second)
+    assert manager.get_store_budget(second, 20, is_decode_phase=False) == 0
+    assert manager.get_store_budget(second, 20, is_decode_phase=True) == 3
+    manager.record_store_submission(second, 3)
+    assert manager.get_store_budget(second, 20, is_decode_phase=True) == 0
+
+    manager.update_device_pressure(0.9)
+    assert manager.get_store_budget(second, 20, is_decode_phase=True) == 2
+    manager.record_store_submission(second, 2)
+    manager.update_device_pressure(0.9)
+    assert manager.get_store_budget(second, 20, is_decode_phase=True) == 0
+
+    # Clearing pressure starts a fresh episode, but the per-request cap still
+    # prevents the same request from monopolizing later migration work.
+    manager.update_device_pressure(0.4)
+    manager.update_device_pressure(0.9)
+    assert manager.get_store_budget(second, 20, is_decode_phase=True) == 0
+    manager.on_request_finished(second)
+    manager.shutdown()
+
+
+def test_inflight_store_job_budget_blocks_new_submissions():
+    mock_region = _mock_mmap_region(8)
+    manager = TieringOffloadingManager(
+        primary_tier=CPUPrimaryTierOffloadingManager(
+            num_blocks=8, mmap_region=mock_region
+        ),
+        policy_config=TieringPolicyConfig(
+            min_session_requests_for_offload=1,
+            min_reuse_probability=0,
+            store_during_decode_only=False,
+            max_inflight_device_store_jobs=1,
+        ),
+    )
+    ctx = ReqContext(req_id="r1")
+    manager.on_new_request(ctx)
+    manager._req_state[ctx.req_id].pending_primary_stores = 1
+
+    assert manager.get_store_budget(ctx, 4, is_decode_phase=True) == 0
+
+    manager._req_state[ctx.req_id].pending_primary_stores = 0
+    manager.on_request_finished(ctx)
+    manager.shutdown()
+
+
+def test_pressure_policy_keeps_cpu_blocks_out_of_secondary_when_cpu_is_relaxed():
+    mock_region = _mock_mmap_region(5)
+    primary = CPUPrimaryTierOffloadingManager(num_blocks=5, mmap_region=mock_region)
+    secondary = ExampleSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_region.create_kv_memoryview(),
+        tier_type="example",
+    )
+    manager = TieringOffloadingManager(
+        primary_tier=primary,
+        secondary_tiers=[secondary],
+        lifecycle_config=LifecycleConfig(
+            cpu_high_watermark=0.8,
+            cpu_low_watermark=0.5,
+            residency_tracking_enabled=True,
+        ),
+        policy_config=TieringPolicyConfig(
+            hbm_pressure_aware=True,
+            secondary_pressure_aware=True,
+        ),
+    )
+    ctx = ReqContext(req_id="cpu-relaxed")
+    keys = to_keys(range(2))
+
+    manager.update_device_pressure(0.9)
+    manager.on_new_request(ctx)
+    prepared = manager.prepare_store(keys, ctx)
+    assert prepared is not None
+    manager.complete_store(prepared.keys_to_store, ctx)
+
+    assert primary.resident_blocks == 2
+    assert secondary.get_num_blocks() == 0
+    assert not manager._transfer_jobs
+    manager.shutdown()
+
+
+def test_cpu_pressure_demotes_then_reclaims_primary_blocks():
+    mock_region = _mock_mmap_region(5)
+    primary = CPUPrimaryTierOffloadingManager(num_blocks=5, mmap_region=mock_region)
+    secondary = ExampleSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_region.create_kv_memoryview(),
+        tier_type="example",
+    )
+    manager = TieringOffloadingManager(
+        primary_tier=primary,
+        secondary_tiers=[secondary],
+        lifecycle_config=LifecycleConfig(
+            cpu_high_watermark=0.6,
+            cpu_low_watermark=0.4,
+            residency_tracking_enabled=True,
+        ),
+        policy_config=TieringPolicyConfig(secondary_pressure_aware=True),
+    )
+    ctx = ReqContext(req_id="cpu-pressure")
+    keys = to_keys(range(4))
+
+    manager.on_new_request(ctx)
+    prepared = manager.prepare_store(keys, ctx)
+    assert prepared is not None
+    manager.complete_store(prepared.keys_to_store, ctx)
+    manager.on_request_finished(ctx)
+
+    schedule_context = ScheduleEndContext([], ())
+    manager.on_schedule_end(schedule_context)
+    assert primary.resident_blocks == 4
+    assert secondary.get_num_blocks() == 2
+
+    manager.on_schedule_end(schedule_context)
+    assert primary.resident_blocks == 2
+    assert secondary.get_num_blocks() == 2
+    manager.shutdown()
+
+
+def test_relaxed_pressure_bypasses_unknown_secondary_lookup():
+    mock_region = _mock_mmap_region(2)
+    primary = CPUPrimaryTierOffloadingManager(num_blocks=2, mmap_region=mock_region)
+    secondary = ExampleSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_region.create_kv_memoryview(),
+        tier_type="example",
+    )
+    manager = TieringOffloadingManager(
+        primary_tier=primary,
+        secondary_tiers=[secondary],
+        lifecycle_config=LifecycleConfig(residency_tracking_enabled=True),
+        policy_config=TieringPolicyConfig(
+            hbm_pressure_aware=True,
+            bypass_unknown_secondary_when_relaxed=True,
+        ),
+    )
+    key = to_keys([1])[0]
+    secondary.blocks[key] = True
+
+    manager.update_device_pressure(0.2)
+    assert manager.lookup(key, _CTX) is LookupResult.MISS
+
+    manager.update_device_pressure(0.9)
+    assert manager.lookup(key, _CTX) is LookupResult.RETRY
+    manager.shutdown()
+
+
+def test_watermark_reclaims_only_secondary_backed_idle_cpu_blocks():
+    mock_region = _mock_mmap_region(5)
+    primary = CPUPrimaryTierOffloadingManager(num_blocks=5, mmap_region=mock_region)
+    secondary = ExampleSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_region.create_kv_memoryview(),
+        tier_type="example",
+    )
+    manager = TieringOffloadingManager(
+        primary_tier=primary,
+        secondary_tiers=[secondary],
+        lifecycle_config=LifecycleConfig(
+            cpu_high_watermark=0.6,
+            cpu_low_watermark=0.4,
+            residency_tracking_enabled=True,
+        ),
+    )
+    ctx = ReqContext(req_id="watermark")
+    keys = to_keys(range(4))
+
+    manager.on_new_request(ctx)
+    prepared = manager.prepare_store(keys, ctx)
+    assert prepared is not None
+    manager.complete_store(prepared.keys_to_store, ctx)
+    manager.on_request_finished(ctx)
+
+    schedule_context = ScheduleEndContext([], ())
+    manager.on_schedule_end(schedule_context)
+    assert primary.resident_blocks == 4
+    manager.on_schedule_end(schedule_context)
+
+    assert primary.resident_blocks == 2
+    assert secondary.get_num_blocks() == 4
+    snapshot = manager._lifecycle.residency.snapshot()
+    assert snapshot["cpu_blocks"] == 2
+    assert snapshot["secondary_blocks"] == {"example:0": 4}
+
+    stats = manager.get_stats()
+    assert stats is not None
+    reduced = stats.reduce()
+    assert reduced[f"{TieringMetrics.PRIMARY_RECLAIMED_BLOCKS}:('watermark',)"] == 2
+    assert reduced[f"{TieringMetrics.MIGRATION_BLOCKS}:('cpu', 'example:0')"] == 4
+    manager.shutdown()
+
+
+def test_shared_block_is_protected_from_watermark_reclamation():
+    mock_region = _mock_mmap_region(1)
+    primary = CPUPrimaryTierOffloadingManager(num_blocks=1, mmap_region=mock_region)
+    secondary = ExampleSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_region.create_kv_memoryview(),
+        tier_type="example",
+    )
+    manager = TieringOffloadingManager(
+        primary_tier=primary,
+        secondary_tiers=[secondary],
+        lifecycle_config=LifecycleConfig(
+            cpu_high_watermark=0.5,
+            cpu_low_watermark=0.5,
+            residency_tracking_enabled=True,
+        ),
+    )
+    key = to_keys([1])[0]
+    first = ReqContext(req_id="first", kv_transfer_params={"session_id": "s1"})
+    second = ReqContext(req_id="second", kv_transfer_params={"session_id": "s2"})
+
+    manager.on_new_request(first)
+    prepared = manager.prepare_store([key], first)
+    assert prepared is not None
+    manager.complete_store(prepared.keys_to_store, first)
+    manager.on_new_request(second)
+    assert manager.lookup(key, second) is LookupResult.HIT
+    manager.on_request_finished(first)
+    manager.on_request_finished(second)
+
+    schedule_context = ScheduleEndContext([], ())
+    manager.on_schedule_end(schedule_context)
+    manager.on_schedule_end(schedule_context)
+
+    assert primary.resident_blocks == 1
+    assert manager._lifecycle.residency.snapshot()["shared_blocks"] == 1
+    manager.shutdown()
+
+
+def test_secondary_promotion_updates_residency_and_migration_metrics():
+    mock_region = _mock_mmap_region(2)
+    primary = CPUPrimaryTierOffloadingManager(num_blocks=2, mmap_region=mock_region)
+    secondary = ExampleSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_region.create_kv_memoryview(),
+        tier_type="example",
+    )
+    manager = TieringOffloadingManager(
+        primary_tier=primary,
+        secondary_tiers=[secondary],
+        lifecycle_config=LifecycleConfig(residency_tracking_enabled=True),
+    )
+    ctx = ReqContext(req_id="promotion")
+    key = to_keys([9])[0]
+    secondary.blocks[key] = True
+
+    manager.on_new_request(ctx)
+    assert manager.lookup(key, ctx) is LookupResult.RETRY
+    schedule_context = ScheduleEndContext([], ())
+    manager.on_schedule_end(schedule_context)
+    manager.on_schedule_end(schedule_context)
+
+    assert primary.lookup(key, ctx) is LookupResult.HIT
+    snapshot = manager._lifecycle.residency.snapshot()
+    assert snapshot["cpu_blocks"] == 1
+    assert snapshot["secondary_blocks"] == {"example:0": 1}
+
+    stats = manager.get_stats()
+    assert stats is not None
+    reduced = stats.reduce()
+    assert reduced[f"{TieringMetrics.MIGRATION_BLOCKS}:('example:0', 'cpu')"] == 1
+    assert reduced[f"{TieringMetrics.LOOKUPS}:('example:0', 'hit')"] == 1
+    manager.shutdown()
 
 
 class TestExampleSecondaryTierManager:

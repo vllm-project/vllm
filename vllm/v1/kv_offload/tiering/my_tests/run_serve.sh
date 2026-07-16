@@ -13,6 +13,24 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 FS_ROOT="${FS_ROOT:-/tmp/vllm_kv_tiering}"
 LIFECYCLE_TTL="${LIFECYCLE_TTL:-10}"
 DELETE_EXPIRED_SECONDARY="${DELETE_EXPIRED_SECONDARY:-false}"
+CPU_DEMOTE_AFTER="${CPU_DEMOTE_AFTER:-2}"
+CPU_HIGH_WATERMARK="${CPU_HIGH_WATERMARK:-0.9}"
+CPU_LOW_WATERMARK="${CPU_LOW_WATERMARK:-0.7}"
+HBM_PRESSURE_AWARE="${HBM_PRESSURE_AWARE:-true}"
+HBM_HIGH_WATERMARK="${HBM_HIGH_WATERMARK:-0.70}"
+HBM_LOW_WATERMARK="${HBM_LOW_WATERMARK:-0.50}"
+SECONDARY_PRESSURE_AWARE="${SECONDARY_PRESSURE_AWARE:-true}"
+MIN_SESSION_REQUESTS="${MIN_SESSION_REQUESTS:-2}"
+MIN_REUSE_PROBABILITY="${MIN_REUSE_PROBABILITY:-0.5}"
+STORE_DURING_DECODE_ONLY="${STORE_DURING_DECODE_ONLY:-true}"
+MAX_STORE_BLOCKS_PER_STEP="${MAX_STORE_BLOCKS_PER_STEP:-16}"
+MAX_STORE_BLOCKS_PER_REQUEST="${MAX_STORE_BLOCKS_PER_REQUEST:-64}"
+MAX_STORE_BLOCKS_PER_EPISODE="${MAX_STORE_BLOCKS_PER_EPISODE:-128}"
+MAX_STORE_BLOCKS_PER_SESSION_EPISODE="${MAX_STORE_BLOCKS_PER_SESSION_EPISODE:-64}"
+MAX_INFLIGHT_STORE_JOBS="${MAX_INFLIGHT_STORE_JOBS:-2}"
+RECLAIM_BATCH_SIZE="${RECLAIM_BATCH_SIZE:-64}"
+RESIDENCY_MAX_ENTRIES="${RESIDENCY_MAX_ENTRIES:-64000}"
+RESIDENCY_TRACKING="${RESIDENCY_TRACKING:-true}"
 VLLM_BIN="${VLLM_BIN:-/root/miniconda3/envs/vllm-hust-dev/bin/vllm-hust}"
 
 EXTRA_ARGS=()
@@ -46,6 +64,24 @@ exec "${VLLM_BIN}" serve "${MODEL}" \
       \"eviction_policy\": \"lru\",
       \"lifecycle_idle_ttl_sec\": ${LIFECYCLE_TTL},
       \"lifecycle_delete_expired_secondary\": ${DELETE_EXPIRED_SECONDARY},
+      \"lifecycle_cpu_demote_after_sec\": ${CPU_DEMOTE_AFTER},
+      \"lifecycle_cpu_high_watermark\": ${CPU_HIGH_WATERMARK},
+      \"lifecycle_cpu_low_watermark\": ${CPU_LOW_WATERMARK},
+      \"tiering_hbm_pressure_aware\": ${HBM_PRESSURE_AWARE},
+      \"tiering_hbm_high_watermark\": ${HBM_HIGH_WATERMARK},
+      \"tiering_hbm_low_watermark\": ${HBM_LOW_WATERMARK},
+      \"tiering_secondary_pressure_aware\": ${SECONDARY_PRESSURE_AWARE},
+      \"tiering_min_session_requests_for_offload\": ${MIN_SESSION_REQUESTS},
+      \"tiering_min_reuse_probability\": ${MIN_REUSE_PROBABILITY},
+      \"tiering_store_during_decode_only\": ${STORE_DURING_DECODE_ONLY},
+      \"tiering_max_device_store_blocks_per_step\": ${MAX_STORE_BLOCKS_PER_STEP},
+      \"tiering_max_device_store_blocks_per_request\": ${MAX_STORE_BLOCKS_PER_REQUEST},
+      \"tiering_max_device_store_blocks_per_pressure_episode\": ${MAX_STORE_BLOCKS_PER_EPISODE},
+      \"tiering_max_device_store_blocks_per_session_episode\": ${MAX_STORE_BLOCKS_PER_SESSION_EPISODE},
+      \"tiering_max_inflight_device_store_jobs\": ${MAX_INFLIGHT_STORE_JOBS},
+      \"lifecycle_reclaim_batch_size\": ${RECLAIM_BATCH_SIZE},
+      \"residency_max_entries\": ${RESIDENCY_MAX_ENTRIES},
+      \"residency_tracking_enabled\": ${RESIDENCY_TRACKING},
       \"secondary_tiers\": [{
         \"type\": \"fs\",
         \"root_dir\": \"${FS_ROOT}\",
