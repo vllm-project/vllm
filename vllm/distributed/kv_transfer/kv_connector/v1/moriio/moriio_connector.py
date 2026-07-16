@@ -1323,7 +1323,7 @@ class MoRIIOConnectorWorker:
 
     def _remote_tp_rank(self, remote_tp_size: int) -> int:
         # 0/unknown remote TP == homogeneous (avoids collapsing all ranks to 0).
-        if remote_tp_size <= 0:
+        if remote_tp_size == 0:
             remote_tp_size = self.world_size
         return get_moriio_remote_tp_rank(self.tp_rank, self.world_size, remote_tp_size)
 
