@@ -5,7 +5,6 @@ from typing import cast
 
 import torch
 
-from vllm import PromptType, TextPrompt
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     BaseMultiModalItemTracker,
@@ -16,6 +15,7 @@ from vllm.entrypoints.chat_utils import (
     _parse_chat_message_content_parts,
 )
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
+from vllm.inputs.llm import PromptType, TextPrompt
 
 from .typing import (
     ScoreContentPartParam,

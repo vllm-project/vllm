@@ -6,8 +6,7 @@ from typing import TYPE_CHECKING, TypeVar
 import numpy as np
 import torch
 
-from vllm import SamplingParams
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.logits_processor.interface import (
     BatchUpdate,
     LogitsProcessor,
@@ -119,6 +118,7 @@ class MinPLogitsProcessor(LogitsProcessor):
 class LogitBiasLogitsProcessor(LogitsProcessor):
     def __init__(self, _, device: torch.device, is_pin_memory: bool):
         self.device = device
+        self.pin_memory = is_pin_memory
         self.biases: dict[int, dict[int, float]] = {}
 
         self.bias_tensor: torch.Tensor = torch.tensor(())
@@ -154,7 +154,9 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
             )
 
     def _device_tensor(self, data: list, dtype: torch.dtype) -> torch.Tensor:
-        return async_tensor_h2d(data, device=self.device, dtype=dtype)
+        return torch.tensor(
+            data, device="cpu", dtype=dtype, pin_memory=self.pin_memory
+        ).to(device=self.device, non_blocking=True)
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         if self.biases:
@@ -168,6 +170,7 @@ class MinTokensLogitsProcessor(LogitsProcessor):
     ):
         # index -> (min_toks, output_token_ids, stop_token_ids)
         self.device = device
+        self.pin_memory = is_pin_memory
         self.min_toks: dict[int, tuple[int, Sequence[int], set[int]]] = {}
 
         # (req_idx_tensor,eos_tok_id_tensor)
@@ -224,7 +227,9 @@ class MinTokensLogitsProcessor(LogitsProcessor):
             )
 
     def _device_tensor(self, data: list, dtype: torch.dtype) -> torch.Tensor:
-        return async_tensor_h2d(data, device=self.device, dtype=dtype)
+        return torch.tensor(
+            data, device="cpu", dtype=dtype, pin_memory=self.pin_memory
+        ).to(device=self.device, non_blocking=True)
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         if self.min_toks:
@@ -278,8 +283,8 @@ class MinTokensLogitsProcessor(LogitsProcessor):
             toks_arr = np.concatenate(all_toks)
             # (row_indices, token_indices) for index_put_ to set -inf.
             logits_slice = (
-                async_tensor_h2d(rows_arr, device=self.device),
-                async_tensor_h2d(toks_arr, device=self.device),
+                torch.from_numpy(rows_arr).to(self.device, non_blocking=True),
+                torch.from_numpy(toks_arr).to(self.device, non_blocking=True),
             )
             logits.index_put_(logits_slice, self.neg_inf_tensor)
 

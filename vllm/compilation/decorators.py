@@ -15,6 +15,7 @@ import torch.nn as nn
 from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
 import vllm.envs as envs
+from vllm._version import __version__
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import (
@@ -253,10 +254,8 @@ def support_torch_compile(
 
 
 def _model_hash_key(fn: Callable[..., Any]) -> str:
-    import vllm
-
     sha256_hash = hashlib.sha256()
-    sha256_hash.update(vllm.__version__.encode())
+    sha256_hash.update(__version__.encode())
     sha256_hash.update(fn.__qualname__.encode())
     sha256_hash.update(str(fn.__code__.co_firstlineno).encode())
     return sha256_hash.hexdigest()

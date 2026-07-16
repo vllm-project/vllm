@@ -417,7 +417,7 @@ def get_sycl_version(run_lambda):
 
 
 def get_vllm_version():
-    from vllm import __version__, __version_tuple__
+    from vllm._version import __version__, __version_tuple__
 
     if __version__ == "dev":
         return "N/A (dev)"
