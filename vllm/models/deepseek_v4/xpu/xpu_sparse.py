@@ -88,6 +88,16 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
         return num_heads
 
+    @property
+    def _needs_oproj_sync(self) -> bool:
+        val = getattr(self, "_oproj_sync_flag", None)
+        if val is None:
+            from vllm.distributed.parallel_state import get_dp_group
+
+            val = get_dp_group().world_size > 1
+            self._oproj_sync_flag = val
+        return val
+
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         # XPU uses BF16 reference wo_a path (same as ROCm).
         from vllm.models.deepseek_v4.amd.rocm import rocm_inv_rope_einsum
@@ -101,7 +111,16 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
             self.o_lora_rank,
             self.wo_a,
         )
-        return self.wo_b(z.flatten(1))
+        out = self.wo_b(z.flatten(1))
+
+        # XPU/XCCL: under data parallelism the o_proj all-reduce output is
+        # consumed immediately by the native (non-kernel) MHC post/pre op.
+        # On this backend the collective's completion is not ordered before
+        # that host-visible consumer, so a host-side stream sync is required
+        # to avoid reading partial results.
+        if self._needs_oproj_sync:
+            torch.xpu.current_stream().synchronize()
+        return out
 
     def forward_mqa(
         self,
