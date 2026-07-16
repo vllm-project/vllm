@@ -169,7 +169,7 @@ EOF
 # Clone custom triton_kernels for install later
 RUN mkdir -p /app/patched_triton_kernels; \
     cd /app/patched_triton_kernels \
-    git clone ${TRITON_KERNEL_REPO} \
+    && git clone ${TRITON_KERNEL_REPO} \
     && cd triton \
     && git checkout ${TRITON_KERNEL_BRANCH} \
     && git submodule update --init --recursive
