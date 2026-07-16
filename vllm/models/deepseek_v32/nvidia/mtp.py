@@ -93,10 +93,11 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
-        is_sequence_parallel = hidden_states.shape[0] != positions.shape[0]
+        is_sequence_parallel = self.mtp_block.use_sequence_parallel_moe
         if is_sequence_parallel:
             hidden_states = hidden_states * get_tensor_model_parallel_world_size()
         else:
+            # Without sequence parallelism, the MoE output is left un-reduced.
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         # Recycle the POST-final-norm hidden into the next draft step. The
         # residual-add is fused into the final RMSNorm so it is computed
