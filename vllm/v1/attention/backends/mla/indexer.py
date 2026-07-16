@@ -950,6 +950,17 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 ):
                     _factor = self.kv_cache_spec.block_size // _kbs
                     block_table = (block_table[:, ::_factor] // _factor).contiguous()
+            seq_lens_is_buffer_view = (use_native and next_n > 1) or (
+                not use_native and max_decode_len > 1
+            )
+
+            # DCP: localize the now-expanded per-token global bounds to this
+            # rank's owned KV. Done here (after expansion) so each token's global
+            # causal length is localized individually; see the comment above.
+            if dcp_local_seq_lens is not None:
+                seq_lens = self._dcp_localize_decode_seq_lens(
+                    seq_lens, num_decodes, seq_lens_is_buffer_view
+                )
 
             # For DeepseekV4 (compress_ratio > 1), the indexer KV cache stores
             # compressed tokens. Convert uncompressed seq_lens to compressed.
