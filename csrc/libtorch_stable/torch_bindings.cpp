@@ -495,11 +495,14 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "dsa_litetopk_seed_prep(Tensor slog, int num_buckets, int topk, "
       "int cand_cap, int emit_limit, float headroom, int probe_stride_tok, "
       "int hist_stride, Tensor! origin, Tensor! inv_delta, Tensor! th_bucket, "
-      "Tensor! bcount, Tensor! cand_val, Tensor! cand_idx, Tensor! cand_cnt) -> ()");
+      "Tensor! bcount, Tensor! cand_val, Tensor! cand_idx, Tensor! cand_cnt) "
+      "-> ()");
   ops.def(
-      "dsa_litetopk_scan(Tensor q, Tensor kv, Tensor kv_scales, Tensor weights, "
+      "dsa_litetopk_scan(Tensor q, Tensor kv, Tensor kv_scales, Tensor "
+      "weights, "
       "Tensor cu_start, Tensor cu_end, Tensor! origin, Tensor! inv_delta, "
-      "Tensor! th_bucket, Tensor! cand_val, Tensor! cand_idx, Tensor! cand_cnt, "
+      "Tensor! th_bucket, Tensor! cand_val, Tensor! cand_idx, Tensor! "
+      "cand_cnt, "
       "Tensor! bcount, int num_buckets, int topk, int refresh_every, "
       "int num_kv_splits_override, int probe_group, int probe_add_max) -> ()");
   ops.def(

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused DSA (DeepSeek Sparse Attention) indexer top-k for Blackwell (SM100).
 
 Streams KV in tiles and fuses fp8 MQA scoring (tcgen05 UMMA) + an online bucketed
@@ -95,13 +96,42 @@ def dsa_litetopk_indexer(
     # emit_limit=0: sample calibrates the gate only, emits no seeds; the full
     # scan (cu_start=cu_seqlen_ks) produces candidates with correct indices.
     ops.dsa_litetopk_seed_prep(
-        sample_logits, num_buckets, topk, cap, 0, 0.0, 0, 1,
-        origin, inv_delta, th_bucket, bcount, cand_val, cand_idx, cand_cnt,
+        sample_logits,
+        num_buckets,
+        topk,
+        cap,
+        0,
+        0.0,
+        0,
+        1,
+        origin,
+        inv_delta,
+        th_bucket,
+        bcount,
+        cand_val,
+        cand_idx,
+        cand_cnt,
     )
     ops.dsa_litetopk_scan(
-        q, kv, kv_scales, weights, cu_seqlen_ks, cu_seqlen_ke,
-        origin, inv_delta, th_bucket, cand_val, cand_idx, cand_cnt, bcount,
-        num_buckets, topk, refresh_every, -1, 0, 0,
+        q,
+        kv,
+        kv_scales,
+        weights,
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+        origin,
+        inv_delta,
+        th_bucket,
+        cand_val,
+        cand_idx,
+        cand_cnt,
+        bcount,
+        num_buckets,
+        topk,
+        refresh_every,
+        -1,
+        0,
+        0,
     )
     # GATE4: cand_val is stored in bucket space, so select rebases with the
     # identity affine (origin=0, inv=1); the true origin/inv were folded in at
@@ -109,6 +139,14 @@ def dsa_litetopk_indexer(
     zero = torch.zeros(num_q, dtype=torch.float32, device=dev)
     one = torch.ones(num_q, dtype=torch.float32, device=dev)
     ops.dsa_litetopk_select(
-        cand_val, cand_idx, cand_cnt, zero, one, th_bucket,
-        num_buckets, topk, out_val, out_indices,
+        cand_val,
+        cand_idx,
+        cand_cnt,
+        zero,
+        one,
+        th_bucket,
+        num_buckets,
+        topk,
+        out_val,
+        out_indices,
     )

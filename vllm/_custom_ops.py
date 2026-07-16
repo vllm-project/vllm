@@ -2847,9 +2847,21 @@ def dsa_litetopk_seed_prep(
     cand_cnt: torch.Tensor,
 ) -> None:
     torch.ops._C.dsa_litetopk_seed_prep(
-        slog, num_buckets, topk, cand_cap, emit_limit, headroom,
-        probe_stride_tok, hist_stride, origin, inv_delta, th_bucket, bcount,
-        cand_val, cand_idx, cand_cnt,
+        slog,
+        num_buckets,
+        topk,
+        cand_cap,
+        emit_limit,
+        headroom,
+        probe_stride_tok,
+        hist_stride,
+        origin,
+        inv_delta,
+        th_bucket,
+        bcount,
+        cand_val,
+        cand_idx,
+        cand_cnt,
     )
 
 
@@ -2875,9 +2887,25 @@ def dsa_litetopk_scan(
     probe_add_max: int,
 ) -> None:
     torch.ops._C.dsa_litetopk_scan(
-        q, kv, kv_scales, weights, cu_start, cu_end, origin, inv_delta,
-        th_bucket, cand_val, cand_idx, cand_cnt, bcount, num_buckets, topk,
-        refresh_every, num_kv_splits_override, probe_group, probe_add_max,
+        q,
+        kv,
+        kv_scales,
+        weights,
+        cu_start,
+        cu_end,
+        origin,
+        inv_delta,
+        th_bucket,
+        cand_val,
+        cand_idx,
+        cand_cnt,
+        bcount,
+        num_buckets,
+        topk,
+        refresh_every,
+        num_kv_splits_override,
+        probe_group,
+        probe_add_max,
     )
 
 
@@ -2894,8 +2922,16 @@ def dsa_litetopk_select(
     out_idx: torch.Tensor,
 ) -> None:
     torch.ops._C.dsa_litetopk_select(
-        cand_val, cand_idx, cand_cnt, origin, inv_delta, th_bucket,
-        num_buckets, topk, out_val, out_idx,
+        cand_val,
+        cand_idx,
+        cand_cnt,
+        origin,
+        inv_delta,
+        th_bucket,
+        num_buckets,
+        topk,
+        out_val,
+        out_idx,
     )
 
 
