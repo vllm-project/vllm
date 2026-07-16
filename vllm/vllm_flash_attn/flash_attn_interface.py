@@ -399,7 +399,7 @@ def flash_attn_varlen_func(
 
         from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
 
-        fa_outputs = _flash_attn_fwd(
+        out, softmax_lse, _, _ = _flash_attn_fwd(
             q,
             k,
             v,
@@ -425,7 +425,6 @@ def flash_attn_varlen_func(
             aux_tensor_leading_dims=aux_tensor_leading_dims,
             output_scale=output_scale,
         )
-        out, softmax_lse = fa_outputs[:2]
     else:
         raise ValueError(f"Unsupported FA version: {fa_version}")
     return (out, softmax_lse) if return_softmax_lse else out

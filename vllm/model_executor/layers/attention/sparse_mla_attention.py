@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Generic, TypeVar, cast
 import numpy as np
 import torch
 
-import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
@@ -465,7 +464,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         max_seqlen_k: int,
         topk_per_req: list[torch.Tensor],
         q_lens: list[int],
-        k_lens: list[int],
         causal: bool,
         return_softmax_lse: bool = False,
         dense_mask: torch.Tensor | None = None,
@@ -473,28 +471,20 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from vllm.model_executor.layers.attention.sparse_mla_mask import (
             dense_mask_mod,
-            dense_mask_to_block_sparse,
             offset_dense_mask_mod,
         )
         from vllm.vllm_flash_attn import flash_attn_varlen_func
 
         tile_m = 128 if max_seqlen_q <= 128 else 256
-        tile_n = 128
         padded_q_len = triton.cdiv(max_seqlen_q, tile_m) * tile_m
-        padded_k_len = (
-            triton.cdiv(max_seqlen_k, tile_n) * tile_n
-            if envs.VLLM_SPARSE_MLA_USE_BLOCK_SPARSE
-            else max_seqlen_k
-        )
         if dense_mask is None:
             dense_mask = _build_topk_mask(
                 topk_per_req,
                 q_lens,
                 padded_q_len,
-                padded_k_len,
+                max_seqlen_k,
                 q.device,
             )
-        assert key_starts is None or not envs.VLLM_SPARSE_MLA_USE_BLOCK_SPARSE
         if key_starts is not None:
             dense_mask[:, 0, -1].copy_(key_starts)
         kwargs = {
@@ -511,25 +501,8 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             "mask_mod": dense_mask_mod if key_starts is None else offset_dense_mask_mod,
             "aux_tensors": [dense_mask],
             "aux_tensor_leading_dims": [2],
+            "causal": causal,
         }
-
-        if envs.VLLM_SPARSE_MLA_USE_BLOCK_SPARSE:
-            kwargs["causal"] = False
-            # FA4 may switch to a 64-wide K tile when its split-K heuristic
-            # activates, but the block-sparse metadata below uses 128-wide
-            # tiles. Split-K is not supported with that fixed sparse layout.
-            kwargs["num_splits"] = 1
-            kwargs["block_sparse_tensors"] = dense_mask_to_block_sparse(
-                dense_mask,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlen_k,
-                seq_lens_q=q_lens,
-                seq_lens_k=k_lens,
-                tile_m=tile_m,
-                tile_n=tile_n,
-            )
-        else:
-            kwargs["causal"] = causal
 
         return flash_attn_varlen_func(**kwargs)
 
@@ -595,7 +568,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
                 max_seqlen_k=chunked_context.max_seq_lens[i],
                 topk_per_req=chunk_topk,
                 q_lens=q_lens,
-                k_lens=chunk_lens,
                 causal=False,
                 return_softmax_lse=True,
                 dense_mask=dense_mask,
@@ -681,7 +653,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
                 max_seqlen_k=prefill_metadata.max_query_len,
                 topk_per_req=topk_per_req,
                 q_lens=q_lens,
-                k_lens=q_lens,
                 causal=True,
             )
             assert isinstance(attn_out, torch.Tensor)
@@ -690,29 +661,27 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
 
         context_lens = chunked_context.seq_lens.sum(dim=0).tolist()
         dense_mask = None
-        if not envs.VLLM_SPARSE_MLA_USE_BLOCK_SPARSE:
-            tile_m = 128 if prefill_metadata.max_query_len <= 128 else 256
-            padded_q_len = triton.cdiv(prefill_metadata.max_query_len, tile_m) * tile_m
-            global_mask_bytes = (
-                len(q_lens)
-                * padded_q_len
-                * (triton.cdiv(prefill_max_seq_len, 32) + 1)
-                * torch.int32.itemsize
+        tile_m = 128 if prefill_metadata.max_query_len <= 128 else 256
+        padded_q_len = triton.cdiv(prefill_metadata.max_query_len, tile_m) * tile_m
+        global_mask_bytes = (
+            len(q_lens)
+            * padded_q_len
+            * (triton.cdiv(prefill_max_seq_len, 32) + 1)
+            * torch.int32.itemsize
+        )
+        workspace_bytes = (
+            chunked_context.workspace.numel() * chunked_context.workspace.element_size()
+        )
+        if global_mask_bytes <= workspace_bytes:
+            dense_mask = _build_topk_mask(
+                topk_per_req,
+                q_lens,
+                padded_q_len,
+                prefill_max_seq_len,
+                q.device,
             )
-            workspace_bytes = (
-                chunked_context.workspace.numel()
-                * chunked_context.workspace.element_size()
-            )
-            if global_mask_bytes <= workspace_bytes:
-                dense_mask = _build_topk_mask(
-                    topk_per_req,
-                    q_lens,
-                    padded_q_len,
-                    prefill_max_seq_len,
-                    q.device,
-                )
-                dense_mask = torch.nn.functional.pad(dense_mask, (0, 1))
-                suffix_topk = topk_per_req
+            dense_mask = torch.nn.functional.pad(dense_mask, (0, 1))
+            suffix_topk = topk_per_req
         if dense_mask is None:
             suffix_topk = self._remap_topk_to_ranges(topk_per_req, context_lens, q_lens)
         suffix_output, suffix_lse = self._run_masked_mha(
@@ -725,7 +694,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             max_seqlen_k=prefill_metadata.max_query_len,
             topk_per_req=suffix_topk,
             q_lens=q_lens,
-            k_lens=q_lens,
             causal=True,
             return_softmax_lse=True,
             dense_mask=dense_mask,
