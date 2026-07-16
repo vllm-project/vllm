@@ -44,6 +44,7 @@ from vllm.v1.core.sched.output import (
     CachedRequestData,
     GrammarOutput,
     NewRequestData,
+    ScheduledEncoderInputStats,
     SchedulerOutput,
 )
 from vllm.v1.core.sched.request_queue import (
@@ -1121,6 +1122,15 @@ class Scheduler(SchedulerInterface):
                 len(num_scheduled_tokens)
             ]
 
+        scheduled_encoder_input_stats = None
+        if (
+            self.log_stats
+            and self.observability_config.enable_logging_iteration_details
+        ):
+            scheduled_encoder_input_stats = self._make_scheduled_encoder_input_stats(
+                scheduled_encoder_inputs
+            )
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -1128,6 +1138,7 @@ class Scheduler(SchedulerInterface):
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
+            scheduled_encoder_input_stats=scheduled_encoder_input_stats,
             num_common_prefix_blocks=num_common_prefix_blocks,
             preempted_req_ids=self.reset_preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
@@ -1506,6 +1517,23 @@ class Scheduler(SchedulerInterface):
             external_load_encoder_input,
         )
 
+    def _make_scheduled_encoder_input_stats(
+        self, scheduled_encoder_inputs: dict[str, list[int]]
+    ) -> ScheduledEncoderInputStats | None:
+        stats = ScheduledEncoderInputStats()
+
+        for req_id, input_ids in scheduled_encoder_inputs.items():
+            request = self.requests.get(req_id)
+            if request is None:
+                continue
+
+            for input_id in input_ids:
+                mm_feature = request.mm_features[input_id]
+                stats.num_inputs += 1
+                stats.output_tokens += mm_feature.mm_position.get_num_embeds()
+
+        return stats if stats.num_inputs else None
+
     def get_grammar_bitmask(
         self, scheduler_output: SchedulerOutput
     ) -> GrammarOutput | None:
@@ -1877,7 +1905,10 @@ class Scheduler(SchedulerInterface):
 
         if (
             stats := self.make_stats(
-                spec_decoding_stats, kv_connector_stats, cudagraph_stats, perf_stats
+                spec_decoding_stats,
+                kv_connector_stats,
+                cudagraph_stats,
+                perf_stats,
             )
         ) is not None:
             # Return stats to only one of the front-ends.
