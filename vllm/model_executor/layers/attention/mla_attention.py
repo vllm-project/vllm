@@ -393,6 +393,19 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             calculate_kv_scales = False
         self.quant_config = quant_config
 
+        if cache_config is not None and cache_config.kv_cache_dtype_skip_layers:
+            from vllm.model_executor.models.utils import extract_layer_index
+
+            layer_idx = extract_layer_index(prefix)
+            if str(layer_idx) in cache_config.kv_cache_dtype_skip_layers:
+                kv_cache_dtype = "auto"
+                calculate_kv_scales = False
+            logger.debug(
+                "Layer %s: kv_cache_dtype=%s",
+                prefix,
+                kv_cache_dtype,
+            )
+
         dtype = torch.get_default_dtype()
         if attn_backend is not None:
             assert attn_backend.is_mla(), (

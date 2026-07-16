@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _LL_BF16_WARMUP_MODEL_SHAPES: tuple[tuple[int, int], ...] = (
+    (6144, 264),  # Inkling
     (7168, 256),  # DSV3
     (7168, 384),  # DSV4-Pro
     (14400, 256),  # DSV4-Flash
