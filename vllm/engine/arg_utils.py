@@ -693,6 +693,7 @@ class EngineArgs:
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
+    prefix_match_unit: int | None = get_field(CacheConfig, "prefix_match_unit")
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
 
     mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
@@ -1193,6 +1194,9 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--mamba-block-size", **cache_kwargs["mamba_block_size"]
+        )
+        cache_group.add_argument(
+            "--prefix-match-unit", **cache_kwargs["prefix_match_unit"]
         )
         cache_group.add_argument(
             "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
@@ -1750,6 +1754,10 @@ class EngineArgs:
         if self.speculative_config is None:
             return None
 
+        self.speculative_config = {
+            k.replace("-", "_"): v for k, v in self.speculative_config.items()
+        }
+
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine
         # config.
@@ -1899,6 +1907,7 @@ class EngineArgs:
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
+            prefix_match_unit=self.prefix_match_unit,
             mamba_cache_mode=self.mamba_cache_mode,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
@@ -2493,7 +2502,11 @@ class EngineArgs:
         self, model_config: ModelConfig
     ) -> None:
         default_chunked_prefill = model_config.is_chunked_prefill_supported
-        default_prefix_caching = model_config.is_prefix_caching_supported
+        # Hybrid models support prefix caching but keep it opt-in for now
+        # while the feature matures.
+        default_prefix_caching = (
+            model_config.is_prefix_caching_supported and not model_config.is_hybrid
+        )
 
         if self.enable_chunked_prefill is None:
             self.enable_chunked_prefill = default_chunked_prefill
