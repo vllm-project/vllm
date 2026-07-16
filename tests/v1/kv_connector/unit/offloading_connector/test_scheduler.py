@@ -218,7 +218,7 @@ def test_abort_cleans_sole_speculator_before_event_translation(request_runner):
     assert events[0].token_ids == []
 
 
-def test_reset_flushes_pre_reset_event_before_clearing_metadata(request_runner):
+def test_reset_drops_reset_time_event_before_new_generation(request_runner):
     runner = request_runner(
         block_size=4,
         num_gpu_blocks=10,
@@ -227,9 +227,8 @@ def test_reset_flushes_pre_reset_event_before_clearing_metadata(request_runner):
     raw_events: list[OffloadingEvent] = []
 
     def take_raw_events():
-        events = list(raw_events)
+        yield from raw_events
         raw_events.clear()
-        return events
 
     runner.manager.lookup.return_value = LookupResult.RETRY
     runner.manager.take_events.side_effect = take_raw_events
@@ -247,8 +246,11 @@ def test_reset_flushes_pre_reset_event_before_clearing_metadata(request_runner):
         OffloadingEvent(keys=[key], medium=MEDIUM_CPU, removed=False)
     )
 
+    runner.manager.take_events.reset_mock()
     scheduler.reset_cache()
 
+    runner.manager.take_events.assert_called_once_with()
+    assert not raw_events
     assert not tracker._pending_event_metadata
     assert not tracker._speculative_owners
     assert not tracker._speculative_keys
@@ -264,12 +266,9 @@ def test_reset_flushes_pre_reset_event_before_clearing_metadata(request_runner):
         LookupResult.RETRY,
     )
 
-    events = list(scheduler.take_events())
-    assert len(events) == 1
-    assert isinstance(events[0], BlockStored)
-    assert events[0].token_ids == [1, 1, 1, 1]
-    assert tracker._speculative_owners[key] == {req_id}
     assert list(scheduler.take_events()) == []
+    assert key in tracker._pending_event_metadata
+    assert tracker._speculative_owners[key] == {req_id}
 
 
 def test_reset_keeps_legacy_event_path_when_self_describing_disabled(
@@ -285,9 +284,8 @@ def test_reset_keeps_legacy_event_path_when_self_describing_disabled(
     raw_events: list[OffloadingEvent] = []
 
     def take_raw_events():
-        events = list(raw_events)
+        yield from raw_events
         raw_events.clear()
-        return events
 
     runner.manager.take_events.side_effect = take_raw_events
     runner.manager.reset_cache.side_effect = lambda: raw_events.append(
@@ -298,7 +296,6 @@ def test_reset_keeps_legacy_event_path_when_self_describing_disabled(
     scheduler.reset_cache()
 
     runner.manager.take_events.assert_not_called()
-    assert scheduler._flushed_events == []
     events = list(scheduler.take_events())
     assert len(events) == 1
     assert isinstance(events[0], BlockStored)

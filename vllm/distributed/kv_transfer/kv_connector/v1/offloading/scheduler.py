@@ -419,7 +419,6 @@ class OffloadingConnectorScheduler:
         self._block_id_to_pending_jobs: dict[int, set[int]] = {}
 
         self._events_tracker = OffloadingEventsTracker(spec.kv_events_config)
-        self._flushed_events: list[KVCacheEvent] = []
 
     def _maybe_observe_lookup_async_delay(
         self, req_status: RequestOffloadState
@@ -1338,8 +1337,6 @@ class OffloadingConnectorScheduler:
             ``BlockStored`` or ``BlockRemoved`` events corresponding to
             the underlying :class:`OffloadingEvent` stream.
         """
-        flushed_events, self._flushed_events = self._flushed_events, []
-        yield from flushed_events
         yield from self._events_tracker.take_events(self.manager.take_events())
 
     def reset_cache(self) -> None:
@@ -1360,11 +1357,8 @@ class OffloadingConnectorScheduler:
         # Reset offloading manager cache
         self.manager.reset_cache()
         if self._events_tracker.self_describing_enabled:
-            # Translate queued events before clearing their pre-reset metadata.
-            flushed_events = list(
-                self._events_tracker.take_events(self.manager.take_events())
-            )
-            self._flushed_events.extend(flushed_events)
+            for _ in self.manager.take_events():
+                pass
 
         # Reset store progress so active requests re-offload from chunk 0.
         for status in self._req_status.values():
