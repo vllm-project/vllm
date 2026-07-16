@@ -148,9 +148,11 @@ class LateInteractionRunner:
         lasts_cpu: list[int] = []
         if use_zerocopy:
             assert pooling_cursor is not None  # narrowed by use_zerocopy
-            if pooling_cursor.first_token_indices_cpu is not None:
-                firsts_cpu = pooling_cursor.first_token_indices_cpu.tolist()
-                lasts_cpu = pooling_cursor.last_token_indices_cpu.tolist()
+            fcpu = pooling_cursor.first_token_indices_cpu
+            lcpu = pooling_cursor.last_token_indices_cpu
+            if fcpu is not None and lcpu is not None:
+                firsts_cpu = fcpu.tolist()
+                lasts_cpu = lcpu.tolist()
             else:  # fallback: single sync (older cursor producers)
                 firsts_cpu = pooling_cursor.first_token_indices_gpu.tolist()
                 lasts_cpu = pooling_cursor.last_token_indices_gpu.tolist()
