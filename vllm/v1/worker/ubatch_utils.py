@@ -193,6 +193,11 @@ def _make_metadata_with_slice(
         if attn_metadata._num_computed_tokens_cpu is not None
         else None
     )
+    num_prompt_tokens_cpu = (
+        attn_metadata.num_prompt_tokens_cpu[request_slice]
+        if attn_metadata.num_prompt_tokens_cpu is not None
+        else None
+    )
 
     if splits_last_request:
         # NOTE: We use start_locs (the original query_start_loc_cpu) to calculate
@@ -243,8 +248,12 @@ def _make_metadata_with_slice(
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
         seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+        num_prompt_tokens_cpu=num_prompt_tokens_cpu,
         _seq_lens_cpu=seq_lens_cpu,
         _num_computed_tokens_cpu=num_computed_tokens_cpu,
+        positions=attn_metadata.positions[token_slice]
+        if attn_metadata.positions is not None
+        else None,
     )
 
 
