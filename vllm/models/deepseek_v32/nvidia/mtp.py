@@ -9,7 +9,6 @@ import torch.nn as nn
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import (
-    get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
@@ -94,9 +93,7 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             positions=positions, hidden_states=hidden_states, residual=None
         )
         is_sequence_parallel = self.mtp_block.use_sequence_parallel_moe
-        if is_sequence_parallel:
-            hidden_states = hidden_states * get_tensor_model_parallel_world_size()
-        else:
+        if not is_sequence_parallel:
             # Without sequence parallelism, the MoE output is left un-reduced.
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         # Recycle the POST-final-norm hidden into the next draft step. The
