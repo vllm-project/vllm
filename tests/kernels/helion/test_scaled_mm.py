@@ -196,6 +196,43 @@ class TestScaledMmCorrectness:
 
         torch.testing.assert_close(c_check, c_actual, rtol=1e-1, atol=1e-1)
 
+    # N and K are multiples of 16 to satisfy cutlass_scaled_mm's alignment
+    # requirements (c.stride(0) and b.stride(1) must be 16-element aligned).
+    @pytest.mark.parametrize("N,K", [(256, 128), (496, 256)])
+    @pytest.mark.parametrize("use_bias", [True, False])
+    # threshold picks the branch: M(=8) <= threshold -> Helion, else -> cutlass.
+    @pytest.mark.parametrize("threshold", [16, 4])
+    def test_helion_cutlass_hybrid_scaled_mm(self, N, K, use_bias, threshold):
+        skip_if_platform_unsupported("scaled_mm")
+        if not current_platform.supports_fp8():
+            pytest.skip("Platform does not support FP8")
+        cap = current_platform.get_device_capability()
+        assert cap is not None
+        if not torch.ops._C.cutlass_scaled_mm_supports_fp8(cap.to_int()):
+            pytest.skip("CUTLASS scaled_mm does not support FP8 on this platform")
+
+        set_random_seed(0)
+        M = 8
+        in_dtype = current_platform.fp8_dtype()
+        out_dtype = torch.bfloat16
+
+        a = (0.25 * torch.rand((M, K), dtype=torch.float32, device="cuda")).to(in_dtype)
+        b = (0.25 * torch.rand((N, K), dtype=torch.float32, device="cuda")).to(in_dtype)
+        b = b.T
+        scale_a = 0.25 * torch.rand((M, 1), device=a.device)
+        scale_b = 0.25 * torch.rand((N, 1), device=b.device)
+        bias = torch.rand((N,), device=a.device, dtype=out_dtype) if use_bias else None
+
+        c_check = torch.empty((M, N), dtype=out_dtype, device=a.device)
+        c_actual = torch.empty((M, N), dtype=out_dtype, device=a.device)
+
+        torch.ops._C.helion_cutlass_hybrid_scaled_mm(
+            c_check, a, b, scale_a, scale_b, bias, threshold
+        )
+        baseline(c_actual, a, b, scale_a, scale_b, bias)
+
+        torch.testing.assert_close(c_check, c_actual, rtol=1e-1, atol=1e-1)
+
 
 class TestScaledMmIntegration:
     def test_kernel_registration_integration(self):
@@ -232,3 +269,8 @@ class TestScaledMmIntegration:
             fn = getattr(torch.ops.vllm_helion, kernel_wrapper.op_name)
             args = _generate_input(16, 4096, 4096)
             opcheck(fn, args)
+
+        # opcheck for the hybrid c++ kernel
+        args = _generate_input(16, 4096, 4096, True)
+        args += (8,)
+        opcheck(torch.ops._C.helion_cutlass_hybrid_scaled_mm, args)
