@@ -14,8 +14,6 @@ ARG AITER_BRANCH="main"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="v1.1.0"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
-ARG TRITON_KERNEL_BRANCH="padroute"
-ARG TRITON_KERNEL_REPO="https://github.com/jpvillam-amd/triton.git"
 
 # Sccache configuration (only used in release pipeline)
 ARG USE_SCCACHE
@@ -38,6 +36,8 @@ ENV ENABLE_CK=0
 ENV SKIP_CK_BUILD="TRUE"
 ENV FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE"
 ARG PREBUILD_KERNELS=0
+ARG TRITON_KERNEL_BRANCH="padroute"
+ARG TRITON_KERNEL_REPO="https://github.com/jpvillam-amd/triton.git"
 
 # Required for RCCL in ROCm7.1
 ENV HSA_NO_SCRATCH_RECLAIM=1

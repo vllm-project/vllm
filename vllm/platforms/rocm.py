@@ -37,14 +37,8 @@ try:
         amdsmi_topo_get_link_type,
         amdsmi_topo_get_numa_node_number,
     )
-
-    _AMDSMI_AVAILABLE = True
 except ImportError as e:
     logger.warning("Failed to import from amdsmi with %r", e)
-    # amdsmi is unavailable on the FFM pre-silicon simulator (and would report
-    # the host's real GPUs, not the sim). amdsmi-decorated methods fall back to
-    # torch when this is False.
-    _AMDSMI_AVAILABLE = False
 
 try:
     import vllm._C  # noqa: F401
@@ -160,10 +154,6 @@ _sync_hip_cuda_env_vars()
 def with_amdsmi_context(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        if not _AMDSMI_AVAILABLE:
-            # amdsmi unavailable (e.g. FFM simulator): skip init/shutdown and let
-            # the wrapped function use its own non-amdsmi (torch) fallback.
-            return fn(*args, **kwargs)
         amdsmi_init()
         try:
             return fn(*args, **kwargs)
@@ -204,13 +194,6 @@ def _get_gcn_arch() -> str:
         return _query_gcn_arch_from_amdsmi()
     except Exception as e:
         logger.debug("Failed to get GCN arch via amdsmi: %s", e)
-        # NOTE: use logger.debug, not warning_once, here. This runs at module
-        # load while resolving the platform; warning_once imports
-        # vllm.distributed, which causes a circular import before
-        # current_platform is bound. This path is taken on the FFM simulator,
-        # where amdsmi is unavailable (and would report the host's real gfx950
-        # cards rather than the simulated gfx1250) — torch.cuda below is correct.
-        logger.debug("Failed to get GCN arch via amdsmi, falling back to torch.cuda.")
     # Ultimate fallback: use torch.cuda (will initialize CUDA)
     return torch.cuda.get_device_properties("cuda").gcnArchName
 
@@ -373,7 +356,6 @@ def get_cdna_version() -> int:
     if on_gfx1250():
         return 5
     return -1
-
 
 
 # Enable HIP online tuning early, before hipBLASLt initializes.
@@ -778,9 +760,6 @@ class RocmPlatform(Platform):
     @with_amdsmi_context
     @lru_cache(maxsize=8)
     def get_device_name(cls, device_id: int = 0) -> str:
-        if not _AMDSMI_AVAILABLE:
-            # FFM simulator: amdsmi can't see the simulated GPU; use torch.
-            return torch.cuda.get_device_name(device_id)
         physical_device_id = cls.device_id_to_physical_device_id(device_id)
         handle = amdsmi_get_processor_handles()[physical_device_id]
         asic_info = amdsmi_get_gpu_asic_info(handle)
