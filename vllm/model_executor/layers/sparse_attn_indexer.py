@@ -385,6 +385,7 @@ def sparse_attn_indexer(
         k, slot_mapping_for_cache = maybe_gather_indexer_k(
             k,
             slot_mapping,
+            num_decode_tokens,
             use_pcp,
         )
         # scale_fmt can be None, but the function expects str

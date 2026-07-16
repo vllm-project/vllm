@@ -453,7 +453,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
-            max_num_batched_tokens=self.max_num_tokens,
+            max_num_batched_tokens=(
+                self.max_num_tokens * self.parallel_config.prefill_context_parallel_size
+            ),
             max_num_blocks_per_group=max_num_blocks_per_group,
             device=self.device,
             kernel_block_sizes=self.kernel_block_sizes,
@@ -1079,12 +1081,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def prepare_dummy_attn(
         self, input_batch: InputBatch
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor, torch.Tensor]:
-        if self.pcp_manager is not None:
-            return self.pcp_manager.prepare_dummy_attn(input_batch)
-
         block_tables = self.block_tables.get_dummy_block_tables(input_batch.num_reqs)
         slot_mappings = self.block_tables.get_dummy_slot_mappings(
-            input_batch.num_tokens
+            input_batch.num_tokens * self.parallel_config.prefill_context_parallel_size
         )
         return block_tables, slot_mappings, slot_mappings
 

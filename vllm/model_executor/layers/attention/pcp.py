@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import torch
 
@@ -14,6 +14,10 @@ from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 
 if TYPE_CHECKING:
     from vllm.config import ParallelConfig
+
+
+class _DecodeMetadata(Protocol):
+    num_decode_tokens: int
 
 
 def get_dcp_tp_size(parallel_config: "ParallelConfig") -> int:
@@ -37,8 +41,44 @@ def allgather_padded_token_tensors(
     )
 
 
+def _gather_prefill_cache_inputs(
+    tensors: tuple[torch.Tensor, ...],
+    slot_mapping: torch.Tensor,
+    num_decode_tokens: int,
+) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+    """Keep replicated decode writes local and gather partitioned prefills."""
+    local_num_tokens = tensors[0].shape[0]
+    assert all(tensor.shape[0] == local_num_tokens for tensor in tensors)
+    assert 0 <= num_decode_tokens <= local_num_tokens
+
+    pcp_size = get_pcp_group().world_size
+    expanded_num_tokens = pcp_size * local_num_tokens
+    rank_slot_mappings = slot_mapping[:expanded_num_tokens].view(
+        pcp_size, local_num_tokens
+    )
+    if num_decode_tokens == 0:
+        return allgather_padded_token_tensors(tensors), rank_slot_mappings.flatten()
+    if num_decode_tokens == local_num_tokens:
+        return tensors, rank_slot_mappings[0, :num_decode_tokens]
+
+    gathered_prefills = allgather_padded_token_tensors(
+        tuple(tensor[num_decode_tokens:] for tensor in tensors)
+    )
+    cache_inputs = tuple(
+        torch.cat((tensor[:num_decode_tokens], gathered_prefill), dim=0)
+        for tensor, gathered_prefill in zip(tensors, gathered_prefills)
+    )
+    cache_slot_mapping = torch.cat(
+        (
+            rank_slot_mappings[0, :num_decode_tokens],
+            rank_slot_mappings[:, num_decode_tokens:].flatten(),
+        )
+    )
+    return cache_inputs, cache_slot_mapping
+
+
 def maybe_gather_mla_latent_cache_inputs(
-    attn_metadata: object | None,
+    attn_metadata: _DecodeMetadata | None,
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     slot_mapping: torch.Tensor | None,
@@ -49,22 +89,27 @@ def maybe_gather_mla_latent_cache_inputs(
     assert slot_mapping is not None
     num_tokens = kv_c_normed.shape[0]
     k_pe_flat = k_pe.reshape(num_tokens, -1)
-    gathered_kv_c, gathered_k_pe_flat = allgather_padded_token_tensors(
-        (kv_c_normed, k_pe_flat)
+    (cache_kv_c, cache_k_pe_flat), cache_slot_mapping = _gather_prefill_cache_inputs(
+        (kv_c_normed, k_pe_flat),
+        slot_mapping,
+        attn_metadata.num_decode_tokens,
     )
-    gathered_k_pe = gathered_k_pe_flat.view(-1, *k_pe.shape[1:])
-    return gathered_kv_c, gathered_k_pe, slot_mapping[: gathered_kv_c.shape[0]]
+    cache_k_pe = cache_k_pe_flat.view(-1, *k_pe.shape[1:])
+    return cache_kv_c, cache_k_pe, cache_slot_mapping
 
 
 def maybe_gather_indexer_k(
     k: torch.Tensor,
     slot_mapping: torch.Tensor,
+    num_decode_tokens: int,
     use_pcp: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if not use_pcp:
         return k, slot_mapping
-    (gathered_k,) = allgather_padded_token_tensors((k,))
-    return gathered_k, slot_mapping[: gathered_k.shape[0]]
+    (cache_k,), cache_slot_mapping = _gather_prefill_cache_inputs(
+        (k,), slot_mapping, num_decode_tokens
+    )
+    return cache_k, cache_slot_mapping
 
 
 def pcp_dcp_a2a_lse_reduce(

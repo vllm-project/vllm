@@ -8,7 +8,6 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
-from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
@@ -24,102 +23,24 @@ from vllm.v1.worker.gpu.states import RequestState
 logger = init_logger(__name__)
 
 
-@dataclass
-class PCPBatchLayout:
-    hidden_restore_idx: torch.Tensor
-    cache_write_idx: torch.Tensor
-    cache_is_padding: torch.Tensor
-    per_rank_num_tokens: list[int]
-    rank_segments: list[list[tuple[int, int, int]]]
+@dataclass(frozen=True)
+class RankSegment:
+    global_batch_req_idx: int
+    global_batch_slice: slice
+    rank_local_batch_slice: slice
 
-
-def allgather_tokens(
-    tensor: torch.Tensor,
-    per_rank_num_tokens: list[int],
-) -> torch.Tensor:
-    pcp_group = get_pcp_group()
-    padded_num_tokens = max(per_rank_num_tokens)
-    assert tensor.shape[0] == padded_num_tokens
-    gathered = pcp_group.all_gather(tensor, dim=0)
-    if all(num_tokens == padded_num_tokens for num_tokens in per_rank_num_tokens):
-        return gathered
-    return torch.cat(
-        [
-            rank_tensor[:num_tokens]
-            for rank_tensor, num_tokens in zip(
-                gathered.split(padded_num_tokens, dim=0),
-                per_rank_num_tokens,
-            )
-        ],
-        dim=0,
-    )
-
-
-@triton.jit
-def _prepare_prefill_inputs_with_start_pos_kernel(
-    input_ids_ptr,
-    next_prefill_tokens_ptr,
-    idx_mapping_ptr,
-    query_start_loc_ptr,
-    all_token_ids_ptr,
-    all_token_ids_stride,
-    prefill_lens_ptr,
-    virtual_start_pos_ptr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    batch_idx = tl.program_id(0)
-    req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
-    prefill_len = tl.load(prefill_lens_ptr + req_state_idx)
-    start_pos = tl.load(virtual_start_pos_ptr + batch_idx)
-    if start_pos >= prefill_len:
-        return
-
-    query_start = tl.load(query_start_loc_ptr + batch_idx)
-    query_end = tl.load(query_start_loc_ptr + batch_idx + 1)
-    query_len = query_end - query_start
-
-    request_ptr = all_token_ids_ptr + req_state_idx * all_token_ids_stride
-    for i in range(0, query_len, BLOCK_SIZE):
-        block = i + tl.arange(0, BLOCK_SIZE)
-        mask = block < query_len
-        tokens = tl.load(request_ptr + start_pos + block, mask=mask)
-        tl.store(input_ids_ptr + query_start + block, tokens, mask=mask)
-
-    next_pos = start_pos + query_len
-    if next_pos < prefill_len:
-        next_token = tl.load(request_ptr + next_pos)
-        tl.store(next_prefill_tokens_ptr + req_state_idx, next_token)
-
-
-def _prepare_prefill_inputs_with_start_pos(
-    input_ids: torch.Tensor,
-    next_prefill_tokens: torch.Tensor,
-    idx_mapping: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    all_token_ids: torch.Tensor,
-    prefill_len: torch.Tensor,
-    virtual_start_pos: torch.Tensor,
-) -> None:
-    num_reqs = idx_mapping.shape[0]
-    _prepare_prefill_inputs_with_start_pos_kernel[(num_reqs,)](
-        input_ids,
-        next_prefill_tokens,
-        idx_mapping,
-        query_start_loc,
-        all_token_ids,
-        all_token_ids.stride(0),
-        prefill_len,
-        virtual_start_pos,
-        BLOCK_SIZE=1024,
-    )
+    @property
+    def num_tokens(self) -> int:
+        return self.global_batch_slice.stop - self.global_batch_slice.start
 
 
 class PCPManager:
-    """Stateful MRV2 PCP virtual-batch manager.
+    """MRV2 PC batch manager.
 
-    The model runner keeps physical request state. This manager rewrites only
-    the per-step InputBatch into virtual DualChunkSwap rows and keeps the
-    physical view privately for sampling/postprocess restore.
+    The model runner keeps the global scheduled batch. This manager rewrites only
+    the per-step InputBatch into rank-local DualChunkSwap rows and keeps the
+    global-batch view privately for to restore to the global batch shape for restoring
+    before sampling/postprocess.
     """
 
     def __init__(
@@ -142,43 +63,45 @@ class PCPManager:
         self.dcp_rank = dcp_rank
         self.cp_interleave = cp_interleave
 
-        self._physical_batch: InputBatch | None = None
+        self._global_batch: InputBatch | None = None
         self._req_states = req_states
         self._block_tables = block_tables
-        self._batch_layout: PCPBatchLayout | None = None
+        self._hidden_restore_idx: torch.Tensor | None = None
+        self._padded_gather_idx: torch.Tensor | None = None
+        self._expanded_is_padding: torch.Tensor | None = None
 
-        max_num_virtual_reqs = (
+        max_num_local_reqs = (
             self._pad_num_reqs(2 * max_num_reqs) if max_num_reqs is not None else None
         )
         self._input_buffers = (
-            InputBuffers(max_num_virtual_reqs, max_num_tokens, device)
-            if max_num_virtual_reqs is not None and max_num_tokens is not None
+            InputBuffers(max_num_local_reqs, max_num_tokens, device)
+            if max_num_local_reqs is not None and max_num_tokens is not None
             else None
         )
-        self._virtual_idx_mapping = (
-            torch.arange(max_num_virtual_reqs, dtype=torch.int32, device=device)
-            if max_num_virtual_reqs is not None
+        self._local_req_idx = (
+            torch.arange(max_num_local_reqs, dtype=torch.int32, device=device)
+            if max_num_local_reqs is not None
             else None
         )
-        self._virtual_block_tables: tuple[torch.Tensor, ...] | None
-        self._virtual_block_table_ptrs: torch.Tensor | None
-        if block_tables is not None and max_num_virtual_reqs is not None:
-            self._virtual_block_tables = tuple(
-                table.new_zeros((max_num_virtual_reqs, table.shape[1]))
+        self._local_block_tables: tuple[torch.Tensor, ...] | None
+        self._local_block_table_ptrs: torch.Tensor | None
+        if block_tables is not None and max_num_local_reqs is not None:
+            self._local_block_tables = tuple(
+                table.new_zeros((max_num_local_reqs, table.shape[1]))
                 for table in block_tables.input_block_tables
             )
-            self._virtual_block_table_ptrs = torch.tensor(
-                [table.data_ptr() for table in self._virtual_block_tables],
+            self._local_block_table_ptrs = torch.tensor(
+                [table.data_ptr() for table in self._local_block_tables],
                 dtype=torch.uint64,
                 device=device,
             )
         else:
-            self._virtual_block_tables = None
-            self._virtual_block_table_ptrs = None
+            self._local_block_tables = None
+            self._local_block_table_ptrs = None
         num_kv_cache_groups = (
             block_tables.num_kv_cache_groups if block_tables is not None else 0
         )
-        self._physical_slot_mappings = (
+        self._global_batch_slot_mappings = (
             torch.empty(
                 num_kv_cache_groups,
                 max_num_tokens,
@@ -188,7 +111,7 @@ class PCPManager:
             if max_num_tokens is not None and num_kv_cache_groups > 0
             else None
         )
-        self._cache_slot_mappings = (
+        self._gathered_kv_slot_mappings = (
             torch.empty(
                 num_kv_cache_groups,
                 max_num_tokens * pcp_world_size,
@@ -249,98 +172,117 @@ class PCPManager:
         self,
         rank: int,
         num_scheduled_tokens: np.ndarray,
-        num_computed_tokens: np.ndarray,
         is_prefilling: np.ndarray,
-    ) -> list[tuple[int, int, int]]:
-        """Build one rank's attention-compatible virtual rows."""
-        decode_segments: list[tuple[int, int, int]] = []
-        context_prefill_segments: list[tuple[int, int, int]] = []
-        fresh_prefill_segments: list[tuple[int, int, int]] = []
+        query_start_loc_np: np.ndarray,
+    ) -> list[RankSegment]:
+        """Build one rank's attention-compatible DualChunkSwap rows.
+
+        PCP=4 partitions each prefill into eight chunks:
+
+            full:  | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+            rank 0:  0                           7
+            rank 1:      1                   6
+            rank 2:          2           5
+            rank 3:              3   4
+        """
+        rank_segments = []
+        rank_offset = 0
         num_chunks = 2 * self.pcp_world_size
-        for req_idx, num_tokens in enumerate(num_scheduled_tokens):
-            base_pos = int(num_computed_tokens[req_idx])
+        for global_batch_req_idx, num_tokens in enumerate(num_scheduled_tokens):
             query_len = int(num_tokens)
             if query_len == 0:
                 continue
-            if not bool(is_prefilling[req_idx]):
-                decode_segments.append((req_idx, base_pos, query_len))
-                continue
+            global_batch_start = int(query_start_loc_np[global_batch_req_idx])
+            chunk_indices: tuple[int, ...]
+            if bool(is_prefilling[global_batch_req_idx]):
+                chunk_size = (query_len + num_chunks - 1) // num_chunks
+                chunk_indices = (rank, num_chunks - 1 - rank)
+            else:  # decodes are replicated
+                chunk_size = query_len
+                chunk_indices = (0,)
 
-            chunk_base, remainder = divmod(query_len, num_chunks)
-
-            for chunk_idx in (rank, num_chunks - 1 - rank):
-                chunk_len = chunk_base + int(chunk_idx < remainder)
-                if chunk_len == 0:
+            for chunk_idx in chunk_indices:
+                chunk_offset = chunk_idx * chunk_size
+                chunk_len = min(chunk_size, query_len - chunk_offset)
+                if chunk_len <= 0:
                     continue
-                chunk_offset = chunk_idx * chunk_base + min(chunk_idx, remainder)
-                start_pos = base_pos + chunk_offset
-                segment = (req_idx, start_pos, chunk_len)
-                if start_pos == 0:
-                    fresh_prefill_segments.append(segment)
-                else:
-                    context_prefill_segments.append(segment)
-
-        # MLA's scalar prefix cutoff requires fresh rows after context rows.
-        return decode_segments + context_prefill_segments + fresh_prefill_segments
+                chunk_start = global_batch_start + chunk_offset
+                rank_segments.append(
+                    RankSegment(
+                        global_batch_req_idx=global_batch_req_idx,
+                        global_batch_slice=slice(chunk_start, chunk_start + chunk_len),
+                        rank_local_batch_slice=slice(
+                            rank_offset, rank_offset + chunk_len
+                        ),
+                    )
+                )
+                rank_offset += chunk_len
+        return rank_segments
 
     def _build_batch_layout(
         self,
         num_scheduled_tokens: np.ndarray,
-        num_computed_tokens: np.ndarray,
         is_prefilling: np.ndarray,
         query_start_loc_np: np.ndarray,
-    ) -> PCPBatchLayout:
-        all_rank_segments = [
-            self._get_rank_segments(
-                rank, num_scheduled_tokens, num_computed_tokens, is_prefilling
+    ) -> tuple[list[list[RankSegment]], list[int]]:
+        segments_by_rank = []
+        per_rank_num_tokens = []
+        for rank in range(self.pcp_world_size):
+            segments = self._get_rank_segments(
+                rank,
+                num_scheduled_tokens,
+                is_prefilling,
+                query_start_loc_np,
             )
-            for rank in range(self.pcp_world_size)
-        ]
-        per_rank_num_tokens = [
-            sum(num_tokens for _, _, num_tokens in segments)
-            for segments in all_rank_segments
-        ]
+            num_rank_tokens = sum(segment.num_tokens for segment in segments)
+            segments_by_rank.append(segments)
+            per_rank_num_tokens.append(num_rank_tokens)
 
-        rank_base_offsets = np.zeros(self.pcp_world_size, dtype=np.int64)
-        for rank in range(1, self.pcp_world_size):
-            rank_base_offsets[rank] = (
-                rank_base_offsets[rank - 1] + per_rank_num_tokens[rank - 1]
-            )
-
-        restore_idx = np.empty(int(query_start_loc_np[-1]), dtype=np.int64)
+        # PCP=2 example:
+        #   global batch:       [A B C D E F G]
+        #   rank 0 / rank 1:    [A B G] / [C D E F]
+        #   padded gathered:    [A B G _ | C D E F]
+        #   hidden_restore_idx: [0, 1, 4, 5, 6, 7, 2]
+        #   padded_gather_idx:  [0, 1, 6, 0, 2, 3, 4, 5]
+        # Therefore global = gathered[hidden_restore_idx] and
+        # padded_gathered = global[padded_gather_idx].
+        hidden_restore_idx = np.empty(int(query_start_loc_np[-1]), dtype=np.int64)
         padded_num_tokens = max(per_rank_num_tokens)
-        full_num_tokens = padded_num_tokens * self.pcp_world_size
-        cache_write_idx = np.zeros(full_num_tokens, dtype=np.int64)
-        cache_is_padding = np.ones(full_num_tokens, dtype=np.bool_)
-        for rank, segments in enumerate(all_rank_segments):
-            rank_offset = 0
-            for req_idx, start_pos, num_tokens in segments:
-                base_pos = int(num_computed_tokens[req_idx])
-                gathered_start = int(rank_base_offsets[rank] + rank_offset)
-                cache_start = rank * padded_num_tokens + rank_offset
-                rank_offset += num_tokens
-                output_start = int(query_start_loc_np[req_idx]) + start_pos - base_pos
-                cache_write_idx[cache_start : cache_start + num_tokens] = np.arange(
-                    output_start,
-                    output_start + num_tokens,
+        num_expanded_tokens = padded_num_tokens * self.pcp_world_size
+        padded_gather_idx = np.zeros(num_expanded_tokens, dtype=np.int64)
+        expanded_is_padding = np.ones(num_expanded_tokens, dtype=np.bool_)
+        for rank, segments in enumerate(segments_by_rank):
+            expanded_rank_offset = rank * padded_num_tokens
+            for segment in segments:
+                padded_gathered_slice = slice(
+                    expanded_rank_offset + segment.rank_local_batch_slice.start,
+                    expanded_rank_offset + segment.rank_local_batch_slice.stop,
+                )
+                padded_gather_idx[padded_gathered_slice] = np.arange(
+                    segment.global_batch_slice.start,
+                    segment.global_batch_slice.stop,
                     dtype=np.int64,
                 )
-                cache_is_padding[cache_start : cache_start + num_tokens] = False
-                if not bool(is_prefilling[req_idx]) and rank != 0:
+                # Cache insertion pairs one slot entry with each rank's local decode.
+                if not bool(is_prefilling[segment.global_batch_req_idx]) and rank != 0:
                     continue
-                restore_idx[output_start : output_start + num_tokens] = np.arange(
-                    gathered_start,
-                    gathered_start + num_tokens,
+                expanded_is_padding[padded_gathered_slice] = False
+                hidden_restore_idx[segment.global_batch_slice] = np.arange(
+                    padded_gathered_slice.start,
+                    padded_gathered_slice.stop,
                     dtype=np.int64,
                 )
 
-        return PCPBatchLayout(
-            hidden_restore_idx=async_copy_to_gpu(restore_idx, device=self.device),
-            cache_write_idx=async_copy_to_gpu(cache_write_idx, device=self.device),
-            cache_is_padding=async_copy_to_gpu(cache_is_padding, device=self.device),
-            per_rank_num_tokens=per_rank_num_tokens,
-            rank_segments=all_rank_segments,
+        self._hidden_restore_idx = async_copy_to_gpu(
+            hidden_restore_idx, device=self.device
         )
+        self._padded_gather_idx = async_copy_to_gpu(
+            padded_gather_idx, device=self.device
+        )
+        self._expanded_is_padding = async_copy_to_gpu(
+            expanded_is_padding, device=self.device
+        )
+        return segments_by_rank, per_rank_num_tokens
 
     def partition_batch(self, input_batch: InputBatch) -> InputBatch:
         assert self._req_states is not None
@@ -354,57 +296,67 @@ class PCPManager:
                 "MRV2 PCP does not support request-padded CUDA graphs yet."
             )
 
-        # Physical is the full scheduled batch; virtual is this PCP rank's batch.
-        physical_batch = input_batch
-        self._physical_batch = physical_batch
+        global_batch = input_batch
+        self._global_batch = global_batch
 
-        num_scheduled_tokens = physical_batch.num_scheduled_tokens
-        num_computed_tokens = physical_batch.num_computed_tokens_np
-        is_prefilling = physical_batch.is_prefilling_np
+        num_scheduled_tokens = global_batch.num_scheduled_tokens
+        num_computed_tokens = global_batch.num_computed_tokens_np
+        is_prefilling = global_batch.is_prefilling_np
 
-        batch_layout = self._build_batch_layout(
+        segments_by_rank, per_rank_num_tokens = self._build_batch_layout(
             num_scheduled_tokens,
-            num_computed_tokens,
             is_prefilling,
-            physical_batch.query_start_loc_np,
+            global_batch.query_start_loc_np,
         )
-        self._batch_layout = batch_layout
 
-        local_segments = batch_layout.rank_segments[self.pcp_rank]
+        local_segments = segments_by_rank[self.pcp_rank]
         if not local_segments:
-            local_segments = [(0, int(num_computed_tokens[0]), 0)]
+            local_segments = [
+                RankSegment(
+                    global_batch_req_idx=0,
+                    global_batch_slice=slice(0, 0),
+                    rank_local_batch_slice=slice(0, 0),
+                )
+            ]
 
-        num_virtual_reqs = len(local_segments)
-        num_virtual_reqs_padded = self._pad_num_reqs(num_virtual_reqs)
-        if num_virtual_reqs_padded > input_buffers.max_num_reqs:
+        num_local_reqs = len(local_segments)
+        num_local_reqs_padded = self._pad_num_reqs(num_local_reqs)
+        if num_local_reqs_padded > input_buffers.max_num_reqs:
             raise RuntimeError(
-                "PCP virtual request count exceeds the MRV2 input buffer size: "
-                f"{num_virtual_reqs_padded} > {input_buffers.max_num_reqs}."
+                "PCP local request count exceeds the MRV2 input buffer size: "
+                f"{num_local_reqs_padded} > {input_buffers.max_num_reqs}."
             )
 
-        virtual_to_physical_np = np.fromiter(
-            (req_idx for req_idx, _, _ in local_segments),
+        local_to_global_batch_req_idx_np = np.fromiter(
+            (segment.global_batch_req_idx for segment in local_segments),
             dtype=np.int32,
-            count=num_virtual_reqs,
+            count=num_local_reqs,
         )
-        virtual_start_pos_np = np.fromiter(
-            (start_pos for _, start_pos, _ in local_segments),
+        local_start_pos_np = np.fromiter(
+            (
+                num_computed_tokens[segment.global_batch_req_idx]
+                + segment.global_batch_slice.start
+                - global_batch.query_start_loc_np[segment.global_batch_req_idx]
+                for segment in local_segments
+            ),
             dtype=np.int32,
-            count=num_virtual_reqs,
+            count=num_local_reqs,
         )
-        virtual_num_scheduled = np.fromiter(
-            (num_tokens for _, _, num_tokens in local_segments),
+        local_num_scheduled_tokens = np.fromiter(
+            (segment.num_tokens for segment in local_segments),
             dtype=np.int32,
-            count=num_virtual_reqs,
+            count=num_local_reqs,
         )
-        virtual_idx_mapping_np = physical_batch.idx_mapping_np[virtual_to_physical_np]
-        virtual_req_ids = [
-            physical_batch.req_ids[physical_idx]
-            for physical_idx in virtual_to_physical_np
+        local_to_global_req_idx_np = global_batch.idx_mapping_np[
+            local_to_global_batch_req_idx_np
+        ]
+        local_req_ids = [
+            global_batch.req_ids[global_batch_req_idx]
+            for global_batch_req_idx in local_to_global_batch_req_idx_np
         ]
 
-        virtual_num_tokens = int(virtual_num_scheduled.sum())
-        virtual_num_tokens_padded = max(batch_layout.per_rank_num_tokens)
+        num_local_tokens = int(local_num_scheduled_tokens.sum())
+        num_local_tokens_padded = max(per_rank_num_tokens)
         fresh_prefills = int(
             np.count_nonzero(is_prefilling & (num_computed_tokens == 0))
         )
@@ -412,82 +364,88 @@ class PCPManager:
             np.count_nonzero(is_prefilling & (num_computed_tokens > 0))
         )
         logger.debug(
-            "PCP batch: rank=%d physical_reqs=%d fresh_prefills=%d "
-            "continued_prefills=%d decodes=%d virtual_reqs=%d "
-            "virtual_tokens=%d per_rank_tokens=%s",
+            "PCP batch: rank=%d global_batch_reqs=%d fresh_prefills=%d "
+            "continued_prefills=%d decodes=%d local_reqs=%d "
+            "local_tokens=%d per_rank_tokens=%s",
             self.pcp_rank,
-            physical_batch.num_reqs,
+            global_batch.num_reqs,
             fresh_prefills,
             continued_prefills,
-            physical_batch.num_reqs - fresh_prefills - continued_prefills,
-            num_virtual_reqs,
-            virtual_num_tokens,
-            batch_layout.per_rank_num_tokens,
+            global_batch.num_reqs - fresh_prefills - continued_prefills,
+            num_local_reqs,
+            num_local_tokens,
+            per_rank_num_tokens,
         )
-        if virtual_num_tokens_padded > input_buffers.max_num_tokens:
+        if num_local_tokens_padded > input_buffers.max_num_tokens:
             raise RuntimeError(
-                "PCP virtual token count exceeds the MRV2 input buffer size: "
-                f"{virtual_num_tokens_padded} > {input_buffers.max_num_tokens}."
+                "PCP local token count exceeds the MRV2 input buffer size: "
+                f"{num_local_tokens_padded} > {input_buffers.max_num_tokens}."
             )
-
-        query_start_loc_np = np.empty(input_buffers.max_num_reqs + 1, dtype=np.int32)
-        query_start_loc_np[0] = 0
-        query_start_loc_out = query_start_loc_np[1 : num_virtual_reqs + 1]
-        np.cumsum(virtual_num_scheduled, out=query_start_loc_out)
-        query_start_loc_np[num_virtual_reqs + 1 :] = virtual_num_tokens
-        async_copy_to_gpu(query_start_loc_np, out=input_buffers.query_start_loc)
-        query_start_loc = input_buffers.query_start_loc[: num_virtual_reqs_padded + 1]
-
-        idx_mapping = async_copy_to_gpu(virtual_idx_mapping_np, device=self.device)
-        virtual_start_pos = async_copy_to_gpu(virtual_start_pos_np, device=self.device)
-
-        if np.any(is_prefilling[virtual_to_physical_np]):
-            _prepare_prefill_inputs_with_start_pos(
-                input_buffers.input_ids,
-                req_states.next_prefill_tokens,
-                idx_mapping,
-                query_start_loc,
-                req_states.all_token_ids.gpu,
-                req_states.prefill_len.gpu,
-                virtual_start_pos,
-            )
-
-        assert self._virtual_idx_mapping is not None
-        prepare_pos_seq_lens(
-            self._virtual_idx_mapping[:num_virtual_reqs],
-            query_start_loc,
-            virtual_start_pos,
-            input_buffers.positions,
-            input_buffers.seq_lens[:num_virtual_reqs_padded],
+        rank_token_start = self.pcp_rank * num_local_tokens_padded
+        assert self._padded_gather_idx is not None
+        local_gather_idx = self._padded_gather_idx[
+            rank_token_start : rank_token_start + num_local_tokens_padded
+        ]
+        torch.index_select(
+            global_batch.input_ids,
+            0,
+            local_gather_idx,
+            out=input_buffers.input_ids[:num_local_tokens_padded],
         )
-        seq_lens = input_buffers.seq_lens[:num_virtual_reqs_padded]
-        is_padding = input_buffers.is_padding[:virtual_num_tokens_padded]
-        is_padding[:virtual_num_tokens].fill_(False)
-        is_padding[virtual_num_tokens:].fill_(True)
-        if virtual_num_tokens_padded > virtual_num_tokens:
-            input_buffers.input_ids[:virtual_num_tokens_padded].masked_fill_(
+
+        local_query_start_loc_np = np.empty(
+            input_buffers.max_num_reqs + 1, dtype=np.int32
+        )
+        local_query_start_loc_np[0] = 0
+        local_query_start_loc_out = local_query_start_loc_np[1 : num_local_reqs + 1]
+        np.cumsum(local_num_scheduled_tokens, out=local_query_start_loc_out)
+        local_query_start_loc_np[num_local_reqs + 1 :] = num_local_tokens
+        async_copy_to_gpu(local_query_start_loc_np, out=input_buffers.query_start_loc)
+        local_query_start_loc = input_buffers.query_start_loc[
+            : num_local_reqs_padded + 1
+        ]
+
+        local_to_global_req_idx = async_copy_to_gpu(
+            local_to_global_req_idx_np, device=self.device
+        )
+        local_start_pos = async_copy_to_gpu(local_start_pos_np, device=self.device)
+
+        assert self._local_req_idx is not None
+        prepare_pos_seq_lens(
+            self._local_req_idx[:num_local_reqs],
+            local_query_start_loc,
+            local_start_pos,
+            input_buffers.positions,
+            input_buffers.seq_lens[:num_local_reqs_padded],
+        )
+        seq_lens = input_buffers.seq_lens[:num_local_reqs_padded]
+        is_padding = input_buffers.is_padding[:num_local_tokens_padded]
+        is_padding[:num_local_tokens].fill_(False)
+        is_padding[num_local_tokens:].fill_(True)
+        if num_local_tokens_padded > num_local_tokens:
+            input_buffers.input_ids[:num_local_tokens_padded].masked_fill_(
                 is_padding, 0
             )
-            input_buffers.positions[:virtual_num_tokens_padded].masked_fill_(
+            input_buffers.positions[:num_local_tokens_padded].masked_fill_(
                 is_padding, 0
             )
 
-        total_num_logits = num_virtual_reqs if virtual_num_tokens > 0 else 0
+        total_num_logits = num_local_reqs if num_local_tokens > 0 else 0
         if total_num_logits > 0:
-            cu_num_logits_np = np.arange(num_virtual_reqs + 1, dtype=np.int32)
+            cu_num_logits_np = np.arange(num_local_reqs + 1, dtype=np.int32)
             cu_num_logits = torch.arange(
-                num_virtual_reqs + 1, device=self.device, dtype=torch.int32
+                num_local_reqs + 1, device=self.device, dtype=torch.int32
             )
         else:
-            cu_num_logits_np = np.zeros(num_virtual_reqs + 1, dtype=np.int32)
+            cu_num_logits_np = np.zeros(num_local_reqs + 1, dtype=np.int32)
             cu_num_logits = torch.zeros(
-                num_virtual_reqs + 1, device=self.device, dtype=torch.int32
+                num_local_reqs + 1, device=self.device, dtype=torch.int32
             )
         logits_indices = combine_sampled_and_draft_tokens(
             input_buffers.input_ids,
-            idx_mapping,
+            local_to_global_req_idx,
             req_states.last_sampled_tokens,
-            query_start_loc,
+            local_query_start_loc,
             seq_lens,
             req_states.prefill_len.gpu,
             req_states.draft_tokens,
@@ -496,16 +454,18 @@ class PCPManager:
             1,
         )
 
-        virtual_prefill_len_np = physical_batch.prefill_len_np[virtual_to_physical_np]
-        virtual_num_computed_prefill_tokens_np = np.minimum(
-            virtual_start_pos_np, virtual_prefill_len_np
+        local_prefill_len_np = global_batch.prefill_len_np[
+            local_to_global_batch_req_idx_np
+        ]
+        local_num_computed_prefill_tokens_np = np.minimum(
+            local_start_pos_np, local_prefill_len_np
         )
-        virtual_is_prefilling_np = (
-            virtual_num_computed_prefill_tokens_np < virtual_prefill_len_np
+        local_is_prefilling_np = (
+            local_num_computed_prefill_tokens_np < local_prefill_len_np
         )
-        seq_lens_cpu_upper_bound_np = np.zeros(num_virtual_reqs_padded, dtype=np.int32)
-        seq_lens_cpu_upper_bound_np[:num_virtual_reqs] = (
-            virtual_start_pos_np + virtual_num_scheduled
+        seq_lens_cpu_upper_bound_np = np.zeros(num_local_reqs_padded, dtype=np.int32)
+        seq_lens_cpu_upper_bound_np[:num_local_reqs] = (
+            local_start_pos_np + local_num_scheduled_tokens
         )
 
         dcp_local_seq_lens = None
@@ -513,45 +473,45 @@ class PCPManager:
             prepare_dcp_local_seq_lens(
                 input_buffers.dcp_local_seq_lens,
                 seq_lens,
-                num_virtual_reqs,
+                num_local_reqs,
                 self.dcp_world_size,
                 self.dcp_rank,
                 self.cp_interleave,
             )
             dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[
-                :num_virtual_reqs_padded
+                :num_local_reqs_padded
             ]
 
         return replace(
             input_batch,
-            req_ids=virtual_req_ids,
-            num_reqs=num_virtual_reqs,
-            num_reqs_after_padding=num_virtual_reqs_padded,
-            idx_mapping=idx_mapping,
-            idx_mapping_np=virtual_idx_mapping_np,
-            expanded_idx_mapping=idx_mapping,
+            req_ids=local_req_ids,
+            num_reqs=num_local_reqs,
+            num_reqs_after_padding=num_local_reqs_padded,
+            idx_mapping=local_to_global_req_idx,
+            idx_mapping_np=local_to_global_req_idx_np,
+            expanded_idx_mapping=local_to_global_req_idx,
             expanded_local_pos=torch.zeros(
-                num_virtual_reqs, dtype=torch.int32, device=self.device
+                num_local_reqs, dtype=torch.int32, device=self.device
             ),
-            num_scheduled_tokens=virtual_num_scheduled,
-            num_tokens=virtual_num_tokens,
-            num_tokens_after_padding=virtual_num_tokens_padded,
+            num_scheduled_tokens=local_num_scheduled_tokens,
+            num_tokens=num_local_tokens,
+            num_tokens_after_padding=num_local_tokens_padded,
             num_draft_tokens=0,
             num_draft_tokens_per_req=None,
-            query_start_loc=query_start_loc,
-            query_start_loc_np=query_start_loc_np[: num_virtual_reqs_padded + 1],
+            query_start_loc=local_query_start_loc,
+            query_start_loc_np=local_query_start_loc_np[: num_local_reqs_padded + 1],
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=torch.from_numpy(seq_lens_cpu_upper_bound_np),
             dcp_local_seq_lens=dcp_local_seq_lens,
-            num_computed_tokens_np=virtual_start_pos_np,
-            prefill_len_np=virtual_prefill_len_np,
-            num_computed_prefill_tokens_np=virtual_num_computed_prefill_tokens_np,
-            is_prefilling_np=virtual_is_prefilling_np,
-            max_seq_len_np=physical_batch.max_seq_len_np[virtual_to_physical_np]
-            if physical_batch.max_seq_len_np is not None
+            num_computed_tokens_np=local_start_pos_np,
+            prefill_len_np=local_prefill_len_np,
+            num_computed_prefill_tokens_np=local_num_computed_prefill_tokens_np,
+            is_prefilling_np=local_is_prefilling_np,
+            max_seq_len_np=global_batch.max_seq_len_np[local_to_global_batch_req_idx_np]
+            if global_batch.max_seq_len_np is not None
             else None,
-            input_ids=input_buffers.input_ids[:virtual_num_tokens_padded],
-            positions=input_buffers.positions[:virtual_num_tokens_padded],
+            input_ids=input_buffers.input_ids[:num_local_tokens_padded],
+            positions=input_buffers.positions[:num_local_tokens_padded],
             is_padding=is_padding,
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
@@ -562,95 +522,69 @@ class PCPManager:
         self, input_batch: InputBatch
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor, torch.Tensor]:
         assert self._block_tables is not None
-        assert self._virtual_block_tables is not None
-        assert self._virtual_block_table_ptrs is not None
+        assert self._local_block_tables is not None
+        assert self._local_block_table_ptrs is not None
         block_tables = self._block_tables.gather_block_tables(
             input_batch.idx_mapping,
             input_batch.num_reqs_after_padding,
-            out=self._virtual_block_tables,
-            out_ptrs=self._virtual_block_table_ptrs,
+            out=self._local_block_tables,
+            out_ptrs=self._local_block_table_ptrs,
         )
         slot_mappings = self.prepare_slot_mappings()
         return block_tables, slot_mappings, slot_mappings
 
-    def prepare_dummy_attn(
-        self, input_batch: InputBatch
-    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor, torch.Tensor]:
-        assert self._virtual_block_tables is not None
-        assert self._physical_slot_mappings is not None
-        block_tables = tuple(
-            block_table[: input_batch.num_reqs]
-            for block_table in self._virtual_block_tables
-        )
-        slot_mappings = self._physical_slot_mappings[:, : input_batch.num_tokens]
-        cache_slot_mappings = self.dummy_cache_slot_mappings(slot_mappings)
-        return block_tables, cache_slot_mappings, cache_slot_mappings
-
     def prepare_slot_mappings(self) -> torch.Tensor:
         assert self._block_tables is not None
-        assert self._physical_slot_mappings is not None
-        assert self._physical_batch is not None
-        physical_batch = self._physical_batch
-        physical_slot_mappings = self._block_tables.compute_slot_mappings(
-            physical_batch.idx_mapping,
-            physical_batch.query_start_loc,
-            physical_batch.positions,
-            physical_batch.num_tokens,
-            out=self._physical_slot_mappings,
+        assert self._global_batch_slot_mappings is not None
+        assert self._global_batch is not None
+        global_batch = self._global_batch
+        global_batch_slot_mappings = self._block_tables.compute_slot_mappings(
+            global_batch.idx_mapping,
+            global_batch.query_start_loc,
+            global_batch.positions,
+            global_batch.num_tokens,
+            out=self._global_batch_slot_mappings,
         )
-        return self._expand_slot_mappings(physical_slot_mappings)
+        return self._convert_to_gathered_slot_mappings(global_batch_slot_mappings)
 
-    def _expand_slot_mappings(
+    def _convert_to_gathered_slot_mappings(
         self,
-        physical_slot_mappings: torch.Tensor,
+        global_batch_slot_mappings: torch.Tensor,
     ) -> torch.Tensor:
-        assert self._batch_layout is not None
-        cache_write_idx = self._batch_layout.cache_write_idx
-        full_num_tokens = cache_write_idx.shape[0]
-        if self._cache_slot_mappings is None:
-            self._cache_slot_mappings = physical_slot_mappings.new_empty(
-                physical_slot_mappings.shape[0], full_num_tokens
+        assert self._padded_gather_idx is not None
+        assert self._expanded_is_padding is not None
+        padded_gather_idx = self._padded_gather_idx
+        num_expanded_tokens = padded_gather_idx.shape[0]
+        if self._gathered_kv_slot_mappings is None:
+            self._gathered_kv_slot_mappings = global_batch_slot_mappings.new_empty(
+                global_batch_slot_mappings.shape[0], num_expanded_tokens
             )
-        cache_slot_mappings = self._cache_slot_mappings[:, :full_num_tokens]
+        gathered_kv_slot_mappings = self._gathered_kv_slot_mappings[
+            :, :num_expanded_tokens
+        ]
         torch.index_select(
-            physical_slot_mappings,
+            global_batch_slot_mappings,
             1,
-            cache_write_idx,
-            out=cache_slot_mappings,
+            padded_gather_idx,
+            out=gathered_kv_slot_mappings,
         )
-        cache_slot_mappings.masked_fill_(
-            self._batch_layout.cache_is_padding.unsqueeze(0), PAD_SLOT_ID
+        gathered_kv_slot_mappings.masked_fill_(
+            self._expanded_is_padding.unsqueeze(0), PAD_SLOT_ID
         )
-        return cache_slot_mappings
-
-    def dummy_cache_slot_mappings(
-        self,
-        slot_mappings: torch.Tensor,
-    ) -> torch.Tensor:
-        full_num_tokens = slot_mappings.shape[1] * self.pcp_world_size
-        if self._cache_slot_mappings is None:
-            self._cache_slot_mappings = slot_mappings.new_empty(
-                slot_mappings.shape[0], full_num_tokens
-            )
-        cache_slot_mappings = self._cache_slot_mappings[:, :full_num_tokens]
-        cache_slot_mappings.fill_(PAD_SLOT_ID)
-        return cache_slot_mappings
+        return gathered_kv_slot_mappings
 
     def restore_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if self._batch_layout is None:
+        if self._hidden_restore_idx is None:
             return hidden_states
-        hidden_states = allgather_tokens(
-            hidden_states, self._batch_layout.per_rank_num_tokens
-        )
-        return hidden_states[self._batch_layout.hidden_restore_idx]
+        gathered = get_pcp_group().all_gather(hidden_states, dim=0)
+        return gathered[self._hidden_restore_idx]
 
     def restore_for_sampling(
         self,
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, InputBatch]:
-        assert self._physical_batch is not None
-        physical_batch = self._physical_batch
-        return self.restore_hidden_states(hidden_states), physical_batch
+        assert self._global_batch is not None
+        return self.restore_hidden_states(hidden_states), self._global_batch
 
 
 def maybe_partition_pcp_batch(
