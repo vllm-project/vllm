@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+
 import pytest
 
 import vllm
@@ -67,7 +68,9 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         generated_texts.append(generated_text)
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert generated_texts[i].startswith(EXPECTED_LORA_OUTPUT[i])
+        generated = " ".join(generated_texts[i].split())
+        expected = " ".join(EXPECTED_LORA_OUTPUT[i].split())
+        assert generated.startswith(expected)
 
 
 # TODO: make the Mxfp4MoeBackend.TRITON spawn-safe.

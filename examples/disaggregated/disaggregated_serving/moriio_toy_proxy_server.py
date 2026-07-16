@@ -237,6 +237,14 @@ def flat_interleaved_dp_route(request_number, instances):
     return inst_idx, dp_rank
 
 
+@app.route("/health", methods=["GET"])
+async def health():
+    # Benchmark harnesses and load balancers often probe the proxy URL and
+    # treat a non-200 response as a dead service. Backends expose /health, but
+    # this proxy used to lack one; report the proxy process itself as healthy.
+    return ("ok", 200)
+
+
 @app.route("/v1/completions", methods=["POST"])
 async def handle_completions_request():
     return await handle_request("/completions", request)
@@ -314,7 +322,13 @@ async def handle_request(api: str, request: Request):
             )
         )
 
-        req_data["max_tokens"] -= 1
+        # max_completion_tokens takes precedence when present (that's the limit
+        # the backend enforces); fall back to max_tokens. If neither is set
+        # (e.g. benchmark clients that omit it), leave the request unchanged.
+        if "max_completion_tokens" in req_data:
+            req_data["max_completion_tokens"] -= 1
+        elif "max_tokens" in req_data:
+            req_data["max_tokens"] -= 1
 
         req_data["kv_transfer_params"] = {
             "do_remote_decode": False,
@@ -353,6 +367,9 @@ async def handle_request(api: str, request: Request):
         session, decode_response = await decode_request_task
         stream_generator = stream_decode_response(session, decode_response, request_id)
         response = await make_response(stream_generator)
+        response.headers["Content-Type"] = decode_response.headers.get(
+            "Content-Type", "application/json"
+        )
         return response
     except Exception as e:
         logger.exception("An error occurred while handling the request: %s", e)

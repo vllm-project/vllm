@@ -24,8 +24,8 @@ from vllm.v1.attention.backend import (
     AttentionMetadata,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    MLAAttentionImpl,
     MultipleOf,
-    SparseMLAAttentionImpl,
 )
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
     AiterMLAHelper,
@@ -347,9 +347,7 @@ class ROCMAiterMLASparseMetadata(AttentionMetadata):
 class ROCMAiterMLASparseMetadataBuilder(
     AttentionMetadataBuilder[ROCMAiterMLASparseMetadata]
 ):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = (
-        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-    )
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(
         self,
@@ -364,6 +362,9 @@ class ROCMAiterMLASparseMetadataBuilder(
         parallel_config = vllm_config.parallel_config
         self.device = device
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+
+        self.vllm_config = vllm_config
+        self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
@@ -522,12 +523,17 @@ class ROCMAiterMLASparseMetadataBuilder(
         # treated as its own batch entry), so persistent metadata can always
         # be precomputed here. The kernel switches to the persistent
         # work-stealing path automatically when work_meta_data is non-None.
-        # The output is a deterministic function of (num_tokens, max_query_len,
-        # num_heads, min(seq_lens, topk_tokens)); fingerprint those CPU-side
-        # and skip the launch when nothing changed.
+        # The output is a deterministic function of the per-request query and
+        # context lengths (both clamped to topk_tokens, past which per-token KV
+        # length saturates) and num_heads; fingerprint those CPU-side and skip
+        # the launch when nothing changed.
         num_reqs = common_attn_metadata.num_reqs
         clamped_seq_lens = np.minimum(
             common_attn_metadata.seq_lens_cpu[:num_reqs].numpy(),
+            self.topk_tokens,
+        )
+        clamped_context_lens = np.minimum(
+            common_attn_metadata.seq_lens_cpu[:num_reqs].numpy() - seg_lengths,
             self.topk_tokens,
         )
         metadata_key = (
@@ -535,6 +541,8 @@ class ROCMAiterMLASparseMetadataBuilder(
             int(common_attn_metadata.max_query_len),
             self._num_attention_heads,
             clamped_seq_lens.tobytes(),
+            clamped_context_lens.tobytes(),
+            seg_lengths.tobytes(),
         )
         if metadata_key != self._prev_metadata_key:
             from aiter import get_mla_metadata_v1
@@ -558,6 +566,9 @@ class ROCMAiterMLASparseMetadataBuilder(
                 uni_seqlen_qo=1,
                 fast_mode=True,
             )
+            # The persistent metadata buffers are read by graph replay. Order
+            # the async metadata write before the graph-captured decode kernel.
+            torch.cuda.current_stream(self.device).synchronize()
             self._prev_metadata_key = metadata_key
 
         metadata = ROCMAiterMLASparseMetadata(
@@ -615,7 +626,9 @@ def reference_mla_sparse_prefill(
     return (result, lse)
 
 
-class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata]):
+class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
+    is_sparse = True
+
     def __init__(
         self,
         num_heads: int,

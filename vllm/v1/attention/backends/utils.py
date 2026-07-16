@@ -892,20 +892,20 @@ def get_dcp_local_seq_lens(
     use this function to calculate split decode seq_lens of each dcp rank.
     Only consider dcp now, we can extend the case of cp based on this.
     """
-    num_requests = seq_lens.size(0)
+    seq_lens_i32 = seq_lens.to(torch.int32)
     if dcp_rank is None:
-        rank_offsets = (
-            torch.arange(dcp_size, dtype=torch.int32, device=seq_lens.device)
-            .unsqueeze(0)
-            .repeat(num_requests, 1)
+        rank_offsets = torch.arange(
+            dcp_size,
+            dtype=torch.int32,
+            device=seq_lens.device,
+        ).view(
+            *((1,) * seq_lens_i32.dim()),
+            dcp_size,
         )
+        seq_lens_tiled = seq_lens_i32.unsqueeze(-1)
     else:
-        rank_offsets = torch.tensor(
-            [[dcp_rank]], dtype=torch.int32, device=seq_lens.device
-        )
-    seq_lens_tiled = (
-        seq_lens.to(torch.int32).unsqueeze(-1).repeat(1, rank_offsets.shape[1])
-    )
+        rank_offsets = torch.tensor(dcp_rank, dtype=torch.int32, device=seq_lens.device)
+        seq_lens_tiled = seq_lens_i32
     base = (
         seq_lens_tiled
         // cp_kv_cache_interleave_size
@@ -919,7 +919,7 @@ def get_dcp_local_seq_lens(
         cp_kv_cache_interleave_size,
     )
     dcp_local_seq_lens = base + remainder
-    return dcp_local_seq_lens.squeeze(1)
+    return dcp_local_seq_lens
 
 
 def mamba_get_block_table_tensor(

@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from itertools import product as iprod
 from typing import Any
 
+import numpy as np
 import torch
 
 from vllm.config import CacheConfig, VllmConfig
@@ -18,11 +19,13 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import largest_power_of_2_divisor
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadataBuilder,
     MultipleOf,
 )
+from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
@@ -94,6 +97,7 @@ class KVBlockZeroer:
         cache_dtype: str,
         static_forward_context: dict[str, Any],
         runner_only_attn_layers: set[str] | None = None,
+        max_concurrency: int = 1,
     ) -> None:
         """Precompute the absolute-address table for the Triton zeroing kernel.
 
@@ -109,10 +113,14 @@ class KVBlockZeroer:
         """
         self.device = device
         self.pin_memory = pin_memory
+        if max_concurrency < 1:
+            raise ValueError("max_concurrency must be at least 1")
+        self.max_concurrency = max_concurrency
         self._meta: tuple[torch.Tensor, int, int, int] | None = None
         self._id_cap: int = 0
-        self._ids_pinned: torch.Tensor | None = None
-        self._ids_gpu: torch.Tensor | None = None
+        self._ids_pinned: list[torch.Tensor] = []
+        self._ids_gpu: list[torch.Tensor] = []
+        self._id_buffer_index = 0
 
         if runner_only_attn_layers is None:
             runner_only_attn_layers = set()
@@ -175,18 +183,28 @@ class KVBlockZeroer:
 
         blk_size = min(largest_power_of_2_divisor(page_size_el), 1024)
         self._id_cap = 8192
-        self._ids_pinned = torch.empty(
-            self._id_cap,
-            dtype=torch.int64,
-            pin_memory=self.pin_memory,
-        )
-        self._ids_gpu = torch.empty(self._id_cap, dtype=torch.int64, device=self.device)
+        self._allocate_id_buffers()
         self._meta = (
             torch.tensor(seg_addrs, dtype=torch.uint64, device=self.device),
             page_size_el,
             blk_size,
             len(seg_addrs),
         )
+
+    def _allocate_id_buffers(self) -> None:
+        self._ids_pinned = [
+            torch.empty(
+                self._id_cap,
+                dtype=torch.int64,
+                pin_memory=self.pin_memory,
+            )
+            for _ in range(self.max_concurrency)
+        ]
+        self._ids_gpu = [
+            torch.empty(self._id_cap, dtype=torch.int64, device=self.device)
+            for _ in range(self.max_concurrency)
+        ]
+        self._id_buffer_index = 0
 
     def zero_block_ids(self, block_ids: list[int]) -> None:
         """Zero the KV cache memory for the given block IDs."""
@@ -195,19 +213,21 @@ class KVBlockZeroer:
         seg_addrs, page_size_el, blk_size, n_segs = self._meta
         n_blocks = len(block_ids)
         if n_blocks > self._id_cap:
+            # The old pinned buffers may still be the source of an in-flight
+            # nonblocking copy. Growing is rare, so we don't mind the sync overhead
+            torch.accelerator.synchronize()
             self._id_cap = n_blocks * 2
-            self._ids_pinned = torch.empty(
-                self._id_cap,
-                dtype=torch.int64,
-                pin_memory=self.pin_memory,
-            )
-            self._ids_gpu = torch.empty(
-                self._id_cap, dtype=torch.int64, device=self.device
-            )
-        assert self._ids_pinned is not None and self._ids_gpu is not None
-        self._ids_pinned[:n_blocks].numpy()[:] = block_ids
-        idx = self._ids_gpu[:n_blocks]
-        idx.copy_(self._ids_pinned[:n_blocks], non_blocking=True)
+            self._allocate_id_buffers()
+
+        # The H2D copy is nonblocking, so its pinned source must not be mutated
+        # while this batch is in flight. Rotate through as many buffers as concurrent
+        # in-flight batches, to avoid collisions.
+        buffer_index = self._id_buffer_index
+        self._id_buffer_index = (buffer_index + 1) % self.max_concurrency
+        ids_pinned = self._ids_pinned[buffer_index]
+        ids_pinned[:n_blocks].numpy()[:] = block_ids
+        idx = self._ids_gpu[buffer_index][:n_blocks]
+        idx.copy_(ids_pinned[:n_blocks], non_blocking=True)
         grid = (n_blocks * n_segs * (page_size_el // blk_size),)
         _zero_kv_blocks_kernel[grid](
             seg_addrs,
@@ -516,6 +536,45 @@ def bind_kv_cache(
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():
         forward_context[layer_name].kv_cache = kv_cache
+
+
+def copy_kv_cache_blocks_inplace(
+    kv_caches: Iterable[torch.Tensor | list[torch.Tensor]],
+    num_blocks: int,
+    kv_cache_block_copies: Sequence[KVCacheBlockCopy],
+) -> None:
+    if not kv_cache_block_copies:
+        return
+
+    storage_tensors: list[torch.Tensor] = []
+    seen_storage: set[int] = set()
+    for entry in kv_caches:
+        # Mamba layers hold a list of state tensors; attention layers a single
+        # tensor. Both alias the shared block-major backing storage.
+        tensors = entry if isinstance(entry, (list, tuple)) else (entry,)
+        for tensor in tensors:
+            ptr = tensor.untyped_storage().data_ptr()
+            if ptr in seen_storage:
+                continue
+            seen_storage.add(ptr)
+            storage_tensors.append(tensor)
+
+    if not storage_tensors:
+        return
+    device = storage_tensors[0].device
+    indices_np = np.array(kv_cache_block_copies, dtype=np.int64)
+    indices = async_tensor_h2d(indices_np, device=device)
+    src_indices, dst_indices = indices.unbind(dim=1)
+
+    for tensor in storage_tensors:
+        assert tensor.device == device
+        blocks = torch.empty(0, dtype=torch.uint8, device=device)
+        blocks.set_(tensor.untyped_storage())
+        # Block-major backing storage: block i owns the contiguous byte range
+        # [i * page_size, (i + 1) * page_size).
+        assert blocks.numel() % num_blocks == 0
+        blocks = blocks.view(num_blocks, -1)
+        blocks[dst_indices] = blocks[src_indices]
 
 
 def is_residual_scattered_for_sp(

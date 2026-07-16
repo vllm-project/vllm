@@ -1,12 +1,14 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use serde_json::{Map, Number, Value};
+use vllm_tokenizer::DynTokenizer;
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, delimited, eof, opt, separated, seq, terminated};
 use winnow::error::{ContextError, ErrMode, ModalResult};
 use winnow::prelude::*;
 use winnow::stream::{Partial, Stream};
 use winnow::token::{literal, take_till, take_until};
-
-use vllm_tokenizer::DynTokenizer;
 
 use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput};
 use crate::reasoning::last_reasoning_boundary;

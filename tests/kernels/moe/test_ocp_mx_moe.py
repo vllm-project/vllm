@@ -1,28 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib.metadata
+import types
 from dataclasses import dataclass
-from importlib.util import find_spec
 
 import pytest
 import torch
-from packaging import version
 
 from tests.kernels.moe.utils import check_accuracy
-from vllm._aiter_ops import is_aiter_found
+from vllm._aiter_ops import is_aiter_found, rocm_aiter_ops
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
-
-# MXFP4 via quark requires amd-quark >= 0.12 on torch >= 2.11.
-# Earlier torch releases work with older quark versions. See
-# https://github.com/amd/Quark/issues/34
-# TODO: Remove once amd-quark>=0.12.0
-QUARK_MXFP4_TORCH_COMPATIBLE = find_spec("quark") is not None and (
-    version.parse(importlib.metadata.version("amd-quark")) >= version.parse("0.12.0")
-    if version.parse(torch.__version__.split("+")[0]) >= version.parse("2.11")
-    else True
-)
 
 TRTLLM_GEN_MXFP4_AVAILABLE = (
     current_platform.is_cuda() and current_platform.is_device_capability_family(100)
@@ -95,8 +83,8 @@ def enable_pickle(monkeypatch):
     ],
 )
 @pytest.mark.skipif(
-    not QUARK_MXFP4_TORCH_COMPATIBLE,
-    reason="MXFP4 via quark requires amd-quark >= 0.12 on torch >= 2.11.",
+    not ROCM_AVAILABLE,
+    reason="This test is only enabled on platforms that support amd-quark",
 )
 def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
     if torch.accelerator.device_count() < model_case.tp:
@@ -1247,6 +1235,7 @@ def test_rocm_mxfp4_moe_oracle(
     num_tokens: int,
     hidden_size: int,
     intermediate_size: int,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """
     Test ROCm MXFP4 MoE using oracle functions.
@@ -1268,6 +1257,7 @@ def test_rocm_mxfp4_moe_oracle(
     if config["requires_gfx950"] and not ROCM_GFX950:
         pytest.skip(f"Backend {backend_name} requires GFX950")
 
+    import vllm.distributed.parallel_state as ps
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
@@ -1281,6 +1271,12 @@ def test_rocm_mxfp4_moe_oracle(
 
     # Initialize workspace manager (needed for modular kernels)
     init_workspace_manager(torch.accelerator.current_device_index())
+
+    # Set up the TP Group to prevent failure on should_use_cdna4_mx_scale_swizzle check
+    monkeypatch.setattr(ps, "_TP", types.SimpleNamespace(world_size=1))
+
+    # AITER must be enabled or aiter_mxfp4_w4a8_moe asserts before dispatch.
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
 
     # Map string to enum
     backend = Mxfp4MoeBackend[backend_name]
