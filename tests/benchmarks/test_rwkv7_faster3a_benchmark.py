@@ -42,6 +42,26 @@ def test_git_revision_reads_source_marker(tmp_path: Path) -> None:
     assert bench._git_revision(tmp_path) == "abc123-dirty"
 
 
+def test_git_revision_reads_synced_submodule_revision(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = tmp_path / "src/infer/vllm-rwkv"
+    repo.mkdir(parents=True)
+    manifest = tmp_path / ".helicopter-dev/source-revisions.json"
+    manifest.parent.mkdir()
+    manifest.write_text(
+        json.dumps({"submodules": {"src/infer/vllm-rwkv": "abc123"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        bench.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(FileNotFoundError),
+    )
+
+    assert bench._git_revision(repo) == "abc123"
+
+
 def test_environment_metadata_resolves_defaults(monkeypatch) -> None:
     for name in bench.PROVENANCE_ENV_VARS:
         monkeypatch.delenv(name, raising=False)

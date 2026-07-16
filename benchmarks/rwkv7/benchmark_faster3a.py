@@ -202,23 +202,46 @@ def _source_revision_file(repo_root: Path) -> Path | None:
     return None
 
 
+def _synced_revision(repo_root: Path) -> str | None:
+    repo_root = repo_root.resolve()
+    for workspace in repo_root.parents:
+        manifest = workspace / ".helicopter-dev/source-revisions.json"
+        if not manifest.is_file():
+            continue
+        try:
+            relative = repo_root.relative_to(workspace).as_posix()
+            revisions = json.loads(manifest.read_text(encoding="utf-8"))
+            revision = revisions["submodules"].get(relative)
+        except (KeyError, OSError, ValueError):
+            continue
+        if revision:
+            return str(revision)
+    return None
+
+
 def _git_revision(repo_root: Path) -> str | None:
     try:
         result = subprocess.run(
-            ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+            ["git", "-C", str(repo_root), "rev-parse", "--show-toplevel", "HEAD"],
             check=True,
             capture_output=True,
             text=True,
         )
     except Exception:
+        revision = _synced_revision(repo_root)
+        if revision:
+            return revision
         marker = _source_revision_file(repo_root)
         if marker is None:
             return None
         revision = marker.read_text(encoding="utf-8").strip()
         return revision or None
-    revision = result.stdout.strip()
-    if not revision:
+    lines = result.stdout.splitlines()
+    if len(lines) != 2:
         return None
+    git_root, revision = Path(lines[0]).resolve(), lines[1].strip()
+    if git_root != repo_root.resolve():
+        return _synced_revision(repo_root)
     try:
         status = subprocess.run(
             [
