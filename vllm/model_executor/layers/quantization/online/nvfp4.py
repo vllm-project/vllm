@@ -40,24 +40,25 @@ def _quantize_moe_weight_to_nvfp4(
     global scale ``(E,)`` stored as ``amax / (fp4_max * fp8_max)``.
     """
     assert weight.dim() == 3, f"expected 3D expert weights, got {weight.shape}"
-    num_experts, _, k = weight.shape
+    num_experts, n, k = weight.shape
     assert k % 16 == 0, f"last dim must be a multiple of 16, got {k}"
 
     amax = weight.abs().amax(dim=(1, 2)).to(torch.float32).clamp_min(1e-8)
     global_scale = (FLOAT4_E2M1_MAX * FLOAT8_E4M3_MAX) / amax
     weight_scale_2 = (1.0 / global_scale).to(torch.float32)
 
-    qweights, block_scales = [], []
-    for expert in range(num_experts):
-        q, block_scale = scaled_fp4_quant(
-            weight[expert].contiguous(),
-            global_scale[expert],
-            is_sf_swizzled_layout=False,
-        )
-        qweights.append(q)
-        block_scales.append(block_scale)
-
-    return torch.stack(qweights), torch.stack(block_scales), weight_scale_2
+    # scaled_fp4_quant(w, g) == scaled_fp4_quant(w * g, 1), so fold each
+    # expert's scale in and quantize all experts in one call (fp32 to keep the
+    # large scale precise), rather than looping per expert.
+    scaled = (weight.float() * global_scale[:, None, None]).to(weight.dtype)
+    scaled = scaled.reshape(-1, k)
+    one = torch.ones((), device=weight.device, dtype=torch.float32)
+    qweight, block_scale = scaled_fp4_quant(scaled, one, is_sf_swizzled_layout=False)
+    return (
+        qweight.reshape(num_experts, n, k // 2),
+        block_scale.reshape(num_experts, n, k // 16),
+        weight_scale_2,
+    )
 
 
 class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
