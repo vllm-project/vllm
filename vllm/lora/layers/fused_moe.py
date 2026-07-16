@@ -31,18 +31,6 @@ from .utils import _get_lora_aux_cuda_stream, _get_lora_device
 
 
 class FusedMoEWithLoRA(BaseLayerWithLoRA):
-    # lora_a_stacked/lora_b_stacked here are lists of views into these
-    # stacks, so the canonical tensors are listed instead. adapter_enabled
-    # is included: zeroing it disables all slots, consistent with the
-    # wiped adapter weights.
-    lora_state_attrs = (
-        "w13_lora_a_stacked",
-        "w13_lora_b_stacked",
-        "w2_lora_a_stacked",
-        "w2_lora_b_stacked",
-        "adapter_enabled",
-    )
-
     def __init__(self, base_layer: MoERunner) -> None:
         super().__init__()
         self.base_layer = base_layer

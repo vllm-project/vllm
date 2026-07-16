@@ -511,13 +511,13 @@ def test_lm_head_logits_processor_invalid_vocab_size(
 
 @torch.inference_mode()
 @pytest.mark.parametrize("device", DEVICES)
-def test_lm_head_logits_processor_zero_lora_state(
+def test_lm_head_reset_sharded_to_full_mapping(
     default_vllm_config, dist_init, device
 ) -> None:
-    """zero_lora_state() must wipe adapter state but restore — not zero —
-    sharded_to_full_mapping_gpu, the permanent index mapping that reorders
-    gathered logits for TP > 1. Regression test for the level-2
-    sleep/wake/reload path."""
+    """reset_sharded_to_full_mapping() must rebuild the TP>1 logits index
+    mapping from the CPU-side list. Regression test for the level-2
+    sleep/wake/reload path, where the GPU tensor's contents are undefined
+    after wake and adapter activation does not rewrite it."""
     if current_platform.is_cuda_alike() or current_platform.is_xpu():
         torch.accelerator.set_device_index(device)
 
@@ -535,17 +535,13 @@ def test_lm_head_logits_processor_zero_lora_state(
     )
     lora_logits_processor.create_lora_weights(max_loras, lora_config)
 
-    # Simulate the state after a level-2 sleep/wake cycle: all of these
-    # tensors are plain attributes in the sleep-mode memory pool, so
-    # their contents are undefined after wake.
-    lora_logits_processor.lora_a_stacked.fill_(1)
-    lora_logits_processor.lora_b_stacked.fill_(1)
+    # Simulate the state after a level-2 sleep/wake cycle: the mapping
+    # tensor lives in the sleep-mode memory pool, so its contents are
+    # undefined after wake.
     lora_logits_processor.sharded_to_full_mapping_gpu.fill_(-1)
 
-    lora_logits_processor.zero_lora_state()
+    lora_logits_processor.reset_sharded_to_full_mapping()
 
-    assert not lora_logits_processor.lora_a_stacked.any()
-    assert not lora_logits_processor.lora_b_stacked.any()
     torch.testing.assert_close(
         lora_logits_processor.sharded_to_full_mapping_gpu,
         torch.tensor(sharded_to_full_mapping, dtype=torch.long),

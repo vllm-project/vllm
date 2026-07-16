@@ -15,11 +15,6 @@ from .base import BaseLayerWithLoRA
 
 
 class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
-    # embeddings_weights views the added-vocab rows of the base weight,
-    # which hold adapter-provided embeddings (filled by set_lora, not
-    # covered by checkpoint reload), so it is re-zeroed like the stacks.
-    lora_state_attrs = (*BaseLayerWithLoRA.lora_state_attrs, "embeddings_weights")
-
     def __init__(self, base_layer: VocabParallelEmbedding) -> None:
         super().__init__()
         self.base_layer = base_layer
