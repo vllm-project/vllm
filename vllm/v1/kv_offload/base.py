@@ -52,9 +52,6 @@ class Medium(Enum):
     STORAGE = "storage"
 
 
-KV_LOAD_TIERS_KEY = "kv_load_tiers"
-
-
 @dataclass(frozen=True)
 class TierFilter:
     """Per-request filter controlling which tiers participate."""
