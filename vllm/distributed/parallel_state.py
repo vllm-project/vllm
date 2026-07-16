@@ -602,7 +602,7 @@ class GroupCoordinator:
         else:
             stream = graph_capture_context.stream
 
-        # only cuda uses this function,
+        # only cuda/rocm uses this function,
         # so we don't abstract it into the base class
         maybe_ca_context = nullcontext()
         maybe_aiter_ar_context = nullcontext()
