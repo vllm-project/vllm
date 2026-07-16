@@ -7,6 +7,7 @@ import vllm.envs as envs
 from tests.v1.kv_connector.unit.utils import MockKVConfig
 from vllm.config import (
     CacheConfig,
+    DeviceConfig,
     ECTransferConfig,
     KVTransferConfig,
     ModelConfig,
@@ -65,6 +66,8 @@ def create_scheduler(
     ec_role: str | None = None,
     use_v2_model_runner: bool | None = None,
     kv_cache_spec: KVCacheSpec | None = None,
+    runner_type: str | None = None,
+    device: str | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -86,6 +89,8 @@ def create_scheduler(
         seed=42,
         skip_tokenizer_init=skip_tokenizer_init,
     )
+    if runner_type is not None:
+        model_config.runner_type = runner_type
     if max_model_len is None:
         max_model_len = max_num_batched_tokens
     scheduler_config = SchedulerConfig(
@@ -154,6 +159,10 @@ def create_scheduler(
         else None
     )
 
+    vllm_config_kwargs = {}
+    if device is not None:
+        vllm_config_kwargs["device_config"] = DeviceConfig(device=device)
+
     vllm_config = VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
@@ -165,6 +174,7 @@ def create_scheduler(
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,
         ec_transfer_config=ec_transfer_config,
+        **vllm_config_kwargs,
     )
     if kv_cache_spec is None:
         kv_cache_spec = FullAttentionSpec(

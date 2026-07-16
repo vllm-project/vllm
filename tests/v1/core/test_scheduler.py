@@ -22,6 +22,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
@@ -165,6 +166,55 @@ def test_schedule(enable_prefix_caching: bool, prompt_logprobs: int | None):
     assert len(scheduler.running) == len(requests)
     for i, request in enumerate(requests):
         assert scheduler.running[i] == request
+
+
+@pytest.mark.skip_global_cleanup
+def test_pooling_chunked_prefill_can_finish_at_max_model_len():
+    scheduler = create_scheduler(
+        max_num_seqs=1,
+        max_model_len=8,
+        max_num_batched_tokens=4,
+        runner_type="pooling",
+        device="cpu",
+    )
+    request = Request(
+        request_id="pool",
+        prompt_token_ids=[1] * 8,
+        sampling_params=None,
+        pooling_params=PoolingParams(task="embed"),
+    )
+    scheduler.add_request(request)
+
+    first_chunk = scheduler.schedule()
+    assert first_chunk.num_scheduled_tokens == {"pool": 4}
+    scheduler.update_from_output(
+        first_chunk,
+        ModelRunnerOutput(
+            req_ids=["pool"],
+            req_id_to_index={"pool": 0},
+            pooler_output=[None],
+        ),
+    )
+    assert request in scheduler.running
+    assert request.is_prefill_chunk
+
+    final_chunk = scheduler.schedule()
+    assert final_chunk.num_scheduled_tokens == {"pool": 4}
+    pooling_output = torch.ones(3)
+    engine_core_outputs = scheduler.update_from_output(
+        final_chunk,
+        ModelRunnerOutput(
+            req_ids=["pool"],
+            req_id_to_index={"pool": 0},
+            pooler_output=[pooling_output],
+        ),
+    )
+
+    output = engine_core_outputs[0].outputs[0]
+    assert output.finish_reason == FinishReason.STOP
+    assert torch.equal(output.pooling_output, pooling_output)
+    assert not scheduler.running
+    assert "pool" not in scheduler.requests
 
 
 def test_scheduler_stats_route_to_existing_output_client():
