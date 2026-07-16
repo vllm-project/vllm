@@ -341,7 +341,9 @@ void fused_rope_fp8_kvcache(
     STD_TORCH_CHECK(key.dim() == 3, "key must be [num_tokens, num_kv_heads, head_size]");
     STD_TORCH_CHECK(value.dim() == 3, "value must be [num_tokens, num_kv_heads, head_size]");
 
-    int num_tokens   = static_cast<int>(key.size(0));
+    // key.size(0) can be larger than slot_mapping.size(0) due to CUDA graph
+    // padding; slot_mapping.size(0) is the actual (unpadded) token count.
+    int num_tokens   = static_cast<int>(slot_mapping.size(0));
     int num_kv_heads = static_cast<int>(key.size(1));
     int head_size    = static_cast<int>(key.size(2));
     int rot_dim      = static_cast<int>(cos_sin_cache.size(1));
