@@ -3741,3 +3741,15 @@ steps:
   commands:
   - pip install 'modelscope<1.38'
   - pytest -v -s test_regression.py
+
+#----------------------------------------------------------- Disaggregated P/D (MoRIIO) SLURM suite ------------------------------------#
+# Isolated behind a dedicated mirror_hardwares tag so it is emitted ONLY when the
+# build sets AMD_MIRROR_HW=amddisagg (default amdproduction runs skip it). The
+# uploader runs on the SLURM login-node agent (no_plugin => command runs directly,
+# no run-amd-test.sh / Docker) and injects the native disagg pipeline.
+- label: "ROCm Disagg P/D (MoRIIO) — SLURM suite"
+  agent_pool: mi250_8
+  no_plugin: true
+  mirror_hardwares: [amddisagg]
+  commands:
+  - buildkite-agent pipeline upload .buildkite/amd-disagg/pipeline-disagg.yaml

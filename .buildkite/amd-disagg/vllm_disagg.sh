@@ -191,7 +191,7 @@ run_accuracy() {
       export HF_HUB_OFFLINE=0 HF_DATASETS_OFFLINE=0
       python3 -m lm_eval --model local-completions \
         --tasks "${ACCURACY_TASKS}" \
-        --model_args "model=${MODEL_PATH},base_url=${base_url},num_concurrent=${ACCURACY_NUM_CONCURRENT},max_retries=${ACCURACY_MAX_RETRIES},tokenized_requests=False" \
+        --model_args "model=${MODEL_PATH},base_url=${base_url},num_concurrent=${ACCURACY_NUM_CONCURRENT},max_retries=${ACCURACY_MAX_RETRIES},tokenized_requests=False,trust_remote_code=True" \
         --output_path "${outdir}" \
         2>&1 | tee "${logf}"
     ) || eval_rc=$?
@@ -242,34 +242,6 @@ PY
 # ============================================================================
 # Server roles (prefill / decode) and their shared helpers
 # ============================================================================
-
-# Apply vLLM PR #39276 when required (WIDE_EP_MODE=1 and xP>1 or yD>1), honoring
-# APPLY_MORIIO_PATCH=auto|1|0. Aborts if a required patch is missing/fails.
-# TODO: Remove this logic after PR #45043 is merged. 
-apply_patch_if_needed() {
-    local patch_required=0
-    if [[ "${WIDE_EP_MODE}" == "1" ]] && { [[ "${xP}" -gt 1 ]] || [[ "${yD}" -gt 1 ]]; }; then
-        patch_required=1
-    fi
-    local patch_script="${PATCH_SCRIPT:-${SCRIPT_DIR}/apply_moriio_2pd_patches.sh}"
-    local do_patch=0
-    case "${APPLY_MORIIO_PATCH}" in
-        1) do_patch=1 ;;
-        0) do_patch=0 ;;
-        auto|*) do_patch="${patch_required}" ;;
-    esac
-    [[ "${do_patch}" == "1" ]] || return 0
-
-    if [[ -f "${patch_script}" ]]; then
-        log "applying MoRIIO multi-node patch (PR #39276): ${patch_script}"
-        if ! bash "${patch_script}"; then
-            [[ "${patch_required}" == "1" ]] && die "patch required for multi-node DP (xP=${xP} yD=${yD}) but failed"
-            log "WARN: patch failed; continuing (not strictly required for 1P1D)"
-        fi
-    elif [[ "${patch_required}" == "1" ]]; then
-        die "patch script not found but required for multi-node DP: ${patch_script}"
-    fi
-}
 
 # Read model-specific flags from models.yaml (mode + role aware) into globals:
 #   MODEL_BASE_FLAGS / MODEL_ROLE_FLAGS / MODEL_EXPERIMENTAL_FLAGS -> MODEL_CONFIG
@@ -413,11 +385,10 @@ configure_decode() {
     TP_PORT="${DECODE_PORT}"
 }
 
-# Build the serve command (patch + model flags + CMD array + LOGF). No exec.
+# Build the serve command (model flags + CMD array + LOGF). No exec.
 # Expects role globals set by configure_prefill/configure_decode.
 build_server_cmd() {
     HOST_IP="${IP_ARRAY[$NODE_RANK]:-}"   # own IP for --host binding, if known
-    apply_patch_if_needed
     load_model_flags
     LOGF="${LOG_PATH}/${ROLE}_${PARALLEL_MODE}_node${NODE_RANK}_$(date +%Y%m%d_%H%M%S).log"
     CMD=(vllm serve "${MODEL_PATH}")
@@ -460,7 +431,7 @@ wait_all_healthy() {
     log "health-gate: waiting on ${#eps[@]} endpoint(s): ${eps[*]}"
     local ep
     for ep in "${eps[@]}"; do
-        until curl -sf "http://${ep}/health" >/dev/null 2>&1; do
+        until /usr/bin/curl -sf "http://${ep}/health" >/dev/null 2>&1; do
             (( $(date +%s) >= deadline )) && { log "TIMEOUT waiting for ${ep}"; return 1; }
             kill -0 "${SERVER_PID}" 2>/dev/null || { log "local server (pid ${SERVER_PID}) exited while waiting"; return 1; }
             sleep 10
@@ -486,16 +457,34 @@ orchestrate_master() {
     # runs as a SEPARATE container started by the SLURM job on this (rank-0) node,
     # so in that mode we don't start anything here.
     PROXY_PID=""
-    if [[ "${ROUTER_TYPE:-toy}" == "vllm-router" ]]; then
+    if [[ "${ROUTER_TYPE:-vllm-router}" == "vllm-router" ]]; then
         log "ROUTER_TYPE=vllm-router: external router expected on gateway :${GATEWAY_PORT:-${ROUTER_PORT}} (not starting toy proxy)"
     else
         start_proxy_bg
     fi
     if wait_all_healthy; then
-        set +e
-        run_workload
-        rc=$?
-        set -e
+        # If using the external vllm-router, wait for it to become ready before
+        # running the workload. The router starts as a separate container on this
+        # (rank-0) node; give it up to 300s to bind port ROUTER_PORT.
+        if [[ "${ROUTER_TYPE:-vllm-router}" == "vllm-router" ]]; then
+            local router_deadline=$(( $(date +%s) + 300 ))
+            log "waiting for vllm-router on :${ROUTER_PORT} (up to 300s)"
+            until /usr/bin/curl -sf "http://127.0.0.1:${ROUTER_PORT}/health" >/dev/null 2>&1; do
+                if (( $(date +%s) >= router_deadline )); then
+                    log "TIMEOUT waiting for vllm-router on :${ROUTER_PORT}"
+                    rc=1
+                    break
+                fi
+                sleep 5
+            done
+            (( rc == 0 )) && log "vllm-router healthy on :${ROUTER_PORT}"
+        fi
+        if (( rc == 0 )); then
+            set +e
+            run_workload
+            rc=$?
+            set -e
+        fi
     else
         rc=1
     fi

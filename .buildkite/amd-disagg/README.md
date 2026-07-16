@@ -22,14 +22,14 @@ single- and multi-node `xP`/`yD` topologies and two parallelism modes via
 
 ### toy proxy vs. vLLM router (`ROUTER_TYPE`)
 
-The client-facing gateway is selectable via **`ROUTER_TYPE`** (default `toy`):
+The client-facing gateway is selectable via **`ROUTER_TYPE`** (default `vllm-router`):
 
 | `ROUTER_TYPE` | What runs | Client port |
 |---------------|-----------|-------------|
-| `toy` (default) | the upstream `moriio_toy_proxy_server.py` example shipped in the image (`PROXY_SCRIPT`) as a background process **inside** the rank-0 container | `PROXY_PORT` (10001) |
-| `vllm-router` | a **separate** `vllm/vllm-router` container on the rank-0 node (started by the SLURM job) | `ROUTER_PORT` (30000) |
+| `vllm-router` (default) | a **separate** `vllm/vllm-router` container on the rank-0 node (started by the SLURM job) | `ROUTER_PORT` (30000) |
+| `toy` | the upstream `moriio_toy_proxy_server.py` example shipped in the image (`PROXY_SCRIPT`) as a background process **inside** the rank-0 container | `PROXY_PORT` (10001) |
 
-Note: There are few existing issues while running vllm-router with DP mode, once that is fixed can be switched as default.
+Note: `vllm-router` may still hit known issues in DP mode; set `ROUTER_TYPE=toy` to fall back to the in-container toy proxy.
 
 Both use the identical MoRIIO discovery mechanism — prefill/decode register to
 `PROXY_IP:PROXY_PING_PORT` (`36367`) — so the prefill/decode serve commands and
@@ -45,8 +45,8 @@ Relevant knobs (in `cluster.sh`, env-overridable): `ROUTER_TYPE`, `ROUTER_PORT`,
 wideEP, `1` for TP).
 
 ```bash
-# opt in to the production router (1P1D):
-ROUTER_TYPE=vllm-router NODES=2 \
+# default uses the vllm-router; fall back to the in-container toy proxy (1P1D):
+ROUTER_TYPE=toy NODES=2 \
   bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
 ```
 

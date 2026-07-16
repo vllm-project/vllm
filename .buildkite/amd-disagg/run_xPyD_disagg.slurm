@@ -3,6 +3,7 @@
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:8
+#SBATCH --exclusive
 #SBATCH --time=08:00:00
 #SBATCH --chdir=/tmp
 #SBATCH --output=/tmp/spur-%j.out
@@ -25,9 +26,9 @@ DRY_RUN="${DRY_RUN:-0}"
 MORIIO_READ_MODE="${MORIIO_READ_MODE:-0}"   # 0 -> prefill writes (default); 1 -> decode reads KV (read_mode)
 
 # ---- router / gateway (host-side; also forwarded into the container) --------
-# toy         -> in-container MoRIIO toy proxy (default; no extra container)
-# vllm-router -> external `vllm/vllm-router` container started on the rank-0 node
-ROUTER_TYPE="${ROUTER_TYPE:-toy}"
+# vllm-router -> external `vllm/vllm-router` container started on the rank-0 node (default)
+# toy         -> in-container MoRIIO toy proxy (no extra container)
+ROUTER_TYPE="${ROUTER_TYPE:-vllm-router}"
 ROUTER_PORT="${ROUTER_PORT:-30000}"
 ROUTER_POLICY="${ROUTER_POLICY:-round_robin}"
 VLLM_ROUTER_IMAGE="${VLLM_ROUTER_IMAGE:-vllm/vllm-router:nightly}"
@@ -285,21 +286,24 @@ run_node_container() {
         echo "DRY_RUN: would start vllm-router on $(hostname): $VLLM_ROUTER_IMAGE (discovery :$PROXY_PING_PORT, port :$ROUTER_PORT, policy $ROUTER_POLICY, dp_local=$ROUTER_DP_LOCAL)"
     elif [ "$ROUTER_TYPE" = "vllm-router" ] && [ "$rank" = "0" ]; then
         docker rm -f "$ROUTER_CONT_NAME" 2>/dev/null || true
-        echo "Starting vllm-router on $(hostname): $VLLM_ROUTER_IMAGE (discovery :$PROXY_PING_PORT, port :$ROUTER_PORT, policy $ROUTER_POLICY, dp_local=$ROUTER_DP_LOCAL)"
         mkdir -p "$LOG_PATH" 2>/dev/null || true
-        docker run -d \
-            --user $(id -u):$(id -g) \
-            --name "$ROUTER_CONT_NAME" \
-            --network host \
-            -v "$LOG_PATH":/run_logs \
-            -v "$SHARED_MOUNT":"$SHARED_MOUNT" \
-            -v "/data/$(id -un):/workspace" \
-            -e HOME=/workspace \
-            -e USER="$(id -un)" \
-            -e LOGNAME="$(id -un)" \
-            "$VLLM_ROUTER_IMAGE" \
-            bash -lc "exec vllm-router --vllm-pd-disaggregation --kv-connector moriio --vllm-discovery-address 0.0.0.0:$PROXY_PING_PORT --port $ROUTER_PORT --host 0.0.0.0 --intra-node-data-parallel-size $ROUTER_DP_LOCAL --policy $ROUTER_POLICY --prefill-policy $ROUTER_POLICY --decode-policy $ROUTER_POLICY --log-level info > $LOG_PATH/vllm_router.log 2>&1" \
-          || echo "WARN: failed to start vllm-router container on $(hostname)"
+        {
+            echo "Starting vllm-router on $(hostname): $VLLM_ROUTER_IMAGE (discovery :$PROXY_PING_PORT, port :$ROUTER_PORT, policy $ROUTER_POLICY, dp_local=$ROUTER_DP_LOCAL)"
+            docker run -d \
+                --name "$ROUTER_CONT_NAME" \
+                --network host \
+                --user "$(id -u):$(id -g)" \
+                -v "$LOG_PATH":/run_logs \
+                -v "$SHARED_MOUNT":"$SHARED_MOUNT" \
+                -v "/data/$(id -un):/workspace" \
+                -e HOME=/workspace \
+                -e USER="$(id -un)" \
+                -e LOGNAME="$(id -un)" \
+                "$VLLM_ROUTER_IMAGE" \
+                bash -lc "exec vllm-router --vllm-pd-disaggregation --kv-connector moriio --vllm-discovery-address 0.0.0.0:$PROXY_PING_PORT --port $ROUTER_PORT --host 0.0.0.0 --intra-node-data-parallel-size $ROUTER_DP_LOCAL --policy $ROUTER_POLICY --prefill-policy $ROUTER_POLICY --decode-policy $ROUTER_POLICY --log-level info >> $LOG_PATH/vllm_router.log 2>&1" \
+              && echo "vllm-router container started ok" \
+              || echo "WARN: failed to start vllm-router container on $(hostname)"
+        } 2>&1 | tee -a "$LOG_PATH/vllm_router_start.log"
     fi
 
     docker run --rm \
@@ -338,6 +342,8 @@ run_node_container() {
         -e xP="$xP" -e yD="$yD" \
         -e GPUS_PER_NODE="$GPUS_PER_NODE" \
         -e CLUSTER_ENV="$CLUSTER_ENV" \
+        -e MODEL_NAME="${MODEL_NAME:-}" \
+        -e MODEL_DIR="${MODEL_DIR:-}" \
         -e LOG_PATH="$LOG_PATH" \
         -e RUN_AFTER_HEALTH="$RUN_AFTER_HEALTH" \
         -e HEALTH_TIMEOUT_S="$HEALTH_TIMEOUT_S" \

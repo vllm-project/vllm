@@ -84,7 +84,7 @@ export MORIIO_READ_MODE="${MORIIO_READ_MODE:-0}"
 #                  on the rank-0 node
 # Both use the SAME MoRIIO discovery mechanism (prefill/decode register to
 # PROXY_IP:PROXY_PING_PORT=36367); only the client HTTP front door differs.
-export ROUTER_TYPE="${ROUTER_TYPE:-toy}"
+export ROUTER_TYPE="${ROUTER_TYPE:-vllm-router}"
 export ROUTER_PORT="${ROUTER_PORT:-30000}"
 export ROUTER_POLICY="${ROUTER_POLICY:-round_robin}"
 export VLLM_ROUTER_IMAGE="${VLLM_ROUTER_IMAGE:-vllm/vllm-router:nightly}"
