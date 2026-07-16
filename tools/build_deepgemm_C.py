@@ -7,7 +7,7 @@ DeepGEMM now registers ops via TORCH_LIBRARY into ``deep_gemm._C_extension``
 delegates to DeepGEMM's ``setup.py build_ext --inplace`` and copies the shim
 plus extension into the cmake output directory.
 
-Usage: python build_deepgemm_C.py <DEEPGEMM_SRC_DIR> <OUTPUT_DIR> <TARGET_PY>
+Usage: python build_deepgemm_C.py <DEEPGEMM_SRC_DIR> <OUTPUT_DIR>
 """
 
 import os
@@ -16,8 +16,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-if len(sys.argv) != 4:
-    sys.exit(f"usage: {sys.argv[0]} <SRC> <OUT> <TARGET_PY>")
+if len(sys.argv) != 3:
+    sys.exit(f"usage: {sys.argv[0]} <SRC> <OUT>")
 
 src = Path(sys.argv[1]).resolve()
 out = Path(sys.argv[2]).resolve()
