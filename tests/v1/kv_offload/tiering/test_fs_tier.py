@@ -22,10 +22,17 @@ from vllm.distributed.kv_events import MEDIUM_FS
 from vllm.v1.kv_offload.base import (
     LookupResult,
     OffloadingEvent,
+    OffloadingKVEventsConfig,
     OffloadKey,
     ReqContext,
     ScheduleEndContext,
     make_offload_key,
+)
+from vllm.v1.kv_offload.config import (
+    OffloadingCacheConfig,
+    OffloadingConfig,
+    OffloadingModelConfig,
+    OffloadingParallelConfig,
 )
 from vllm.v1.kv_offload.tiering.base import JobMetadata
 from vllm.v1.kv_offload.tiering.fs.manager import (
@@ -41,33 +48,38 @@ _BLOCK_ELEMENTS = 128 * mmap.PAGESIZE  # 2MB per block for pagesize 4096.
 _DTYPE: torch.dtype = torch.float32
 _CTX = ReqContext(req_id="test")
 
-_MOCK_VLLM_CONFIG = MagicMock()
-_MOCK_VLLM_CONFIG.model_config.model = "test-model"
-_MOCK_VLLM_CONFIG.cache_config.block_size = 16
-_MOCK_VLLM_CONFIG.cache_config.cache_dtype = "torch.float32"
-_MOCK_VLLM_CONFIG.parallel_config.tensor_parallel_size = 1
-_MOCK_VLLM_CONFIG.parallel_config.pipeline_parallel_size = 1
-_MOCK_VLLM_CONFIG.parallel_config.prefill_context_parallel_size = 1
-_MOCK_VLLM_CONFIG.parallel_config.decode_context_parallel_size = 1
-_MOCK_VLLM_CONFIG.parallel_config.rank = 0
-
-_MOCK_KV_CACHE_CONFIG = MagicMock()
-_MOCK_KV_CACHE_CONFIG.kv_cache_groups = []
-
-_MOCK_OFFLOADING_SPEC = MagicMock()
-_MOCK_OFFLOADING_SPEC.vllm_config = _MOCK_VLLM_CONFIG
-_MOCK_OFFLOADING_SPEC.kv_cache_config = _MOCK_KV_CACHE_CONFIG
-_MOCK_OFFLOADING_SPEC.block_size_factor = 1
-
 
 def _make_offloading_spec(enable_kv_cache_events: bool) -> MagicMock:
     """Mock spec with an explicit global KV events flag."""
     spec = MagicMock()
-    spec.vllm_config = _MOCK_VLLM_CONFIG
-    spec.kv_cache_config = _MOCK_KV_CACHE_CONFIG
-    spec.block_size_factor = 1
-    spec.kv_events_config.enable_kv_cache_events = enable_kv_cache_events
+    spec.config = OffloadingConfig(
+        groups=(),
+        worker_kv_bytes_per_block=0,
+        enable_kv_cache_events=enable_kv_cache_events,
+        extra_config={},
+        engine_id="test-engine",
+        model=OffloadingModelConfig(name="test-model", dtype="float32"),
+        cache=OffloadingCacheConfig(tokens_per_hash=16, blocks_per_chunk=1),
+        parallel=OffloadingParallelConfig(
+            rank=0,
+            world_size=1,
+            tp_size=1,
+            pp_size=1,
+            pcp_size=1,
+            dcp_size=1,
+            data_parallel_index=0,
+            is_parallelism_agnostic=False,
+        ),
+    )
+    spec.blocks_per_chunk = 1
+    spec.kv_events_config = OffloadingKVEventsConfig(
+        enable_kv_cache_events=enable_kv_cache_events,
+        self_describing_kv_events=False,
+    )
     return spec
+
+
+_MOCK_OFFLOADING_SPEC = _make_offloading_spec(enable_kv_cache_events=False)
 
 
 def key(n: int) -> OffloadKey:
