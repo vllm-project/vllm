@@ -83,10 +83,10 @@ def test_qwen3_5_mtp_remaps_multimodal_weights():
 
     weights = [
         ("mtp.layers.0.self_attn.q_proj.weight", Mock()),
-        ("language_model.embed_tokens.weight", Mock()),
-        ("language_model.embed_tokens_extend.weight", Mock()),
-        ("language_model.lm_head.weight", Mock()),
-        ("visual.patch_embed.weight", Mock()),
+        ("model.language_model.embed_tokens.weight", Mock()),
+        ("model.language_model.embed_tokens_extend.weight", Mock()),
+        ("lm_head.weight", Mock()),
+        ("model.visual.patch_embed.weight", Mock()),
     ]
     remapped_names = []
 
@@ -102,6 +102,6 @@ def test_qwen3_5_mtp_remaps_multimodal_weights():
 
     assert remapped_names == [
         "model.layers.0.self_attn.q_proj.weight",
-        "embed_tokens.weight",
+        "model.embed_tokens.weight",
         "lm_head.weight",
     ]
