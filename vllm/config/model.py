@@ -106,6 +106,21 @@ AttnTypeStr = Literal[
 ]
 
 
+def _resolve_tokenizer_revision(
+    tokenizer: str,
+    tokenizer_revision: str | None,
+    model_revision: str | None,
+    *,
+    tokenizer_uses_model: bool,
+    token: str | bool | None,
+) -> str | None:
+    if tokenizer_revision is not None:
+        return tokenizer_revision
+    if tokenizer_uses_model:
+        return model_revision
+    return maybe_resolve_latest_hf_revision(tokenizer, None, token=token)
+
+
 @config(config=ConfigDict(arbitrary_types_allowed=True))
 class ModelConfig:
     """Configuration for the model."""
@@ -517,15 +532,13 @@ class ModelConfig:
         if self.tokenizer is None:
             self.tokenizer = self.model
         self.tokenizer = maybe_model_redirect(self.tokenizer)
-        if self.tokenizer_revision is None:
-            if tokenizer_uses_model:
-                self.tokenizer_revision = self.revision
-            else:
-                self.tokenizer_revision = maybe_resolve_latest_hf_revision(
-                    self.tokenizer,
-                    None,
-                    token=self.hf_token,
-                )
+        self.tokenizer_revision = _resolve_tokenizer_revision(
+            self.tokenizer,
+            self.tokenizer_revision,
+            self.revision,
+            tokenizer_uses_model=tokenizer_uses_model,
+            token=self.hf_token,
+        )
 
         if isinstance(self.hf_config_path, str):
             self.hf_config_path = maybe_model_redirect(self.hf_config_path)
