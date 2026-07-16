@@ -502,6 +502,15 @@ class EngineCore:
         if not self.vllm_config.observability_config.enable_logging_iteration_details:
             yield
             return
+        # Real V2 iterations are logged from asynchronously completed worker
+        # device timings. Keep this CPU fallback for V1 and DP dummy passes.
+        if (
+            self.vllm_config.use_v2_model_runner
+            and self.vllm_config.device_config.device_type == "cuda"
+            and scheduler_output is not None
+        ):
+            yield
+            return
         # 0-token step: let the dummy_batch wrapper log it (avoids double-log).
         if scheduler_output and scheduler_output.total_num_scheduled_tokens == 0:
             yield
@@ -538,6 +547,37 @@ class EngineCore:
         )
         self._iteration_index += 1
 
+    def log_worker_iteration_details(self, output: ModelRunnerOutput) -> None:
+        if not (
+            self.vllm_config.use_v2_model_runner
+            and self.vllm_config.device_config.device_type == "cuda"
+            and self.vllm_config.observability_config.enable_logging_iteration_details
+        ):
+            return
+        for timing in output.worker_timing_samples:
+            proposer_time = (
+                ""
+                if timing.proposer_time_seconds is None
+                else ", proposer device time: "
+                f"{timing.proposer_time_seconds * 1000:.2f} ms"
+            )
+            logger.info(
+                "Iteration(%d): phase=%s, %d context requests, %d context "
+                "tokens, %d generation requests, %d generation tokens, %d "
+                "padded model tokens, model device time: %.2f ms%s, total "
+                "device time: %.2f ms",
+                timing.iteration_index,
+                timing.phase,
+                timing.num_prefill_requests,
+                timing.num_prefill_tokens,
+                timing.num_decode_requests,
+                timing.num_decode_tokens,
+                timing.num_model_tokens,
+                timing.model_time_seconds * 1000,
+                proposer_time,
+                timing.total_time_seconds * 1000,
+            )
+
     def _should_throttle_prefills(self) -> bool:
         """Whether to defer new prefills this step (DP prefill balancing).
         Overridden by the DP engine core; never throttles otherwise."""
@@ -564,6 +604,7 @@ class EngineCore:
             model_output = future.result()
             if model_output is None:
                 model_output = self.model_executor.sample_tokens(grammar_output)
+        self.log_worker_iteration_details(model_output)
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
@@ -665,6 +706,7 @@ class EngineCore:
                 # call failed - raise that exception.
                 exec_model_fut.result()
                 raise RuntimeError("unexpected error")
+        self.log_worker_iteration_details(model_output)
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.

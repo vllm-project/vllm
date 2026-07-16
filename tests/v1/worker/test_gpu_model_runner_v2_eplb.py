@@ -10,6 +10,7 @@ import torch
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.worker.gpu import eplb_utils as eplb
 from vllm.v1.worker.gpu import model_runner as mrv2
+from vllm.v1.worker.gpu.metrics.timing import ModelRunnerTiming
 
 
 class FakeMemoryProfiler:
@@ -85,6 +86,7 @@ def _make_runner(**overrides: Any) -> Any:
     runner.eplb = eplb.EPLBController(runner.parallel_config, runner.device)
     runner.pooling_runner = None
     runner.execute_model_state = None
+    runner.worker_timing = ModelRunnerTiming(None)  # type: ignore[arg-type]
     for key, value in overrides.items():
         setattr(runner, key, value)
     return runner
@@ -172,9 +174,18 @@ def test_v2_setup_eplb_from_mapping_rebuilds_state(monkeypatch):
     assert FakeEplbState.from_mapping_kwargs["num_valid_physical_experts"] == 2
 
 
-def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
+def test_v2_sample_tokens_runs_eplb_before_timing_on_non_last_pp_rank(monkeypatch):
     events = []
     runner = _make_runner(is_last_pp_rank=False, num_speculative_steps=0)
+
+    def finish_output(result):
+        events.append("timing")
+        return result
+
+    runner.worker_timing = SimpleNamespace(
+        is_active=True,
+        finish_output=finish_output,
+    )
     runner.execute_model_state = SimpleNamespace(
         input_batch=SimpleNamespace(
             num_reqs=2, idx_mapping=torch.zeros(2, dtype=torch.int32)
@@ -201,4 +212,9 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
 
     output = mrv2.GPUModelRunner.sample_tokens(runner, None)
     assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
-    assert events == ["receive", "postprocess_num_computed_tokens", "eplb"]
+    assert events == [
+        "receive",
+        "postprocess_num_computed_tokens",
+        "eplb",
+        "timing",
+    ]

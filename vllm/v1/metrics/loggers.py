@@ -28,6 +28,7 @@ from vllm.v1.metrics.stats import (
     SchedulerStats,
 )
 from vllm.v1.metrics.utils import create_metric_per_engine
+from vllm.v1.metrics.worker import WorkerTimingProm
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
 logger = init_logger(__name__)
@@ -410,6 +411,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
     _spec_decoding_cls = SpecDecodingProm
     _kv_connector_cls = KVConnectorProm
     _perf_metrics_cls = PerfMetricsProm
+    _worker_timing_cls = WorkerTimingProm
 
     def __init__(
         self, vllm_config: VllmConfig, engine_indexes: list[int] | None = None
@@ -448,6 +450,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.perf_metrics_prom = self._perf_metrics_cls(
             vllm_config, labelnames, per_engine_labelvalues
+        )
+        self.worker_timing_prom = self._worker_timing_cls(
+            labelnames, per_engine_labelvalues
         )
 
         #
@@ -1112,6 +1117,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
             if scheduler_stats.perf_stats is not None:
                 self.perf_metrics_prom.observe(scheduler_stats.perf_stats, engine_idx)
+
+            if scheduler_stats.worker_timing_samples:
+                self.worker_timing_prom.observe(
+                    scheduler_stats.worker_timing_samples, engine_idx
+                )
 
             if (
                 self.kv_cache_metrics_enabled

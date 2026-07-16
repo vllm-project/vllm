@@ -6,6 +6,7 @@ import time
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorProm
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.perf import PerfMetricsProm
+from vllm.v1.metrics.worker import WorkerTimingProm
 from vllm.v1.spec_decode.metrics import SpecDecodingProm
 
 try:
@@ -200,6 +201,12 @@ class RayPerfMetricsProm(PerfMetricsProm):
     _counter_cls = RayCounterWrapper
 
 
+class RayWorkerTimingProm(WorkerTimingProm):
+    """Record worker timing metrics using Ray metrics."""
+
+    _histogram_cls = RayHistogramWrapper
+
+
 class RayPrometheusStatLogger(PrometheusStatLogger):
     """RayPrometheusStatLogger uses Ray metrics instead."""
 
@@ -209,6 +216,7 @@ class RayPrometheusStatLogger(PrometheusStatLogger):
     _spec_decoding_cls = RaySpecDecodingProm
     _kv_connector_cls = RayKVConnectorProm
     _perf_metrics_cls = RayPerfMetricsProm
+    _worker_timing_cls = RayWorkerTimingProm
 
     @staticmethod
     def _unregister_vllm_metrics():

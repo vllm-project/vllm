@@ -23,6 +23,7 @@ METRIC_SOURCE_FILES = [
         "output": "nixl_connector.inc.md",
     },
     {"path": "vllm/v1/metrics/perf.py", "output": "perf.inc.md"},
+    {"path": "vllm/v1/metrics/worker.py", "output": "worker.inc.md"},
 ]
 
 

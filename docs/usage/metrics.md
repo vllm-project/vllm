@@ -41,6 +41,16 @@ The following metrics are exposed:
 
 --8<-- "docs/generated/metrics/spec_decode.inc.md"
 
+## Worker Timing Metrics
+
+The V2 GPU model runner records these device timings asynchronously. Model and
+total step metrics are labeled by `phase` and `num_model_tokens`, the target-model
+input size after padding; proposer metrics are labeled by phase and request count.
+A batch containing any prefill work is labeled `prefill`.
+Pure decode and speculative verification batches are labeled `decode`.
+
+--8<-- "docs/generated/metrics/worker.inc.md"
+
 ## NIXL KV Connector Metrics
 
 --8<-- "docs/generated/metrics/nixl_connector.inc.md"

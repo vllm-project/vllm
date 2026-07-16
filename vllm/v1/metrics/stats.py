@@ -167,6 +167,23 @@ class KVCacheEvictionEvent:
     reuse_gaps_seconds: tuple[float, ...]
 
 
+@dataclass(frozen=True)
+class WorkerTimingStats:
+    """Device timing for one model-runner step."""
+
+    iteration_index: int
+    phase: str
+    num_model_tokens: int
+    num_requests: int
+    num_prefill_requests: int
+    num_prefill_tokens: int
+    num_decode_requests: int
+    num_decode_tokens: int
+    model_time_seconds: float
+    proposer_time_seconds: float | None
+    total_time_seconds: float
+
+
 @dataclass
 class SchedulerStats:
     """Stats associated with the scheduler."""
@@ -196,6 +213,8 @@ class SchedulerStats:
     cudagraph_stats: CUDAGraphStat | None = None
 
     perf_stats: PerfStats | None = None
+
+    worker_timing_samples: list[WorkerTimingStats] = field(default_factory=list)
 
 
 @dataclass

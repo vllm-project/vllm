@@ -34,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
 )
+from vllm.v1.metrics.stats import WorkerTimingStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
@@ -106,6 +107,38 @@ def test_schedule(enable_prefix_caching: bool, prompt_logprobs: int | None):
     assert len(scheduler.running) == len(requests)
     for i, request in enumerate(requests):
         assert scheduler.running[i] == request
+
+
+def test_worker_timing_samples_are_forwarded() -> None:
+    scheduler = create_scheduler()
+    (request,) = create_requests(num_requests=1)
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    timing = WorkerTimingStats(
+        iteration_index=0,
+        phase="prefill",
+        num_model_tokens=16,
+        num_requests=1,
+        num_prefill_requests=1,
+        num_prefill_tokens=16,
+        num_decode_requests=0,
+        num_decode_tokens=0,
+        model_time_seconds=0.005,
+        proposer_time_seconds=None,
+        total_time_seconds=0.005,
+    )
+    model_output = ModelRunnerOutput(
+        req_ids=[request.request_id],
+        req_id_to_index={request.request_id: 0},
+        sampled_token_ids=[[0]],
+        worker_timing_samples=[timing],
+    )
+
+    outputs = scheduler.update_from_output(scheduler_output, model_output)
+
+    scheduler_stats = next(iter(outputs.values())).scheduler_stats
+    assert scheduler_stats is not None
+    assert scheduler_stats.worker_timing_samples == [timing]
 
 
 def test_schedule_multimodal_requests():

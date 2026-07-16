@@ -93,6 +93,7 @@ from vllm.v1.worker.gpu.lora_utils import (
     get_lora_capture_cases,
     get_num_active_loras_for_dispatch,
 )
+from vllm.v1.worker.gpu.metrics import timing
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
@@ -251,6 +252,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # For transferring state from execute_model to subsequent sample_tokens call.
         self.execute_model_state: ExecuteModelState | None = None
+        self.worker_timing = timing.ModelRunnerTiming(self.main_stream)
 
         # Expert parallelism load balancer.
         self.eplb = EPLBController(self.parallel_config, self.device)
@@ -1130,6 +1132,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
     @torch.inference_mode()
+    @timing.drain_timing_samples
     def execute_model(
         self,
         scheduler_output: SchedulerOutput,
@@ -1138,6 +1141,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        self.worker_timing.start_step(dummy_run, scheduler_output)
         if not dummy_run:
             # Update the request states.
             self.update_pp_decode_requests()
@@ -1227,6 +1231,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 block_tables = None
                 slot_mappings = None
+
+        self.worker_timing.set_step_metadata(input_batch)
 
         attn_metadata = None
         slot_mappings_by_layer = None
@@ -1373,6 +1379,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return None
 
     @torch.inference_mode()
+    @timing.finalize_step_timing
     @step_eplb_after()
     def sample_tokens(
         self, grammar_output: GrammarOutput | None
@@ -1447,6 +1454,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_sampled_tokens=num_sampled,
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
+            timing=self.worker_timing,
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
@@ -1482,6 +1490,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
+            self.worker_timing.start_proposer()
             draft_tokens = self.speculator.propose(
                 input_batch,
                 attn_metadata,
@@ -1497,6 +1506,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mm_inputs=mm_inputs,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
+            self.worker_timing.end_proposer()
 
         if self.num_speculative_steps > 0:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does
@@ -1516,6 +1526,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return self.draft_tokens_handler.get_draft_tokens()
 
     @torch.inference_mode()
+    @timing.finalize_step_timing
     @step_eplb_after()
     def pool(self) -> AsyncPoolingOutput | ModelRunnerOutput | None:
         if self.execute_model_state is None:
@@ -1551,6 +1562,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             is_valid=is_valid,
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
+            timing=self.worker_timing,
         )
 
         self.postprocess_num_computed_tokens(input_batch)
