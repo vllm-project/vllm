@@ -194,9 +194,7 @@ class Request:
         # The number of times this request has been preempted by the scheduler.
         self.num_preemptions = 0
 
-        # Whether this request's prefix-cache query stat has been recorded.
-        # Prevents re-counting when a KVConnector defers the request. Reset on
-        # preemption so each recomputation is counted once.
+        # Set once the prefix-cache query is recorded. Reset on preemption.
         self.prefix_cache_stats_recorded = False
 
         self.prefill_stats: PrefillStats | None = PrefillStats()

@@ -1215,7 +1215,7 @@ class Scheduler(SchedulerInterface):
         if request.spec_token_ids:
             request.spec_token_ids = []
         request.num_preemptions += 1
-        # Re-allow prefix-cache stat recording so the recomputation is counted.
+        # Reset so the post-preemption recomputation is recorded.
         request.prefix_cache_stats_recorded = False
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)

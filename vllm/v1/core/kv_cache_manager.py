@@ -205,10 +205,8 @@ class KVCacheManager:
         return stats
 
     def record_prefix_cache_query(self, request: Request, num_hits: int) -> None:
-        # Record the prefix-cache query at most once per request. The scheduler
-        # re-runs the lookup on every waiting-loop visit while a KVConnector
-        # defers the request. Preemption resets the flag so each recomputation is
-        # counted once.
+        # Record once per request. The lookup re-runs while a KVConnector defers
+        # the request, so the guard keeps deferral retries from double counting.
         if not self.log_stats or request.prefix_cache_stats_recorded:
             return
         assert self.prefix_cache_stats is not None
