@@ -209,6 +209,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     worker = object.__new__(NixlConnectorWorker)
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
     worker._engine_last_active = {}
+    worker._bidirectional_kv_xfer_enabled = False
 
     has_mamba = any(t is MambaSpec for t in resolved_types)
     has_swa = any(t is SlidingWindowSpec for t in resolved_types)
