@@ -152,6 +152,7 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
             backend=self.nvfp4_backend,
             routing_tables=layer._expert_routing_tables(),
             layer=layer,
+            per_token_activation=True,
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
@@ -166,5 +167,4 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
             a2_scale=layer.w2_input_scale,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             layer=layer,
-            per_token_activation=True,
         )

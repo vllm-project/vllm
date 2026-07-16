@@ -33,8 +33,8 @@ from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 logger = init_logger(__name__)
 
-# Base multiplier for per-token NVFP4 activation quant; the kernel derives the
-# per-token global scale from the activation amax on top of it.
+# Base scale for per-token NVFP4 activation quant; the kernel folds the
+# per-token global scale (from the activation amax) on top of it.
 _PER_TOKEN_BASE_GLOBAL_SCALE = 1.0 / (448.0 * 6.0)
 
 
@@ -47,12 +47,13 @@ class TrtLlmNvFp4ExpertsBase:
         self,
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
+        per_token_activation: bool = False,
     ):
         self.moe_config = moe_config
         self.quant_config = quant_config
-        # Per-token activation: quantize the input here (deferred from prepare)
-        # to capture a per-token global scale, instead of a static one.
-        self.per_token_activation = quant_config.nvfp4_per_token_activation
+        # Quantize the input here (deferred from prepare) to capture a per-token
+        # global scale, instead of a static one.
+        self.per_token_activation = per_token_activation
 
         self.routing_method_type = self.moe_config.routing_method
         self.topk = moe_config.experts_per_token

@@ -469,7 +469,6 @@ def make_nvfp4_moe_quant_config(
     a2_scale: torch.Tensor,
     swiglu_limit: float | None = None,
     layer: torch.nn.Module | None = None,
-    per_token_activation: bool = False,
 ) -> FusedMoEQuantConfig:
     if backend == NvFp4MoeBackend.HUMMING:
         from vllm.model_executor.layers.fused_moe import RoutedExperts
@@ -520,7 +519,6 @@ def make_nvfp4_moe_quant_config(
             )
         ),
         gemm1_clamp_limit=swiglu_limit,
-        nvfp4_per_token_activation=per_token_activation,
     )
 
 
@@ -531,6 +529,7 @@ def make_nvfp4_moe_kernel(
     backend: NvFp4MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     layer: torch.nn.Module | None = None,
+    per_token_activation: bool = False,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
@@ -548,6 +547,8 @@ def make_nvfp4_moe_kernel(
     if backend == NvFp4MoeBackend.HUMMING:
         assert layer is not None
         extra_kwargs = {"layer": layer}
+    if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM and per_token_activation:
+        extra_kwargs["per_token_activation"] = True
 
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
