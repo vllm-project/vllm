@@ -139,6 +139,32 @@ def all_reduce_fake(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
     return torch.empty_like(tensor)
 
 
+def all_reduce_inplace_(tensor: torch.Tensor, group_name: str) -> None:
+    # Mutation-only, void-return TP all-reduce for the opt-in eager PIECEWISE
+    # split (enable_eager_tp_all_reduce). The void ABI (mutates_args + a None
+    # return) is what keeps the following non-integer getitem/slice out of the
+    # eager submodule; a tensor-returning collective reproduces the codegen
+    # stitch assertion (see vllm/compilation/codegen.py).
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+    if group.device_communicator is None:
+        raise ValueError(f"Group {group_name} has no device communicator.")
+    if tensor.is_cuda and torch.cuda.is_current_stream_capturing():
+        # Reaching CUDA graph capture means FX partitioning failed to split
+        # this op out of the graph; refuse rather than capture the collective.
+        raise RuntimeError(
+            "all_reduce_inplace_ was reached during CUDA graph capture; the "
+            "eager TP all-reduce split must execute outside CUDA graphs."
+        )
+    group.device_communicator.all_reduce_in_place(tensor)
+
+
+def all_reduce_inplace_fake_(tensor: torch.Tensor, group_name: str) -> None:
+    return None
+
+
 def reduce_scatter(
     tensor: torch.Tensor, dim: int, world_size: int, group_name: str
 ) -> torch.Tensor:
@@ -333,6 +359,16 @@ direct_register_custom_op(
     fake_impl=all_reduce_fake,
 )
 
+# Mutation-only variant used only when enable_eager_tp_all_reduce is active.
+# Registered unconditionally; routing to it is gated per-group (TP only).
+direct_register_custom_op(
+    op_name="all_reduce_inplace_",
+    op_func=all_reduce_inplace_,
+    mutates_args=["tensor"],
+    fake_impl=all_reduce_inplace_fake_,
+    tags=(torch._C.Tag.cudagraph_unsafe,),
+)
+
 direct_register_custom_op(
     op_name="reduce_scatter",
     op_func=reduce_scatter,
@@ -392,6 +428,7 @@ class GroupCoordinator:
         use_device_communicator: bool,  # whether to use device communicator
         use_message_queue_broadcaster: bool = False,
         group_name: str | None = None,
+        enable_eager_tp_all_reduce: bool = False,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -504,6 +541,18 @@ class GroupCoordinator:
         self.use_custom_op_call = (
             current_platform.is_tpu() or current_platform.use_custom_op_collectives()
         )
+
+        # When True (only the TP group sets this), route all_reduce through the
+        # mutation-only op so the collective is split out of piecewise CUDA
+        # graphs and executed eagerly in place via PyNccl.
+        self.enable_eager_tp_all_reduce = enable_eager_tp_all_reduce
+        if self.enable_eager_tp_all_reduce and self.world_size > 1:
+            logger.info_once(
+                "Experimental eager TP all-reduce PIECEWISE split is active "
+                "for group '%s'; the collective runs eagerly in place via "
+                "PyNccl on the current model stream, outside CUDA graphs.",
+                self.unique_name,
+            )
 
         self.use_cpu_custom_send_recv = (
             current_platform.is_cpu()
@@ -655,6 +704,14 @@ class GroupCoordinator:
         """
         # Bypass the function if we are using only 1 GPU.
         if self.world_size == 1:
+            return input_
+
+        if self.enable_eager_tp_all_reduce and self.use_custom_op_call:
+            # Eager in-place TP all-reduce split (TP group only): the void op
+            # mutates ``input_`` and is kept outside CUDA graphs by FX
+            # partitioning. Return the now-mutated tensor to preserve the
+            # functional Python calling contract.
+            torch.ops.vllm.all_reduce_inplace_(input_, group_name=self.unique_name)
             return input_
 
         if self.use_custom_op_call:
@@ -1302,6 +1359,7 @@ def init_model_parallel_group(
     use_message_queue_broadcaster: bool = False,
     group_name: str | None = None,
     use_device_communicator: bool = True,
+    enable_eager_tp_all_reduce: bool = False,
 ) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=group_ranks,
@@ -1310,6 +1368,7 @@ def init_model_parallel_group(
         use_device_communicator=use_device_communicator,
         use_message_queue_broadcaster=use_message_queue_broadcaster,
         group_name=group_name,
+        enable_eager_tp_all_reduce=enable_eager_tp_all_reduce,
     )
 
 
@@ -1816,6 +1875,11 @@ def initialize_model_parallel(
         backend,
         use_message_queue_broadcaster=True,
         group_name="tp",
+        # Only the TP group may use the eager in-place all-reduce split; leave
+        # world, PP, DP, DCP, EP, and other groups on the stock path.
+        enable_eager_tp_all_reduce=(
+            config.compilation_config.enable_eager_tp_all_reduce
+        ),
     )
 
     # Build the DCP model-parallel groups.
