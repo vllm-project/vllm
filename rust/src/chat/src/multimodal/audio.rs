@@ -80,7 +80,7 @@ mod tests {
 
     const AUDIO_PAD_ID: u32 = 151_676;
     const INKLING_AUDIO_MARKER_ID: u32 = 200_020;
-    const INKLING_AUDIO_EMBED_ID: i32 = 200_054;
+    const INKLING_AUDIO_EMBED_ID: i32 = 200_053;
 
     fn inkling_info(decoder_dmodel: serde_json::Value) -> MultimodalModelInfo {
         let config = serde_json::json!({

@@ -40,8 +40,8 @@ AUDIO_MARKER_ID = 200020  # <|content_audio_input|>
 # Per-patch / per-frame placeholder ids marking where tower embeddings are
 # scattered in. These are unused slots in the padded vocabulary and the
 # corresponding positions are always overwritten by tower embeddings.
-IMAGE_TOKEN_ID = 200053  # <|unused_200053|>
-AUDIO_TOKEN_ID = 200054  # <|unused_200054|>
+IMAGE_TOKEN_ID = 200054  # <|unused_200054|>
+AUDIO_TOKEN_ID = 200053  # <|unused_200053|>
 
 # ---------------------------------------------------------------------------
 # Image processing
