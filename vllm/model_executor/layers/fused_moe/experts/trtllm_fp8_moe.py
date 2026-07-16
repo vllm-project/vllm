@@ -15,7 +15,10 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import trtllm_moe_pack_topk_ids_weights
+from vllm.model_executor.layers.fused_moe.utils import (
+    fi_moe_largest_bucket,
+    trtllm_moe_pack_topk_ids_weights,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
 )
@@ -119,7 +122,9 @@ class TrtLlmFp8ExpertsBase:
         return (
             not moe_parallel_config.use_all2all_kernels
             or moe_parallel_config.use_ag_rs_all2all_kernels
-        ) and not moe_parallel_config.enable_eplb
+        ) and not (
+            moe_parallel_config.enable_eplb or moe_parallel_config.is_sequence_parallel
+        )
 
 
 class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
@@ -133,6 +138,8 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             not moe_parallel_config.use_all2all_kernels
             or moe_parallel_config.use_ag_rs_all2all_kernels
             or moe_parallel_config.use_deepep_v2_kernels
+            or moe_parallel_config.use_fi_nvl_one_sided_kernels
+            or moe_parallel_config.use_fi_nvl_two_sided_kernels
         ) and not moe_parallel_config.enable_eplb
 
     @staticmethod
@@ -249,6 +256,7 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             weight_layout=weight_layout,
             fp8_quantization_type=fp8_quant_type,
             output=output,
+            tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
         )
 
 
@@ -387,7 +395,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             n_group = num_expert_group or None
             selected_topk_group = topk_group or None
         else:
-            assert self.topk <= 10
+            assert self.topk <= 32
             fp8_quant_type = Fp8QuantizationType.DeepSeekFp8
             use_shuffled_weight = True
             weight_layout = WeightLayout.BlockMajorK
@@ -419,6 +427,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             use_shuffled_weight=use_shuffled_weight,
             weight_layout=weight_layout,
             fp8_quantization_type=fp8_quant_type,
+            tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
         )
         if is_mxfp8 or activation == MoEActivation.RELU2_NO_MUL:
             kwargs["activation_type"] = activation_type
@@ -475,6 +484,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             use_routing_scales_on_input=apply_router_weight_on_input,
             routing_method_type=self.routing_method_type,
             activation_type=activation_type,
+            tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
         )
         return out
 

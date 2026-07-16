@@ -92,21 +92,22 @@ class OffloadingConnectorWorker:
                         if layer_is_packed[layer_name]
                         else page
                     )
+                    raw = torch.empty(
+                        0,
+                        dtype=torch.int8,
+                        device=layer_kv_cache.device,
+                    ).set_(layer_kv_cache.untyped_storage())
                     tensors_per_block[layer_name] = (
-                        torch.tensor(
-                            [],
-                            dtype=torch.int8,
-                            device=layer_kv_cache.device,
-                        ).set_(
-                            layer_kv_cache.untyped_storage(),
-                            byte_offset,
+                        torch.as_strided(
+                            raw,
                             (num_blocks, page),
                             (block_stride_bytes, 1),
+                            byte_offset,
                         ),
                     )
                     page_size_bytes[layer_name] = layer_kv_cache_spec.page_size_bytes
                     unpadded_page_size_bytes[layer_name] = (
-                        layer_kv_cache_spec.real_page_size_bytes
+                        layer_kv_cache_spec.unpadded_page_size_bytes
                     )
 
                 elif isinstance(layer_kv_cache_spec, MambaSpec):
