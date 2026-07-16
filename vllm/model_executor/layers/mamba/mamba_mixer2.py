@@ -1055,7 +1055,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 initial_state_idx=block_idx_last_computed_token_d,
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=query_start_loc_d,
-                max_query_len=state_indices_tensor_d.size(-1),
+                max_query_len=self.max_spec_len,
             )
 
             # cached-spec (hybrid) feeds the full channel-last post-conv output
