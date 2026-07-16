@@ -821,10 +821,19 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[_AsyncMultiModalItem]
         if not self._items_by_modality:
             return None, None
 
-        resolved_items_by_modality = {
-            modality: await asyncio.gather(*(item() for item in items))
-            for modality, items in self._items_by_modality.items()
-        }
+        resolved_items_by_modality: dict[str, list[Any]] = {}
+        for modality, items in self._items_by_modality.items():
+            results = await asyncio.gather(
+                *(item() for item in items), return_exceptions=True
+            )
+            for result in results:
+                if isinstance(result, BaseException):
+                    # Gathering with return_exceptions=True lets every task in
+                    # this modality finish (or itself fail) before we raise,
+                    # instead of abandoning still-in-flight fetches (real
+                    # network/thread-pool work) the moment the first one fails.
+                    raise result
+            resolved_items_by_modality[modality] = results
 
         mm_processor = (
             self.mm_processor if self._model_config.is_multimodal_model else None
