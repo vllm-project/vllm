@@ -103,22 +103,24 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
 
         io_processor = self.pooling_io_processors[pooling_task]
 
-        inputs_context_cls: type(OfflinePluginInputsContext) | type(
-            OfflineEncodeInputsContext
-        )
         if isinstance(prompts, dict) and "data" in prompts:
-            inputs_context_cls = OfflinePluginInputsContext
+            ctx = OfflinePluginInputsContext(
+                pooling_task=pooling_task,
+                prompts=prompts,
+                tokenization_kwargs=tokenization_kwargs,
+                pooling_params=pooling_params,
+                lora_request=lora_request,
+                priorities=None,
+            )
         else:
-            inputs_context_cls = OfflineEncodeInputsContext
-
-        ctx = inputs_context_cls(
-            pooling_task=pooling_task,
-            prompts=prompts,
-            tokenization_kwargs=tokenization_kwargs,
-            pooling_params=pooling_params,
-            lora_request=lora_request,
-            priorities=None,
-        )
+            ctx = OfflineEncodeInputsContext(
+                pooling_task=pooling_task,
+                prompts=prompts,
+                tokenization_kwargs=tokenization_kwargs,
+                pooling_params=pooling_params,
+                lora_request=lora_request,
+                priorities=None,
+            )
 
         request_factory, num_requests = io_processor.get_request_factory_offline(ctx)
         outputs = self._run_tiling_engine(

@@ -11,6 +11,7 @@ from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from ..base.io_processor import PoolingIOProcessor
 from ..typing import (
     ALLOfflineInputsContext,
+    OfflineEncodeInputsContext,
     OfflineOutputsContext,
     OfflinePluginInputsContext,
     PoolingServeContext,
@@ -152,10 +153,16 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
             if p.task is None:
                 p.task = "plugin"
 
-        ctx.prompts = prompts_seq
-        ctx.pooling_params = params_seq
-
-        return super().get_request_factory_offline(ctx)
+        return super().get_request_factory_offline(
+            OfflineEncodeInputsContext(
+                prompts=prompts_seq,
+                pooling_params=params_seq,
+                pooling_task="plugin",
+                tokenization_kwargs=ctx.tokenization_kwargs,
+                lora_request=ctx.lora_request,
+                priorities=ctx.priorities,
+            )
+        )
 
     def post_process_offline(
         self,
