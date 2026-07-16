@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Validate aligned and unaligned Ascend NPU/CPU KV block transfers."""
 
 from __future__ import annotations

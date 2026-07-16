@@ -101,7 +101,7 @@ CPU 层支持两类主动降级策略：Block 空闲超过设定时间，或 CPU
 在仓库根目录执行：
 
 ```bash
-bash vllm/v1/kv_offload/tiering/my_tests/run_serve.sh
+bash examples/features/kv_cache_tiering/run_serve.sh
 ```
 
 常用覆盖参数：
@@ -124,13 +124,13 @@ MIN_SESSION_REQUESTS=2 \
 MAX_STORE_BLOCKS_PER_STEP=16 \
 MAX_STORE_BLOCKS_PER_REQUEST=64 \
 VLLM_ASCEND_KV_LOAD_STAGING_BYTES=67108864 \
-bash vllm/v1/kv_offload/tiering/my_tests/run_serve.sh
+bash examples/features/kv_cache_tiering/run_serve.sh
 ```
 
 服务启动后运行：
 
 ```bash
-python3 vllm/v1/kv_offload/tiering/my_tests/serve_lifecycle_client.py \
+python3 examples/features/kv_cache_tiering/serve_lifecycle_client.py \
   --url http://127.0.0.1:8081/v1/chat/completions \
   --fs-root /tmp/vllm_kv_tiering
 ```
@@ -159,13 +159,13 @@ python3 -m pytest -q --confcutdir=tests/v1/kv_offload \
 Ascend NPU/CPU 数据回环：
 
 ```bash
-python3 vllm/v1/kv_offload/tiering/my_tests/npu_worker_roundtrip.py
+python3 examples/features/kv_cache_tiering/npu_worker_roundtrip.py
 ```
 
 已有 Benchmark JSON 可以使用以下命令比较：
 
 ```bash
-python3 vllm/v1/kv_offload/tiering/my_tests/summarize_benchmark.py \
+python3 examples/features/kv_cache_tiering/summarize_benchmark.py \
   /tmp/baseline-256m-round2.json \
   /tmp/tiering-256m-round2.json
 ```
