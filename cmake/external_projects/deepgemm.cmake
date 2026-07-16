@@ -40,7 +40,6 @@ else()
   set(_deepgemm_bin "${_deepgemm_fc_root}/deepgemm-build")
   set(_deepgemm_sub "${_deepgemm_fc_root}/deepgemm-subbuild")
 
-  # Require the TORCH_LIBRARY shim layout; stale pybind-only checkouts re-fetch.
   if(EXISTS "${_deepgemm_src}/deep_gemm/_C.py")
     set(deepgemm_SOURCE_DIR "${_deepgemm_src}")
     set(deepgemm_BINARY_DIR "${_deepgemm_bin}")
@@ -115,7 +114,7 @@ if(DEEPGEMM_ARCHS)
     OUTPUT "${_dg_marker}"
     COMMAND "${Python_EXECUTABLE}"
             "${CMAKE_SOURCE_DIR}/tools/build_deepgemm_C.py"
-            "${deepgemm_SOURCE_DIR}" "${_dg_dir}" "${Python_EXECUTABLE}"
+            "${deepgemm_SOURCE_DIR}" "${_dg_dir}"
     COMMAND "${CMAKE_COMMAND}" -E touch "${_dg_marker}"
     DEPENDS "${CMAKE_SOURCE_DIR}/tools/build_deepgemm_C.py"
             "${deepgemm_SOURCE_DIR}/csrc/python_api.cpp"
