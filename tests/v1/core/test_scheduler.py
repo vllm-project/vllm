@@ -477,7 +477,7 @@ class _FakeKVCacheManager:
         return _FakeKVBlocks()
 
     def get_computed_blocks(self, request: Request):
-        return self.empty_kv_cache_blocks, 0
+        return self.empty_kv_cache_blocks, 0, 0
 
     def get_blocks(self, request_id: str) -> _FakeKVBlocks:
         return _FakeKVBlocks()

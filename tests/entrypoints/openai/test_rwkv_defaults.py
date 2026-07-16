@@ -58,16 +58,3 @@ def test_rwkv_defaults_do_not_apply_to_other_models() -> None:
     apply_rwkv_default_sampling_params(default_sampling_params, model_config)
 
     assert default_sampling_params == {}
-
-
-def test_rwkv_chat_defaults_do_not_override_explicit_empty_stops() -> None:
-    default_sampling_params: dict[str, Any] = {}
-    apply_rwkv_default_sampling_params(default_sampling_params, _ModelConfig())
-
-    sampling_params = _chat_request(
-        stop=[],
-        stop_token_ids=[],
-    ).to_sampling_params(128, default_sampling_params)
-
-    assert sampling_params.stop == []
-    assert sampling_params.stop_token_ids == []

@@ -84,7 +84,14 @@ RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
 TokenizerMode = Literal[
-    "auto", "hf", "slow", "mistral", "deepseek_v32", "deepseek_v4", "inkling"
+    "auto",
+    "hf",
+    "slow",
+    "mistral",
+    "deepseek_v32",
+    "deepseek_v4",
+    "inkling",
+    "rwkv",
 ]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
