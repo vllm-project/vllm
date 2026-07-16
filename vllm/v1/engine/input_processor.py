@@ -168,24 +168,14 @@ class InputProcessor:
         mm_hash: str,
         lora_request: LoRARequest | None,
     ) -> str:
-        """
-        When enable_tower_connector_lora is True, multi-modal embeddings
-        vary depending on the LoRA request. Therefore, the mm_hash must be
-        generated based on the LoRA request to prevent incorrect cache hits.
+        """Fold the active LoRA into the mm encoder-cache identifier.
 
-        The identifier folds in a fingerprint of ``lora_path`` rather than
-        keying on ``lora_name`` alone: a same-name in-place reload keeps the
-        ``lora_name`` (and reuses the ``lora_int_id``) while swapping the
-        adapter weights at a new ``lora_path``. Keying on the name only would
-        reuse the previous adapter's encoder embeddings on a cache hit and
-        skip recomputing the vision encoder/projector. See issue #44939.
-
-        Note: the fingerprint is over the ``lora_path`` string, so
-        re-uploading different adapter weights to the *same* ``lora_path``
-        under the same ``lora_name`` is not covered (the fingerprint is
-        unchanged and the stale encoder cache is reused). Catching that would
-        require content- or mtime-based keying, which costs more per request;
-        path-keying is the chosen tradeoff.
+        With ``enable_tower_connector_lora`` the encoder embeddings depend on
+        the LoRA, so the identifier keys on a fingerprint of ``lora_path`` (not
+        ``lora_name``): a same-name in-place reload keeps the name and reuses
+        ``lora_int_id`` while pointing at a new path, so name-only keying would
+        serve the previous adapter's cached embeddings. Re-uploads to the same
+        path are not distinguished. See issue #44939.
         """
         if (
             lora_request is None
