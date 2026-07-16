@@ -465,7 +465,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
 
         except Exception:
             if added_request_ids:
-                self.llm_engine.abort_request(list(added_request_ids), internal=True)
+                self.llm_engine.abort_request(list(added_request_ids))
             raise
 
         finally:

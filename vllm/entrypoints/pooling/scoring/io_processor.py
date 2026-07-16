@@ -547,12 +547,13 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             else None,
         )
 
+        tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
+
         if token_type_ids := engine_prompt.pop("token_type_ids", None):
             params = params.clone()
             compressed = compress_token_type_ids(token_type_ids)
             params.extra_kwargs = {"compressed_token_type_ids": compressed}
 
-        tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
         engine_input = self.renderer.process_for_engine(engine_prompt, arrival_time)
 
         return PoolingEngineInput(
