@@ -610,6 +610,27 @@ class FlashInferBackend(AttentionBackend):
             # The trtllm-gen kernels consume head-major block interiors; the L/B
             # nesting outside the block is immaterial to them.
             return (KVCacheLayout.LBHNC, KVCacheLayout.BLHNC)
+        # NVFP4 KV on consumer Blackwell (sm120/sm121, FA2 path): each K/V
+        # side of the cache packs [data | scale] regions carved out of the
+        # side's byte range (reshape_and_cache_nvfp4 writes the scales at
+        # side_base + num_heads * block_size * data_dim;
+        # nvfp4_split_data_scale reads them back with derived strides).
+        # That carve is only byte-coherent when each side's heads own one
+        # contiguous region per page, i.e. a head-major (HND) block interior.
+        # Under NHD the K and V head rows interleave within each token and
+        # the side-region offsets land inside the other side's data ->
+        # silent KV corruption. This hook has no dtype parameter, so read
+        # the ambient vllm config (same pattern as
+        # get_kv_connector_cache_layout); if the hook grows a dtype-aware
+        # signature, this decision moves into it.
+        if capability is not None and capability.major == 12:
+            vllm_config = get_current_vllm_config_or_none()
+            if (
+                vllm_config is not None
+                and vllm_config.cache_config is not None
+                and vllm_config.cache_config.cache_dtype.startswith("nvfp4")
+            ):
+                return (KVCacheLayout.LBHNC, KVCacheLayout.BLHNC)
         return super().supported_kv_cache_layouts()
 
     forward_includes_kv_cache_update: bool = False
@@ -907,6 +928,24 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.use_fa2_nvfp4_kv = False
             assert self.kv_cache_spec.dtype == self.model_config.dtype
             self.kv_cache_dtype = self.kv_cache_spec.dtype
+
+        if self.is_kvcache_nvfp4 and not (
+            self.kv_cache_layout.is_block_compact
+            and self.kv_cache_layout.is_block_contiguous
+        ):
+            # The NVFP4 per-side [data | scale] carve (reshape_and_cache_nvfp4
+            # writes scales at side_base + num_heads * block_size * data_dim;
+            # nvfp4_split_data_scale reads them back with derived strides) is
+            # only byte-coherent when each page's [H, N, C] bytes form one
+            # contiguous head-major run. Test the resolved layout itself, not
+            # its FlashInfer nickname: BHLNC also reports "HND" but is neither
+            # block-compact nor block-contiguous, and would silently corrupt
+            # the cache. See FlashInferBackend.supported_kv_cache_layouts.
+            raise ValueError(
+                "NVFP4 KV cache requires a block-compact, head-major KV cache "
+                f"layout; resolved layout is {self.kv_cache_layout.name!r}. "
+                "Unset VLLM_KV_CACHE_LAYOUT or set it to 'HND' (LBHNC)."
+            )
 
         # Compute per-phase Q dtype.  On SM90 (XQA decode), the prefill and
         # decode phases require different Q dtypes when the KV cache is FP8
