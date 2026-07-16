@@ -565,12 +565,18 @@ class RocmAttentionImpl(AttentionImpl):
                 True,  # flash_layout
             )
         else:
-            # Non-FP8: keep existing AITER path (split_kv_cache → non-flash layout)
+            # Fallback: non-FP8 AITER path (split_kv_cache → non-flash
+            # layout), or FP8 with the fused kernel disabled via
+            # VLLM_DISABLE_FUSED_ROPE_FP8_KV — the cache must still be
+            # FP8-viewed and quantized on write in that case.
             key_cache, value_cache = PagedAttention.split_kv_cache(
                 kv_cache,
                 layer.num_kv_heads,  # type: ignore[attr-defined]
                 layer.head_size,  # type: ignore[attr-defined]
             )
+            if is_fp8_kv_cache:
+                key_cache = key_cache.view(self.fp8_dtype)
+                value_cache = value_cache.view(self.fp8_dtype)
             rocm_aiter_ops.triton_rope_and_cache(
                 query,
                 key,
@@ -584,6 +590,6 @@ class RocmAttentionImpl(AttentionImpl):
                 layer._k_scale,
                 layer._v_scale,
                 False,  # flash_layout
-                False,  # is_fp8_kv_cache
+                is_fp8_kv_cache,
             )
 

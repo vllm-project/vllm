@@ -882,7 +882,12 @@ class TritonAttentionImpl(AttentionImpl):
                 True,  # flash_layout
             )
         else:
-            # Non-FP8: keep existing AITER path
+            # Fallback: non-FP8 AITER path, or FP8 with the fused kernel
+            # disabled via VLLM_DISABLE_FUSED_ROPE_FP8_KV — the cache must
+            # still be FP8-viewed and quantized on write in that case.
+            if is_fp8_kv_cache:
+                key_cache = key_cache.view(self.fp8_dtype)
+                value_cache = value_cache.view(self.fp8_dtype)
             rocm_aiter_ops.triton_rope_and_cache(
                 query,
                 key,
@@ -895,7 +900,7 @@ class TritonAttentionImpl(AttentionImpl):
                 layer_slot_mapping,
                 layer._k_scale,
                 layer._v_scale,
-                True,   # flash_layout
-                False,  # is_fp8_kv_cache
+                True,  # flash_layout
+                is_fp8_kv_cache,
             )
 
