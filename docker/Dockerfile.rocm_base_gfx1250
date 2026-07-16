@@ -15,7 +15,7 @@ ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="v1.1.0"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
 ARG TRITON_KERNEL_BRANCH="padroute"
-ARG TRITON_KERNEL_REP="https://github.com/jpvillam-amd/triton.git"
+ARG TRITON_KERNEL_REPO="https://github.com/jpvillam-amd/triton.git"
 
 # Sccache configuration (only used in release pipeline)
 ARG USE_SCCACHE
@@ -168,7 +168,7 @@ EOF
 
 # Clone custom triton_kernels for install later
 RUN mkdir -p /app/; \
-    git clone ${TRITON_KERNEL_BRANCH} \
+    git clone ${TRITON_KERNEL_REPO} \
     && cd triton \
     && git checkout ${TRITON_KERNEL_BRANCH} \
     && git submodule update --init --recursive
