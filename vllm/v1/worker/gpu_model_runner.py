@@ -490,6 +490,12 @@ class GPUModelRunner(
         # Set to True after init_routed_experts_capturer() completes.
         # Prevents routed experts code from running during profiling/dummy run.
         self.routed_experts_initialized = False
+        # HiPrune: pruned soft-token indices per encoded mm item, keyed by
+        # mm_hash (persistent so encoder/prefix cache hits can still report
+        # them; entries are deterministic for a given image + ratio).
+        self.hiprune_indices_cache: dict[str, list[int]] = {}
+        # Requests whose pruned indices were already attached to an output.
+        self._hiprune_reported_reqs: set[str] = set()
         self.max_model_len = model_config.max_model_len
 
         # Always set to false after the first forward pass
@@ -1175,6 +1181,7 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
+            self._hiprune_reported_reqs.discard(req_id)
         self.late_interaction_runner.on_requests_finished(
             scheduler_output.finished_req_ids
         )
@@ -3077,6 +3084,9 @@ class GPUModelRunner(
                 )
 
         encoder_outputs: list[torch.Tensor] = []
+        # HiPrune: pruned soft-token indices per encoded item (aligned
+        # with encoder_outputs / mm_hashes); None for unpruned items.
+        pruned_indices_per_item: list[list[int] | None] = []
         # Track the current index in mm_kwargs/mm_lora_refs to map groups to request IDs
         current_item_idx = 0
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
@@ -3154,15 +3164,60 @@ class GPUModelRunner(
             sanity_check_mm_encoder_outputs(batch_outputs, expected_num_items=num_items)
             encoder_outputs.extend(batch_outputs)
 
+            # HiPrune: the model records pruned indices for the items of
+            # its most recent embed_multimodal call. The length guard
+            # skips paths that bypassed embed_multimodal (cudagraph
+            # replay) where the attribute would be stale.
+            item_pruned = getattr(model, "hiprune_pruned_indices_per_item", None)
+            if item_pruned is not None and len(item_pruned) == num_items:
+                pruned_indices_per_item.extend(item_pruned)
+            else:
+                pruned_indices_per_item.extend([None] * num_items)
+
             current_item_idx += num_items
 
         # Cache the encoder outputs by mm_hash
-        for mm_hash, output in zip(mm_hashes, encoder_outputs):
+        for mm_hash, output, item_indices in zip(
+            mm_hashes, encoder_outputs, pruned_indices_per_item
+        ):
             self.encoder_cache[mm_hash] = output
+            if item_indices is not None:
+                self.hiprune_indices_cache[mm_hash] = item_indices
             logger.debug("Finish execute for mm hash %s", mm_hash)
             self.maybe_save_ec_to_connector(self.encoder_cache, mm_hash)
 
         return encoder_outputs
+
+    def _collect_hiprune_pruned_indices(
+        self, req_ids: list[str]
+    ) -> dict[str, list[list[int] | None]] | None:
+        """Report HiPrune pruned soft-token indices per request, once.
+
+        For each not-yet-reported request in this step's output that has
+        image features with cached pruned indices, returns a mapping of
+        req_id -> per-image index lists (None for unpruned images). The
+        lookup is by mm_hash, so requests served from the encoder or
+        prefix cache still report as long as the item was pruned-encoded
+        by this runner at some point.
+        """
+        if not self.hiprune_indices_cache:
+            return None
+        report: dict[str, list[list[int] | None]] = {}
+        for req_id in req_ids:
+            if req_id in self._hiprune_reported_reqs:
+                continue
+            req_state = self.requests.get(req_id)
+            if req_state is None or not req_state.mm_features:
+                continue
+            per_image = [
+                self.hiprune_indices_cache.get(f.identifier)
+                for f in req_state.mm_features
+                if f.modality == "image"
+            ]
+            if any(x is not None for x in per_image):
+                report[req_id] = per_image
+                self._hiprune_reported_reqs.add(req_id)
+        return report or None
 
     def _gather_mm_embeddings(
         self,
@@ -4709,6 +4764,9 @@ class GPUModelRunner(
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
                 routed_experts=None,
+                pruned_token_indices=self._collect_hiprune_pruned_indices(
+                    req_ids_output_copy
+                ),
             )
 
         if not self.use_async_scheduling:

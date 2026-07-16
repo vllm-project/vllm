@@ -280,6 +280,11 @@ class ModelRunnerOutput:
     # ``None`` when ``enable_return_routed_experts`` is off.
     routed_experts: RoutedExpertsLists | None = None
 
+    # HiPrune: req_id -> per-image lists of pruned soft-token indices
+    # (None entries for images that were not pruned). Populated at most
+    # once per request, on the first step after its images are encoded.
+    pruned_token_indices: dict[str, list[list[int] | None]] | None = None
+
     @staticmethod
     def with_kv_conn_output_only(
         kv_connector_output: KVConnectorOutput | None,

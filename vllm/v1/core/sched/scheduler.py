@@ -1812,6 +1812,13 @@ class Scheduler(SchedulerInterface):
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
 
+            # HiPrune: stash pruned indices on the request until an
+            # EngineCoreOutput is actually emitted for it (the report may
+            # arrive during chunked prefill, before any token is sampled).
+            runner_pruned = model_runner_output.pruned_token_indices
+            if runner_pruned is not None and req_id in runner_pruned:
+                request.pruned_token_indices = runner_pruned[req_id]
+
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if (
@@ -1821,6 +1828,10 @@ class Scheduler(SchedulerInterface):
                 or ec_transfer_params
                 or stopped
             ):
+                # Emit pruned indices once, on the first output.
+                pruned_token_indices = request.pruned_token_indices
+                request.pruned_token_indices = None
+
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
@@ -1838,6 +1849,7 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        pruned_token_indices=pruned_token_indices,
                     )
                 )
             else:

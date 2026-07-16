@@ -138,6 +138,11 @@ class ChatCompletionResponse(OpenAIBaseModel):
         default=None, description="ECTransfer parameters."
     )
     metrics: PerRequestTimingMetrics | None = None
+    # HiPrune (requested via ``token_pruning``): per input image, the
+    # soft-token indices that were pruned before reaching the language
+    # model (``None`` entries for images that were not pruned). ``None``
+    # overall when no pruning happened for this request.
+    pruned_token_indices: list[list[int] | None] | None = None
 
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
@@ -358,6 +363,19 @@ class ChatCompletionRequest(OpenAIBaseModel):
     mm_processor_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
+    )
+    token_pruning: float | None = Field(
+        default=None,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "HiPrune visual token pruning: fraction of image tokens to "
+            "KEEP (e.g. 0.14 keeps 14% and prunes the rest). Shorthand "
+            "for mm_processor_kwargs={'hiprune_ratio': ...}. Only "
+            "supported by models with HiPrune integration (Gemma 4). "
+            "The indices of the pruned soft tokens are returned in the "
+            "'pruned_token_indices' response field."
+        ),
     )
     structured_outputs: StructuredOutputsParams | None = Field(
         default=None,
@@ -949,6 +967,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 "`add_generation_prompt` to True.",
             )
         return data
+
+    @model_validator(mode="after")
+    def merge_token_pruning_into_mm_kwargs(self):
+        """Map the top-level token_pruning field onto the HiPrune
+        mm-processor kwarg so it reaches the multimodal processor (and
+        thus the mm/prefix-cache hash) through the standard path."""
+        if self.token_pruning is not None:
+            self.mm_processor_kwargs = {
+                **(self.mm_processor_kwargs or {}),
+                "hiprune_ratio": self.token_pruning,
+            }
+        return self
 
     @model_validator(mode="before")
     @classmethod
