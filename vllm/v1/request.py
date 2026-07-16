@@ -194,11 +194,9 @@ class Request:
         # The number of times this request has been preempted by the scheduler.
         self.num_preemptions = 0
 
-        # Whether the GPU prefix-cache lookup stat has already been recorded for
-        # this request. Guards against double-counting when a KVConnector defers
-        # the request (get_num_new_matched_tokens -> None), which re-queues it
-        # with num_computed_tokens == 0 and would otherwise re-record the stat on
-        # each scheduler retry.
+        # Whether this request's prefix-cache query stat has been recorded.
+        # Prevents re-counting when a KVConnector defers the request. Reset on
+        # preemption so each recomputation is counted once.
         self.prefix_cache_stats_recorded = False
 
         self.prefill_stats: PrefillStats | None = PrefillStats()

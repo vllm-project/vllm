@@ -2001,6 +2001,54 @@ def test_prefix_cache_stats_disabled():
     assert manager.prefix_cache_stats is None
 
 
+def test_prefix_cache_stats_recorded_once_across_retries():
+    """A deferred request re-runs get_computed_blocks on every waiting-loop visit
+    while a KVConnector defers it. The prefix-cache stat must be recorded once,
+    not once per retry. Preemption resets the flag so the recomputation is counted
+    again as a preempted query."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, 11),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        log_stats=True,
+    )
+    # Warm the cache with a 3-block prefix, then reset stats to isolate req1.
+    common_token_ids = [i for i in range(3) for _ in range(block_size)]
+    req0 = make_request("0", common_token_ids + [3] * 7, block_size, sha256)
+    computed, _, _ = manager.get_computed_blocks(req0)
+    manager.allocate_slots(req0, 55, len(computed.blocks[0]) * block_size, computed)
+    manager.make_prefix_cache_stats()
+    stats = manager.prefix_cache_stats
+    assert stats is not None
+
+    # A second request reuses the whole cached prefix.
+    req1 = make_request("1", common_token_ids + [3] * 5, block_size, sha256)
+
+    # First lookup records one query with the local hit.
+    _, num_hits, _ = manager.get_computed_blocks(req1)
+    assert num_hits == 3 * block_size
+    assert req1.prefix_cache_stats_recorded
+    assert (stats.requests, stats.queries, stats.hits) == (1, req1.num_tokens, num_hits)
+
+    # Deferral retry: same request, still num_computed_tokens == 0. No re-count.
+    manager.get_computed_blocks(req1)
+    assert (stats.requests, stats.queries, stats.hits) == (1, req1.num_tokens, num_hits)
+
+    # Preemption (Scheduler._preempt_request) resets the flag and bumps
+    # num_preemptions, so the recomputation is counted as a preempted query.
+    req1.num_preemptions += 1
+    req1.prefix_cache_stats_recorded = False
+    manager.get_computed_blocks(req1)
+    assert (stats.requests, stats.queries, stats.hits) == (1, req1.num_tokens, num_hits)
+    assert (
+        stats.preempted_requests,
+        stats.preempted_queries,
+        stats.preempted_hits,
+    ) == (1, req1.num_tokens, num_hits)
+
+
 def test_maybe_evict_cached_block():
     pool = BlockPool(num_gpu_blocks=4, enable_caching=True, hash_block_size=16)
     block_hash0 = make_block_hash_with_group_id(BlockHash(b"10"), 1000)

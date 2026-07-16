@@ -204,6 +204,21 @@ class KVCacheManager:
         self.prefix_cache_stats = PrefixCacheStats()
         return stats
 
+    def record_prefix_cache_query(self, request: Request, num_hits: int) -> None:
+        # Record the prefix-cache query at most once per request. The scheduler
+        # re-runs the lookup on every waiting-loop visit while a KVConnector
+        # defers the request. Preemption resets the flag so each recomputation is
+        # counted once.
+        if not self.log_stats or request.prefix_cache_stats_recorded:
+            return
+        assert self.prefix_cache_stats is not None
+        request.prefix_cache_stats_recorded = True
+        self.prefix_cache_stats.record(
+            num_tokens=request.num_tokens,
+            num_hits=num_hits,
+            preempted=request.num_preemptions > 0,
+        )
+
     def get_computed_blocks(self, request: Request) -> tuple[KVCacheBlocks, int, int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
@@ -269,17 +284,7 @@ class KVCacheManager:
             num_new_computed_tokens + num_uncached if num_uncached else 0
         )
 
-        # Record at most once per request: the scheduler re-runs this lookup on
-        # every waiting-loop visit while a KVConnector defers the request, but the
-        # prefix-cache query/hit stat must be counted once, not once per retry.
-        if self.log_stats and not request.prefix_cache_stats_recorded:
-            assert self.prefix_cache_stats is not None
-            request.prefix_cache_stats_recorded = True
-            self.prefix_cache_stats.record(
-                num_tokens=request.num_tokens,
-                num_hits=num_new_computed_tokens,
-                preempted=request.num_preemptions > 0,
-            )
+        self.record_prefix_cache_query(request, num_new_computed_tokens)
 
         blocks = self.create_kv_cache_blocks(computed_blocks)
         return blocks, num_new_computed_tokens, shared_prefix_boundary

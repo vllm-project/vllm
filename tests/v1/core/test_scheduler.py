@@ -1068,6 +1068,24 @@ def test_preempt_during_execution():
     assert requests[1].output_token_ids[0] == 42
 
 
+def test_preemption_reenables_prefix_cache_stat_recording():
+    """_preempt_request clears prefix_cache_stats_recorded so the prefix-cache
+    recomputation after preemption is counted again."""
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    request = create_requests(num_requests=1)[0]
+    scheduler.add_request(request)
+
+    # First schedule records the prefix-cache query and sets the flag.
+    scheduler.schedule()
+    assert request.status == RequestStatus.RUNNING
+    assert request.prefix_cache_stats_recorded
+
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, 0.0)
+    assert request.status == RequestStatus.PREEMPTED
+    assert not request.prefix_cache_stats_recorded
+
+
 def test_scheduler_reset_prefix_cache():
     scheduler = create_scheduler(enable_prefix_caching=True)
     requests = create_requests(num_requests=10)
