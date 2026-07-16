@@ -743,7 +743,7 @@ PREFILL_BATCH_SPECS = {
     "short_dense_mha": BatchSpec(seq_lens=[64, 128], query_lens=[64, 128]),
     "short_context_dense_mha": BatchSpec(seq_lens=[128, 160], query_lens=[64, 32]),
     "masked_mha": BatchSpec(seq_lens=[256], query_lens=[256]),
-    "masked_mha_chunked_context": BatchSpec(seq_lens=[448], query_lens=[256]),
+    "masked_mha_chunked_context": BatchSpec(seq_lens=[448, 384], query_lens=[256, 256]),
 }
 
 
@@ -943,9 +943,11 @@ def test_sparse_backend_prefill_correctness(
     builder_cls = backend_cls.get_builder_cls()
     builder = builder_cls(kv_cache_spec, ["placeholder"], vllm_config, device)
     if batch_name == "masked_mha_chunked_context":
-        builder.chunked_prefill_workspace_size = block_size
+        builder.chunked_prefill_workspace_size = block_size * batch_spec.batch_size
         builder.chunked_prefill_workspace = torch.empty(
-            (block_size, head_size), dtype=dtype, device=device
+            (builder.chunked_prefill_workspace_size, head_size),
+            dtype=dtype,
+            device=device,
         )
     # Drive the queries through the dense-MHA prefill path directly (the routing
     # threshold would otherwise classify these short queries as MQA decodes).

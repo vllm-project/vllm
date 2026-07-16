@@ -1303,6 +1303,7 @@ class MLACommonPrefillMetadata:
         seq_tot: list[int]
         max_seq_lens: list[int]
         seq_lens: torch.Tensor
+        context_lens: torch.Tensor
         workspace: torch.Tensor
         token_to_seq: torch.Tensor
         chunk_total_token: list[int]
@@ -1591,6 +1592,7 @@ def build_mla_chunked_context_metadata(
             seq_tot=padded_local_chunk_seq_lens.sum(dim=1).tolist(),
             max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
             seq_lens=chunk_seq_lens,
+            context_lens=context_lens_cpu.to(device, non_blocking=True),
             token_to_seq=token_to_seq_cpu.to(device, non_blocking=True),
             chunk_total_token=chunk_total_token.tolist(),
             workspace=chunked_prefill_workspace,
@@ -1613,6 +1615,7 @@ def build_mla_chunked_context_metadata(
             seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
             max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
             seq_lens=chunk_seq_lens,
+            context_lens=context_lens_cpu.to(device, non_blocking=True),
             token_to_seq=token_to_seq_cpu.to(device, non_blocking=True),
             chunk_total_token=chunk_total_token,
             workspace=chunked_prefill_workspace,
