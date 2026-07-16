@@ -20,6 +20,10 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
 from vllm.utils.flashinfer import (
     flashinfer_scaled_fp4_mm,
 )
+from vllm.model_executor.kernels.linear import (
+    _LINEAR_BACKEND_KERNEL_MAP,
+    NvFp4LinearKernel,
+)
 
 __all__ = ["is_qutlass_fp4_scheme", "QutlassNvFP4LinearMethod"]
 
@@ -70,6 +74,25 @@ class QutlassNvFP4LinearMethod(CompressedTensorsLinearTransformMethod):
 
         return ret
 
+    @staticmethod
+    def _get_flashinfer_gemm_backend(kernel: NvFp4LinearKernel) -> str:
+        """
+        Given a kernel, find the string that is needed to be passed into
+        `flashinfer_scaled_fp4_mm`, using
+        vllm.model_executor.kernels.linear._LINEAR_BACKEND_KERNEL_MAP as source of truth
+        """
+        kernel_type = type(kernel)
+        for key, kernels in _LINEAR_BACKEND_KERNEL_MAP.items():
+            if not key.startswith("flashinfer_") or kernel_type not in kernels:
+                continue
+            backend = key.removeprefix("flashinfer_")
+            # flashinfer GEMM backend uses "cute-dsl", not "cutedsl"
+            return backend.replace("cutedsl", "cute-dsl")
+        raise ValueError(
+            f"QutlassNvFP4 transform requires a FlashInfer kernel, "
+            f"got {kernel_type.__name__}"
+        )
+
     def process_weights_after_loading(self, layer):
         super().process_weights_after_loading(layer)
 
@@ -91,6 +114,10 @@ class QutlassNvFP4LinearMethod(CompressedTensorsLinearTransformMethod):
                 device=layer.weight_global_scale.device,
             ),
             requires_grad=False,
+        )
+
+        layer.flashinfer_gemm_backend = self._get_flashinfer_gemm_backend(
+            layer.scheme.kernel
         )
 
     def apply(
@@ -118,7 +145,7 @@ class QutlassNvFP4LinearMethod(CompressedTensorsLinearTransformMethod):
             layer.weight_scale,
             layer.fused_alpha,
             x.dtype,
-            backend="cutlass",
+            backend=layer.flashinfer_gemm_backend,
         )
 
         out = slice_nvfp4_output(out, output_size)
