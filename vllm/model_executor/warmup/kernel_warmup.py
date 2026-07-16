@@ -6,8 +6,7 @@ This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
 
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -230,13 +229,18 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     Without autotuning, FlashInfer will rely on heuristics, which may
     be significantly slower.
 
-    Tuning is performed only on rank 0. The resulting cache is broadcast
-    to every rank so all ranks dispatch the same kernel tactic.
+    Every rank profiles the same tactics. When distributed, per-tactic
+    timings are averaged over the world CPU group so all ranks select the
+    same tactic.
     """
+    from flashinfer.autotuner import AutoTuner, set_autotune_process_group
+
     import vllm.utils.flashinfer as fi_utils
     from vllm.distributed.parallel_state import get_world_group
 
     world = get_world_group()
+    is_leader = world.rank_in_group == 0
+    tuner = AutoTuner.get()
 
     autotune_kwargs: dict = {}
     skip_ops = _flashinfer_autotune_skip_ops(runner)
@@ -246,16 +250,6 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
             tuple(sorted(skip_ops)),
         )
         autotune_kwargs["skip_ops"] = skip_ops
-
-    synchronized_autotune: Callable[[Any], None] | None = None
-    tuner: Any = None
-    if world.world_size > 1:
-        from flashinfer.autotuner import AutoTuner, set_autotune_process_group
-
-        synchronized_autotune = set_autotune_process_group
-        tuner = AutoTuner.get()
-
-    is_leader = world.rank_in_group == 0
 
     cache_path = resolve_flashinfer_autotune_file(runner)
     if is_leader:
@@ -271,68 +265,31 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         is_profile=True,
     )
 
-    cache_valid = True
-    if synchronized_autotune is not None:
-        cached_results: bytes | None = None
-        if is_leader and cache_path.exists():
-            with open(cache_path, "rb") as f:
-                cached_results = f.read()
-
-        cached_results = world.broadcast_object(cached_results, src=0)
-        if cached_results is not None:
-            write_flashinfer_autotune_cache(cache_path, cached_results)
-            world.barrier()
-            assert tuner is not None
-            cache_valid = tuner.load_configs(str(cache_path))
-
-        synchronized_autotune(world.cpu_group)
-        try:
-            with (
-                torch.inference_mode(),
-                fi_utils.autotune(tune_mode=True, **autotune_kwargs),
-            ):
-                runner._dummy_run(**dummy_run_kwargs)
-        finally:
-            synchronized_autotune(None)
-        world.barrier()
-
-        if is_leader and cache_valid:
-            assert tuner is not None
-            tuner.save_configs(str(cache_path))
-    else:
-        with torch.inference_mode():
-            if is_leader:
-                with fi_utils.autotune(
-                    tune_mode=True, cache=str(cache_path), **autotune_kwargs
-                ):
-                    runner._dummy_run(**dummy_run_kwargs)
-            else:
-                runner._dummy_run(**dummy_run_kwargs)
-
-    # Broadcast autotune cache from rank 0 to all other ranks so every
-    # rank loads the same set of chosen tactics.
-    tune_results: bytes | None = None
-    if is_leader and cache_valid and cache_path.exists():
+    # Read the cached autotune results and broadcast them to all ranks.
+    cached_results: bytes | None = None
+    if is_leader and cache_path.exists():
         with open(cache_path, "rb") as f:
-            tune_results = f.read()
-
-    tune_results = world.broadcast_object(tune_results, src=0)
-
-    if tune_results is None:
-        logger.warning_once(
-            "No FlashInfer autotune cache entries found; "
-            "falling back to default tactics."
-        )
-    else:
-        write_flashinfer_autotune_cache(cache_path, tune_results)
+            cached_results = f.read()
+    cached_results = world.broadcast_object(cached_results, src=0)
+    if cached_results is not None:
+        write_flashinfer_autotune_cache(cache_path, cached_results)
         world.barrier()
-        if tuner is None:
-            from flashinfer.autotuner import AutoTuner
-
-            tuner = AutoTuner.get()
         tuner.load_configs(str(cache_path))
-        logger.info_once(
-            "FlashInfer autotune cache loaded on rank %d from %s.",
-            world.rank_in_group,
-            cache_path,
-        )
+
+    # A CPU process group averages per-tactic timings across ranks; None
+    # (single rank) is a no-op, keeping one code path for both cases.
+    group = world.cpu_group if world.world_size > 1 else None
+    set_autotune_process_group(group)
+    try:
+        with (
+            torch.inference_mode(),
+            fi_utils.autotune(tune_mode=True, **autotune_kwargs),
+        ):
+            runner._dummy_run(**dummy_run_kwargs)
+    finally:
+        set_autotune_process_group(None)
+
+    if world.world_size > 1:
+        world.barrier()
+    if is_leader:
+        tuner.save_configs(str(cache_path))
