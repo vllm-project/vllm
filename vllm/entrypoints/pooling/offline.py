@@ -25,9 +25,9 @@ from .factories import init_pooling_io_processors
 from .scoring.io_processor import ScoringIOProcessor
 from .scoring.typing import ScoreInput
 from .typing import (
-    OfflineInputsContext,
-    OfflineInputsScoringContext,
+    OfflineEncodeInputsContext,
     OfflineOutputsContext,
+    OfflineScoringInputsContext,
     RequestFactory,
 )
 
@@ -101,7 +101,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         assert pooling_task is not None and pooling_task in self.pooling_io_processors
 
         io_processor = self.pooling_io_processors[pooling_task]
-        ctx = OfflineInputsContext(
+        ctx = OfflineEncodeInputsContext(
             pooling_task=pooling_task,
             prompts=prompts,
             tokenization_kwargs=tokenization_kwargs,
@@ -357,12 +357,14 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             )
             raise ValueError(msg)
 
-        ctx = OfflineInputsScoringContext(
+        ctx = OfflineScoringInputsContext(
+            pooling_task=pooling_task,
             scoring_data=scoring_data,
             pooling_params=pooling_params,
             tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
             chat_template=chat_template,
+            priorities=None,
         )
 
         request_factory, num_requests = io_processor.get_request_factory_offline(ctx)

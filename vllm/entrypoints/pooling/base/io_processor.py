@@ -149,7 +149,7 @@ class PoolingIOProcessor:
                 raise ValueError(msg)
 
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
-        seq_priority = self._priority_to_seq(None, num_requests)
+        seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
         def request_factory() -> RequestGenerator:
             for i in range(num_requests):

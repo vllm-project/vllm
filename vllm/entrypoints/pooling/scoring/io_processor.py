@@ -24,7 +24,7 @@ from ..typing import (
     ALLOfflineInputsContext,
     EncodeChatRenderParams,
     EncodeCMPLRenderParams,
-    OfflineInputsContext,
+    OfflineEncodeInputsContext,
     OfflineOutputsContext,
     OfflineScoringInputsContext,
     PoolingEngineInput,
@@ -247,7 +247,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         prompts = data_1 + data_2
 
         return super().get_request_factory_offline(
-            OfflineInputsContext(
+            OfflineEncodeInputsContext(
                 pooling_task=self.pooling_task,
                 prompts=prompts,
                 tokenization_kwargs=ctx.tokenization_kwargs,
@@ -492,7 +492,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         prompt_extras = ctx.pooling_params.extra_kwargs
 
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
-        seq_priority = self._priority_to_seq(None, num_requests)
+        seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
         def request_factory() -> RequestGenerator:
             for i in range(num_requests):
@@ -869,7 +869,7 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
 
         return PoolingIOProcessor.get_request_factory_offline(
             self,
-            OfflineInputsContext(
+            OfflineEncodeInputsContext(
                 pooling_task=self.pooling_task,
                 prompts=prompts,
                 tokenization_kwargs=ctx.tokenization_kwargs,
