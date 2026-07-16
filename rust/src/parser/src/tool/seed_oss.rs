@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use super::qwen_coder::{Qwen3CoderToolParser, QwenCoderConfig};
 use crate::tool::{Result, Tool, ToolParser, ToolParserOutput};
 
