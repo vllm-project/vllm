@@ -31,9 +31,6 @@ pub use parser::reasoning::{
 };
 pub use parser::tool::{ToolParser, ToolParserError, ToolParserFactory};
 pub use parser::unified::UnifiedParserFactory;
-pub use vllm_parser::unified::{
-    CombinedParser, UnifiedParser, UnifiedParserEvent, UnifiedParserOutput,
-};
 pub use renderer::hf::ChatTemplateContentFormatOption;
 pub use renderer::{
     ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer,
@@ -45,6 +42,9 @@ pub use request::{
 };
 pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
 pub use vllm_llm::FinishReason;
+pub use vllm_parser::unified::{
+    CombinedParser, UnifiedParser, UnifiedParserEvent, UnifiedParserOutput,
+};
 
 mod backend;
 mod error;
@@ -277,6 +277,8 @@ impl ChatLlm {
     ) -> Result<vllm_text::BeamSearchOutput> {
         request.validate()?;
 
+        let arrival_time = vllm_llm::current_unix_timestamp_secs();
+
         let rendered = self.backend.chat_renderer().render(&request)?;
 
         let (prompt, mm_features) = multimodal::finalize_rendered_prompt(
@@ -300,6 +302,7 @@ impl ChatLlm {
             data_parallel_rank: request.data_parallel_rank,
             reasoning_parser_kwargs: None,
             lora_request: request.lora_request,
+            arrival_time: Some(arrival_time),
         };
 
         self.text.beam_search(text_request).await.map_err(Error::from)

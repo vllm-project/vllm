@@ -382,7 +382,8 @@ async fn collect_beam_search_completion(
         choices,
         usage: Some(usage),
         system_fingerprint: None,
-        kv_transfer_params: None,
+        kv_transfer_params: beam_result.kv_transfer_params,
+        ec_transfer_params: beam_result.ec_transfer_params,
     }
 }
 

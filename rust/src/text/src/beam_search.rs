@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use serde_json::Value;
 use tracing::warn;
 use vllm_engine_core_client::protocol::logprobs::TokenLogprob;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
@@ -40,6 +41,10 @@ pub struct BeamSearchOutput {
     pub prompt_token_ids: Vec<u32>,
     /// Best beams after beam search, sorted by score.
     pub sequences: Vec<BeamSearchSequence>,
+    /// Connector-specific KV transfer parameters from the engine.
+    pub kv_transfer_params: Option<Value>,
+    /// Connector-specific encoder cache transfer parameters from the engine.
+    pub ec_transfer_params: Option<Value>,
 }
 
 /// Configuration for one beam search invocation.
@@ -57,6 +62,7 @@ pub(crate) struct BeamSearchParams {
     pub cache_salt: Option<String>,
     pub priority: i32,
     pub data_parallel_rank: Option<u32>,
+    pub arrival_time: Option<f64>,
 }
 
 /// One candidate extension during beam search step processing.
@@ -191,6 +197,8 @@ pub(crate) async fn run_beam_search(
         lora_request: params.lora_request.clone(),
     }];
     let mut completed: Vec<BeamSearchSequence> = vec![];
+    let mut kv_transfer_params: Option<Value> = None;
+    let mut ec_transfer_params: Option<Value> = None;
 
     let all_stop_token_ids = all_stop_ids(&params);
 
@@ -220,7 +228,7 @@ pub(crate) async fn run_beam_search(
                 // TODO: pass through seq.mm_features once BeamSearchSequence
                 // stores them (see TODO on BeamSearchSequence struct).
                 mm_features: None,
-                arrival_time: None,
+                arrival_time: params.arrival_time,
                 cache_salt: params.cache_salt.clone(),
                 trace_headers: None,
                 priority: params.priority,
@@ -241,6 +249,13 @@ pub(crate) async fn run_beam_search(
 
             if matches!(output.finish_reason, FinishReason::Error) {
                 return Err(crate::error::Error::BeamSearchEngineError);
+            }
+
+            if output.kv_transfer_params.is_some() {
+                kv_transfer_params = output.kv_transfer_params.clone();
+            }
+            if output.ec_transfer_params.is_some() {
+                ec_transfer_params = output.ec_transfer_params.clone();
             }
 
             let (step_candidates, step_completed) =
@@ -301,6 +316,8 @@ pub(crate) async fn run_beam_search(
     Ok(BeamSearchOutput {
         prompt_token_ids,
         sequences: best_sequences,
+        kv_transfer_params,
+        ec_transfer_params,
     })
 }
 
@@ -423,6 +440,7 @@ mod tests {
             cache_salt: None,
             priority: 0,
             data_parallel_rank: None,
+            arrival_time: None,
         };
         let all = all_stop_ids(&params);
         assert!(all.contains(&151643));
@@ -445,6 +463,7 @@ mod tests {
             cache_salt: None,
             priority: 0,
             data_parallel_rank: None,
+            arrival_time: None,
         };
         let all = all_stop_ids(&params);
         assert!(all.contains(&151643));
@@ -460,6 +479,8 @@ mod tests {
         let output = BeamSearchOutput {
             prompt_token_ids: vec![1, 2, 3],
             sequences: vec![make_sequence(vec![1, 2, 3, 4], -1.0, vec![])],
+            kv_transfer_params: None,
+            ec_transfer_params: None,
         };
         assert_eq!(output.prompt_token_ids, vec![1, 2, 3]);
         assert_eq!(output.sequences.len(), 1);
@@ -514,6 +535,7 @@ mod tests {
             cache_salt: None,
             priority: 0,
             data_parallel_rank: None,
+            arrival_time: None,
         };
         assert_eq!(params.beam_width.max(1).min(MAX_BEAM_WIDTH) as usize, 1);
     }
@@ -534,6 +556,7 @@ mod tests {
             cache_salt: None,
             priority: 0,
             data_parallel_rank: None,
+            arrival_time: None,
         };
         assert_eq!(
             params.beam_width.max(1).min(MAX_BEAM_WIDTH) as usize,
@@ -723,6 +746,7 @@ mod tests {
             finish_reason,
             usage: TokenUsage::default(),
             kv_transfer_params: None,
+            ec_transfer_params: None,
         }
     }
 
@@ -745,6 +769,7 @@ mod tests {
             cache_salt: None,
             priority: 0,
             data_parallel_rank: None,
+            arrival_time: None,
         }
     }
 

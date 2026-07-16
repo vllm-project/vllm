@@ -218,6 +218,7 @@ impl TextLlm {
             cache_salt: request.cache_salt,
             priority: request.priority,
             data_parallel_rank: request.data_parallel_rank,
+            arrival_time: request.arrival_time,
         };
 
         crate::beam_search::run_beam_search(&self.llm, prompt_token_ids, params).await

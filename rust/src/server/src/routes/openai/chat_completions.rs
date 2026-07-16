@@ -541,7 +541,7 @@ fn collect_beam_search_chat_completion(
             .flatten();
 
         let (raw_content, reasoning, tool_calls) = if decoded.is_empty() {
-            (None, None, None)
+            (None, None, vec![])
         } else {
             let (parsed_content, parsed_reasoning, parsed_tool_calls) = parse_beam_chat_output(
                 &decoded,
@@ -551,7 +551,7 @@ fn collect_beam_search_chat_completion(
                 tool_call_parser,
                 reasoning_parser,
             )?;
-            let tool_calls = Some(parsed_tool_calls).filter(|c| !c.is_empty());
+            let tool_calls = parsed_tool_calls;
             let reasoning = if include_reasoning {
                 parsed_reasoning
             } else {
@@ -600,7 +600,8 @@ fn collect_beam_search_chat_completion(
         system_fingerprint: None,
         prompt_logprobs: None,
         prompt_token_ids: return_token_ids.then_some(beam_result.prompt_token_ids),
-        kv_transfer_params: None,
+        kv_transfer_params: beam_result.kv_transfer_params,
+        ec_transfer_params: beam_result.ec_transfer_params,
     })
 }
 
