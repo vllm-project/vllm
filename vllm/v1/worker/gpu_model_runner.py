@@ -248,6 +248,9 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
+# Max entries in the persistent HiPrune pruned-indices cache (FIFO).
+_HIPRUNE_INDICES_CACHE_CAP = 4096
+
 
 # Wrapper for ModelRunnerOutput to support overlapped execution.
 class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
@@ -3094,6 +3097,12 @@ class GPUModelRunner(
         ):
             batch_outputs: MultiModalEmbeddings
 
+            # HiPrune: clear stale per-item indices so paths that bypass
+            # embed_multimodal (e.g. cudagraph replay) cannot leak the
+            # previous call's indices into this group.
+            if hasattr(model, "hiprune_pruned_indices_per_item"):
+                model.hiprune_pruned_indices_per_item = []
+
             # EVS and dynamic res video related change.
             # (ekhvedchenia): Temporary hack to limit peak memory usage when
             # processing multimodal data. This solves the issue with scheduler
@@ -3182,6 +3191,12 @@ class GPUModelRunner(
         ):
             self.encoder_cache[mm_hash] = output
             if item_indices is not None:
+                # Bounded FIFO: evict the oldest entry so the persistent
+                # indices cache cannot grow without limit.
+                while len(self.hiprune_indices_cache) >= _HIPRUNE_INDICES_CACHE_CAP:
+                    self.hiprune_indices_cache.pop(
+                        next(iter(self.hiprune_indices_cache))
+                    )
                 self.hiprune_indices_cache[mm_hash] = item_indices
             logger.debug("Finish execute for mm hash %s", mm_hash)
             self.maybe_save_ec_to_connector(self.encoder_cache, mm_hash)
@@ -3209,13 +3224,23 @@ class GPUModelRunner(
             req_state = self.requests.get(req_id)
             if req_state is None or not req_state.mm_features:
                 continue
-            per_image = [
-                self.hiprune_indices_cache.get(f.identifier)
-                for f in req_state.mm_features
-                if f.modality == "image"
+            image_features = [f for f in req_state.mm_features if f.modality == "image"]
+            # Only images whose kwargs carry a hiprune_ratio are expected
+            # to produce indices. With chunked prefill the images of one
+            # request may be encoded across several steps, so wait until
+            # every expected image has a cache entry before reporting
+            # (the report is sent only once per request).
+            expected = [
+                f.identifier
+                for f in image_features
+                if f.data is not None and "hiprune_ratio" in f.data
             ]
-            if any(x is not None for x in per_image):
-                report[req_id] = per_image
+            if not expected:
+                continue
+            if all(h in self.hiprune_indices_cache for h in expected):
+                report[req_id] = [
+                    self.hiprune_indices_cache.get(f.identifier) for f in image_features
+                ]
                 self._hiprune_reported_reqs.add(req_id)
         return report or None
 

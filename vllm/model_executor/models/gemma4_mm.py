@@ -169,7 +169,13 @@ def _get_hiprune_ratio(merged_kwargs: Mapping[str, object]) -> float | None:
             f"hiprune_ratio must be in (0, 1], got {ratio}. It is the "
             "fraction of image tokens to KEEP."
         )
-    return None if ratio == 1.0 else ratio
+    if ratio == 1.0:
+        return None
+    # Quantize to float32: the ratio travels to the model in a float32
+    # tensor, and compute_retained_tokens_count rounds, so the processor
+    # must use the exact same bits or the placeholder count can differ
+    # from the model's kept-token count near half-integer boundaries.
+    return float(torch.tensor(ratio, dtype=torch.float32).item())
 
 
 # ---------------------------------------------------------------------------
@@ -1477,8 +1483,21 @@ class Gemma4ForConditionalGeneration(
                 ),
             )
 
-            for chunk_idx in range(0, len(items), max_batch_size):
-                chunk_items = items[chunk_idx : chunk_idx + max_batch_size]
+            chunk_idx = 0
+            while chunk_idx < len(items):
+                # Eager attention capture materializes full
+                # (heads, patches, patches) attention matrices, which
+                # _encoder_chunk's SDPA-based cost model does not account
+                # for — so pruned images are encoded one at a time.
+                if ratios[items[chunk_idx][0]] is not None:
+                    chunk_items = [items[chunk_idx]]
+                else:
+                    chunk_items = []
+                    for item in items[chunk_idx : chunk_idx + max_batch_size]:
+                        if ratios[item[0]] is not None:
+                            break
+                        chunk_items.append(item)
+                chunk_idx += len(chunk_items)
 
                 pv_tensor = torch.cat(
                     [item[1].unsqueeze(0) for item in chunk_items], dim=0
