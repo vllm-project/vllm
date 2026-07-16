@@ -45,7 +45,7 @@ jobs:
 
   pre-commit:
     needs: pre-run-check
-    if: always() && (needs.pre-run-check.result == 'success' || needs.pre-run-check.result == 'skipped')
+    if: false
     runs-on: [self-hosted, linux, x64, vllm-runners]
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

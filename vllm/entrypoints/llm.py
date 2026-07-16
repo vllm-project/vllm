@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from tqdm.auto import tqdm
 from typing_extensions import TypeVar, overload
 
-from vllm.beam_search import (
+from vllm.entrypoints.generate.beam_search.utils import (
     BeamSearchInstance,
     BeamSearchOutput,
     BeamSearchSequence,
@@ -34,9 +34,7 @@ from vllm.config.model import (
     RunnerOption,
     TokenizerMode,
 )
-from vllm.config.quantization import (
-    OnlineQuantizationConfigArgs,
-)
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
@@ -52,7 +50,7 @@ from vllm.entrypoints.pooling.factories import init_pooling_io_processors
 from vllm.entrypoints.pooling.scoring.io_processor import ScoringIOProcessor
 from vllm.entrypoints.pooling.scoring.typing import ScoreInput
 from vllm.entrypoints.pooling.typing import OfflineInputsContext, OfflineOutputsContext
-from vllm.entrypoints.utils import log_non_default_args
+from vllm.entrypoints.serve.utils.api_utils import log_non_default_args
 from vllm.inputs import (
     DataPrompt,
     EngineInput,
@@ -249,7 +247,7 @@ class LLM:
         kv_cache_memory_bytes: int | None = None,
         compilation_config: int | dict[str, Any] | CompilationConfig | None = None,
         quantization_config: dict[str, Any]
-        | OnlineQuantizationConfigArgs
+        | QuantizationConfigArgs
         | None = None,
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
         **kwargs: Any,

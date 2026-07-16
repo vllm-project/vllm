@@ -23,6 +23,11 @@ from huggingface_hub.utils import (
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.transformers_utils.modelscope_utils import (
+    configure_modelscope_runtime,
+    should_use_modelscope,
+    warn_modelscope_fallback,
+)
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -93,14 +98,25 @@ def list_repo_files(
             ]
         # if model is remote, use hf_hub api to list files
         try:
-            if envs.VLLM_USE_MODELSCOPE:
+            if should_use_modelscope():
+                configure_modelscope_runtime()
                 from vllm.transformers_utils.utils import modelscope_list_repo_files
 
-                return modelscope_list_repo_files(
-                    repo_id,
-                    revision=revision,
-                    token=os.getenv("MODELSCOPE_API_TOKEN", None),
-                )
+                try:
+                    return modelscope_list_repo_files(
+                        repo_id,
+                        revision=revision,
+                        token=os.getenv("MODELSCOPE_API_TOKEN", None),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "ModelScope file listing failed for %s; falling back to "
+                        "Hugging Face Hub: %s",
+                        repo_id,
+                        exc,
+                    )
+            if envs.VLLM_USE_MODELSCOPE:
+                warn_modelscope_fallback("vllm.transformers_utils.repo_utils")
             return hf_api().list_repo_files(
                 repo_id, revision=revision, repo_type=repo_type, token=token
             )
@@ -234,10 +250,21 @@ def get_model_path(model: str | Path, revision: str | None = None):
         "revision": revision,
     }
 
-    if envs.VLLM_USE_MODELSCOPE:
-        from modelscope.hub.snapshot_download import snapshot_download
+    if should_use_modelscope():
+        configure_modelscope_runtime()
+        try:
+            from modelscope.hub.snapshot_download import snapshot_download
 
-        return snapshot_download(model_id=model, **common_kwargs)
+            return snapshot_download(model_id=model, **common_kwargs)
+        except Exception as exc:
+            logger.warning(
+                "ModelScope snapshot download failed for %s; falling back to "
+                "Hugging Face Hub: %s",
+                model,
+                exc,
+            )
+    if envs.VLLM_USE_MODELSCOPE:
+        warn_modelscope_fallback("vllm.transformers_utils.repo_utils")
 
     return hf_api().snapshot_download(
         repo_id=model,

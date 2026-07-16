@@ -26,6 +26,11 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.transformers_utils.modelscope_utils import (
+    configure_modelscope_runtime,
+    should_use_modelscope,
+    warn_modelscope_fallback,
+)
 from vllm.transformers_utils.repo_utils import is_mistral_model_repo
 from vllm.transformers_utils.utils import (
     parse_safetensors_file_metadata,
@@ -43,9 +48,12 @@ from .repo_utils import (
     with_retry,
 )
 
-if envs.VLLM_USE_MODELSCOPE:
+if should_use_modelscope():
+    configure_modelscope_runtime()
     from modelscope import AutoConfig
 else:
+    if envs.VLLM_USE_MODELSCOPE:
+        warn_modelscope_fallback("vllm.transformers_utils.config")
     from transformers import AutoConfig
 
 MISTRAL_CONFIG_NAME = "params.json"
@@ -621,12 +629,23 @@ def maybe_override_with_speculators(
         Tuple of (resolved_model, resolved_tokenizer, speculative_config)
     """
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
-    config_dict, _ = PretrainedConfig.get_config_dict(
-        model,
-        revision=revision,
-        token=hf_token,
-        **without_trust_remote_code(kwargs),
-    )
+    try:
+        config_dict, _ = PretrainedConfig.get_config_dict(
+            model,
+            revision=revision,
+            token=hf_token,
+            **without_trust_remote_code(kwargs),
+        )
+    except Exception as exc:
+        if envs.VLLM_USE_MODELSCOPE:
+            logger.warning(
+                "Skipping speculative config override for %s after config "
+                "lookup failed through ModelScope: %s",
+                model,
+                exc,
+            )
+            return model, tokenizer, vllm_speculative_config
+        raise
     speculators_config = config_dict.get("speculators_config")
 
     if speculators_config is None:
@@ -1010,7 +1029,7 @@ def get_hf_image_processor_config(
     **kwargs,
 ) -> dict[str, Any]:
     # ModelScope does not provide an interface for image_processor
-    if envs.VLLM_USE_MODELSCOPE:
+    if should_use_modelscope():
         return dict()
     return get_image_processor_config(
         model, token=hf_token, revision=revision, **kwargs

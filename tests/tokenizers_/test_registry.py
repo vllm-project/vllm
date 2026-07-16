@@ -68,6 +68,20 @@ def test_resolve_tokenizer_args_idempotent(runner_type):
     )
 
 
+def test_resolve_tokenizer_args_falls_back_without_modelscope(
+    monkeypatch, tmp_path: Path
+):
+    monkeypatch.setattr(
+        "vllm.transformers_utils.modelscope_utils.modelscope_is_available",
+        lambda: False,
+    )
+    monkeypatch.setattr("vllm.envs.VLLM_USE_MODELSCOPE", True)
+
+    _, tokenizer_name, _, _ = resolve_tokenizer_args(tmp_path)
+
+    assert tokenizer_name == tmp_path
+
+
 def test_customized_tokenizer():
     TokenizerRegistry.register("test_tokenizer", __name__, TestTokenizer.__name__)
 

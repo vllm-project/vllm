@@ -990,6 +990,24 @@ client_parameters = dict(payload.get("client_parameters") or {})
 # defaults can trip plugin paths that are not reliable for smoke gating.
 server_parameters["no_enable_chunked_prefill"] = True
 server_parameters["no_enable_prefix_caching"] = True
+preview_gpu_memory_utilization = 0.85
+requested_gpu_memory_utilization = server_parameters.get(
+    "gpu_memory_utilization")
+if requested_gpu_memory_utilization is None:
+    server_parameters["gpu_memory_utilization"] = preview_gpu_memory_utilization
+else:
+    try:
+        requested_gpu_memory_utilization = float(
+            requested_gpu_memory_utilization)
+    except (TypeError, ValueError):
+        requested_gpu_memory_utilization = None
+
+    if requested_gpu_memory_utilization is None:
+        server_parameters[
+            "gpu_memory_utilization"] = preview_gpu_memory_utilization
+    else:
+        server_parameters["gpu_memory_utilization"] = min(
+            requested_gpu_memory_utilization, preview_gpu_memory_utilization)
 client_parameters.setdefault("temperature", 0)
 
 payload["server_parameters"] = server_parameters

@@ -109,6 +109,10 @@ class QuantizationConfigArgs:
         return QuantSpec(weight=_coerce_quant_key(v))
 
 
+# Backward-compatible alias for older import sites.
+OnlineQuantizationConfigArgs = QuantizationConfigArgs
+
+
 # CLI shorthands accepted by `--quantization`. Each desugars to a full
 # QuantizationConfigArgs; activation overrides go through quantization_config.
 _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
