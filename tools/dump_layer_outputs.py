@@ -180,11 +180,50 @@ class HookManager:
 
 
 def register_hooks_on_model(llm, hook_manager: "HookManager"):
-    """Register hooks via LLM.apply_model() — works for all executor types."""
+    """Register hooks via LLM.apply_model() — works for all executor types.
+
+    Because apply_model serializes the closure to a worker process,
+    we attach the hook_manager to the model itself so we can retrieve
+    captured data later with a second apply_model call.
+    """
+    dump_mode = hook_manager.dump_mode
+    target_layers = hook_manager.target_layers
+
     def _register(model: torch.nn.Module):
-        hook_manager.register_hooks(model)
+        mgr = HookManager(dump_mode=dump_mode, layers=target_layers)
+        mgr.register_hooks(model)
+        # Stash on the model so we can retrieve captured data later
+        model._dump_hook_manager = mgr  # noqa: SLF001
 
     llm.apply_model(_register)
+
+
+def retrieve_captured_data(llm) -> dict[str, dict[str, torch.Tensor]]:
+    """Retrieve captured tensor data from the worker process."""
+
+    def _retrieve(model: torch.nn.Module):
+        mgr = getattr(model, "_dump_hook_manager", None)
+        if mgr is None:
+            return {}
+        return dict(mgr.captured)
+
+    results = llm.apply_model(_retrieve)
+    # results is a list (one per worker); for tp=1, just take the first
+    if results:
+        return results[0]
+    return {}
+
+
+def cleanup_hooks_on_model(llm):
+    """Remove hooks from the worker model."""
+
+    def _cleanup(model: torch.nn.Module):
+        mgr = getattr(model, "_dump_hook_manager", None)
+        if mgr is not None:
+            mgr.remove_hooks()
+            del model._dump_hook_manager
+
+    llm.apply_model(_cleanup)
 
 
 def main():
@@ -263,6 +302,11 @@ def main():
     generated_text = outputs[0].outputs[0].text if outputs else ""
     print(f"Generated: {generated_text!r}")
 
+    # Retrieve captured data from worker process
+    captured_data = retrieve_captured_data(llm)
+    hook_manager.captured = captured_data
+    print(f"Retrieved {len(captured_data)} layer/step combinations from worker")
+
     # Save tensors
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -295,8 +339,8 @@ def main():
         f"to {output_dir / args.backend}/"
     )
 
-    # Cleanup
-    hook_manager.remove_hooks()
+    # Cleanup hooks in worker
+    cleanup_hooks_on_model(llm)
 
 
 if __name__ == "__main__":
