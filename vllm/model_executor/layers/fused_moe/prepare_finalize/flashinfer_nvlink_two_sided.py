@@ -103,23 +103,22 @@ class FlashInferNVLinkTwoSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
 
     def finalize(
         self,
-        output: torch.Tensor,
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
-    ) -> None:
+    ) -> torch.Tensor:
         top_k = topk_ids.size(1)
-        token_count = output.shape[0]
-        fused_expert_output = flashinfer_alltoall_combine(
+        token_count = topk_ids.size(0)
+        # combine() returns a fresh (token_count, K) tensor; return it directly.
+        return flashinfer_alltoall_combine(
             self.all2all_manager,
             fused_expert_output,
             top_k=top_k,
             token_count=token_count,
             alltoall_info=self.alltoall_info,
         )
-        output.copy_(fused_expert_output)
 
 
 def flashinfer_alltoall_dispatch(

@@ -153,17 +153,16 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     def finalize(
         self,
-        output: torch.Tensor,
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
-    ) -> None:
+    ) -> torch.Tensor:
         if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
             weight_and_reduce_impl = TopKWeightAndReduceNaiveBatched(self.rank)
-        weight_and_reduce_impl.apply(
-            output=output,
+        # apply() allocates a fresh (num_tokens, K) buffer and returns it.
+        return weight_and_reduce_impl.apply(
             fused_expert_output=fused_expert_output,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
