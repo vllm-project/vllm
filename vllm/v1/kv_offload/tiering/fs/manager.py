@@ -18,7 +18,7 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
 import functools
 import json
 import os
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from typing import TYPE_CHECKING
 
 try:
@@ -40,6 +40,7 @@ from vllm.v1.kv_offload.tiering.base import (
     RequestOffloadingContext,
     ScheduleEndContext,
     SecondaryTierManager,
+    TierDeleteResult,
 )
 from vllm.v1.kv_offload.tiering.fs.io import load_block, store_block
 from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
@@ -200,6 +201,28 @@ class FileSystemTierManager(SecondaryTierManager):
 
     def on_request_finished(self, req_context: ReqContext) -> None:
         self._lookup_manager.cleanup(req_context.req_id)
+
+    @override
+    def delete(self, keys: Collection[OffloadKey]) -> TierDeleteResult:
+        deleted = 0
+        removed_keys: set[OffloadKey] = set()
+        for key in keys:
+            try:
+                os.unlink(self.file_mapper.get_file_name(key))
+            except FileNotFoundError:
+                removed_keys.add(key)
+            except OSError:
+                logger.warning(
+                    "Failed to delete KV block from filesystem tier",
+                    exc_info=True,
+                )
+            else:
+                deleted += 1
+                removed_keys.add(key)
+        return TierDeleteResult(
+            removed_keys=removed_keys,
+            deleted_count=deleted,
+        )
 
     @override
     def on_schedule_end(self, context: ScheduleEndContext) -> None:

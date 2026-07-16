@@ -43,14 +43,20 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     OffloadingManager,
     OffloadingMetricMetadata,
+    OffloadingWorker,
 )
-from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+from vllm.v1.kv_offload.cpu.worker_factory import create_cpu_offloading_worker
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
+from vllm.v1.kv_offload.tiering.lifecycle import LifecycleConfig
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
+    TieringPolicyConfig,
+)
+from vllm.v1.kv_offload.tiering.residency import (
+    build_tiering_metric_definitions,
 )
 
 logger = init_logger(__name__)
@@ -77,6 +83,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         cls, extra_config: dict[str, Any]
     ) -> dict[str, OffloadingMetricMetadata]:
         metrics = super().build_metric_definitions(extra_config)
+        metrics.update(build_tiering_metric_definitions())
         secondary_tier_configs = extra_config.get("secondary_tiers", [])
         if not isinstance(secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")
@@ -105,6 +112,17 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         if not isinstance(self.secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")
 
+        pinned_primary = self.extra_config.get("tiering_use_pinned_cpu_primary")
+        self.use_pinned_cpu_primary = (
+            not self.secondary_tier_configs
+            if pinned_primary is None
+            else bool(pinned_primary)
+        )
+        if self.use_pinned_cpu_primary and self.secondary_tier_configs:
+            raise ValueError(
+                "tiering_use_pinned_cpu_primary requires secondary_tiers to be empty"
+            )
+
         # Scheduler-side mmap (rank=None); kept for cleanup
         self._scheduler_mmap: SharedOffloadRegion | None = None
 
@@ -123,27 +141,35 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         if not self._manager:
             # Create scheduler-side SharedOffloadRegion (rank=None) so the
             # primary tier can eagerly create a memoryview over _base.
-            scheduler_mmap = SharedOffloadRegion(
-                instance_id=self.vllm_config.instance_id,
-                num_blocks=self.num_blocks,
-                rank=None,
-                kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
-                cpu_page_size=self.cpu_page_size_per_worker,
-            )
+            scheduler_mmap = None
+            if not self.use_pinned_cpu_primary:
+                scheduler_mmap = SharedOffloadRegion(
+                    instance_id=self.vllm_config.instance_id,
+                    num_blocks=self.num_blocks,
+                    rank=None,
+                    kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
+                    cpu_page_size=self.cpu_page_size_per_worker,
+                )
             self._scheduler_mmap = scheduler_mmap
 
             # Create primary tier (CPU-based)
             primary_tier = CPUPrimaryTierOffloadingManager(
                 num_blocks=self.num_blocks,
+                block_size_bytes=self.kv_bytes_per_offloaded_block,
                 cache_policy=self.eviction_policy,  # type: ignore[arg-type]
                 enable_events=self.kv_events_config.enable_kv_cache_events,
                 mmap_region=scheduler_mmap,
             )
 
             # Create secondary tiers
-            primary_kv_view = primary_tier.get_kv_memoryview()
             secondary_tiers = []
+            primary_kv_view = (
+                primary_tier.get_kv_memoryview()
+                if self.secondary_tier_configs
+                else None
+            )
             for i, tier_config in enumerate(self.secondary_tier_configs):
+                assert primary_kv_view is not None
                 try:
                     tier = SecondaryTierFactory.create_secondary_tier(
                         tier_config, primary_kv_view, self
@@ -169,6 +195,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 primary_tier=primary_tier,
                 secondary_tiers=secondary_tiers,
                 enable_events=self.kv_events_config.enable_kv_cache_events,
+                lifecycle_config=LifecycleConfig.from_extra_config(self.extra_config),
+                policy_config=TieringPolicyConfig.from_extra_config(self.extra_config),
             )
             if int(self.extra_config.get("store_threshold", 0)) >= 2:
                 raise ValueError(
@@ -187,16 +215,18 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         return self._manager
 
     @override
-    def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
+    def create_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
         rank = torch.accelerator.current_device_index()
-        worker_mmap = SharedOffloadRegion(
-            instance_id=self.vllm_config.instance_id,
-            num_blocks=self.num_blocks,
-            rank=rank,
-            kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
-            cpu_page_size=self.cpu_page_size_per_worker,
-        )
-        return CPUOffloadingWorker(
+        worker_mmap = None
+        if not self.use_pinned_cpu_primary:
+            worker_mmap = SharedOffloadRegion(
+                instance_id=self.vllm_config.instance_id,
+                num_blocks=self.num_blocks,
+                rank=rank,
+                kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
+                cpu_page_size=self.cpu_page_size_per_worker,
+            )
+        return create_cpu_offloading_worker(
             kv_caches=kv_caches,
             block_size_factor=self.block_size_factor,
             num_cpu_blocks=self.num_blocks,

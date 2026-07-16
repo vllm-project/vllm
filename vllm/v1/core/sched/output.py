@@ -244,6 +244,11 @@ class SchedulerOutput:
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
 
+    # Fraction of the scheduler-managed KV block pool currently allocated.
+    # This is the relevant pressure signal for KV offloading because the
+    # underlying HBM region is preallocated at engine startup.
+    kv_cache_usage: float = 0.0
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(

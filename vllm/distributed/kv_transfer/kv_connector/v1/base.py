@@ -539,6 +539,10 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    def take_reclaimable_block_ids(self) -> set[int]:
+        """Return device cache block IDs made durable by this connector."""
+        return set()
+
     def request_finished(
         self,
         request: "Request",
