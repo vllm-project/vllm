@@ -6748,9 +6748,9 @@ class GPUModelRunner(
         # Setup torch profiler for graph capture traces (conditional)
         from vllm.distributed.parallel_state import get_world_group
         local_rank = get_world_group().local_rank
-        enable_profiler = (local_rank == 0) and self.vllm_config.profiler_config.capture_torch_profiler_dir
+        enable_profiler = (local_rank == 0) and self.vllm_config.profiler_config.capture_torch_profiler
         if enable_profiler:
-            trace_dir = self.vllm_config.profiler_config.capture_torch_profiler_dir
+            trace_dir = self.vllm_config.profiler_config.torch_profiler_dir + "/capture_traces"
             profiler = torch.profiler.profile(
                 activities=[
                     torch.profiler.ProfilerActivity.CPU,
@@ -6763,10 +6763,10 @@ class GPUModelRunner(
                     trace_dir, worker_name=f"graph_capture_rank_{local_rank}",use_gzip=True
                 ),
             )
-            logger.info("Rank %d: Torch profiler enabled for CUDA graph capture, traces will be saved to: %s", local_rank, trace_dir)
+            logger.info_once("Rank %d: Torch profiler enabled for CUDA graph capture, traces will be saved to: %s", local_rank, trace_dir)
         else:
             profiler = nullcontext()
-            logger.info("Rank %d: Torch profiler disabled for CUDA graph capture", local_rank)
+            logger.info_once("Rank %d: Torch profiler disabled for CUDA graph capture", local_rank)
             
         with self._freeze_gc(), graph_capture(device=self.device):
             torch.accelerator.synchronize()
