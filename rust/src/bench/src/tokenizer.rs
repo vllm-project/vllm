@@ -197,8 +197,8 @@ pub fn load_tokenizer(
     _trust_remote_code: bool,
     server_info: Option<(&str, &str)>,
 ) -> Result<TokenizerKind> {
-    // 0. Check for built-in tiktoken encoding names (no HF download needed).
-    //    These are useful for consistent cross-model token counting (e.g. Artificial Analysis).
+    // 0. Check for built-in tiktoken encoding names (no HF download needed). These are useful for
+    //    consistent cross-model token counting (e.g. Artificial Analysis).
     const BUILTIN_TIKTOKEN: &[&str] = &[
         "o200k_base",
         "cl100k_base",

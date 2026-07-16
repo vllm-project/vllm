@@ -417,8 +417,9 @@ mod tests {
         assert!((w.end_s - 10.0).abs() < 1e-9);
     }
 
-    use crate::datasets::SampleRequest;
     use std::sync::Arc;
+
+    use crate::datasets::SampleRequest;
 
     fn mk_full(
         start: f64,
@@ -467,7 +468,7 @@ mod tests {
             &requests,
             &w,
             &[99.0],
-            /* is_pooling */ false,
+            false, // is_pooling
         );
 
         // Window is [0.0, 10.0). All 3 requests start in window (3).

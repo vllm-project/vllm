@@ -427,8 +427,9 @@ fn fmt_f64(v: Option<f64>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     fn point(result_json: serde_json::Value) -> SweepPoint {
         let ss_request_throughput = ss_f64(&result_json, "request_throughput");

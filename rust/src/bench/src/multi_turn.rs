@@ -771,9 +771,8 @@ async fn get_first_model(
 mod tests {
     use std::sync::Arc;
 
-    use crate::datasets::{ConversationTurn, MultiTurnConversation};
-
     use super::{filter_turns_by_max_model_len, valid_prefix_len_for_max_model_len};
+    use crate::datasets::{ConversationTurn, MultiTurnConversation};
 
     fn conversation(turns: &[(usize, usize)]) -> MultiTurnConversation {
         MultiTurnConversation {

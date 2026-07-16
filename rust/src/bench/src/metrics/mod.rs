@@ -5,7 +5,6 @@ pub mod calculator;
 pub mod steady_state;
 
 use serde::{Deserialize, Serialize};
-
 pub use steady_state::SteadyStateMetrics;
 
 /// Multi-turn benchmark metrics with overall and per-turn breakdown.

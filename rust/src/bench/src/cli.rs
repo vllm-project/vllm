@@ -207,7 +207,8 @@ pub struct Cli {
     #[arg(long)]
     pub output_len: Option<usize>,
 
-    /// Maximum model context length. Requests with prompt_len + output_len above this are filtered out.
+    /// Maximum model context length. Requests with prompt_len + output_len above this are filtered
+    /// out.
     #[arg(long)]
     pub max_model_len: Option<usize>,
 
@@ -539,7 +540,8 @@ pub struct Cli {
     #[arg(long, default_value_t = crate::datasets::sonnet::DEFAULT_PREFIX_LEN)]
     pub sonnet_prefix_len: usize,
 
-    /// SPEED-Bench config/split (qualitative, throughput_1k, throughput_2k, throughput_8k, throughput_16k, throughput_32k).
+    /// SPEED-Bench config/split (qualitative, throughput_1k, throughput_2k, throughput_8k,
+    /// throughput_16k, throughput_32k).
     #[arg(long, default_value = "qualitative")]
     pub speed_bench_config: SpeedBenchConfig,
 
@@ -548,7 +550,8 @@ pub struct Cli {
     pub speed_bench_category: Option<String>,
 
     /// Truncate SPEED-Bench prompts to at most this many tokens.
-    /// Useful for creating custom input lengths from larger splits (e.g. --speed-bench-config throughput_16k --speed-bench-max-input-len 10240).
+    /// Useful for creating custom input lengths from larger splits (e.g. --speed-bench-config
+    /// throughput_16k --speed-bench-max-input-len 10240).
     #[arg(long)]
     pub speed_bench_max_input_len: Option<usize>,
 
@@ -576,15 +579,18 @@ pub struct Cli {
     pub compare: Option<Vec<String>>,
 
     // --- Sweep mode ---
-    /// Sweep over max-concurrency values (comma-separated, e.g. --sweep-max-concurrency 1,10,50,100,500).
+    /// Sweep over max-concurrency values (comma-separated, e.g. --sweep-max-concurrency
+    /// 1,10,50,100,500).
     #[arg(long)]
     pub sweep_max_concurrency: Option<String>,
 
-    /// When sweeping concurrency, set num_prompts = concurrency * this factor for each sweep point.
+    /// When sweeping concurrency, set num_prompts = concurrency * this factor for each sweep
+    /// point.
     #[arg(long)]
     pub sweep_num_prompts_factor: Option<usize>,
 
-    /// Sweep over request-rate values (comma-separated, supports "inf", e.g. --sweep-request-rate 1,10,100,inf).
+    /// Sweep over request-rate values (comma-separated, supports "inf", e.g. --sweep-request-rate
+    /// 1,10,100,inf).
     #[arg(long)]
     pub sweep_request_rate: Option<String>,
 

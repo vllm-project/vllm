@@ -840,9 +840,10 @@ fn parse_ramp_up(cli: &Cli) -> Result<Option<RampUpConfig>> {
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
+
     use super::*;
     use crate::cli::Cli;
-    use clap::Parser;
 
     fn base_multi_turn_args() -> Vec<&'static str> {
         vec![

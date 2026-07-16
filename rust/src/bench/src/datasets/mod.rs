@@ -83,9 +83,8 @@ pub fn oversample_requests(
     request_id_prefix: &str,
     no_oversample: bool,
 ) {
-    use rand::Rng;
-    use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
 
     if requests.len() >= num_requests || requests.is_empty() {
         return;

@@ -245,8 +245,8 @@ pub(crate) fn compute_spec_decode_stats(
 /// for the i-th item.
 ///
 /// - `RoundRobin` cycles deterministically: `lora_modules[i % N]`.
-/// - `Random` uses `StdRng::seed_from_u64(seed)` so the assignment is fully
-///   reproducible across runs with the same seed.
+/// - `Random` uses `StdRng::seed_from_u64(seed)` so the assignment is fully reproducible across
+///   runs with the same seed.
 ///
 /// "Item" is a request in single-shot mode and a conversation in multi-turn
 /// mode (sticky across all turns of that conversation).
@@ -269,9 +269,8 @@ pub(crate) fn assign_lora_modules(
             }
         }
         LoraAssignment::Random => {
-            use rand::Rng;
-            use rand::SeedableRng;
             use rand::rngs::StdRng;
+            use rand::{Rng, SeedableRng};
             let mut rng = StdRng::seed_from_u64(seed);
             for _ in 0..n {
                 out.push(modules[rng.random_range(0..m)].clone());
@@ -1182,9 +1181,8 @@ fn filter_requests_by_max_model_len(
 mod max_model_len_tests {
     use std::sync::Arc;
 
-    use crate::datasets::SampleRequest;
-
     use super::filter_requests_by_max_model_len;
+    use crate::datasets::SampleRequest;
 
     fn sample(prompt_len: usize, expected_output_len: usize) -> SampleRequest {
         SampleRequest {

@@ -11,7 +11,8 @@ use crate::error::{BenchError, Result};
 /// Default regex pattern matching cl100k_base (GPT-4, Qwen, etc.)
 const DEFAULT_TIKTOKEN_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
-/// Number of reserved special token slots (matches Python's TikTokenTokenizer.num_reserved_special_tokens)
+/// Number of reserved special token slots (matches Python's
+/// TikTokenTokenizer.num_reserved_special_tokens)
 const NUM_RESERVED_SPECIAL_TOKENS: u32 = 256;
 
 /// Tiktoken-based tokenizer for models that use tiktoken format (Kimi, Qwen, etc.)
@@ -381,7 +382,7 @@ fn read_tokenizer_config(config_path: &Path) -> Option<TokenizerConfig> {
 }
 
 /// Try to extract pat_str from Python tokenizer source files in a local directory.
-/// Returns None if unavailable or unparseable.
+/// Returns None if unavailable or unparsable.
 fn extract_pat_str_from_local_dir(dir: &Path) -> Option<String> {
     ["tokenization_kimi.py", "tokenizer.py"]
         .iter()
@@ -395,7 +396,7 @@ fn extract_pat_str_from_local_dir(dir: &Path) -> Option<String> {
 }
 
 /// Try to download the Python tokenizer source file and extract pat_str via regex.
-/// Returns None if unavailable or unparseable.
+/// Returns None if unavailable or unparsable.
 fn extract_pat_str_from_repo(repo: &crate::hub::HubRepo) -> Option<String> {
     // Try common Python tokenizer filenames
     let py_path = repo.get("tokenization_kimi.py").or_else(|_| repo.get("tokenizer.py")).ok()?;

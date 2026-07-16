@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-//! Pooling/embedding backends: non-streaming HTTP POST for embedding, pooling, and rerank endpoints.
+//! Pooling/embedding backends: non-streaming HTTP POST for embedding, pooling, and rerank
+//! endpoints.
 //!
 //! Supported variants:
 //! - `openai-embeddings`: Standard OpenAI `/v1/embeddings` with text input
-//! - `openai-embeddings-chat`: OpenAI `/v1/embeddings` with chat message format (supports multimodal)
+//! - `openai-embeddings-chat`: OpenAI `/v1/embeddings` with chat message format (supports
+//!   multimodal)
 //! - `vllm-pooling`: vLLM `/v1/pooling` endpoint
 //! - `vllm-rerank`: vLLM `/v1/rerank` endpoint (query + documents)
 

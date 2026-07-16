@@ -25,7 +25,6 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::Context;
 use clap::Parser;
-
 use cli::Cli;
 use config::BenchConfig;
 
