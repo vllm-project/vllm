@@ -273,12 +273,24 @@ def is_fa_version_supported(fa_version: int) -> bool:
         return False
 
 
-def flash_attn_supports_kv_cache_dtype(kv_cache_dtype: str = "fp8_e4m3") -> bool:
+def flash_attn_supports_kv_cache_dtype(
+    kv_cache_dtype: str = "fp8_e4m3",
+    *,
+    requires_alibi: bool = False,
+    head_size: int | None = None,
+    head_size_v: int | None = None,
+    has_sinks: bool = False,
+) -> bool:
     if kv_cache_dtype == "fp8_e5m2":
         return False
     if current_platform.is_xpu():
         return True
-    return get_flash_attn_version() in (3, 4)
+    return get_flash_attn_version(
+        requires_alibi=requires_alibi,
+        head_size=head_size,
+        head_size_v=head_size_v,
+        has_sinks=has_sinks,
+    ) in (3, 4)
 
 
 def flash_attn_supports_quant_query_input() -> bool:

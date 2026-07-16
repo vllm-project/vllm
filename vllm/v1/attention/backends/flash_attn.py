@@ -217,6 +217,17 @@ class FlashAttentionBackend(AttentionBackend):
         if has_sink and device_capability < DeviceCapability(9, 0):
             return "sink not supported on compute capability < 9.0"
         if (
+            kv_cache_dtype is not None
+            and is_quantized_kv_cache(kv_cache_dtype)
+            and not flash_attn_supports_kv_cache_dtype(
+                kv_cache_dtype,
+                head_size=head_size,
+                head_size_v=head_size,
+                has_sinks=has_sink,
+            )
+        ):
+            return "FP8 KV cache requires FlashAttention 3 or 4"
+        if (
             use_mm_prefix
             and get_flash_attn_version(head_size=head_size, has_sinks=has_sink) != 4
         ):
@@ -772,6 +783,7 @@ class FlashAttentionImpl(AttentionImpl):
         self.vllm_flash_attn_version = get_flash_attn_version(
             requires_alibi=alibi_slopes is not None,
             head_size=head_size,
+            has_sinks=sinks is not None,
         )
         logger.info_once(
             "Using FlashAttention version %s",
@@ -782,7 +794,13 @@ class FlashAttentionImpl(AttentionImpl):
 
         if is_quantized_kv_cache(
             self.kv_cache_dtype
-        ) and not flash_attn_supports_kv_cache_dtype(self.kv_cache_dtype):
+        ) and not flash_attn_supports_kv_cache_dtype(
+            self.kv_cache_dtype,
+            requires_alibi=alibi_slopes is not None,
+            head_size=head_size,
+            head_size_v=head_size,
+            has_sinks=sinks is not None,
+        ):
             raise NotImplementedError(
                 f"FlashAttention does not support {self.kv_cache_dtype}"
                 " kv-cache on this device."
