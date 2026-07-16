@@ -18,7 +18,6 @@ from vllm.model_executor.layers.fused_moe.router.dsv4_topk import (
     can_use_dsv4_topk,
     dsv4_topk,
 )
-from vllm.platforms import current_platform
 
 
 def vllm_topk_softmax(
@@ -120,6 +119,8 @@ def vllm_topk_softplus_sqrt(
     hash_indices_table: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
 ) -> tuple[torch.Tensor, ...]:
+    from vllm.platforms import current_platform
+
     if current_platform.is_xpu():
         return _topk_softplus_sqrt_torch(
             topk_weights,
@@ -173,34 +174,12 @@ def fused_topk_bias(
     hash_indices_table: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
 ):
-    # The topk kernel dispatches dtype based on topk_ids (set by
-    # indices_type) and assumes input_tokens/hash_indices_table match.
-    use_dsv4_mixed_hash_indices = (
-        current_platform.is_cuda()
-        and scoring_func == "sqrtsoftplus"
-        and gating_output.dtype == torch.float32
-        and gating_output.ndim == 2
-        and gating_output.shape[1] in (256, 384)
-        and gating_output.is_contiguous()
-        and topk == 6
-        and renormalize
-        and indices_type == torch.int64
-        and input_tokens is not None
-        and input_tokens.dtype == torch.int32
-        and input_tokens.is_contiguous()
+    if (
+        input_tokens is not None
         and hash_indices_table is not None
-        and hash_indices_table.dtype == torch.int64
-        and hash_indices_table.is_contiguous()
-    )
-    if indices_type is not None:
-        if (
-            input_tokens is not None
-            and input_tokens.dtype != indices_type
-            and not use_dsv4_mixed_hash_indices
-        ):
-            input_tokens = input_tokens.to(dtype=indices_type)
-        if hash_indices_table is not None and hash_indices_table.dtype != indices_type:
-            hash_indices_table = hash_indices_table.to(dtype=indices_type)
+        and input_tokens.dtype != hash_indices_table.dtype
+    ):
+        input_tokens = input_tokens.to(dtype=hash_indices_table.dtype)
 
     if not rocm_aiter_ops.is_fused_moe_enabled():
         assert hidden_states.size(0) == gating_output.size(0), (
@@ -344,6 +323,7 @@ def fused_topk_bias(
         scores_for_choice = scores.view(-1, n_routed_experts)
     # For batch invariance, use sorted=True to ensure deterministic expert selection
     if hash_indices_table is not None:
+        assert input_tokens is not None
         topk_indices = hash_indices_table[input_tokens]
     else:
         use_sorted = envs.VLLM_BATCH_INVARIANT

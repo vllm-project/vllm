@@ -150,14 +150,13 @@ def test_fused_topk_softplus_sqrt_hash(
     vocab_size = 1024
     hidden_states = torch.randn((num_tokens, hidden_size), dtype=dtype, device="cuda")
     gating_output = torch.randn((num_tokens, num_experts), dtype=dtype, device="cuda")
-    indices_type = torch.int64 if dtype == torch.float32 else torch.int32
     # Per-token fixed expert selection: for each vocab id pick `topk` distinct
     # experts.
     hash_indices_table = torch.stack(
         [torch.randperm(num_experts)[:topk] for _ in range(vocab_size)]
-    ).to(device="cuda", dtype=indices_type)
+    ).to(device="cuda", dtype=torch.long)
     input_ids = torch.randint(
-        0, vocab_size, (num_tokens,), dtype=torch.int32, device="cuda"
+        0, vocab_size, (num_tokens,), dtype=torch.long, device="cuda"
     )
 
     topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
@@ -176,13 +175,12 @@ def test_fused_topk_softplus_sqrt_hash(
         e_score_correction_bias=None,
         topk=topk,
         renormalize=renormalize,
-        indices_type=indices_type,
         input_tokens=input_ids,
         hash_indices_table=hash_indices_table,
         routed_scaling_factor=routed_scaling_factor,
     )
 
-    sorted_ref_ids, idx_ref = topk_ids_ref.to(indices_type).sort(dim=-1)
+    sorted_ref_ids, idx_ref = topk_ids_ref.sort(dim=-1)
     sorted_ids, idx_ops = topk_ids.sort(dim=-1)
     torch.testing.assert_close(sorted_ref_ids, sorted_ids, atol=0, rtol=0)
 
