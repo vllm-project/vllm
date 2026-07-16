@@ -143,6 +143,8 @@ def test_take_events_forwards_locality_to_rich_store():
 
     assert len(events) == 1
     assert isinstance(events[0], BlockStored)
+    assert events[0].token_ids == [1, 2, 3, 4]
+    assert events[0].block_size == 4
     assert events[0].locality == "LOCAL"
 
 

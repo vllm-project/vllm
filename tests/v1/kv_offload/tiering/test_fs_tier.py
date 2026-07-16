@@ -37,6 +37,7 @@ from vllm.v1.kv_offload.config import (
     OffloadingParallelConfig,
 )
 from vllm.v1.kv_offload.tiering.base import JobMetadata
+from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.fs.manager import (
     FileSystemTierManager,
 )
@@ -254,7 +255,8 @@ def test_invalid_path_raises_at_construction():
         )
 
 
-def test_invalid_locality_raises_at_construction(tmp_path):
+@pytest.mark.parametrize("locality", ["local", ""])
+def test_invalid_locality_raises_at_construction(tmp_path, locality):
     tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
 
     with pytest.raises(ValueError, match="locality"):
@@ -263,7 +265,7 @@ def test_invalid_locality_raises_at_construction(tmp_path):
             primary_kv_view=memoryview(tensor.numpy()),
             tier_type="fs",
             root_dir=str(tmp_path),
-            locality="local",
+            locality=locality,
         )
 
 
@@ -286,6 +288,26 @@ def test_parse_locality_rejects_invalid_value():
     assert str(exc_info.value) == (
         "locality must be 'LOCAL', 'REMOTE', or None, got 'local'"
     )
+
+
+def test_factory_forwards_locality_to_fs_tier(tmp_path):
+    tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+    tier = SecondaryTierFactory.create_secondary_tier(
+        {
+            "type": "fs",
+            "root_dir": str(tmp_path),
+            "n_read_threads": 1,
+            "n_write_threads": 1,
+            "locality": "LOCAL",
+        },
+        memoryview(tensor.numpy()),
+        _MOCK_OFFLOADING_SPEC,
+    )
+    try:
+        assert isinstance(tier, FileSystemTierManager)
+        assert tier.locality is Locality.LOCAL
+    finally:
+        tier.shutdown()
 
 
 def test_failed_load_missing_file(fs_tier):

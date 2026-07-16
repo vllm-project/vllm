@@ -267,9 +267,10 @@ def lookup_and_wait(
 # ---------------------------------------------------------------------------
 
 
-def test_invalid_locality_raises_at_construction():
+@pytest.mark.parametrize("locality", ["local", ""])
+def test_invalid_locality_raises_at_construction(locality):
     with pytest.raises(ValueError, match="locality"):
-        _make_tier(locality="local")
+        _make_tier(locality=locality)
 
 
 class TestMockObjTierBasic:
