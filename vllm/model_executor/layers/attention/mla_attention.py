@@ -1749,6 +1749,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self.determine_chunked_prefill_workspace_size(vllm_config)
         )
 
+        use_packed_fp8_cache = vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
         if self.dcp_world_size > 1:
             # Note(hc): The local kvcache is incomplete when DCP is triggered,
             # an additional kvcache allgather across the DCP group is therefore
@@ -1761,7 +1762,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     + self.chunked_prefill_workspace_size // self.dcp_world_size,
                     self.model_config.get_head_size(),
                 ),
-                dtype=self.model_config.dtype,
+                dtype=torch.bfloat16
+                if use_packed_fp8_cache
+                else self.model_config.dtype,
                 device=device,
             )
         else:
@@ -1770,7 +1773,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     self.chunked_prefill_workspace_size,
                     self.model_config.get_head_size(),
                 ),
-                dtype=self.q_data_type,
+                dtype=torch.bfloat16 if use_packed_fp8_cache else self.q_data_type,
                 device=device,
             )
 
@@ -2115,7 +2118,16 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
 
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
-            if not use_fp8_prefill:
+            if self.kv_cache_dtype == "fp8_ds_mla":
+                ops.cp_gather_and_upconvert_fp8_kv_cache(
+                    src_cache=kv_c_and_k_pe_cache,
+                    dst=workspace[:toks],
+                    block_table=prefill_metadata.block_table,
+                    workspace_starts=prefill_metadata.chunked_context.cu_seq_lens[i],
+                    batch_size=attn_metadata.num_prefills,
+                    seq_starts=prefill_metadata.chunked_context.starts[i],
+                )
+            elif not use_fp8_prefill:
                 ops.gather_and_maybe_dequant_cache(
                     src_cache=kv_c_and_k_pe_cache,
                     dst=workspace,
@@ -2230,9 +2242,16 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             padded_local_cu_seq_lens = (
                 prefill_metadata.chunked_context.padded_local_cu_seq_lens[i]
             )
-            if is_quantized_kv_cache(self.kv_cache_dtype) and (
-                self.kv_cache_dtype != "fp8_ds_mla"
-            ):
+            if self.kv_cache_dtype == "fp8_ds_mla":
+                ops.cp_gather_and_upconvert_fp8_kv_cache(
+                    src_cache=kv_c_and_k_pe_cache,
+                    dst=workspace[:toks],
+                    block_table=prefill_metadata.block_table,
+                    workspace_starts=padded_local_cu_seq_lens,
+                    batch_size=attn_metadata.num_prefills,
+                    seq_starts=prefill_metadata.chunked_context.starts[i],
+                )
+            elif is_quantized_kv_cache(self.kv_cache_dtype):
                 assert k_scale is not None
                 ops.gather_and_maybe_dequant_cache(
                     src_cache=kv_c_and_k_pe_cache,
