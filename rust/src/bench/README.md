@@ -22,7 +22,7 @@ vllm-bench --backend vllm --base-url http://127.0.0.1:8000 \
 ### Performance vs. Python
 
 | Metric | Python | Rust |
-|--------|--------|------|
+| -------- | -------- | ------ |
 | Startup time | Multi-second (import vllm + numpy + aiohttp) | ~7 ms |
 | 100k random prompts (input_len=8192) | Minutes | Seconds (rayon parallelism) |
 | Binary size | — | ~7 MB |
@@ -405,14 +405,16 @@ vllm-bench \
 ## Supported Backends
 
 ### Generation
+
 | Backend | API Endpoint | Description |
-|---------|-------------|-------------|
+| --------- | ------------- | ------------- |
 | `vllm` / `openai` | `/v1/completions` | OpenAI-compatible completions (streaming) |
 | `openai-chat` | `/v1/chat/completions` | OpenAI-compatible chat completions (streaming, multimodal) |
 
 ### Embedding / Pooling
+
 | Backend | API Endpoint | Description |
-|---------|-------------|-------------|
+| --------- | ------------- | ------------- |
 | `openai-embeddings` | `/v1/embeddings` | Text embedding (accepts text or token IDs) |
 | `openai-embeddings-chat` | `/v1/embeddings` | Chat-format embedding (supports multimodal content) |
 | `vllm-pooling` | `/v1/pooling` | vLLM native pooling endpoint |
@@ -423,7 +425,7 @@ Pooling backends are non-streaming and report E2EL (end-to-end latency) only. Us
 ## Supported Datasets
 
 | Dataset | Description |
-|---------|-------------|
+| --------- | ------------- |
 | `random` | Synthetic prompts with exact token-length matching (default) |
 | `random-mm` | Synthetic multimodal prompts with random JPEG images for VLM benchmarking (requires `openai-chat`) |
 | `sharegpt` | Real conversations from ShareGPT (auto-downloads from HuggingFace, or use `--dataset-path`) |
@@ -434,6 +436,7 @@ Pooling backends are non-streaming and report E2EL (end-to-end latency) only. Us
 ## Metrics
 
 ### Generation backends
+
 - **TTFT** (Time to First Token) — latency from request send to first token received
 - **TPOT** (Time per Output Token) — average time between output tokens
 - **ITL** (Inter-Token Latency) — per-token latency distribution
@@ -443,6 +446,7 @@ Pooling backends are non-streaming and report E2EL (end-to-end latency) only. Us
 - **Goodput** — requests/sec meeting all specified SLOs (with `--goodput`)
 
 ### Pooling / embedding backends
+
 - **E2EL** — total request latency (mean, median, std, percentiles)
 - **Throughput** — requests/sec, input tokens/sec
 - **Concurrency** — peak concurrent requests
@@ -461,7 +465,7 @@ Run `vllm-bench --help` for the authoritative list. Grouped reference below.
 <summary><b>Server connection</b></summary>
 
 | Flag | Default | Description |
-|------|---------|-------------|
+| ------ | --------- | ------------- |
 | `--backend` | `openai` | Backend type (`vllm`, `openai`, `openai-chat`, `openai-embeddings`, `openai-embeddings-chat`, `vllm-pooling`, `vllm-rerank`) |
 | `--base-url` | — | Server base URL (overrides `--host`/`--port`) |
 | `--host` | `127.0.0.1` | Server host |
@@ -475,7 +479,7 @@ Run `vllm-bench --help` for the authoritative list. Grouped reference below.
 <summary><b>Model &amp; tokenizer</b></summary>
 
 | Flag | Default | Description |
-|------|---------|-------------|
+| ------ | --------- | ------------- |
 | `--model` | Auto-detect | Model name (fetched from `/v1/models` if omitted) |
 | `--served-model-name` | — | Model name used in API requests |
 | `--tokenizer` | Same as model | Tokenizer name or path (supports HF, tiktoken, server fallback) |
@@ -489,7 +493,7 @@ Run `vllm-bench --help` for the authoritative list. Grouped reference below.
 <summary><b>Dataset</b></summary>
 
 | Flag | Default | Description |
-|------|---------|-------------|
+| ------ | --------- | ------------- |
 | `--dataset-name` | `random` | Dataset type (`random`, `random-mm`, `sharegpt`, `sonnet`, `speed-bench`, `hf`) |
 | `--dataset-path` | — | Path to dataset file (optional for `sharegpt`/`sonnet`, which auto-source) |
 | `--num-prompts` | `1000` | Number of prompts to generate (conversations in multi-turn mode) |
@@ -532,7 +536,7 @@ Run `vllm-bench --help` for the authoritative list. Grouped reference below.
 <summary><b>Rate control</b></summary>
 
 | Flag | Default | Description |
-|------|---------|-------------|
+| ------ | --------- | ------------- |
 | `--request-rate` | `inf` | Requests per second (`inf` = all at once) |
 | `--burstiness` | `1.0` | Burstiness factor (1.0 = Poisson, >1 = bursty) |
 | `--max-concurrency` | `num-prompts` | Maximum concurrent requests (semaphore) |
@@ -546,7 +550,7 @@ Run `vllm-bench --help` for the authoritative list. Grouped reference below.
 <summary><b>Sampling parameters</b></summary>
 
 | Flag | Description |
-|------|-------------|
+| ------ | ------------- |
 | `--temperature` | Temperature (server default if omitted) |
 | `--top-p` | Top-p (nucleus) sampling |
 | `--top-k` | Top-k sampling |
@@ -563,7 +567,7 @@ Merged into the request body. Only effective with generation backends (`vllm`, `
 <summary><b>Output &amp; results</b></summary>
 
 | Flag | Default | Description |
-|------|---------|-------------|
+| ------ | --------- | ------------- |
 | `--save-result` | `false` | Save results to JSON file |
 | `--save-detailed` | `false` | Include per-request data in JSON (input/output lens, ITLs, texts) |
 | `--append-result` | `false` | Append to existing JSON file (JSONL format) |
@@ -583,7 +587,7 @@ Merged into the request body. Only effective with generation backends (`vllm`, `
 <summary><b>Request options</b></summary>
 
 | Flag | Default | Description |
-|------|---------|-------------|
+| ------ | --------- | ------------- |
 | `--ignore-eos` | `false` | Ignore EOS token (force full output length) |
 | `--logprobs` | — | Number of logprobs per token |
 | `--num-warmups` | `0` | Warmup requests before benchmarking |
@@ -599,7 +603,7 @@ Merged into the request body. Only effective with generation backends (`vllm`, `
 <summary><b>Steady-state metrics</b></summary>
 
 | Flag | Default | Description |
-|------|---------|-------------|
+| ------ | --------- | ------------- |
 | `--steady-state-threshold` | `0.95` | Fraction of `--max-concurrency` at which the steady-state window opens, range (0, 1] |
 | `--steady-state-min-window` | Auto | Minimum window duration (s) below which a warning is attached. Default `max(10, 0.1 × run_duration)` |
 | `--no-steady-state` | `false` | Disable steady-state metrics computation |
@@ -612,7 +616,7 @@ Computed only when `--max-concurrency` is set and `--request-rate` is `inf`.
 <summary><b>Profiling</b></summary>
 
 | Flag | Default | Description |
-|------|---------|-------------|
+| ------ | --------- | ------------- |
 | `--profile` | `false` | Trigger vLLM server-side profiling (`/start_profile` before, `/stop_profile` after) |
 | `--profile-batch-threshold` | — | Defer profiling until `/metrics` reports ≥ N running requests, then capture. Requires `--profile` |
 | `--profile-duration` | `5.0` | Seconds to capture once the batch threshold is reached. Requires `--profile-batch-threshold` |
@@ -623,7 +627,7 @@ Computed only when `--max-concurrency` is set and `--request-rate` is `inf`.
 <summary><b>Sweep mode</b></summary>
 
 | Flag | Default | Description |
-|------|---------|-------------|
+| ------ | --------- | ------------- |
 | `--sweep-max-concurrency` | — | Comma-separated concurrency values to sweep (e.g. `1,10,50,100,500`) |
 | `--sweep-request-rate` | — | Comma-separated rate values to sweep, supports `inf` (e.g. `1,10,100,inf`) |
 | `--sweep-num-prompts-factor` | — | Set `num_prompts = concurrency × factor` per concurrency sweep point |
@@ -637,7 +641,7 @@ Runs the benchmark once per value, then prints a summary table comparing through
 <summary><b>Multi-turn conversation benchmark</b></summary>
 
 | Flag | Default | Description |
-|------|---------|-------------|
+| ------ | --------- | ------------- |
 | `--multi-turn` | `false` | Enable multi-turn conversation mode (requires `--backend openai-chat`) |
 | `--multi-turn-num-turns` | `3` | Turns per conversation (synthetic mode) |
 | `--multi-turn-min-turns` | `0` | Minimum turns per conversation (0 = use `--multi-turn-num-turns`) |
@@ -651,11 +655,13 @@ Runs the benchmark once per value, then prints a summary table comparing through
 With `--multi-turn`, `--num-prompts` controls the number of **conversations**, not individual requests.
 
 **How it works:**
+
 - Turn 1: send `[user_1]`, get `assistant_1`
 - Turn 2: send `[user_1, assistant_1, user_2]`, get `assistant_2`
 - Turn N: send full history + `user_N` — measures growing-context performance
 
 **Data sources:**
+
 - `--dataset-name random` — synthetic conversations with controllable per-turn token lengths. Auto-sets `min_tokens` to enforce output length without `ignore_eos`.
 - `--dataset-name sharegpt` — loads all turns (not just the first two); filters for entries with ≥ 2 real turns.
 
@@ -671,7 +677,7 @@ With `--multi-turn`, `--num-prompts` controls the number of **conversations**, n
 <summary><b>LoRA multi-adapter</b></summary>
 
 | Flag | Default | Description |
-|------|---------|-------------|
+| ------ | --------- | ------------- |
 | `--lora-modules` | — | Adapter names registered on the server (`vllm serve --lora-modules name=path`). Each request's `model` field is rewritten to one of these. Repeatable |
 | `--lora-assignment` | `random` | Distribution: `random` (uniform, seeded by `--seed`) or `round-robin` (deterministic `i % N`) |
 
@@ -687,7 +693,7 @@ With `--multi-turn`, `--num-prompts` controls the number of **conversations**, n
 <summary><b>Multi-run &amp; comparison</b></summary>
 
 | Flag | Default | Description |
-|------|---------|-------------|
+| ------ | --------- | ------------- |
 | `--num-runs` | `1` | Run benchmark N times; report mean/std/min/max with CV |
 | `--compare` | — | Compare two result JSON files side-by-side (skips benchmarking) |
 
@@ -711,7 +717,7 @@ Models without `tokenizer.json` (e.g. `nvidia/Kimi-K2.5-NVFP4`) fall back to ser
 
 JSON output is compatible with the `vllm bench serve` Python schema. Result files are named:
 
-```
+```text
 {label}-{rate}qps-concurrency{max_concurrency}-{model}-{timestamp}.json
 ```
 
@@ -722,7 +728,7 @@ Use `--append-result` to append multiple runs to the same file in JSONL format. 
 <details>
 <summary><b>Source layout</b></summary>
 
-```
+```text
 src/
 ├── main.rs                  # Entry point, mimalloc, tokio runtime, mode dispatch
 ├── cli.rs                   # clap CLI argument definitions
@@ -792,7 +798,7 @@ The Rust implementation matches Python `vllm bench serve` in:
 ## Environment Variables
 
 | Variable | Description |
-|----------|-------------|
+| ---------- | ------------- |
 | `OPENAI_API_KEY` | API key for authenticated endpoints (cached, not read per-request) |
 | `HF_TOKEN` | HuggingFace token for gated model tokenizers and gated datasets |
 | `TOKIO_WORKER_THREADS` | Override tokio worker thread count (default: physical cores) |

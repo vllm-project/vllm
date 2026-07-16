@@ -654,19 +654,6 @@ dependencies = [
 
 [[package]]
 name = "console"
-version = "0.15.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "054ccb5b10f9f2cbf51eb355ca1d05c2d279ce1804688d0db74b4733a5aeafd8"
-dependencies = [
- "encode_unicode",
- "libc",
- "once_cell",
- "unicode-width",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "console"
 version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03e45a4a8926227e4197636ba97a9fc9b00477e9f4bd711395687c5f0734bec4"
@@ -1650,7 +1637,7 @@ checksum = "aef3982638978efa195ff11b305f51f1f22f4f0a6cabee7af79b383ebee6a213"
 dependencies = [
  "dirs",
  "futures",
- "indicatif 0.18.4",
+ "indicatif",
  "libc",
  "log",
  "native-tls",
@@ -2012,24 +1999,11 @@ dependencies = [
 
 [[package]]
 name = "indicatif"
-version = "0.17.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "183b3088984b400f4cfac3620d5e076c84da5364016b4f49473de574b2586235"
-dependencies = [
- "console 0.15.11",
- "number_prefix",
- "portable-atomic",
- "unicode-width",
- "web-time",
-]
-
-[[package]]
-name = "indicatif"
 version = "0.18.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "25470f23803092da7d239834776d653104d551bc4d7eacaf31e6837854b8e9eb"
 dependencies = [
- "console 0.16.2",
+ "console",
  "portable-atomic",
  "unicode-width",
  "unit-prefix",
@@ -2632,12 +2606,6 @@ checksum = "5c7398b9c8b70908f6371f47ed36737907c87c52af34c268fed0bf0ceb92ead9"
 dependencies = [
  "libc",
 ]
-
-[[package]]
-name = "number_prefix"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
 
 [[package]]
 name = "once_cell"
@@ -4819,7 +4787,7 @@ dependencies = [
  "derive_builder",
  "esaxx-rs",
  "getrandom 0.3.4",
- "indicatif 0.18.4",
+ "indicatif",
  "itertools 0.14.0",
  "log",
  "macro_rules_attribute",
@@ -5505,12 +5473,12 @@ dependencies = [
  "futures",
  "hf-hub",
  "image",
- "indicatif 0.17.11",
+ "indicatif",
  "mimalloc",
  "rand 0.9.2",
  "rand_distr",
  "rayon",
- "reqwest",
+ "reqwest 0.12.28",
  "rlimit",
  "rustc-hash 1.1.0",
  "serde",
@@ -6164,15 +6132,6 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
-dependencies = [
- "windows-targets",
-]
-
-[[package]]
-name = "windows-sys"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets",
 ]
