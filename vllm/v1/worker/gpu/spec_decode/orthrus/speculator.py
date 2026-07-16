@@ -1,25 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Mapping
 from typing import Any
 
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import VllmConfig, get_layers_from_vllm_config, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
-from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import prepare_dflash_inputs
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import get_parallel_drafting_token_id
+from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
 
@@ -69,6 +72,16 @@ class OrthrusSpeculator(DraftModelSpeculator):
         self.query_cudagraph_manager: DFlashCudaGraphManager | None = None
         self.draft_kv_cache_group_id: int = -1
 
+    @property
+    def attn_vllm_config(self) -> VllmConfig:
+        return replace(
+            self.vllm_config,
+            attention_config=replace(
+                self.vllm_config.attention_config,
+                use_non_causal=True,
+            ),
+        )
+
     def load_model(self, target_model: nn.Module) -> None:
         self.model = target_model
         if not hasattr(self.model, "get_top_tokens"):
@@ -105,7 +118,18 @@ class OrthrusSpeculator(DraftModelSpeculator):
         )
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
+        wants_full = cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+        supports_full = (
+            self.attn_cg_support.min_cg_support.value
+            >= AttentionCGSupport.UNIFORM_BATCH.value
+        )
+        if wants_full and not supports_full:
+            logger.warning(
+                "Orthrus draft attention (%s) does not support full CUDA graphs; "
+                "running the draft eagerly.",
+                self.attn_cg_support.min_cg_attn_backend,
+            )
+        if wants_full and supports_full:
             cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
         else:
             cudagraph_mode = CUDAGraphMode.NONE
@@ -115,7 +139,6 @@ class OrthrusSpeculator(DraftModelSpeculator):
             self.device,
             cudagraph_mode,
             decode_query_len=self.num_query_per_req,
-            causal=False,
         )
 
     def capture(self, attn_states: dict | None = None) -> None:
@@ -131,6 +154,7 @@ class OrthrusSpeculator(DraftModelSpeculator):
             self.attn_groups,
             self.kv_cache_config,
             self.max_model_len,
+            causal=False,
             progress_bar_desc="Capturing orthrus CUDA graphs",
         )
 
@@ -139,8 +163,16 @@ class OrthrusSpeculator(DraftModelSpeculator):
         model_state: ModelState,
         kv_cache_config: KVCacheConfig,
         block_tables: BlockTables,
+        target_input_buffers: InputBuffers,
+        target_attn_groups: list[list[AttentionGroup]],
     ) -> None:
-        super().set_attn(model_state, kv_cache_config, block_tables)
+        super().set_attn(
+            model_state,
+            kv_cache_config,
+            block_tables,
+            target_input_buffers,
+            target_attn_groups,
+        )
         draft_groups = [gid for gid, group in enumerate(self.attn_groups) if group]
         assert len(draft_groups) == 1, (
             "Orthrus currently requires all diffusion attention layers to share "
@@ -232,7 +264,7 @@ class OrthrusSpeculator(DraftModelSpeculator):
         num_reqs_padded: int,
         num_tokens_padded: int,
         num_query_per_req: int | None = None,
-        causal: bool = False,
+        causal: bool | Mapping[int, bool] = False,
     ) -> dict[str, Any] | None:
         if not self.draft_attn_layer_names:
             return None
@@ -314,6 +346,7 @@ class OrthrusSpeculator(DraftModelSpeculator):
             self.num_speculative_steps,
             self.max_num_reqs,
             self.max_num_tokens,
+            self.max_model_len,
             sample_bonus_token=True,
         )
 
