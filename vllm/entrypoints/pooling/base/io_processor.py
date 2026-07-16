@@ -182,7 +182,7 @@ class PoolingIOProcessor:
     ) -> PoolingEngineInput:
         if "conversations" in render_params:
             render_params = cast(EncodeChatRenderParams, render_params)
-            (_,), (engine_input,) = self.renderer.render_chat(
+            (_,), engine_input = self.renderer.render_chat(
                 conversations=[render_params["conversations"]],
                 chat_params=render_params["chat_params"],
                 tok_params=render_params["tok_params"],
