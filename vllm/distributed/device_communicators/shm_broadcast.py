@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
+import os
 import pickle
+import shutil
 import sys
 import threading
 import time
@@ -213,6 +215,46 @@ class SpinCondition:
         self.local_notify_socket.send(b"\x00")
 
 
+# POSIX shared memory (used by multiprocessing.shared_memory) is backed by a
+# tmpfs mounted at /dev/shm. tmpfs allocation is lazy: creating a segment larger
+# than the available space succeeds, and the process is later killed by an
+# uncatchable SIGBUS when it faults in pages beyond the limit -- often only under
+# load, e.g. when broadcasting large tensors between tensor-parallel workers.
+# Checking up front lets us fail with an actionable error instead of a crash.
+SHM_PATH = "/dev/shm"
+
+
+def check_shm_free_space(required_bytes: int, shm_path: str = SHM_PATH) -> None:
+    """Raise if ``shm_path`` cannot fit a ``required_bytes`` shared segment.
+
+    Args:
+        required_bytes: Size of the shared-memory segment to be created.
+        shm_path: Mount point backing POSIX shared memory. The check is skipped
+            when it does not exist (e.g. on non-Linux platforms).
+
+    Raises:
+        RuntimeError: If ``required_bytes`` exceeds the free space of
+            ``shm_path``.
+    """
+    if not os.path.isdir(shm_path):
+        return
+    free_bytes = shutil.disk_usage(shm_path).free
+    if required_bytes <= free_bytes:
+        return
+    mib = 1 << 20
+    raise RuntimeError(
+        f"Insufficient space in {shm_path} to allocate the shared-memory "
+        f"ring buffer: {required_bytes / mib:.0f} MiB required but only "
+        f"{free_bytes / mib:.0f} MiB free. vLLM uses POSIX shared memory for "
+        "fast inter-process communication (e.g. between tensor-parallel "
+        f"workers). Increase the size of {shm_path}: for containers pass "
+        "`--shm-size=<size>` or `--ipc=host` (Docker/Podman), or mount a "
+        "larger /dev/shm (e.g. a Kubernetes emptyDir with `medium: Memory` and "
+        "a `sizeLimit`). Otherwise allocation would later fail with an "
+        "unrecoverable SIGBUS."
+    )
+
+
 class ShmRingBuffer:
     def __init__(
         self,
@@ -283,6 +325,7 @@ class ShmRingBuffer:
         if name is None:
             # we are creating a buffer
             self.is_creator = True
+            check_shm_free_space(self.total_bytes_of_buffer)
             self.shared_memory = shared_memory.SharedMemory(
                 create=True, size=self.total_bytes_of_buffer
             )
