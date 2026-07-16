@@ -237,7 +237,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             local_nheads, head_dim, dstate = kv_cache_spec.shapes[1]
             conv_dim_local = kv_cache_spec.shapes[2][1]
             d_inner_local = local_nheads * head_dim
-            ngroups_local = (conv_dim_local - d_inner_local) // (2 * dstate)
+            # The spec post_conv page caches x|B only (C is read fresh from
+            # conv_out), so the width beyond d_inner is ngroups_local * dstate.
+            ngroups_local = (conv_dim_local - d_inner_local) // dstate
+            assert ngroups_local >= 1, (
+                f"invalid ngroups_local={ngroups_local} derived from spec page "
+                f"width {conv_dim_local} (d_inner {d_inner_local}, dstate {dstate})"
+            )
             block_spec = 1 << (max(1, self.max_spec_len) - 1).bit_length()
             # This is a PER-STEP scratch consumed by the scatter on every decode
             # step (eager AND cudagraph), indexed by pid_b in [0, num_decodes).

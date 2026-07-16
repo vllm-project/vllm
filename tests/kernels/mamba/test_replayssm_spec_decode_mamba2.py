@@ -250,7 +250,7 @@ def _run_single_step(
 
     conv_out = _pack_window_conv_out(x[wp:], B[wp:], C[wp:], d_inner, G, N, act_dtype)
     dt_spec = dt[wp:].float()
-    z_spec = z[wp:] if has_z else None
+    z_spec = z[wp:] if z is not None else None
     write_pos = torch.zeros(num_blocks, dtype=torch.int32, device=DEV)
     write_pos[1] = wp
     post_origin = torch.zeros(num_blocks, dtype=torch.int32, device=DEV)
@@ -500,7 +500,7 @@ def _run_rollback(
 
         base_out = []
         for s in range(k):
-            ot = torch.empty(1, H, P, device=DEV, dtype=act_dtype)
+            out_t = torch.empty(1, H, P, device=DEV, dtype=act_dtype)
             selective_state_update(
                 state_base,
                 x[s : s + 1],
@@ -509,13 +509,13 @@ def _run_rollback(
                 Bw[s : s + 1],
                 Cw[s : s + 1],
                 D=D,
-                z=zw[s : s + 1] if has_z else None,
+                z=zw[s : s + 1] if zw is not None else None,
                 dt_bias=dt_bias[:, None].expand(H, P),
                 dt_softplus=True,
                 state_batch_indices=sbi,
-                out=ot,
+                out=out_t,
             )
-            base_out.append(ot.clone())
+            base_out.append(out_t.clone())
             total_accepted += 1
             snapshots[total_accepted] = state_base[1].clone()
         base_out = torch.cat(base_out, dim=0)
@@ -706,4 +706,140 @@ def test_spec_continuous_batching(precision, with_padding):
         assert torch.equal(out_spec[pad], torch.full_like(out_spec[pad], 42.0))
     # non-flush verify leaves every state slot untouched.
     assert torch.equal(state_spec[unused], S0[unused])
+    torch.testing.assert_close(state_spec, S0, rtol=0, atol=0)
+
+
+_TP_SHARD_GEOMETRIES = [
+    pytest.param((32, 64, 128, 2), id="super120b_tp4"),
+    pytest.param((16, 64, 128, 1), id="super120b_tp8"),
+]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
+@pytest.mark.parametrize(
+    "precision",
+    [
+        pytest.param((torch.float32, torch.float32), id="s32_a32"),
+        pytest.param((torch.float32, torch.bfloat16), id="s32_a16"),
+    ],
+)
+@pytest.mark.parametrize("geometry", _TP_SHARD_GEOMETRIES)
+def test_spec_external_bc_pre_builder_shape(precision, geometry):
+    """Multi-row verify with an externally allocated bc_pre scratch, as the
+    engine provides it (fp32, oversized batch dim sliced to the batch), at
+    the TP4/TP8 per-rank shards of Super-120B. Each row's outputs must match
+    its standard-decode oracle; the checkpoint stays untouched."""
+    state_dtype, act_dtype = precision
+    set_random_seed(0)
+    H, P, N, G = geometry
+    d_inner = H * P
+    base_block = 16
+    max_spec_len = 4
+    spec_len = max_spec_len
+    L, buf = _lbt(base_block, max_spec_len)
+    both_fp32 = state_dtype == torch.float32 and act_dtype == torch.float32
+    rtol, atol = _tolerances(both_fp32)
+
+    batch = 3
+    total_slots = 8
+    C = base_block - max_spec_len
+    wps = [C, C // 2, C]  # per-row non-flush fills incl. the tight edge
+
+    A = _tied_A(H, P, N)
+    dt_bias = torch.rand(H, device=DEV) - 4.0
+    D = torch.randn(H, P, device=DEV)
+    sbi = torch.arange(1, 1 + batch, device=DEV, dtype=torch.int32)
+
+    S0 = torch.randn(total_slots, H, P, N, device=DEV, dtype=state_dtype) * 0.1
+    state_spec = S0.clone()
+    post_conv_cache = torch.zeros(
+        total_slots, buf, d_inner + G * N, device=DEV, dtype=act_dtype
+    )
+    dt_cache = torch.zeros(total_slots, H, buf, device=DEV, dtype=torch.float32)
+    write_pos = torch.zeros(total_slots, dtype=torch.int32, device=DEV)
+    post_origin = torch.zeros(total_slots, dtype=torch.int32, device=DEV)
+    is_flush = torch.zeros(total_slots, dtype=torch.int8, device=DEV)
+
+    oracles = []
+    conv_dim = d_inner + 2 * G * N
+    conv_out = torch.zeros(batch * spec_len, conv_dim, device=DEV, dtype=act_dtype)
+    dt_spec = torch.zeros(batch * spec_len, H, device=DEV, dtype=torch.float32)
+    for r in range(batch):
+        wp = wps[r]
+        slot = int(sbi[r].item())
+        T_tot = wp + spec_len
+        x = torch.randn(T_tot, H, P, device=DEV, dtype=act_dtype)
+        dt = torch.randn(T_tot, H, device=DEV, dtype=act_dtype)
+        Bv = torch.randn(T_tot, G, N, device=DEV, dtype=act_dtype)
+        Cv = torch.randn(T_tot, G, N, device=DEV, dtype=act_dtype)
+        oracles.append(
+            _standard_window_oracle(
+                S0_slot=S0[slot],
+                x_all=x,
+                dt_all=dt,
+                B_all=Bv,
+                C_all=Cv,
+                z_all=None,
+                A=A,
+                D=D,
+                dt_bias=dt_bias,
+                dt_softplus=True,
+                wp=wp,
+                spec_len=spec_len,
+                buffer_len=buf,
+                act_dtype=act_dtype,
+            )
+        )
+        _scatter_packed_history(
+            post_conv_cache, dt_cache, slot, x[:wp], Bv[:wp], dt[:wp], d_inner, G, N
+        )
+        write_pos[slot] = wp
+        seg = slice(r * spec_len, (r + 1) * spec_len)
+        conv_out[seg] = _pack_window_conv_out(
+            x[wp:], Bv[wp:], Cv[wp:], d_inner, G, N, act_dtype
+        )
+        dt_spec[seg] = dt[wp:].float()
+
+    # Engine-style external scratch: fp32, oversized batch dim sliced to the
+    # batch, NaN-filled so an unwritten-but-read cell fails loudly.
+    block_spec = 1 << (max_spec_len - 1).bit_length()
+    scratch = torch.full(
+        (batch + 5, G, buf, block_spec),
+        float("nan"),
+        device=DEV,
+        dtype=torch.float32,
+    )
+
+    qsl = torch.arange(
+        0, (batch + 1) * spec_len, spec_len, device=DEV, dtype=torch.int32
+    )
+    out_spec = torch.empty(batch * spec_len, H, P, device=DEV, dtype=act_dtype)
+    selective_state_update_replayssm_spec(
+        state_spec,
+        post_conv_cache,
+        dt_cache,
+        conv_out,
+        dt_spec,
+        A,
+        write_pos=write_pos,
+        post_conv_state_pos=post_origin,
+        is_flush=is_flush,
+        query_start_loc=qsl,
+        state_batch_indices=sbi,
+        max_cache_len=L,
+        max_spec_len=max_spec_len,
+        d_inner=d_inner,
+        ngroups=G,
+        dstate=N,
+        D=D,
+        z=None,
+        dt_bias=dt_bias,
+        dt_softplus=True,
+        out=out_spec,
+        bc_pre=scratch[:batch],
+    )
+
+    for r in range(batch):
+        seg = slice(r * spec_len, (r + 1) * spec_len)
+        torch.testing.assert_close(out_spec[seg], oracles[r], rtol=rtol, atol=atol)
     torch.testing.assert_close(state_spec, S0, rtol=0, atol=0)
