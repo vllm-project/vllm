@@ -175,6 +175,19 @@ torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
                                      int64_t split_k_iters, int64_t thx,
                                      int64_t thy);
 
+// Helion linear ops
+
+// Dispatches to the Helion scaled_mm when a.size(0) <= helion_threshold,
+// otherwise to cutlass_scaled_mm. The Helion branch re-enters Python through
+// the dispatcher (GIL acquisition + dispatch overhead), so only enable it for
+// a.size(0) values covered by the CUDA graph capture range, where the branch
+// is resolved at capture time and the re-entry cost is paid once, not per step.
+void helion_cutlass_hybrid_scaled_mm(
+    torch::stable::Tensor& out, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales,
+    std::optional<torch::stable::Tensor> const& bias, int64_t helion_threshold);
+
 // DSV3 fused A GEMM: conditionally compiled so declaration and impl
 // registration are in the source file (dsv3_fused_a_gemm.cu)
 
