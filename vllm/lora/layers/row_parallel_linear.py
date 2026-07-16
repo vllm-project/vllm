@@ -118,6 +118,14 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         output = self._get_quant_method().apply(self.base_layer, x, bias)
 
+        # NOTE: No layer-level skip here. This fully-sharded (S-LoRA) path runs
+        # an all_reduce below whose participation must be identical across TP
+        # ranks. _num_adapters_with_active_slices is computed from each rank's
+        # local weight shard, so it can differ across ranks and skipping on it
+        # would desync the collective and hang the TP group. Zero-weight
+        # skipping here is handled by the kernel-level slice_active_mask, which
+        # launches symmetrically on every rank.
+
         x = x.view(-1, x.shape[-1])
         output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
         buffer = torch.zeros(
@@ -126,8 +134,15 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
             device=x.device,
         )
 
+        # NOTE: no per-rank skip here — active-slice state is per-rank and
+        # would diverge ranks before the all_reduce below. Only the kernel-
+        # level slice_active_mask is safe (symmetric launch on every rank).
         shrunk_buffer: torch.Tensor | None = self.punica_wrapper.add_shrink(
-            buffer, x, self.lora_a_stacked, 1.0
+            buffer,
+            x,
+            self.lora_a_stacked,
+            1.0,
+            slice_active_mask=self._kernel_slice_mask,
         )
         if not current_platform.can_update_inplace():
             buffer = shrunk_buffer
@@ -150,6 +165,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
             self.output_slices,
             offset_start=offset_start,
             add_input=True,
+            slice_active_mask=self._kernel_slice_mask,
         )
 
         if not current_platform.can_update_inplace():

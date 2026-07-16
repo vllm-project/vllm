@@ -150,10 +150,41 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         )
         self.output_slices = (self.lora_b_stacked[0].shape[2],)
 
+        # Zero-slice early-exit: tracks which (adapter, slice) pairs have
+        # non-zero weights to skip unnecessary kernel launches.
+        self.slice_active_mask = torch.zeros(
+            max_loras,
+            self.n_slices,
+            dtype=torch.int32,
+            device=self.device,
+        )
+        self._num_adapters_with_active_slices = 0
+        # Whether passing slice_active_mask to the kernels can ever skip work.
+        # Only true when some loaded adapter has a partial slice pattern
+        # (>=1 active AND >=1 inactive slice) — the sole case where a per-CTA
+        # mask read skips a CTA. Recomputed on every load/reset. When false
+        # (dense adapters, or n_slices==1 layers), we pass None so the kernels
+        # avoid the per-invocation mask overhead.
+        # Resolved mask handed to the kernels: the mask tensor when a partial
+        # slice pattern makes a per-CTA skip possible, else None (recomputed at
+        # load time, so the hot path is a plain attribute read, not a branch).
+        self._kernel_slice_mask: torch.Tensor | None = None
+
+    def _recompute_mask_can_skip(self) -> None:
+        active_per_adapter = self.slice_active_mask.sum(dim=1)
+        can_skip = bool(
+            ((active_per_adapter > 0) & (active_per_adapter < self.n_slices)).any()
+        )
+        self._kernel_slice_mask = self.slice_active_mask if can_skip else None
+
     def reset_lora(self, index: int):
+        if self.slice_active_mask[index].any():
+            self._num_adapters_with_active_slices -= 1
         for s_index in range(self.n_slices):
             self.lora_a_stacked[s_index][index] = 0
             self.lora_b_stacked[s_index][index] = 0
+        self.slice_active_mask[index] = 0
+        self._recompute_mask_can_skip()
 
     def set_lora(
         self,
@@ -182,6 +213,10 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.lora_b_stacked[0][index, 0, : lora_b.shape[0], : lora_b.shape[1]].copy_(
             lora_b, non_blocking=True
         )
+        if lora_a.any() and lora_b.any():
+            self.slice_active_mask[index, 0] = 1
+            self._num_adapters_with_active_slices += 1
+        self._recompute_mask_can_skip()
 
     def _get_quant_method(self) -> QuantizeMethodBase:
         quant_method = self.base_layer.quant_method
@@ -215,6 +250,15 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     def _apply_lora_to_output(
         self, x: torch.Tensor, output: torch.Tensor
     ) -> torch.Tensor:
+        # Layer-level skip: if no loaded adapter has active slices on this
+        # layer, skip the entire LoRA path. Only in eager mode — with CUDA
+        # graphs the kernel-level slice_active_mask handles skipping.
+        if (
+            self._num_adapters_with_active_slices == 0
+            and not torch.compiler.is_compiling()
+        ):
+            return output
+
         original_shape = output.shape if output.ndim == 3 else None
 
         # In transformers backend, x and output have extra batch dimension like
@@ -225,7 +269,13 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             x = x.flatten(0, 1)
 
         lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_linear(
-            output, x, self.lora_a_stacked, self.lora_b_stacked, 1.0, self.output_slices
+            output,
+            x,
+            self.lora_a_stacked,
+            self.lora_b_stacked,
+            1.0,
+            self.output_slices,
+            slice_active_mask=self._kernel_slice_mask,
         )
         if not current_platform.can_update_inplace():
             output = lora_output

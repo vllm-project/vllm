@@ -35,6 +35,15 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
 
     output = layer._get_quant_method().apply(layer.base_layer, x, bias)
 
+    # NOTE: No layer-level skip here. This fully-sharded (S-LoRA) path runs
+    # collectives (all_gather below, and add_shrink's all_reduce) whose
+    # participation must be identical across TP ranks. _num_adapters_with_
+    # active_slices is computed from each rank's local weight shard, so it can
+    # differ across ranks (an adapter whose non-zero rows land entirely in one
+    # rank's shard). Skipping on it would desync the collectives and hang the
+    # TP group. Zero-weight skipping on this path is handled by the kernel-level
+    # slice_active_mask, which launches symmetrically on every rank.
+
     x = x.view(-1, x.shape[-1])
     output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
 
@@ -54,8 +63,19 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
     )
     buffers.zero_()
 
+    # NOTE: this fully-sharded path must not use any per-rank skip (Python
+    # layer-level or CPU-tensor wrapper-level): the active-slice state is
+    # computed from each rank's local weight shard and can differ across TP
+    # ranks, so a per-rank skip would make one rank shrink while another does
+    # not — feeding inconsistent data into the all_gather below. Only the
+    # kernel-level slice_active_mask is safe here (symmetric launch on every
+    # rank, per-CTA device-tensor skip).
     shrunk_buffers: torch.Tensor | None = layer.punica_wrapper.add_shrink(
-        buffers, x, layer.lora_a_stacked, 1.0
+        buffers,
+        x,
+        layer.lora_a_stacked,
+        1.0,
+        slice_active_mask=layer._kernel_slice_mask,
     )
 
     if not current_platform.can_update_inplace():
@@ -70,6 +90,7 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
         layer.output_slices,
         offset_start=0,
         add_input=True,
+        slice_active_mask=layer._kernel_slice_mask,
     )
 
     if not current_platform.can_update_inplace():
@@ -245,6 +266,16 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             for output_size in self.output_slices
         )
 
+        # Zero-slice early-exit mask for packed/merged layers.
+        self.slice_active_mask = torch.zeros(
+            max_loras,
+            self.n_slices,
+            dtype=torch.int32,
+            device=self.device,
+        )
+        self._num_adapters_with_active_slices = 0
+        self._kernel_slice_mask: torch.Tensor | None = None
+
     def slice_lora_a(
         self, lora_a: list[torch.Tensor | None]
     ) -> list[torch.Tensor | None]:
@@ -322,10 +353,18 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 self.lora_a_stacked[i][
                     index, 0, : lora_a_i.shape[0], : lora_a_i.shape[1]
                 ].copy_(lora_a_i, non_blocking=True)
+                if lora_a_i.any():
+                    self.slice_active_mask[index, i] = 1
             if (lora_b_i := lora_b[i]) is not None:
                 self.lora_b_stacked[i][
                     index, 0, : lora_b_i.shape[0], : lora_b_i.shape[1]
                 ].copy_(lora_b_i, non_blocking=True)
+                if not lora_b_i.any():
+                    self.slice_active_mask[index, i] = 0
+
+        if self.slice_active_mask[index].any():
+            self._num_adapters_with_active_slices += 1
+        self._recompute_mask_can_skip()
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         merged_cls = maybe_get_oot_by_class(MergedColumnParallelLinear)
