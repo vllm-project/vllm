@@ -301,20 +301,19 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         assert swa_metadata.decode_swa_indices is not None
         assert swa_metadata.block_table is not None
 
+        decode_swa_width = swa_metadata.decode_swa_indices.shape[-1]
+        assert num_prefill_tokens == 0 or decode_swa_width == self.window_size
         decode_swa_indices = swa_metadata.decode_swa_indices.reshape(
-            num_decode_tokens, self.window_size
+            num_decode_tokens, decode_swa_width
         )
         decode_compressed_topk_lens = None
         decode_compressed_indices_are_local = False
         decode_is_valid_token = None
 
         if swa_only:
-            assert self.topk_indices_buffer is not None
             compressed_kv_cache = swa_k_cache
             decode_compressed_indices = None
-            prefill_topk_indices = self.topk_indices_buffer[
-                num_decode_tokens:num_tokens, :0
-            ]
+            prefill_topk_indices = decode_swa_indices.new_empty(num_prefill_tokens, 0)
             compressed_block_table = None
             compressed_block_size = swa_metadata.block_size
             top_k = 0
@@ -397,7 +396,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
                 swa_metadata.block_size,
                 compressed_block_table,
                 compressed_block_size,
-                self.window_size,
+                decode_swa_width,
                 self.compress_ratio,
                 top_k,
                 decode_compressed_indices_are_local=decode_compressed_indices_are_local,
@@ -481,8 +480,6 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         # uniform-q batches, and this avoids flattening mixed batches into one call.
         if num_decode_tokens > 0:
             decode_cu = query_start_loc[: num_decodes + 1]
-            decode_cu_cpu = query_start_loc_cpu[: num_decodes + 1]
-            decode_lens_cpu = decode_cu_cpu[1:] - decode_cu_cpu[:-1]
             flashinfer_trtllm_batch_decode_sparse_mla_dsv4(
                 query=query[:num_decode_tokens],
                 swa_kv_cache=swa_k_cache,
@@ -496,7 +493,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
                 bmm2_scale=bmm2_scale,
                 sinks=self.attn_sink,
                 cum_seq_lens_q=decode_cu,
-                max_q_len=int(decode_lens_cpu.max().item()),
+                max_q_len=swa_metadata.max_decode_query_len,
             )
 
         if num_prefill_tokens > 0:

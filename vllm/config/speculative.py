@@ -234,6 +234,15 @@ class SpeculativeConfig:
     synthetic_acceptance_rates. Only valid when rejection_sample_method is 'synthetic'.
     Mutually exclusive with synthetic_acceptance_rates."""
 
+    dspark_enable_confidence_based_verification: bool = True
+    """Whether to enable DSpark confidence-based verification."""
+
+    @property
+    def use_confidence_based_verification(self) -> bool:
+        return (
+            self.method == "dspark" and self.dspark_enable_confidence_based_verification
+        )
+
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
         """Mean acceptance length to unconditional per-position rates, using

@@ -68,7 +68,6 @@ def sync_cudagraph_and_dp_padding(
         uniform_token_counts_across_dp == synced_uniform_token_count
     ):
         synced_uniform_token_count = None
-
     # Dispatch for the final synced values, use num_reqs instead of synced_num_reqs
     # so we don't perform request padding for PIECEWISE graphs.
     # num_active_loras is per-rank and doesn't need cross-rank agreement.
@@ -77,6 +76,7 @@ def sync_cudagraph_and_dp_padding(
         synced_num_tokens,
         synced_uniform_token_count,
         num_active_loras=num_active_loras,
+        max_query_len=desired_batch_desc.max_query_len or 0,
     )
 
     # Update num_tokens_across_dp to reflect padded size.
@@ -92,6 +92,7 @@ def dispatch_cg_and_sync_dp(
     uniform_token_count: int | None,
     dp_size: int,
     dp_rank: int,
+    max_query_len: int | None = None,
     need_eager: bool = False,
     num_active_loras: int = 0,
 ) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
@@ -100,6 +101,7 @@ def dispatch_cg_and_sync_dp(
             cg_mode=CUDAGraphMode.NONE,
             num_tokens=num_tokens,
             num_reqs=num_reqs,
+            max_query_len=max_query_len or None,
             num_active_loras=num_active_loras,
         )
     else:
@@ -112,6 +114,7 @@ def dispatch_cg_and_sync_dp(
             num_tokens,
             uniform_token_count,
             num_active_loras=num_active_loras,
+            max_query_len=max_query_len or 0,
         )
 
     if dp_size == 1:

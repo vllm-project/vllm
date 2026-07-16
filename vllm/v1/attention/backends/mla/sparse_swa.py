@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from typing import ClassVar, cast
+from typing import cast
 
 import torch
 
@@ -20,6 +20,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.flashmla import FlashMLASchedMeta, get_mla_metadata
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     KVCacheSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
@@ -178,6 +179,7 @@ class DeepseekSparseSWAMetadata:
     num_prefills: int = 0
     num_decode_tokens: int = 0
     num_prefill_tokens: int = 0
+    max_decode_query_len: int = 1
 
     # Pre-computed prefill metadata shared across all DeepseekV4 attention layers.
     prefill_seq_lens: torch.Tensor | None = None
@@ -293,7 +295,18 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
     """
 
     reorder_batch_threshold: int | None = None
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> AttentionCGSupport:
+        if current_platform.is_cuda() and current_platform.is_device_capability_family(
+            100
+        ):
+            return AttentionCGSupport.ALWAYS
+        return AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -320,6 +333,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             2 if (spec_config is not None and spec_config.parallel_drafting) else 1
         )
         self.decode_threshold = 1 + spec_mult * self.num_speculative_tokens
+        self.max_decode_query_len = 1 + self.num_speculative_tokens
         self.reorder_batch_threshold = None
 
         hf_config = self.vllm_config.model_config.hf_config
@@ -537,6 +551,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             num_prefills=num_prefills,
             num_decode_tokens=num_decode_tokens,
             num_prefill_tokens=num_prefill_tokens,
+            max_decode_query_len=self.max_decode_query_len,
             tile_sched_swaonly=tile_sched[_LAYER_TYPE_SWAONLY],
             tile_sched_c4a=tile_sched[_LAYER_TYPE_C4A],
             tile_sched_c128a=tile_sched[_LAYER_TYPE_C128A],
@@ -678,6 +693,13 @@ def _compute_swa_indices_and_lens_kernel(
     is_valid = tl.load(is_valid_token_ptr + token_idx)
     if not is_valid:
         tl.store(swa_lens_ptr + pid, 0)
+        for i in range(0, window_size, TRITON_BLOCK_SIZE):
+            offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
+            tl.store(
+                swa_indices_ptr + pid * swa_indices_stride + offset,
+                -1,
+                mask=offset < window_size,
+            )
         return
 
     req_idx = tl.load(token_to_req_indices_ptr + token_idx)
@@ -744,6 +766,13 @@ def _compute_dspark_noncausal_swa_indices_kernel(
     is_valid = tl.load(is_valid_token_ptr + token_idx)
     if not is_valid:
         tl.store(swa_lens_ptr + pid, 0)
+        for i in range(0, index_width, TRITON_BLOCK_SIZE):
+            offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
+            tl.store(
+                swa_indices_ptr + pid * swa_indices_stride + offset,
+                -1,
+                mask=offset < index_width,
+            )
         return
 
     req_idx = tl.load(token_to_req_indices_ptr + token_idx)

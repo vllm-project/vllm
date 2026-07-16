@@ -27,6 +27,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import round_up
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
@@ -53,6 +54,7 @@ class BatchExecutionDescriptor:
     num_tokens: int
     num_reqs: int | None  # None means no request padding is needed (PIECEWISE graphs)
     uniform_token_count: int | None = None
+    max_query_len: int | None = None
     num_active_loras: int = 0
 
 
@@ -74,6 +76,7 @@ def _is_compatible(
     num_tokens: int,
     uniform_token_count: int | None,
     num_active_loras: int,
+    max_query_len: int,
 ) -> bool:
     # desc.uniform_token_count=None (PIECEWISE) can handle any uniform_token_count
     # desc.num_reqs=None means no request padding needed (PIECEWISE)
@@ -82,6 +85,7 @@ def _is_compatible(
             desc.uniform_token_count is None
             or desc.uniform_token_count == uniform_token_count
         )
+        and (desc.max_query_len is None or desc.max_query_len >= max_query_len)
         and (desc.num_reqs is None or desc.num_reqs >= num_reqs)
         and desc.num_tokens >= num_tokens
         and desc.num_active_loras == num_active_loras
@@ -112,6 +116,8 @@ class CudaGraphManager:
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
+        adaptive_verification: bool = False,
+        time_graphs: bool = False,
     ):
         self.vllm_config = vllm_config
         self.device = device
@@ -120,6 +126,9 @@ class CudaGraphManager:
         assert self.compilation_config is not None
         self.cudagraph_mode = cudagraph_mode
         self.decode_query_len = decode_query_len
+        self.adaptive_verification = adaptive_verification
+        self.time_graphs = time_graphs
+        self.graph_timings: dict[BatchExecutionDescriptor, float] = {}
 
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -222,8 +231,8 @@ class CudaGraphManager:
         for num_tokens, num_active_loras in product(
             capture_sizes, self.lora_capture_cases
         ):
-            # Capture uniform decode specfifc graphs if required
-            #  (i.e. separate decode routine)
+            # Capture decode-specific graphs when decode and mixed batches use
+            # separate routines.
             if separate_decode_routine and decode_mode:
                 for decode_query_len in decode_query_lens:
                     rounded_num_tokens = round_up(num_tokens, decode_query_len)
@@ -240,11 +249,18 @@ class CudaGraphManager:
                         cg_mode=decode_mode,
                         num_tokens=rounded_num_tokens,
                         num_reqs=rounded_num_reqs,
-                        uniform_token_count=decode_query_len,
+                        uniform_token_count=(
+                            None if self.adaptive_verification else decode_query_len
+                        ),
+                        max_query_len=(
+                            self.decode_query_len
+                            if self.adaptive_verification
+                            else None
+                        ),
                         num_active_loras=num_active_loras,
                     )
 
-                    # avoid duplicate graphs
+                    # Avoid duplicate graphs.
                     if desc not in descs_by_mode[decode_mode]:
                         descs_by_mode[decode_mode].append(desc)
                         descs_by_token_lora[
@@ -296,6 +312,7 @@ class CudaGraphManager:
         self,
         create_forward_fn: CreateForwardFn,
         progress_bar_desc: str = "Capturing CUDA graphs",
+        prepare_timing: Callable[[BatchExecutionDescriptor], None] | None = None,
     ) -> None:
         """Capture CUDA graphs.
 
@@ -307,6 +324,7 @@ class CudaGraphManager:
                 that perform lazy metadata initialization (e.g. FlashMLA),
                 FULL cudagraph capture requires distinct metadatas for warmup
                 and capture.
+            prepare_timing: Optional input preparation before timed replays.
         """
         with graph_capture(device=self.device):
             # Capture in order: PIECEWISE first, then FULL. PIECEWISE has larger
@@ -351,6 +369,20 @@ class CudaGraphManager:
                             get_offloader().join_after_forward()
                         self.graphs[desc] = graph
                         compilation_counter.num_cudagraph_captured += 1
+        # Collective graph addresses are registered when graph_capture exits.
+        if self.time_graphs:
+            start = torch.Event(enable_timing=True)
+            end = torch.Event(enable_timing=True)
+            for desc, graph in self.graphs.items():
+                create_forward_fn(desc, warmup=False)
+                if prepare_timing is not None:
+                    prepare_timing(desc)
+                start.record()
+                graph.replay()
+                end.record()
+                with gpu_sync_allowed():
+                    end.synchronize()
+                self.graph_timings[desc] = start.elapsed_time(end)
         self._graphs_captured = True
 
     def dispatch(
@@ -359,6 +391,7 @@ class CudaGraphManager:
         num_tokens: int,
         uniform_token_count: int | None,
         num_active_loras: int,
+        max_query_len: int = 0,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
 
@@ -372,6 +405,7 @@ class CudaGraphManager:
                     num_tokens,
                     uniform_token_count,
                     effective_loras,
+                    max_query_len,
                 ):
                     return desc
         return BatchExecutionDescriptor(
@@ -420,6 +454,8 @@ class ModelCudaGraphManager(CudaGraphManager):
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
+        adaptive_verification: bool = False,
+        time_graphs: bool = False,
     ):
         super().__init__(
             vllm_config,
@@ -427,6 +463,8 @@ class ModelCudaGraphManager(CudaGraphManager):
             cudagraph_mode,
             decode_query_len,
             lora_capture_cases=lora_capture_cases,
+            adaptive_verification=adaptive_verification,
+            time_graphs=time_graphs,
         )
         self.hidden_states: torch.Tensor | None = None
         self.aux_hidden_states: list[torch.Tensor] = []
@@ -555,7 +593,11 @@ class ModelCudaGraphManager(CudaGraphManager):
 
             return forward_fn
 
-        super().capture(create_forward_fn, progress_bar_desc)
+        super().capture(
+            create_forward_fn,
+            progress_bar_desc,
+            lambda desc: input_buffers.is_padding[: desc.num_tokens].zero_(),
+        )
 
     def run_fullgraph(
         self, desc: BatchExecutionDescriptor
