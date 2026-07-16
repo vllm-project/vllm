@@ -354,14 +354,17 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
         elif contains_type(type_hints, set):
             kwargs[name].update(collection_to_kwargs(type_hints, set))
         elif contains_type(type_hints, int):
+            # Arguments that accept human-readable integer strings (e.g., 1K, 2M, 1G)
+            human_readable_int_args = {
+                "max_num_batched_tokens",
+                "max_num_scheduled_tokens",
+                "kv_cache_memory_bytes",
+                "safetensors_prefetch_block_size",
+            }
             if name == "max_model_len":
                 kwargs[name]["type"] = human_readable_int_or_auto
                 kwargs[name]["help"] += f"\n\n{human_readable_int_or_auto.__doc__}"
-            elif name in (
-                "max_num_batched_tokens",
-                "kv_cache_memory_bytes",
-                "safetensors_prefetch_block_size",
-            ):
+            elif name in human_readable_int_args:
                 kwargs[name]["type"] = human_readable_int
                 kwargs[name]["help"] += f"\n\n{human_readable_int.__doc__}"
             else:
@@ -523,6 +526,7 @@ class EngineArgs:
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
     max_num_batched_tokens: int | None = None
+    max_num_scheduled_tokens: int | None = None
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
     max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
@@ -689,6 +693,7 @@ class EngineArgs:
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
+    prefix_match_unit: int | None = get_field(CacheConfig, "prefix_match_unit")
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
 
     mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
@@ -1191,6 +1196,9 @@ class EngineArgs:
             "--mamba-block-size", **cache_kwargs["mamba_block_size"]
         )
         cache_group.add_argument(
+            "--prefix-match-unit", **cache_kwargs["prefix_match_unit"]
+        )
+        cache_group.add_argument(
             "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
         )
         cache_group.add_argument(
@@ -1409,6 +1417,13 @@ class EngineArgs:
             "--max-num-batched-tokens",
             **{
                 **scheduler_kwargs["max_num_batched_tokens"],
+                "default": None,
+            },
+        )
+        scheduler_group.add_argument(
+            "--max-num-scheduled-tokens",
+            **{
+                **scheduler_kwargs["max_num_scheduled_tokens"],
                 "default": None,
             },
         )
@@ -1739,6 +1754,10 @@ class EngineArgs:
         if self.speculative_config is None:
             return None
 
+        self.speculative_config = {
+            k.replace("-", "_"): v for k, v in self.speculative_config.items()
+        }
+
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine
         # config.
@@ -1888,6 +1907,7 @@ class EngineArgs:
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
+            prefix_match_unit=self.prefix_match_unit,
             mamba_cache_mode=self.mamba_cache_mode,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
@@ -2151,6 +2171,7 @@ class EngineArgs:
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
+            max_num_scheduled_tokens=self.max_num_scheduled_tokens,
             max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
@@ -2481,7 +2502,11 @@ class EngineArgs:
         self, model_config: ModelConfig
     ) -> None:
         default_chunked_prefill = model_config.is_chunked_prefill_supported
-        default_prefix_caching = model_config.is_prefix_caching_supported
+        # Hybrid models support prefix caching but keep it opt-in for now
+        # while the feature matures.
+        default_prefix_caching = (
+            model_config.is_prefix_caching_supported and not model_config.is_hybrid
+        )
 
         if self.enable_chunked_prefill is None:
             self.enable_chunked_prefill = default_chunked_prefill

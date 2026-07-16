@@ -168,6 +168,21 @@ class KVCacheEvictionEvent:
 
 
 @dataclass
+class SchedulerIterationDetails:
+    """Scheduler-side details for one engine iteration."""
+
+    iteration_index: int
+    num_ctx_requests: int
+    num_ctx_tokens: int
+    num_generation_requests: int
+    num_generation_tokens: int
+    elapsed_ms: float
+    num_encoder_inputs: int = 0
+    num_encoder_output_tokens: int = 0
+    is_dummy: bool = False
+
+
+@dataclass
 class SchedulerStats:
     """Stats associated with the scheduler."""
 
@@ -181,6 +196,7 @@ class SchedulerStats:
     current_wave: int = 0
 
     kv_cache_usage: float = 0.0
+    iteration_details: SchedulerIterationDetails | None = None
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
     connector_prefix_cache_stats: PrefixCacheStats | None = None

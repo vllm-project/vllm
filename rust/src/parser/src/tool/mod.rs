@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Streaming tool parsers for chat completions.
 
 #[macro_use]
@@ -6,7 +9,7 @@ mod deepseek_dsml;
 pub(crate) mod deepseek_json;
 mod glm_xml;
 mod hy_v3;
-mod json;
+pub(crate) mod json;
 mod kimi_k2;
 mod minimax_m2;
 mod minimax_m3;

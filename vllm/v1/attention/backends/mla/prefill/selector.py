@@ -134,7 +134,7 @@ def get_mla_prefill_backend(
                 f"Reason: {invalid_reasons}"
             )
         assert backend_cls is not None
-        logger.info("Using %s MLA prefill backend.", selected_backend.name)
+        logger.info_once("Using %s MLA prefill backend.", selected_backend.name)
         return backend_cls
 
     return _auto_select_mla_prefill_backend(
