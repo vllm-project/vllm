@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -25,6 +26,7 @@ from vllm.utils.torch_utils import is_quantized_kv_cache, np_to_pinned_tensor
 from vllm.v1.attention.backend import AttentionMetadata, AttentionMetadataBuilder
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -429,29 +431,57 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             offset += q_len
         return topk_per_req
 
+    @staticmethod
+    def _remap_topk_to_ranges(
+        topk_per_req: list[torch.Tensor],
+        range_starts: list[int] | torch.Tensor,
+        range_lens: list[int],
+    ) -> list[torch.Tensor]:
+        remapped = []
+        for topk, start, length in zip(topk_per_req, range_starts, range_lens):
+            valid = (topk >= start) & (topk < start + length)
+            remapped.append(torch.where(valid, topk - start, -1))
+        return remapped
+
+    def _project_kv(
+        self, kv_c_normed: torch.Tensor, k_pe: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
+            -1,
+            self.num_heads,
+            self.qk_nope_head_dim + self.v_head_dim,
+        )
+        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        return self._concat_k_nope_k_pe(k_nope, k_pe), v
+
     def _run_masked_mha(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        prefill_metadata: MLACommonPrefillMetadata,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
         topk_per_req: list[torch.Tensor],
         q_lens: list[int],
-    ) -> torch.Tensor:
+        k_lens: list[int],
+        causal: bool,
+        return_softmax_lse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from vllm.model_executor.layers.attention.sparse_mla_mask import (
             dense_mask_mod,
             dense_mask_to_block_sparse,
         )
         from vllm.vllm_flash_attn import flash_attn_varlen_func
 
-        max_seq_len = prefill_metadata.max_query_len
-        tile_m = 128 if max_seq_len <= 128 else 256
+        tile_m = 128 if max_seqlen_q <= 128 else 256
         tile_n = 128
-        padded_q_len = triton.cdiv(max_seq_len, tile_m) * tile_m
+        padded_q_len = triton.cdiv(max_seqlen_q, tile_m) * tile_m
         padded_k_len = (
-            triton.cdiv(max_seq_len, tile_n) * tile_n
+            triton.cdiv(max_seqlen_k, tile_n) * tile_n
             if envs.VLLM_SPARSE_MLA_USE_BLOCK_SPARSE
-            else max_seq_len
+            else max_seqlen_k
         )
         dense_mask = _build_topk_mask(
             topk_per_req,
@@ -464,12 +494,12 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             "q": q,
             "k": k,
             "v": v,
-            "cu_seqlens_q": prefill_metadata.query_start_loc,
-            "cu_seqlens_k": prefill_metadata.query_start_loc,
-            "max_seqlen_q": max_seq_len,
-            "max_seqlen_k": max_seq_len,
+            "cu_seqlens_q": cu_seqlens_q,
+            "cu_seqlens_k": cu_seqlens_k,
+            "max_seqlen_q": max_seqlen_q,
+            "max_seqlen_k": max_seqlen_k,
             "softmax_scale": self.scale,
-            "return_softmax_lse": False,
+            "return_softmax_lse": return_softmax_lse,
             "fa_version": 4,
             "mask_mod": dense_mask_mod,
             "aux_tensors": [dense_mask],
@@ -478,19 +508,108 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
 
         if envs.VLLM_SPARSE_MLA_USE_BLOCK_SPARSE:
             kwargs["causal"] = False
+            # FA4 may switch to a 64-wide K tile when its split-K heuristic
+            # activates, but the block-sparse metadata below uses 128-wide
+            # tiles. Split-K is not supported with that fixed sparse layout.
+            kwargs["num_splits"] = 1
             kwargs["block_sparse_tensors"] = dense_mask_to_block_sparse(
                 dense_mask,
-                max_seqlen_q=max_seq_len,
-                max_seqlen_k=max_seq_len,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_k,
                 seq_lens_q=q_lens,
-                seq_lens_k=q_lens,
+                seq_lens_k=k_lens,
                 tile_m=tile_m,
                 tile_n=tile_n,
             )
         else:
-            kwargs["causal"] = True
+            kwargs["causal"] = causal
 
         return flash_attn_varlen_func(**kwargs)
+
+    def _compute_context_mha(
+        self,
+        q: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        prefill_metadata: MLACommonPrefillMetadata,
+        k_scale: torch.Tensor,
+        q_lens: list[int],
+        topk_per_req: list[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.dcp_world_size > 1:
+            raise NotImplementedError(
+                "Masked MHA with context does not yet support decode context "
+                "parallelism"
+            )
+
+        chunked_context = prefill_metadata.chunked_context
+        assert chunked_context is not None
+        output = None
+        output_lse = None
+        merge_output = None
+        merge_output_lse = None
+        workspace = chunked_context.workspace
+
+        for i, toks in enumerate(chunked_context.seq_tot):
+            if toks == 0:
+                continue
+            ops.gather_and_maybe_dequant_cache(
+                src_cache=kv_c_and_k_pe_cache,
+                dst=workspace,
+                block_table=prefill_metadata.block_table,
+                cu_seq_lens=chunked_context.cu_seq_lens[i],
+                token_to_seq=chunked_context.token_to_seq[i],
+                num_tokens=chunked_context.chunk_total_token[i],
+                kv_cache_dtype=self.kv_cache_dtype,
+                scale=k_scale,
+                seq_starts=chunked_context.starts[i],
+            )
+
+            chunk_kv_c = workspace[:toks, : self.kv_lora_rank]
+            chunk_k_pe = workspace[:toks, self.kv_lora_rank :].unsqueeze(1)
+            k, v = self._project_kv(chunk_kv_c, chunk_k_pe)
+            chunk_lens = chunked_context.seq_lens[i].tolist()
+            chunk_topk = self._remap_topk_to_ranges(
+                topk_per_req,
+                chunked_context.starts[i],
+                chunk_lens,
+            )
+            attn_out, lse = self._run_masked_mha(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=prefill_metadata.query_start_loc,
+                cu_seqlens_k=chunked_context.cu_seq_lens[i],
+                max_seqlen_q=prefill_metadata.max_query_len,
+                max_seqlen_k=chunked_context.max_seq_lens[i],
+                topk_per_req=chunk_topk,
+                q_lens=q_lens,
+                k_lens=chunk_lens,
+                causal=False,
+                return_softmax_lse=True,
+            )
+
+            if output is None:
+                output = attn_out
+                output_lse = lse
+            else:
+                assert output_lse is not None
+                if merge_output is None:
+                    merge_output = torch.empty_like(output)
+                    merge_output_lse = torch.empty_like(output_lse)
+                assert merge_output_lse is not None
+                merge_attn_states(
+                    output=merge_output,
+                    output_lse=merge_output_lse,
+                    prefix_output=output,
+                    prefix_lse=output_lse,
+                    suffix_output=attn_out,
+                    suffix_lse=lse,
+                )
+                output, merge_output = merge_output, output
+                output_lse, merge_output_lse = merge_output_lse, output_lse
+
+        assert output is not None and output_lse is not None
+        return output, output_lse
 
     def forward_mha(  # type: ignore[override]
         self,
@@ -523,7 +642,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         assert self.masked_mha_available
         prefill_metadata = attn_metadata.prefill  # type: ignore[attr-defined]
         assert prefill_metadata is not None
-        assert prefill_metadata.chunked_context is None
         assert prefill_metadata.query_lens_cpu is not None
         assert self.topk_indices_buffer is not None
 
@@ -534,21 +652,55 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         ]
         topk_per_req = self._slice_topk_per_req(topk_all, q_lens)
 
-        kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
-            -1,
-            self.num_heads,
-            self.qk_nope_head_dim + self.v_head_dim,
+        k, v = self._project_kv(kv_c_normed, k_pe)
+        chunked_context = prefill_metadata.chunked_context
+        if chunked_context is None:
+            attn_out = self._run_masked_mha(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=prefill_metadata.query_start_loc,
+                cu_seqlens_k=prefill_metadata.query_start_loc,
+                max_seqlen_q=prefill_metadata.max_query_len,
+                max_seqlen_k=prefill_metadata.max_query_len,
+                topk_per_req=topk_per_req,
+                q_lens=q_lens,
+                k_lens=q_lens,
+                causal=True,
+            )
+            assert isinstance(attn_out, torch.Tensor)
+            output.copy_(attn_out[..., : self.v_head_dim].flatten(start_dim=-2))
+            return
+
+        context_lens = chunked_context.seq_lens.sum(dim=0).tolist()
+        suffix_topk = self._remap_topk_to_ranges(topk_per_req, context_lens, q_lens)
+        suffix_output, suffix_lse = self._run_masked_mha(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=prefill_metadata.query_start_loc,
+            cu_seqlens_k=prefill_metadata.query_start_loc,
+            max_seqlen_q=prefill_metadata.max_query_len,
+            max_seqlen_k=prefill_metadata.max_query_len,
+            topk_per_req=suffix_topk,
+            q_lens=q_lens,
+            k_lens=q_lens,
+            causal=True,
+            return_softmax_lse=True,
         )
-        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        k = self._concat_k_nope_k_pe(k_nope, k_pe)
-        attn_out = self._run_masked_mha(
-            q,
-            k,
-            v,
-            prefill_metadata,
-            topk_per_req,
-            q_lens,
+        context_output, context_lse = self._compute_context_mha(
+            q=q,
+            kv_c_and_k_pe_cache=kv_c_and_k_pe_cache,
+            prefill_metadata=prefill_metadata,
+            k_scale=k_scale,
+            q_lens=q_lens,
+            topk_per_req=topk_per_req,
         )
-        if isinstance(attn_out, tuple):
-            attn_out = attn_out[0]
-        output.copy_(attn_out[..., : self.v_head_dim].flatten(start_dim=-2))
+        merge_attn_states(
+            output=output.view(-1, self.num_heads, self.v_head_dim),
+            prefix_output=context_output[..., : self.v_head_dim],
+            prefix_lse=context_lse,
+            suffix_output=suffix_output[..., : self.v_head_dim],
+            suffix_lse=suffix_lse,
+            prefill_tokens_with_context=chunked_context.prefill_tokens_with_context,
+        )
