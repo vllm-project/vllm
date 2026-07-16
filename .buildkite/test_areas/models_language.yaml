@@ -113,6 +113,7 @@ steps:
     - pytest -v -s models/language/generation_ppl_test
   mirror:
     amd:
+      dind: false
       device: mi300_1
       depends_on:
       - image-build-amd
@@ -165,6 +166,7 @@ steps:
     - pytest -v -s models/language/pooling_mteb_test
   mirror:
     amd:
+      dind: false
       device: mi300_1
       timeout_in_minutes: 100
       depends_on:

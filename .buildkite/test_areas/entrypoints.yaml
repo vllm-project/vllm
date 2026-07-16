@@ -15,6 +15,7 @@ steps:
   - pytest -v -s entrypoints/weight_transfer
   mirror:
     amd:
+      dind: false
       device: mi300_1
       depends_on:
       - image-build-amd
@@ -129,6 +130,7 @@ steps:
   - pytest -v -s entrypoints/openai/responses
   mirror:
     amd:
+      dind: false
       device: mi300_1
       depends_on:
       - image-build-amd
@@ -158,6 +160,7 @@ steps:
   - pytest -v -s entrypoints/multimodal
   mirror:
     amd:
+      dind: false
       device: mi300_1
       depends_on:
       - image-build-amd

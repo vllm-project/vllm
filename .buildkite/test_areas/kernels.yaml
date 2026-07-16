@@ -287,6 +287,7 @@ steps:
   parallelism: 2
   mirror:
     amd:
+      dind: false
       device: mi300_1
       timeout_in_minutes: 50
       depends_on:

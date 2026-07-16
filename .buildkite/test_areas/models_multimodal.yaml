@@ -96,6 +96,7 @@ steps:
     - pytest -v -s models/multimodal/processing/test_tensor_schema.py
   mirror:
     amd:
+      dind: false
       device: mi300_1
       depends_on:
       - image-build-amd
@@ -151,6 +152,7 @@ steps:
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
   mirror:
     amd:
+      dind: false
       device: mi300_1
       depends_on:
       - image-build-amd
@@ -166,6 +168,7 @@ steps:
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
   mirror:
     amd:
+      dind: false
       device: mi300_1
       depends_on:
       - image-build-amd
