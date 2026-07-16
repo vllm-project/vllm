@@ -25,6 +25,7 @@ from vllm.models.inkling.nvidia.ops.fa4_rel_attention import (
     inkling_fa4_rel_attention,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 
 _cap = current_platform.get_device_capability() if current_platform.is_cuda() else None
 
@@ -58,6 +59,34 @@ def test_split_packed_kv_cache():
     torch.testing.assert_close(value_cache, attention.kv_cache[..., 8:].transpose(1, 2))
 
 
+def test_num_splits_hopper_is_unsplit(monkeypatch):
+    monkeypatch.setattr(
+        current_platform,
+        "get_device_capability",
+        lambda: DeviceCapability(major=9, minor=0),
+    )
+    assert (
+        inkling_fa4_num_splits(
+            is_local=False,
+            batch_size=1,
+            max_query_len=1,
+            num_heads=16,
+            num_kv_heads=2,
+            max_kv_len=1_048_576,
+        )
+        == 1
+    )
+
+
+@pytest.fixture
+def blackwell_platform(monkeypatch):
+    monkeypatch.setattr(
+        current_platform,
+        "get_device_capability",
+        lambda: DeviceCapability(major=10, minor=0),
+    )
+
+
 @pytest.mark.parametrize(
     ("batch_size", "max_query_len", "expected"),
     [
@@ -68,7 +97,7 @@ def test_split_packed_kv_cache():
         (1, 2048, (1, 1, 1, 1)),
     ],
 )
-def test_num_splits_all_tp(batch_size, max_query_len, expected):
+def test_num_splits_all_tp(blackwell_platform, batch_size, max_query_len, expected):
     actual = tuple(
         inkling_fa4_num_splits(
             is_local=False,
@@ -103,7 +132,7 @@ def test_num_splits_local_is_unsplit(tp):
     [(8192, 32), (65536, 64), (1048576, 128)],
 )
 @pytest.mark.parametrize("tp", [4, 8])
-def test_num_splits_long_context_bound(tp, max_kv_len, expected):
+def test_num_splits_long_context_bound(blackwell_platform, tp, max_kv_len, expected):
     assert (
         inkling_fa4_num_splits(
             is_local=False,

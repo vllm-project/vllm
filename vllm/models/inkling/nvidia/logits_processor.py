@@ -15,7 +15,7 @@ whether an lm_head LoRA is attached:
   LoRA path: run the wrapper's ``_get_logits`` (base logits + the lm_head LoRA
   delta), then divide the full logits by the multiplier so the delta is scaled
   too. muP thus composes with the LoRA delta, with the dispatch as the only
-  model-side branching.
+model-side branching.
 """
 
 from __future__ import annotations

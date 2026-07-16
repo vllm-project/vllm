@@ -400,6 +400,7 @@ mod tests {
     use super::{CONTENT_TEXT, CONTENT_THINKING, InklingUnifiedParser, MESSAGE_MODEL};
     use crate::tool::Tool;
     use crate::unified::{UnifiedParser, UnifiedParserEvent, UnifiedParserOutput};
+    use thiserror_ext::AsReport;
     use vllm_tokenizer::Tokenizer;
 
     struct FakeTokenizer;
@@ -706,7 +707,7 @@ mod tests {
 
         let error = parser.finish().unwrap_err();
 
-        assert!(error.to_string().contains("incomplete Inkling tool call"));
+        assert!(error.as_report().to_string().contains("incomplete Inkling tool call"));
     }
 
     #[test]
@@ -716,7 +717,7 @@ mod tests {
             .parse_chunk("<|content_invoke_tool_json|>{\"name\":\"get_weather\",\"args\":42")
             .unwrap_err();
 
-        assert!(error.to_string().contains("JSON object argument"));
+        assert!(error.as_report().to_string().contains("JSON object argument"));
     }
 
     #[test]
@@ -762,6 +763,6 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(error.to_string().contains(CONTENT_THINKING));
+        assert!(error.as_report().to_string().contains(CONTENT_THINKING));
     }
 }

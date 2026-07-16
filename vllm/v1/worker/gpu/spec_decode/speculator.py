@@ -174,6 +174,12 @@ class DraftModelSpeculator(BaseSpeculator):
                 num_unpadded_tokens,
             )
 
+    @property
+    def attn_vllm_config(self) -> VllmConfig:
+        """Config for the draft's attention metadata builders. Overridden by
+        speculators whose attention mode differs from the target's."""
+        return self.vllm_config
+
     def set_attn(
         self,
         model_state: ModelState,
@@ -184,9 +190,9 @@ class DraftModelSpeculator(BaseSpeculator):
     ) -> None:
         self.model_state = model_state
         self.kv_cache_config = kv_cache_config
-        self.attn_groups, _, _ = init_attn_backend(
+        self.attn_groups, self.attn_cg_support, _ = init_attn_backend(
             kv_cache_config,
-            self.vllm_config,
+            self.attn_vllm_config,
             self.device,
             active_layer_names=self.draft_attn_layer_names,
         )

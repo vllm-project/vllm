@@ -683,6 +683,34 @@ class KVCacheManager:
             ids.extend(mgr.take_new_block_ids())
         return ids
 
+    def get_zeroing_block_ids_in_range(
+        self, request_id: str, start_token: int, end_token: int
+    ) -> list[int]:
+        """The request's block ids covering [start_token, end_token), from
+        the groups whose new blocks are zeroed by the worker."""
+        ids: list[int] = []
+        for mgr in self.coordinator.single_type_managers:
+            if mgr.records_new_block_ids:
+                start_idx = start_token // mgr.block_size
+                end_idx = cdiv(end_token, mgr.block_size)
+                blocks = mgr.req_to_blocks[request_id]
+                ids.extend(blk.block_id for blk in blocks[start_idx:end_idx])
+        return ids
+
+    def record_blocks_for_zeroing(self, request_id: str, start_token: int) -> None:
+        """Re-record the request's blocks from start_token onwards for
+        zeroing, e.g. blocks a failed async KV load left unwritten.
+
+        start_token must be block-aligned: zeroing a partially-valid block
+        would wipe its valid prefix.
+        """
+        for mgr in self.coordinator.single_type_managers:
+            if mgr.records_new_block_ids:
+                assert start_token % mgr.block_size == 0
+                start_idx = start_token // mgr.block_size
+                blocks = mgr.req_to_blocks[request_id]
+                mgr.new_block_ids.extend(blk.block_id for blk in blocks[start_idx:])
+
     def take_kv_cache_block_copies(
         self,
     ) -> tuple[list[KVCacheBlockCopy], list[KVCacheBlock]]:

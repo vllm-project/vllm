@@ -19,10 +19,10 @@ why this needs no decode-vs-prefill split and is valid for prefill / decode /
 spec alike.
 
 All kernels address the cache purely by ``(slot, absolute_position)`` and
-allocate nothing inside the captured region; their grids depend only on the
-token count (``fused_sconv`` on a fixed token/channel tiling), so the same
-path replays correctly under eager, breakable PIECEWISE, and FULL cudagraphs
-without any data-dependent shape or branch.
+  allocate nothing inside the captured region; their grids depend only on the
+  token count (``fused_sconv`` on a fixed token/channel tiling), so the same
+ decode path replays correctly under a full CUDA graph without any
+ data-dependent shape or branch.
 """
 
 from __future__ import annotations
@@ -167,8 +167,8 @@ def fused_sconv(
     """Single-launch insert + depthwise causal conv1d over the paged cache.
 
     Reads same-forward taps from ``x`` and pre-forward taps from the cache, so
-    it is race-free in one launch for prefill / decode / spec and cudagraph-safe
-    under eager / piecewise / full capture.
+    it is race-free in one launch for prefill / decode / spec and supports full
+    CUDA-graph capture for decode.
     """
     T = x.shape[0]
     out = torch.empty_like(x)

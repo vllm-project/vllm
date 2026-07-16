@@ -218,12 +218,14 @@ class InklingGate(nn.Module):
             torch.empty(padded_experts, d_model), requires_grad=False
         )
         set_weight_attrs(self.weight, {"weight_loader": self._load_weight})
+        self.global_scale: Parameter | None
         if use_global_scale:
             self.global_scale = Parameter(
                 torch.empty(1, dtype=torch.float32), requires_grad=False
             )
         else:
             self.global_scale = None
+        self.bias: Parameter | None
         if use_gate_bias:
             self.bias = Parameter(
                 torch.empty(n_routed_experts, dtype=torch.float32),
@@ -587,9 +589,9 @@ class InklingMoE(nn.Module):
             lambda: self.sink_experts(x, gammas),
             self._sink_events[0],
             self._sink_events[1],
-            self._sink_stream,
-            enable_parallel=num_tokens
-            <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD,
+            self._sink_stream
+            if num_tokens <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
+            else None,
         )
         self._routed_sel = None
 

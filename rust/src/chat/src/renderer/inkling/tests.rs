@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use expect_test::{ExpectFile, expect_file};
 use serde_json::json;
+use thiserror_ext::AsReport;
 use vllm_text::tokenizer::Tokenizer;
 
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
@@ -321,7 +322,7 @@ fn rejects_out_of_range_reasoning_effort() {
             .insert("reasoning_effort".to_string(), json!(value));
 
         let error = renderer().render(&request).unwrap_err();
-        assert!(error.to_string().contains("must be in [0.0, 0.99]"));
+        assert!(error.as_report().to_string().contains("must be in [0.0, 0.99]"));
     }
 }
 
@@ -338,7 +339,7 @@ fn rejects_continue_final_message() {
 
     let error = renderer().render(&request).unwrap_err();
     assert!(matches!(error, Error::ChatTemplate(_)));
-    assert!(error.to_string().contains("continue_final_message"));
+    assert!(error.as_report().to_string().contains("continue_final_message"));
 }
 
 #[test]
@@ -370,5 +371,5 @@ fn rejects_non_object_tool_call_arguments() {
     };
 
     let error = renderer().render(&request).unwrap_err();
-    assert!(error.to_string().contains("JSON object"));
+    assert!(error.as_report().to_string().contains("JSON object"));
 }

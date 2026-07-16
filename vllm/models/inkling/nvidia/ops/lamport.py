@@ -51,12 +51,12 @@ import torch
 from vllm.distributed import get_tp_group
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 
 logger = init_logger(__name__)
 
 _MAX_TOKENS = 16384
-_EMPTY_PAIR = tl.constexpr(0x80008000)
+_EMPTY_PAIR = tl.constexpr(0x80008000) if HAS_TRITON else 0x80008000
 
 
 @triton.jit

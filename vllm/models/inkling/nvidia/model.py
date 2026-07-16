@@ -695,6 +695,8 @@ def _load_inkling_weights(
 
             yield name, weight
 
+    # The release checkpoint also carries auxiliary prediction-head weights;
+    # they are not part of the causal LM served by this implementation.
     loader = AutoWeightsLoader(module, skip_prefixes=["model.mtp."])
     loaded |= loader.load_weights(_iter_loadable_weights())
 

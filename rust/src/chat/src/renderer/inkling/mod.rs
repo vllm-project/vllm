@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use serde_json::{Map, Value, json};
+use thiserror_ext::AsReport as _;
 use vllm_text::Prompt;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 
@@ -398,7 +399,7 @@ fn rendered_tools(request: &ChatRequest) -> Vec<&ChatTool> {
 
 fn tool_call_json(tool_call: &AssistantToolCall) -> Result<String> {
     let name_json = serde_json::to_string(&tool_call.name)
-        .map_err(|error| Error::ChatTemplate(error.to_string()))?;
+        .map_err(|error| Error::ChatTemplate(error.as_report().to_string()))?;
     let arguments = if tool_call.arguments.trim().is_empty() {
         Value::Object(Map::new())
     } else {
@@ -418,7 +419,7 @@ fn tool_call_json(tool_call: &AssistantToolCall) -> Result<String> {
 }
 
 fn compact_json(value: &Value) -> Result<String> {
-    serde_json::to_string(value).map_err(|error| Error::ChatTemplate(error.to_string()))
+    serde_json::to_string(value).map_err(|error| Error::ChatTemplate(error.as_report().to_string()))
 }
 
 fn sort_json(value: &Value) -> Value {

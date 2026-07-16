@@ -18,7 +18,6 @@ if TYPE_CHECKING:
         )
         from .nvidia.mtp import InklingMTP
 
-
 __all__ = [
     "InklingForConditionalGeneration",
     "InklingForCausalLM",

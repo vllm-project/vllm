@@ -4,11 +4,16 @@
 import numpy as np
 import pytest
 
+from vllm.config.compilation import CompilationConfig, CUDAGraphMode
 from vllm.models.inkling.common.mm_preprocess import InklingMultiModalDataParser
 from vllm.models.inkling.configs import (
     InklingAudioConfig,
     InklingVisionConfig,
 )
+from vllm.models.inkling.nvidia.sconv_swa_attn import (
+    InklingSconvMetadataBuilder,
+)
+from vllm.v1.attention.backend import AttentionCGSupport
 
 
 @pytest.mark.parametrize(
@@ -27,3 +32,19 @@ def test_inkling_raw_2d_audio_is_rejected_as_ambiguous():
     parser = InklingMultiModalDataParser(target_sr=16_000, target_channels=1)
     with pytest.raises(ValueError, match="ambiguous channel layout"):
         parser._parse_audio_data(np.zeros((2, 100), dtype=np.float32))
+
+
+def test_inkling_supports_full_decode_only_cudagraphs():
+    support = InklingSconvMetadataBuilder.get_cudagraph_support
+    assert support(None, None) == AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL,
+        splitting_ops=[],
+    )
+    resolved_mode = compilation_config.resolve_cudagraph_mode_and_sizes(
+        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE,
+        "InklingSconvBackend",
+    )
+
+    assert resolved_mode == CUDAGraphMode.FULL_DECODE_ONLY

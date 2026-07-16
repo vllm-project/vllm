@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import torch
 
+from vllm.platforms import current_platform
+
 
 def bucket_max_seqlen_q(max_seqlen_q: int) -> int:
     """Round the FA4 scheduling bound up to a power of two."""
@@ -20,6 +22,9 @@ def inkling_fa4_num_splits(
     max_kv_len: int,
 ) -> int:
     """Return the split-KV cap for FA4 with sheared relative bias."""
+    capability = current_platform.get_device_capability()
+    if capability is not None and capability.major == 9:
+        return 1
     if is_local:
         return 1
 
