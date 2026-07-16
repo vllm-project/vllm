@@ -565,6 +565,8 @@ class SpecDecodeBaseProposer:
         model_kwargs, slot_mapping_size = self.build_model_inputs_first_pass(
             num_tokens, num_input_tokens, mm_embed_inputs
         )
+        if self.method == "mtp":
+            model_kwargs["spec_step_idx"] = 0
         # Step 0 of index_share_for_mtp_iteration: let the MTP layer
         # compute its own indices (skip_topk=False) so subsequent steps
         # can reuse them.
@@ -729,6 +731,8 @@ class SpecDecodeBaseProposer:
             }
             if self.pass_hidden_states_to_model:
                 model_kwargs["hidden_states"] = self.hidden_states[:input_batch_size]
+            if self.method == "mtp":
+                model_kwargs["spec_step_idx"] = token_index + 1
 
             if self.eplb_state is not None:
                 self.eplb_state.prepare_forward(
@@ -1670,6 +1674,8 @@ class SpecDecodeBaseProposer:
                 )
                 if self.pass_hidden_states_to_model:
                     kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
+                if self.method == "mtp":
+                    kwargs["spec_step_idx"] = fwd_idx
                 self.model(**kwargs)
 
     def _get_eagle3_use_aux_hidden_state_from_config(self) -> bool:

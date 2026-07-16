@@ -76,3 +76,35 @@ def test_qwen3_5_mtp_lm_head_receives_quant_config():
         MockLMHead.assert_called_once()
         call_kwargs = MockLMHead.call_args.kwargs
         assert call_kwargs["quant_config"] is mock_quant_config
+
+
+def test_qwen3_5_mtp_forwards_spec_step_idx():
+    from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MTP
+
+    mtp = Mock()
+    mtp.model.return_value = expected_hidden_states = Mock()
+    input_ids = Mock()
+    positions = Mock()
+    hidden_states = Mock()
+    intermediate_tensors = Mock()
+    inputs_embeds = Mock()
+
+    output = Qwen3_5MTP.forward(
+        mtp,
+        input_ids,
+        positions,
+        hidden_states,
+        intermediate_tensors,
+        inputs_embeds,
+        spec_step_idx=2,
+    )
+
+    mtp.model.assert_called_once_with(
+        input_ids,
+        positions,
+        hidden_states,
+        intermediate_tensors,
+        inputs_embeds,
+        2,
+    )
+    assert output is expected_hidden_states
