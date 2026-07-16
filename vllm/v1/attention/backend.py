@@ -282,6 +282,10 @@ class AttentionBackend(ABC):
         return True
 
     @classmethod
+    def supports_device_query_lengths(cls) -> bool:
+        return False
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """Check if backend supports a given attention type.
 
@@ -327,7 +331,7 @@ class AttentionBackend(ABC):
         use_non_causal: bool = False,
         use_batch_invariant: bool = False,
         use_kv_connector: bool = False,
-        required_cg_support: "AttentionCGSupport | None" = None,
+        requires_device_query_lengths: bool = False,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -368,16 +372,8 @@ class AttentionBackend(ABC):
             invalid_reasons.append("batch invariance not supported")
         if use_kv_connector and not cls.supports_kv_connector():
             invalid_reasons.append("KV connector not supported")
-        if required_cg_support is not None:
-            builder_cls = cls.get_builder_cls()
-            if (
-                required_cg_support is not None
-                and builder_cls.get_cudagraph_support_for_selection().value
-                < required_cg_support.value
-            ):
-                invalid_reasons.append(
-                    f"{required_cg_support.name} CUDA graph support required"
-                )
+        if requires_device_query_lengths and not cls.supports_device_query_lengths():
+            invalid_reasons.append("device-side query lengths not supported")
         combination_reason = cls.supports_combination(
             head_size,
             dtype,
@@ -603,11 +599,8 @@ class AttentionCGSupport(Enum):
     Here we do not consider the cascade attention, as currently
     it is never cudagraph supported."""
 
-    ALWAYS = 4
+    ALWAYS = 3
     """Cudagraph always supported; supports mixed-prefill-decode"""
-    VARLEN_BATCH = 3
-    """Cudagraph supported for variable-length, decode-only batches without
-    consulting host-side sequence or query lengths."""
     UNIFORM_BATCH = 2
     """Cudagraph supported for batches the only contain query lengths that are
     the same, this can be used for spec-decode
@@ -650,11 +643,6 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         kv_cache_spec: "AttentionSpec",
     ) -> AttentionCGSupport:
         """Get the cudagraph support level of this builder class."""
-        return cls._cudagraph_support
-
-    @classmethod
-    def get_cudagraph_support_for_selection(cls) -> AttentionCGSupport:
-        """Return conservative support before the KV cache spec is known."""
         return cls._cudagraph_support
 
     def _init_reorder_batch_threshold(

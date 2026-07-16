@@ -15,7 +15,6 @@ from vllm.config import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
-from vllm.v1.attention.backend import AttentionCGSupport
 
 if current_platform.is_cuda():
     from vllm.platforms.cuda import CudaPlatform
@@ -37,7 +36,7 @@ def clear_cache():
     _cached_get_attn_backend.cache_clear()
 
 
-def test_adaptive_verification_requires_varlen_for_dspark_drafter(monkeypatch):
+def test_adaptive_verification_requires_device_query_lengths_for_target(monkeypatch):
     from vllm.compilation.backends import set_model_tag
     from vllm.v1.attention import selector
 
@@ -60,8 +59,8 @@ def test_adaptive_verification_requires_varlen_for_dspark_drafter(monkeypatch):
     with set_model_tag("dspark_head"):
         selector.get_attn_backend(16, torch.float16, None)
 
-    assert selector_configs[0].required_cg_support == AttentionCGSupport.VARLEN_BATCH
-    assert selector_configs[1].required_cg_support == AttentionCGSupport.VARLEN_BATCH
+    assert selector_configs[0].requires_device_query_lengths
+    assert not selector_configs[1].requires_device_query_lengths
 
 
 # Define MLA and non-MLA backends separately

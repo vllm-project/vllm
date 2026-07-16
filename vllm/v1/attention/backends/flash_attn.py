@@ -101,6 +101,10 @@ class FlashAttentionBackend(AttentionBackend):
         return True
 
     @classmethod
+    def supports_device_query_lengths(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_non_causal(cls) -> bool:
         return True
 
@@ -334,14 +338,14 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     # the graphs would not work for mixed prefill-decode; sorta the inverse
     # of UNIFORM_SINGLE_TOKEN_DECODE.
     # There's probably a better way to describe this using `AttentionCGSupport`
-    # but for now use `VARLEN_BATCH` to drop mixed batches down to
-    # FULL_AND_PIECEWISE while retaining variable-length decode graphs.
+    # but for now just set it to `UNIFORM_BATCH` to get use to drop down
+    # to FULL_AND_PIECEWISE.
     # TODO(luka, lucas): audit FA2 as part of:
     #  https://github.com/vllm-project/vllm/issues/22945
     _cudagraph_support = (
         AttentionCGSupport.ALWAYS
         if get_flash_attn_version() == 3
-        else AttentionCGSupport.VARLEN_BATCH
+        else AttentionCGSupport.UNIFORM_BATCH
     )
     supports_update_block_table: bool = True
 

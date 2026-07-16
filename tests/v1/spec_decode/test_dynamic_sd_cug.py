@@ -15,8 +15,7 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
-from vllm.v1.attention.backend import AttentionCGSupport
-from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadataBuilder
+from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.spec_decode.dynamic.drafting_manager import (
     AdaptiveDraftingManager,
     DynamicSDDraftingManager,
@@ -38,12 +37,9 @@ def _mock_cudagraph_runtime(monkeypatch):
     )
 
 
-def test_flash_attention_supports_variable_length_decode_cudagraphs():
+def test_flash_attention_supports_device_query_lengths():
     """FA2 and FA3 must both meet adaptive verification's target requirement."""
-    assert (
-        FlashAttentionMetadataBuilder._cudagraph_support.value
-        >= AttentionCGSupport.VARLEN_BATCH.value
-    )
+    assert FlashAttentionBackend.supports_device_query_lengths()
 
 
 def test_adaptive_verification_supports_structured_outputs():

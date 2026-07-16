@@ -10,11 +10,7 @@ import vllm.envs as envs
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.v1.attention.backend import (
-    AttentionBackend,
-    AttentionCGSupport,
-    AttentionType,
-)
+from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.backends.registry import (
     MambaAttentionBackendEnum,
 )
@@ -37,7 +33,7 @@ class AttentionSelectorConfig(NamedTuple):
     use_non_causal: bool = False
     use_batch_invariant: bool = False
     use_kv_connector: bool = False
-    required_cg_support: AttentionCGSupport | None = None
+    requires_device_query_lengths: bool = False
 
     def __repr__(self):
         return (
@@ -55,7 +51,7 @@ class AttentionSelectorConfig(NamedTuple):
             f"use_non_causal={self.use_non_causal}, "
             f"use_batch_invariant={self.use_batch_invariant}, "
             f"use_kv_connector={self.use_kv_connector}, "
-            f"required_cg_support={self.required_cg_support})"
+            f"requires_device_query_lengths={self.requires_device_query_lengths})"
         )
 
 
@@ -98,9 +94,13 @@ def get_attn_backend(
     )
     speculative_config = vllm_config.speculative_config
     adaptive_verification = bool(
-        speculative_config is not None
-        and speculative_config.adaptive_verification
+        speculative_config is not None and speculative_config.adaptive_verification
     )
+    if adaptive_verification:
+        from vllm.compilation.backends import model_tag
+
+        # Only the verifier requires device query lengths.
+        adaptive_verification = model_tag != "dspark_head"
 
     attn_selector_config = AttentionSelectorConfig(
         head_size=head_size,
@@ -117,9 +117,7 @@ def get_attn_backend(
         use_non_causal=vllm_config.attention_config.use_non_causal,
         use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
         use_kv_connector=use_kv_connector,
-        required_cg_support=(
-            AttentionCGSupport.VARLEN_BATCH if adaptive_verification else None
-        ),
+        requires_device_query_lengths=adaptive_verification,
     )
 
     return _cached_get_attn_backend(
